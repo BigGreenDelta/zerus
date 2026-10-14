@@ -90,18 +90,35 @@ export function apply(ctx,config) {
   // Native disposal unloads an agent's Cordis scope before the agent leaves
   // the live registry. Keep a marked child in that window, as a slow scope
   // teardown would, and report it with a marker file until the test releases it.
-  const disposing=new WeakSet();
+  // Another marker reports when the child has left the registry.
+  const disposing=new WeakMap();
   ctx.on('agent/pre-step',(request,next)=>{
     const agent=request.agent;
     const hold=agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/DISPOSING_CHILD_\w+/)?.[0];
     if(hold&&config?.holds&&!disposing.has(agent)){
-      disposing.add(agent);
+      disposing.set(agent,hold);
       agent.ctx.effect(()=>async()=>{
         writeFileSync(join(config.holds,hold+'.disposing'),'');
         for(let i=0;i<300&&!existsSync(join(config.holds,hold));i++)await new Promise(resolve=>setTimeout(resolve,50));
       },'hgs-test.disposal-hold');
     }
     return next();
+  });
+  ctx.on('agent/disposed',({agent})=>{
+    const hold=disposing.get(agent);
+    if(hold)writeFileSync(join(config.holds,hold+'.disposed'),'');
+  });
+  // While ACCOUNT_HOLD exists, account reads, which bridge reads await, report
+  // ACCOUNT_HOLD.waiting and wait for its removal, so agents can change meanwhile.
+  ctx.inject(['deepseekAccount'],scope=>{
+    const account=scope.deepseekAccount,getState=account.getState;
+    account.getState=async function(...args){
+      const gate=config?.holds&&join(config.holds,'ACCOUNT_HOLD');
+      if(gate&&existsSync(gate))writeFileSync(gate+'.waiting','');
+      for(let i=0;gate&&i<300&&existsSync(gate);i++)await new Promise(resolve=>setTimeout(resolve,50));
+      return getState.apply(this,args);
+    };
+    return()=>{account.getState=getState;};
   });
   ctx.tools.register(defineTool({name:'hgs_test_job_read',description:'Verify the model output cursor',parameters:{},
     output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},

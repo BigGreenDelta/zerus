@@ -224,6 +224,9 @@ export function apply(ctx, config) {
     const parentLive = ctx.agents.get(sessionId);
     const live = agentId ? ctx.agents.get(agentId) : parentLive;
     const selection = live ? selectionOf(live, baseline.values) : null;
+    // Read the goal before awaiting: a disposing Agent may leave the live
+    // registry meanwhile, and the goal registry rejects it once it has.
+    const goal = live ? ctx.goals.get(live) ?? null : baseline.values.goal ?? null;
     const status = await accountStatus();
     const jobs = ctx.get('jobs');
     return { generation, baseline, page,
@@ -231,7 +234,7 @@ export function apply(ctx, config) {
       jobs: jobs && request.includeProcesses !== false ? jobOwners.flatMap(owner => jobs.list(owner).filter(job => job.kind === 'bash' && job.owner === owner)
         .map(job => ({ ...job, callId:jobCalls.get(job.id)?.callId, controllable: owned.has(sessionId) && Boolean(ctx.agents.get(owner)) }))) : undefined,
       shellCalls:request.includeProcesses !== false ? [...shellCalls.values()].filter(call=>jobOwners.includes(call.owner)) : undefined,
-      childMode: child?.mode, childSendSupported: !starting && child?.mode === 'continuable' && Boolean(parentLive), goal: live ? ctx.goals.get(live) ?? null : baseline.values.goal ?? null,
+      childMode: child?.mode, childSendSupported: !starting && child?.mode === 'continuable' && Boolean(parentLive), goal,
       pendingQuestions: publicQuestions(sessionId), selection, accountStatus: status, authRequired: needsSignIn(selection, status),
       live: Boolean(live), owned: owned.has(sessionId), nativeRecovery: recoveryPublic(sessionId), interruptSupported: typeof api.cancel === 'function',
       compactSupported: Boolean(live && ctx.commands.find(live,'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'), compactRequest: agentId ? null : compactionPublic(sessionId) };

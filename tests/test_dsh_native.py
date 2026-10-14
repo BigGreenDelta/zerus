@@ -2,6 +2,7 @@
 No user credentials, live terminals, real model requests, or browser opening.
 """
 import base64
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -437,6 +438,20 @@ class NativeHarness(unittest.TestCase):
                     self.assertEqual(native['selection'],native['baseline']['values']['modelSelection']['next'])
                     inspected=self.cli('inspect',parent)
                     self.assertEqual(inspected['model'],'test-a');self.assertIn(child,inspected['subagents'])
+                    # The child may leave the registry while an inspection
+                    # awaits the account; it keeps what it read before.
+                    gate=self.root/'holds'/'ACCOUNT_HOLD';gate.with_name('ACCOUNT_HOLD.waiting').unlink(missing_ok=True);gate.touch()
+                    try:
+                        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                            late=pool.submit(self.rpc,'inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+                            self.wait(lambda:gate.with_name('ACCOUNT_HOLD.waiting').exists())
+                            (self.root/'holds'/hold).touch()
+                            self.wait(lambda:(self.root/'holds'/(hold+'.disposed')).exists())
+                            gate.unlink();late=late.result(timeout=30)
+                    finally:
+                        gate.unlink(missing_ok=True)
+                    self.assertTrue(late['live']);self.assertEqual(late['selection'],stored)
+                    self.assertEqual(late['goal'],native['goal'])
                 finally:
                     (self.root/'holds'/hold).touch()
                 self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
