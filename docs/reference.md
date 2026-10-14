@@ -1888,6 +1888,19 @@ Tracked live sessions add resumability and activity. Saved sessions use
 Archives add `archive_id` and `archived_at`; missing state remains compatible with
 older live-session snapshots. `ok: false` indicates an unavailable host.
 
+A launch with `--launch-id` that no session or record of the snapshot carries, and
+whose session existed before the snapshot was taken, has ended: such launches
+appear newest first, at most 32, in `ended_launches`, as `{launch_id, name, code,
+output}`. `code` is the exit code of the session's supervisor, or null when no
+supervisor reported one (a command that runs without one, a supervisor that was
+killed); `output` holds the last 8 lines (2 KiB) of the session's screen, followed
+by the error that stopped the supervisor. A detached launch records its launch ID
+once the terminal has created the session, and a supervisor that ends within two
+minutes without a confirmed conversation records how; a run that confirmed one
+leaves its record to carry the launch ID instead. These records live in
+`launches/` of the hgs state directory for a week, as long as the desktop keeps a
+launch placeholder. The key is omitted when no launch has ended.
+
 A running Zerus desktop records input idle time and screen lock with
 `hgs presence set --json` (`{"idle_seconds": 12, "locked": false}` on stdin) every
 30 seconds and when the screen locks, unlocks or the owner returns. The listing then

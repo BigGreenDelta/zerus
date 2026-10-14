@@ -734,6 +734,41 @@ class Sessions(Contract):
         self.assertIn("no such session", self.hgs("kill", name, rc=1).stderr)
         self.assertTrue((self.root / "history" / (row["conversation_id"] + ".jsonl")).is_file())
 
+    def ended_launches(self):
+        return {launch["launch_id"]: launch for launch in self.json("ls", "--json", "--local").get("ended_launches", [])}
+
+    def test_a_launch_whose_session_ends_without_a_conversation_is_listed_as_ended(self):
+        # The desktop's launch placeholder waits for a session or record with its launch ID.
+        # An agent that started but then cannot go on says why and exits, without a
+        # conversation: the listing reports how its launch ended, with its last lines.
+        self.configure(HOOKS="none")
+        self.launched = True
+        launch_id = str(uuid.uuid4())
+        name = "claude/project/failing"
+        result = self.hgs("claude", str(self.project), "--new", "-n", "failing", "-d", "--launch-id", launch_id)
+        self.assertEqual(result.stdout, f"hgs: started {name}\n")
+        agent = self.wait_for(lambda: next((event for event in self.events(kind="ready")), None), "the agent")
+        # Running, it is no ended launch.
+        self.assertEqual(self.sessions()[name]["launch_id"], launch_id)
+        self.assertNotIn(launch_id, self.ended_launches())
+        staged = self.root / "control.new"
+        staged.write_text("write \\r\\ncannot start: example failure\\r\\n\nexit 3\n", encoding="utf-8")
+        os.replace(staged, self.root / "control")
+        ended = self.wait_for(lambda: self.ended_launches().get(launch_id), "the ended launch")
+        self.assertEqual((ended["name"], ended["code"]), (name, 3))
+        self.assertEqual(ended["output"].splitlines()[-1], "cannot start: example failure")
+        self.assertEqual([event["code"] for event in self.events(agent["pid"], "exit")], [3])
+        self.assertNotIn(name, self.sessions())
+
+    def test_a_launch_that_confirmed_a_conversation_is_never_listed_as_ended(self):
+        name, row, _ = self.launch()
+        self.hgs("pause", name)
+        self.assertEqual(self.sessions()[name]["launch_id"], row["launch_id"])
+        # Its record carried the launch ID; once it is forgotten the launch is still not ended.
+        self.hgs("kill", name)
+        self.assertNotIn(name, self.sessions())
+        self.assertNotIn(row["launch_id"], self.ended_launches())
+
 
 class Input(Contract):
     def test_send_pastes_exact_bytes_then_one_enter_and_never_repeats(self):
