@@ -2,6 +2,7 @@
 #include <QScopedValueRollback>
 #include "HgsClient.h"
 #include "MachineAppearance.h"
+#include "MachinePlatform.h"
 #include "WorkspaceIcons.h"
 #include "WorkspacePageHeader.h"
 #include "IdentityBadge.h"
@@ -67,6 +68,7 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     auto *editor = new QVBoxLayout(editorWidget); editor->setContentsMargins(0, 0, 8, 0); editor->setSpacing(12);
     m_title = new QLabel; m_title->setObjectName("heading"); m_title->setTextFormat(Qt::PlainText); editor->addWidget(m_title);
     m_origin = new QLabel; m_origin->setObjectName("muted"); m_origin->setWordWrap(true); m_origin->setTextFormat(Qt::PlainText); editor->addWidget(m_origin);
+    m_localHost = new QLabel; m_localHost->setObjectName("localSessionHost"); m_localHost->setWordWrap(true); m_localHost->setTextFormat(Qt::PlainText); m_localHost->setTextInteractionFlags(Qt::TextSelectableByMouse); m_localHost->hide(); editor->addWidget(m_localHost);
     auto *appearance = new QHBoxLayout;
     m_color = new QPushButton(tr("Label color…")); m_color->setObjectName("machineColor"); appearance->addWidget(m_color);
     m_colorStyle = new QComboBox; m_colorStyle->setObjectName("machineLabelStyle"); m_colorStyle->setAccessibleName(tr("Label style"));
@@ -91,6 +93,8 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     m_ssh = new QPushButton(tr("Open SSH terminal")); m_ssh->setObjectName("sshMachine");
     actions->addWidget(m_save); actions->addWidget(m_discardDraft); actions->addWidget(m_check); actions->addWidget(m_ssh); actions->addStretch(); editor->addLayout(actions);
     auto *setup = new QHBoxLayout;
+    m_enableLocal = new QPushButton(tr("Enable local sessions (preview)")); m_enableLocal->setObjectName("enableLocalSessions"); m_enableLocal->hide(); setup->addWidget(m_enableLocal);
+    m_enableLocal->setToolTip(tr("Run agents on this computer too. Zerus stages the HGS CLI and a session host in your user profile."));
     m_install = new QPushButton(tr("Install / update HGS…")); m_install->setObjectName("installMachine"); setup->addWidget(m_install);
     m_sessions = new QPushButton(tr("View sessions")); m_sessions->setObjectName("machineSessions"); setup->addWidget(m_sessions);
     m_accounts = new QPushButton(tr("Agent accounts…")); m_accounts->setObjectName("machineAccounts"); setup->addWidget(m_accounts); setup->addStretch(); editor->addLayout(setup);
@@ -153,6 +157,7 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     connect(m_save, &QPushButton::clicked, this, &MachinesPage::save); connect(m_check, &QPushButton::clicked, this, &MachinesPage::check);
     connect(m_ssh, &QPushButton::clicked, this, [this] { emit sshTerminalRequested(alias()); });
     connect(m_install, &QPushButton::clicked, this, &MachinesPage::install);
+    connect(m_enableLocal, &QPushButton::clicked, this, &MachinesPage::enableLocalSessions);
     connect(m_sessions, &QPushButton::clicked, this, [this] { emit viewSessionsRequested(m_selected == "@local" ? QString() : alias()); });
     connect(m_accounts, &QPushButton::clicked, this, [this] { emit accountsRequested(m_selected == "@local" ? QString() : alias()); });
     for (auto *button : {m_remove, m_reset}) connect(button, &QPushButton::clicked, this, [this, button] {
@@ -207,6 +212,19 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
             if (!m_new && m_selected == m_resolveAlias) m_effective->setText(tr("Could not read effective SSH settings: %1\nYour connection overrides are shown below.").arg(error));
         } else if (request == m_request) { m_request = 0; report(error, true); updateControls(); }
     });
+    connect(m_client, &HgsClient::sessionHostReady, this, [this](quint64 request, const QJsonObject &data) {
+        if (request != m_hostRequest) return;
+        m_hostRequest = 0; m_installing = false;
+        const auto cli = data.value("cli").toObject().value("path").toString();
+        // This GUI keeps its CLI until it restarts (spec D2).
+        m_localNotice = cli.isEmpty() ? tr("Local sessions are enabled on this computer. Zerus runs the stable HGS CLI from its next start.")
+                                      : tr("Local sessions are enabled on this computer. Zerus runs %1 from its next start.").arg(cli);
+        report(m_localNotice); updateControls(); emit machinesChanged();
+    });
+    connect(m_client, &HgsClient::sessionHostFailed, this, [this](quint64 request, const QString &error) {
+        if (request != m_hostRequest) return;
+        m_hostRequest = 0; m_installing = false; report(error, true); updateControls();
+    });
     connect(m_client, &HgsClient::machineSetupOutput, this, [this](const QString &text) {
         auto cursor = m_log->textCursor(); cursor.movePosition(QTextCursor::End); cursor.insertText(text); m_log->setTextCursor(cursor); m_log->ensureCursorVisible();
     });
@@ -258,8 +276,12 @@ void MachinesPage::setTheme(bool dark) {
 }
 void MachinesPage::setFleet(const FleetState &fleet) {
     const bool console = fleet.local().localSessions != m_fleet.local().localSessions;
+    // Windows: its platform and session host decide what this computer offers.
+    const bool host = fleet.local().localHost != m_fleet.local().localHost
+        || MachinePlatform::of(fleet.local().metrics, true) != MachinePlatform::of(m_fleet.local().metrics, true);
     m_fleet = fleet; renderRows(); updateAppearance();
     if (console && !m_loading) { if (m_selected == "@local" && !m_new && !m_dirty) loadSelection(); else updateControls(); }
+    else if (host && !m_loading) updateControls();
 }
 void MachinesPage::renderRows() {
     const QSignalBlocker blocked(m_list);const QScopedValueRollback<bool> loading(m_loading,true);
@@ -296,7 +318,7 @@ void MachinesPage::loadSelection() {
                                                              : tr("This computer is a control console: agents run on the remote machines you add here, over SSH.")) :
         (row.value("source").toString() == "config" ? tr("This alias comes from HGS configuration. ") : QString()) +
         tr("SSH supplies inherited values from your OpenSSH configuration and defaults. Fields below are Zerus overrides; blank fields keep the inherited value.") + (m_data.value("environment_override").toBool() ? tr(" HGS_PEERS in the environment overrides the list of monitored machines.") : QString()));
-    m_dirty = false; m_loading = false; m_log->hide(); report({}); updateControls(); resolveConnection();
+    m_dirty = false; m_loading = false; m_log->hide(); report(local ? m_localNotice : QString()); updateControls(); resolveConnection();
 }
 QString MachinesPage::appearanceMachine() const {
     if (m_new) return {};
@@ -360,6 +382,24 @@ void MachinesPage::updateControls() {
     m_sessions->setVisible(!console); m_accounts->setVisible(!console);
     for (int row = 0; row < m_form->rowCount(); ++row) m_form->setRowVisible(row, !console);
     for (auto *button : {m_save, m_check, m_ssh, m_install, m_reset, m_remove}) button->setVisible(!console);
+    // Windows (spec D16): this computer shows its session host, and a control
+    // console whose CLI reports one can enable local sessions.
+    const auto &host = m_fleet.local().localHost;
+    const bool windowsHost = local && !m_new && !host.isEmpty()
+        && MachinePlatform::of(m_fleet.local().metrics, true) == MachinePlatform::Style::Windows;
+    m_enableLocal->setVisible(windowsHost && console); m_enableLocal->setEnabled(!busy);
+    m_localHost->setVisible(windowsHost);
+    if (windowsHost) {
+        const auto state = host.value("state").toString();
+        QStringList facts{state == "not-installed" ? tr("not installed") : state == "stopped" ? tr("stopped")
+                          : state == "running" ? tr("running") : state == "unavailable" ? tr("unavailable") : state};
+        if (host.value("pid").isDouble()) facts << tr("PID %1").arg(host.value("pid").toInteger());
+        if (!host.value("conpty").toString().isEmpty()) facts << tr("%1 ConPTY").arg(host.value("conpty").toString());
+        if (!host.value("integrity").toString().isEmpty()) facts << tr("%1 integrity").arg(host.value("integrity").toString());
+        if (host.value("windows_session").isDouble()) facts << tr("Windows session %1").arg(host.value("windows_session").toInteger());
+        const auto error = host.value("error").toString();
+        m_localHost->setText(tr("Session host: %1").arg(facts.join(", ")) + (error.isEmpty() ? QString() : ": " + error));
+    }
     updateAppearance();
 }
 void MachinesPage::save() {
@@ -370,6 +410,18 @@ void MachinesPage::save() {
     m_request = m_client->requestMachines(arguments); updateControls();
 }
 void MachinesPage::check() { m_operation = "check"; report(tr("Testing SSH and checking HGS…")); m_request = m_client->requestMachines({"check", alias()}); updateControls(); }
+void MachinesPage::enableLocalSessions() {
+    if (m_request || m_installing) return;
+    QMessageBox confirm(QMessageBox::Question, tr("Enable local sessions?"),
+        tr("Run agents on this computer too? Zerus stages the HGS CLI and a session host in your user profile and enables local sessions. "
+           "This is a preview; to disable local sessions again, run hgs session-host uninstall."), QMessageBox::Cancel, this);
+    confirm.setObjectName("enableLocalSessionsConfirm"); confirm.setTextFormat(Qt::PlainText);
+    auto *proceed = confirm.addButton(tr("Enable local sessions"), QMessageBox::AcceptRole);
+    confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
+    confirm.exec(); if (confirm.clickedButton() != proceed || m_request || m_installing) return;
+    m_installing = true; report(tr("Enabling local sessions on this computer…")); updateControls();
+    m_hostRequest = m_client->requestSessionHost("install");
+}
 void MachinesPage::install() {
     QDialog dialog(this); dialog.setObjectName("machineSetupDialog"); dialog.setWindowTitle(tr("Install HGS on %1").arg(alias())); dialog.resize(520, 280);
     auto *layout = new QVBoxLayout(&dialog);

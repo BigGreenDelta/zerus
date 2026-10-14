@@ -1,7 +1,10 @@
 #pragma once
 
+#include <QJsonObject>
 #include <QString>
 #include <QStringList>
+
+#include "MachinePlatform.h"
 
 // Разбирается ДО создания QApplication: --selftest и --version обязаны работать по ssh,
 // где QApplication упал бы, не найдя дисплея.
@@ -81,6 +84,25 @@ struct AppConfig {
     // portable zip), otherwise hgs.exe in PATH. Absolute where it was found, so the
     // tray, its terminals and copied commands all name the same file.
     static QString resolveHgsPath(const QString &configured, const QString &applicationDir);
+    // The hgs a Windows GUI runs from its start (spec D2). status is the answer of
+    // `session-host status --json` from the bundled hgs (bundled, with SHA-256
+    // bundledSha256). An explicit --hgs or hgs= (configured) is used as given; a
+    // computer without local sessions runs the bundled build. An enabled one runs
+    // the stable CLI that status names, staged again first (`session-host
+    // install`) when the bundled build differs and is at least as new; a staged
+    // build of unknown version counts as older. fallback runs when that refresh
+    // fails: the stable CLI when one is staged, otherwise the bundled build.
+    struct HgsChoice {
+        QString path;
+        bool refresh = false;
+        QString fallback;
+    };
+    static HgsChoice chooseHgs(const QJsonObject &status, const QString &bundled, const QString &bundledSha256,
+                               const QString &configured);
+    // The local poll interval. Every poll of a Windows computer starts hgs.exe, so
+    // a control console waits at least 15 s, and an enabled one at least 5 s
+    // until its session host can push changes; Unix keeps the configured interval.
+    static int localPollInterval(int configured, bool localSessions, MachinePlatform::Style style);
     // The options of args (as for load(), argv[0] first) that a restarted tray
     // keeps: every setting, but not argv[0] and the one-shot --sessions. Windows
     // restarts the tray with them after a crash or a watchdog abort

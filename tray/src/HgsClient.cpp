@@ -177,6 +177,7 @@ BoxState boxFromObject(const QJsonObject &obj)
     const auto errorDetail = obj.value(QStringLiteral("error_detail")).toString();
     if (!errorDetail.isEmpty()) box.error = errorDetail;
     box.localSessions = obj.value(QStringLiteral("local_sessions")).toBool(true);
+    box.localHost = obj.value(QStringLiteral("local_host")).toObject();
     box.peersKnown = obj.value("peers").isArray();
     for (const auto &peer : obj.value("peers").toArray()) if (peer.isString()) box.peers.append(peer.toString());
 
@@ -419,6 +420,21 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
             else emit swarmReady(request, data.object());
         }, [this, request](const QString &, const QString &error) { emit swarmFailed(request, error); },
         input.isEmpty() ? QByteArray() : QJsonDocument(input).toJson(QJsonDocument::Compact));
+    return request;
+}
+
+quint64 HgsClient::requestSessionHost(const QString &action)
+{
+    const quint64 request = ++m_sessionHostRequest;
+    // install copies hgs.exe and a host image into the profile; status asks a
+    // running host, which answers within five seconds or counts as unavailable.
+    const int timeoutMs = action == QLatin1String("install") ? 60000 : action == QLatin1String("status") ? 15000 : 25000;
+    runHgs(m_hgs, {QStringLiteral("session-host"), action, QStringLiteral("--json")}, timeoutMs, this,
+        [this, request](const QByteArray &bytes) {
+            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
+            if (error.error != QJsonParseError::NoError || !data.isObject()) emit sessionHostFailed(request, tr("Invalid session host response"));
+            else emit sessionHostReady(request, data.object());
+        }, [this, request](const QString &, const QString &error) { emit sessionHostFailed(request, error); });
     return request;
 }
 

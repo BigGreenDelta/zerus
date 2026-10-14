@@ -661,8 +661,8 @@ machine: Linux and macOS GUIs, and every peer, behave as today.
   local machine's display name), in the terminal view and the update tooltip
   (`TerminalView.cpp:63,141`, `SessionsWindow.cpp:1299`). The Machines page keeps its
   tmux wording for remote Unix machines.
-- An enabled Windows computer polls itself at least every 5 s until the host can push
-  changes (a control console keeps 15 s); Unix keeps the configured interval.
+- An enabled Windows computer waits at least 5 s between polls of itself until the host
+  can push changes (a control console keeps its 15 s); Unix keeps the configured interval.
 
 ## Unix compatibility rules for the refactor
 

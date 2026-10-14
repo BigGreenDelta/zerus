@@ -21,6 +21,7 @@
 #include "MachinesPage.h"
 #include "MessageBoxIcons.h"
 #include "MachineAppearance.h"
+#include "MachinePlatform.h"
 
 class TestMachinesPage : public QObject {
     Q_OBJECT
@@ -39,6 +40,10 @@ private slots:
     void colorsWorkForLocalAndPersistWithoutSavingConnection();
     void dashboardSelectionWaitsForProfiles();
     void controlOnlyComputerIsAConsoleWithoutSessions();
+    void windowsConsoleEnablesLocalSessions();
+    void enablingIsOfferedOnlyToAWindowsConsole();
+    void localSessionHostStates_data();
+    void localSessionHostStates();
     void preview();
 private:
     template<class T> T *widget(MachinesPage &page, const char *name) {
@@ -57,7 +62,7 @@ void TestMachinesPage::init()
     QVERIFY(m_dir.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_dir.path());
     QCoreApplication::setOrganizationName("hgs-machines-test"); QCoreApplication::setApplicationName("MachinesPage"); QSettings().clear(); MachineAppearance::invalidate();
-    for (const auto &name : {"calls.jsonl", "stale", "probe-mode", "resolve-delay", "list-delay"}) QFile::remove(m_dir.filePath(name));
+    for (const auto &name : {"calls.jsonl", "stale", "probe-mode", "resolve-delay", "list-delay", "host-mode"}) QFile::remove(m_dir.filePath(name));
     m_script = m_dir.filePath("hgs");
     QFile fixture(m_script); QVERIFY(fixture.open(QIODevice::WriteOnly));
     fixture.write(R"(#!/usr/bin/env python3
@@ -65,6 +70,14 @@ import json, pathlib, sys, time
 root=pathlib.Path(__file__).parent
 args=sys.argv[1:]
 with (root/'calls.jsonl').open('a') as out: out.write(json.dumps(args)+'\n')
+if args[0]=='session-host':
+ assert args==['session-host','install','--json'],args
+ time.sleep(.05)
+ if (root/'host-mode').exists():
+  print('cannot enable local sessions: access denied',file=sys.stderr); sys.exit(1)
+ print(json.dumps({'enabled':True,'version':'1.52.0','marker_created':True,
+  'cli':{'path':'C:\\Users\\user\\.local\\bin\\hgs.exe','sha256':'a'*64,'version':'1.52.0','changed':True}}))
+ sys.exit(0)
 assert args[0]=='machine'
 command=args[1]
 if command=='ls':
@@ -410,6 +423,126 @@ void TestMachinesPage::controlOnlyComputerIsAConsoleWithoutSessions()
     QVERIFY(widget<QCheckBox>(page, "machineEnabled")->isVisible());
     for (const char *name : {"saveMachine", "checkMachine", "sshMachine", "installMachine", "removeMachine"})
         QVERIFY2(widget<QPushButton>(page, name)->isVisible(), name);
+}
+
+namespace {
+// This computer as a Windows CLI reports it (spec D2): a control console until
+// local sessions are enabled, with its session host.
+FleetState windowsComputer(bool enabled, const QJsonObject &host, const QString &platform = "windows")
+{
+    BoxState local; local.host = "windows-pc"; local.ok = true; local.localSessions = enabled; local.localHost = host;
+    if (!platform.isEmpty()) local.metrics = {{"platform", platform}};
+    FleetState fleet; fleet.setLocal(local, 0); return fleet;
+}
+QJsonObject sessionHost(const QString &state)
+{
+    return {{"state", state}, {"pid", QJsonValue::Null}, {"protocol", QJsonValue::Null}, {"conpty", QJsonValue::Null},
+            {"integrity", QJsonValue::Null}, {"windows_session", QJsonValue::Null}};
+}
+}
+
+void TestMachinesPage::windowsConsoleEnablesLocalSessions()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    page.setFleet(windowsComputer(false, sessionHost("not-installed")));
+    auto *enable = widget<QPushButton>(page, "enableLocalSessions"); auto *notice = widget<QLabel>(page, "machineNotice");
+    QVERIFY(enable->isVisible()); QVERIFY(enable->isEnabled()); QVERIFY(enable->text().contains("(preview)"));
+    QSignalSpy changed(&page, &MachinesPage::machinesChanged);
+    const auto installs = [&] {
+        int count = 0; for (const auto &call : calls()) count += call.toArray().at(0) == "session-host";
+        return count;
+    };
+    // Enabling writes into the profile: it asks first, and Cancel is the default.
+    const auto answer = [&](bool proceed) {
+        bool shown = false; QTimer respond; respond.setInterval(5);
+        connect(&respond, &QTimer::timeout, &page, [&] {
+            auto *box = page.findChild<QMessageBox *>("enableLocalSessionsConfirm"); if (!box || !box->isVisible()) return;
+            respond.stop(); shown = true;
+            QCOMPARE(box->defaultButton(), qobject_cast<QPushButton *>(box->button(QMessageBox::Cancel)));
+            QVERIFY(box->text().contains("hgs session-host uninstall"));
+            if (!proceed) { QTest::keyClick(box, Qt::Key_Escape); return; }
+            for (auto *button : box->buttons()) if (box->buttonRole(button) == QMessageBox::AcceptRole) button->click();
+        });
+        respond.start(); enable->click(); respond.stop(); QVERIFY(shown);
+    };
+    answer(false); QTest::qWait(100); QCOMPARE(installs(), 0); QVERIFY(changed.isEmpty());
+    // A failure is reported and changes nothing.
+    flag("host-mode", "fail"); answer(true);
+    QVERIFY(!enable->isEnabled()); QVERIFY(!widget<QListWidget>(page, "machineProfiles")->isEnabled());
+    QTRY_VERIFY(notice->text().contains("access denied")); QVERIFY(notice->styleSheet().contains("color"));
+    QVERIFY(enable->isEnabled()); QCOMPARE(installs(), 1); QVERIFY(changed.isEmpty());
+    QFile::remove(m_dir.filePath("host-mode")); answer(true);
+    QTRY_COMPARE(changed.size(), 1); QCOMPARE(installs(), 2);
+    QVERIFY(notice->text().contains("Local sessions are enabled")); QVERIFY(notice->text().contains("next start"));
+    QVERIFY(notice->text().contains("C:\\Users\\user\\.local\\bin\\hgs.exe")); QVERIFY(notice->styleSheet().isEmpty());
+    for (const auto &call : calls())
+        if (call.toArray().at(0) == "session-host") QCOMPARE(call.toArray(), QJsonArray({"session-host", "install", "--json"}));
+    // The next poll reports an enabled computer: no second offer, and the notice
+    // that the stable CLI follows from the next start stays.
+    page.setFleet(windowsComputer(true, sessionHost("stopped")));
+    QVERIFY(!enable->isVisible()); QVERIFY(widget<QPushButton>(page, "machineSessions")->isVisible());
+    QVERIFY(notice->text().contains("next start"));
+    widget<QListWidget>(page, "machineProfiles")->setCurrentRow(1); QTRY_VERIFY(!notice->text().contains("next start"));
+}
+
+void TestMachinesPage::enablingIsOfferedOnlyToAWindowsConsole()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    auto *enable = widget<QPushButton>(page, "enableLocalSessions"); auto *host = widget<QLabel>(page, "localSessionHost");
+    // Linux, macOS and an older Windows CLI without local_host offer nothing.
+    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
+    page.setFleet(windowsComputer(false, sessionHost("not-installed"), "linux"));
+    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
+    page.setFleet(windowsComputer(false, sessionHost("not-installed"), "macos"));
+    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
+    page.setFleet(windowsComputer(false, {}));
+    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
+    // Before the first answer names the platform, this GUI's own platform counts.
+    page.setFleet(windowsComputer(false, sessionHost("not-installed"), {}));
+    QCOMPARE(enable->isVisible(), MachinePlatform::build() == MachinePlatform::Style::Windows);
+    page.setFleet(windowsComputer(false, sessionHost("not-installed")));
+    QVERIFY(enable->isVisible()); QVERIFY(host->isVisible());
+    // An enabled computer shows its host without the offer; a remote machine neither.
+    page.setFleet(windowsComputer(true, sessionHost("stopped")));
+    QVERIFY(!enable->isVisible()); QVERIFY(host->isVisible());
+    page.setFleet(windowsComputer(false, sessionHost("not-installed")));
+    widget<QListWidget>(page, "machineProfiles")->setCurrentRow(1);
+    QTRY_VERIFY(widget<QPushButton>(page, "machineSessions")->isVisible());
+    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
+    // A Unix computer's page keeps its actions.
+    page.setFleet(windowsComputer(true, {}, "linux")); widget<QListWidget>(page, "machineProfiles")->setCurrentRow(0);
+    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
+    QVERIFY(widget<QPushButton>(page, "machineSessions")->isVisible()); QVERIFY(widget<QPushButton>(page, "machineAccounts")->isVisible());
+}
+
+void TestMachinesPage::localSessionHostStates_data()
+{
+    QTest::addColumn<bool>("enabled");
+    QTest::addColumn<QJsonObject>("host");
+    QTest::addColumn<QString>("text");
+    QTest::newRow("not installed") << false << sessionHost("not-installed") << "Session host: not installed";
+    QTest::newRow("stopped") << true << sessionHost("stopped") << "Session host: stopped";
+    QTest::newRow("running") << true << QJsonObject{{"state", "running"}, {"pid", 4242}, {"protocol", 1}, {"conpty", "bundled"},
+        {"integrity", "medium"}, {"windows_session", 1}}
+        << "Session host: running, PID 4242, bundled ConPTY, medium integrity, Windows session 1";
+    QTest::newRow("inbox") << true << QJsonObject{{"state", "running"}, {"pid", 77}, {"protocol", 1}, {"conpty", "inbox"},
+        {"integrity", "high"}, {"windows_session", 0}}
+        << "Session host: running, PID 77, inbox ConPTY, high integrity, Windows session 0";
+    auto unavailable = sessionHost("unavailable"); unavailable["error"] = "the session host on this computer runs elevated";
+    QTest::newRow("unavailable") << true << unavailable << "Session host: unavailable: the session host on this computer runs elevated";
+    QTest::newRow("console unavailable") << false << unavailable << "Session host: unavailable: the session host on this computer runs elevated";
+}
+
+void TestMachinesPage::localSessionHostStates()
+{
+    QFETCH(bool, enabled); QFETCH(QJsonObject, host); QFETCH(QString, text);
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    page.setFleet(windowsComputer(enabled, host));
+    auto *label = widget<QLabel>(page, "localSessionHost");
+    QVERIFY(label->isVisible()); QCOMPARE(label->text(), text);
+    QCOMPARE(widget<QPushButton>(page, "enableLocalSessions")->isVisible(), !enabled);
+    // Each poll shows the host as found.
+    page.setFleet(windowsComputer(enabled, sessionHost("stopped"))); QCOMPARE(label->text(), QString("Session host: stopped"));
 }
 
 QTEST_MAIN(TestMachinesPage)

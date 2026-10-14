@@ -28,6 +28,7 @@ private:
     void save();
     void check();
     void install();
+    void enableLocalSessions();
     void report(const QString &text, bool error = false);
     QJsonObject connection() const;
     QString alias() const;
@@ -41,20 +42,23 @@ private:
     FleetState m_fleet;
     QJsonObject m_data;
     QListWidget *m_list;
-    QLabel *m_summary, *m_title, *m_status, *m_origin, *m_effective, *m_colorHint;
+    QLabel *m_summary, *m_title, *m_status, *m_origin, *m_effective, *m_colorHint, *m_localHost;
     QLineEdit *m_alias, *m_hostname, *m_user, *m_key;
     QSpinBox *m_port;
     QCheckBox *m_enabled;
     QFormLayout *m_form;
     QPushButton *m_save, *m_check, *m_ssh, *m_install, *m_remove, *m_reset, *m_sessions, *m_accounts, *m_add, *m_browse, *m_refresh;
-    QPushButton *m_discardDraft;
+    QPushButton *m_discardDraft, *m_enableLocal;
     QPushButton *m_color, *m_colorReset;
     QComboBox *m_colorStyle;
     IdentityBadge *m_colorPreview;
     QPlainTextEdit *m_log;
     QString m_selected = "@local", m_operation, m_pendingSelection;
-    quint64 m_request = 0, m_resolveRequest = 0;
+    quint64 m_request = 0, m_resolveRequest = 0, m_hostRequest = 0;
     QString m_resolveAlias;
+    // Shown for this computer once it enabled local sessions: the stable CLI
+    // follows from the next start (spec D2).
+    QString m_localNotice;
     QJsonObject m_effectiveData;
     bool m_loading = false, m_dirty = false, m_new = false, m_installing = false;
     bool m_discardPrompt = false;
