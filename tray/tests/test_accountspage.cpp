@@ -56,6 +56,7 @@ private slots:
     void addToMachineOffersCopyOrNativeSignIn();
     void missingAgentInstallsOnSelectedMachine();
     void deepSeekKeyStaysOnSelectedMachine();
+    void localWindowsOffersNoDeepSeekOrOpenCode();
     void refreshPreservesRowsAndShowsPendingUsage();
     void initialLoadingPublishesOnlyGroupedAccounts();
     void loadingFinishesWithPartialOrUnavailableResults_data();
@@ -293,9 +294,12 @@ void TestAccountsPage::detailsPaneShowsPageBackground()
     QCOMPARE(pixel({8,viewport->height()-8}),QString("#161b21"));
     QCOMPARE(pixel({viewport->width()-8,8}),QString("#161b21"));
 }
+// The local computer reports Linux: without a platform it would follow the GUI's
+// build platform, and a Windows build offers fewer agents there.
 FleetState TestAccountsPage::fleet(bool remote) const
 {
     FleetState fleet; BoxState local; local.host = "arch"; local.ok = true; local.peersKnown = true;
+    local.metrics = QJsonObject{{"platform", "linux"}};
     if (remote) local.peers = {"mac"}; fleet.setLocal(local, 0); return fleet;
 }
 void TestAccountsPage::controlOnlyComputerManagesAccountsOnRemoteMachinesOnly()
@@ -680,6 +684,58 @@ void TestAccountsPage::deepSeekKeyStaysOnSelectedMachine()
     QTRY_VERIFY(page.findChild<QPushButton *>("refreshAccounts")->isEnabled());
     page.showAccount({}, "native-dsh"); page.findChild<QPushButton *>("accountDestinationTag")->click(); QTRY_COMPARE(install.size(), 1);
     QCOMPARE(install.first(), QVariantList({QString("mac"), QString("dsh")})); QCOMPARE(login.size(), 0);
+}
+
+void TestAccountsPage::localWindowsOffersNoDeepSeekOrOpenCode()
+{
+    // Spec D16: the local Windows computer lists, adds and takes no DeepSeek or
+    // OpenCode account; the Linux peer keeps them.
+    using MachinePlatform::Style;
+    for (const auto *provider : {"codex", "claude", "kimi", "dsh", "opencode"}) {
+        QVERIFY(AccountCatalog::launchable(provider, Style::Posix));
+        QCOMPARE(AccountCatalog::launchable(provider, Style::Windows), QString(provider) != "dsh" && QString(provider) != "opencode");
+    }
+    QFile original(m_script); QVERIFY(original.open(QIODevice::ReadOnly));
+    const auto bytes = original.readAll().replace("for p in ['codex','claude','kimi']", "for p in ['codex','claude','kimi','opencode']");
+    original.close(); QVERIFY(FakeCli::replace(m_script, bytes)); QVERIFY(FakeCli::makeRunnable(m_script));
+    QFile dsh(m_dir.filePath("deepseek")); QVERIFY(dsh.open(QIODevice::WriteOnly)); dsh.close();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.show();
+    auto *list = page.findChild<QListWidget *>("accountProfiles"); QTRY_COMPARE(list->count(), 12);
+    const auto destinations = [&] {
+        QStringList hosts;
+        for (auto *tag : page.findChildren<QPushButton *>("accountDestinationTag")) if (tag->isVisibleTo(&page)) hosts << tag->property("host").toString();
+        return hosts;
+    };
+    const auto shown = [&](const QString &provider) {
+        return list->currentItem() && list->currentItem()->data(Qt::UserRole).toJsonObject()["provider"].toString() == provider;
+    };
+    page.showAccount("mac", "native-dsh"); QTRY_VERIFY(shown("dsh")); QTRY_COMPARE(destinations(), QStringList{QString()});
+    auto state = fleet(); auto local = state.local(); local.metrics = QJsonObject{{"platform", "windows"}}; state.setLocal(local, 0);
+    page.setFleet(state); QTRY_COMPARE(list->count(), 10);
+    for (const auto &value : page.profiles(true)) {
+        const auto p = value.toObject();
+        QVERIFY(!p["host"].toString().isEmpty() || AccountCatalog::launchable(p["provider"].toString(), Style::Windows));
+    }
+    for (const auto *provider : {"dsh", "opencode"}) {
+        page.showAccount("mac", QString("native-") + provider); QTRY_VERIFY(shown(provider));
+        QTRY_VERIFY(destinations().isEmpty()); QVERIFY(!page.findChild<QPushButton *>("copyAccount")->isEnabled());
+    }
+    page.showAccount("mac", "native-codex"); QTRY_VERIFY(page.findChild<QPushButton *>("refreshAccounts")->isEnabled());
+    auto *add = page.findChild<QPushButton *>("addAccount"); QTRY_VERIFY(add->isEnabled());
+    QTimer::singleShot(0, &page, [&] {
+        auto *dialog = page.findChild<QDialog *>("accountDialog"); QVERIFY(dialog);
+        const auto closeOnFailure = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        auto *machine = dialog->findChild<QComboBox *>("addAccountMachine"); auto *provider = dialog->findChild<QComboBox *>("addAccountProvider");
+        const auto names = [provider] { QStringList result; for (int i = 0; i < provider->count(); ++i) result << provider->itemText(i); return result; };
+        QCOMPARE(machine->currentData().toString(), QString()); QCOMPARE(names(), QStringList({"codex", "claude", "kimi"}));
+        machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh"}));
+        provider->setCurrentIndex(provider->findText("dsh"));
+        machine->setCurrentIndex(machine->findData(QString())); QCOMPARE(names(), QStringList({"codex", "claude", "kimi"}));
+        QCOMPARE(provider->currentText(), QString("codex"));
+        provider->setCurrentIndex(provider->findText("claude"));
+        machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(provider->currentText(), QString("claude"));
+    });
+    add->click();
 }
 
 void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()

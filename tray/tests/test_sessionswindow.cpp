@@ -6815,7 +6815,10 @@ void TestSessionsWindow::openCodeModelLaunchUsesNativeAccountAndActivity()
         "elif a[0]=='dirs':print('{\"path\":\"/fixture/project\",\"directories\":[]}')\n"
         "elif a[0]=='worktrees':print('{\"state\":\"not_repo\"}')\n"));
     QSettings().setValue("workspace/launchOpenTerminal",true);
-    NewSessionDialog dialog(FakeCli::program(fake),fleet(),{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
+    // This computer reports Linux: without a platform a Windows build takes it for
+    // Windows, which offers no OpenCode (spec D16).
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    NewSessionDialog dialog(FakeCli::program(fake),state,{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
     auto *start=dialog.findChild<QPushButton *>("primary"),*none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
     auto *account=dialog.findChild<QListWidget *>("launchAccount");auto *models=dialog.findChild<QComboBox *>("launchModel");
     QVERIFY(account);QVERIFY(models);QVERIFY(!dialog.findChild<QComboBox *>("launchAgent"));
@@ -6886,7 +6889,10 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     QFETCH(QString,agent);
     SessionOrganization projects; projects.addFolder("ungrouped","arch","/workspace/infra");
     QSettings().setValue("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
-    SessionsWindow window(program());auto state=fleet();window.setFleet(state);window.show();
+    // This computer reports Linux: without a platform a Windows build takes it for
+    // Windows, which offers no DeepSeek (spec D16).
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.setFleet(state);window.show();
     constexpr int noticeMs=250;window.setNoticeDurationForTests(noticeMs);
     QSignalSpy terminal(&window,&SessionsWindow::newSessionRequested);
     auto *client=window.findChild<HgsClient *>();QSignalSpy launched(client,&HgsClient::nativeSessionLaunched);
