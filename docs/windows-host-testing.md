@@ -141,7 +141,10 @@ shows the reason instead of waiting for the session. A detached launch that
 starts returns after those 3 s; `hgs resume`, restores and forks do not wait. A
 session that ends later without a record, or at once with exit 0, is reported by
 the next listing in `ended_launches` instead ([JSON and external
-clients](reference.md#json-and-external-clients)). In the window above:
+clients](reference.md#json-and-external-clients)). Its supervisor reads its pane
+before the pseudoconsole has delivered everything, so the host replaces those
+lines in the supervisor's report with its pane's last lines once the output has
+drained, before the session leaves the listing. In the window above:
 
 ```sh
 "$hgs" no_such_agent "$project" --new -n missing -d  # exit 1
