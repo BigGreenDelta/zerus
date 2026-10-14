@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Check a Windows portable zip: layout, notices, size limits and provenance.
 
-Every platform reads only the zip directory and build-info.json, as the nightly
-publisher does. On Windows, --run also extracts the bundle into a disposable
-folder and starts its executables with a minimal environment: no Qt, build,
-user or HGS_* paths, and PATH without the bundle, so they must load the Qt and
-MSVC runtime from their own folder.
+Every platform reads only the zip directory, build-info.json and the ConPTY
+pair, whose SHA-256 must be the pinned one, as the nightly publisher does. On
+Windows, --run also extracts the bundle into a disposable folder and starts its
+executables with a minimal environment: no Qt, build, user or HGS_* paths, and
+PATH without the bundle, so they must load the Qt and MSVC runtime from their
+own folder. --selftest then also enables local sessions in that folder's
+temporary profile with `hgs.exe session-host install`, which must stage the
+pinned pair into the host image; no session host starts.
 """
 import argparse
 import json
@@ -16,7 +19,8 @@ import tempfile
 import tomllib
 import zipfile
 
-from release_common import require
+import conpty_pair
+from release_common import require, sha256
 from windows_portable import TOP, UNPACKED_LIMIT, ZIP_LIMIT, inspect
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +104,19 @@ def main():
                 report = run(tray, ["--selftest"], environment, base)
                 require(report.startswith("hgs ok: "), f"Unexpected hgs-tray --selftest output: {report}")
                 print(f"Control-only local computer {box.get('host')!r}; hgs-tray --selftest: {report}")
+                # Enabling local sessions from the extracted folder stages the
+                # ConPTY pair next to hgs.exe into the host image (spec D2, D6).
+                # Only the temporary profile changes, and nothing starts a host.
+                installed = json.loads(run(hgs, ["session-host", "install", "--json"], environment, base))
+                image = installed.get("image") if isinstance(installed, dict) else None
+                require(isinstance(image, dict) and image.get("pair") == "bundled" and image.get("conpty") == "bundled",
+                        f"hgs.exe session-host install did not stage the ConPTY pair: {installed}")
+                staged = Path(image["path"])
+                for name, pinned in conpty_pair.PIN["files"].items():
+                    require((staged / name).is_file() and sha256(staged / name) == pinned["sha256"],
+                            f"The host image lacks the pinned {name}: {staged}")
+                print(f"session-host install staged hgs.exe with ConPTY {conpty_pair.PIN['version']} "
+                      f"into host image {image.get('name')}.")
     print(f"Windows portable bundle verified for commit {commit}.")
 
 

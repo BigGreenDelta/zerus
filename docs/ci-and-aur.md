@@ -407,9 +407,13 @@ warnings`: clippy is pinned like the relay lints, so a new stable release cannot
 fail an unchanged commit, and Windows-only code, compiled nowhere else, is checked
 against Rust 1.85. It builds the release `hgs.exe` and the `fake_ssh` and
 `fake_agent` examples and runs `tests/test_windows_client.py` and the session host
-suites (`tests/test_windows_host.py`, `tests/test_windows_host_survival.py`,
-`tests/test_windows_lifecycle.py`, [testing the host](windows-host-testing.md))
-against them. The runner puts every step in a job that forbids breakaway, where
+suites (`tests/test_windows_host.py`, `tests/test_windows_host_conpty.py`,
+`tests/test_windows_host_survival.py`, `tests/test_windows_lifecycle.py`,
+[testing the host](windows-host-testing.md)) against them. Before the host suites,
+`scripts/fetch-conpty.py` fetches the [ConPTY pair](#the-bundled-conpty-pair) once
+into `RUNNER_TEMP/conpty`; the host step names that folder in
+`HGS_TEST_CONPTY_DIR`, and the portable zip takes the same files. Nothing caches
+or uploads the folder. The runner puts every step in a job that forbids breakaway, where
 hgs refuses to start a host (spec D4), so `scripts/ci/outside-job.py` starts the
 host suites outside it through WMI. That copy restores the step's environment
 without credentials and runs the suites in a kill-on-close job of its own that
@@ -464,7 +468,13 @@ into `zerus-windows-x86_64.zip` with one top-level `zerus-windows-x86_64/` folde
   needs.
 - The app-local Visual C++ runtime DLLs come from the default redistributable
   folder of the Visual Studio found by `vswhere`, never a hard-coded version.
-- `licenses/` holds the libvterm, md4c and Codex texts, the host-target Rust
+- `conpty.dll` and `OpenConsole.exe`, the pinned [ConPTY pair](#the-bundled-conpty-pair),
+  sit next to `hgs.exe`, so `hgs session-host install` from the extracted folder
+  stages them into the host image. `--conpty` names a folder from
+  `scripts/fetch-conpty.py`, whose files must match the pin; without it the
+  script fetches the pair itself.
+- `licenses/` holds the libvterm, md4c, Codex and ConPTY texts (the ConPTY license
+  and Windows Terminal's notices), the host-target Rust
   dependency notices from `scripts/collect-licenses.py`, the per-module SPDX
   documents shipped with Qt and, in `licenses/qt`, the texts from
   `packaging/windows/licenses` (sources in its `README.md`). Packaging parses the
@@ -478,16 +488,58 @@ device, case-duplicate or symlink names, no ICU, software OpenGL or Direct3D
 shader compiler DLLs and no Qt WebEngine files), the required runtime and license texts, the manifest
 provenance and the limits: at most 512 MiB compressed, the release mirror's
 asset limit, and 500 MB unpacked, the bound applied to whole nightly candidates.
+`conpty.dll` and `OpenConsole.exe` must be the pinned builds, by size and SHA-256
+read in memory, and no file of either name may sit anywhere but next to
+`hgs.exe`; nightly assembly and publication repeat these checks.
 With `--run --selftest` on Windows it extracts the zip and starts both
 executables with a minimal environment, without Qt or the bundle on `PATH`:
 `--version` of each, `hgs.exe ls --json --local` must report the control-only
 local computer, and `hgs-tray.exe --selftest` must find the `hgs.exe` next to
-it. The job uploads the zip and logs as `windows-x86_64-<commit>` without
+it. Last, `hgs.exe session-host install` enables local sessions in the
+disposable profile and must stage the pinned pair into the host image; it starts
+no host. The job uploads the zip and logs as `windows-x86_64-<commit>` without
 recompressing them and keeps them for seven days (three for schedules). Qt
 WebEngine, which made earlier zips about 140 MB (345 MB unpacked), is not part of
 it. Only nightly assembly uses that zip. On main pushes the [Dev channel](public-distribution.md#verified-main-dev-channel)
 waits for this job like every other suite, so a Windows failure also holds back
 Dev, but Dev candidates carry no Windows build.
+
+#### The bundled ConPTY pair
+
+The session host prefers Microsoft's ConPTY from the NuGet package
+`Microsoft.Windows.Console.ConPTY` to the inbox one (spec D6 of
+[Windows Phase 2](superpowers/specs/2026-10-13-windows-native-host-design.md)): it
+loads `conpty.dll` by absolute path from its image folder, and only when
+`OpenConsole.exe` sits there too. `conpty.dll` runs the `OpenConsole.exe` next to
+it, else one in an `x64` subfolder (where the package's own build targets put it),
+else silently System32's `conhost.exe`; the zip checks therefore allow no copy
+of either file outside the top folder.
+`packaging/windows/conpty.json` pins version 1.25.260930003: the package by its
+nuget.org URL, size and SHA-256
+(`02b07b349af66d801159bdf9e440d4a1ce78bb951f37fc8609731665afdae7ee`), and the x64
+`runtimes/win-x64/native/conpty.dll`
+(`feeef341d891643c62d30b6b07800bc70f0bc148f44cb8c3bee84aa557ae805a`) and
+`build/native/runtimes/x64/OpenConsole.exe`
+(`3d66b23d0a71bb8eed2b77edc8b9df9bf54ce6c8fb74c863a30e760997f80586`) inside it.
+The package attached to the microsoft/terminal release `v1.25.2733.0` differs only
+in its signature file and holds the same two files byte for byte.
+`scripts/fetch-conpty.py --output DIR [--nupkg FILE]` downloads the package (or
+reads a copy), checks it before opening it, and writes only those two files once
+they match; nothing in the package runs. The package declares MIT and carries no
+license file: `docs/licenses/conpty-LICENSE.txt` is the `LICENSE` of
+[microsoft/terminal](https://github.com/microsoft/terminal) (tag `v1.25.2733.0`,
+unchanged since its first release), shipped as `licenses/conpty-LICENSE.txt`.
+`OpenConsole.exe` also contains third-party code, such as Chromium's numerics
+library (BSD-3-Clause), so `docs/licenses/conpty-NOTICE.md`, that repository's
+`NOTICE.md` from the same tag, ships as `licenses/conpty-NOTICE.md`. Both are
+stored with LF line endings; the text is otherwise unchanged.
+
+To move to another version, read its `.nuspec` and build targets and the
+exports `src/host/conpty.rs` resolves, record the new package, paths, sizes and
+digests in the pin, refresh both notice files from the release tag that ships
+that package, change the version named in `src/host/conpty.rs` (a contract
+test compares them) and run the host suites, including
+`tests/test_windows_host_conpty.py`, on Windows.
 
 From Linux or macOS, `scripts/ci/check-windows-target.sh` type-checks all targets
 for `x86_64-pc-windows-msvc` without the MSVC toolchain (`clippy` instead of the

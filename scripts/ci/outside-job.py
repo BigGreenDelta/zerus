@@ -13,7 +13,7 @@ breakaway, as an sshd session does, runs the command there with stdin from NUL,
 and writes its output and exit status to files that this side follows. When the
 command ends, or this side times out and ends the copy, the job ends everything
 the command left, and session hosts that legitimately broke away from it are
-ended by executable path (--end). Usage:
+ended by executable path (--end, a PowerShell -like pattern). Usage:
 
     python scripts/ci/outside-job.py --log FILE [--timeout SECONDS] [--end EXE]... -- COMMAND...
 
@@ -80,23 +80,45 @@ def join_kill_on_close_job():
     return job
 
 
-def end_executables(paths):
-    """End every process that runs one of these executables (left behind by a failed suite)."""
-    for path in paths:
+def end_executables(patterns):
+    """End every process whose executable path matches one of these -like patterns
+    (left behind by a failed suite)."""
+    for pattern in patterns:
         subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                        "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $env:OUTSIDE_JOB_EXE } "
+                        "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like $env:OUTSIDE_JOB_EXE } "
                         "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "
                         "'outside-job: ended leftover ' + $_.ProcessId }"],
-                       env=dict(os.environ, OUTSIDE_JOB_EXE=path), stdin=subprocess.DEVNULL, timeout=120)
+                       env=dict(os.environ, OUTSIDE_JOB_EXE=pattern), stdin=subprocess.DEVNULL, timeout=120)
+
+
+def report_survivors(started, log):
+    """Log processes created since `started` that still run: a suite should leave none,
+    and anything left keeps loading the runner for the steps that follow."""
+    listing = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+         "$since = [datetime]::FromFileTimeUtc([long]$env:OUTSIDE_JOB_SINCE).ToLocalTime(); "
+         "Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -gt $since -and $_.ProcessId -ne $PID } "
+         "| ForEach-Object { 'outside-job: still running: ' + $_.ProcessId + ' ' + $_.Name + ' ' + $_.CommandLine }"],
+        env=dict(os.environ, OUTSIDE_JOB_SINCE=str(started)), stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=120)
+    lines = [line for line in listing.stdout.splitlines() if line.startswith("outside-job:")]
+    log.write(("\n".join(lines) + "\n" if lines else "outside-job: no process of the suites is left\n").encode())
+
+
+def file_time_now():
+    """Now as a Windows FILETIME (100 ns ticks since 1601)."""
+    return int((time.time() + 11644473600) * 10_000_000)
 
 
 def child(spec_path):
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     Path(spec_path).unlink()
+    started = None
     with open(spec["log"], "ab", buffering=0) as log:
         try:
             log.write(f"outside-job: pid {os.getpid()}, in_job {in_job()} before its own job\n".encode())
             job = join_kill_on_close_job()  # noqa: F841 - held until this process exits
+            started = file_time_now()
             code = subprocess.run(spec["argv"], cwd=spec["cwd"], env=spec["env"], stdin=subprocess.DEVNULL,
                                   stdout=log, stderr=subprocess.STDOUT).returncode
         except OSError as error:
@@ -104,6 +126,8 @@ def child(spec_path):
             code = 127
         log.flush()
         end_executables(spec["end"])
+        if started is not None:
+            report_survivors(started, log)
     temporary = spec["status"] + ".tmp"
     Path(temporary).write_text(str(code), encoding="utf-8")
     os.replace(temporary, spec["status"])
@@ -114,7 +138,8 @@ def main():
     parser.add_argument("--child", help=argparse.SUPPRESS)
     parser.add_argument("--log")
     parser.add_argument("--timeout", type=float, default=900)
-    parser.add_argument("--end", action="append", default=[], help="end processes of this executable afterwards")
+    parser.add_argument("--end", action="append", default=[],
+                        help="end processes whose executable path is -like this pattern afterwards")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.child:
@@ -131,7 +156,7 @@ def main():
     spec = work / "spec.json"
     spec.write_text(json.dumps({
         "argv": command, "cwd": os.getcwd(), "log": str(log), "status": str(status),
-        "end": [str(Path(path).resolve()) for path in args.end],
+        "end": args.end,
         "env": {key: value for key, value in os.environ.items() if not SECRET.search(key)},
     }), encoding="utf-8")
     # The base interpreter: a virtual environment's launcher would add a job of its own.
@@ -173,7 +198,7 @@ def main():
                 # Ending the copy closes its job, which ends the command's processes.
                 subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], stdin=subprocess.DEVNULL,
                                capture_output=True)
-                end_executables([str(Path(path).resolve()) for path in args.end])
+                end_executables(args.end)
                 sys.stderr.write(f"outside-job: timed out after {args.timeout:.0f} s; ended pid {pid}\n")
                 code = 124
                 break

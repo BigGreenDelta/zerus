@@ -4,7 +4,9 @@ from pathlib import Path
 import re
 import stat
 import zipfile
+import zlib
 
+import conpty_pair
 from release_common import require
 
 TOP = "zerus-windows-x86_64"
@@ -23,15 +25,17 @@ QT_LICENSE_TEXTS = (
     "Qt-GPL-exception-1.0", "Unicode-3.0", "Unlicense", "X11", "Zlib", "blessing", "libpng-2.0",
 )
 # The tested executables, the Qt runtime windeployqt must deploy, the app-local
-# MSVC runtime and the notices that make the bundle redistributable.
+# MSVC runtime, the pinned ConPTY pair next to hgs.exe (conpty_pair.py) and the
+# notices that make the bundle redistributable.
 REQUIRED = (
     "hgs.exe", "hgs-tray.exe", "build-info.json", "README.txt", "LICENSE", "THIRD_PARTY_NOTICES.md",
     "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Svg.dll", "Qt6Multimedia.dll",
     "platforms/qwindows.dll", "imageformats/qsvg.dll", "iconengines/qsvgicon.dll",
     "multimedia/ffmpegmediaplugin.dll", "multimedia/windowsmediaplugin.dll",
     "avcodec-61.dll", "avformat-61.dll", "avutil-59.dll", "swresample-5.dll", "swscale-8.dll",
-    "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
-    "licenses/libvterm-LICENSE", "licenses/md4c-LICENSE", "licenses/rust/inventory.json",
+    "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "conpty.dll", "OpenConsole.exe",
+    "licenses/libvterm-LICENSE", "licenses/md4c-LICENSE", "licenses/conpty-LICENSE.txt",
+    "licenses/conpty-NOTICE.md", "licenses/rust/inventory.json",
     *(f"licenses/qt/{name}.txt" for name in QT_LICENSE_TEXTS),
 )
 # Never shipped: windeployqt copies ICU from the build machine's System32 (a
@@ -42,6 +46,8 @@ REQUIRED = (
 # Zerus on Windows: the embedded native UI is an optional Linux plugin.
 FORBIDDEN = re.compile(r"(?i)(?:^|/)(?:(?:icu[^/]*|opengl32sw|d3dcompiler[^/]*|dxcompiler|dxil|qt6webengine[^/]*)\.dll"
                        r"|qtwebengineprocess\.exe|qtwebengine[^/]*\.pak|icudtl\.dat|v8_context_snapshot\.bin)$")
+# File names of the ConPTY pair: only the pinned files next to hgs.exe may use them.
+CONPTY_NAMES = {name.casefold() for name in conpty_pair.NAMES}
 WINDOWS_INVALID = re.compile(r'[\x00-\x1f\x7f<>:"|?*\\]')
 WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)), *(f"LPT{n}" for n in range(1, 10))}
 VERSION = re.compile(r"\d+\.\d+\.\d+")
@@ -58,8 +64,22 @@ def safe_name(name):
     return name
 
 
+def pinned_entry(archive, name, pinned):
+    """Whether the bundle's `name` holds the pinned file: a bounded read in memory."""
+    entry = archive.getinfo(f"{TOP}/{name}")
+    if entry.file_size != pinned["size"]:
+        return False
+    try:
+        with archive.open(entry) as stream:
+            data = stream.read(pinned["size"] + 1)
+    except (zipfile.BadZipFile, zlib.error, EOFError):
+        return False
+    return conpty_pair.matches(pinned, data)
+
+
 def inspect(path, required=REQUIRED):
-    """Return build-info.json after checking every entry and the expected layout."""
+    """Return build-info.json after checking every entry, the expected layout and
+    the pinned ConPTY pair."""
     path = Path(path)
     require(path.is_file() and not path.is_symlink(), "Windows portable bundle is not a regular file.")
     require(0 < path.stat().st_size <= ZIP_LIMIT, "Windows portable bundle exceeds the release asset limit.")
@@ -74,6 +94,9 @@ def inspect(path, required=REQUIRED):
         for entry in entries:
             name = safe_name(entry.filename)
             require(not FORBIDDEN.search(name), f"Windows portable bundle must not contain {name}")
+            # conpty.dll would run an OpenConsole.exe from a subfolder when none sat next to it.
+            require(name.rpartition("/")[2].casefold() not in CONPTY_NAMES or name.count("/") == 1,
+                    f"Windows portable ConPTY files belong next to hgs.exe: {name}")
             # Unix file type bits, when present, must say "regular file" (no symlinks).
             require(not entry.is_dir() and stat.S_IFMT(entry.external_attr >> 16) in {0, stat.S_IFREG},
                     f"Windows portable entries must be regular files: {name}")
@@ -87,6 +110,13 @@ def inspect(path, required=REQUIRED):
         require(total <= UNPACKED_LIMIT, "Windows portable bundle unpacks beyond its size limit.")
         missing = sorted(item for item in required if f"{TOP}/{item}" not in names)
         require(not missing, "Windows portable bundle lacks: " + ", ".join(missing))
+        # `hgs session-host install` stages the pair from the folder of hgs.exe into
+        # the host image, which loads conpty.dll and runs OpenConsole.exe (spec D2,
+        # D6): a different binary under either name fails.
+        for name, pinned in conpty_pair.PIN["files"].items():
+            require(f"{TOP}/{name}" in names and pinned_entry(archive, name, pinned),
+                    f"Windows portable {name} is not the pinned {conpty_pair.PACKAGE} "
+                    f"{conpty_pair.PIN['version']} build.")
         info = archive.getinfo(f"{TOP}/build-info.json")
         require(info.file_size <= MANIFEST_LIMIT, "Windows portable build-info.json is too large.")
         with archive.open(info) as stream:
