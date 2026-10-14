@@ -9,7 +9,9 @@ hgs.exe session-host install. This stages the hgs CLI in
 %USERPROFILE%\.local\bin and a session host in
 %USERPROFILE%\.local\share\hgs\host; hgs.exe session-host uninstall disables
 local sessions again. Claude Code, Codex and Kimi Code then run here once
-installed; DeepSeek and OpenCode do not. Voice messages to sessions on this
+installed; DeepSeek and OpenCode do not. Install agent... in Accounts installs
+Codex with npm (Node.js required) and Claude Code and Kimi Code with their
+vendors' PowerShell installers. Voice messages to sessions on this
 computer, the DeepSeek Native UI and the mobile gateway are not available on
 Windows.
 Documentation: https://github.com/ufna/zerus/blob/main/docs/installation.md#windows
