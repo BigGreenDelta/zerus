@@ -147,7 +147,7 @@ same candidate run. Never rebuild or replace published assets.
 
 The website mirror must run the current `scripts/update_feed.py` before
 `MACOS_CASKS_ENABLED` is set: older versions reject a stable or nightly release
-with a macOS asset. Like the Windows nightly zip, the macOS zip stays on GitHub:
+with a macOS asset. Like the Windows zip, the macOS zip stays on GitHub:
 the mirror checks its sealed name and GitHub digest but neither stores it nor lists
 it in catalog artifacts; see [public distribution](public-distribution.md).
 

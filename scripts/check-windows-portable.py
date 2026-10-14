@@ -2,7 +2,7 @@
 """Check a Windows portable zip: layout, notices, size limits and provenance.
 
 Every platform reads only the zip directory, build-info.json and the ConPTY
-pair, whose SHA-256 must be the pinned one, as the nightly publisher does. On
+pair, whose SHA-256 must be the pinned one, as the release publishers do. On
 Windows, --run also extracts the bundle into a disposable folder and starts its
 executables with a minimal environment: no Qt, build, user or HGS_* paths, and
 PATH without the bundle, so they must load the Qt and MSVC runtime from their
