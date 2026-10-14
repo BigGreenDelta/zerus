@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.MotionEvent
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -63,7 +64,8 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
     private fun node(label:String):AccessibilityNodeInfo {
         var found:AccessibilityNodeInfo?=null
         await(label) { found=find(uiAutomation.rootInActiveWindow) { it.isVisibleToUser &&
-            (it.contentDescription?.toString()==label || it.text?.toString()==label) };found!=null }
+            (it.contentDescription?.toString()==label || it.text?.toString()==label ||
+                it.actionList.any { action -> action.id==AccessibilityNodeInfo.ACTION_CLICK && action.label?.toString()==label }) };found!=null }
         return checkNotNull(found)
     }
     private fun button(label:String):AccessibilityNodeInfo {
@@ -148,6 +150,13 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
                 model.refreshActivity()
             }
             await("opened retained position") { main { model.activityVerified && model.readPositionReady } && visibleText("Synthetic navigation row 1.") }
+            check(!visibleText("Messages") && find(uiAutomation.rootInActiveWindow) { it.contentDescription?.toString()=="Search loaded messages" }==null)
+            tap("Session details");node("Overview")
+            sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+            await("closed details") { !visibleText("Overview") }
+            check(main { model.selected?.target==target && model.draft(target).text=="Retained fixture draft" })
+            tap("Session actions");tap("Search loaded messages");node("Close")
+            tap("Close")
             check(!visibleText("Synthetic navigation row 70."))
             tap("Jump to latest messages")
             await("unchanged content tail") { visibleText("Synthetic navigation row 70.") }
@@ -196,6 +205,10 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
             mode.set("larger");tap("Jump to latest messages")
             await("retry reaches latest") { main { !model.olderLoading && model.olderError.isBlank() && !model.hasNewer } && visibleText("Synthetic navigation row 80.") }
             check(main { model.conversationEvents.size==70 && model.conversationEvents.first().id=="history:fixture-11" })
+            await("enabled conversation Read all") { button("Read all").isEnabled }
+            tap("Read all")
+            await("cleared conversation unread replies") { main { !model.readAllPending(target) } && !button("Read all").isEnabled }
+            check(main { model.draft(target).text=="Retained fixture draft" && model.outgoing.isEmpty() })
 
             middleWindow();gate.set(CountDownLatch(1))
             val leavingRead=reads.get();tap("Jump to latest messages")

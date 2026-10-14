@@ -231,6 +231,14 @@ class MainActivity : ComponentActivity() {
     }
     BackHandler(model.selected != null || tab == 1 && model.selectedProject != null || tab == 0 && model.sessionProjectScope != null) { back() }
     val selected = model.selected
+    var sessionDetails by remember(selected?.target?.key) { mutableStateOf(false) }
+    if (selected != null && sessionDetails) {
+        ObscureConversation()
+        SessionDetailsSheet(model,selected) { sessionDetails = false }
+    }
+    val sessionHeaderHeight = with(LocalDensity.current) {
+        maxOf(64.dp,22.sp.toDp() + MaterialTheme.typography.labelSmall.lineHeight.toDp() + 14.dp)
+    }
     val project = if (tab == 1) model.selectedProject else model.sessionProjectScope.takeIf { tab == 0 }
     Scaffold(modifier = Modifier.fillMaxSize(), containerColor = Background,
         topBar = { TopAppBar(title = {
@@ -243,14 +251,7 @@ class MainActivity : ComponentActivity() {
                         style = MaterialTheme.typography.labelSmall, color = Muted, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
                 if (model.demo) Tag("PREVIEW", Amber)
-            } else Column { Text(selected.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 18.sp)
-                val status = if (model.activity == null && !model.demo) "Checking…" else selectedStatus(selected, model.activity)
-                val freshness = if (model.demo) " / Preview" else if (model.activityVerified || model.activity == null) "" else " / Last known"
-                val provider = if (selected.target.agentId.isNotBlank()) model.activity?.string("provider").orEmpty().ifBlank { selected.agent } else selected.agent
-                Text(DesktopIcons.providerName(provider) + " / " + status + freshness, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall,
-                    color = if (model.activity == null && !model.demo) Muted else Color(DesktopSessionPalette.colors(
-                        DesktopSessionPalette.badge(SelectedSessionPresentation.session(selected,model.activity), true).kind, MaterialTheme.colorScheme.background.luminance() < .5f).foreground)) }
+            } else SessionHeaderTitle(model,selected) { sessionDetails = true }
         }, navigationIcon = { if (selected != null || project != null) IconButton(onClick = { back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
             actions = {
                 if (selected == null) NewSessionButton(model)
@@ -269,7 +270,8 @@ class MainActivity : ComponentActivity() {
                         Icon(Icons.Default.Settings, "Settings")
                     }
                 }
-            }, colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)) },
+            }, expandedHeight = if (selected == null) 64.dp else sessionHeaderHeight,
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)) },
         bottomBar = { if (selected == null) NavigationBar(containerColor = Background) {
             listOf(Triple(0, "Sessions", DesktopIcons.Sessions), Triple(1, "Projects", DesktopIcons.Projects),
                 Triple(2, "Drafts", Icons.Default.EditNote), Triple(4, "Accounts", Icons.Default.AccountCircle),
@@ -282,7 +284,7 @@ class MainActivity : ComponentActivity() {
                 if (!model.demo && (model.busy || model.catalogProgress))
                     LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
             }
-            if (selected != null) SessionHeaderTools(model,selected) { messageJump = it }
+            if (selected != null) SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
             if (model.error.isNotBlank()) Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(model.error, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -706,7 +708,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val loadStatus = ConversationLoadPresentation.status(events.isNotEmpty() || questions.isNotEmpty(),
         model.detailBusy, model.detailProgress, model.olderLoading, historyProgress, model.demo)
     val conversationLoading = !model.demo && (model.detailBusy || model.olderLoading)
-    val canReadAll = !archived && !model.demo && model.canReadAll(target)
     val context = LocalContext.current
     val keys = buildList {
         add("history:earlier")
@@ -893,26 +894,18 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             if (!obscured && !model.demo && (model.detailProgress || historyProgress))
                 LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
         }
-        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val stripStatus = loadStatus?.takeIf { !it.initial || queueVisible }
-            if (stripStatus?.spinner == true && !obscured) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-            Text(stripStatus?.text ?: unread?.let { "${it.text} unread" } ?: "Messages",
-                Modifier.weight(1f).semantics { if (!obscured && stripStatus != null) liveRegion = LiveRegionMode.Polite },
-                color = if (stripStatus == null && unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
-            if (offeredQuestionCount > 0) TextButton(onClick = {
-                if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
-            }) { Text("Questions ($offeredQuestionCount)") }
-            TextButton(onClick = {
-                val result = model.markAllRead(listOf(target))
-                Toast.makeText(context, ConversationLoadPresentation.readAllOutcome(result.marked, result.skipped, result.partial), Toast.LENGTH_SHORT).show()
-            }, enabled = canReadAll, modifier = Modifier.semantics {
-                contentDescription = if (canReadAll) "Read all replies in this conversation on this phone"
-                    else if (model.demo) "Read all unavailable in preview"
-                    else if (archived) "Read all unavailable for archived conversations"
-                    else if (!model.readAllPending(target)) "Read all unavailable. Nothing in this conversation is unread on this phone"
-                    else "Read all unavailable. This conversation needs verified history or loaded replies on this phone"
-            }) { Text("Read all") }
+        val stripStatus = loadStatus?.takeIf { !it.initial || queueVisible }
+        if (stripStatus != null || unread != null || offeredQuestionCount > 0) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (stripStatus?.spinner == true && !obscured) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                Text(stripStatus?.text ?: unread?.let { "${it.text} unread" }.orEmpty(),
+                    Modifier.weight(1f).semantics { if (!obscured && stripStatus != null) liveRegion = LiveRegionMode.Polite },
+                    color = if (stripStatus == null && unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
+                if (offeredQuestionCount > 0) TextButton(onClick = {
+                    if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
+                }) { Text("Questions ($offeredQuestionCount)") }
+            }
         }
         if(searchNotice.isNotBlank()) Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),verticalAlignment = Alignment.CenterVertically) {
             Text(searchNotice,Modifier.weight(1f),color = Amber,style = MaterialTheme.typography.bodySmall)
