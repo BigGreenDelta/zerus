@@ -2,10 +2,24 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonObject>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QTemporaryDir>
 #include <QTextStream>
 #include "AppConfig.h"
 #include "SingleInstance.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <memory>
+#include <vector>
+
+#ifndef Q_OS_WIN
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
 
 // --open-mode / open-mode= -- см. AppConfig.h. Сама логика "что означает значение" живёт
 // в бэкендах (auto/tab/window -- KonsoleBackend, terminal -- MacBackend,
@@ -44,6 +58,13 @@ private slots:
     void enabledWindowsRunsTheStableCli();
     void localPollingFollowsPlatformAndEnablement();
     void singleInstanceNameIsPerUserOnWindows();
+    void serviceStateFollowsTheServiceManager();
+    void onlyAnotherServiceProcessKeepsTheSocket();
+    void concurrentStartsLeaveOneReachableOwner();
+    void launcherForwardsOnceTheStartingServiceListens();
+    void launcherClaimsWhenTheServiceStopsOrNeverListens();
+    void staleSocketAndLockRecoverAfterACrash();
+    void aStuckStartDelaysOthersBoundedly();
     void restartKeepsSettingsButNotOneShotOptions();
 
     void writeCreatesFileWithHeaderWhenAbsent();
@@ -618,6 +639,313 @@ void TestAppConfig::singleInstanceNameIsPerUserOnWindows()
     QCOMPARE(SingleInstance::key("c:/users/ALICE"), first);
 }
 
+namespace {
+using Service = SingleInstance::Service;
+using ServiceState = SingleInstance::Service::State;
+using Outcome = SingleInstance::Outcome;
+
+// A start on a socket in `dir`, where the service manager answers `service`.
+// self is compared with the service's pid only, so fake ids stand for processes.
+SingleInstance::Startup startupIn(const QString &dir, qint64 self, std::function<Service()> service)
+{
+    SingleInstance::Startup startup;
+    startup.key = dir + QStringLiteral("/hgs-tray");
+    startup.lockPath = dir + QStringLiteral("/hgs-tray-start.lock");
+    startup.activation = "show\n";
+    startup.self = self;
+    startup.service = std::move(service);
+    startup.pollMs = 20;
+    return startup;
+}
+
+Service noService() { return {}; }
+
+bool answers(const QString &key)
+{
+    QLocalSocket probe;
+    probe.connectToServer(key);
+    return probe.waitForConnected(1000);
+}
+
+// The next activation line a GUI receives, empty when none arrives.
+QByteArray nextActivation(QLocalServer &server)
+{
+    if (!server.hasPendingConnections() && !server.waitForNewConnection(5000))
+        return {};
+    std::unique_ptr<QLocalSocket> socket(server.nextPendingConnection());
+    while (!socket->canReadLine() && socket->waitForReadyRead(5000)) {
+    }
+    return socket->readLine();
+}
+} // namespace
+
+void TestAppConfig::serviceStateFollowsTheServiceManager()
+{
+    const auto systemd = [](const QByteArray &text) {
+        const Service service = SingleInstance::systemdService(text);
+        return std::make_pair(service.state, service.pid);
+    };
+    QCOMPARE(systemd("ActiveState=active\nMainPID=4242\n"), std::make_pair(ServiceState::Running, qint64(4242)));
+    // Restart=on-failure waits RestartSec before the next process.
+    QCOMPARE(systemd("MainPID=0\nActiveState=activating\n"), std::make_pair(ServiceState::Starting, qint64(0)));
+    // `systemctl restart` stops the previous process first.
+    QCOMPARE(systemd("ActiveState=deactivating\nMainPID=4242\n"), std::make_pair(ServiceState::Starting, qint64(4242)));
+    for (const QByteArray &absent : {QByteArray("ActiveState=inactive\nMainPID=0\n"),
+                                     QByteArray("ActiveState=failed\nMainPID=0\n"), QByteArray(), QByteArray("garbage")})
+        QCOMPARE(systemd(absent), std::make_pair(ServiceState::Absent, qint64(0)));
+    QCOMPARE(systemd("ActiveState=active\nMainPID=unknown\n"), std::make_pair(ServiceState::Running, qint64(0)));
+
+    const auto launchd = [](const QByteArray &state, const QByteArray &pid) {
+        // Only the job's own properties count, not those of nested blocks.
+        const QByteArray text = "gui/501/com.hgdev.hgs-tray = {\n"
+                                "\tactive count = 1\n"
+                                "\tpath = /Users/example/Library/LaunchAgents/com.hgdev.hgs-tray.plist\n"
+                                "\ttype = LaunchAgent\n"
+                                + (state.isEmpty() ? QByteArray() : "\tstate = " + state + "\n")
+                                + "\n\tprogram = /Applications/Zerus.app/Contents/MacOS/hgs-tray\n"
+                                  "\targuments = {\n"
+                                  "\t\t/Applications/Zerus.app/Contents/MacOS/hgs-tray\n"
+                                  "\t}\n"
+                                  "\tevent triggers = {\n"
+                                  "\t\tcom.example.trigger => {\n"
+                                  "\t\t\tstate = running\n"
+                                  "\t\t\tpid = 7\n"
+                                  "\t\t}\n"
+                                  "\t}\n"
+                                + (pid.isEmpty() ? QByteArray() : "\tpid = " + pid + "\n")
+                                + "\tlast exit code = (never exited)\n"
+                                  "}\n";
+        const Service service = SingleInstance::launchdService(text);
+        return std::make_pair(service.state, service.pid);
+    };
+    QCOMPARE(launchd("running", "4242"), std::make_pair(ServiceState::Running, qint64(4242)));
+    QCOMPARE(launchd("spawn scheduled", ""), std::make_pair(ServiceState::Starting, qint64(0)));
+    QCOMPARE(launchd("not running", ""), std::make_pair(ServiceState::Absent, qint64(0)));
+    QCOMPARE(launchd("", ""), std::make_pair(ServiceState::Absent, qint64(0)));
+    QCOMPARE(SingleInstance::launchdService({}).state, ServiceState::Absent);
+}
+
+void TestAppConfig::onlyAnotherServiceProcessKeepsTheSocket()
+{
+    QVERIFY(!SingleInstance::waitsForService(Service(), 100));
+    // The service's own process claims the socket.
+    QVERIFY(!SingleInstance::waitsForService(Service{ServiceState::Running, 100}, 100));
+    QVERIFY(SingleInstance::waitsForService(Service{ServiceState::Running, 200}, 100));
+    // A scheduled restart, and the previous process while it stops.
+    QVERIFY(SingleInstance::waitsForService(Service{ServiceState::Starting, 0}, 100));
+    QVERIFY(SingleInstance::waitsForService(Service{ServiceState::Starting, 200}, 100));
+}
+
+void TestAppConfig::concurrentStartsLeaveOneReachableOwner()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Windows starts keep their own lifetime lock (main.cpp)");
+#endif
+    // Without the lock, two of these removed each other's socket or failed to
+    // listen: a GUI that nothing reached, or a start that exited with code 3.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    constexpr int count = 8;
+    std::atomic<int> ready{0}, finished{0};
+    std::atomic<bool> go{false};
+    std::vector<Outcome> outcomes(count, Outcome::Failed);
+    std::vector<char> listening(count, false);
+    QMutex mutex;
+    QList<QByteArray> received;
+    std::vector<std::unique_ptr<QThread>> threads;
+    for (int i = 0; i < count; ++i) {
+        threads.emplace_back(QThread::create([&, i] {
+            QLocalServer server;
+            SingleInstance::Startup startup = startupIn(dir.path(), 100 + i, noService);
+            startup.activation = QByteArray::number(i) + '\n';
+            ++ready;
+            while (!go)
+                QThread::yieldCurrentThread();
+            outcomes[i] = SingleInstance::start(startup, server);
+            if (outcomes[i] == Outcome::Claimed)
+                for (int n = 1; n < count; ++n) {
+                    const QByteArray activation = nextActivation(server);
+                    const QMutexLocker locker(&mutex);
+                    received << activation;
+                }
+            // Every server stays until all starts are done, as running GUIs would.
+            ++finished;
+            while (finished < count)
+                QThread::msleep(5);
+            listening[i] = server.isListening();
+        }));
+        threads.back()->start();
+    }
+    while (ready < count)
+        QThread::yieldCurrentThread();
+    go = true;
+    for (const auto &thread : threads)
+        QVERIFY(thread->wait(60000));
+
+    QCOMPARE(std::count(outcomes.begin(), outcomes.end(), Outcome::Claimed), 1);
+    QCOMPARE(std::count(outcomes.begin(), outcomes.end(), Outcome::Forwarded), count - 1);
+    const int owner = int(std::find(outcomes.begin(), outcomes.end(), Outcome::Claimed) - outcomes.begin());
+    QVERIFY(listening[owner]);
+    // Each other start reached that one GUI.
+    QList<QByteArray> expected;
+    for (int i = 0; i < count; ++i)
+        if (i != owner)
+            expected << QByteArray::number(i) + '\n';
+    std::sort(received.begin(), received.end());
+    QCOMPARE(received, expected);
+    QVERIFY(!QFileInfo::exists(dir.filePath("hgs-tray-start.lock")));
+}
+
+void TestAppConfig::launcherForwardsOnceTheStartingServiceListens()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Windows has no service manager here (main.cpp)");
+#endif
+    // `systemctl --user restart hgs-tray` and then `hgs-tray --sessions`: the
+    // launcher used to claim the socket first, and the service then forwarded to it
+    // and exited, leaving no managed GUI.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    constexpr qint64 launcherPid = 100, servicePid = 200;
+    const auto service = [] { return Service{ServiceState::Running, servicePid}; };
+    std::atomic<Outcome> launched{Outcome::Failed};
+    std::atomic<bool> launcherListened{true};
+    QStringList reports;
+    std::unique_ptr<QThread> launcher(QThread::create([&] {
+        QLocalServer server;
+        SingleInstance::Startup startup = startupIn(dir.path(), launcherPid, service);
+        startup.activation = "sessions\n";
+        startup.report = [&reports](const QString &text) { reports << text; };
+        launched = SingleInstance::start(startup, server);
+        launcherListened = server.isListening();
+    }));
+    launcher->start();
+    QTest::qWait(500);
+    QVERIFY(launcher->isRunning());
+    QVERIFY(!answers(dir.filePath("hgs-tray")));
+
+    // The service's own process claims the socket and opens the launcher's workspace.
+    QLocalServer owner;
+    QCOMPARE(SingleInstance::start(startupIn(dir.path(), servicePid, service), owner), Outcome::Claimed);
+    QCOMPARE(nextActivation(owner), QByteArray("sessions\n"));
+    QVERIFY(launcher->wait(10000));
+    QCOMPARE(launched.load(), Outcome::Forwarded);
+    QVERIFY(!launcherListened);
+    QCOMPARE(reports, QStringList{"waiting for the Zerus service (pid 200) to open its socket"});
+}
+
+void TestAppConfig::launcherClaimsWhenTheServiceStopsOrNeverListens()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Windows has no service manager here (main.cpp)");
+#endif
+    {
+        // The service stops before it listens, for example when it crashes on start.
+        // (Without a system tray it listens first and then exits: main.cpp checks
+        // the tray only after it has claimed the socket.)
+        QTemporaryDir dir;
+        QElapsedTimer elapsed;
+        elapsed.start();
+        const auto service = [&elapsed] {
+            return elapsed.elapsed() < 400 ? Service{ServiceState::Running, 200} : Service();
+        };
+        QLocalServer server;
+        QCOMPARE(SingleInstance::start(startupIn(dir.path(), 100, service), server), Outcome::Claimed);
+        QVERIFY(elapsed.elapsed() >= 400);
+        QVERIFY(elapsed.elapsed() < 10000);
+        QVERIFY(server.isListening());
+        QVERIFY(answers(dir.filePath("hgs-tray")));
+    }
+    {
+        // A service that never listens delays the launcher by serviceWaitMs at most.
+        QTemporaryDir dir;
+        QStringList reports;
+        SingleInstance::Startup startup =
+            startupIn(dir.path(), 100, [] { return Service{ServiceState::Starting, 0}; });
+        startup.serviceWaitMs = 300;
+        startup.report = [&reports](const QString &text) { reports << text; };
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QLocalServer server;
+        QCOMPARE(SingleInstance::start(startup, server), Outcome::Claimed);
+        QVERIFY(elapsed.elapsed() >= 300);
+        QVERIFY(server.isListening());
+        QCOMPARE(reports, (QStringList{"waiting for the Zerus service to start",
+                                       "the Zerus service did not open its socket within 0.3 s; starting here"}));
+    }
+}
+
+void TestAppConfig::staleSocketAndLockRecoverAfterACrash()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Windows pipes leave no socket file behind");
+#else
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString key = dir.filePath("hgs-tray");
+    // A crashed GUI's socket: bound, never unlinked, nobody listening.
+    {
+        sockaddr_un address = {};
+        address.sun_family = AF_UNIX;
+        const QByteArray path = QFile::encodeName(key);
+        QVERIFY(size_t(path.size()) < sizeof(address.sun_path));
+        std::memcpy(address.sun_path, path.constData(), size_t(path.size()));
+        const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        QVERIFY(fd >= 0);
+        QCOMPARE(::bind(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)), 0);
+        ::close(fd);
+    }
+    QVERIFY(QFileInfo::exists(key));
+    QVERIFY(!answers(key));
+    // A start that crashed while it held the lock.
+    QProcess finished;
+    finished.start(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), QStringLiteral("exit 0")});
+    QVERIFY(finished.waitForStarted());
+    const qint64 deadPid = finished.processId();
+    QVERIFY(finished.waitForFinished());
+    {
+        QFile lock(dir.filePath("hgs-tray-start.lock"));
+        QVERIFY(lock.open(QIODevice::WriteOnly));
+        lock.write(QByteArray::number(deadPid) + "\nhgs-tray\n" + QSysInfo::machineHostName().toUtf8() + '\n');
+    }
+
+    QStringList reports;
+    SingleInstance::Startup startup = startupIn(dir.path(), 100, noService);
+    startup.report = [&reports](const QString &text) { reports << text; };
+    QElapsedTimer elapsed;
+    elapsed.start();
+    QLocalServer server;
+    QCOMPARE(SingleInstance::start(startup, server), Outcome::Claimed);
+    QVERIFY(elapsed.elapsed() < 5000);
+    QVERIFY(reports.isEmpty());
+    QVERIFY(answers(key));
+#endif
+}
+
+void TestAppConfig::aStuckStartDelaysOthersBoundedly()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Windows starts keep their own lifetime lock (main.cpp)");
+#endif
+    // A live start that keeps the lock, for example one stopped in a debugger.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QLockFile stuck(dir.filePath("hgs-tray-start.lock"));
+    QVERIFY(stuck.tryLock(0));
+    QStringList reports;
+    SingleInstance::Startup startup = startupIn(dir.path(), 100, noService);
+    startup.lockWaitMs = 300;
+    startup.report = [&reports](const QString &text) { reports << text; };
+    QElapsedTimer elapsed;
+    elapsed.start();
+    QLocalServer server;
+    QCOMPARE(SingleInstance::start(startup, server), Outcome::Claimed);
+    QVERIFY(elapsed.elapsed() >= 300);
+    QCOMPARE(reports, QStringList{QStringLiteral("another start keeps %1 locked; starting without it")
+                                      .arg(dir.filePath("hgs-tray-start.lock"))});
+    QVERIFY(stuck.isLocked());
+}
+
 void TestAppConfig::restartKeepsSettingsButNotOneShotOptions()
 {
     // Windows restarts a crashed tray with these (RegisterApplicationRestart).
@@ -761,5 +1089,5 @@ void TestAppConfig::bundledHgsIsMacOnly()
     QVERIFY(AppConfig::bundledHgsPath(macos + QStringLiteral("/hgs-tray"), AppConfig::Platform::Linux).isEmpty());
 }
 
-QTEST_APPLESS_MAIN(TestAppConfig)
+QTEST_GUILESS_MAIN(TestAppConfig)
 #include "test_appconfig.moc"
