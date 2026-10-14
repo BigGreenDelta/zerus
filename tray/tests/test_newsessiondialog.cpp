@@ -223,15 +223,17 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.show();auto *list=choices(dialog);
         QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(list->count(),5);QTRY_VERIFY(list->item(row(dialog,"work"))->toolTip().contains("17% used"));
         list->setCurrentRow(row(dialog,"work"));QPersistentModelIndex index=list->currentIndex();
+        // Opening asks for each installed account's limits, at most two at a time.
+        QTRY_COMPARE(probes().size(),4);
         dialog.setFleet(fleet());QCOMPARE(list->currentIndex(),QModelIndex(index));
         const auto scroll=list->verticalScrollBar()->value();flag("fail");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
         QTRY_VERIFY(dialog.findChild<QLabel *>("launchAccountStatus")->text().contains("Could not load accounts"));
         QVERIFY(!list->currentItem()->toolTip().contains("failed"));
         QVERIFY(list->currentItem()->toolTip().contains("17% used"));QCOMPARE(list->currentIndex(),QModelIndex(index));
         QCOMPARE(list->verticalScrollBar()->value(),scroll);QCOMPARE(list->count(),5);
-        const auto probed=probes().size();
+        // A failed catalog refresh and the minute timer ask for no limits.
         for(auto *timer:dialog.findChildren<QTimer *>())if(timer->interval()==60000)QMetaObject::invokeMethod(timer,"timeout");
-        QTest::qWait(100);QCOMPARE(probes().size(),probed);
+        QTest::qWait(100);QCOMPARE(probes().size(),4);
     }
     void lateUsageCannotRetargetAnotherComputer() {
         flag("slow-mac");flag("mac-started",false);
