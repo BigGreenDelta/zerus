@@ -751,7 +751,8 @@ one.
   (`src/state/codex_trust.rs:33,49`, `claude_permission.rs:94`,
   `clear_context.rs:90-93`), open-file holders for Codex resume input.
 - **M5 Attach client and listings** (D13, `local_host`; implemented 2026-10-14).
-- **M6 GUI** (D15 local folders, D16; implementation in progress).
+- **M6 GUI** (D15 local folders and on-disk session-name casing, D16; implemented
+  2026-10-14).
 - **M7 Tests, CI, packaging and docs**: a native `examples/fake_agent.rs` (raw input
   recorder, fixture renderer, mode toggles, hook emitter); one backend contract suite
   run against tmux on Unix and against the host on Windows; host survival tests
