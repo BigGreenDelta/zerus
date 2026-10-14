@@ -3041,8 +3041,9 @@ void SessionsWindow::renderDetails()
     const QString pauseCaption = updating ? tr("Updating…") : archived ? tr("Restore session") : s.state == "running" ? tr("Pause session") : tr("Resume session");
     m_pause->setAccessibleName(pauseCaption); m_pause->setText({});
     m_pause->setIcon(workspaceIcon(s.state == "running" ? "pause" : "play", QColor(archived ? m_accent : m_muted)));
+    // Codex defers SessionStart after resume; its verified restored conversation can pause too.
     const bool canPause = s.state == "running" && s.resumable && (s.activity == "idle" || m_details.value("auth_required").toBool()) && s.processState != "exited"
-        && m_details.value("expected_id").toString().isEmpty();
+        && (m_details.value("expected_id").toString().isEmpty() || m_details.value("resume_message_can_send").toBool());
     m_pause->setEnabled(entry->online && !updating && (archived ? (s.resumable && !s.archiveId.isEmpty() && !occupied) :
         ((canPause && NativeSessionCapabilities::action(s,"pause",m_details)) || (s.state != "running" && s.resumable && NativeSessionCapabilities::action(s,"resume",m_details)))));
     m_more->setEnabled(entry->online && !updating && (!archived || !s.archiveId.isEmpty()));

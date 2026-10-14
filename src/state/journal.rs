@@ -432,7 +432,8 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
             .unwrap()
             .clone(),
     );
-    output.as_object_mut().unwrap().extend(session_action::summary(record,live_pane).as_object().unwrap().clone());
+    let resumed = resume_input::summary_check(record, live_pane);
+    output.as_object_mut().unwrap().extend(session_action::summary(record,live_pane,&resumed).as_object().unwrap().clone());
     output["terminal_supported"] = json!(live_pane && string(record,"archive_id").is_empty() && process_alive(record));
     output["terminal_reason"] = json!(if output["terminal_supported"] == true { "" } else { "Terminal requires this exact live tracked tmux pane" });
     output["subagent_count"] = output["subagent_active_count"].clone();
@@ -450,7 +451,7 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
             output["attention_started"] = record.get("attention_started").cloned().unwrap_or(json!(0));
         }
     }
-    resume_input::enrich(record, &mut output, live_pane);
+    resume_input::enrich(&mut output, &resumed);
     provider_errors::enrich(record, &mut output, live_pane);
     if live_pane {
         // Native startup choosers have no hook. A later recognized panel wins;
@@ -652,7 +653,10 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     }
     output["compact_context_supported"] = json!(archive_id.is_none() && clear_context::available(&record,panes.is_some()));
     output["compact_context_request"] = record["compact_context_request"].clone();
-    output["clear_context_supported"] = json!(archive_id.is_none() && clear_context::available(&record,panes.is_some()));
+    // The summary above verified a pending resume once; its message and
+    // actions reuse that result instead of checking the terminal again.
+    output["clear_context_supported"] = json!(archive_id.is_none() && (clear_context::available(&record,panes.is_some())
+        || clear_context::resumed_verified(&record,panes.is_some(),output["resume_message_can_send"] == true)));
     output["clear_context_dismiss"] = json!(archive_id.is_none() && output["clear_context_supported"] != true
         && clear_context::dismissable(&record,panes.is_some()) && !clear_context::startup_choice(&output["pending_questions"]));
     output["interrupt_supported"] = json!(archive_id.is_none() && interrupt::available(&record,panes.is_some()));

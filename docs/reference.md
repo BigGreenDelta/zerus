@@ -131,9 +131,11 @@ remain on the selected host: project synchronization does not move conversations
 
 Before the agent confirms its conversation and creates native history, pause is
 unavailable. Codex and Kimi may defer creation until the first message. Codex can
-also defer `SessionStart` after resume; Activity may send the first resumed message
-only after verifying the exact process, matching history and empty native input.
-Clear is unavailable until that confirmation; start the stopped session fresh instead.
+also defer `SessionStart` after resume; Activity may send the first resumed message,
+pause or clear only after verifying the exact process, matching history and empty
+native input. Codex reports such a clear with the next message's `SessionStart`,
+which then names the new conversation instead of the restored one. A sent first
+message or an archive restore still waits for that confirmation.
 Unknown flags or noninteractive modes such as `codex exec` are not guessed.
 The original positional prompt is never replayed during resume.
 
@@ -1430,6 +1432,14 @@ the failed model request; an older host uses continuation messages. Sign-in,
 balance, other quota and context exhaustion require manual action. Questions, new input,
 Stop, session termination and identity changes cancel waiting; a native draft
 blocks delivery. Unknown providers do not receive automatic input.
+
+A continuation goes only to an agent that the failure stopped. When the agent
+keeps working after a provider error that followed an accepted continuation, the
+episode returns to **Recovery in progress** with the same attempt count: nothing
+further is scheduled or delivered while it works, and its answer completes the
+episode. An account has one recovery request in flight at a time, until the agent
+accepts the continuation and makes progress, so a long working turn does not hold
+the account's other sessions at **Waiting to retry**.
 
 Provider failures replace Working or Compacting with a specific state such as
 **Usage limit reached**, **Model at capacity** or **Sign-in failed** and appear
