@@ -493,9 +493,9 @@ Implemented in M5 (`src/host/attach.rs`, `state::backend::host`):
 - Standard input and output must both be a console that takes the attach modes;
   pipes, files and a legacy console are refused before anything is created,
   resumed or attached (`TerminalBackend::attachable`), as tmux refuses a client
-  without a terminal. The input mode also sets `ENABLE_WINDOW_INPUT`; the window size is also
-  polled, because a classic console window sends no event when only its height
-  changes. Ctrl+C and Ctrl+Break events are ignored while attached.
+  without a terminal. The input mode also sets `ENABLE_WINDOW_INPUT`; the window
+  size is also polled, because a classic console window sends no event when only
+  its height changes. Ctrl+C and Ctrl+Break events are ignored while attached.
 - At the end the client resets the modes a session may leave on its terminal (as
   tmux does on detach), leaves the alternate screen only when the session had
   entered it, moves below the last row and prints tmux's `[detached (from session

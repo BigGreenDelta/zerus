@@ -173,11 +173,11 @@ input and output must both be a console (Windows Terminal, the console host, a
 pseudoconsole) that takes terminal sequences. The mintty window that the Git
 Bash shortcut opens gives pipes, which are refused before anything is created,
 resumed or attached (`attaching needs a console`, exit 1): use Git Bash inside
-Windows Terminal, or `winpty`. The client
-gets a repaint of the pane, then its output as it comes, written with
-`WriteConsoleW`; the console keeps its own scrollback, as there is no alternate
-screen around the session. The pane takes the size of the client that was
-active last, and an attached launch starts the session at the console's size.
+Windows Terminal, or `winpty`. The client gets a repaint of the pane, then its
+output as it comes, written with `WriteConsoleW`; the console keeps its own
+scrollback, as there is no alternate screen around the session. The pane takes
+the size of the client that was active last, and an attached launch starts the
+session at the console's size.
 
 | Keys | What happens |
 |---|---|
