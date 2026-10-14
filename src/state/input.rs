@@ -728,6 +728,10 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
         // Let bracketed-paste handlers finish before Enter. Never send a second
         // Enter as a retry: that could approve a new dialog or duplicate a turn.
         std::thread::sleep(Duration::from_millis(180));
+        #[cfg(windows)]
+        if string(&record, "agent") == "codex" {
+            settle_codex_paste(terminal, pane, &pasted);
+        }
         if !process_alive(&record) || !matches(&record, live()?.get(name)) {
             return Err("agent changed after paste".into());
         }
@@ -746,9 +750,59 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     Ok(receipt)
 }
 
+/// Codex on Windows reads console key events, not VT input, so the pseudoconsole
+/// turns a bracketed paste into typed keys, and Codex's paste-burst handling makes
+/// an Enter within 120 ms of the last of them a newline. Wait until the composer
+/// shows the paste (or Codex's placeholder for a long one), then past that
+/// window; when it never shows within the limit, Enter goes as before.
+#[cfg(windows)]
+fn settle_codex_paste(terminal: &dyn backend::TerminalBackend, pane: &str, pasted: &str) {
+    let limit = std::time::Instant::now()
+        + Duration::from_millis(2_000 + 4 * pasted.len().min(4_000) as u64);
+    while std::time::Instant::now() < limit {
+        let shown = terminal
+            .capture(pane, backend::Capture::Plain)
+            .is_ok_and(|screen| paste_shown(&String::from_utf8_lossy(&screen), pasted));
+        if shown {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+/// Whether `screen` shows all of `pasted` (wrapping, indentation and borders
+/// aside), only its end when it is too long to fit, or Codex's placeholder for a
+/// long paste. The whole text counts, as a reply's closing tag repeats its opening.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn paste_shown(screen: &str, pasted: &str) -> bool {
+    let squeeze = |text: &str| -> String {
+        text.chars()
+            .filter(|ch| !ch.is_whitespace() && !matches!(ch, '│' | '┃' | '|'))
+            .collect()
+    };
+    if screen.contains("[Pasted Content") {
+        return true;
+    }
+    let pasted: Vec<char> = squeeze(pasted).chars().collect();
+    let shown: String = pasted[pasted.len().saturating_sub(2_000)..].iter().collect();
+    !shown.is_empty() && squeeze(screen).contains(&shown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_paste_shows_by_its_end_through_wrapping_or_as_a_placeholder() {
+        let envelope = "<send_user_message_question_reply>\n[{\"answer\":\"Two\",\"question\":\"Which option?\"}]\n</send_user_message_question_reply>";
+        // Codex wraps the composer's rows; the end still reads through.
+        let screen = "› <send_user_message_question_reply>\n  [{\"answer\":\"Two\",\"quest\n  ion\":\"Which option?\"}]\n  </send_user_message_question_reply>\n\n  GPT default · ~\\project";
+        assert!(paste_shown(screen, envelope));
+        // Only the start so far: not shown yet.
+        assert!(!paste_shown("› <send_user_message_question_reply>\n  [{\"answer\":", envelope));
+        assert!(paste_shown("› [Pasted Content 4096 chars]", &"x".repeat(4096)));
+        assert!(!paste_shown("› ", ""));
+    }
     #[test]
     fn entire_input_region_must_be_empty() {
         assert!(!composer_empty(
