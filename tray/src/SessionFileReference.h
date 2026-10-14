@@ -1,5 +1,7 @@
 #pragma once
 
+#include "MachinePlatform.h"
+
 #include <QDir>
 #include <QRegularExpression>
 #include <QUrl>
@@ -13,13 +15,24 @@ struct Target {
     bool valid() const { return !path.isEmpty(); }
 };
 
-inline Target parse(const QString &href)
+// A Windows GUI also reads drive paths: "C:\work\a.cpp:12", "C:/work/a.cpp" and
+// "file:///C:/work/a.cpp", never a share (UNC). Elsewhere "C:\x" stays invalid.
+inline Target parse(const QString &href, MachinePlatform::Style style = MachinePlatform::build())
 {
-    const QUrl url(href);
+    const bool windows = style == MachinePlatform::Style::Windows;
+    const auto separator = [](QChar c) { return c == '/' || c == '\\'; };
+    const auto drive = [&](const QString &path) {
+        return MachinePlatform::absolute(path, MachinePlatform::Style::Windows) && !separator(path.at(0));
+    };
+    // A drive path reads as a file URL, which splits off and decodes the same parts
+    // as any other reference; its backslashes stay as written.
+    const QUrl url(windows && drive(href) ? QStringLiteral("file:///") + QString(href).replace('\\', "%5C") : href);
     if (!url.isValid() || !url.host().isEmpty() || !url.userInfo().isEmpty()
         || (!url.scheme().isEmpty() && url.scheme() != "file") || url.hasQuery()) return {};
     QString path = url.path(QUrl::FullyDecoded);
+    if (windows && path.startsWith('/') && drive(path.mid(1))) path.remove(0, 1);
     if (path.isEmpty() || path.startsWith("//") || path.size() > 8192) return {};
+    if (windows && path.size() > 1 && separator(path.at(0)) && separator(path.at(1))) return {};
     for (const auto ch : path) if (ch.isNull() || ch.category() == QChar::Other_Control) return {};
     QString location = url.fragment(QUrl::FullyDecoded);
     if (location.size() > 2048) return {};

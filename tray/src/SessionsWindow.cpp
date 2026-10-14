@@ -48,6 +48,7 @@
 #include "MachinesPage.h"
 #include "MachineFilter.h"
 #include "MachineAppearance.h"
+#include "MachinePlatform.h"
 #include "DashboardPage.h"
 #include "AccountsPage.h"
 #include "SessionSearch.h"
@@ -584,7 +585,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (!entry || m_details.isEmpty()) return target;
         target.key=entry->key;target.host=entry->host;target.session=entry->session.name;
         target.run=m_details.value("run_id").toString();target.conversation=m_details.value("conversation_id").toString();
-        target.available=entry->online && entry->session.archiveId.isEmpty() && messageBlockReason(*entry).isEmpty();
+        // Voice messages to local Windows sessions are a Phase 2 non-goal (spec D16).
+        const bool localWindows=entry->host.isEmpty()&&MachinePlatform::of(m_fleet.local().metrics,true)==MachinePlatform::Style::Windows;
+        target.available=!localWindows && entry->online && entry->session.archiveId.isEmpty() && messageBlockReason(*entry).isEmpty();
+        if(localWindows)target.reason=tr("Voice messages cannot be sent to sessions on this Windows computer yet.");
         if(CacheStatus::expired(m_details))target.warning=CacheStatus::warning(m_details)+tr("\n\nSend this voice message with the full conversation context?");
         return target;
     });
@@ -1296,7 +1300,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     restartEntry->setProperty("glyph", "zerus");
     restartEntry->setIconSize(QSize(14, 14));
     restartEntry->setAttribute(Qt::WA_LayoutUsesWidgetRect);
-    restartEntry->setToolTip(tr("Zerus was updated on disk. Drafts are kept; agents and tmux keep running."));
+    restartEntry->setToolTip(tr("Zerus was updated on disk. Drafts are kept; sessions keep running."));
     restartEntry->setAccessibleName(restartEntry->toolTip());
     statusLayout->addWidget(restartEntry);
     auto restartEntryState = [updates, restartEntry] { restartEntry->setVisible(updates->restartRequired()); };
@@ -1954,9 +1958,22 @@ QString SessionsWindow::terminalDropTarget() const
 
 void SessionsWindow::pasteTerminalPaths(const QStringList &paths)
 {
+    // A local Windows session gets native paths, in double quotes when needed (no
+    // Windows name contains one) or, with `$` or a backtick that PowerShell expands
+    // there, in single quotes with `'` doubled; POSIX machines, including every peer,
+    // single quotes.
+    const auto *entry=selected();
+    const bool windows=entry&&MachinePlatform::of(m_fleet.local().metrics,entry->host.isEmpty())==MachinePlatform::Style::Windows;
+    static const QRegularExpression plain("^[\\w.:\\\\~+-]+$",QRegularExpression::UseUnicodePropertiesOption);
     QStringList quoted;
     for(auto path:paths) {
         if(path.contains(QRegularExpression("[\\x00-\\x1f\\x7f]"))) {showNotice(tr("File names containing control characters cannot be pasted into Terminal."),true);return;}
+        if(windows) {
+            path=MachinePlatform::native(path,MachinePlatform::Style::Windows);
+            if(path.contains('$')||path.contains('`'))quoted<<'\''+path.replace('\'',QStringLiteral("''"))+'\'';
+            else quoted<<(plain.match(path).hasMatch()?path:'"'+path+'"');
+            continue;
+        }
         path.replace('\'',QStringLiteral("'\\''"));quoted<<'\''+path+'\'';
     }
     m_terminal->pasteText(quoted.join(' ')+" ");m_terminal->setFocus(Qt::OtherFocusReason);
@@ -1985,6 +2002,7 @@ void SessionsWindow::showWorkspaceSettings()
 void SessionsWindow::setFleet(const FleetState &fleet) {
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setLocalSessions(fleet.local().localSessions); m_settingsPage->setPeers(fleet.peerNames());
+    m_settingsPage->setMobileGateway(fleet.local().localSessions&&MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Posix);
     m_fleet = fleet; m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {
@@ -2236,7 +2254,8 @@ void SessionsWindow::placeLaunchedSessions()
             // A generated worktree launches in its target but adds the folder it
             // came from. Launches saved before "folder" existed add their target.
             const auto path=launch.value("add_folder").toBool()?launch.value("folder").toString(launch.value("target").toString()):QString();
-            if(path.startsWith('/'))m_organization.addFolder(group,entry.machine,path);
+            const auto style=MachinePlatform::of(m_fleet.local().metrics,entry.host.isEmpty());
+            if(MachinePlatform::absolute(path,style))m_organization.addFolder(group,entry.machine,path,{},style);
             m_organization.moveSession(entry.identity, group); m_organization.setCollapsed(group, false); consumed = true;
         }
         if (consumed) { it = m_pendingLaunches.erase(it); changed = true; } else ++it;
@@ -2374,6 +2393,7 @@ void SessionsWindow::rebuild()
             QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs);
         if (reachable) ++online;
         const bool selectedHost = m_hostFilters.isEmpty() || m_hostFilters.contains(host.isEmpty() ? "@local" : host);
+        const auto style = MachinePlatform::of(box.metrics, host.isEmpty());
         for (const auto &stored : box.sessions) {
             auto s=stored;
             const QString key = host + '\n' + s.name + (s.state == "archived" ? '\n' + s.archiveId : QString());
@@ -2382,7 +2402,7 @@ void SessionsWindow::rebuild()
             if (entryHasDraft(m_entries.last())) drafts.insert(key);
             if (!selectedHost) continue;
             if (!m_folderFilterPath.isEmpty() && (host != m_folderFilterHost ||
-                (m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd) != m_folderFilterPath)) continue;
+                !MachinePlatform::same(m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd, m_folderFilterPath, style))) continue;
             if (s.state == "archived") { ++archived; continue; }
             ++total;
             const bool needsAttention = entryNeedsAttention(m_entries.last());
@@ -2461,7 +2481,7 @@ void SessionsWindow::rebuild()
             && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
         if (m_filter == "paused" && s.state == "running") continue;
         if (!(s.name + ' ' + e.machine + ' ' + s.prompt + ' ' + s.currentTool + ' ' + s.gitBranch + ' ' + s.gitWorktreeName + ' ' + s.activitySummary + ' ' + s.activityDetail).contains(query, Qt::CaseInsensitive)) continue;
-        if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd)!=m_folderFilterPath))continue;
+        if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||!MachinePlatform::same(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd,m_folderFilterPath,MachinePlatform::of(m_fleet.local().metrics,e.host.isEmpty()))))continue;
         visible.append(e);
     }
     struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch; };
@@ -2657,7 +2677,8 @@ void SessionsWindow::rebuild()
     m_countFull = m_count->text(); m_countShort = QString::number(visible.size() + starting);
     // The strip keeps this row hidden (applySessionStrip()).
     m_folderFilterClear->setVisible(!m_folderFilterPath.isEmpty() && !(m_sessionDock && m_sessionDock->chromeNarrow()));
-    m_folderFilterClear->setText(tr("Folder: %1   ×").arg(m_folderFilterPath.section('/',-1)));m_folderFilterClear->setToolTip(m_folderFilterPath+tr("\nClear folder filter"));
+    const auto folderStyle=MachinePlatform::of(m_fleet.local().metrics,m_folderFilterHost.isEmpty());
+    m_folderFilterClear->setText(tr("Folder: %1   ×").arg(MachinePlatform::leaf(m_folderFilterPath,folderStyle)));m_folderFilterClear->setToolTip(MachinePlatform::native(m_folderFilterPath,folderStyle)+tr("\nClear folder filter"));
     m_count->setToolTip(m_countFull);
     m_count->setVisible(!m_searchResults->active());
     applySessionStrip();
@@ -2740,7 +2761,7 @@ void SessionsWindow::selectSession()
         m_processPollAge.invalidate();m_inspectionAge.invalidate();
         m_childrenHtml.clear(); m_activityView->setSessionKey(key); m_composer->setSessionKey(key);
         const auto *entry = selected();
-        m_terminal->setSession(m_client.executable(), entry ? entry->host : QString(), entry ? entry->session.name : QString());
+        m_terminal->setSession(m_client.executable(), entry ? entry->host : QString(), entry ? entry->session.name : QString(), {}, entry ? entry->machine : QString());
         if (!child.isEmpty()) openSubagent(child);
         inspect(); renderDetails();
         if (selected() && m_subagentId.isEmpty() && m_detailTabs->currentWidget() == m_terminal) m_terminal->connectSession();
@@ -2961,7 +2982,7 @@ void SessionsWindow::renderDetails()
     }
     s.cwd = m_details.value("cwd").toString(s.cwd);
     const QString directory = m_subagentId.isEmpty() ? s.cwd : m_subagentCwd;
-    m_shell->setEnabled(entry->online && directory.startsWith('/'));
+    m_shell->setEnabled(entry->online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, entry->host.isEmpty())));
     const bool localFolder = entry->host.isEmpty() && QFileInfo(directory).isAbsolute() && QFileInfo(directory).isDir();
     m_fileManager->setEnabled(localFolder);
     m_fileManager->setToolTip(!entry->host.isEmpty() ? tr("Available only for sessions on this computer")
@@ -3108,7 +3129,7 @@ void SessionsWindow::renderDetails()
     m_composer->setSettingsNotice(m_details.value("settings_change_notice").toString());
     renderQuestion(*entry);
     updateSessionFeedback();
-    m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString());
+    m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString(), entry->machine);
     m_nativeUi->setSession(entry->host, s.cmd == "dsh" ? s.name : QString(), m_details.value("run_id").toString(s.runId), entry->machine, s.cmd == "dsh" && entry->online && !archived);
     const bool terminalTab = terminalAvailable && m_subagentId.isEmpty();
     // Loads the optional plugin on the first DeepSeek session, not at startup.
@@ -4152,7 +4173,8 @@ void SessionsWindow::openFolderShell()
     const auto *entry = selected();
     if (!entry || !entry->online) return;
     const auto directory = m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd;
-    if (directory.startsWith('/')) emit folderShellRequested(entry->host, directory);
+    if (MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, entry->host.isEmpty())))
+        emit folderShellRequested(entry->host, directory);
 }
 
 void SessionsWindow::openSessionFolder()
@@ -4205,7 +4227,8 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     add(tr("Open folder"), "contextOpenFolder", SessionMenuAction::OpenFolder, localFolder,
         !original.host.isEmpty() ? tr("Available only for sessions on this computer")
         : localFolder ? tr("Open session folder in file manager\n%1").arg(directory) : tr("Session folder is unavailable"));
-    add(tr("Open shell in session folder"), "contextFolderShell", SessionMenuAction::FolderShell, original.online && directory.startsWith('/'));
+    add(tr("Open shell in session folder"), "contextFolderShell", SessionMenuAction::FolderShell,
+        original.online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, original.host.isEmpty())));
     add(archived ? tr("Copy restore command") : tr("Copy connect command"), "contextCopyCommand", SessionMenuAction::CopyCommand,
         (archived || NativeSessionCapabilities::terminal(target)) && (!archived || !original.session.archiveId.isEmpty()));
     if (!archived) {
@@ -4295,7 +4318,9 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
     case SessionMenuAction::OpenFolder:
         if (current.host.isEmpty()) openLocalFolder(directory); return;
     case SessionMenuAction::FolderShell:
-        if (current.online && directory.startsWith('/')) emit folderShellRequested(current.host, directory); return;
+        if (current.online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, current.host.isEmpty())))
+            emit folderShellRequested(current.host, directory);
+        return;
     case SessionMenuAction::CopyName: emit copyTextRequested(current.session.name); return;
     case SessionMenuAction::CopyReference: copySessionReference(current); return;
     case SessionMenuAction::CopyFolder: if (!directory.isEmpty()) emit copyTextRequested(directory); return;

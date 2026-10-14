@@ -46,8 +46,8 @@ the protocol, configuration and identity code.
 ### D2. Explicit enablement, a stable CLI and staged host images
 
 Local sessions on Windows are off until the user enables them, from the GUI
-("Enable local sessions" on the Machines page for this computer) or with
-`hgs session-host install`. This keeps home-directory writes explicit, as for
+("Enable local sessions (preview)" on the Machines page for this computer, D16) or
+with `hgs session-host install`. This keeps home-directory writes explicit, as for
 `zerus-setup` on Linux and macOS. Enabling:
 
 1. **Stages the stable CLI** `%USERPROFILE%\.local\bin\hgs.exe`, the Windows form of
@@ -106,10 +106,14 @@ adds `error`, and a stopped host of a computer without the marker is `not-instal
 the control-console box carries it too.
 
 **One CLI over the state directory.** Once enabled, the GUI runs the stable CLI, not
-the `hgs.exe` in its own folder. When the GUI's bundled `hgs.exe` is newer than the
-staged one, the GUI refreshes the staged CLI and host image (the user consented to
-staging when enabling). State formats stay readable in both directions across one
-version of skew.
+the `hgs.exe` in its own folder, from its next start. At start, a Windows GUI asks its
+bundled `hgs.exe` for `session-host status`; on an enabled computer it refreshes the
+staged CLI and host image with `session-host install` when the bundled build differs
+(SHA-256) and is at least as new as the staged one (a staged build of unknown version
+counts as older; the user consented to staging when enabling), then runs every `hgs`
+call through the stable CLI. An explicit `--hgs` or `hgs=` setting is used as given.
+A GUI that enables local sessions keeps its CLI until it restarts. State formats stay
+readable in both directions across one version of skew.
 
 ### D3. Host lifetime: like the tmux server
 
@@ -185,7 +189,8 @@ integrity level at least the host's; a lower-integrity client is refused with a 
 message ("the session host on this computer runs elevated"). The host reports its
 integrity level and Windows session ID in the hello and in `local_host`, and the GUI
 warns before launching into a host that runs in another Windows session (for example
-one started over SSH). Elevated SSH testing uses an isolated `HGS_STATE_DIR`.
+one started over SSH; a follow-up task after M6). Elevated SSH testing uses an
+isolated `HGS_STATE_DIR`.
 
 **Security.** The first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE` and
 `PIPE_REJECT_REMOTE_CLIENTS` and a protected DACL granting access only to the user SID.
@@ -593,7 +598,9 @@ The M3 variable `HGS_HOST_RECOVERY_WORKER` is gone.
   stored or compared path uses it (38 `canonicalize` sites in `src/state`, including
   `cwd_canonical` at `src/state/workspace.rs:185`).
 - Comparisons of local paths on Windows are case-insensitive; session names derive
-  from the canonical (on-disk) casing of the folder.
+  from the canonical (on-disk) casing of the folder, in the CLI: the canonical name
+  is used only when it equals the logical one ignoring case, so a junction keeps its
+  own name.
 - `hgs.exe` gets an application manifest (UTF-8 code page, `longPathAware`), as
   `hgs-tray.exe` already has; today only the GUI has one (`build.rs:1-11`).
 - `.gitattributes` keeps `tests/fixtures/*.txt` and `src/state/data/*.txt`
@@ -603,36 +610,61 @@ The M3 variable `HGS_HOST_RECOVERY_WORKER` is gone.
   `NUL` instead of `/dev/null`) and an `ssh` that never receives synchronous pipes
   (`src/state/worktrees.rs:67-72`).
 - **Local Windows folders stay local.** The GUI pushes the whole organization to the
-  swarm (`tray/src/SessionsWindow.cpp:1819-1821`), `flatten` publishes every folder
-  (`src/swarm/model.rs:52-66`), the catalog rejects non-`/` paths
-  (`src/swarm/catalog.rs:77-78`), and `organizationReady` replaces the local
-  organization (`SessionsWindow.cpp:1190-1193`). Phase 2 adds a local folder list
-  keyed by machine ID: `flatten` leaves non-POSIX local folders out, and the GUI
-  merges the local list back after each `organizationReady`. A test checks that a
-  Unix peer's sync never drops them. A shared catalog kind for Windows paths is
-  Phase 3.
+  swarm (`tray/src/SessionsWindow.cpp:1827`), `flatten` publishes every folder
+  (`src/swarm/model.rs:53-69`), the catalog accepts any path that starts with `/`
+  (`src/swarm/catalog.rs:78`, so `//server/share` too), and `organizationReady`
+  replaces the local organization (`SessionsWindow.cpp:1195-1199`). Local Windows
+  folders stay in the GUI's organization model but never reach the swarm:
+  `SwarmController::sharedOrganization` strips drive and UNC folders before sending,
+  and `presentation` merges them back for the local machine only (an empty
+  `machine_id` or the snapshot's `node_id`), dropping those whose project was
+  deleted. `flatten` skips drive and UNC folder paths while other invalid paths still
+  fail, so an older or newer GUI never breaks an apply. A test checks that a Unix
+  peer's sync never drops them. A shared catalog kind for Windows paths is Phase 3.
 
 ### D16. GUI
 
-- Machines page: "Enable local sessions" for this computer when the marker is absent,
-  running `hgs.exe session-host install`; host status, integrity and Windows session.
-- Once enabled, the GUI runs the stable CLI and refreshes it when its bundled build is
-  newer (D2).
-- Path model per machine from `metrics.platform`: drive and UNC roots accepted for the
-  local Windows machine wherever `startsWith('/')` gates folders today
-  (`SessionOrganization.cpp:24,176,187`, `ProjectsDialog.cpp:351`,
-  `NewSessionDialog.cpp:27,122,462`, `SessionsWindow.cpp:2229,2954,4132,4184,4274`,
-  `SessionCommands.h:109-113`), with the local-only list from D15.
-- Terminal file drops quote for the target platform; the local folder shell opens
-  PowerShell in that folder through Windows Terminal; file references accept
-  `C:\…` and `C:/…` with line suffixes.
-- New session lists only agents the machine supports (no `dsh` on Windows); voice
-  sends to local Windows sessions are disabled with an explanation.
+Apart from the status text, these rules change only a Windows GUI and its local
+machine: Linux and macOS GUIs, and every peer, behave as today.
+
+- Machines page: "Enable local sessions (preview)" for this computer when it runs
+  Windows, is a control console and its CLI reports `local_host`, running
+  `hgs.exe session-host install`; the page shows the host's state, PID, ConPTY,
+  integrity, Windows session and error. M6 has no disable action
+  (`hgs session-host uninstall` remains).
+- Once enabled, the GUI runs the stable CLI from its next start and refreshes it when
+  its bundled build is newer (D2).
+- Path model per machine (`tray/src/MachinePlatform.h`): the local machine is Windows
+  when `metrics.platform` says so, and has the GUI's build platform before its box
+  reports one; peers are POSIX. Windows folders are stored in Qt form (`C:/work`,
+  `//server/share/dir`), compared with either separator and ignoring case, and shown
+  with native separators. Drive and UNC roots are accepted for the local Windows
+  machine wherever `startsWith('/')` or `QDir::isAbsolutePath` gates folders today
+  (`SessionOrganization.cpp:24,176,187`, `ProjectsDialog.cpp:351,441`,
+  `NewSessionDialog.cpp:77,183`, `SessionsWindow.cpp:2239,2964,4155,4208,4298`,
+  `SessionCommands.h:109`), with the local-only folders of D15.
+- Terminal file drops into a local Windows session use native separators and double
+  quotes around a path with whitespace or shell-special characters (Windows names
+  cannot contain `"`), or single quotes with `'` doubled around a path with `$` or a
+  backtick, which PowerShell expands inside double quotes; remote drops keep POSIX
+  quoting. The local folder shell opens
+  PowerShell in that folder through Windows Terminal, or a console started there when
+  Windows Terminal is missing or cannot pass the path unchanged. On a Windows GUI,
+  file references accept `C:\…`, `C:/…` (with `:line[:col]`) and `file:///C:/…`,
+  never UNC; elsewhere `C:\x` stays invalid.
+- New session and Accounts hide `dsh` and `opencode` on the local Windows machine
+  (OpenCode's launch path does not resolve npm `.cmd` shims); the shell entry stays,
+  labelled PowerShell. Voice sends to local Windows sessions are disabled, with the
+  reason as the button's tooltip.
 - Mobile connection settings stay hidden on Windows independently of
-  `local_sessions` (today they are coupled in `SettingsPage::setLocalSessions`).
-- Status text no longer names tmux ("the session continues on <machine>").
-- Local polling keeps a platform minimum interval on Windows until the host can push
-  changes.
+  `local_sessions` (today both follow `SettingsPage::setLocalSessions`); Recovery
+  keeps following `local_sessions`.
+- Status text no longer names tmux ("the session continues on <machine>", with the
+  local machine's display name), in the terminal view and the update tooltip
+  (`TerminalView.cpp:63,141`, `SessionsWindow.cpp:1299`). The Machines page keeps its
+  tmux wording for remote Unix machines.
+- An enabled Windows computer waits at least 5 s between polls of itself until the host
+  can push changes (a control console keeps its 15 s); Unix keeps the configured interval.
 
 ## Unix compatibility rules for the refactor
 
@@ -719,7 +751,7 @@ one.
   (`src/state/codex_trust.rs:33,49`, `claude_permission.rs:94`,
   `clear_context.rs:90-93`), open-file holders for Codex resume input.
 - **M5 Attach client and listings** (D13, `local_host`; implemented 2026-10-14).
-- **M6 GUI** (D15 local folders, D16).
+- **M6 GUI** (D15 local folders, D16; implementation in progress).
 - **M7 Tests, CI, packaging and docs**: a native `examples/fake_agent.rs` (raw input
   recorder, fixture renderer, mode toggles, hook emitter); one backend contract suite
   run against tmux on Unix and against the host on Windows; host survival tests

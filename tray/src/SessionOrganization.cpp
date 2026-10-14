@@ -5,6 +5,18 @@
 #include <QColor>
 #include <QDir>
 
+namespace {
+// Stored folders keep the form of their machine: local Windows folders are drive or
+// UNC paths (MachinePlatform::clean), compared with either separator and any case.
+bool sameFolder(const QString &a, const QString &b)
+{
+    using MachinePlatform::Style;
+    if (MachinePlatform::windowsShaped(a) && MachinePlatform::windowsShaped(b))
+        return MachinePlatform::same(MachinePlatform::clean(a, Style::Windows), MachinePlatform::clean(b, Style::Windows), Style::Windows);
+    return QDir::cleanPath(a) == QDir::cleanPath(b);
+}
+}
+
 SessionOrganization::SessionOrganization(const QJsonObject &data)
 {
     QSet<QString> ids, sessions;
@@ -21,7 +33,8 @@ SessionOrganization::SessionOrganization(const QJsonObject &data)
         for (const auto &value : obj.value("folders").toArray()) {
             const auto folder = value.toObject(); const auto machine = folder.value("machine").toString();
             const auto path = folder.value("path").toString(); const auto key = machine + '\n' + path;
-            if (machine.isEmpty() || !path.startsWith('/') || folders.contains(key)) continue;
+            // Local Windows folders (D15) are drive or UNC paths, kept by this GUI only.
+            if (machine.isEmpty() || (!path.startsWith('/') && !MachinePlatform::windowsShaped(path)) || folders.contains(key)) continue;
             folders.insert(key);
             const auto id = folder.value("id").toString(QUuid::createUuid().toString(QUuid::WithoutBraces));
             g.folders.append({id, machine, path, folder.value("name").toString(), folder.value("machine_id").toString(), folder.value("machine_name").toString()});
@@ -171,23 +184,25 @@ void SessionOrganization::setColor(const QString &id, const QString &color)
     const QColor chosen(color); if (!chosen.isValid()) return;
     for (auto &g : m_groups) if (g.id == id) g.color = chosen.name();
 }
-QString SessionOrganization::addFolder(const QString &project, const QString &machine, const QString &path, const QString &name)
+QString SessionOrganization::addFolder(const QString &project, const QString &machine, const QString &path, const QString &name,
+                                      MachinePlatform::Style style)
 {
-    if (machine.trimmed().isEmpty() || !path.startsWith('/') || path.contains('\n')) return {};
-    const auto clean = QDir::cleanPath(path);
+    if (machine.trimmed().isEmpty() || !MachinePlatform::absolute(path, style) || path.contains('\n')) return {};
+    const auto clean = MachinePlatform::clean(path, style);
     for (auto &g : m_groups) if (g.id == project) {
-        for (const auto &folder : g.folders) if (folder.machine == machine && folder.path == clean) return folder.id;
+        for (const auto &folder : g.folders) if (folder.machine == machine && MachinePlatform::same(folder.path, clean, style)) return folder.id;
         const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
         g.folders.append({id, machine, clean, name.trimmed().left(80)}); return id;
     }
     return {};
 }
-bool SessionOrganization::editFolder(const QString &project, const QString &id, const QString &machine, const QString &path, const QString &name)
+bool SessionOrganization::editFolder(const QString &project, const QString &id, const QString &machine, const QString &path, const QString &name,
+                                     MachinePlatform::Style style)
 {
-    if (machine.isEmpty() || !path.startsWith('/') || path.contains('\n')) return false;
-    const auto clean = QDir::cleanPath(path);
+    if (machine.isEmpty() || !MachinePlatform::absolute(path, style) || path.contains('\n')) return false;
+    const auto clean = MachinePlatform::clean(path, style);
     for (auto &g : m_groups) if (g.id == project) {
-        for (const auto &f : g.folders) if (f.id != id && f.machine == machine && f.path == clean) return false;
+        for (const auto &f : g.folders) if (f.id != id && f.machine == machine && MachinePlatform::same(f.path, clean, style)) return false;
         for (auto &f : g.folders) if (f.id == id) { if(f.machine!=machine){f.machineId.clear();f.machineName.clear();} f.machine=machine; f.path=clean; f.name=name.trimmed().left(80); return true; }
     }
     return false;
@@ -223,7 +238,7 @@ QString SessionOrganization::transferFolder(const QString &project, const QStrin
     for (const auto &existing : m_groups[to].folders) {
         const bool sameMachine = !folder.machineId.isEmpty() && !existing.machineId.isEmpty()
             ? folder.machineId == existing.machineId : folder.machine == existing.machine;
-        if (sameMachine && QDir::cleanPath(folder.path) == QDir::cleanPath(existing.path)) {
+        if (sameMachine && sameFolder(folder.path, existing.path)) {
             targetId = existing.id;
             break;
         }

@@ -327,7 +327,8 @@ void SpeechComposer::update() {
     m_voice->setActive(true);m_voice->setEnabled(!m_loading && (recording || (m_state==State::Idle && current.available && !current.conversation.isEmpty() && m_composer->isInputVisible())));
     m_voice->setTone(recording?ChipTone::Danger:ChipTone::Quiet);m_voice->setIconName(recording?"stop":"microphone");
     m_voice->setLabels(recording?tr("Stop voice (%1)").arg(duration(m_seconds)):m_state==State::Starting?tr("Opening microphone…"):tr("Voice"));
-    m_voice->setDetail(tr("Record a voice message, review it, then choose Send voice. Your text draft stays separate."));
+    m_voice->setDetail(!recording && !current.available && !current.reason.isEmpty()?current.reason
+        :tr("Record a voice message, review it, then choose Send voice. Your text draft stays separate."));
     m_cancel->setActive(m_state==State::Starting || recording);
     const bool preview=!m_pcm.isEmpty();m_preview->setVisible(preview);m_previewLabel->setText(tr("Voice %1").arg(duration(m_seconds)));
     m_play->setText(m_player && m_player->playbackState()==QMediaPlayer::PlayingState?tr("Pause"):tr("Play"));

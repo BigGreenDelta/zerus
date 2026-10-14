@@ -37,6 +37,8 @@ private slots:
     void preservesArgumentBytes();
     void parsesOfflineBox();
     void parsesControlOnlyComputer();
+    void parsesLocalSessionHost();
+    void sessionHostActionsUseJsonAndReportFailures();
     void parsesFleetArray();
     void rejectsGarbage();
     void tagAndProjectMayBeNull();
@@ -1019,6 +1021,66 @@ void TestHgsClient::parsesControlOnlyComputer()
     QVERIFY(posix.localSessions);
     const auto fleet = HgsClient::parseFleet(R"([{"host":"windows-pc","ok":true,"local_sessions":false},{"host":"mac","ok":true}])", &err);
     QCOMPARE(fleet.size(), 2); QVERIFY(!fleet[0].localSessions); QVERIFY(fleet[1].localSessions);
+}
+
+void TestHgsClient::parsesLocalSessionHost()
+{
+    // A Windows CLI adds local_host to its own box (spec D2): every key, null
+    // facts unless a host answers, and the error of an unavailable one.
+    QString err;
+    const auto running = HgsClient::parseBox(R"({"host":"windows-pc","ok":true,"sessions":[],
+        "metrics":{"platform":"windows"},"local_host":{"state":"running","pid":4242,"protocol":1,
+        "conpty":"bundled","integrity":"medium","windows_session":1}})", &err);
+    QVERIFY(err.isEmpty()); QVERIFY(running.localSessions);
+    QCOMPARE(running.localHost, QJsonObject({{"state", "running"}, {"pid", 4242}, {"protocol", 1},
+        {"conpty", "bundled"}, {"integrity", "medium"}, {"windows_session", 1}}));
+    const auto unavailable = HgsClient::parseBox(R"({"host":"windows-pc","ok":true,"sessions":[],"local_sessions":false,
+        "local_host":{"state":"unavailable","pid":null,"protocol":null,"conpty":null,"integrity":null,
+        "windows_session":null,"error":"the session host on this computer runs elevated"}})", &err);
+    QVERIFY(!unavailable.localSessions);
+    QCOMPARE(unavailable.localHost.value("state").toString(), QString("unavailable"));
+    QCOMPARE(unavailable.localHost.value("error").toString(), QString("the session host on this computer runs elevated"));
+    QVERIFY(unavailable.localHost.value("pid").isNull());
+    // Unix listings and older CLIs carry none.
+    const auto posix = HgsClient::parseBox(R"({"host":"arch","ok":true,"sessions":[],"metrics":{"platform":"linux"}})", &err);
+    QVERIFY(posix.localHost.isEmpty());
+    const auto fleet = HgsClient::parseFleet(R"([{"host":"windows-pc","ok":true,"local_host":{"state":"stopped"}},{"host":"mac","ok":true}])", &err);
+    QCOMPARE(fleet[0].localHost.value("state").toString(), QString("stopped")); QVERIFY(fleet[1].localHost.isEmpty());
+}
+
+void TestHgsClient::sessionHostActionsUseJsonAndReportFailures()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const auto program = directory.filePath("hgs");
+    QVERIFY(FakeCli::install(program, "#!/usr/bin/env python3\nimport json,os,sys\n"
+        "open(__file__+'.calls','a').write(json.dumps(sys.argv[1:])+'\\n')\n"
+        "mode=open(__file__+'.mode').read() if os.path.exists(__file__+'.mode') else ''\n"
+        "if mode=='fail':\n print('cannot enable local sessions: access denied',file=sys.stderr); sys.exit(1)\n"
+        "if mode=='garbage':\n print('not json'); sys.exit(0)\n"
+        "print(json.dumps({'enabled':sys.argv[2]=='install','version':'1.52.0'}))\n"));
+    const auto mode = [&](const QByteArray &value) {
+        QFile file(program + ".mode"); QVERIFY(file.open(QIODevice::WriteOnly)); file.write(value);
+    };
+    HgsClient client(FakeCli::program(program));
+    QSignalSpy ready(&client, &HgsClient::sessionHostReady), failed(&client, &HgsClient::sessionHostFailed);
+    const auto status = client.requestSessionHost("status"), install = client.requestSessionHost("install");
+    QVERIFY(status != install);
+    QTRY_COMPARE(ready.size(), 2); QVERIFY(failed.isEmpty());
+    for (const auto &result : ready) {
+        const bool installed = result[0].toULongLong() == install;
+        QCOMPARE(result[1].toJsonObject(), QJsonObject({{"enabled", installed}, {"version", "1.52.0"}}));
+    }
+    mode("fail"); const auto refused = client.requestSessionHost("install");
+    QTRY_COMPARE(failed.size(), 1); QCOMPARE(failed[0][0].toULongLong(), refused);
+    QCOMPARE(failed[0][1].toString(), QString("cannot enable local sessions: access denied"));
+    mode("garbage"); const auto invalid = client.requestSessionHost("status");
+    QTRY_COMPARE(failed.size(), 2); QCOMPARE(failed[1][0].toULongLong(), invalid);
+    QCOMPARE(failed[1][1].toString(), QString("Invalid session host response"));
+    QCOMPARE(ready.size(), 2);
+    QFile calls(program + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+    QSet<QByteArray> lines;
+    for (const auto &line : calls.readAll().split('\n')) if (!line.isEmpty()) lines.insert(line);
+    QCOMPARE(lines, (QSet<QByteArray>{R"(["session-host", "status", "--json"])", R"(["session-host", "install", "--json"])"}));
 }
 
 void TestHgsClient::parsesSavedSessions()

@@ -27,6 +27,7 @@ private slots:
     void nativeDropPlacement();
     void pinningRestoresPreviousGroup();
     void projectsShareFoldersButOwnSessions();
+    void localWindowsFoldersFollowTheirMachine();
     void folderTransfersPreserveCatalogIdentity_data();
     void folderTransfersPreserveCatalogIdentity();
     void folderTransfersReuseExistingLinks_data();
@@ -485,6 +486,58 @@ void TestWorkspace::projectsShareFoldersButOwnSessions()
     SessionOrganization restored(model.toJson()); QCOMPARE(restored.group(a)->folders[0].id,one);
     restored.removeGroup(b); QCOMPARE(restored.groupFor("arch\nsession"),QString("ungrouped"));
     QCOMPARE(restored.group(a)->folders.size(),2);
+}
+
+void TestWorkspace::localWindowsFoldersFollowTheirMachine()
+{
+    using MachinePlatform::Style;
+    SessionOrganization model; const auto a=model.createGroup("Windows"),b=model.createGroup("Other");
+    // The local Windows machine stores the Qt form and finds a folder with either
+    // separator and in any case (D15, D16).
+    const auto drive=model.addFolder(a,"desktop","C:\\Work\\Project\\","Drive",Style::Windows);
+    QVERIFY(!drive.isEmpty()); QCOMPARE(model.group(a)->folders.last().path,QString("C:/Work/Project"));
+    QCOMPARE(model.addFolder(a,"desktop","c:/work/project",{},Style::Windows),drive);
+    QCOMPARE(model.addFolder(a,"desktop","C:\\work/PROJECT\\.",{},Style::Windows),drive);
+    const auto mixed=model.addFolder(a,"desktop","D:\\work/sub\\dir",{},Style::Windows);
+    QVERIFY(!mixed.isEmpty()); QCOMPARE(model.group(a)->folders.last().path,QString("D:/work/sub/dir"));
+    const auto share=model.addFolder(a,"desktop","\\\\server\\share\\dir",{},Style::Windows);
+    QVERIFY(!share.isEmpty()); QCOMPARE(model.group(a)->folders.last().path,QString("//server/share/dir"));
+    QCOMPARE(model.addFolder(a,"desktop","//SERVER/Share/dir/",{},Style::Windows),share);
+    const auto root=model.addFolder(a,"desktop","c:\\",{},Style::Windows);
+    QVERIFY(!root.isEmpty()); QCOMPARE(model.group(a)->folders.last().path,QString("c:/"));
+    // Not folders of a Windows machine: rooted without a drive, drive-relative, verbatim and POSIX paths.
+    for(const char *path:{"\\work","C:work","\\\\?\\C:\\work","/workspace/project","work",""})
+        QVERIFY2(model.addFolder(a,"desktop",path,{},Style::Windows).isEmpty(),path);
+    // Peers are POSIX: no drive or backslash UNC folder, whatever their own platform.
+    for(const char *path:{"C:\\work","C:/work","\\\\server\\share"})
+        QVERIFY2(model.addFolder(a,"mac",path).isEmpty(),path);
+    QCOMPARE(model.group(a)->folders.size(),4);
+    // POSIX folders keep exact names: another case is another folder.
+    const auto posix=model.addFolder(b,"mac","/Users/test/Work");
+    QCOMPARE(model.addFolder(b,"mac","/Users/test/Work/"),posix);
+    QVERIFY(!model.addFolder(b,"mac","/Users/test/work").isEmpty());
+    QVERIFY(model.addFolder(b,"mac","/Users/test/work")!=posix);
+    QVERIFY(!model.editFolder(b,posix,"mac","C:\\work","Drive on a peer"));
+    // Edits compare the same way and store the Qt form.
+    QVERIFY(!model.editFolder(a,share,"desktop","c:\\WORK\\project","Duplicate",Style::Windows));
+    QVERIFY(!model.editFolder(a,share,"desktop","E:\\Other","Posix rules",Style::Posix));
+    QVERIFY(model.editFolder(a,share,"desktop","E:\\Other\\","Other",Style::Windows));
+    QVERIFY(model.editFolder(a,share,"desktop","e:/other","Renamed",Style::Windows));
+    QCOMPARE(model.group(a)->folders[2].path,QString("e:/other"));
+    // Saved or merged back from the swarm, drive and UNC folders survive as stored.
+    auto data=model.toJson(); auto projects=data["projects"].toArray(); auto project=projects[0].toObject();
+    auto folders=project["folders"].toArray();
+    folders.append(QJsonObject{{"id","unc"},{"machine","desktop"},{"path","\\\\server\\share"}});
+    for(const char *path:{"C:work","\\work","relative"})folders.append(QJsonObject{{"id",path},{"machine","desktop"},{"path",path}});
+    project["folders"]=folders; projects[0]=project; data["projects"]=projects;
+    const SessionOrganization restored(data); QCOMPARE(restored.group(a)->folders.size(),5);
+    QCOMPARE(restored.group(a)->folders[0].path,QString("C:/Work/Project"));
+    QCOMPARE(restored.group(a)->folders[4].path,QString("\\\\server\\share"));
+    // A transfer finds the same Windows folder in another case; POSIX ones stay exact.
+    const auto existing=model.addFolder(b,"desktop","C:\\WORK\\project",{},Style::Windows);
+    QCOMPARE(model.copyFolder(a,drive,b),existing); QCOMPARE(model.group(b)->folders.size(),3);
+    const auto lower=model.addFolder(a,"mac","/users/test/WORK");
+    QVERIFY(model.copyFolder(a,lower,b)!=posix); QCOMPARE(model.group(b)->folders.size(),4);
 }
 
 void TestWorkspace::folderTransfersPreserveCatalogIdentity_data()

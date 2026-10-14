@@ -22,8 +22,10 @@ class TestNewSessionDialog : public QObject {
     void flag(const QString &name,bool enabled=true) {
         QFile f(m_fixture.filePath(name));if(enabled){QVERIFY(f.open(QIODevice::WriteOnly));}else f.remove();
     }
+    // The local computer reports Linux: without a platform it would follow the
+    // GUI's build platform, and a Windows build hides some agents there.
     static FleetState fleet() {
-        FleetState fleet;BoxState local;local.host="pc";local.ok=true;
+        FleetState fleet;BoxState local;local.host="pc";local.ok=true;local.metrics=QJsonObject{{"platform","linux"}};
         fleet.setLocal(local,QDateTime::currentMSecsSinceEpoch());BoxState mac;mac.host="mac";mac.ok=true;
         fleet.setPeer(mac,QDateTime::currentMSecsSinceEpoch());return fleet;
     }
@@ -38,7 +40,7 @@ private slots:
     }
     void init() {
         QSettings().clear();
-        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog"})flag(name,false);
+        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode"})flag(name,false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -59,6 +61,8 @@ if a[:2]==['account','ls']:
  if (root/'machine-accounts').exists():
   profiles=[{'id':i,'provider':'claude','label':'Review','home':'/profiles/'+i,'installed':True,'is_default':True}
             for i in (['mac-claude'] if host=='mac' else ['pc-claude','pc-copy'])]
+ if (root/'opencode').exists():
+  profiles.append({'id':'native-opencode','provider':'opencode','label':'Native configuration','home':'/profiles/native-opencode','installed':True,'is_default':True})
  if (root/'empty-catalog').exists():profiles=[]
  for profile in profiles:
   window={'window_minutes':300,'used_percent':91 if host=='mac' else 17,'resets_at':int(time.time())+3600}
@@ -193,6 +197,30 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(row(dialog,"pc-claude"),-1);QTRY_VERIFY(row(dialog,"mac-claude")>=0);QCOMPARE(choices(dialog)->count(),2);
         QCOMPARE(choices(dialog)->item(0)->text(),QString("mac@example.invalid"));
         QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
+    }
+    void localWindowsHidesDeepSeekAndOpenCode() {
+        // Spec D16: the local Windows computer starts neither DeepSeek nor OpenCode,
+        // even with their accounts in its catalog, and its shell is PowerShell. A
+        // Linux peer in the same dialog keeps both.
+        flag("opencode");auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","windows"}};
+        state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+        NewSessionDialog dialog(program(),state,{},"dsh");dialog.show();auto *list=choices(dialog);
+        QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(list->count(),4);
+        QCOMPARE(row(dialog,"native-dsh"),-1);QCOMPARE(row(dialog,"native-opencode"),-1);
+        for(int i=0;i<list->count();++i)for(const auto *hidden:{"dsh","opencode"})QVERIFY(list->item(i)->data(Qt::UserRole+1).toString()!=hidden);
+        QVERIFY(list->currentItem());QCOMPARE(list->item(list->count()-1)->text(),QString("Run PowerShell"));
+        QCOMPARE(list->item(list->count()-1)->data(Qt::UserRole+1).toString(),QString("sh"));
+        auto *computer=dialog.findChild<QComboBox *>("launchComputer");computer->setCurrentIndex(computer->findData(QString("mac")));
+        QTRY_VERIFY(row(dialog,"native-dsh")>=0);QVERIFY(row(dialog,"native-opencode")>=0);QCOMPARE(list->count(),6);
+        QCOMPARE(list->item(list->count()-1)->text(),QString("Run shell"));
+        computer->setCurrentIndex(computer->findData(QString()));
+        QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(list->count(),4);
+        QCOMPARE(row(dialog,"native-dsh"),-1);QCOMPARE(row(dialog,"native-opencode"),-1);
+        QCOMPARE(list->item(list->count()-1)->text(),QString("Run PowerShell"));
+        // A Linux computer keeps both and its shell.
+        NewSessionDialog posix(program(),fleet(),{},"dsh");posix.show();
+        QTRY_VERIFY(row(posix,"native-dsh")>=0);QTRY_VERIFY(row(posix,"native-opencode")>=0);QCOMPARE(choices(posix)->count(),6);
+        QCOMPARE(choices(posix)->item(5)->text(),QString("Run shell"));
     }
     void chooserAndAccountsPageShowSameAccountsForEachComputer() {
         flag("duplicates");AccountUsageStore store(program());AccountsPage page(program(),nullptr,&store);page.setFleet(fleet());page.show();

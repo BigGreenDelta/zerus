@@ -1,5 +1,6 @@
 #pragma once
 #include "FleetState.h"
+#include "MachinePlatform.h"
 #include "WorktreeCleanupDialog.h"
 #include <QApplication>
 #include <QClipboard>
@@ -130,7 +131,7 @@ private:
         if(roots.isEmpty()&&!m_path.isEmpty())roots.append(QJsonObject{{"path",m_data["path"].toString(m_path)},{"kind","folder"},{"available",state!="folder_unavailable"&&!m_data.isEmpty()}});
         QJsonArray rows;
         for(const auto &value:roots){auto row=value.toObject();QJsonArray sessions;const auto path=row["path"].toString();const bool checkout=row["kind"]!="folder";
-            if(const auto *b=box())for(const auto &s:b->sessions){const auto confirmed=checkout?s.gitRoot:s.canonicalCwd;if(confirmed!=path)continue;
+            if(const auto *b=box())for(const auto &s:b->sessions){const auto confirmed=checkout?s.gitRoot:s.canonicalCwd;if(!MachinePlatform::same(confirmed,path,MachinePlatform::of(b->metrics,m_host.isEmpty())))continue;
                 sessions.append(QJsonObject{{"name",s.name},{"archive",s.archiveId},{"state",s.state}});
             }
             row["sessions"]=sessions;rows.append(row);

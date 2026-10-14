@@ -33,9 +33,6 @@
 
 namespace {
 
-// Local poll interval of a control-only computer (see onLocalReady).
-constexpr int kControlOnlyPollMs = 15000;
-
 // Иконка трея -- по платформе сборки, без настройки: на Linux KStatusNotifierItem (ради
 // ЛКМ, см. SniTrayIcon.h), везде остальное QSystemTrayIcon. Не по cfg: выбирать тут
 // нечего, у пользователя нет причины хотеть иконку без работающего клика.
@@ -369,8 +366,10 @@ void TrayAgent::onLocalReady(const BoxState &box)
         if (!previousPeers.contains(peer)) m_client.requestPeer(peer);
     if (box.peersKnown && !m_peerTimer.isActive()) m_peerTimer.start();
     // A control-only computer reports no sessions; its answer only carries the
-    // machine list and metrics, and every poll is a process start on Windows.
-    const int localPoll = box.localSessions ? m_cfg.localPollMs : std::max(m_cfg.localPollMs, kControlOnlyPollMs);
+    // machine list and metrics. Every poll is a process start on Windows, so it
+    // polls less often, as does an enabled one until its host can push changes.
+    const int localPoll = AppConfig::localPollInterval(m_cfg.localPollMs, box.localSessions,
+                                                       MachinePlatform::of(box.metrics, true));
     if (m_localTimer.interval() != localPoll) m_localTimer.setInterval(localPoll);
     observeAttention({}, m_state.local());
     if (m_sessionsWindow) { m_sessionsWindow->setConnectionError(m_localReadError); m_sessionsWindow->setFleet(m_state); m_sessionsWindow->setPollingHosts(m_pollingHosts); }
@@ -613,7 +612,7 @@ void TrayAgent::showSessions()
             const auto command = SessionCommands::folderShell(m_cfg.hgsPath, host, directory);
             if (command.isEmpty()) return;
             auto backend = makeLaunchTerminal(m_cfg); QString error;
-            const bool opened = host.isEmpty() ? backend->open(command, &error)
+            const bool opened = host.isEmpty() ? backend->openShell(directory, &error)
                 : backend->openProgram(m_cfg.hgsPath, {"machine", "ssh", host, "--directory", directory}, &error);
             if (!opened) notify(tr("Could not open folder shell"), error, QSystemTrayIcon::Warning, 8000);
             else reportAdvisory(*backend);

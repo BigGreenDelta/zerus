@@ -253,12 +253,13 @@ void ProjectsDialog::showProject()
     m_remove->setEnabled(m_projects->groups().size()>1);m_folders->setSortingEnabled(false); m_folders->setRowCount(0);
     for (const auto &folder : project->folders) {
         const int row = m_folders->rowCount(); m_folders->insertRow(row);
-        const QString name = folder.name.isEmpty() ? suggestName(folder.path) : folder.name;
+        const auto style = folderStyle(folder.machine); const auto path = MachinePlatform::native(folder.path, style);
+        const QString name = folder.name.isEmpty() ? suggestName(folder.path, style) : folder.name;
         m_folders->setItem(row,0,new FolderSortItem(name)); m_folders->item(row,0)->setData(Qt::UserRole,folder.id);
         m_folders->item(row,0)->setToolTip(name);
-        m_folders->setItem(row,1,new FolderSortItem(folder.machineName.isEmpty()?folder.machine:folder.machineName)); m_folders->setItem(row,2,new FolderSortItem(folder.path));
+        m_folders->setItem(row,1,new FolderSortItem(folder.machineName.isEmpty()?folder.machine:folder.machineName)); m_folders->setItem(row,2,new FolderSortItem(path));
         for(int column=1;column<3;++column)m_folders->item(row,column)->setData(Qt::UserRole,folder.id);
-        m_folders->item(row,2)->setToolTip(folder.path);
+        m_folders->item(row,2)->setToolTip(path);
     }
     m_folders->setSortingEnabled(true);
     for(int row=0;row<m_folders->rowCount();++row)if(m_folders->item(row,0)->data(Qt::UserRole).toString()==selected){m_folders->setCurrentCell(row,0);break;}
@@ -295,7 +296,7 @@ void ProjectsDialog::importLegacy(const QString &host,const QList<ProjectInfo> &
         if (legacy.fromAnsible) continue;
         QString id; for(const auto &project:m_projects->groups()) if(project.name==legacy.name){id=project.id;break;}
         if(id.isEmpty()) id=m_projects->createGroup(legacy.name);
-        m_projects->addFolder(id,machine,legacy.dir);
+        m_projects->addFolder(id,machine,legacy.dir,{},folderStyle(machine));
     }
     m_projects->markImported(machine);changed();
 }
@@ -340,15 +341,17 @@ void ProjectsDialog::editFolder(const QString &id, const QString &projectId)
     if(!initialHost.isEmpty()&&machine->findData(initialHost)<0)machine->addItem(initialHost,initialHost);
     machine->setCurrentIndex(qMax(0,machine->findData(initialHost)));
     auto *name=new QLineEdit;name->setObjectName("projectFolderName");name->setPlaceholderText(tr("Optional label"));name->setText(existing.name);
-    auto *path=new QLineEdit;path->setObjectName("projectFolderPath");path->setPlaceholderText(tr("Absolute folder path"));path->setText(existing.path);
+    auto *path=new QLineEdit;path->setObjectName("projectFolderPath");path->setPlaceholderText(tr("Absolute folder path"));path->setText(MachinePlatform::native(existing.path,folderStyle(existing.machine)));
     auto *row=new QHBoxLayout;row->addWidget(path,1);auto *browse=new QPushButton(tr("Browse…"));row->addWidget(browse);
     form->addRow(tr("Computer"),machine);form->addRow(tr("Name"),name);form->addRow(tr("Folder"),row);layout->addLayout(form);
     auto *buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);buttons->button(QDialogButtonBox::Ok)->setText(id.isEmpty()?tr("Add folder"):tr("Save folder"));layout->addWidget(buttons);
     const auto validate=[&]{
         const auto host=machine->currentData().toString();const auto address=host.isEmpty()?local:host;
+        // Drive and UNC folders only for a local Windows machine (D16); peers are POSIX.
+        const auto style=folderStyle(address);
         bool duplicate=false;for(const auto &folder:m_projects->group(project)->folders)
-            if(folder.id!=id&&folder.machine==address&&folder.path==QDir::cleanPath(path->text()))duplicate=true;
-        buttons->button(QDialogButtonBox::Ok)->setEnabled(!duplicate&&machine->currentIndex()>=0&&path->text().startsWith('/')&&!path->text().contains('\n'));
+            if(folder.id!=id&&folder.machine==address&&MachinePlatform::same(folder.path,MachinePlatform::clean(path->text(),style),style))duplicate=true;
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(!duplicate&&machine->currentIndex()>=0&&MachinePlatform::absolute(path->text(),style)&&!path->text().contains('\n'));
         path->setToolTip(duplicate?tr("This folder is already in this project."):QString());
     };
     connect(path,&QLineEdit::textChanged,&dialog,validate);validate();
@@ -356,8 +359,9 @@ void ProjectsDialog::editFolder(const QString &id, const QString &projectId)
     connect(machine,&QComboBox::currentIndexChanged,&dialog,[&]{path->clear();});
     connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     if(dialog.exec()!=QDialog::Accepted)return;
-    const auto host=machine->currentData().toString();if(id.isEmpty())m_projects->addFolder(project,host.isEmpty()?local:host,path->text(),name->text());
-    else m_projects->editFolder(project,id,host.isEmpty()?local:host,path->text(),name->text());changed();
+    const auto host=machine->currentData().toString();const auto address=host.isEmpty()?local:host;
+    if(id.isEmpty())m_projects->addFolder(project,address,path->text(),name->text(),folderStyle(address));
+    else m_projects->editFolder(project,id,address,path->text(),name->text(),folderStyle(address));changed();
 }
 void ProjectsDialog::removeFolder(const QString &projectId, const QString &id)
 {
@@ -393,6 +397,10 @@ void ProjectsDialog::transferFolder(const QString &projectId, const SessionOrgan
     changed();
     m_status->setText(copy ? tr("Folder copied to %1.").arg(name) : tr("Folder moved to %1.").arg(name));
 }
+MachinePlatform::Style ProjectsDialog::folderStyle(const QString &machine) const
+{
+    return MachinePlatform::of(m_fleet.local().metrics,!machine.isEmpty()&&machine==m_fleet.local().host);
+}
 SessionOrganization::Folder ProjectsDialog::selectedFolder() const
 {
     if(m_folders->selectedItems().isEmpty())return {};
@@ -427,9 +435,10 @@ void ProjectsDialog::updateFolderActions()
     m_worktrees->setContext(folder.machine==m_fleet.local().host?QString():folder.machine,folder.path,m_fleet);
     m_editFolder->setEnabled(!folder.id.isEmpty());m_removeFolder->setEnabled(!folder.id.isEmpty());
     m_openFolder->setEnabled(problem.isEmpty());
-    m_openFolder->setToolTip(problem.isEmpty()?tr("Open in file manager\n%1").arg(folder.path):problem);
+    const auto shown=MachinePlatform::native(folder.path,folderStyle(folder.machine));
+    m_openFolder->setToolTip(problem.isEmpty()?tr("Open in file manager\n%1").arg(shown):problem);
     const auto launchProblem=folderLaunchProblem(folder);m_newSession->setEnabled(launchProblem.isEmpty());
-    m_newSession->setToolTip(launchProblem.isEmpty()?tr("New session in %1 on %2").arg(folder.path,folder.machine):launchProblem);
+    m_newSession->setToolTip(launchProblem.isEmpty()?tr("New session in %1 on %2").arg(shown,folder.machine):launchProblem);
 }
 QString ProjectsDialog::folderLaunchProblem(const SessionOrganization::Folder &folder) const
 {
@@ -438,7 +447,7 @@ QString ProjectsDialog::folderLaunchProblem(const SessionOrganization::Folder &f
     const bool local=folder.machine==m_fleet.local().host;
     const auto *machine=local?&m_fleet.local():m_fleet.peer(folder.machine);
     if(!machine||!machine->ok)return tr("Reconnect %1 to start a session in this folder.").arg(folder.machine);
-    if(!QDir::isAbsolutePath(folder.path)||(local&&!QFileInfo(folder.path).isDir()))return tr("This folder is unavailable on this computer.");
+    if(!MachinePlatform::absolute(folder.path,folderStyle(folder.machine))||(local&&!QFileInfo(folder.path).isDir()))return tr("This folder is unavailable on this computer.");
     return {};
 }
 void ProjectsDialog::newFolderSession(const QString &projectId,const SessionOrganization::Folder &folder)
@@ -465,15 +474,16 @@ void ProjectsDialog::showFolderMenu(const QPoint &position)
     auto *menu=new QMenu(this);menu->setObjectName("projectFolderMenu");menu->setToolTipsVisible(true);
     const QColor color(m_dark?"#a1adbb":"#647386");
     if(!folder.id.isEmpty()) {
+        const auto shown=MachinePlatform::native(folder.path,folderStyle(folder.machine));
         auto *launch=menu->addAction(workspaceIcon("add",color),tr("New session…"));launch->setObjectName("contextNewProjectFolderSession");
-        const auto launchProblem=folderLaunchProblem(folder);launch->setEnabled(launchProblem.isEmpty());launch->setToolTip(launchProblem.isEmpty()?folder.path:launchProblem);
+        const auto launchProblem=folderLaunchProblem(folder);launch->setEnabled(launchProblem.isEmpty());launch->setToolTip(launchProblem.isEmpty()?shown:launchProblem);
         connect(launch,&QAction::triggered,this,[this,project,folder]{newFolderSession(project,folder);});
         menu->addSeparator();
         auto *open=menu->addAction(workspaceIcon("folder",color),tr("Open folder"));open->setObjectName("contextOpenProjectFolder");
-        const auto problem=folderOpenProblem(folder);open->setEnabled(problem.isEmpty());open->setToolTip(problem.isEmpty()?folder.path:problem);
+        const auto problem=folderOpenProblem(folder);open->setEnabled(problem.isEmpty());open->setToolTip(problem.isEmpty()?shown:problem);
         connect(open,&QAction::triggered,this,[this,folder]{openFolder(folder);});
         auto *copy=menu->addAction(tr("Copy folder path"));copy->setObjectName("contextCopyProjectFolder");
-        connect(copy,&QAction::triggered,this,[folder]{QApplication::clipboard()->setText(folder.path);});
+        connect(copy,&QAction::triggered,this,[shown]{QApplication::clipboard()->setText(shown);});
         menu->addSeparator();
         for (const bool copyFolder : {false, true}) {
             auto *targets = menu->addMenu(copyFolder ? tr("Copy to") : tr("Move to"));
@@ -512,7 +522,10 @@ bool ProjectsDialog::nameProblem(const QString &name,QString *why)
     const bool bad=name.trimmed().isEmpty()||name.size()>80||name.contains('\n');
     if(why)*why=bad?tr("Use a name of 1–80 characters on one line."):QString();return bad;
 }
-QString ProjectsDialog::suggestName(const QString &dir) { return QDir::cleanPath(dir).section('/',-1); }
+QString ProjectsDialog::suggestName(const QString &dir, MachinePlatform::Style style)
+{
+    return MachinePlatform::leaf(MachinePlatform::clean(dir,style),style);
+}
 
 void ProjectsDialog::setTheme(bool dark)
 {

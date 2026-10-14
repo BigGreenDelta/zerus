@@ -60,7 +60,7 @@ TerminalView::TerminalView(QWidget *parent)
             emit errorOccurred(message);
           });
   connect(m_process, &PtyProcess::finished, this, [this](int code) {
-    showStatus(code == 0 ? tr("Disconnected — the session continues in tmux")
+    showStatus(code == 0 ? disconnectedStatus()
                          : tr("Attach client exited (%1) — session output is "
                               "preserved above")
                                .arg(code));
@@ -73,7 +73,8 @@ TerminalView::TerminalView(QWidget *parent)
 TerminalView::~TerminalView() { m_process->stop(); }
 bool TerminalView::isConnected() const { return m_process->isRunning(); }
 void TerminalView::setSession(const QString &path, const QString &host,
-                              const QString &name, const QString &runId) {
+                              const QString &name, const QString &runId,
+                              const QString &machine) {
   const bool sameEndpoint = m_hgsPath == path && m_host == host;
   const bool sameRun = !m_runId.isEmpty() && m_runId == runId;
   const bool changed =
@@ -87,6 +88,8 @@ void TerminalView::setSession(const QString &path, const QString &host,
   m_hgsPath = path;
   m_host = host;
   m_name = name;
+  // After disconnecting: that status names the machine of the previous session.
+  m_machine = machine;
   // The first inspection may enrich an untracked target with its run token.
   // A transient omission must not erase an already established guard.
   if (changed || !runId.isEmpty())
@@ -138,7 +141,7 @@ void TerminalView::disconnectSession() {
     return;
   ++m_connectionGeneration;
   m_process->stop();
-  showStatus(tr("Disconnected — the session continues in tmux"));
+  showStatus(disconnectedStatus());
   updateButtons();
   emit connectedChanged(false);
 }
@@ -149,6 +152,12 @@ void TerminalView::reconnectSession() {
 void TerminalView::pasteText(const QString &text) {
   if (isConnected())
     m_screen->pasteText(text);
+}
+QString TerminalView::disconnectedStatus() const {
+  // tmux keeps Unix sessions, the session host Windows ones.
+  return m_machine.isEmpty()
+             ? tr("Disconnected — the session keeps running")
+             : tr("Disconnected — the session continues on %1").arg(m_machine);
 }
 void TerminalView::showStatus(const QString &status) {
   m_status->setText(status);

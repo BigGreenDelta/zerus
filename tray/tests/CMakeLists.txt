@@ -228,6 +228,12 @@ target_include_directories(test_fleetstate PRIVATE ../src)
 target_link_libraries(test_fleetstate PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
 zerus_add_test(fleetstate test_fleetstate)
 
+# Folder paths per machine (MachinePlatform.h, header-only): both styles everywhere.
+add_executable(test_machineplatform test_machineplatform.cpp)
+target_include_directories(test_machineplatform PRIVATE ../src)
+target_link_libraries(test_machineplatform PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+zerus_add_test(machineplatform test_machineplatform)
+
 # QApplication нужен: IconFactory рисует QPainter-ом на QPixmap и читает
 # QApplication::palette()/::font() — этого GUILESS/APPLESS ранер не даёт. QTEST_MAIN
 # сам создаёт QApplication, раз видит QT_WIDGETS_LIB через Qt6::Widgets. На боксе без

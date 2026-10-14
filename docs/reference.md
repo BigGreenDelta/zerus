@@ -614,7 +614,9 @@ or naming an agent type; they are not listed either and never keep a finished
 session Working.
 
 File links retain their visible path and source position. Relative references
-resolve against that session's folder. Local references can open the file or its
+resolve against that session's folder. On Windows, references may also name a drive
+path (`C:\work\a.cpp:12`, `C:/work/a.cpp` or `file:///C:/work/a.cpp`); a share
+(`\\server\share\…`) never opens. Local references can open the file or its
 parent folder; remote references identify the host and offer **Download…** and
 **Download and open…**, with a local Save dialog, plus an SSH terminal. Downloads
 use that machine's configured SSH profile and SFTP, stream directly to disk and
@@ -1481,8 +1483,12 @@ behavior. The vendored terminal engine is libvterm 0.3.3 under MIT; builds do no
 download it. Rendering updates changed cells and the cursor rather than scanning
 the full screen for every small change.
 
-Dropping files into Terminal inserts paths without Enter. Remote drops first copy
-files to the session host, limited to eight files, 10 MiB each and 20 MiB total.
+Dropping files into Terminal inserts paths without Enter, quoted for the session's
+machine: in single quotes on Unix machines, and with backslashes for a session on
+this Windows computer, in double quotes when a path has spaces or shell-special
+characters, or in single quotes when it has `$` or a backtick, which PowerShell
+would expand inside double quotes. Remote drops first copy files to the session host, limited to eight
+files, 10 MiB each and 20 MiB total.
 Changing tab, session or connection during transfer cancels insertion.
 **Open externally** and **Copy connect command** retain access from other clients.
 
@@ -1553,7 +1559,11 @@ are single-quoted when needed, `'@host'` is always quoted, and a quoted `hgs.exe
 path gets the `&` call operator. When Windows PowerShell 5.1 would pass an argument
 incorrectly (an empty one, a double quote, or a space before a final backslash),
 the command is copied as `Start-Process -FilePath … -ArgumentList … -NoNewWindow -Wait`
-instead. A computer without local sessions offers no local folder shell.
+instead. **Open shell in session folder** starts PowerShell (`pwsh.exe` when
+installed, otherwise Windows PowerShell) in a folder of this computer: in a Windows
+Terminal tab or window that starts there, or in a console window started there when
+`wt.exe` is missing or would change the folder (it expands `%NAME%`). A
+`--terminal` template receives `Set-Location -LiteralPath FOLDER` as `{cmd}`.
 
 The tray config lives at `~/.config/hgs/tray.conf` unless overridden; on Windows
 `~` is `HOME` when set, otherwise the account's profile folder (normally

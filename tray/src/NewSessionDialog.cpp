@@ -8,6 +8,7 @@
 #include "AccountUsageStore.h"
 #include "AccountCatalog.h"
 #include "WorkspaceList.h"
+#include "MachinePlatform.h"
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -73,8 +74,10 @@ private:
     AccountUsage::Button *m_limits;
 };
 QLabel *plainLabel(const QString &text = {}) {auto *l=new QLabel(text);l->setTextFormat(Qt::PlainText);l->setWordWrap(true);return l;}
-bool withinFolder(const QString &path,const QString &folder) {
-    return QDir::isAbsolutePath(folder)&&(path==folder||path.startsWith(folder=="/"?folder:folder+'/'));
+// Folders of the selected computer: drive and UNC paths on the local Windows
+// machine (D16), POSIX paths elsewhere.
+MachinePlatform::Style folderStyle(const FleetState &fleet,const QString &host) {
+    return MachinePlatform::of(fleet.local().metrics,host.isEmpty());
 }
 }
 NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &selectedHost,
@@ -180,7 +183,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         if(!m_validation||request!=m_validation||machine!=host())return;
         m_validation=0;
         const auto path=data.value("path").toString();
-        if(!path.startsWith('/')) {m_error->setText(tr("The computer did not confirm this folder. Try again."));updateForm();return;}
+        if(!MachinePlatform::absolute(path,folderStyle(m_fleet,host()))) {m_error->setText(tr("The computer did not confirm this folder. Try again."));updateForm();return;}
         if(m_startWithWorktree&&!automaticWorktreeAvailable()){
             m_error->setText(tr("The repository could not be confirmed. Choose a working folder again."));updateForm();return;
         }
@@ -293,9 +296,10 @@ void NewSessionDialog::loadFolders(const QString &selectedPath)
     const bool available=machine&&machine->ok;
     struct Row {QString id,path,name;};
     QList<Row> rows;
+    const auto style=folderStyle(m_fleet,host());
     const auto add=[&](const QString &id,const QString &rawPath,const QString &name){
-        const auto path=QDir::cleanPath(rawPath);
-        rows.append({id,path,name.isEmpty()?(path=="/"?path:path.section('/',-1)):name});
+        const auto path=MachinePlatform::clean(rawPath,style);const auto leaf=MachinePlatform::leaf(path,style);
+        rows.append({id,path,name.isEmpty()?(leaf.isEmpty()?MachinePlatform::native(path,style):leaf):name});
     };
     if(project)for(const auto &folder:project->folders){
         if((folder.machine==m_fleet.local().host?QString():folder.machine)!=host())continue;
@@ -304,7 +308,7 @@ void NewSessionDialog::loadFolders(const QString &selectedPath)
     const auto custom=!selectedPath.isEmpty()?selectedPath:!previous.isEmpty()?previous:m_browsedFolders.value(host());
     int index=rows.isEmpty()?-1:0;
     if(!custom.isEmpty()){
-        index=-1;for(int row=0;row<rows.size()&&index<0;++row)if(rows[row].path==custom)index=row;
+        index=-1;for(int row=0;row<rows.size()&&index<0;++row)if(MachinePlatform::same(rows[row].path,custom,style))index=row;
         if(index<0){add({},custom,{});index=rows.size()-1;}
     }
     // Fleet polls refresh availability in place: new rows would reset an open
@@ -319,7 +323,7 @@ void NewSessionDialog::loadFolders(const QString &selectedPath)
         m_folder->clear();
         for(const auto &row:rows){
             m_folder->addItem(row.name,row.id);const int at=m_folder->count()-1;
-            m_folder->setItemData(at,host(),Qt::UserRole+1);m_folder->setItemData(at,row.path,Qt::UserRole+2);m_folder->setItemData(at,row.path,Qt::ToolTipRole);
+            m_folder->setItemData(at,host(),Qt::UserRole+1);m_folder->setItemData(at,row.path,Qt::UserRole+2);m_folder->setItemData(at,MachinePlatform::native(row.path,style),Qt::ToolTipRole);
         }
     }
     for(int row=0;row<m_folder->count();++row)m_folder->setItemData(row,available,Qt::UserRole+3);
@@ -332,14 +336,15 @@ void NewSessionDialog::browseFolder()
     const auto path=DirectoryDialog::chooseDirectory(m_client.executable(),target,m_folder->currentData(Qt::UserRole+2).toString(),this);
     if(path.isEmpty()||host()!=target||m_project->currentData().toString()!=project)return;
     selectPath(path);
-    m_browsedFolders[target]=QDir::cleanPath(path);
+    m_browsedFolders[target]=MachinePlatform::clean(path,folderStyle(m_fleet,target));
 }
 
 void NewSessionDialog::updateForm()
 {
     const auto path=m_folder->currentData(Qt::UserRole+2).toString();
-    m_projectPath->setText(path);m_projectPath->setVisible(!path.isEmpty());
-    m_projectPath->setToolTip(path);m_projectPath->ensurePolished();m_projectPath->setFixedHeight(m_projectPath->fontMetrics().height());
+    const auto shown=MachinePlatform::native(path,folderStyle(m_fleet,host()));
+    m_projectPath->setText(shown);m_projectPath->setVisible(!path.isEmpty());
+    m_projectPath->setToolTip(shown);m_projectPath->ensurePolished();m_projectPath->setFixedHeight(m_projectPath->fontMetrics().height());
     const bool worktree=m_folder->currentData().toString().isEmpty()&&projectWorktree(path);
     const bool outside=!path.isEmpty()&&m_folder->currentData().toString().isEmpty()&&!worktree;
     m_preview->setProperty("outsideProject",outside);
@@ -395,7 +400,7 @@ bool NewSessionDialog::automaticWorktreeAvailable() const
         ||m_worktreeCatalog["common_dir"].toString().isEmpty()||!QDir::isAbsolutePath(root)||QFileInfo(root).fileName().isEmpty())return false;
     for(const auto &value:m_worktreeCatalog["worktrees"].toArray()){
         const auto entry=value.toObject();
-        if(entry["available"].toBool()&&entry["kind"]!="bare"&&withinFolder(path,entry["path"].toString()))return true;
+        if(entry["available"].toBool()&&entry["kind"]!="bare"&&MachinePlatform::within(path,entry["path"].toString(),folderStyle(m_fleet,host())))return true;
     }
     return false;
 }
@@ -438,8 +443,10 @@ void NewSessionDialog::updateAccounts()
 {
     if(m_machine->count()==0){const QSignalBlocker block(m_account);m_account->clear();updateModels();updateForm();return;}
     QJsonArray localProfiles;
-    auto providers=m_agents;
-    for(const auto &value:m_accounts){const auto provider=value.toObject()["provider"].toString();if(!provider.isEmpty()&&provider!="sh"&&!providers.contains(provider))providers.append(provider);}
+    // The selected computer's agents only: the local Windows computer hides some (spec D16).
+    const auto style=folderStyle(m_fleet,host());
+    QStringList providers;for(const auto &provider:m_agents)if(AccountCatalog::launchable(provider,style))providers.append(provider);
+    for(const auto &value:m_accounts){const auto provider=value.toObject()["provider"].toString();if(!provider.isEmpty()&&provider!="sh"&&!providers.contains(provider)&&AccountCatalog::launchable(provider,style))providers.append(provider);}
     for(const auto &provider:providers){
         for(const auto &value:m_accounts){
             auto profile=value.toObject();if(profile["provider"]!=provider||profile["id"].toString().isEmpty())continue;
@@ -488,7 +495,7 @@ void NewSessionDialog::updateAccounts()
         }
     }
     auto *shell=same?m_account->item(profiles.size()):new QListWidgetItem(m_account);
-    shell->setText(tr("Run shell"));shell->setData(Qt::UserRole,QString());shell->setData(ProviderRole,"sh");
+    shell->setText(style==MachinePlatform::Style::Windows?tr("Run PowerShell"):tr("Run shell"));shell->setData(Qt::UserRole,QString());shell->setData(ProviderRole,"sh");
     shell->setData(UsageTextRole,tr("Interactive terminal session"));shell->setIcon(workspaceIcon("terminal",iconColor));
     shell->setData(Qt::AccessibleTextRole,shell->text());
     if(m_preferredAgent=="sh")defaultIndex=lastIndex=explicitIndex=profiles.size();
@@ -542,26 +549,29 @@ void NewSessionDialog::updateUsage()
 void NewSessionDialog::selectPath(const QString &path, bool automaticWorktree)
 {
     m_prefillRequest=0;
-    if(!QDir::isAbsolutePath(path))return;
+    const auto style=folderStyle(m_fleet,host());
+    if(!MachinePlatform::absolute(path,style))return;
     if(!automaticWorktree)m_autoPreferred=false;
     m_browsedFolders.remove(host());
-    loadFolders(QDir::cleanPath(path));
+    loadFolders(MachinePlatform::clean(path,style));
 }
 QString NewSessionDialog::matchingProjectFolder(const QString &path,const QString &canonicalPath) const
 {
-    QString best;
+    QString best;const auto style=folderStyle(m_fleet,host());
     if(const auto *project=m_projects.group(m_project->currentData().toString()))
         for(const auto &folder:project->folders){
             if((folder.machine==m_fleet.local().host?QString():folder.machine)!=host())continue;
-            const auto root=QDir::cleanPath(folder.path);
-            if((withinFolder(path,root)||withinFolder(canonicalPath,root))&&root.size()>best.size())best=root;
+            const auto root=MachinePlatform::clean(folder.path,style);
+            if((MachinePlatform::within(path,root,style)||MachinePlatform::within(canonicalPath,root,style))&&root.size()>best.size())best=root;
         }
     return best.isEmpty()?path:best;
 }
 void NewSessionDialog::prefillSessionFolder(const QString &path,const QString &canonicalPath)
 {
-    if(!QDir::isAbsolutePath(path))return;
-    m_prefillPath=QDir::cleanPath(path);m_prefillCanonicalPath=QDir::isAbsolutePath(canonicalPath)?QDir::cleanPath(canonicalPath):QString();
+    const auto style=folderStyle(m_fleet,host());
+    if(!MachinePlatform::absolute(path,style))return;
+    m_prefillPath=MachinePlatform::clean(path,style);
+    m_prefillCanonicalPath=MachinePlatform::absolute(canonicalPath,style)?MachinePlatform::clean(canonicalPath,style):QString();
     selectPath(matchingProjectFolder(m_prefillPath,m_prefillCanonicalPath));
     m_prefillContext=m_project->currentData().toString()+'\n'+host()+'\n'+m_folder->currentData(Qt::UserRole+2).toString();
     const auto *box=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
@@ -574,13 +584,14 @@ void NewSessionDialog::finishFolderPrefill(const QJsonObject &catalog)
     const auto *box=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
     if(context!=m_prefillContext||!box||!box->ok||catalog["state"]!="ok"||catalog["stale"].toBool()
         ||catalog["partial"].toBool()||catalog["common_dir"].toString().isEmpty())return;
-    const auto selected=QDir::cleanPath(catalog["selected_root"].toString());
-    if(!withinFolder(m_prefillPath,selected)&&!withinFolder(m_prefillCanonicalPath,selected))return;
+    const auto style=folderStyle(m_fleet,host());
+    const auto selected=MachinePlatform::clean(catalog["selected_root"].toString(),style);
+    if(!MachinePlatform::within(m_prefillPath,selected,style)&&!MachinePlatform::within(m_prefillCanonicalPath,selected,style))return;
     bool linked=false;QString main;
     for(const auto &value:catalog["worktrees"].toArray()){
-        const auto entry=value.toObject();const auto root=QDir::cleanPath(entry["path"].toString());
-        if(!QDir::isAbsolutePath(root)||!entry["available"].toBool())continue;
-        if(root==selected&&entry["kind"]=="linked")linked=true;
+        const auto entry=value.toObject();const auto root=MachinePlatform::clean(entry["path"].toString(),style);
+        if(!MachinePlatform::absolute(root,style)||!entry["available"].toBool())continue;
+        if(MachinePlatform::same(root,selected,style)&&entry["kind"]=="linked")linked=true;
         if(entry["kind"]=="main"){
             if(!main.isEmpty())return;
             main=root;
@@ -605,12 +616,12 @@ void NewSessionDialog::updateWorktrees()
 bool NewSessionDialog::projectWorktree(const QString &path,const QJsonObject &catalog) const
 {
     if(path.isEmpty()||catalog["state"]!="ok"||catalog["stale"].toBool()||catalog["common_dir"].toString().isEmpty())return false;
+    const auto style=folderStyle(m_fleet,host());
     const auto contains=[&](const QString &folder){
         for(const auto &value:catalog["worktrees"].toArray()){
-            const auto entry=value.toObject();const auto root=QDir::cleanPath(entry["path"].toString());
-            if(!QDir::isAbsolutePath(root)||entry["kind"]=="bare"||!entry["available"].toBool())continue;
-            const auto clean=QDir::cleanPath(folder);
-            if(clean==root||clean.startsWith(root=='/'?root:root+'/'))return true;
+            const auto entry=value.toObject();const auto root=MachinePlatform::clean(entry["path"].toString(),style);
+            if(entry["kind"]=="bare"||!entry["available"].toBool())continue;
+            if(MachinePlatform::within(MachinePlatform::clean(folder,style),root,style))return true;
         }
         return false;
     };

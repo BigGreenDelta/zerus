@@ -9,10 +9,11 @@
 // a console window is the fallback. That window is hgs-tray.exe itself acting as
 // a console host (ConsoleHost.h): it starts hgs.exe with the exact argument
 // vector, without a shell, and stays open when hgs reports an error; Windows
-// Terminal keeps a failed tab open by itself (closeOnExit "automatic").
+// Terminal keeps a failed tab open by itself (closeOnExit "automatic"). A local
+// folder shell is PowerShell started in that folder, by either of them.
 //
 // The command builders are pure and compiled on every platform for the tests;
-// only open()/openProgram() start processes, and only on Windows.
+// only open(), openProgram() and openShell() start processes, and only on Windows.
 class WindowsTerminalBackend : public TerminalBackend {
 public:
     // auto: a tab, or the console without a word when wt.exe is missing or cannot
@@ -27,6 +28,9 @@ public:
 
     bool open(const QString &command, QString *error) override;
     bool openProgram(const QString &program, const QStringList &arguments, QString *error) override;
+    // PowerShell in a folder of this computer: a Windows Terminal tab that starts
+    // there, or a console started there (the same fallback as openProgram).
+    bool openShell(const QString &directory, QString *error) override;
     QString takeAdvisory() override;
 
     static OpenMode modeFromString(const QString &mode);
@@ -37,13 +41,26 @@ public:
     // environment references. ';' separates wt subcommands and is escaped.
     static QStringList terminalArguments(OpenMode mode, const QString &title, const QString &program,
                                          const QStringList &arguments);
+    // wt.exe arguments that open shell (the program, then its arguments) in a
+    // tab or window starting in directory, or empty when Windows Terminal would
+    // change the folder or the shell's arguments: it also expands %NAME% in the
+    // folder.
+    static QStringList shellArguments(OpenMode mode, const QString &directory, const QStringList &shell);
     static QString title(const QStringList &arguments);
     static QString locateWindowsTerminal();
+    // The PowerShell of a folder shell, program first: PowerShell 7 (pwsh) when
+    // installed, otherwise Windows PowerShell without its banner.
+    static QStringList shell(const QString &pwsh);
+    static QStringList locateShell();
 
 private:
+    // Starts Windows Terminal unless the mode is console; otherwise, or when it
+    // cannot, false, with the reason as the advisory of an explicit tab or window
+    // ("... so <what> opened in a console window").
+    bool startTerminal(const QStringList &arguments, const QString &refused, const QString &what);
     bool startShell(const QString &command, QString *error);
     bool startConsoleHost(const QString &title, const QString &program, const QStringList &arguments,
-                          QString *error);
+                          QString *error, const QString &directory = QString());
     OpenMode m_mode;
     QString m_terminal;
     QString m_consoleHost;

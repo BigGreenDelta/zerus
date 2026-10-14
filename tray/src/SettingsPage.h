@@ -118,11 +118,13 @@ public:
         connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();});
     }
     void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);}
-    // A control-only computer is no mobile gateway and keeps no recovery policy:
-    // the Mobile connection page is hidden (the row stays, so indices do not move).
-    void setLocalSessions(bool enabled){
-        sync->setLocalSessions(enabled);nav->item(5)->setHidden(!enabled);
-        if(!enabled&&nav->currentRow()==5)nav->setCurrentRow(0);
+    // A control-only computer keeps no recovery policy of its own.
+    void setLocalSessions(bool enabled){sync->setLocalSessions(enabled);}
+    // Neither a control-only computer nor Windows is a mobile gateway: the Mobile
+    // connection page is hidden (the row stays, so indices do not move).
+    void setMobileGateway(bool gateway){
+        nav->item(5)->setHidden(!gateway);
+        if(!gateway&&nav->currentRow()==5)nav->setCurrentRow(0);
     }
     void openUpdates(){nav->setCurrentRow(4);}
     void openRecovery(){nav->setCurrentRow(2);sync->refresh();}

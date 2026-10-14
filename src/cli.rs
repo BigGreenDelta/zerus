@@ -204,6 +204,34 @@ fn basename(path: &str) -> String {
         .unwrap_or(path)
         .into()
 }
+/// The name a session takes from `directory`: on Windows in the letter case of
+/// the folder on disk, so `cd C:\work\myproj` names it after `MyProj` (spec D15).
+#[cfg(windows)]
+fn folder_name(directory: &str) -> String {
+    let canonical = platform::canonical(directory)
+        .ok()
+        .map(|path| basename(&path.to_string_lossy()));
+    on_disk_name(basename(directory), canonical)
+}
+#[cfg(unix)]
+fn folder_name(directory: &str) -> String {
+    basename(directory)
+}
+/// The `canonical` folder name when it is the `logical` one in another letter
+/// case; a junction, link or short name with another name keeps its own.
+/// Plain Rust, so its tests run on every platform.
+#[cfg_attr(unix, allow(dead_code))]
+fn on_disk_name(logical: String, canonical: Option<String>) -> String {
+    let fold = |name: &str| {
+        name.chars()
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    match canonical {
+        Some(canonical) if fold(&canonical) == fold(&logical) => canonical,
+        _ => logical,
+    }
+}
 fn session_exists(name: &str) -> bool {
     terminal().session_exists(name)
 }
@@ -1575,7 +1603,7 @@ fn resolve_project(
     let project = &options.project;
     if project.is_empty() {
         let directory = logical_cwd()?.to_string_lossy().into_owned();
-        return Ok((directory.clone(), basename(&directory)));
+        return Ok((directory.clone(), folder_name(&directory)));
     }
     // A Windows folder may also be `C:\work`, `work\site` or `C:work`.
     let windows_path = cfg!(windows) && (project.contains('\\') || project.get(1..2) == Some(":"));
@@ -1588,7 +1616,7 @@ fn resolve_project(
             .map_err(|_| Error::new(1, format!("no such directory: {project}")))?
             .to_string_lossy()
             .into_owned();
-        return Ok((directory.clone(), basename(&directory)));
+        return Ok((directory.clone(), folder_name(&directory)));
     }
     let projects = config.projects()?;
     if let Some(found) = projects.iter().find(|p| p.name == *project) {
@@ -2026,6 +2054,39 @@ fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_names_take_the_on_disk_case_of_the_same_folder_only() {
+        let name = |logical: &str, canonical: Option<&str>| {
+            on_disk_name(logical.into(), canonical.map(str::to_owned))
+        };
+        // `cd C:\work\myproj` names the session after the folder on disk.
+        assert_eq!(name("myproj", Some("MyProj")), "MyProj");
+        assert_eq!(name("SITE", Some("site")), "site");
+        assert_eq!(name("ölaf", Some("Ölaf")), "Ölaf");
+        assert_eq!(name("MyProj", Some("MyProj")), "MyProj");
+        // A junction, link or short name with another name keeps its own.
+        assert_eq!(name("site", Some("example-site")), "site");
+        assert_eq!(name("PROGRA~1", Some("Program Files")), "PROGRA~1");
+        assert_eq!(name("myproj", Some("myproj2")), "myproj");
+        assert_eq!(name("myproj2", Some("MyProj")), "myproj2");
+        // Only letter case may differ, never the letters themselves.
+        assert_eq!(name("STRASSE", Some("straße")), "STRASSE");
+        // A folder that cannot be resolved keeps the name it was given.
+        assert_eq!(name("myproj", None), "myproj");
+        // Unix names stay exactly as given, even for a link to another case.
+        #[cfg(unix)]
+        {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("Site")).unwrap();
+            let link = root.path().join("site");
+            // A case-insensitive file system (macOS) already finds `Site` as `site`.
+            if !link.exists() {
+                std::os::unix::fs::symlink("Site", &link).unwrap();
+            }
+            assert_eq!(folder_name(&link.to_string_lossy()), "site");
+        }
+    }
 
     #[test]
     fn crashes_and_stops_of_a_resume_are_final_and_quick_failures_start_fresh() {

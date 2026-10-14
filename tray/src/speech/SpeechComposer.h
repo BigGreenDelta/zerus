@@ -17,6 +17,8 @@ public:
     struct Target {
         QString key, host, session, run, conversation, warning;
         bool available = false;
+        // Why an unavailable target can never take voice: the voice button's tooltip.
+        QString reason;
         bool sameConversation(const Target &other) const {
             return key == other.key && host == other.host && session == other.session
                 && run == other.run && conversation == other.conversation;

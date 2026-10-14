@@ -178,6 +178,8 @@ private slots:
     void controlOnlyComputerOffersOnlyRemoteMachines();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
     void controlOnlyComputerAloneExplainsRecovery();
+    void enabledWindowsComputerIsNoMobileGateway();
+    void localWindowsSessionExplainsDisabledVoice();
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
     void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
@@ -214,6 +216,8 @@ private slots:
     void clearArchiveKeepsLiveAndNewEntries();
     void projectFolderActionsKeepTargets();
     void projectFolderNewSessionPrefillsExactTarget();
+    void localWindowsLaunchJoinsTheFolderInAnyCase();
+    void localWindowsFolderFilterIgnoresCase();
     void dashboardActivityRowsStayReadable_data();
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
@@ -269,6 +273,8 @@ private slots:
     void activityAttachmentsOpenLikeDownloads();
     void fileReferenceOpeningOutlivesDialog_data();
     void fileReferenceOpeningOutlivesDialog();
+    void terminalDropQuotesPathsForTheMachine();
+    void folderShellFollowsTheMachinePlatform();
     void remoteFileDownloads_data();
     void remoteFileDownloads();
     void buttonFocusFollowsKeyboardAndNotClicks();
@@ -452,6 +458,8 @@ FleetState TestSessionsWindow::fleet() const
     saved.state = "paused"; saved.currentTool.clear(); saved.prompt = "Simplify the mobile navigation.";
     SessionInfo old; old.name = "sh/scratch"; old.cmd = "sh"; old.project = "scratch";
     BoxState arch; arch.host = "arch"; arch.ok = true; arch.sessions = {codex, kimi, saved, old};
+    // Its folders are POSIX on every GUI; tests of local Windows paths set their own platform.
+    arch.metrics = QJsonObject{{"platform", "linux"}};
     auto approval = codex; approval.name = "claude/infra/review"; approval.cmd = "claude"; approval.project = "infra";
     approval.tag = "review"; approval.phase = "approval"; approval.currentTool = "Bash";
     approval.toolDetail = "terraform plan"; approval.prompt = "Review infrastructure changes before the next deployment.";
@@ -3863,7 +3871,8 @@ void TestSessionsWindow::activityEscapingAndActions()
 
 void TestSessionsWindow::sessionContextMenuSignalsAndKeyboard()
 {
-    auto state = fleet(); auto box = state.local(); box.sessions[0].cwd = "/work/a folder";
+    // A POSIX folder, also when this GUI runs on Windows.
+    auto state = fleet(); auto box = state.local(); box.sessions[0].cwd = "/work/a folder"; box.metrics["platform"] = "linux";
     box.sessions[0].attached = 1; box.sessions[0].clients = {"/dev/pts/42"};
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program()); window.setFleet(state); window.setClipboardMode(true); window.show();
@@ -4097,7 +4106,9 @@ void TestSessionsWindow::terminalDropKeepsActivityDraftAndDoesNotSubmit()
         "sys.argv[0]="+FakeCli::pythonString(script())+";runpy.run_path(sys.argv[0],run_name='__main__')\n");
     fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
     const auto path=m_dir->filePath("report's draft.pdf");QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture");file.close();
-    SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());window.resize(1100,760);window.show();window.showSession({},"codex/hgs/dashboard");
+    // The dropped file is a real one of this computer, in the form of the GUI's platform.
+    auto state=fleet();auto own=state.local();own.metrics.remove("platform");state.setLocal(own,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program));window.setFleet(state);window.resize(1100,760);window.show();window.showSession({},"codex/hgs/dashboard");
     auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer, "Keep Activity draft");
     auto *terminal=window.findChild<TerminalView *>();auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");
     tabs->setCurrentWidget(terminal);QTRY_VERIFY(terminal->isConnected());QTest::qWait(150);
@@ -4109,7 +4120,13 @@ void TestSessionsWindow::terminalDropKeepsActivityDraftAndDoesNotSubmit()
     QCOMPARE(tabs->currentWidget(),terminal);QCOMPARE(composer->editor()->toPlainText(),QString("Keep Activity draft"));
     QCOMPARE(composer->findChildren<QWidget *>("attachmentRow").size(),0);QCOMPARE(sent.size(),0);
     QByteArray pasted;for(const auto &item:output)pasted+=item.first().toByteArray();
-    QVERIFY(pasted.contains("report'\\''s draft.pdf"));QVERIFY(!pasted.contains('\r'));QVERIFY(!pasted.contains('\n'));
+#ifdef Q_OS_WIN
+    // This Windows computer reads native paths (terminalDropQuotesPathsForTheMachine).
+    QVERIFY(pasted.contains(('"'+QDir::toNativeSeparators(path)+'"').toUtf8()));
+#else
+    QVERIFY(pasted.contains("report'\\''s draft.pdf"));
+#endif
+    QVERIFY(!pasted.contains('\r'));QVERIFY(!pasted.contains('\n'));
     output.clear();QDragEnterEvent second(QPoint(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&second);
     tabs->setCurrentIndex(0);QDropEvent stale(QPointF(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&stale);
     QVERIFY(!stale.isAccepted());
@@ -4654,9 +4671,6 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog_data()
 
 void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
 {
-#ifdef Q_OS_WIN
-    QSKIP("Local session folders and files exist only on computers that run agents; a Windows control console has none.");
-#endif
     QFETCH(bool, folder); QFETCH(QString, name);
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -4688,6 +4702,97 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
     }
     QTRY_COMPARE(opened.urls.size(), 1);
     QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(folder ? directory.path() : path));
+}
+
+void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
+{
+    // The local Windows machine reads native paths in double quotes, or in single
+    // quotes when PowerShell would expand `$` or a backtick; a peer's staged copies and
+    // a POSIX local machine keep single quotes.
+    const auto program=m_dir->filePath("terminal-quoting-hgs");QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write("#!/usr/bin/env python3\nimport json,os,runpy,sys\na=sys.argv[1:]\nif a and a[0].startswith('@'):a=a[1:]\n"
+        "if a[:1]==['a']:\n if os.name!='nt':\n  import tty;tty.setraw(0)\n"
+        " sys.stdout.write('\\x1b[?2004h');sys.stdout.flush();sys.stdin.buffer.read();sys.exit(0)\n"
+        "if a[:1]==['attachment']:\n p=json.load(sys.stdin)\n"
+        " print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],"
+        "status='staged',files=[dict(path=\"/srv/inbox/report's draft.pdf\") for _ in p['attachments']])));sys.exit(0)\n"
+        "sys.argv[0]="+FakeCli::pythonString(script())+";runpy.run_path(sys.argv[0],run_name='__main__')\n");
+    fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    QStringList paths;
+    for(const auto &name:{QString("plain.txt"),QString("report's draft.pdf"),QString("a&b.txt"),QString("cost $5's `q`.txt")}) {
+        QFile file(m_dir->filePath(name));QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture");paths<<file.fileName();
+    }
+    QMimeData mime;QList<QUrl> urls;for(const auto &path:paths)urls<<QUrl::fromLocalFile(path);mime.setUrls(urls);
+    const auto native=[](QString path){return path.replace('/','\\');};
+    const auto drop=[&](SessionsWindow &window,const QString &host,const QString &name) {
+        window.showSession(host,name);
+        auto *terminal=window.findChild<TerminalView *>();auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");
+        tabs->setCurrentWidget(terminal);if(!QTest::qWaitFor([&]{return terminal->isConnected();},10000))return QByteArray();QTest::qWait(150);
+        QSignalSpy output(terminal->terminalScreen(),&TerminalScreen::output);
+        auto *panel=window.findChild<QWidget *>("sessionDetailPanel");
+        QDragEnterEvent enter(QPoint(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&enter);
+        QDropEvent event(QPointF(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&event);
+        if(!event.isAccepted())return QByteArray();
+        QByteArray pasted;
+        (void)QTest::qWaitFor([&]{pasted.clear();for(const auto &item:output)pasted+=item.first().toByteArray();return pasted.contains(".txt")||pasted.contains(".pdf");},20000);
+        return pasted;
+    };
+    for(const auto &platform:{QString("windows"),QString("linux")}) {
+        auto state=fleet();auto local=state.local();local.metrics["platform"]=platform;
+        state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+        auto mac=*state.peer("mac");mac.sessions[0].runId="run-mac";mac.sessions[0].conversationId="conversation-mac";
+        state.setPeer(mac,QDateTime::currentMSecsSinceEpoch());
+        SessionsWindow window(FakeCli::program(program));window.setFleet(state);window.resize(1100,760);window.show();
+        const auto pasted=QString::fromUtf8(drop(window,{},"codex/hgs/dashboard"));
+        if(platform=="windows") {
+            QVERIFY2(pasted.contains(native(paths[0])+" \""+native(paths[1])+"\" \""+native(paths[2])+"\" '"
+                                     +native(paths[3]).replace("'","''")+"' "),qPrintable(pasted));
+            QVERIFY(!pasted.contains('/'));QVERIFY(!pasted.contains('\''+native(paths[1])));
+        } else {
+            QVERIFY2(pasted.contains('\''+paths[0]+"' '"+QString(paths[1]).replace("'","'\\''")+"' '"+paths[2]+"' '"
+                                     +QString(paths[3]).replace("'","'\\''")+"' "),qPrintable(pasted));
+            QVERIFY(!pasted.contains('"'));
+        }
+        // A peer's staged copies keep POSIX quoting whatever this computer runs.
+        const auto remote=QString::fromUtf8(drop(window,"mac","claude/infra/review"));
+        QVERIFY2(remote.contains("'/srv/inbox/report'\\''s draft.pdf' '/srv/inbox/report'\\''s draft.pdf' '/srv/inbox/report'\\''s draft.pdf' "),
+                 qPrintable(remote));
+        QVERIFY(!remote.contains('"'));QVERIFY(!remote.contains('\\'+QString("srv")));
+    }
+}
+
+void TestSessionsWindow::folderShellFollowsTheMachinePlatform()
+{
+    // The local Windows machine opens drive and UNC folders; a POSIX one, and
+    // every peer, folders that start with '/'.
+    for(const auto &platform:{QString("windows"),QString("linux")}) {
+        const bool windows=platform=="windows";const auto now=QDateTime::currentMSecsSinceEpoch();
+        auto state=fleet();auto local=state.local();local.metrics["platform"]=platform;
+        local.sessions[0].cwd="C:\\work\\a folder";local.sessions[1].cwd="/work/docs";state.setLocal(local,now);
+        auto mac=*state.peer("mac");mac.sessions[0].cwd="C:/work";state.setPeer(mac,now);
+        SessionsWindow window(program());window.setFleet(state);window.show();
+        auto *list=window.findChild<QListWidget *>("sessionList");auto *menu=window.findChild<QMenu *>("sessionContextMenu");
+        auto *shell=window.findChild<QPushButton *>("openFolderShellAction");QVERIFY(shell);
+        QSignalSpy requested(&window,&SessionsWindow::folderShellRequested);
+        const auto menuAllows=[&](const QString &key) {
+            for(int row=0;row<list->count();++row) if(list->item(row)->data(SessionRoles::Key).toString()==key) {
+                const auto point=list->visualItemRect(list->item(row)).center();
+                QContextMenuEvent event(QContextMenuEvent::Mouse,point,list->viewport()->mapToGlobal(point));
+                QApplication::sendEvent(list->viewport(),&event);
+                const bool enabled=menu->findChild<QAction *>("contextFolderShell")->isEnabled();menu->hide();return enabled;
+            }
+            return false;
+        };
+        window.showSession({},local.sessions[0].name);
+        QCOMPARE(shell->isEnabled(),windows);QCOMPARE(menuAllows("\n"+local.sessions[0].name),windows);
+        shell->click();
+        if(windows){QCOMPARE(requested.size(),1);QCOMPARE(requested[0][0].toString(),QString());QCOMPARE(requested[0][1].toString(),QString("C:\\work\\a folder"));}
+        else QCOMPARE(requested.size(),0);
+        window.showSession({},local.sessions[1].name);
+        QCOMPARE(shell->isEnabled(),!windows);QCOMPARE(menuAllows("\n"+local.sessions[1].name),!windows);
+        window.showSession("mac",mac.sessions[0].name);
+        QVERIFY(!shell->isEnabled());QVERIFY(!menuAllows("mac\n"+mac.sessions[0].name));
+    }
 }
 
 void TestSessionsWindow::nativeSessionUsageStaysWithSelectedConversation()
@@ -6815,7 +6920,10 @@ void TestSessionsWindow::openCodeModelLaunchUsesNativeAccountAndActivity()
         "elif a[0]=='dirs':print('{\"path\":\"/fixture/project\",\"directories\":[]}')\n"
         "elif a[0]=='worktrees':print('{\"state\":\"not_repo\"}')\n"));
     QSettings().setValue("workspace/launchOpenTerminal",true);
-    NewSessionDialog dialog(FakeCli::program(fake),fleet(),{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
+    // This computer reports Linux: without a platform a Windows build takes it for
+    // Windows, which offers no OpenCode (spec D16).
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    NewSessionDialog dialog(FakeCli::program(fake),state,{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
     auto *start=dialog.findChild<QPushButton *>("primary"),*none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
     auto *account=dialog.findChild<QListWidget *>("launchAccount");auto *models=dialog.findChild<QComboBox *>("launchModel");
     QVERIFY(account);QVERIFY(models);QVERIFY(!dialog.findChild<QComboBox *>("launchAgent"));
@@ -6886,7 +6994,10 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     QFETCH(QString,agent);
     SessionOrganization projects; projects.addFolder("ungrouped","arch","/workspace/infra");
     QSettings().setValue("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
-    SessionsWindow window(program());auto state=fleet();window.setFleet(state);window.show();
+    // This computer reports Linux: without a platform a Windows build takes it for
+    // Windows, which offers no DeepSeek (spec D16).
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.setFleet(state);window.show();
     constexpr int noticeMs=250;window.setNoticeDurationForTests(noticeMs);
     QSignalSpy terminal(&window,&SessionsWindow::newSessionRequested);
     auto *client=window.findChild<HgsClient *>();QSignalSpy launched(client,&HgsClient::nativeSessionLaunched);
@@ -7215,17 +7326,17 @@ void TestSessionsWindow::projectsEmbeddedAndRemote()
 
 void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
 {
-#ifdef Q_OS_WIN
-    QSKIP("Local session folders and files exist only on computers that run agents; a Windows control console has none.");
-#endif
+    // The local folder is a real one of this computer, in the form of the GUI's platform.
+    auto state=fleet();auto own=state.local();own.metrics.remove("platform");state.setLocal(own,QDateTime::currentMSecsSinceEpoch());
+    const auto style=MachinePlatform::of(own.metrics,true);
     QTemporaryDir local;QVERIFY(local.isValid());
     SessionOrganization projects;const auto project=projects.createGroup("Chosen project");
-    const auto localId=projects.addFolder(project,"arch",local.path(),"Local folder");
+    const auto localId=projects.addFolder(project,"arch",local.path(),"Local folder",style);
     projects.addFolder(project,"mac","/remote/other","Other remote folder");
     const auto remoteId=projects.addFolder(project,"mac","/remote/work tree","Chosen remote folder");
     projects.markImported("arch");projects.markImported("mac");
     QSettings().setValue("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
-    SessionsWindow window(program());window.resize(1150,760);window.setFleet(fleet());window.show();window.showProjects();
+    SessionsWindow window(program());window.resize(1150,760);window.setFleet(state);window.show();window.showProjects();
     auto *page=window.findChild<ProjectsDialog *>();page->selectProject(project);
     auto *table=page->findChild<QTableWidget *>("projectFolders");auto *create=page->findChild<QPushButton *>("newProjectFolderSession");
     const auto rowFor=[&](const QString &id){for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->data(Qt::UserRole).toString()==id)return row;return -1;};
@@ -7253,7 +7364,7 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
         QCOMPARE(dialog->findChild<QComboBox *>("launchProject")->currentData().toString(),project);
         QCOMPARE(dialog->findChild<QComboBox *>("launchComputer")->currentData().toString(),QString());
         QCOMPARE(dialog->findChild<QComboBox *>("launchProjectFolder")->currentData().toString(),localId);
-        QCOMPARE(dialog->findChild<QLabel *>("launchFolderPath")->text(),local.path());localOpened=true;dialog->reject();});
+        QCOMPARE(dialog->findChild<QLabel *>("launchFolderPath")->text(),MachinePlatform::native(local.path(),style));localOpened=true;dialog->reject();});
     create->click();QVERIFY(localOpened);QVERIFY(page->isVisible());
     table->customContextMenuRequested(table->visualItemRect(table->item(rowFor(remoteId),0)).center());
     QPointer<QMenu> menu=page->findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);auto *launch=menu->findChild<QAction *>("contextNewProjectFolderSession");
@@ -7263,7 +7374,7 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
         QCOMPARE(dialog->findChild<QComboBox *>("launchProject")->currentData().toString(),project);
         QCOMPARE(dialog->findChild<QComboBox *>("launchComputer")->currentData().toString(),QString("mac"));
         auto *folders=dialog->findChild<QComboBox *>("launchProjectFolder");QCOMPARE(folders->currentData().toString(),remoteId);
-        window.setFleet(fleet());QCOMPARE(folders->currentData().toString(),remoteId);
+        window.setFleet(state);QCOMPARE(folders->currentData().toString(),remoteId);
         QCOMPARE(dialog->findChild<QLabel *>("launchFolderPath")->text(),QString("/remote/work tree"));remoteOpened=true;
         auto *accounts=dialog->findChild<QListWidget *>("launchAccount");
         const auto claude=[&]{for(int i=0;i<accounts->count();++i)if(accounts->item(i)->data(Qt::UserRole).toString()=="native-claude")return i;return -1;};
@@ -7274,24 +7385,25 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
     QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][2].toString(),QString("/remote/work tree"));delete menu.data();
     window.showProjects();page->selectProject(project);table->setCurrentCell(rowFor(remoteId),0);
     table->customContextMenuRequested(table->visualItemRect(table->item(rowFor(remoteId),0)).center());menu=page->findChild<QMenu *>("projectFolderMenu");
-    auto offline=fleet();BoxState missing;missing.host="mac";missing.error="offline";offline.setPeer(missing,QDateTime::currentMSecsSinceEpoch());window.setFleet(offline);
+    auto offline=state;BoxState missing;missing.host="mac";missing.error="offline";offline.setPeer(missing,QDateTime::currentMSecsSinceEpoch());window.setFleet(offline);
     QVERIFY(!create->isEnabled());QSignalSpy requests(page,&ProjectsDialog::newSessionRequested);
     menu->findChild<QAction *>("contextNewProjectFolderSession")->trigger();QCOMPARE(requests.size(),0);delete menu.data();
 }
 
 void TestSessionsWindow::projectFolderActionsKeepTargets()
 {
-#ifdef Q_OS_WIN
-    QSKIP("Local session folders and files exist only on computers that run agents; a Windows control console has none.");
-#endif
+    // Local folders are real ones of this computer, in the form of the GUI's platform;
+    // the peer's folder is POSIX.
+    auto state=fleet();auto own=state.local();own.metrics.remove("platform");state.setLocal(own,QDateTime::currentMSecsSinceEpoch());
+    const auto style=MachinePlatform::of(own.metrics,true);
     QTemporaryDir temporary;QVERIFY(temporary.isValid());
-    const auto path=temporary.path()+"/folder #1";QVERIFY(QDir().mkpath(path));
+    const auto path=temporary.path()+"/folder #1";QVERIFY(QDir().mkpath(path));const QString remote="/remote/folder #1";
     SessionOrganization projects;const auto first=projects.createGroup("First"),second=projects.createGroup("Second");
-    projects.addFolder(first,"arch",path,"Local");projects.addFolder(first,"mac",path,"Remote");
-    projects.addFolder(first,"arch",path+"/missing","Missing");projects.addFolder(second,"arch",path);
+    projects.addFolder(first,"arch",path,"Local",style);projects.addFolder(first,"mac",remote,"Remote");
+    projects.addFolder(first,"arch",path+"/missing","Missing",style);projects.addFolder(second,"arch",path,{},style);
     projects.markImported("arch");projects.markImported("mac");
     QSettings().setValue("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
-    SessionsWindow window(program());window.setFleet(fleet());window.show();window.showProjects();
+    SessionsWindow window(program());window.setFleet(state);window.show();window.showProjects();
     auto *page=window.findChild<ProjectsDialog *>();page->selectProject(first);
     auto *table=page->findChild<QTableWidget *>("projectFolders");
     auto *open=page->findChild<QPushButton *>("openProjectFolder");QVERIFY(open);QVERIFY(!open->isEnabled());
@@ -7303,12 +7415,12 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
     table->customContextMenuRequested(table->visualItemRect(table->item(2,0)).center());
     QPointer<QMenu> menu=page->findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);
     QVERIFY(!menu->findChild<QAction *>("contextOpenProjectFolder")->isEnabled());
-    menu->findChild<QAction *>("contextCopyProjectFolder")->trigger();QCOMPARE(QApplication::clipboard()->text(),path);
+    menu->findChild<QAction *>("contextCopyProjectFolder")->trigger();QCOMPARE(QApplication::clipboard()->text(),remote);
     table->setCurrentCell(0,0); // A menu command still edits the folder it was opened on.
     bool editedRemote=false;
     QTimer::singleShot(0,&window,[&]{auto *dialog=page->findChild<QDialog *>("projectFolderDialog");QVERIFY(dialog);
         editedRemote=dialog->findChild<QComboBox *>("projectFolderMachine")->currentData().toString()=="mac";
-        QCOMPARE(dialog->findChild<QLineEdit *>("projectFolderPath")->text(),path);dialog->reject();});
+        QCOMPARE(dialog->findChild<QLineEdit *>("projectFolderPath")->text(),remote);dialog->reject();});
     menu->findChild<QAction *>("contextEditProjectFolder")->trigger();QVERIFY(editedRemote);delete menu.data();
     table->setCurrentCell(1,0);QCOMPARE(table->item(1,0)->text(),QString("Missing"));QVERIFY(!open->isEnabled());
     table->customContextMenuRequested(table->visualItemRect(table->item(0,0)).center());
@@ -7330,6 +7442,67 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
     page->deleteProject(first);
     const SessionOrganization afterDelete(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
     QVERIFY(afterDelete.group(first));
+}
+
+void TestSessionsWindow::localWindowsLaunchJoinsTheFolderInAnyCase()
+{
+    // A launch into a local Windows folder joins the project folder it names in any
+    // case and with either separator (D15, D16); a new one is stored in Qt form.
+    SessionOrganization projects;const auto project=projects.createGroup("Windows work");
+    const auto existing=projects.addFolder(project,"arch","C:\\Work\\Repo","Repository",MachinePlatform::Style::Windows);
+    projects.markImported("arch");projects.markImported("mac");
+    QSettings().setValue("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
+    const QStringList tags{"same","new","rooted"};QStringList tokens;QJsonObject pending;
+    const QList<QPair<QString,QString>> targets{{"c:\\work\\repo\\worktree","c:\\WORK\\repo"},{"D:\\New\\Folder","D:\\New\\Folder\\"},{"/repo","/repo"}};
+    for(int i=0;i<tags.size();++i){
+        tokens<<QUuid::createUuid().toString(QUuid::WithoutBraces);
+        pending.insert(tokens[i],QJsonObject{{"host",""},{"cmd","codex"},{"tag",tags[i]},{"group",project},{"target",targets[i].first},
+            {"add_folder",true},{"folder",targets[i].second},{"show_pending",true},{"created",QDateTime::currentSecsSinceEpoch()}});
+    }
+    QSettings().setValue("workspace/pendingLaunches",QJsonDocument(pending).toJson(QJsonDocument::Compact));
+    auto state=fleet();auto local=state.local();local.metrics["platform"]="windows";
+    for(int i=0;i<tags.size();++i){
+        SessionInfo created;created.name="codex/work/"+tags[i];created.cmd="codex";created.project="work";created.tag=tags[i];
+        created.runId="run-"+tags[i];created.state="running";created.launchId=tokens[i];local.sessions.append(created);
+    }
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.show();window.setFleet(state);
+    const SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    QStringList paths;for(const auto &folder:saved.group(project)->folders)paths<<folder.path;
+    // A drive-less rooted path is no folder of a Windows machine: the session still joins.
+    QCOMPARE(paths,QStringList({"C:/Work/Repo","D:/New/Folder"}));QCOMPARE(saved.group(project)->folders[0].id,existing);
+    for(const auto &tag:tags)QCOMPARE(saved.groupFor("arch\ncodex/work/"+tag),project);
+    QVERIFY(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().isEmpty());
+}
+
+void TestSessionsWindow::localWindowsFolderFilterIgnoresCase()
+{
+    // A local Windows folder filter matches the CLI's paths in any case and with either
+    // separator, and names the folder natively; a peer's POSIX folder stays exact.
+    auto state=fleet();auto local=state.local();local.metrics["platform"]="windows";
+    local.sessions[0].cwd=local.sessions[0].canonicalCwd="c:\\work\\repo";local.sessions[0].gitRoot="C:\\WORK\\Repo";
+    local.sessions[1].cwd=local.sessions[1].canonicalCwd="C:\\Work\\Repo\\sub";local.sessions[1].gitRoot="C:\\Work\\Repo";
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    // A peer is POSIX even when it reports Windows (Phase 2 has no Windows peers).
+    auto remote=*state.peer("mac");remote.metrics["platform"]="windows";remote.sessions[0].canonicalCwd=remote.sessions[0].gitRoot="/work/repo";
+    state.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.setFleet(state);window.resize(1200,850);window.show();
+    auto *page=window.findChild<ProjectsDialog *>("projectsPage");auto *list=window.findChild<SessionList *>("sessionList");
+    auto *clear=window.findChild<QPushButton *>("clearFolderFilter");
+    const auto keys=[&]{QStringList result;for(int i=0;i<list->count();++i){const auto key=list->item(i)->data(SessionRoles::Key).toString();if(!key.isEmpty())result<<key;}result.sort();return result;};
+    const auto all=[&]{for(auto *button:window.findChildren<QPushButton *>())if(button->property("filter")=="all")return button->property("count").toInt();return -1;};
+    page->folderSessionsRequested({},"C:/Work/Repo",false);
+    QCOMPARE(keys(),QStringList{"\ncodex/hgs/dashboard"});QCOMPARE(all(),1);
+    QCOMPARE(clear->text(),QString("Folder: Repo   ×"));QVERIFY(clear->toolTip().startsWith("C:\\Work\\Repo\n"));
+    page->folderSessionsRequested({},"c:/work/repo",true);
+    QCOMPARE(keys(),QStringList({"\ncodex/hgs/dashboard","\nkimi/docs/research"}));QCOMPARE(all(),2);
+    page->folderSessionsRequested("mac","/Work/Repo",true);QVERIFY(keys().isEmpty());QCOMPARE(all(),0);
+    QCOMPARE(clear->text(),QString("Folder: Repo   ×"));QVERIFY(clear->toolTip().startsWith("/Work/Repo\n"));
+    page->folderSessionsRequested("mac","/work/repo",true);QCOMPARE(keys(),QStringList{"mac\nclaude/infra/review"});QCOMPARE(all(),1);
+    // A Linux computer keeps exact POSIX names.
+    local.metrics["platform"]="linux";state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    page->folderSessionsRequested({},"c:/work/repo",true);QVERIFY(keys().isEmpty());QCOMPARE(all(),0);
+    QVERIFY(clear->toolTip().startsWith("c:/work/repo\n"));
 }
 
 void TestSessionsWindow::projectColorsApplyOrCancel()
@@ -7435,7 +7608,11 @@ void TestSessionsWindow::controlOnlyComputerOffersOnlyRemoteMachines(){
     window.findChild<QPushButton *>("workspaceSettings")->click();
     auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);
     QVERIFY(sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
-    window.setFleet(fleet());QVERIFY(!sections->item(5)->isHidden());window.setFleet(state);
+    // A Linux computer that runs sessions is a mobile gateway; without a platform
+    // a Windows build would take this computer for Windows, which never is one.
+    auto linuxFleet=fleet();auto linuxBox=linuxFleet.local();linuxBox.metrics=QJsonObject{{"platform","linux"}};
+    linuxFleet.setLocal(linuxBox,QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(linuxFleet);QVERIFY(!sections->item(5)->isHidden());window.setFleet(state);
     NewSessionDialog launch(program(),state,{},"codex");launch.show();
     auto *machine=launch.findChild<QComboBox *>("launchComputer");QVERIFY(machine);
     QCOMPARE(machine->count(),1);QCOMPARE(machine->itemData(0).toString(),QString("mac"));
@@ -7488,6 +7665,54 @@ void TestSessionsWindow::controlOnlyComputerAloneExplainsRecovery(){
     QVERIFY(!window.findChild<QPushButton *>("recoverySave")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryEnabled")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryRule_service")->isEnabled());
+}
+
+// An enabled Windows computer runs sessions, so it keeps its recovery policy, but
+// it is no mobile gateway (spec D16): Mobile connection stays hidden.
+void TestSessionsWindow::enabledWindowsComputerIsNoMobileGateway(){
+    QTemporaryDir fixture;QVERIFY(fixture.isValid());const auto script=fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(script,R"PY(#!/usr/bin/env python3
+import sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+if a[:1]!=['recovery']:sys.exit(2)
+print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer","enabled":false,"enabled_at":0,"service":true,"network":true,"rate_limit":true,"delays":[15,30,60,300]}}')
+)PY"));
+    QSettings().remove("recovery/sharedPolicy");
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","windows"}};
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(script));window.resize(1100,900);window.setFleet(state);window.show();
+    window.findChild<QPushButton *>("workspaceSettings")->click();
+    auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);
+    QVERIFY(sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
+    // Recovery includes this computer as well as the remote machine.
+    static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"))->openRecovery();
+    auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("Synchronized across 2 machines"),20000);
+    local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(state);QVERIFY(!sections->item(5)->isHidden());
+    local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    sections->setCurrentRow(5);window.setFleet(state);QVERIFY(sections->item(5)->isHidden());QCOMPARE(sections->currentRow(),0);
+}
+
+// Voice sends to local Windows sessions are a Phase 2 non-goal (spec D16): the
+// disabled voice button says why.
+void TestSessionsWindow::localWindowsSessionExplainsDisabledVoice(){
+    const QJsonObject details{{"tracked",true},{"run_id","fixture-run"},{"conversation_id","fixture-conversation"},
+        {"runtime_state","live"},{"process_state","running"},{"phase","idle"},{"activity","idle"},
+        {"events",QJsonArray{}},{"cursor",0}};
+    const auto fake=programInspecting("windows-voice",details);QVERIFY(!fake.isEmpty());
+    auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","linux"}};
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(fake);window.setFleet(state);window.show();window.showSession({},"codex/hgs/dashboard");
+    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);
+    auto *voice=composer->findChild<ToolbarChip *>("voiceRecord");QVERIFY(voice);
+    QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Record a voice message"));
+    local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QTRY_VERIFY(!voice->isEnabled());
+    QCOMPARE(voice->toolTip(),QString("Voice messages cannot be sent to sessions on this Windows computer yet."));
 }
 
 void TestSessionsWindow::updatesEntryOpensExactSettingsPage(){

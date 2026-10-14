@@ -96,6 +96,10 @@ struct BoxState {
     // machines but runs no sessions, accounts or recovery of its own. hgs omits
     // "local_sessions" unless it is false.
     bool localSessions = true;
+    // Windows: the session host as this box's CLI found it ("local_host": state,
+    // pid, protocol, conpty, integrity, windows_session, and error when it is
+    // unavailable). Empty on Unix and from an older CLI.
+    QJsonObject localHost;
 };
 
 struct ProjectInfo {
@@ -145,6 +149,9 @@ public:
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
+    // `hgs session-host <action> --json` on this computer (Windows, spec D2):
+    // install enables local sessions and stages the stable CLI and a host image.
+    quint64 requestSessionHost(const QString &action);
     // `hgs presence set --json`. At most one write runs; while it does, only the
     // newest sample waits, so a slow CLI never builds a queue of stale samples.
     void setPresence(double idleSeconds, bool locked);
@@ -242,6 +249,8 @@ signals:
     void machinesFailed(quint64 request, const QString &error);
     void swarmReady(quint64 request, const QJsonObject &result);
     void swarmFailed(quint64 request, const QString &error);
+    void sessionHostReady(quint64 request, const QJsonObject &result);
+    void sessionHostFailed(quint64 request, const QString &error);
     void presenceFinished(const QString &error); // Empty on success.
     void machineSetupOutput(const QString &text);
     void machineSetupFinished(bool ok, const QString &error);
@@ -321,6 +330,7 @@ private:
     quint64 m_recoveryRequest = 0;
     quint64 m_machineRequest = 0;
     quint64 m_swarmRequest = 0;
+    quint64 m_sessionHostRequest = 0;
     quint64 m_accountRequest = 0;
     bool m_machineSetupInFlight = false;
     quint64 m_messageRequest = 0;

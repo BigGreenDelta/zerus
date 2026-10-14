@@ -21,6 +21,7 @@ private slots:
     void activeScopeIncludesDraftsAndRefreshesMembership();
     void staleQueriesCannotReplaceCurrentResults();
     void multipleMachinesScopeSearch();
+    void folderScopeFollowsTheMachinePathStyle();
     void selectionSurvivesFleetPollsAndExplicitRefresh();
     void errorsFollowHostScopeAndRecoverWhenPeerConnects();
     void newlyAddedPeerIsSearchedForTheCurrentQuery();
@@ -170,6 +171,26 @@ void TestSessionSearch::multipleMachinesScopeSearch()
     search.setHostsScope(state,"all",{"mac","build"}); QTRY_COMPARE(list(search)->count(),2);
     for(int i=0;i<list(search)->count();++i) QVERIFY(!list(search)->item(i)->data(Qt::AccessibleTextRole).toString().contains("Needle live body"));
     QCOMPARE(calls().size(),3); search.setHostsScope(state,"all",{}); QCOMPARE(list(search)->count(),5);
+}
+
+void TestSessionSearch::folderScopeFollowsTheMachinePathStyle()
+{
+    // A local Windows folder scope matches sessions in any case and with either
+    // separator; a peer is POSIX even when it reports Windows, and keeps exact names.
+    auto state = fleet(); auto box = state.local(); box.metrics["platform"] = "windows";
+    box.sessions[0].canonicalCwd = "c:\\docs\\live"; box.sessions[1].canonicalCwd = "C:\\Docs\\Saved"; box.sessions[2].canonicalCwd = "C:\\Docs\\Live";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    auto mac = *state.peer("mac"); mac.metrics["platform"] = "windows"; mac.sessions[0].canonicalCwd = "/remote/Docs";
+    state.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
+    SessionSearch search(FakeCli::program(script())); search.setScope(state, "all", {}); search.setFolderScope({}, "C:/Docs/Live", false);
+    search.setQuery("needle"); QTRY_COMPARE(calls().size(), 2); QTRY_COMPARE(list(search)->count(), 2);
+    for (int i = 0; i < list(search)->count(); ++i) QVERIFY(!list(search)->item(i)->data(Qt::AccessibleTextRole).toString().contains("saved body"));
+    // The peer's reply may still be on its way: wait for its hit, then check the case.
+    search.setFolderScope("mac", "/remote/Docs", false); QTRY_COMPARE(list(search)->count(), 1);
+    search.setFolderScope("mac", "/remote/docs", false); QCOMPARE(list(search)->count(), 0);
+    box.metrics["platform"] = "linux"; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    search.setScope(state, "all", {}); search.setFolderScope({}, "C:/Docs/Live", false); QCOMPARE(list(search)->count(), 0);
+    search.setFolderScope({}, "c:\\docs\\live", false); QCOMPARE(list(search)->count(), 1);
 }
 
 void TestSessionSearch::staleQueriesCannotReplaceCurrentResults()
