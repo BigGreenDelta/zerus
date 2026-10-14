@@ -1879,7 +1879,9 @@ On Windows the local box also carries `local_host`, the session host as found
 (never started): `state` is `not-installed`, `stopped`, `running` or `unavailable`
 (with `error`), and `pid`, `protocol`, `conpty` (`bundled` or `inbox`), `integrity`
 and `windows_session` describe a running host and are null otherwise. Its sessions
-list attached clients in `clients` by opaque IDs such as `c1` instead of tty paths.
+list attached clients in `clients` by opaque IDs such as `c1` instead of tty paths,
+and a live session's `cwd` (`cwd_source: tmux`) is the folder it started in: the
+host does not follow a later change of directory, such as `cd` in a shell.
 Linux and macOS snapshots have no `local_host`. When `windows_session` differs from
 the desktop app's own Windows session (a host started over SSH, for example), the app
 asks before a launch, resume, restore or fork on this computer goes into that host,

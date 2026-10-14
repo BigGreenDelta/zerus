@@ -596,16 +596,8 @@ impl<L: Launcher> Host<L> {
                 size: request.size,
             })
             .map_err(|e| failed(format!("cannot start the session: {e}")))?;
-        Session::start(
-            id,
-            pane,
-            request.launch_id.clone(),
-            request.name.clone(),
-            unix_now(),
-            request.size,
-            launched,
-        )
-        .map_err(|e| failed(format!("cannot start the session: {e}")))
+        Session::start(id, pane, request, unix_now(), launched)
+            .map_err(|e| failed(format!("cannot start the session: {e}")))
     }
 
     /// Wait for a registered session's end on a thread of its own.
@@ -688,9 +680,11 @@ impl<L: Launcher> Host<L> {
                 pid: session.pid,
                 dead: session.dead(),
                 run_marker: session.variable(RUN_MARKER).unwrap_or_default(),
-                // Another process's current directory is not readable yet
-                // (platform::current_directories); "" means unknown.
-                current_path: String::new(),
+                // Where the session started: another process's current
+                // directory lives in its memory, which the host does not read
+                // (platform::current_directories), so a program that changes
+                // directory is still listed where it started.
+                current_path: session.cwd.clone(),
             });
             listed.clients.extend(clients);
         }

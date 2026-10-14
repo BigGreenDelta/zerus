@@ -256,6 +256,7 @@ class Lifecycle(HostCase):
         self.assertEqual([session["name"] for session in listed["sessions"]], ["cmd/a"])
         self.assertEqual(listed["panes"][0]["run_marker"], "run-1")
         self.assertEqual(listed["panes"][0]["pid"], created["pid"])
+        self.assertEqual(listed["panes"][0]["current_path"], str(self.work))
         for target in ({"name": "cmd/a"}, {"session": created["session"]}, {"pane": pane}):
             resolved = self.ok({"op": "resolve_target", "target": target})
             self.assertEqual(resolved, {"session": created["session"], "name": "cmd/a", "pane": pane})

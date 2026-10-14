@@ -1242,6 +1242,30 @@ mod tests {
         }
     }
 
+    /// A listed `current_path` (the directory a host session started in) is
+    /// the session's live folder, which `ls --json` reports as its `cwd`; ""
+    /// gives none.
+    #[test]
+    fn listed_current_paths_are_the_live_session_folders() {
+        #[cfg(windows)]
+        const WORK: &str = r"C:\work\p";
+        #[cfg(not(windows))]
+        const WORK: &str = "/work/p";
+        let mut listed = listed();
+        listed.panes[1].current_path = WORK.into();
+        let wire = serde_json::to_value(listed).unwrap();
+        let backend: &'static HostBackend<Fake> =
+            Box::leak(Box::new(HostBackend::new(Fake::new(move |_| {
+                Ok(wire.clone())
+            }))));
+        let cwds = super::super::with_fake(backend, crate::state::workspace::pane_cwds);
+        assert_eq!(
+            cwds,
+            BTreeMap::from([("fake_agent/p/b".to_string(), WORK.to_string())])
+        );
+        assert!(calls(backend).iter().all(|op| *op == Op::List));
+    }
+
     #[test]
     fn targets_resolve_and_missing_ones_are_none() {
         let backend = HostBackend::new(Fake::new(|op| match op {
