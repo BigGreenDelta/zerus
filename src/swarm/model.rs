@@ -8,6 +8,23 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A drive (`C:\`, `c:/`) or UNC (`\\server\share`, `//server/share`) path: a local
+/// Windows folder of a desktop (D15 of the Windows native host design). The catalog
+/// has no Windows path kind yet, so these stay in that desktop's organization.
+/// Matches `MachinePlatform::windowsShaped` in the GUI.
+fn windows_folder(path: &str) -> bool {
+    let separator = |c: &u8| *c == b'/' || *c == b'\\';
+    match path.as_bytes() {
+        [drive, b':', next, ..] if drive.is_ascii_alphabetic() && separator(next) => true,
+        // Two separators, a server name, a separator and a share name.
+        [first, second, rest @ ..] if separator(first) && separator(second) => {
+            let end = rest.iter().position(separator);
+            end.is_some_and(|end| end > 0 && rest.get(end + 1).is_some_and(|c| !separator(c)))
+        }
+        _ => false,
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Patch {
@@ -52,6 +69,10 @@ impl Store {
             }
             if let Some(folders) = p["folders"].as_array() {
                 for f in folders {
+                    // Skipped whole: other invalid paths still fail when written.
+                    if f["path"].as_str().is_some_and(windows_folder) {
+                        continue;
+                    }
                     let folder = f["id"]
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("missing folder ID"))?;
@@ -404,6 +425,99 @@ mod tests {
             .map(|op| op.value.as_str().unwrap())
             .collect();
         assert_eq!(values, BTreeSet::from(["project", "another-project"]));
+    }
+    #[test]
+    fn windows_folder_paths_are_drive_or_unc() {
+        for path in [
+            "C:\\work",
+            "c:/",
+            "D:\\",
+            "C:\\work/sub\\dir",
+            "\\\\server\\share",
+            "//server/share/dir",
+            "\\/server/share",
+            "\\\\?\\C:\\work",
+        ] {
+            assert!(windows_folder(path), "{path}");
+        }
+        for path in [
+            "/work",
+            "/",
+            "//server",
+            "//server/",
+            "//server//share",
+            "///share",
+            "C:",
+            "C:work",
+            "1:/work",
+            "/work/C:/x",
+            "work",
+            "",
+        ] {
+            assert!(!windows_folder(path), "{path}");
+        }
+    }
+    #[test]
+    fn windows_folders_stay_local_and_other_invalid_paths_still_fail() {
+        let mut a = store();
+        a.initialize(&org("Initial")).unwrap();
+        let versions = a.catalog.versions();
+        let digest = a.catalog.digest();
+        let with = |path: &str| {
+            let mut document = org("Initial");
+            // An alias the catalog has never seen: resolving it would record a machine.
+            document["projects"][0]["folders"] =
+                json!([{"id":"local-folder","machine":"windows-desktop","path":path,"name":""}]);
+            document
+        };
+        for path in [
+            "C:\\work",
+            "c:/Users/user/project",
+            "\\\\server\\share\\dir",
+            "//server/share",
+        ] {
+            a.apply(Patch {
+                base: org("Initial"),
+                desired: with(path),
+                versions: versions.clone(),
+            })
+            .unwrap();
+            a.apply(Patch {
+                base: with(path),
+                desired: org("Initial"),
+                versions: versions.clone(),
+            })
+            .unwrap();
+            assert_eq!(a.catalog.digest(), digest, "{path}");
+        }
+        assert!(a
+            .flatten(&with("C:\\work"))
+            .unwrap()
+            .keys()
+            .all(|key| !matches!(key, Key::Folder { .. })));
+        for path in ["work", "C:work", "\\work"] {
+            assert!(
+                a.apply(Patch {
+                    base: org("Initial"),
+                    desired: with(path),
+                    versions: versions.clone(),
+                })
+                .is_err(),
+                "{path}"
+            );
+        }
+        a.apply(Patch {
+            base: org("Initial"),
+            desired: with("/work"),
+            versions,
+        })
+        .unwrap();
+        assert_eq!(
+            a.catalog.values()[&Key::Folder {
+                id: "local-folder".into()
+            }]["path"],
+            "/work"
+        );
     }
     #[test]
     fn verified_connection_cannot_silently_change_machine_identity() {

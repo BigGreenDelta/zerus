@@ -2241,7 +2241,8 @@ void SessionsWindow::placeLaunchedSessions()
             // A generated worktree launches in its target but adds the folder it
             // came from. Launches saved before "folder" existed add their target.
             const auto path=launch.value("add_folder").toBool()?launch.value("folder").toString(launch.value("target").toString()):QString();
-            if(path.startsWith('/'))m_organization.addFolder(group,entry.machine,path);
+            const auto style=MachinePlatform::of(m_fleet.local().metrics,entry.host.isEmpty());
+            if(MachinePlatform::absolute(path,style))m_organization.addFolder(group,entry.machine,path,{},style);
             m_organization.moveSession(entry.identity, group); m_organization.setCollapsed(group, false); consumed = true;
         }
         if (consumed) { it = m_pendingLaunches.erase(it); changed = true; } else ++it;
@@ -2379,6 +2380,7 @@ void SessionsWindow::rebuild()
             QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs);
         if (reachable) ++online;
         const bool selectedHost = m_hostFilters.isEmpty() || m_hostFilters.contains(host.isEmpty() ? "@local" : host);
+        const auto style = MachinePlatform::of(box.metrics, host.isEmpty());
         for (const auto &stored : box.sessions) {
             auto s=stored;
             const QString key = host + '\n' + s.name + (s.state == "archived" ? '\n' + s.archiveId : QString());
@@ -2387,7 +2389,7 @@ void SessionsWindow::rebuild()
             if (entryHasDraft(m_entries.last())) drafts.insert(key);
             if (!selectedHost) continue;
             if (!m_folderFilterPath.isEmpty() && (host != m_folderFilterHost ||
-                (m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd) != m_folderFilterPath)) continue;
+                !MachinePlatform::same(m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd, m_folderFilterPath, style))) continue;
             if (s.state == "archived") { ++archived; continue; }
             ++total;
             const bool needsAttention = entryNeedsAttention(m_entries.last());
@@ -2466,7 +2468,7 @@ void SessionsWindow::rebuild()
             && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
         if (m_filter == "paused" && s.state == "running") continue;
         if (!(s.name + ' ' + e.machine + ' ' + s.prompt + ' ' + s.currentTool + ' ' + s.gitBranch + ' ' + s.gitWorktreeName + ' ' + s.activitySummary + ' ' + s.activityDetail).contains(query, Qt::CaseInsensitive)) continue;
-        if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd)!=m_folderFilterPath))continue;
+        if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||!MachinePlatform::same(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd,m_folderFilterPath,MachinePlatform::of(m_fleet.local().metrics,e.host.isEmpty()))))continue;
         visible.append(e);
     }
     struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch; };
@@ -2662,7 +2664,8 @@ void SessionsWindow::rebuild()
     m_countFull = m_count->text(); m_countShort = QString::number(visible.size() + starting);
     // The strip keeps this row hidden (applySessionStrip()).
     m_folderFilterClear->setVisible(!m_folderFilterPath.isEmpty() && !(m_sessionDock && m_sessionDock->chromeNarrow()));
-    m_folderFilterClear->setText(tr("Folder: %1   ×").arg(m_folderFilterPath.section('/',-1)));m_folderFilterClear->setToolTip(m_folderFilterPath+tr("\nClear folder filter"));
+    const auto folderStyle=MachinePlatform::of(m_fleet.local().metrics,m_folderFilterHost.isEmpty());
+    m_folderFilterClear->setText(tr("Folder: %1   ×").arg(MachinePlatform::leaf(m_folderFilterPath,folderStyle)));m_folderFilterClear->setToolTip(MachinePlatform::native(m_folderFilterPath,folderStyle)+tr("\nClear folder filter"));
     m_count->setToolTip(m_countFull);
     m_count->setVisible(!m_searchResults->active());
     applySessionStrip();

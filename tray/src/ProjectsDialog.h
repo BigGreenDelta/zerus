@@ -27,7 +27,7 @@ public:
     void deleteProject(const QString &id);
     static bool nameProblem(const QString &name, QString *why);
     static QString nameWarning(const QString &) { return {}; }
-    static QString suggestName(const QString &dir);
+    static QString suggestName(const QString &dir, MachinePlatform::Style style = MachinePlatform::Style::Posix);
 public slots:
     void setProjects(const QList<ProjectInfo> &projects);
 signals:
@@ -53,6 +53,8 @@ private:
     void transferFolder(const QString &projectId, const SessionOrganization::Folder &folder,
                         const QString &destination, bool copy);
     SessionOrganization::Folder selectedFolder() const;
+    // Folders of the local machine follow its platform (MachinePlatform::of); peers are POSIX.
+    MachinePlatform::Style folderStyle(const QString &machine) const;
     QString folderOpenProblem(const SessionOrganization::Folder &folder) const;
     void openFolder(const SessionOrganization::Folder &folder);
     QString folderLaunchProblem(const SessionOrganization::Folder &folder) const;

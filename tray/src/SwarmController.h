@@ -20,7 +20,9 @@ public:
     void suspend(bool paused) { m_suspended = paused; if(!paused)refresh(); }
     void acceptExternal(const QJsonObject &snapshot);
     void setDraftEditing(bool active) { m_draftEditing = active; if(!active)refresh(); }
-    static QJsonObject presentation(const QJsonObject &shared, const QJsonObject &local);
+    // node: this computer's catalog ID (the snapshot's node_id), whose local
+    // Windows folders are merged back from local.
+    static QJsonObject presentation(const QJsonObject &shared, const QJsonObject &local, const QString &node = {});
 signals:
     void organizationReady(const QJsonObject &organization);
     void statusChanged(const QString &text, bool error);

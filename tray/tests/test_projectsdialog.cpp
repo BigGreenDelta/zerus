@@ -12,6 +12,10 @@
 #include <QPushButton>
 #include <QSplitter>
 #include <QTableWidget>
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QLineEdit>
+#include <functional>
 
 class TestProjectsDialog : public QObject {
     Q_OBJECT
@@ -24,6 +28,8 @@ private slots:
     void folderTransferMenusRejectStaleChanges();
     void folderTransferMenusRespectVisibleProjects();
     void folderSplitPrioritizesListAndRemembersAdjustment();
+    void folderDialogTakesDriveFoldersOnlyOnLocalWindows_data();
+    void folderDialogTakesDriveFoldersOnlyOnLocalWindows();
     void acceptsPlainName();
     void rejectsSlashAndSpace();
     void rejectsEmpty();
@@ -170,7 +176,8 @@ void TestProjectsDialog::sortingKeepsFolderIdentityAndLaunchTarget()
     projects.addFolder(project,"arch","/workspace/alpha");
     const auto otherBeta=projects.addFolder(project,"arch","/workspace/other","beta");
     projects.markImported("arch");projects.markImported("mac");const auto original=projects.toJson();
-    BoxState local;local.host="arch";local.ok=true;BoxState remote;remote.host="mac";remote.ok=true;
+    // POSIX folders on every GUI: a Windows GUI would show its own machine's natively.
+    BoxState local;local.host="arch";local.ok=true;local.metrics["platform"]="linux";BoxState remote;remote.host="mac";remote.ok=true;
     FleetState fleet;fleet.setLocal(local,QDateTime::currentMSecsSinceEpoch());fleet.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
     ProjectsDialog dialog(&client,nullptr,false,&projects);dialog.setFleet(fleet);dialog.selectProject(project);
     auto *table=dialog.findChild<QTableWidget *>("projectFolders");QVERIFY(table);QCOMPARE(table->rowCount(),4);
@@ -222,6 +229,73 @@ void TestProjectsDialog::folderSplitPrioritizesListAndRemembersAdjustment()
     reopened.findChild<QTableWidget *>("projectFolders")->setCurrentCell(0,0);QTest::qWait(30);
     const auto restored=reopened.findChild<QSplitter *>("projectFolderSplitter")->sizes();
     QVERIFY(qAbs(restored[1]-adjusted[1])<4);
+}
+
+void TestProjectsDialog::folderDialogTakesDriveFoldersOnlyOnLocalWindows_data()
+{
+    QTest::addColumn<QString>("platform");
+    QTest::newRow("windows") << QString("windows");
+    QTest::newRow("linux") << QString("linux");
+}
+
+void TestProjectsDialog::folderDialogTakesDriveFoldersOnlyOnLocalWindows()
+{
+    QFETCH(QString, platform); const bool windows = platform == "windows";
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
+    QCoreApplication::setOrganizationName("hgs-folder-platform-test"); QCoreApplication::setApplicationName("projects");
+    SessionOrganization projects; const auto project = projects.createGroup("Work");
+    // A peer is POSIX even when it reports Windows (Phase 2 has no Windows peers).
+    BoxState local; local.host = "desktop"; local.ok = true; local.metrics["platform"] = platform;
+    BoxState peer; peer.host = "mac"; peer.ok = true; peer.metrics["platform"] = "windows";
+    FleetState fleet; fleet.setLocal(local, QDateTime::currentMSecsSinceEpoch()); fleet.setPeer(peer, QDateTime::currentMSecsSinceEpoch());
+    HgsClient client("/nonexistent/hgs"); ProjectsDialog dialog(&client, nullptr, false, &projects);
+    dialog.setFleet(fleet); dialog.selectProject(project); dialog.show();
+    const auto edit = [&](const std::function<void(QDialog *, QComboBox *, QLineEdit *, QPushButton *)> &check) {
+        bool opened = false;
+        QTimer::singleShot(0, &dialog, [&] {
+            auto *folder = dialog.findChild<QDialog *>("projectFolderDialog"); QVERIFY(folder);
+            check(folder, folder->findChild<QComboBox *>("projectFolderMachine"), folder->findChild<QLineEdit *>("projectFolderPath"),
+                  folder->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok));
+            opened = true; if (folder->isVisible()) folder->reject();
+        });
+        dialog.findChild<QPushButton *>("addProjectFolder")->click(); QVERIFY(opened);
+    };
+    edit([&](QDialog *folder, QComboBox *machine, QLineEdit *path, QPushButton *ok) {
+        QCOMPARE(machine->currentData().toString(), QString());
+        for (const char *drive : {"C:\\work", "c:/work/", "C:\\work/sub\\dir", "\\\\server\\share\\dir"}) {
+            path->setText(drive); QVERIFY2(ok->isEnabled() == windows, drive);
+        }
+        for (const char *other : {"\\work", "C:work", "\\\\?\\C:\\work", "work"}) { path->setText(other); QVERIFY2(!ok->isEnabled(), other); }
+        path->setText("/workspace/project"); QCOMPARE(ok->isEnabled(), !windows);
+        machine->setCurrentIndex(machine->findData("mac")); QVERIFY(path->text().isEmpty());
+        path->setText("C:\\work"); QVERIFY(!ok->isEnabled());
+        path->setText("/Users/test/work"); QVERIFY(ok->isEnabled());
+        machine->setCurrentIndex(machine->findData(QString()));
+        path->setText(windows ? "C:\\Work\\Project\\" : "/workspace/project/"); QVERIFY(ok->isEnabled()); folder->accept();
+    });
+    const auto stored = windows ? QString("C:/Work/Project") : QString("/workspace/project");
+    QCOMPARE(projects.group(project)->folders.size(), 1); QCOMPARE(projects.group(project)->folders[0].path, stored);
+    QCOMPARE(projects.group(project)->folders[0].machine, QString("desktop"));
+    // Windows folders show native separators; the stored form stays Qt's.
+    auto *table = dialog.findChild<QTableWidget *>("projectFolders");
+    QCOMPARE(table->item(0, 2)->text(), windows ? QString("C:\\Work\\Project") : stored);
+    QCOMPARE(table->item(0, 0)->text(), QString(windows ? "Project" : "project"));
+    // The same folder in another case or form is a duplicate only on Windows.
+    edit([&](QDialog *, QComboBox *, QLineEdit *path, QPushButton *ok) {
+        path->setText(windows ? "c:/work/project" : "/workspace/Project"); QCOMPARE(ok->isEnabled(), !windows);
+        QCOMPARE(path->toolTip().isEmpty(), !windows);
+        path->setText(windows ? "C:\\Work\\Project" : "/workspace/project"); QVERIFY(!ok->isEnabled());
+    });
+    // Editing shows the folder as Windows writes it.
+    bool edited = false;
+    QTimer::singleShot(0, &dialog, [&] {
+        auto *folder = dialog.findChild<QDialog *>("projectFolderDialog"); QVERIFY(folder);
+        QCOMPARE(folder->findChild<QLineEdit *>("projectFolderPath")->text(), windows ? QString("C:\\Work\\Project") : stored);
+        edited = true; folder->reject();
+    });
+    table->setCurrentCell(0, 0); dialog.findChild<QPushButton *>("editProjectFolder")->click(); QVERIFY(edited);
+    QCOMPARE(projects.group(project)->folders[0].path, stored);
 }
 
 void TestProjectsDialog::emptyListContextCreatesProject()
@@ -280,6 +354,13 @@ void TestProjectsDialog::nameDefaultsToBasename()
              QStringLiteral("sample-tray"));
     QCOMPARE(ProjectsDialog::suggestName(QStringLiteral("/workspace/sample-tray/")),
              QStringLiteral("sample-tray"));
+    QCOMPARE(ProjectsDialog::suggestName(QStringLiteral("C:\\workspace\\sample-tray\\"), MachinePlatform::Style::Windows),
+             QStringLiteral("sample-tray"));
+    QCOMPARE(ProjectsDialog::suggestName(QStringLiteral("\\\\server\\share\\dir"), MachinePlatform::Style::Windows),
+             QStringLiteral("dir"));
+    QVERIFY(ProjectsDialog::suggestName(QStringLiteral("C:\\"), MachinePlatform::Style::Windows).isEmpty());
+    // A backslash is part of a POSIX name.
+    QCOMPARE(ProjectsDialog::suggestName(QStringLiteral("/workspace/a\\b")), QStringLiteral("a\\b"));
 }
 
 QTEST_MAIN(TestProjectsDialog)
