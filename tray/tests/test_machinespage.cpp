@@ -40,6 +40,7 @@ private slots:
     void colorsWorkForLocalAndPersistWithoutSavingConnection();
     void dashboardSelectionWaitsForProfiles();
     void controlOnlyComputerIsAConsoleWithoutSessions();
+    void countsReadInSingularAndPlural();
     void windowsConsoleEnablesLocalSessions();
     void enablingIsOfferedOnlyToAWindowsConsole();
     void localSessionHostStates_data();
@@ -405,7 +406,7 @@ void TestMachinesPage::controlOnlyComputerIsAConsoleWithoutSessions()
     for (auto *label : page.findChildren<QLabel *>("muted")) {
         console |= label->text().contains("control console");
         // As on Overview, the console itself is not a machine of the fleet.
-        counted |= label->text() == "0 connected, 1 machines";
+        counted |= label->text() == "0 connected, 1 machine";
     }
     QVERIFY(console); QVERIFY(counted);
     // It has no SSH connection to edit, test or remove; only its color.
@@ -441,6 +442,26 @@ QJsonObject sessionHost(const QString &state)
 }
 }
 
+void TestMachinesPage::countsReadInSingularAndPlural()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    auto *list = widget<QListWidget>(page, "machineProfiles");
+    const auto summary = [&] {
+        QStringList texts; for (auto *label : page.findChildren<QLabel *>("muted")) texts << label->text(); return texts;
+    };
+    QVERIFY2(summary().contains("1 connected, 2 machines"), qPrintable(summary().join(" | ")));
+    QCOMPARE(list->item(1)->text(), QString("mac\nNot connected"));
+    BoxState local; local.host = "arch"; local.ok = true;
+    BoxState mac; mac.host = "mac"; mac.ok = true; mac.sessions.resize(1);
+    FleetState fleet; fleet.setLocal(local, 0); fleet.setPeer(mac, QDateTime::currentMSecsSinceEpoch()); page.setFleet(fleet);
+    QVERIFY2(summary().contains("2 connected, 2 machines"), qPrintable(summary().join(" | ")));
+    QCOMPARE(list->item(1)->text(), QString("mac\nConnected, 1 session"));
+    mac.sessions.resize(2); fleet.setPeer(mac, QDateTime::currentMSecsSinceEpoch()); page.setFleet(fleet);
+    QCOMPARE(list->item(1)->text(), QString("mac\nConnected, 2 sessions"));
+    // A control console leaves one machine of the fleet.
+    local.localSessions = false; fleet.setLocal(local, 0); page.setFleet(fleet);
+    QVERIFY2(summary().contains("1 connected, 1 machine"), qPrintable(summary().join(" | ")));
+}
 void TestMachinesPage::windowsConsoleEnablesLocalSessions()
 {
     MachinesPage page(FakeCli::program(m_script)); start(page);

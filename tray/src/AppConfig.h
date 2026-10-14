@@ -26,7 +26,8 @@ struct AppConfig {
     // платформы, см. makeTerminal() в TrayAgent.cpp.
     QString openMode = defaultOpenMode(currentPlatform());
     bool selfTest = false;
-    bool showSessions = false;
+    bool showSessions = false;   // --sessions
+    bool background = false;     // --background; never together with --sessions
 
     // Возвращает false и заполняет *error, если разбор не удался. Особые значения
     // error: "__help__" и "__version__" — не ошибки, а запрос вывести текст и выйти.
@@ -103,10 +104,17 @@ struct AppConfig {
     // a control console waits at least 15 s, and an enabled one at least 5 s
     // until its session host can push changes; Unix keeps the configured interval.
     static int localPollInterval(int configured, bool localSessions, MachinePlatform::Style style);
+    // Whether this start opens the Sessions window: with --sessions, and on
+    // Windows also without --background. Windows 11 puts a new notification icon
+    // in the hidden overflow, so a tray-only start would show nothing there. A
+    // second instance forwards the same choice to the running one: "sessions"
+    // opens the window, "show" (also an older plain start) opens nothing.
+    bool opensSessions(Platform p) const;
     // The options of args (as for load(), argv[0] first) that a restarted tray
-    // keeps: every setting, but not argv[0] and the one-shot --sessions. Windows
-    // restarts the tray with them after a crash or a watchdog abort
-    // (RegisterApplicationRestart in main.cpp).
+    // keeps: every setting, but not argv[0] and the one-shot --sessions, and
+    // --background first, so a restart brings back the tray without opening a
+    // window, as systemd and launchd do. Windows restarts the tray with them
+    // after a crash or a watchdog abort (RegisterApplicationRestart in main.cpp).
     static QStringList restartArguments(const QStringList &args);
 
     // Только для тестов: подменяет путь, который вернёт configPath(), не трогая
