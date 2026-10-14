@@ -731,11 +731,13 @@ mode switches, are marked and need a second **Confirm** click. Choosing a **No**
 option ends Claude's turn as in Terminal; the composer reopens after Claude's
 prompt is verified. A clipped or unrecognized panel, a mismatched request and
 plan approval stay visible with **Open Terminal**. Claude reports no answer
-given in Terminal, so Zerus settles it from the screen alone: Claude's
+given in Terminal, so Zerus settles it from the screen alone whenever a status
+listing, `hgs inspect` or `hgs read` looks at the session: Claude's
 interruption ending the turn records **No** or Esc, and the approved Bash
 command shown running with its elapsed time records **Yes**. Until Terminal
 shows either, and for an approved tool that is not a Bash command, the session
-stays at **Needs approval** until Claude's next event.
+stays at **Needs approval** until Claude's next event. Only a session waiting
+for such a request reads its terminal for this.
 
 Claude's Bash safety confirmations, including warnings about possibly empty
 paths in `rm` commands, also appear in Activity with the native warning text.
@@ -1994,11 +1996,13 @@ printf '%s' '{"run_id":"…","conversation_id":"…","reply_id":"12:1787840176.5
 
 `hgs [@host] read` applies each non-null field only while it equals the session's
 current value in the same run and conversation; other fields are reported as not
-applied and the mark does not change. It prints `{"ok": true, "applied":
-{"reply_id": …, "attention_signature": …}, "read": …}`; an unknown session prints
-`{"ok": false, "error": "not_found"}` and exits with status 1. Marks live in
-`read-marks.json` in the hgs state directory, at most eight conversations per
-session, and follow `hgs rename`.
+applied and the mark does not change. The current value is what a listing would
+show at that moment: a Claude approval already answered in Terminal is settled
+from the screen first, so its old signature is no longer acknowledged. It prints
+`{"ok": true, "applied": {"reply_id": …, "attention_signature": …}, "read": …}`;
+an unknown session prints `{"ok": false, "error": "not_found"}` and exits with
+status 1. Marks live in `read-marks.json` in the hgs state directory, at most
+eight conversations per session, and follow `hgs rename`.
 
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances
