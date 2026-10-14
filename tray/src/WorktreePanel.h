@@ -65,6 +65,7 @@ public:
         render();if(isVisible()&&(changed||(!wasOnline&&online())||!m_requested))request();
     }
     QString selectedPath() const {auto *item=rootItem();return item?item->data(0,Qt::UserRole).toString():QString();}
+    void refreshCatalog() { request(true); }
 protected:
     void showEvent(QShowEvent *event) override {QWidget::showEvent(event);request();}
 private:

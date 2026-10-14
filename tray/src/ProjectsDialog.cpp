@@ -1,5 +1,6 @@
 #include "ProjectsDialog.h"
 #include "WorktreePanel.h"
+#include "WorktreesDialog.h"
 #include "ProjectAppearance.h"
 #include "IdentityBadge.h"
 #include <QStyledItemDelegate>
@@ -96,6 +97,15 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     auto *root = new QVBoxLayout(this); root->setContentsMargins(24, 22, 24, 18); root->setSpacing(14);
     auto *heading = new QLabel(tr("Projects")); heading->setObjectName("heading");
     auto *headingRow=new QHBoxLayout;headingRow->addWidget(heading);headingRow->addStretch();
+    auto *worktrees = new QPushButton(tr("Worktrees…")); worktrees->setObjectName("projectWorktrees"); worktrees->setAutoDefault(false);
+    worktrees->setToolTip(tr("View worktrees across projects and computers, and review cleanup.")); headingRow->addWidget(worktrees);
+    connect(worktrees, &QPushButton::clicked, this, [this] {
+        WorktreesDialog dialog(m_client, *m_projects, m_fleet, m_allProjects->isChecked(), this);
+        m_worktreeOverview = &dialog;
+        dialog.exec();
+        m_worktreeOverview.clear();
+        if (dialog.changed()) m_worktrees->refreshCatalog();
+    });
     auto *swarm=new QPushButton(tr("Swarm…"));swarm->setObjectName("projectSwarm");headingRow->addWidget(swarm);root->addLayout(headingRow);
     connect(swarm,&QPushButton::clicked,this,&ProjectsDialog::swarmRequested);
     auto *hint = new QLabel(tr("Organize sessions and folders across your computers. A folder can be used by several projects."));
@@ -221,6 +231,7 @@ void ProjectsDialog::setSwarmStatus(const QString &text,bool error)
 }
 void ProjectsDialog::refresh()
 {
+    if (m_worktreeOverview) m_worktreeOverview->setContext(*m_projects, m_fleet, m_allProjects->isChecked());
     const auto selected = currentId(); const QSignalBlocker block(m_list); m_list->clear();
     for (const auto &project : m_projects->groups()) {
         if(!project.accessible&&!m_allProjects->isChecked())continue;
@@ -278,6 +289,7 @@ void ProjectsDialog::selectHost(const QString &host) { m_host=host; refresh(); }
 void ProjectsDialog::setFleet(const FleetState &fleet)
 {
     m_fleet=fleet;
+    if (m_worktreeOverview) m_worktreeOverview->setContext(*m_projects, m_fleet, m_allProjects->isChecked());
     updateFolderActions();
     const auto request=[this](const QString &host,const QString &machine,bool online){
         if (!online || machine.isEmpty() || m_projects->hasImported(machine) || m_importing.contains(host)) return;

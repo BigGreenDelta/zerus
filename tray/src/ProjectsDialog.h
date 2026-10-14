@@ -1,9 +1,11 @@
 #pragma once
 #include <QDialog>
+#include <QPointer>
 #include "FleetState.h"
 #include "SessionOrganization.h"
 class ProjectPreview;
 class WorktreePanel;
+class WorktreesDialog;
 class QAction;
 class QCheckBox;
 class QLabel;
@@ -75,6 +77,7 @@ private:
     QSplitter *m_folderSplitter;
     bool m_folderSplitInitialized = false;
     WorktreePanel *m_worktrees;
+    QPointer<WorktreesDialog> m_worktreeOverview;
     QLineEdit *m_name;
     QLabel *m_id, *m_status;
     QCheckBox *m_default;

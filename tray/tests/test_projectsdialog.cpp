@@ -4,6 +4,7 @@
 #include <QCheckBox>
 #include <QJsonDocument>
 #include <QJsonArray>
+#include <QLabel>
 #include <QListWidget>
 #include <QMenu>
 #include <QSettings>
@@ -16,10 +17,12 @@
 #include <QDialogButtonBox>
 #include <QLineEdit>
 #include <functional>
+#include <QTimer>
 
 class TestProjectsDialog : public QObject {
     Q_OBJECT
 private slots:
+    void worktreeOverviewIsVisibleWithoutSelectingAProjectFolder();
     void emptyListContextCreatesProject();
     void sortingKeepsFolderIdentityAndLaunchTarget();
     void folderTransfersKeepMenuTargetsAndPersist_data();
@@ -36,6 +39,18 @@ private slots:
     void warnsOnDotOrColon();
     void nameDefaultsToBasename();
 };
+
+void TestProjectsDialog::worktreeOverviewIsVisibleWithoutSelectingAProjectFolder()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-worktree-test");QCoreApplication::setApplicationName("projects");
+    SessionOrganization projects;HgsClient client("/nonexistent/hgs");ProjectsDialog dialog(&client,nullptr,false,&projects);
+    dialog.resize(760,560);dialog.show();auto *button=dialog.findChild<QPushButton *>("projectWorktrees");QVERIFY(button);QVERIFY(button->isVisible());QVERIFY(button->isEnabled());
+    bool opened=false;QTimer::singleShot(0,&dialog,[&]{auto *overview=dialog.findChild<QDialog *>("worktreesDialog");QVERIFY(overview);
+        QVERIFY(overview->findChild<QLabel *>("worktreeOverviewStatus")->text().contains("Add a project folder"));opened=true;overview->reject();});
+    button->click();QVERIFY(opened);
+}
 
 static QMenu *folderMenu(ProjectsDialog &dialog, const QString &id)
 {

@@ -115,6 +115,9 @@ private:
         for(const auto &value:m_data["worktrees"].toArray()) {
             const auto row=value.toObject();if(row["kind"]!="linked")continue;
             const auto path=row["path"].toString(),verdict=row["verdict"].toString();
+            // Keep a single-checkout operation scoped even if the response
+            // contains a wider repository review.
+            if(!m_focus.isEmpty()&&path!=m_focus)continue;
             const auto branch=row["branch"].toString().isEmpty()?tr("detached %1").arg(row["head"].toString().left(8)):row["branch"].toString();
             auto *item=new QTreeWidgetItem(m_list,{QFileInfo(path).fileName()+" · "+branch,state(verdict),summary(row)});
             item->setData(0,Qt::UserRole,path);item->setData(0,Qt::UserRole+1,row);item->setToolTip(0,path);item->setToolTip(2,details(row));
