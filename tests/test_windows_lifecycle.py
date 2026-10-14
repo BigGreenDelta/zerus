@@ -20,6 +20,11 @@ size, a changed run is refused, and the session's end and the host's death end
 the client. Without a console `hgs a` refuses. `Listings` checks `local_host` in
 the local box of `hgs ls --json` (spec D2).
 
+`AgentInstall` runs `hgs account install` with only fakes and System32 on PATH:
+npm runs through Node.js's `npm.cmd`, Claude Code and Kimi Code use their
+vendors' PowerShell installers, never install.sh, and an agent in Kimi Code's
+install folder is found before PATH lists it.
+
 `Supervisor` covers the supervisor channel (spec D10, D11, D14) with untracked
 sessions: input checks of the console the supervisor reports (a pager the agent
 starts, cooked input, an agent that is gone while its supervisor runs on), the
@@ -840,6 +845,43 @@ class Listings(LifecycleCase):
         box = self.local_box()
         self.assertIs(box["local_sessions"], False)
         self.assertEqual(box["local_host"], dict(state="not-installed", **none))
+
+
+class AgentInstall(LifecycleCase):
+    """`hgs account install` on a computer with local sessions (src/accounts/install.rs)."""
+
+    def setUp(self):
+        super().setUp()
+        # Only the fakes and System32: no real npm, installer or agent can run.
+        self.env["PATH"] = os.pathsep.join((str(self.bin), str(Path(os.environ["SystemRoot"]) / "System32")))
+
+    def test_npm_runs_through_its_command_file(self):
+        # std looks only for npm.exe; Node.js installs npm.cmd.
+        (self.bin / "npm.cmd").write_bytes(b'@echo off\r\n>"%~dp0npm-args.txt" echo %*\r\n')
+        result = self.hgs("account", "install", "codex")
+        self.assertIn("Installing codex on this machine.", result.stdout)
+        self.assertEqual((self.bin / "npm-args.txt").read_text().strip(), "install -g @openai/codex")
+
+    def test_claude_and_kimi_use_the_vendors_powershell_installers(self):
+        for provider, url in (("claude", "https://claude.ai/install.ps1"),
+                              ("kimi", "https://code.kimi.com/kimi-code/install.ps1")):
+            with self.subTest(provider=provider):
+                planned = json.loads(self.hgs("account", "install", provider, "--dry-run").stdout)
+                self.assertEqual(planned, dict(provider=provider, package="", installer_url=url, dry_run=True))
+
+    def test_kimi_code_is_found_in_its_install_folder_before_path_lists_it(self):
+        # Its installer adds the folder to the user's PATH, which the running GUI
+        # and the hgs it starts do not see until they are restarted.
+        folder = self.home / ".kimi-code" / "bin"
+        folder.mkdir(parents=True)
+
+        def kimi():
+            listing = json.loads(self.hgs("account", "ls").stdout)
+            return next(row for row in listing["profiles"] if row["id"] == "native-kimi")
+
+        self.assertFalse(kimi()["installed"])
+        shutil.copy2(FAKE_AGENT, folder / "kimi.exe")
+        self.assertTrue(kimi()["installed"])
 
 
 @unittest.skipUnless(CONPTY, "pseudoconsoles need Windows 10 1809 or later")
