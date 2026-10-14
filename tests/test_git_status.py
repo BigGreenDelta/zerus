@@ -190,6 +190,36 @@ class GitStatus(unittest.TestCase):
             self.assertEqual((data['branch'], data['upstream'], data['changed_files']), ('main', 'origin/main', 0))
             self.assertNotIn('remote_checked_at', data)
 
+    def test_failed_or_stalled_tracking_lookup_is_not_reported_as_changed(self):
+        # Only the local tracking ref lookup fails, is killed or outlives its
+        # deadline. A shell shim keeps the other local reads within theirs.
+        fake = Path(self.env['HOME']) / '.local/bin'
+        fake.mkdir(parents=True)
+        program = fake / 'git'
+        self.env['PATH'] = str(fake) + os.pathsep + self.env['PATH']
+        cache = self.root / 'state/git-status-cache'
+        for lookup in ('echo "fatal: unable to read refs/remotes/origin/main: Connection timed out" >&2; exit 128',
+                       'kill -KILL $$', 'exec sleep 30'):
+            program.write_text("#!/bin/sh\ncase \" $* \" in *' @{upstream} '*) " + lookup + ';; esac\n'
+                               'exec ' + shlex.quote(shutil.which('git')) + ' "$@"\n')
+            program.chmod(0o755)
+            start = time.monotonic()
+            data = self.status()
+            self.assertLess(time.monotonic() - start, 4)
+            self.assertEqual((data['state'], data['remote_state']), ('ok', 'unknown'), lookup)
+            self.assertEqual((data['remote'], data['remote_ref'], data['changed_files']), ('origin', 'refs/heads/main', 0))
+            self.assertNotIn('remote_checked_at', data)
+            self.assertFalse(cache.exists(), lookup)
+        # A completed lookup that finds no tracking ref still compares the remote
+        # branch with nothing, so a fetch is the remedy.
+        program.unlink()
+        self.git('-C', str(self.repo), 'update-ref', '-d', 'refs/remotes/origin/main')
+        data = self.status()
+        self.assertEqual((data['state'], data['remote_state']), ('ok', 'changed'))
+        self.assertIn('remote_checked_at', data)
+        self.git('-C', str(self.repo), 'fetch', '-q')
+        self.assertEqual(self.status()['remote_state'], 'verified')
+
     def test_expired_remote_verification_cannot_hide_remote_changes(self):
         self.assertEqual(self.status()['remote_state'], 'verified')
         peer = self.root / 'peer'

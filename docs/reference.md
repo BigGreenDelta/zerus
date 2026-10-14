@@ -2036,8 +2036,10 @@ caps Git output at 1 MiB and the whole check at three seconds, and never prompts
 for credentials. Ahead/behind counts compare HEAD with its configured local
 tracking ref; `remote_state: verified` requires that ref's OID to match an exact
 read-only `ls-remote` result. `changed` and `missing` do not imply synchronization.
-`no_upstream` requires a completed lookup that finds no configured upstream; a
-failed or timed-out upstream lookup leaves `remote_state: unknown`.
+`no_upstream` requires a completed lookup that finds no configured upstream, and
+a local tracking ref counts as absent (`changed` while the remote branch exists)
+only when its lookup completes without finding it. A failed or timed-out upstream
+or tracking ref lookup leaves `remote_state: unknown`.
 
 Subagent count fields distinguish active, completed, total, completeness and
 source; unknown totals are null. Up to six active/unreviewed previews accompany
