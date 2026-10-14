@@ -63,7 +63,18 @@ libpng, zlib and others), and `packaging/windows/licenses` with the text of ever
 standard license and exception those documents name. Based in part on the work of the Independent JPEG Group
 and of the FreeType Team. The zip also carries the Rust, libvterm, md4c and Codex
 notices and the Microsoft Visual C++ runtime DLLs, redistributed with the
-application from Visual Studio's redistributable folder. It contains no Windows
+application from Visual Studio's redistributable folder. Next to `hgs.exe` it
+carries Microsoft's ConPTY, the unmodified x64 `conpty.dll` and `OpenConsole.exe`
+from the NuGet package `Microsoft.Windows.Console.ConPTY` 1.25.260930003 (built
+from [Windows Terminal](https://github.com/microsoft/terminal)), under MIT. Its
+license, from that repository's `LICENSE` (tag `v1.25.2733.0`, unchanged since
+the first release), is retained in `docs/licenses/conpty-LICENSE.txt` and shipped
+as `licenses/conpty-LICENSE.txt`; the package declares MIT and carries no license
+file. `OpenConsole.exe` also contains third-party code, such as Chromium's numerics
+library under BSD-3-Clause; the repository's `NOTICE.md` from the same tag lists it
+with each license and is retained in `docs/licenses/conpty-NOTICE.md` and shipped
+as `licenses/conpty-NOTICE.md`. `packaging/windows/conpty.json` pins the package
+and both files by SHA-256, and no other file of the package is shipped. It contains no Windows
 system library, such as ICU or the Direct3D shader compiler, no Windows SDK shader
 compiler and no software OpenGL fallback. `scripts/package-windows.py` fails when
 the Qt documents are missing or name a license without a shipped text, and when

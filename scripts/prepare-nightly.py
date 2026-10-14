@@ -29,7 +29,8 @@ def main():
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     count = int(subprocess.check_output(["git", "rev-list", "--count", "HEAD"], cwd=ROOT, text=True))
     version = nightly_version(product, count, commit, args.run_number)
-    # Reads only the zip directory and build-info.json; never extracts or runs it.
+    # Reads only the zip directory, build-info.json and the pinned ConPTY pair
+    # (checked in memory); never extracts or runs it.
     portable = windows_portable.inspect(args.windows_zip)
     require(portable["source_commit"] == commit and portable["version"] == product,
             "Windows portable bundle belongs to another commit/version.")

@@ -94,7 +94,8 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
             {path.name for path in directory.iterdir()} == expected_files | directories | {"SHA256SUMS"},
             "Unsealed/missing nightly assets.")
     if windows is not None:
-        # Bounded reads of the zip directory and build-info.json; nothing is extracted or run.
+        # Bounded reads of the zip directory, build-info.json and the pinned ConPTY
+        # pair; nothing is extracted or run.
         manifest = windows_portable.inspect(directory / windows)
         require(manifest["source_commit"] == info["source_commit"] and
                 manifest["version"] == info["product_version"],

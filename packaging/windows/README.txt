@@ -50,5 +50,10 @@ describes the components it uses. The folder also contains:
   name. This software is based in part on the work of the Independent JPEG
   Group and of the FreeType Team (https://freetype.org).
 - The Microsoft Visual C++ runtime DLLs, redistributed with the application.
+- Microsoft's ConPTY, conpty.dll and OpenConsole.exe from the NuGet package
+  Microsoft.Windows.Console.ConPTY @CONPTY_VERSION@, under the MIT license
+  (licenses\conpty-LICENSE.txt), with the notices of the third-party code
+  that OpenConsole.exe contains (licenses\conpty-NOTICE.md). hgs.exe hosts
+  consoles with them once local sessions are enabled.
 - License texts of the Rust crates in hgs.exe (licenses\rust) and of libvterm
   and md4c, which hgs-tray.exe contains (licenses).
