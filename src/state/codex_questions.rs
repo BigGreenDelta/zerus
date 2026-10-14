@@ -313,6 +313,16 @@ pub(super) fn response(record: &Value, card: &Value) -> Result<Option<Value>> {
     Ok((!response.is_null()).then(|| response.clone()))
 }
 fn panel_body(screen: &str, card: &Value) -> Result<Option<String>> {
+    Ok(panel(screen, card)?.map(|(_, body)| body))
+}
+/// Codex animates its working status above a waiting question. Before input,
+/// only this card's complete panel must be unchanged.
+pub(super) fn same_panel(first: &str, second: &str, card: &Value) -> bool {
+    matches!((panel(first, card), panel(second, card)), (Ok(Some((a, _))), Ok(Some((b, _)))) if a == b)
+}
+/// This card's visible panel rows, from its progress line or title through the
+/// key hints, and the answer rows within them.
+fn panel(screen: &str, card: &Value) -> Result<Option<(String, String)>> {
     let plain = question_terminal::plain(screen)?;
     let lines: Vec<_> = plain.lines().collect();
     let Some(footer) = lines.iter().rposition(|line| {
@@ -334,6 +344,7 @@ fn panel_body(screen: &str, card: &Value) -> Result<Option<String>> {
         .rev()
         .find(|i| lines[*i].trim().is_empty())
         .map_or(0, |i| i + 1);
+    let start = title_start;
     // Codex 0.162 numbers the questions of one call above the title ("1 of 2").
     // Only this card's own position may stand there.
     if let Some(shown) = progress(lines[title_start]) {
@@ -358,7 +369,7 @@ fn panel_body(screen: &str, card: &Value) -> Result<Option<String>> {
     {
         return Ok(None);
     }
-    Ok(Some(body))
+    Ok(Some((lines[start..=footer].join("\n"), body)))
 }
 fn progress(line: &str) -> Option<usize> {
     let (shown, total) = line.trim().split_once(" of ")?;
@@ -760,5 +771,25 @@ mod tests {
             assert!(!visible_panel(&wrong, card).unwrap());
         }
         assert!(visible_panel(&notes.replace("  Any notes?", "  2 of 2\n  Any notes?"), freeform).unwrap());
+    }
+    #[test]
+    fn working_status_above_a_codex_panel_does_not_change_it() {
+        let mut cache = json!({"items":{}});
+        observe(&json!({}), &mut cache, &request());
+        let card = &cache["items"]["codex-async:call_one:0"];
+        // Captured from Codex 0.162.0 with animations, one second apart.
+        let panel = "• Queued follow-up inputs\n\n\n  1 of 2\n  Which option?\n\n  › 1. One\n    2. Two\n    3. Other\n\n  enter submit   ^] skip   shift+→ main prompt   shift+← next question\n\n";
+        let first = format!("• \x1b[2mWorking\x1b[0m \x1b[2m(2s • \x1b[0;1mesc\x1b[0;2m to interrupt)\x1b[0m\n\n{panel}");
+        let second = format!("\x1b[2m◦\x1b[0m \x1b[2mWorking\x1b[0m \x1b[2m(3s • \x1b[0;1mesc\x1b[0;2m to interrupt)\x1b[0m\n\n{panel}");
+        assert_ne!(first, second);
+        assert!(same_panel(&first, &second, card));
+        for changed in [
+            second.replace("  › 1. One\n    2. Two", "    1. One\n  › 2. Two"),
+            second.replace("3. Other", "3. Draft"),
+            second.replace("1 of 2", "2 of 2"),
+            second.replace("^] skip", "esc cancel"),
+        ] {
+            assert!(!same_panel(&first, &changed, card));
+        }
     }
 }
