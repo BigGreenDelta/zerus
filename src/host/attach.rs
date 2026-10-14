@@ -367,7 +367,9 @@ pub(crate) fn relay(
         // The host closes the stream as soon as it reads a detach, which
         // can be before the input thread has recorded it: only once that
         // thread has ended does `detaching` tell a detach from a lost host.
-        let _ = input.join();
+        if let Err(panic) = input.join() {
+            std::panic::resume_unwind(panic);
+        }
         match end {
             Err(error) => Outcome::Failed(error),
             Ok(reason) => ended(&detaching, &failed, exited, reason),
