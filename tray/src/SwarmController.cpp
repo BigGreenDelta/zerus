@@ -3,8 +3,14 @@
 #include <QJsonDocument>
 #include <QSettings>
 #include <QSet>
+#include "MachinePlatform.h"
 
 namespace {
+// Local Windows folders (D15): the shared catalog has no Windows path kind yet.
+bool localOnly(const QJsonValue &folder)
+{
+    return MachinePlatform::windowsShaped(folder.toObject().value("path").toString());
+}
 QJsonObject sharedOrganization(QJsonObject local)
 {
     // Keep fallback placement/order in the desktop cache, but never send it as
@@ -17,7 +23,12 @@ QJsonObject sharedOrganization(QJsonObject local)
         auto project = value.toObject(); QJsonArray sessions;
         for (const auto &session : project.value("sessions").toArray())
             if (!unassigned.contains(session.toString())) sessions.append(session);
-        project.insert("sessions", sessions); projects.append(project);
+        project.insert("sessions", sessions);
+        // Local Windows folders stay in this cache; presentation() restores them.
+        const auto folders = project.value("folders").toArray(); QJsonArray shared;
+        for (const auto &folder : folders) if (!localOnly(folder)) shared.append(folder);
+        if (shared.size() != folders.size()) project.insert("folders", shared);
+        projects.append(project);
     }
     local.insert("projects", projects);
     local.insert("session_assignments_explicit", true);
@@ -94,7 +105,7 @@ void SwarmController::persist()
         m_persistedVersions = versions;
     }
 }
-QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJsonObject &local)
+QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJsonObject &local, const QString &node)
 {
     QMap<QString,QJsonObject> remaining;
     QSet<QString> assigned, unassigned, retained;
@@ -116,7 +127,18 @@ QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJson
             }
         // Session order is local too. Explicit membership comes from the catalog.
         for(const auto &s:old.value("sessions").toArray())if(sessions.contains(s)){sorted.append(s);for(qsizetype i=0;i<sessions.size();++i)if(sessions[i]==s){sessions.removeAt(i);break;}}
-        for(const auto &s:sessions)sorted.append(s);project.insert("sessions",sorted);ordered.append(project);
+        for(const auto &s:sessions)sorted.append(s);project.insert("sessions",sorted);
+        // The catalog never sees local Windows folders. Restore this machine's (not yet
+        // synced, or of this node) while their project lives; a deleted project drops them.
+        auto folders=project.value("folders").toArray();const auto sharedFolders=folders.size();
+        for(const auto &value:old.value("folders").toArray()){
+            const auto folder=value.toObject();const auto machine=folder.value("machine_id").toString();
+            if(!localOnly(folder)||(!machine.isEmpty()&&machine!=node))continue;
+            bool present=false;for(const auto &f:folders)present|=f.toObject().value("id")==folder.value("id");
+            if(!present)folders.append(folder);
+        }
+        if(folders.size()!=sharedFolders)project.insert("folders",folders);
+        ordered.append(project);
     }
     for(const auto &project:remaining)ordered.append(project);
     auto result=shared;result.insert("projects",ordered);
@@ -143,7 +165,7 @@ void SwarmController::received(quint64 id,const QJsonObject &result)
     if(pending){persist();m_flush.start();return;}
     if(m_draftEditing){persist();return;}
     m_snapshot=result;m_versions=result.value("versions").toObject();
-    m_desired=presentation(result.value("organization").toObject(),m_desired);
+    m_desired=presentation(result.value("organization").toObject(),m_desired,result.value("node_id").toString());
     m_base=m_desired;persist();
     emit organizationReady(m_desired);
     emit snapshotChanged(result);

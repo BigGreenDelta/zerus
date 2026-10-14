@@ -4,6 +4,7 @@
 #include <QList>
 #include <QStringList>
 #include <QSet>
+#include "MachinePlatform.h"
 
 // Logical projects own membership and named folders across machines.
 // Moving a session changes its project, never its working directory or process.
@@ -26,8 +27,12 @@ public:
     void moveSession(const QString &session, const QString &group, const QString &before = {});
     void setVivid(const QString &id, bool vivid);
     void setColor(const QString &id, const QString &color);
-    QString addFolder(const QString &project, const QString &machine, const QString &path, const QString &name = {});
-    bool editFolder(const QString &project, const QString &folder, const QString &machine, const QString &path, const QString &name);
+    // style is the folder form of the machine (MachinePlatform::of): drive and UNC
+    // folders of the local Windows machine stay local (D15); peers are POSIX.
+    QString addFolder(const QString &project, const QString &machine, const QString &path, const QString &name = {},
+                      MachinePlatform::Style style = MachinePlatform::Style::Posix);
+    bool editFolder(const QString &project, const QString &folder, const QString &machine, const QString &path, const QString &name,
+                    MachinePlatform::Style style = MachinePlatform::Style::Posix);
     void removeFolder(const QString &project, const QString &folder);
     // Transfer catalog links only; copying creates a distinct shared folder ID.
     QString moveFolder(const QString &project, const QString &folder, const QString &destination);
