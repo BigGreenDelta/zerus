@@ -2,6 +2,7 @@
 No user credentials, live terminals, real model requests, or browser opening.
 """
 import base64
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -410,6 +411,52 @@ class NativeHarness(unittest.TestCase):
             (self.root/'holds'/hold).touch()
         done=self.wait(lambda: next((e for e in child_inspect(child)['events'] if e['type']=='AgentMessage'),None))
         self.assertIn(hold,done['detail'])
+
+    def test_reads_do_not_add_effects_while_a_child_scope_unloads(self):
+        # Native disposal unloads a finished child's Cordis scope before the
+        # child leaves the live registry; the fixture holds that window open.
+        # Nothing may read the child before it: a read of the live child
+        # installs its model selection, which later reads would reuse.
+        for mode in ('one-shot', 'continuable'):
+            with self.subTest(mode=mode):
+                parent=self.create();hold='DISPOSING_CHILD_'+uuid.uuid4().hex
+                text='SUBAGENT '+('CONTINUABLE ' if mode=='continuable' else '')+hold
+                self.cli('send',parent,self.payload(parent,text=text,attachments=[]))
+                try:
+                    self.wait(lambda:(self.root/'holds'/(hold+'.disposing')).exists())
+                    rows=self.rpc('list')['items']
+                    row=next(r for r in rows if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent')
+                    child=row['sessionId']
+                    self.assertTrue(row['agentAvailable']);self.assertFalse(row['running'])
+                    stored=row['projections']['values']['modelSelection']['next']
+                    self.assertEqual((stored['provider'],stored['model']),('hgs-test','test-a'))
+                    self.assertEqual(row['selection'],stored)
+                    parent_row=next(r for r in rows if r['sessionId']==parent['conversation_id'])
+                    self.assertEqual((parent_row['selection']['provider'],parent_row['selection']['model']),('hgs-test','test-a'))
+                    native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+                    self.assertTrue(native['live'])
+                    self.assertEqual(native['selection'],native['baseline']['values']['modelSelection']['next'])
+                    inspected=self.cli('inspect',parent)
+                    self.assertEqual(inspected['model'],'test-a');self.assertIn(child,inspected['subagents'])
+                    # The child may leave the registry while an inspection
+                    # awaits the account; it keeps what it read before.
+                    gate=self.root/'holds'/'ACCOUNT_HOLD';gate.with_name('ACCOUNT_HOLD.waiting').unlink(missing_ok=True);gate.touch()
+                    try:
+                        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                            late=pool.submit(self.rpc,'inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+                            self.wait(lambda:gate.with_name('ACCOUNT_HOLD.waiting').exists())
+                            (self.root/'holds'/hold).touch()
+                            self.wait(lambda:(self.root/'holds'/(hold+'.disposed')).exists())
+                            gate.unlink();late=late.result(timeout=30)
+                    finally:
+                        gate.unlink(missing_ok=True)
+                    self.assertTrue(late['live']);self.assertEqual(late['selection'],stored)
+                    self.assertEqual(late['goal'],native['goal'])
+                finally:
+                    (self.root/'holds'/hold).touch()
+                self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
+                done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'][child]['state']=='finished' else None)
+                self.assertEqual(done['subagent_completed_count'],1)
 
     def test_continuable_child_send_is_addressed_and_idempotent(self):
         parent, other = self.create(), self.create()
