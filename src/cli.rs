@@ -2079,8 +2079,11 @@ mod tests {
         {
             let root = tempfile::tempdir().unwrap();
             std::fs::create_dir(root.path().join("Site")).unwrap();
-            std::os::unix::fs::symlink("Site", root.path().join("site")).unwrap();
             let link = root.path().join("site");
+            // A case-insensitive file system (macOS) already finds `Site` as `site`.
+            if !link.exists() {
+                std::os::unix::fs::symlink("Site", &link).unwrap();
+            }
             assert_eq!(folder_name(&link.to_string_lossy()), "site");
         }
     }

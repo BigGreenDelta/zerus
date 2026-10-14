@@ -359,8 +359,11 @@ void TestProjectsDialog::nameDefaultsToBasename()
     QCOMPARE(ProjectsDialog::suggestName(QStringLiteral("\\\\server\\share\\dir"), MachinePlatform::Style::Windows),
              QStringLiteral("dir"));
     QVERIFY(ProjectsDialog::suggestName(QStringLiteral("C:\\"), MachinePlatform::Style::Windows).isEmpty());
-    // A backslash is part of a POSIX name.
+#ifndef Q_OS_WIN
+    // A backslash is part of a POSIX name (a Windows build's QDir::cleanPath reads
+    // it as a separator, as it did before machine styles).
     QCOMPARE(ProjectsDialog::suggestName(QStringLiteral("/workspace/a\\b")), QStringLiteral("a\\b"));
+#endif
 }
 
 QTEST_MAIN(TestProjectsDialog)
