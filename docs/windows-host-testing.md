@@ -100,7 +100,8 @@ host sets `HGS_HOST_SESSION`, `HGS_HOST_PANE` and `TERM`. Programs are found wit
 `PATHEXT`; an npm command shim runs Node.js on its script, and any other batch
 file is refused. Tracked Claude Code, Codex and Kimi sessions are refused until
 their Windows hook form is settled (spec D12; `HGS_TRACKING=0` runs them
-untracked), and attaching a terminal (`hgs a`, a launch without `-d`) waits for
+untracked, and the S6 preview below runs them tracked in a disposable setup),
+and attaching a terminal (`hgs a`, a launch without `-d`) waits for
 the attach client (M5). In a new Git Bash window, as above:
 
 ```sh
@@ -164,6 +165,36 @@ With recovery enabled (`hgs recovery set`), `hgs recovery get` asks a running ho
 to supervise the stable CLI's `hgs.exe recovery worker` (D14); without a host
 nothing starts one.
 
+## Tracked agents: the S6 preview
+
+Spike S6 confirms the Windows hook forms (spec D12, `src/state/hooks.rs`) with real
+agents before tracking is enabled. Until then `HGS_WINDOWS_TRACKING_PREVIEW=1` runs
+tracked Claude Code, Codex and Kimi sessions, and only where nothing outlives the
+test: the state directory must be isolated (as for the host overrides above) and
+the agent's home variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `KIMI_CODE_HOME`) must
+name an existing directory that is not its default one. The variable is temporary;
+the switch `WINDOWS_TRACKING` in `src/state/mod.rs` replaces it once S6 passes. In
+a window prepared as in "Local sessions through the CLI", with a fake agent named
+`claude` that answers hgs's version probe:
+
+```sh
+cp target/debug/examples/fake_agent.exe "$root/bin/claude.exe"
+mkdir "$root/claude-home"
+export HGS_WINDOWS_TRACKING_PREVIEW=1 CLAUDE_CONFIG_DIR="$(cygpath -w "$root/claude-home")"
+FAKE_AGENT_PROBE_TEXT='2.1.296 (Claude Code)' FAKE_AGENT_PROMPT='claude> ' \
+    "$hgs" claude "$project" --new -n tracked -d
+cat "$root/claude-home/settings.json"     # exec form: the stable CLI, args __state hook
+"$hgs" inspect claude/project/tracked      # conversation_id from the SessionStart hook
+"$hgs" kill claude/project/tracked
+```
+
+Hooks name the stable CLI with forward slashes. Claude Code from 2.1.296 gets its
+exec form (`command` and `args`, no shell), an older one the shell form
+`"C:/…/hgs.exe" __state hook` with Git Bash; Codex gets the shell form as `command`
+and `commandWindows` and runs it with `%COMSPEC% /C`; Kimi gets it in its
+`config.toml` block and runs it with `%COMSPEC% /d /s /c`. PowerShell cannot run the
+shell form. The fake agent runs each configuration's hooks the way its agent does.
+
 ## Running the tests
 
 ```sh
@@ -173,6 +204,7 @@ cargo build --locked --example fake_agent
 python -m unittest discover -s tests -p test_windows_host.py -v </dev/null
 python -m unittest discover -s tests -p test_windows_host.py -v -k Staged </dev/null
 python -m unittest discover -s tests -p test_windows_lifecycle.py -v </dev/null
+python -m unittest discover -s tests -p test_windows_hooks.py -v </dev/null
 ```
 
 The Rust filter `host::supervisor` includes
@@ -183,7 +215,10 @@ from `HGS_TEST_BIN` (default `target/debug/hgs.exe`) and the fake agent from
 `HGS_TEST_FAKE_AGENT` (default `target/debug/examples/fake_agent.exe`); their fake
 agent cases skip without one. The lifecycle cases install into a temporary profile
 as `Staged` does and launch from the build under test, which plays the portable
-copy: sessions must still run the staged stable CLI.
+copy: sessions must still run the staged stable CLI. `tests/test_windows_hooks.py`
+runs the hook shell form through `CreateProcess`, `cmd.exe` as Codex and Kimi run
+it, and Git Bash when installed, and tracked fake agents through the S6 preview in
+a profile whose folder name has spaces and Cyrillic.
 
 ## Writing host tests
 
