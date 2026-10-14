@@ -32,7 +32,7 @@ can select a PR head or another exact revision.
 | Arch desktop | Always | Qt build and all CTest suites |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
-| Windows client and desktop | Always | Rust tests, Rust 1.85 clippy for the Windows target, Windows client integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
+| Windows client and desktop | Always | Rust tests, Rust 1.85 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
 Quick checks and the full suites start together once the commit is resolved, so
@@ -405,8 +405,18 @@ Python step uses one exact CPython 3.13 from the SHA-pinned `actions/setup-pytho
 It runs `cargo test` with stable Rust and `cargo +1.85.0 clippy --all-targets -- -D
 warnings`: clippy is pinned like the relay lints, so a new stable release cannot
 fail an unchanged commit, and Windows-only code, compiled nowhere else, is checked
-against Rust 1.85. It builds the release `hgs.exe` and the `fake_ssh` example and
-runs `tests/test_windows_client.py` against them. The Rust cache uses its own
+against Rust 1.85. It builds the release `hgs.exe` and the `fake_ssh` and
+`fake_agent` examples and runs `tests/test_windows_client.py` and the session host
+suites (`tests/test_windows_host.py`, `tests/test_windows_host_survival.py`,
+`tests/test_windows_lifecycle.py`, [testing the host](windows-host-testing.md))
+against them. The runner puts every step in a job that forbids breakaway, where
+hgs refuses to start a host (spec D4), so `scripts/ci/outside-job.py` starts the
+host suites outside it through WMI. That copy restores the step's environment
+without credentials and runs the suites in a kill-on-close job of its own that
+allows breakaway, as an sshd session does. The step follows the log and exit
+status, and after the suites or the 15-minute timeout it ends whatever they left,
+including hosts of the tested `hgs.exe`. This is a CI harness only: the product
+never escapes a job through WMI. The Rust cache uses its own
 `windows-cli-` key with line-table debug information to bound its size. The runner
 gives each step a synchronous anonymous pipe as stdin, and Windows OpenSSH never
 exits after using one (the fake client refuses it), so steps that start `hgs.exe`,

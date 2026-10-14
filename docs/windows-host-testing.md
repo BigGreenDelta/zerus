@@ -249,7 +249,7 @@ cargo test --locked -- host:: state::backend state::control_console_tests platfo
 cargo build --locked
 cargo build --locked --example fake_agent
 HGS_TEST_BIN="$(cygpath -w "$PWD/target/debug/hgs.exe")" cargo test --locked -- host::attach </dev/null
-python -m unittest discover -s tests -p test_windows_host.py -v </dev/null
+python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
 python -m unittest discover -s tests -p test_windows_host.py -v -k Staged </dev/null
 python -m unittest discover -s tests -p test_windows_lifecycle.py -v </dev/null
 python -m unittest discover -s tests -p test_windows_hooks.py -v </dev/null
@@ -264,21 +264,23 @@ cannot tell whether a build it finds is current) as `hgs a` on a pseudoconsole o
 the test against an isolated host of that build: the repaint, keys and the prefix
 bindings, a resize, `--existing --run-id`, the session's end and the host's
 death, and the console modes before, during and after each attach.
-`tests/test_windows_host.py` and `tests/test_windows_lifecycle.py` take the build
-from `HGS_TEST_BIN` (default `target/debug/hgs.exe`) and the fake agent from
-`HGS_TEST_FAKE_AGENT` (default `target/debug/examples/fake_agent.exe`); their fake
-agent cases skip without one. The lifecycle cases install into a temporary profile
-as `Staged` does and launch from the build under test, which plays the portable
-copy: sessions must still run the staged stable CLI. Their `Attach` cases run
-`hgs a` and an attached launch on a pseudoconsole of the test (`PseudoConsole`),
-which reads the last frame as the GUI does: once the program has exited, it closes
-the pseudoconsole and reads its output to the end. `Listings` checks `local_host`
-in the local box. `tests/test_windows_hooks.py`
-runs the hook shell form through `CreateProcess`, `cmd.exe` as Kimi runs it, and
-Git Bash when installed, Codex's PowerShell form through `pwsh` and Windows
-PowerShell as Codex runs it (as an isolated test host's hooks, so local sessions
-need not be enabled), and tracked fake agents through the S6 preview in a profile
-whose folder name has spaces and Cyrillic.
+`tests/test_windows_host.py`, `tests/test_windows_host_survival.py` and
+`tests/test_windows_lifecycle.py` take the build from `HGS_TEST_BIN` (default
+`target/debug/hgs.exe`) and the fake agent from `HGS_TEST_FAKE_AGENT` (default
+`target/debug/examples/fake_agent.exe`); their fake agent cases skip without one.
+The lifecycle cases install into a temporary profile as `Staged` does and launch
+from the build under test, which plays the portable copy: sessions must still run
+the staged stable CLI. Their `Attach` cases run `hgs a` and an attached launch on
+a pseudoconsole of the test (`PseudoConsole`), which reads the last frame as the
+GUI does: once the program has exited, it closes the pseudoconsole and reads its
+output to the end. `Listings` checks `local_host` in the local box.
+`tests/test_windows_hooks.py` runs the hook shell form through `CreateProcess`,
+`cmd.exe` as Kimi runs it, and Git Bash when installed, Codex's PowerShell form
+through `pwsh` and Windows PowerShell as Codex runs it (as an isolated test host's
+hooks, so local sessions need not be enabled), and tracked fake agents through the
+S6 preview in a profile whose folder name has spaces and Cyrillic. The
+`windows-desktop` CI job runs the host and survival modules against the release
+`hgs.exe` ([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)).
 
 ## Writing host tests
 
@@ -300,3 +302,24 @@ drops the test variables and installs into its temporary profile.
   `in_job` in the hello: the host must have broken away. A job that forbids
   breakaway makes `__host call --start` fail instead of starting a host that would
   end with that job.
+
+## Survival tests
+
+`tests/test_windows_host_survival.py` checks what a host outlives and what ends
+with it (spec D2-D4, D9). Its cases subclass `SurvivalCase`, a `HostCase` that also
+closes the named jobs it created, stops its helper processes and ends any process
+it pinned that still runs. `Breakaway` runs `__host call --start` from a helper
+process that first joins kill-on-close jobs, as a shell inside sshd's job runs
+`hgs`: from a job that allows breakaway, the host (`in_job` false) and its session
+outlive the job; a job that forbids breakaway starts no host; when breakaway leaves
+the host in an outer job that forbids it, the host reports `in_job` true, its
+launcher refuses it and it exits once idle. A host also outlives the short-lived
+client that started it. `Ownership` terminates a host and checks that every process
+of its sessions ends with it, a process with a hidden console of its own included.
+`StableCli` installs another build (the build under test with a few bytes appended,
+so another hash and image) while the staged stable CLI runs an attach client: the
+running file moves aside as `hgs.exe.old-<seconds>-<random>` and is never written,
+the client finishes normally, and a later install removes the aside file and the
+old image once nothing runs them. When the test process itself runs inside a job
+that forbids breakaway, every host start fails with that reason; the survival cases
+also say where the test process runs.
