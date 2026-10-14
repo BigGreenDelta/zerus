@@ -673,8 +673,8 @@ landed in PR #33). S6 is done (2026-10-14; results in D12). S2 and S5 probes are
 done (results in D10, D11) and are confirmed through the host after M3. S4 is folded
 into the M3/M7 host survival tests. S7's baseline on the development PC: `hgs.exe`
 starts in about 11 ms warm and 132 ms for a freshly built image, and a Git Bash hook
-takes about 55 ms; S6 measured a 25 ms start and a 37-38 ms hook path on its PC.
-Neither PC scans in real time, so the scanning half of S7 needs another machine.
+takes about 55 ms; S6 measured a 25 ms start and a 37-38 ms whole hook path there.
+That PC has no real-time scanning, so the scanning half of S7 needs another machine.
 
 D10 and D11 are provisional until their spikes are confirmed through the host.
 
