@@ -9,6 +9,7 @@
 #include "AccountCatalog.h"
 #include "WorkspaceList.h"
 #include "MachinePlatform.h"
+#include "LocalLaunchWarning.h"
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -389,6 +390,9 @@ void NewSessionDialog::updateForm()
 void NewSessionDialog::start()
 {
     if(!m_start->isEnabled())return;
+    // Spec D5: ask before this computer's session host of another Windows session
+    // starts the agent. Cancel keeps the form; no folder check or worktree starts.
+    if(!LocalSessionHost::confirmLaunch(this,m_fleet.local(),host())||!m_start->isEnabled())return;
     m_startWithWorktree=m_autoPreferred&&automaticWorktreeAvailable();
     m_error->setText(tr("Checking folder…"));m_validation=m_client.requestDirectories(host(),m_folder->currentData(Qt::UserRole+2).toString());updateForm();
 }

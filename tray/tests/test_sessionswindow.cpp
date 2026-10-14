@@ -83,6 +83,8 @@
 #include "MachinesPage.h"
 #include "AccountsPage.h"
 #include "FakeCli.h"
+#include "LaunchWarnings.h"
+#include "LocalSessionHost.h"
 #include "ProcessRunner.h"
 #include "ProcessSettings.h"
 
@@ -242,6 +244,7 @@ private slots:
     void nativeColdCacheChoiceKeepsExactAnswer();
     void coldCacheClearKeepsDraftAndPinsIdentity();
     void stoppedSessionStartsFreshOrSendsAfterStart();
+    void localStartsAskAboutAnotherWindowsSession();
     void clearInspectionUpdatesActivityAndCountersImmediately();
     void coldCacheCompactWaitsForSuccess_data();
     void coldCacheCompactWaitsForSuccess();
@@ -2029,6 +2032,63 @@ if a[:1]!=['a']:
     settle();const auto disabled=log().size();QTRY_VERIFY(log().size()>disabled);
     for(const auto &call:log().sliced(disabled))QVERIFY(call.contains("--skip-processes"));
     window.hide();settle();const auto hidden=log().size();QTest::qWait(activityMs+400);QCOMPARE(log().size(),hidden);
+}
+
+void TestSessionsWindow::localStartsAskAboutAnotherWindowsSession()
+{
+    // Spec D5: resuming, opening or forking a saved session of this Windows computer
+    // asks first when its session host runs in another Windows session.
+    const auto reset = qScopeGuard([] { LocalSessionHost::resetOwnWindowsSessionForTests(); });
+    LocalSessionHost::setOwnWindowsSessionForTests(1);
+    const QString name = "codex/website/navigation";
+    auto state = fleet(); auto box = state.local(); box.metrics["platform"] = "windows";
+    box.localHost = QJsonObject{{"state", "running"}, {"pid", 4242}, {"protocol", 1}, {"conpty", "bundled"},
+        {"integrity", "medium"}, {"windows_session", 2}};
+    for (auto &session : box.sessions) if (session.name == name) session.runId = "saved-run";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    const QJsonObject details{{"tracked", true}, {"run_id", "saved-run"}, {"conversation_id", "conversation-one"},
+        {"fork_supported", true}, {"runtime_state", "saved"}, {"process_state", "exited"},
+        {"events", QJsonArray{}}, {"cursor", 0}};
+    const auto fixture = programInspecting("other-windows-session-hgs", details); QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(fixture); window.setFleet(state); window.show(); window.showSession({}, name);
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
+    QSignalSpy opened(&window, &SessionsWindow::sessionActivated);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Keep this draft");
+    auto *resume = window.findChild<QPushButton *>("pauseAction"); QTRY_VERIFY(resume->isEnabled());
+    LaunchWarnings warnings(window);
+    // Cancel starts nothing and keeps the draft.
+    resume->click(); QCOMPARE(warnings.shown, 1);
+    QVERIFY(warnings.texts[0].contains("another Windows session (2)"));
+    QVERIFY(resume->isEnabled()); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
+    auto *open = window.findChild<QPushButton *>("openSessionAction"); QVERIFY(open->isEnabled());
+    open->click(); QCOMPARE(warnings.shown, 2); QCOMPARE(opened.size(), 0);
+    QTest::qWait(200); QCOMPARE(writes.size(), 0);
+    // Launch anyway resumes exactly once.
+    warnings.answer = "launchAnyway"; resume->click(); QCOMPARE(warnings.shown, 3);
+    QTRY_COMPARE_WITH_TIMEOUT(writes.size(), 1, 15000); QCOMPARE(writes[0][0].toString(), "resume " + name);
+    QTRY_VERIFY(open->isEnabled()); open->click(); QCOMPARE(warnings.shown, 4); QCOMPARE(opened.size(), 1);
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
+    // A host in the GUI's own Windows session asks nothing.
+    LocalSessionHost::setOwnWindowsSessionForTests(2);
+    QTRY_VERIFY(resume->isEnabled()); resume->click(); QTRY_COMPARE_WITH_TIMEOUT(writes.size(), 2, 15000); QCOMPARE(warnings.shown, 4);
+    // Cancel in the warning keeps the fork dialog and its name; Launch anyway forks once.
+    LocalSessionHost::setOwnWindowsSessionForTests(1); warnings.answer = "cancel";
+    // Fork support arrives with the first inspection, which a loaded runner may delay.
+    auto *fork = window.findChild<QAction *>("forkSessionAction"); QTRY_VERIFY_WITH_TIMEOUT(fork->isEnabled(), 20000);
+    bool checked = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("forkSessionDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        auto *forkName = dialog->findChild<QLineEdit *>("forkSessionName"); forkName->setText("forked-here");
+        auto *create = dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok);
+        create->click(); QCOMPARE(warnings.shown, 5);
+        QVERIFY(dialog->isVisible()); QCOMPARE(forkName->text(), QString("forked-here")); QCOMPARE(writes.size(), 2);
+        warnings.answer = "launchAnyway"; create->click(); QCOMPARE(warnings.shown, 6); checked = true;
+    });
+    fork->trigger(); QVERIFY(checked);
+    QTRY_COMPARE_WITH_TIMEOUT(writes.size(), 3, 15000);
+    QVERIFY(writes[2][2].toString().startsWith("fork\n" + name + "\n-n\nforked-here\n-d"));
+    QTest::qWait(200); QCOMPARE(writes.size(), 3); QCOMPARE(warnings.shown, 6);
 }
 
 void TestSessionsWindow::stoppedSessionStartsFreshOrSendsAfterStart()

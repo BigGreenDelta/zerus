@@ -2,6 +2,7 @@
 #include <QComboBox>
 #include <QFile>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPersistentModelIndex>
 #include <QPushButton>
@@ -14,6 +15,8 @@
 #include "IdentityBadge.h"
 #include "AccountCatalog.h"
 #include "AccountsPage.h"
+#include "LaunchWarnings.h"
+#include "LocalSessionHost.h"
 
 class TestNewSessionDialog : public QObject {
     Q_OBJECT
@@ -28,6 +31,14 @@ class TestNewSessionDialog : public QObject {
         FleetState fleet;BoxState local;local.host="pc";local.ok=true;local.metrics=QJsonObject{{"platform","linux"}};
         fleet.setLocal(local,QDateTime::currentMSecsSinceEpoch());BoxState mac;mac.host="mac";mac.ok=true;
         fleet.setPeer(mac,QDateTime::currentMSecsSinceEpoch());return fleet;
+    }
+    // This computer runs Windows, and its session host runs in that Windows session
+    // (spec D5), or none runs when session is negative.
+    static FleetState windowsFleet(qint64 session) {
+        auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","windows"}};
+        local.localHost=session<0?QJsonObject{{"state","stopped"},{"pid",QJsonValue::Null},{"windows_session",QJsonValue::Null}}
+            :QJsonObject{{"state","running"},{"pid",4242},{"protocol",1},{"conpty","bundled"},{"integrity","medium"},{"windows_session",session}};
+        state.setLocal(local,QDateTime::currentMSecsSinceEpoch());return state;
     }
     static QListWidget *choices(NewSessionDialog &dialog) {return dialog.findChild<QListWidget *>("launchAccount");}
     static int row(NewSessionDialog &dialog,const QString &id) {
@@ -93,6 +104,7 @@ elif a and a[0]=='dirs':print(json.dumps({'path':a[-1],'directories':[]}))
 elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]}))
 )PY"));
     }
+    void cleanup() {LocalSessionHost::resetOwnWindowsSessionForTests();}
     void pairsAndLimitsLaunchExactProfile_data() {
         QTest::addColumn<QString>("host");QTest::addColumn<bool>("dark");
         QTest::newRow("pc-light")<<QString()<<false;QTest::newRow("pc-dark")<<QString()<<true;
@@ -275,6 +287,53 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         flag("missing",false);flag("ended");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
         QTRY_COMPARE(choices(dialog)->item(row(dialog,"work"))->toolTip(),QString("shared@example.invalid\nlimits n/a"));
         QTest::qWait(100);QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
+    }
+    // Spec D5: Start session on this Windows computer asks first when its session
+    // host runs in another Windows session (for example one started over SSH).
+    void launchIntoAnotherWindowsSessionAsksFirst() {
+        LocalSessionHost::setOwnWindowsSessionForTests(1);
+        NewSessionDialog dialog(program(),windowsFleet(2),{},"codex");dialog.selectPath("C:/work/example",false);dialog.show();
+        QTRY_VERIFY_WITH_TIMEOUT(row(dialog,"work")>=0,15000);choices(dialog)->setCurrentRow(row(dialog,"work"));
+        auto *name=dialog.findChild<QLineEdit *>("launchName");name->setText("keep-this-name");
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);LaunchWarnings warnings(dialog);
+        // Cancel keeps the form as it was: nothing is checked, created or started.
+        start->click();QCOMPARE(warnings.shown,1);
+        QVERIFY(warnings.texts[0].contains("another Windows session (2), for example one started over SSH"));
+        QVERIFY(warnings.texts[0].contains("cannot show windows on this desktop"));QVERIFY(warnings.texts[0].endsWith("Launch anyway?"));
+        QVERIFY(dialog.isVisible());QCOMPARE(launched.size(),0);QCOMPARE(name->text(),QString("keep-this-name"));
+        QCOMPARE(start->text(),QString("Start session"));QVERIFY(start->isEnabled());
+        QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("work"));
+        QVERIFY(!dialog.findChild<QLabel *>("launchError")->text().contains("Checking"));
+        // Launch anyway starts exactly once, after a single question.
+        warnings.answer="launchAnyway";start->click();QTRY_COMPARE_WITH_TIMEOUT(launched.size(),1,15000);QCOMPARE(warnings.shown,2);
+        QCOMPARE(launched[0][0].toString(),QString());QCOMPARE(launched[0][1].toString(),QString("codex"));
+        QCOMPARE(launched[0][2].toString(),QString("C:/work/example"));QCOMPARE(launched[0][3].toString(),QString("keep-this-name"));
+        QCOMPARE(launched[0][4].toString(),QString("work"));QTRY_VERIFY(!dialog.isVisible());
+        QTest::qWait(200);QCOMPARE(launched.size(),1);QCOMPARE(warnings.shown,2);
+    }
+    // No question for the same Windows session, without a running host (the launch
+    // starts one in this session), for a remote machine or for a Linux computer: a
+    // Linux or macOS GUI launches exactly as before.
+    void launchWithoutAnotherWindowsSessionDoesNotAsk_data() {
+        QTest::addColumn<QString>("platform");QTest::addColumn<qint64>("hostSession");QTest::addColumn<QString>("machine");
+        QTest::addColumn<QString>("folder");
+        QTest::newRow("same session")<<"windows"<<qint64(1)<<QString()<<"C:/work/example";
+        QTest::newRow("no host runs")<<"windows"<<qint64(-1)<<QString()<<"C:/work/example";
+        QTest::newRow("remote machine")<<"windows"<<qint64(2)<<"mac"<<"/workspace/example";
+        QTest::newRow("linux computer")<<"linux"<<qint64(2)<<QString()<<"/workspace/example";
+    }
+    void launchWithoutAnotherWindowsSessionDoesNotAsk() {
+        QFETCH(QString,platform);QFETCH(qint64,hostSession);QFETCH(QString,machine);QFETCH(QString,folder);
+        LocalSessionHost::setOwnWindowsSessionForTests(1);
+        auto state=windowsFleet(hostSession);auto local=state.local();local.metrics["platform"]=platform;
+        state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+        NewSessionDialog dialog(program(),state,machine,"codex");dialog.selectPath(folder,false);dialog.show();
+        QTRY_VERIFY_WITH_TIMEOUT(row(dialog,"work")>=0,15000);choices(dialog)->setCurrentRow(row(dialog,"work"));
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);LaunchWarnings warnings(dialog);
+        start->click();QTRY_COMPARE_WITH_TIMEOUT(launched.size(),1,15000);QCOMPARE(warnings.shown,0);
+        QCOMPARE(launched[0][0].toString(),machine);QCOMPARE(launched[0][2].toString(),folder);
     }
 };
 QTEST_MAIN(TestNewSessionDialog)
