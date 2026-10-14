@@ -2,6 +2,7 @@
 """End-to-end lifecycle tests: private tmux socket, fake agents, no model calls."""
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -1013,6 +1014,166 @@ class ActivitySummary(Harness):
         self.assertEqual(row["subagent_total_count"], total)
         self.assertEqual(row["subagent_count"], active)
 
+    def test_interrupted_workflow_children_without_stop_hooks_leave_active_roster(self):
+        name = self.start()
+        ids = ("spike-host", "spike-console", "screen-model")
+        for child in ids:
+            self.send_event(name, "SubagentStart", agent_id=child, agent_type="workflow-subagent")
+            self.send_event(name, "PostToolUse", agent_id=child, tool_name="Bash")
+        self.send_event(name, "Stop", last_assistant_message="Parent result")
+        before = self.row(name)
+        self.counts(before, 3, 0, 3)
+        record = self.binding(name)
+        session = record["conversation_id"]
+        account = self.root / ".claude"
+        transcript = account / "projects" / "fixture" / (session + ".jsonl")
+        children = transcript.with_suffix("") / "subagents" / "workflows" / "wf-fixture"
+        children.mkdir(parents=True)
+        transcript.write_text("{}\n")
+        at = datetime.now(timezone.utc).isoformat()
+        for child in ids:
+            row = dict(type="user", userType="external", isSidechain=True, agentId=child,
+                       sessionId=session, timestamp=at,
+                       message=dict(role="user", content=[dict(type="text", text="[Request interrupted by user]")]))
+            (children / ("agent-" + child + ".jsonl")).write_text(json.dumps(row) + "\n")
+        record.update(agent_home=str(account), transcript=str(transcript))
+        state = self.root / "state" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        state.write_text(json.dumps(record))
+        after = self.row(name)
+        self.counts(after, 0, 3, 3)
+        self.assertEqual(after["activity"], "idle")
+        self.assertEqual(after["subagent_previews"], [])
+        self.assertEqual(after["reply_id"], before["reply_id"])
+        inspected = json.loads(self.hgs("inspect", name))
+        self.assertEqual(inspected["reply_id"], before["reply_id"])
+        self.assertEqual(set(inspected["subagents"]), set(ids))
+        for child in ids:
+            info = json.loads(self.hgs("inspect", name, "--agent", child))
+            self.assertEqual(info["state"], "finished")
+            self.assertEqual(info["history_scope"], "Native subagent history")
+            self.assertTrue(any(e.get("detail") == "[Request interrupted by user]" for e in info["events"]))
+
+    def test_native_child_completion_and_resume_reconcile_missing_hooks(self):
+        name = self.start()
+        self.send_event(name, "SubagentStart", agent_id="worker", agent_type="workflow-subagent")
+        self.send_event(name, "Stop", last_assistant_message="Parent result")
+        record = self.binding(name)
+        session = record["conversation_id"]
+        transcript = self.root / ".claude" / "projects" / "fixture" / (session + ".jsonl")
+        child = transcript.with_suffix("") / "subagents" / "workflows" / "wf-fixture" / "agent-worker.jsonl"
+        child.parent.mkdir(parents=True)
+        transcript.write_text("{}\n")
+        record.update(agent_home=str(self.root / ".claude"), transcript=str(transcript))
+        state = self.root / "state" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        state.write_text(json.dumps(record))
+        native = dict(type="assistant", isSidechain=True, agentId="worker", sessionId=session,
+                      timestamp=datetime.now(timezone.utc).isoformat(), uuid="native-finish",
+                      message=dict(role="assistant", stop_reason="end_turn", content=[dict(type="text", text="Checks passed.")]))
+        child.write_text(json.dumps(native) + "\n")
+        finished = self.row(name)
+        self.counts(finished, 0, 1, 1)
+        self.assertEqual(finished["activity"], "idle")
+        self.assertEqual(finished["subagents"]["worker"]["tracking_evidence"]["kind"], "end_turn")
+        # A later native tool starts new child work even if both hooks are absent.
+        native.update(timestamp=datetime.now(timezone.utc).isoformat(), uuid="native-resume",
+                      message=dict(role="assistant", stop_reason="tool_use",
+                                   content=[dict(type="tool_use", id="next-call", name="Read", input={})]))
+        child.write_text(json.dumps(native) + "\n")
+        resumed = self.row(name)
+        self.counts(resumed, 1, 0, 1)
+        self.assertEqual(resumed["activity"], "busy")
+        self.assertEqual(resumed["reply_id"], finished["reply_id"])
+        evidence = resumed["subagents"]["worker"]["tracking_evidence"]
+        self.assertEqual(evidence["source"], "claude_transcript")
+        self.assertEqual(evidence["kind"], "tool_use")
+        # A newer real hook is authoritative, rather than the cached native row.
+        self.send_event(name, "SubagentStop", agent_id="worker", last_assistant_message="Final result")
+        current = self.row(name)
+        self.counts(current, 0, 1, 1)
+        self.assertEqual(current["subagents"]["worker"]["tracking_evidence"]["source"], "hook")
+
+    def test_codex_native_child_turns_reconcile_missing_hooks(self):
+        name = self.start("codex")
+        child = str(uuid.uuid4())
+        self.send_event(name, "SubagentStart", agent_id=child, agent_type="Review")
+        self.send_event(name, "Stop", last_assistant_message="Parent result")
+        before = self.row(name)
+        record = self.binding(name)
+        account = self.root / ".codex"
+        rollout = account / "child.jsonl"
+        with sqlite3.connect(account / "state_5.sqlite") as db:
+            db.execute("CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT)")
+            db.execute("INSERT INTO threads VALUES(?,?,?)", (child, str(rollout), str(self.project)))
+        header = dict(type="session_meta", payload=dict(id=child, parent_thread_id=record["conversation_id"]))
+        def write(kind, **extra):
+            event = dict(type="event_msg", timestamp=datetime.now(timezone.utc).isoformat(),
+                         payload=dict(type=kind, turn_id="child-turn", **extra))
+            rollout.write_text(json.dumps(header) + "\n" + json.dumps(event) + "\n")
+        write("task_complete", last_agent_message="Verified child result")
+        finished = self.row(name)
+        self.counts(finished, 0, 1, 1)
+        self.assertEqual(finished["activity"], "idle")
+        self.assertEqual(finished["reply_id"], before["reply_id"])
+        info = json.loads(self.hgs("inspect", name, "--agent", child))
+        self.assertEqual(info["state"], "finished")
+        self.assertEqual(info["tracking_evidence"]["source"], "codex_native_rollout")
+        write("task_started")
+        self.counts(self.row(name), 1, 0, 1)
+        self.assertEqual(self.row(name)["activity"], "busy")
+        write("turn_aborted", reason="interrupted")
+        self.counts(self.row(name), 0, 1, 1)
+        # A transcript for a different parent cannot complete a newer hook turn.
+        self.send_event(name, "SubagentStart", agent_id=child, agent_type="Review")
+        header["payload"]["parent_thread_id"] = str(uuid.uuid4())
+        write("task_complete", last_agent_message="Foreign result")
+        self.counts(self.row(name), 1, 0, 1)
+
+    def test_kimi_native_catalog_separates_same_profile_children(self):
+        name = self.start("kimi")
+        for task in ("First task", "Second task"):
+            self.send_event(name, "SubagentStart", agent_name="code", prompt=task)
+        self.send_event(name, "Stop", last_assistant_message="Parent result")
+        before = self.row(name)
+        record = self.binding(name)
+        session = self.root / ".kimi-code/sessions/workspace" / record["conversation_id"]
+        agents = {}
+        for child in ("main", "agent-0", "agent-1"):
+            directory = session / "agents" / child
+            directory.mkdir(parents=True)
+            (directory / "wire.jsonl").write_text("{}\n")
+            agents[child] = dict(homedir=str(directory))
+            if child != "main":
+                agents[child].update(parentAgentId="main", labels=dict(profileName="code"))
+        state = dict(id=record["conversation_id"], version=2, updatedAt=time.time() * 1000, agents=agents)
+        (session / "state.json").write_text(json.dumps(state))
+        def write(child, kind, **extra):
+            event = dict(type=kind, agentId=child, time=time.time() * 1000, turnId=0, **extra)
+            (session / "agents" / child / "wire.jsonl").write_text(json.dumps(event) + "\n")
+        write("agent-0", "turn.ended", reason="completed")
+        write("agent-1", "agent.turn.started")
+        working = self.row(name)
+        self.counts(working, 1, 1, 2)
+        self.assertEqual(working["subagent_source"], "kimi_native")
+        self.assertEqual(set(working["subagents"]), {"agent-0", "agent-1"})
+        self.assertEqual(working["activity"], "busy")
+        write("agent-1", "agent.turn.ended", outcome="aborted")
+        finished = self.row(name)
+        self.counts(finished, 0, 2, 2)
+        self.assertEqual(finished["activity"], "idle")
+        self.assertEqual(finished["reply_id"], before["reply_id"])
+        info = json.loads(self.hgs("inspect", name, "--agent", "agent-1"))
+        self.assertEqual(info["tracking_evidence"]["kind"], "agent.turn.ended")
+        self.assertEqual(info["state"], "finished")
+        write("agent-0", "agent.turn.started")
+        self.counts(self.row(name), 1, 1, 2)
+        self.hgs("pause", name, rc=1)
+        # A fresh profile hook can beat a delayed native catalog, but old
+        # profile starts cannot then masquerade as complete individual counts.
+        self.send_event(name, "SubagentStart", agent_name="code", prompt="New task")
+        delayed = self.row(name)
+        self.assertEqual(delayed["subagent_source"], "hook_profiles")
+        self.assertFalse(delayed["subagent_counts_complete"])
+
     def test_child_progress_previews_and_finished_details_preserve_hook_evidence(self):
         name = self.start()
         initial = self.row(name)
@@ -1184,11 +1345,13 @@ class FailedStartup(Harness):
         self.gate = self.root / "launch-gate"
         self.ready = self.root / "wrapper-ready"
         self.launcher = self.project / "run_codex.sh"
+        # A project launcher may prompt, unlock secrets or exit. It records every
+        # run with its identity and never special-cases a capability probe.
         self.launcher.write_text("#!" + sys.executable + r'''
-import os, pathlib, signal, sys
+import json, os, pathlib, signal, sys
 home = pathlib.Path.home()
-if sys.argv[1:] == ["--help"]:
-    os.execvp("codex", ["codex", "--help"])
+with open(home / "launcher-runs.jsonl", "a") as log:
+    log.write(json.dumps({"argv": sys.argv[1:], "run_id": os.environ.get("HGS_RUN_ID")}) + "\n")
 gate = home / "launch-gate"
 if gate.exists():
     status = gate.read_text()
@@ -1214,6 +1377,15 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
     def attempts(self):
         return [json.loads(path.read_text()) for path in (self.root / "state/attempts").glob("*.json")]
 
+    def assert_launcher_runs(self, *runs):
+        """The launcher ran once per supervised run, never to detect capabilities."""
+        log = self.root / "launcher-runs.jsonl"
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        self.assertEqual([call["run_id"] for call in calls], list(runs))
+        for call in calls:
+            self.assertNotIn("--help", call["argv"])
+            self.assertEqual(call["argv"].count("--no-daemon"), 1)
+
     def assert_unconfirmed_not_saved(self, name):
         self.assertIsNone(self.binding(name)["conversation_id"])
         self.assertFalse((self.root / "argv.jsonl").exists(), "wrapper failed before the agent started")
@@ -1221,6 +1393,22 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
         self.assertFalse([row for row in rows if row["name"] == name])
         self.hgs("resume", name, "-d", rc=1)
+
+    def test_capability_detection_never_runs_the_launcher(self):
+        # Without the probe the launcher's Codex is unknown: it gets the flag that
+        # reviewed releases require. --bare still detects the native Codex.
+        (self.root / "old-codex").touch()
+        name = self.launch()
+        self.wait(lambda: self.binding(name).get("conversation_id"))
+        self.assert_launcher_runs(self.binding(name)["run_id"])
+        bare = self.hgs("codex", "-n", "bare", "--bare", "-d", cwd=self.project).strip().removeprefix("hgs: started ")
+        self.wait(lambda: self.binding(bare).get("conversation_id"))
+        self.assertEqual(self.binding(bare)["base"], ["codex"])
+        launches = [json.loads(line)["argv"] for line in (self.root / "argv.jsonl").read_text().splitlines()]
+        self.assertEqual(len(launches), 2)
+        self.assertEqual(launches[0].count("--no-daemon"), 1)
+        self.assertNotIn("--no-daemon", launches[1])
+        self.assert_launcher_runs(self.binding(name)["run_id"])
 
     def test_cancelled_wrapper_retries_same_command_without_fresh(self):
         self.gate.write_text("wait")
@@ -1255,6 +1443,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.wait(lambda: self.binding(name).get("run_id") != confirmed["run_id"] and
                   self.binding(name).get("activity") == "idle")
         self.assertEqual(self.binding(name)["conversation_id"], confirmed["conversation_id"])
+        self.assert_launcher_runs(failed["run_id"], confirmed["run_id"], self.binding(name)["run_id"])
 
     def test_new_can_retry_a_failed_unconfirmed_name(self):
         self.gate.write_text("7")
@@ -1265,6 +1454,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.assertEqual(self.launch("--new"), name)
         self.wait(lambda: self.binding(name).get("conversation_id"))
         self.assertEqual([record["run_id"] for record in self.attempts()], [failed["run_id"]])
+        self.assert_launcher_runs(failed["run_id"], self.binding(name)["run_id"])
 
     def test_failed_wrapper_can_retry_requested_id_under_same_name(self):
         self.gate.write_text("7")
@@ -1276,6 +1466,9 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.wait(lambda: self.binding(name).get("conversation_id") == requested and
                   self.binding(name).get("activity") == "idle")
         self.assertEqual([record["run_id"] for record in self.attempts()], [failed["run_id"]])
+        self.assert_launcher_runs(failed["run_id"], self.binding(name)["run_id"])
+        argv = json.loads((self.root / "launcher-runs.jsonl").read_text().splitlines()[-1])["argv"]
+        self.assertEqual(argv[argv.index("resume"):argv.index("resume") + 2], ["resume", requested])
 
     def test_repeated_failed_attempts_are_preserved_separately(self):
         failed = []
@@ -1292,6 +1485,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.assertEqual({record["exit_code"] for record in attempts}, {7, 130})
         self.assertEqual(len({record["attempt_id"] for record in attempts}), 2)
         self.assertEqual(len(list((self.root / "history").glob("*.jsonl"))), 1)
+        self.assert_launcher_runs(*[record["run_id"] for record in failed], self.binding(name)["run_id"])
 
     def test_living_unconfirmed_wrapper_is_not_replaced(self):
         self.gate.write_text("wait")
@@ -1306,6 +1500,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.assertEqual(self.binding(name), before)
         self.assertEqual(self.attempts(), [])
         self.t("has-session", "-t", "=" + name)
+        self.assert_launcher_runs(before["run_id"])
 
     def test_living_orphan_unconfirmed_child_is_not_replaced(self):
         self.gate.write_text("7")
@@ -1323,6 +1518,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
             self.assertEqual(self.binding(name), failed)
             self.assertIsNone(orphan.poll())
             self.assertEqual(self.attempts(), [])
+            self.assert_launcher_runs(failed["run_id"])
         finally:
             orphan.terminate()
             orphan.wait(timeout=5)
@@ -1934,8 +2130,6 @@ class Rename(Harness):
         launcher.write_text("#!" + sys.executable + r'''
 import os, pathlib, sys, time
 home = pathlib.Path.home()
-if sys.argv[1:] == ["--help"]:
-    os.execvp("codex", ["codex", "--help"])
 (home / "rename-ready").touch()
 while (home / "rename-gate").exists():
     time.sleep(0.01)

@@ -833,6 +833,8 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
             info["current_tool"] = json!("");
         }
         info["updated"] = json!(timestamp);
+        info["tracking_evidence"] = json!({"source":"hook","kind":kind,"at":timestamp});
+        info.as_object_mut().unwrap().remove("completion_source");
         if record["main_done"].as_bool().unwrap_or(false) {
             let tools_busy = record["active_tools"]
                 .as_object()
@@ -841,7 +843,7 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
             let busy = tools_busy
                 || children
                     .values()
-                    .any(|child| string(child, "state") == "working");
+                    .any(|child| telemetry::child_working(record, child));
             record["activity"] = json!(if busy { "busy" } else { "idle" });
             record["phase"] = json!(if tools_busy {
                 "tool"
@@ -1030,7 +1032,7 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 .as_object()
                 .unwrap()
                 .values()
-                .any(|child| string(child, "state") == "working");
+                .any(|child| telemetry::child_working(record, child));
             record["activity"] = json!(if busy { "busy" } else { "idle" });
             record["phase"] = json!(if busy { "working" } else { "idle" });
             record["last_message"] = json!(clipped(
@@ -1084,7 +1086,7 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 .as_object()
                 .unwrap()
                 .values()
-                .any(|child| string(child, "state") == "working");
+                .any(|child| telemetry::child_working(record, child));
             // A hook ends a conversation scope, not necessarily the CLI process.
             // Preserve positive idle evidence; never turn ongoing work into idle.
             if record["activity"] != "idle" || !tools.is_empty() || children_busy {
@@ -1139,7 +1141,7 @@ pub(super) fn repair_kimi_main(record: &mut Value) {
         && record["subagents"].as_object().is_none_or(|children| {
             !children
                 .values()
-                .any(|child| string(child, "state") == "working")
+                .any(|child| telemetry::child_working(record, child))
         })
         && telemetry::grouped_active(record) == 0
     {
@@ -1177,8 +1179,13 @@ pub(super) fn repair_claude_internal(record: &mut Value) {
     children.retain(|id, child| {
         child["external"] == true || child["announced"] == true || string(child, "name") != id
     });
-    if children.len() != before
-        && record["main_done"] == true
+    if children.len() != before {
+        settle_children(record);
+    }
+}
+
+pub(super) fn settle_children(record: &mut Value) {
+    if record["main_done"] == true
         && record["phase"] == "working"
         && record["active_tools"]
             .as_object()
@@ -1186,7 +1193,7 @@ pub(super) fn repair_claude_internal(record: &mut Value) {
         && record["subagents"].as_object().is_none_or(|children| {
             !children
                 .values()
-                .any(|child| string(child, "state") == "working")
+                .any(|child| telemetry::child_working(record, child))
         })
         && telemetry::grouped_active(record) == 0
     {

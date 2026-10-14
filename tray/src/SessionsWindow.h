@@ -344,6 +344,8 @@ private:
     void pasteTerminalPaths(const QStringList &paths);
     quint64 m_terminalDropRequest = 0;
     QString m_terminalDropKey;
+    // The machine of an untracked session's transfer, empty for a tracked one.
+    QString m_terminalDropUntracked;
     int m_terminalDropCount = 0;
     SessionUsage::ContextButton *m_contextUsage, *m_subagentContextUsage;
     AccountUsage::Button *m_accountUsage;

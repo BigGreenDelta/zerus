@@ -131,6 +131,22 @@ hgs=target/debug/hgs.exe project="$(cygpath -w "$root/work/project")"
 rm -rf "$root"
 ```
 
+A program that cannot start (one missing from `PATH`, an executable this user may
+not run, a tracked agent whose hook setup the supervisor refuses) ends its session
+at once, before any record exists. A launch therefore watches its new session for
+3 s through the host's `launch_status` (how the session of a launch ID runs or
+ended: its exit code and the last lines of its pane, wrapped rows joined): one
+that ends in that time with a failure fails the launch with exit 1, and the GUI
+shows the reason instead of waiting for the session. A detached launch that
+starts returns after those 3 s; `hgs resume`, restores and forks do not wait. In
+the window above:
+
+```sh
+"$hgs" no_such_agent "$project" --new -n missing -d  # exit 1
+# hgs: session no_such_agent/project/missing ended immediately (exit 127):
+# hgs: no_such_agent: not found on PATH
+```
+
 `hgs __host backend '<operation>'` runs one operation of the terminal backend
 (`listing`, `panes`, `pane_info`, `capture`, `send`, `paste`, `set_run_marker`,
 `rename`, `kill_session`, `kill_pane`, `session_exists`, `session_name`,
@@ -227,7 +243,12 @@ Windows Terminal, or `winpty`. The client gets a repaint of the pane, then its
 output as it comes, written with `WriteConsoleW`; the console keeps its own
 scrollback, as there is no alternate screen around the session. The pane takes
 the size of the client that was active last, and an attached launch starts the
-session at the console's size.
+session at the console's size. Inside a session (`HGS_HOST_PANE` is set), `hgs a`
+and a launch with or without `-d` are refused with exit 2, as inside tmux, but
+without naming tmux (`already inside session NAME; open a new tab`, or `already
+inside a session; ...` when the host cannot name it). `fork` and `resume` without
+`-d` are refused the same way (`already inside a session; use fork -d or open a new
+tab`); `fork -d` and `resume -d` still start their sessions from there.
 
 | Keys | What happens |
 |---|---|

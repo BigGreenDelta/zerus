@@ -251,6 +251,32 @@ pub(super) fn stage_native(request: &Value) -> Result<Value> {
     }
     Ok(json!(staged))
 }
+/// The creation time a staging request names instead of a run identity: an
+/// untracked session, such as a shell from `hgs sh -d`, has none.
+fn untracked_request(request: &Value) -> Option<u64> {
+    (request["expected_run_id"] == "" && request["expected_conversation_id"] == "")
+        .then(|| request["expected_created"].as_u64())
+        .flatten()
+}
+
+/// Binds staging for an untracked session to the session the caller listed:
+/// it still runs, was created at `created`, and no pane carries a run marker.
+/// A marked pane belongs to a tracked run whose identity the caller lacks.
+fn untracked(
+    name: &str,
+    created: u64,
+    sessions: &[backend::SessionRow],
+    panes: Option<&Vec<Pane>>,
+) -> Result<()> {
+    let listed = sessions.iter().any(|row| row.name == name && row.created == created);
+    match panes {
+        Some(panes) if listed && panes.iter().all(|pane| pane.2.is_empty()) => Ok(()),
+        Some(_) if listed => {
+            Err("Wait for the session identity to load, then drop the files again".into())
+        }
+        _ => Err("Session changed; drop the files again in its Terminal".into()),
+    }
+}
 fn read_file(root: &Path, file: &Value) -> Result<Vec<u8>> {
     let allowed = crate::platform::canonical(root.join("attachments"))
         .map_err(|_| "The attachment is no longer available")?;
@@ -289,6 +315,16 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         if bytes.len() > 30 * 1024 * 1024 { return Err("Attachment request is too large".into()); }
         let request: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         let native = dsh::exists(name);
+        if let (false, Some(created)) = (native, untracked_request(&request)) {
+            let _guard = lock(None)?;
+            let terminal = backend::current();
+            untracked(name, created, &terminal.listing()?.sessions, live()?.get(name))?;
+            if request["attachments"].as_array().is_none_or(Vec::is_empty) { return Err("No files to transfer".into()); }
+            let files = stage_native(&request)?;
+            println!("{}",json!({"status":"staged","request_id":request["request_id"],"name":name,
+                "run_id":"","conversation_id":"","created":created,"files":files}));
+            return Ok(0);
+        }
         let _guard = if native { lock(Some(&root().join("dsh/bindings.lock")))? } else { lock(None)? };
         let record = if native { dsh::binding(name)? } else { read(name)? };
         if string(&request,"expected_run_id").is_empty() || request["expected_run_id"] != record["run_id"]
@@ -429,6 +465,44 @@ mod tests {
         assert!(read_file(temp.path(), &json!({"path":link})).is_err());
         fs::remove_file(&path).unwrap();
         assert!(read_file(temp.path(), &json!({"path":path})).is_err());
+    }
+    #[test]
+    fn untracked_staging_is_bound_to_the_listed_live_session() {
+        let request = |run: Value, conversation: Value, created: Value| {
+            json!({"expected_run_id":run,"expected_conversation_id":conversation,"expected_created":created})
+        };
+        assert_eq!(untracked_request(&request(json!(""), json!(""), json!(1_700_000_000))), Some(1_700_000_000));
+        // Tracked requests and requests without a creation time keep the run identity check.
+        for other in [
+            request(json!("run"), json!(""), json!(1_700_000_000)),
+            request(json!(""), json!("conversation"), json!(1_700_000_000)),
+            request(json!(""), json!(""), Value::Null),
+            request(json!(""), json!(""), json!("1700000000")),
+            request(json!(""), json!(""), json!(-1)),
+            request(Value::Null, Value::Null, json!(1_700_000_000)),
+        ] {
+            assert_eq!(untracked_request(&other), None, "{other}");
+        }
+        let row = |name: &str, created| backend::SessionRow {
+            name: name.into(),
+            attached: 1,
+            created,
+            launch_id: String::new(),
+        };
+        let sessions = [row("sh/scratch", 1_700_000_000), row("codex/hgs/dashboard", 1_700_000_001)];
+        let shell = vec![("%1".to_owned(), "0".to_owned(), String::new()), ("%2".to_owned(), "1".to_owned(), String::new())];
+        assert!(untracked("sh/scratch", 1_700_000_000, &sessions, Some(&shell)).is_ok());
+        let changed = "Session changed; drop the files again in its Terminal";
+        // Recreated under the same name, ended, or never listed.
+        assert_eq!(untracked("sh/scratch", 1_699_999_999, &sessions, Some(&shell)).unwrap_err(), changed);
+        assert_eq!(untracked("sh/scratch", 1_700_000_000, &sessions, None).unwrap_err(), changed);
+        assert_eq!(untracked("sh/other", 1_700_000_000, &sessions, Some(&shell)).unwrap_err(), changed);
+        // A supervisor's run marker means a tracked run whose identity the caller lacks.
+        let tracked = vec![("%3".to_owned(), "0".to_owned(), "run".to_owned())];
+        assert_eq!(
+            untracked("codex/hgs/dashboard", 1_700_000_001, &sessions, Some(&tracked)).unwrap_err(),
+            "Wait for the session identity to load, then drop the files again"
+        );
     }
     #[test]
     fn legacy_image_only_receipt_has_no_synthetic_prompt() {

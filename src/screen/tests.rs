@@ -59,6 +59,26 @@ fn state_carries_across_rows_and_trailing_spaces_are_trimmed() {
 }
 
 #[test]
+fn joined_text_reads_wrapped_rows_as_one_line() {
+    // Output wrapped at the edge continues on the next row, its spaces kept;
+    // a line feed still ends a row, and a row that only filled up does not
+    // continue.
+    let screen = model(
+        5,
+        10,
+        b"hgs: cannot read it \x1b[31m(denied)\x1b[0m\r\n0123456789\r\nlast  ",
+    );
+    assert_eq!(
+        plain(&screen),
+        "hgs: canno\nt read it\n(denied)\n0123456789\nlast\n"
+    );
+    assert_eq!(
+        screen.joined_text(),
+        "hgs: cannot read it (denied)\n0123456789\nlast\n"
+    );
+}
+
+#[test]
 fn wide_characters_print_once_and_the_cursor_counts_cells() {
     let screen = model(2, 10, "中文xB".as_bytes());
     assert_eq!(plain(&screen), "中文xB\n\n");
