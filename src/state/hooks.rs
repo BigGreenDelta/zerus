@@ -764,6 +764,8 @@ pub(super) fn hook() -> Result<i32> {
                 "resume_settings",
                 "effort_source_path",
                 "effort_source_offset",
+                "model_source_path",
+                "model_source_offset",
             ] {
                 record.as_object_mut().unwrap().remove(key);
             }

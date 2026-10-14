@@ -229,7 +229,9 @@ fn turn_origin<'a>(record: &Value, event: &'a Value) -> Option<&'a str> {
 }
 
 pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
-    if string(event, "hook_event_name") == "SessionHeartbeat" {
+    // Kimi's heartbeat and Claude's model switch change state, not Activity;
+    // the model selector shows the switch.
+    if ["SessionHeartbeat", "PostModelSwitch"].contains(&string(event, "hook_event_name")) {
         return Ok(());
     }
     let mut data = json!({"type": event["hook_event_name"], "at": now(), "run_id": record["run_id"],
@@ -902,6 +904,9 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
     if event["model"].is_string() {
         record["model"] = json!(clipped(&event["model"], 120));
     }
+    if kind == "PostModelSwitch" {
+        effort::observe_switch(record, event);
+    }
     for field in ["effort", "reasoning_effort", "thinking_effort"] {
         // Claude hooks report the turn's applied effort as {"level": ...}.
         let value = event[field].as_str().or(event[field]["level"].as_str());
@@ -1334,6 +1339,23 @@ mod attention_regressions {
         assert_eq!(record["effort"], "xhigh");
         update_activity(&mut record, &json!({"hook_event_name":"Stop","effort":{"level":"turbo"}}));
         assert_eq!(record["effort"], "xhigh");
+    }
+    #[test]
+    fn claude_model_switch_sets_the_main_model_without_activity() {
+        let mut record = json!({"agent":"claude","model":"claude-opus-5-5","activity":"idle","phase":"idle",
+            "main_done":true,"active_tools":{},"subagents":{}});
+        let switch = json!({"hook_event_name":"PostModelSwitch","session_id":"s","from_model":"claude-opus-5-5",
+            "to_model":"claude-haiku-5-5","requested_model":"haiku","source":"command","context_tokens":0});
+        update_activity(&mut record, &switch);
+        assert_eq!(record["model"], "claude-haiku-5-5");
+        assert_eq!((&record["activity"], &record["phase"], &record["main_done"]), (&json!("idle"), &json!("idle"), &json!(true)));
+        assert!(record.get("last_main_progress_at").is_none());
+        // A subagent's switch is not the session's.
+        let mut child = switch.clone();
+        child["agent_id"] = json!("child");
+        child["to_model"] = json!("claude-sonnet-5-5");
+        update_activity(&mut record, &child);
+        assert_eq!(record["model"], "claude-haiku-5-5");
     }
     #[test]
     fn compaction_has_its_own_clock_and_survives_duplicate_start_and_queued_input() {
