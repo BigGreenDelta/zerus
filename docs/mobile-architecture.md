@@ -228,6 +228,9 @@ a phone or relay. The native dispatcher rechecks the enabled edge immediately
 before forwarding, so stale relay inventory cannot authorize a removed peer.
 Bound peer fanout, subprocess output and deadlines independently of the fixed
 one-hop rule, and keep local heartbeats independent of slow remote probes.
+Fanout workers run concurrently but spawn transport processes one at a time: on
+macOS a concurrently spawned child could inherit another peer's pipes and stall
+that peer until it exits.
 Computer-level revocation covers every route and preserved legacy presentation
 alias for that native identity within its workspace. Revoking a gateway removes
 its routes only; it does not revoke independently authorized routes elsewhere.
