@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <memory>
 #include <QComboBox>
 #include <QFile>
 #include <QLabel>
@@ -40,10 +41,16 @@ class TestNewSessionDialog : public QObject {
             :QJsonObject{{"state","running"},{"pid",4242},{"protocol",1},{"conpty","bundled"},{"integrity","medium"},{"windows_session",session}};
         state.setLocal(local,QDateTime::currentMSecsSinceEpoch());return state;
     }
+    // Each quota probe the fixture answered, as "host id arguments".
+    QStringList probes() const {
+        QFile f(m_fixture.filePath("quota-probes"));if(!f.open(QIODevice::ReadOnly))return {};
+        return QString::fromUtf8(f.readAll()).split('\n',Qt::SkipEmptyParts);
+    }
     static QListWidget *choices(NewSessionDialog &dialog) {return dialog.findChild<QListWidget *>("launchAccount");}
     static int row(NewSessionDialog &dialog,const QString &id) {
         const auto *list=choices(dialog);for(int i=0;i<list->count();++i)if(list->item(i)->data(Qt::UserRole).toString()==id)return i;return -1;
     }
+    static QString tip(NewSessionDialog &dialog,const QString &id) {const int at=row(dialog,id);return at<0?QString():choices(dialog)->item(at)->toolTip();}
 private slots:
     void initTestCase() {
         QVERIFY(m_settings.isValid());QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("new-session-dialog");
@@ -51,12 +58,25 @@ private slots:
     }
     void init() {
         QSettings().clear();
-        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode"})flag(name,false);
+        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes"})flag(name,false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
 a=sys.argv[1:];host=''
 if a and a[0].startswith('@'):host=a.pop(0)[1:]
+# The catalog's cached status and a probe report the same account state.
+def status(i,provider):
+ window={'window_minutes':300,'used_percent':91 if host=='mac' else 17,'resets_at':int(time.time())+3600}
+ weekly={'window_minutes':10080,'used_percent':78,'resets_at':int(time.time())+86400}
+ if (root/'missing').exists():window.pop('used_percent');weekly.pop('used_percent')
+ if (root/'ended').exists():window['resets_at']=weekly['resets_at']=int(time.time())-60
+ result={'status':'signed_out' if provider=='dsh' else 'ok','identity':{'email':'shared@example.invalid'},
+         'windows':[] if provider=='dsh' else [window,weekly],'checked_at':time.time()}
+ if provider=='codex':result['identity']['account_id']='scope-'+i
+ if provider=='opencode':result.update(status='configured',identity={},windows=[])
+ if (root/'other-scope').exists() and i=='claude-copy':result['identity']['organization']='Other team'
+ if (root/'machine-accounts').exists():result['identity']['email']=('mac' if host=='mac' else 'pc')+'@example.invalid'
+ return result
 if a[:2]==['account','ls']:
  if (root/'fail').exists():sys.exit(1)
  if host=='mac' and (root/'slow-catalog-mac').exists():
@@ -76,35 +96,80 @@ if a[:2]==['account','ls']:
   profiles.append({'id':'native-opencode','provider':'opencode','label':'Native configuration','home':'/profiles/native-opencode','installed':True,'is_default':True})
  if (root/'empty-catalog').exists():profiles=[]
  for profile in profiles:
-  window={'window_minutes':300,'used_percent':91 if host=='mac' else 17,'resets_at':int(time.time())+3600}
-  weekly={'window_minutes':10080,'used_percent':78,'resets_at':int(time.time())+86400}
-  if (root/'missing').exists():window.pop('used_percent');weekly.pop('used_percent')
-  if (root/'ended').exists():window['resets_at']=weekly['resets_at']=int(time.time())-60
-  profile['account_status']={'status':'signed_out' if profile['provider']=='dsh' else 'ok','identity':{'email':'shared@example.invalid'},
-                             'windows':[] if profile['provider']=='dsh' else [window,weekly]}
-  if profile['provider']=='codex':profile['account_status']['identity']['account_id']='scope-'+profile['id']
-  if (root/'other-scope').exists() and profile['id']=='claude-copy':profile['account_status']['identity']['organization']='Other team'
-  if (root/'machine-accounts').exists():profile['account_status']['identity']['email']=('mac' if host=='mac' else 'pc')+'@example.invalid'
+  if not (root/'uncached').exists():profile['account_status']=status(profile['id'],profile['provider'])
  print(json.dumps({'profiles':profiles,'removed_profiles':[{'id':'native-kimi','provider':'kimi'}]}))
 elif a[:2]==['account','inspect']:
- (root/'quota-probes').touch()
- i=a[2];p='claude' if i.startswith(('claude','pc-','mac-')) else 'dsh' if i=='native-dsh' else 'codex'
+ i=a[2];p='claude' if i.startswith(('claude','pc-','mac-')) else 'dsh' if i=='native-dsh' else 'opencode' if i=='native-opencode' else 'codex'
+ with open(root/'quota-probes','a') as probes:probes.write(host+' '+i+' '+' '.join(a[3:])+'\n')
+ if (root/'hold-probes').exists():
+  for _ in range(500):
+   if (root/'released').exists():break
+   time.sleep(.02)
  if host=='mac' and i=='work' and (root/'slow-mac').exists():
   (root/'mac-started').touch()
   for _ in range(500):
    if (root/'released').exists():break
    time.sleep(.02)
  if (root/'fail').exists():sys.exit(1)
- window={'window_minutes':300,'used_percent':91 if host=='mac' else 17,'resets_at':int(time.time())+3600}
- if (root/'missing').exists():window.pop('used_percent')
- if (root/'ended').exists():window['resets_at']=int(time.time())-60
- print(json.dumps({'id':i,'provider':p,'home':'/profiles/'+i,'status':'signed_out' if p=='dsh' else 'ok',
-                   'identity':{'email':'shared@example.invalid',**({'account_id':'scope-'+i} if p=='codex' else {})},'windows':[] if p=='dsh' else [window,{'window_minutes':10080,'used_percent':78,'resets_at':int(time.time())+86400}]}))
+ print(json.dumps({'id':i,'provider':p,'home':'/profiles/'+i,**status(i,p)}))
 elif a and a[0]=='dirs':print(json.dumps({'path':a[-1],'directories':[]}))
 elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]}))
 )PY"));
     }
     void cleanup() {LocalSessionHost::resetOwnWindowsSessionForTests();}
+    // macOS gives a new dialog's first focus to this list: its combo boxes and
+    // buttons take no Tab focus. Focus alone must not turn the loading list's only
+    // row, Run shell, into a choice that replaces the remembered agent.
+    void focusWhileCatalogLoadsKeepsRememberedAgent() {
+        flag("slow-catalog-mac");QSettings().setValue("workspace/launchAgent","claude");
+        NewSessionDialog dialog(program(),fleet(),"mac");dialog.show();QVERIFY(QTest::qWaitForWindowActive(&dialog));
+        QTRY_VERIFY(QFile::exists(m_fixture.filePath("catalog-started")));QCOMPARE(choices(dialog)->count(),1);
+        choices(dialog)->setFocus(Qt::ActiveWindowFocusReason);QTRY_VERIFY(choices(dialog)->hasFocus());
+        QVERIFY(!choices(dialog)->currentItem());
+        flag("released");QTRY_VERIFY(row(dialog,"claude")>=0);
+        QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude"));
+    }
+    // A remembered agent this computer lacks falls back to the first agent, not the shell.
+    void unavailableRememberedAgentSelectsFirstAgent() {
+        flag("machine-accounts");QSettings().setValue("workspace/launchAgent","kimi");
+        NewSessionDialog dialog(program(),fleet());dialog.show();
+        QTRY_VERIFY(row(dialog,"pc-claude")>=0);QCOMPARE(choices(dialog)->currentRow(),0);
+        QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole+1).toString(),QString("claude"));
+    }
+    // Opening asks for current limits of the chosen computer's accounts, as often
+    // as the shared store allows. Replies update rows in place: the list keeps its
+    // rows, choice and scroll position, even when they identify two rows as one account.
+    void openingRefreshesLimitsInPlace() {
+        flag("uncached");flag("duplicates");flag("hold-probes");
+        AccountUsageStore store(program());store.setFleet(fleet());
+        auto dialog=std::make_unique<NewSessionDialog>(program(),fleet(),QString(),"claude",QString(),nullptr,&store);dialog->show();
+        auto *list=choices(*dialog);QTRY_VERIFY(row(*dialog,"claude-copy")>=0);QTRY_COMPARE(list->count(),6);
+        QTRY_COMPARE(probes().size(),2);QCOMPARE(tip(*dialog,"work"),QString("Work\nlimits n/a"));
+        list->setCurrentRow(row(*dialog,"claude"));
+        list->verticalScrollBar()->setValue(list->verticalScrollBar()->maximum());const auto scroll=list->verticalScrollBar()->value();
+        QList<QPersistentModelIndex> rows;for(int i=0;i<list->count();++i)rows.append(list->model()->index(i,0));
+        QSignalSpy inserted(list->model(),&QAbstractItemModel::rowsInserted),removed(list->model(),&QAbstractItemModel::rowsRemoved);
+        QSignalSpy reset(list->model(),&QAbstractItemModel::modelReset),layout(list->model(),&QAbstractItemModel::layoutChanged);
+        QSignalSpy chosen(list,&QListWidget::currentItemChanged);flag("released");
+        for(const auto *id:{"work","claude","claude-copy"})QTRY_VERIFY2(tip(*dialog,id).contains("17% used"),id);
+        QVERIFY(tip(*dialog,"work").startsWith("shared@example.invalid\n"));
+        QCOMPARE(inserted.size(),0);QCOMPARE(removed.size(),0);QCOMPARE(reset.size(),0);QCOMPARE(layout.size(),0);QCOMPARE(chosen.size(),0);
+        for(int i=0;i<rows.size();++i)QCOMPARE(rows[i].row(),i);
+        QCOMPARE(list->count(),6);QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),QString("claude"));
+        QCOMPARE(list->verticalScrollBar()->value(),scroll);
+        auto expected=QStringList{" work --refresh"," other --refresh"," claude --refresh"," claude-copy --refresh"," native-dsh --refresh"};
+        QTRY_COMPARE(probes().size(),expected.size());auto sorted=probes();sorted.sort();expected.sort();QCOMPARE(sorted,expected);
+        // Choosing rows and the minute timer repaint cached limits without probing.
+        list->setCurrentRow(row(*dialog,"work"));
+        for(auto *timer:dialog->findChildren<QTimer *>())if(timer->interval()==60000)QMetaObject::invokeMethod(timer,"timeout");
+        QTest::qWait(200);QCOMPARE(probes().size(),expected.size());
+        // The next dialog groups the identified account and reuses the fresh limits.
+        dialog.reset();dialog=std::make_unique<NewSessionDialog>(program(),fleet(),QString(),"claude",QString(),nullptr,&store);dialog->show();
+        list=choices(*dialog);QTRY_COMPARE(list->count(),5);QTRY_VERIFY(tip(*dialog,"work").contains("17% used"));
+        QTest::qWait(200);QCOMPARE(probes().size(),expected.size());
+        // Refresh asks again at once.
+        dialog->findChild<QPushButton *>("refreshLaunchAccounts")->click();QTRY_COMPARE(probes().size(),2*expected.size());
+    }
     void pairsAndLimitsLaunchExactProfile_data() {
         QTest::addColumn<QString>("host");QTest::addColumn<bool>("dark");
         QTest::newRow("pc-light")<<QString()<<false;QTest::newRow("pc-dark")<<QString()<<true;
@@ -138,7 +203,6 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][1].toString(),QString("codex"));QCOMPARE(launched[0][4].toString(),QString("work"));
         NewSessionDialog next(program(),fleet(),host);QTRY_VERIFY(row(next,"work")>=0);QTRY_COMPARE(choices(next)->count(),5);
         QCOMPARE(choices(next)->currentItem()->data(Qt::UserRole).toString(),QString("work"));
-        QTest::qWait(100);QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
     }
     void rememberedAndExplicitMissingAccounts() {
         QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));
@@ -165,8 +229,9 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QVERIFY(!list->currentItem()->toolTip().contains("failed"));
         QVERIFY(list->currentItem()->toolTip().contains("17% used"));QCOMPARE(list->currentIndex(),QModelIndex(index));
         QCOMPARE(list->verticalScrollBar()->value(),scroll);QCOMPARE(list->count(),5);
+        const auto probed=probes().size();
         for(auto *timer:dialog.findChildren<QTimer *>())if(timer->interval()==60000)QMetaObject::invokeMethod(timer,"timeout");
-        QTest::qWait(100);QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
+        QTest::qWait(100);QCOMPARE(probes().size(),probed);
     }
     void lateUsageCannotRetargetAnotherComputer() {
         flag("slow-mac");flag("mac-started",false);
@@ -195,7 +260,6 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude"));
         QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);auto *start=dialog.findChild<QPushButton *>("primary");
         QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][4].toString(),QString("claude"));
-        QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
     }
     void selectedComputerCatalogRejectsLateOtherComputerRows() {
         flag("machine-accounts");flag("slow-catalog-mac");NewSessionDialog dialog(program(),fleet(),"mac","claude");dialog.show();
@@ -208,7 +272,6 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         computer->setCurrentIndex(computer->findData(QString("mac")));
         QCOMPARE(row(dialog,"pc-claude"),-1);QTRY_VERIFY(row(dialog,"mac-claude")>=0);QCOMPARE(choices(dialog)->count(),2);
         QCOMPARE(choices(dialog)->item(0)->text(),QString("mac@example.invalid"));
-        QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
     }
     void localWindowsHidesDeepSeekAndOpenCode() {
         // Spec D16: the local Windows computer starts neither DeepSeek nor OpenCode,
@@ -263,7 +326,6 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         choices(dialog)->setCurrentRow(0);QTRY_VERIFY(start->isEnabled());
         QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launched.size(),1);
         QCOMPARE(launched[0][0].toString(),QString("mac"));QCOMPARE(launched[0][1].toString(),QString("sh"));flag("released");
-        QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
     }
     void cachedLimitBarsReuseFooterWidgetAndIndicatorPreference() {
         NewSessionDialog dialog(program(),fleet());dialog.show();QTRY_VERIFY(row(dialog,"work")>=0);
@@ -277,7 +339,6 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(renderer->indicator(),AccountUsage::Indicator::MarkerCountdown);
         flag("missing");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
         QTRY_COMPARE(choices(dialog)->item(row(dialog,"work"))->toolTip(),QString("shared@example.invalid\nlimits n/a"));
-        QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
     }
     void unknownAndEndedWindowsStayUnavailable() {
         flag("missing");NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.show();
@@ -286,7 +347,6 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QVERIFY(!choices(dialog)->item(row(dialog,"work"))->toolTip().contains("0% used"));
         flag("missing",false);flag("ended");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
         QTRY_COMPARE(choices(dialog)->item(row(dialog,"work"))->toolTip(),QString("shared@example.invalid\nlimits n/a"));
-        QTest::qWait(100);QVERIFY(!QFile::exists(m_fixture.filePath("quota-probes")));
     }
     // Spec D5: Start session on this Windows computer asks first when its session
     // host runs in another Windows session (for example one started over SSH).

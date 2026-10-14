@@ -31,7 +31,7 @@
 #include <QUuid>
 #include <QVBoxLayout>
 namespace {
-enum { ProviderRole=Qt::UserRole+1, ProfileRole, UsageTextRole, UsageColorRole };
+enum { ProviderRole=Qt::UserRole+1, ProfileRole, UsageTextRole, UsageColorRole, MembersRole };
 class LaunchAccountDelegate final : public QStyledItemDelegate {
 public:
     explicit LaunchAccountDelegate(QWidget *parent):QStyledItemDelegate(parent),m_limits(new AccountUsage::Button(parent)) {
@@ -175,10 +175,10 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     });
     connect(m_folder,&QComboBox::activated,this,[this]{m_prefillRequest=0;updateForm();});
     connect(m_account,&QListWidget::currentItemChanged,this,[this]{m_preferredAgent=this->agent();m_preferredAccount=account();m_accountPreset=true;updateModels();updateForm();});
-    connect(m_refreshAccounts,&QPushButton::clicked,this,[this]{loadAccounts(true);});
-    connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){updateAccounts();});
+    connect(m_refreshAccounts,&QPushButton::clicked,this,[this]{m_forceUsage=true;loadAccounts(true);});
+    connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){refreshUsage();});
     auto *usageTimer=new QTimer(this);usageTimer->setInterval(60000);
-    connect(usageTimer,&QTimer::timeout,this,[this]{updateAccounts();m_account->viewport()->update();});usageTimer->start();
+    connect(usageTimer,&QTimer::timeout,this,[this]{refreshUsage();m_account->viewport()->update();});usageTimer->start();
     connect(m_name,&QLineEdit::textChanged,this,&NewSessionDialog::updateForm);
     connect(&m_client,&HgsClient::directoriesReady,this,[this](quint64 request,const QString &machine,const QJsonObject &data){
         if(!m_validation||request!=m_validation||machine!=host())return;
@@ -202,11 +202,12 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     });
     connect(&m_client,&HgsClient::accountsReady,this,[this](quint64 id,const QString &machine,const QJsonObject &data){
         if(id!=m_accountRequest||machine!=host())return;
-        m_accountRequest=0;m_accountCatalogLoaded=true;m_accounts=data["profiles"].toArray();m_accountStatus->setText({});updateAccounts();
+        m_accountRequest=0;m_accountCatalogLoaded=true;m_accounts=data["profiles"].toArray();m_accountStatus->setText({});
+        m_regroupAccounts=true;updateAccounts();requestUsage(std::exchange(m_forceUsage,false));
     });
     connect(&m_client,&HgsClient::accountsFailed,this,[this](quint64 id,const QString &machine,const QString &error){
         if(id!=m_accountRequest||machine!=host())return;
-        m_accountRequest=0;m_accountCatalogLoaded=true;updateAccounts();m_accountStatus->setText(tr("Could not load accounts: %1").arg(error));
+        m_accountRequest=0;m_accountCatalogLoaded=true;m_forceUsage=false;updateAccounts();m_accountStatus->setText(tr("Could not load accounts: %1").arg(error));
     });
     connect(&m_client,&HgsClient::worktreesReady,this,[this](quint64 request,const QString &machine,const QString &path,const QJsonObject &data){
         if(m_prefillRequest&&request==m_prefillRequest&&machine==host()&&path==m_prefillPath){
@@ -235,7 +236,8 @@ QString NewSessionDialog::host() const {return m_machine->currentData().toString
 void NewSessionDialog::setFleet(const FleetState &fleet)
 {
     m_fleet=fleet;
-    m_usageStore->setFleet(fleet);updateAccounts();
+    m_usageStore->setFleet(fleet);
+    if(folderStyle(m_fleet,host())!=m_accountStyle)updateAccounts();else refreshUsage();
     if(m_creation||m_validation){updateForm();return;}
     loadMachines();loadFolders();
 }
@@ -438,7 +440,7 @@ void NewSessionDialog::loadAccounts(bool refresh)
     if(m_machine->count()==0){m_accountRequest=0;m_accountCatalogLoaded=false;m_accounts={};updateAccounts();return;}
     if(m_accountHost==host()&&(m_accountRequest||(!refresh&&m_accountCatalogLoaded)))return;
     if(m_accountHost!=host()){
-        m_accounts={};m_accountPreset=false;m_accountCatalogLoaded=false;
+        m_accounts={};m_accountPreset=false;m_accountCatalogLoaded=false;m_regroupAccounts=true;
     }
     m_accountHost=host();m_accountStatus->setText(tr("Loading accounts…"));
     m_accountRequest=m_client.requestAccounts(host(),{"ls"});updateAccounts();
@@ -446,24 +448,30 @@ void NewSessionDialog::loadAccounts(bool refresh)
 void NewSessionDialog::updateAccounts()
 {
     if(m_machine->count()==0){const QSignalBlocker block(m_account);m_account->clear();updateModels();updateForm();return;}
-    QJsonArray localProfiles;
-    // The selected computer's agents only: the local Windows computer hides some (spec D16).
     const auto style=folderStyle(m_fleet,host());
-    QStringList providers;for(const auto &provider:m_agents)if(AccountCatalog::launchable(provider,style))providers.append(provider);
-    for(const auto &value:m_accounts){const auto provider=value.toObject()["provider"].toString();if(!provider.isEmpty()&&provider!="sh"&&!providers.contains(provider)&&AccountCatalog::launchable(provider,style))providers.append(provider);}
-    for(const auto &provider:providers){
-        for(const auto &value:m_accounts){
-            auto profile=value.toObject();if(profile["provider"]!=provider||profile["id"].toString().isEmpty())continue;
-            profile["host"]=host();profile["usage"]=cachedUsage(profile);localProfiles.append(profile);
-        }
-    }
     // Use the Accounts page's identity/scope rules, applied only to this
     // computer's catalog. An account can have several local launch bindings.
+    // Group when the catalog arrives: later limits only refresh these rows, even
+    // when they show two rows to be one account (the next dialog joins them).
+    if(m_regroupAccounts||style!=m_accountStyle){
+        m_regroupAccounts=false;m_accountStyle=style;
+        QJsonArray localProfiles;
+        // The selected computer's agents only: the local Windows computer hides some (spec D16).
+        QStringList providers;for(const auto &provider:m_agents)if(AccountCatalog::launchable(provider,style))providers.append(provider);
+        for(const auto &value:m_accounts){const auto provider=value.toObject()["provider"].toString();if(!provider.isEmpty()&&provider!="sh"&&!providers.contains(provider)&&AccountCatalog::launchable(provider,style))providers.append(provider);}
+        for(const auto &provider:providers){
+            for(const auto &value:m_accounts){
+                auto profile=value.toObject();if(profile["provider"]!=provider||profile["id"].toString().isEmpty())continue;
+                profile["host"]=host();profile["usage"]=cachedUsage(profile);localProfiles.append(profile);
+            }
+        }
+        m_accountGroups=AccountCatalog::group(localProfiles);
+    }
     const auto remembered=QJsonDocument::fromJson(QSettings().value("workspace/launchAccounts").toByteArray()).object().value(host()).toObject();
     const auto current=m_account->currentItem()?m_account->currentItem()->data(ProfileRole).toJsonObject():QJsonObject();
     const auto currentId=current["host"].toString()==host()&&current["provider"]==m_preferredAgent?current["id"].toString():QString();
-    QList<QJsonObject> profiles;
-    for(const auto &value:AccountCatalog::group(localProfiles)){
+    QList<QJsonObject> profiles;QList<QJsonArray> members;
+    for(const auto &value:m_accountGroups){
         const auto group=value.toObject();QJsonObject chosen;int best=-1;
         for(const auto &member:group["members"].toArray()){
             const auto profile=member.toObject();const auto provider=profile["provider"].toString(),id=profile["id"].toString();
@@ -472,7 +480,7 @@ void NewSessionDialog::updateAccounts()
                 profile["is_default"].toBool()?2:profile["native"].toBool()?1:0;
             if(rank>best){chosen=profile;best=rank;}
         }
-        chosen["usage"]=group["usage"];profiles.append(chosen);
+        members.append(group["members"].toArray());chosen["usage"]=accountUsage(members.last());profiles.append(chosen);
     }
     const QSignalBlocker block(m_account);
     bool same=m_account->count()==profiles.size()+1;
@@ -489,7 +497,7 @@ void NewSessionDialog::updateAccounts()
     for(int row=0;row<profiles.size();++row){
         const auto profile=profiles[row];const auto provider=profile["provider"].toString(),id=profile["id"].toString();
         auto *item=same?m_account->item(row):new QListWidgetItem(m_account);
-        item->setData(Qt::UserRole,id);item->setData(ProviderRole,provider);item->setData(ProfileRole,profile);
+        item->setData(Qt::UserRole,id);item->setData(ProviderRole,provider);item->setData(ProfileRole,profile);item->setData(MembersRole,members[row]);
         item->setIcon(workspaceIcon(m_agents.contains(provider)?provider:QString("terminal"),IdentityBadges::providerColor(provider,dark)));
         if(provider==m_preferredAgent){
             if(defaultIndex<0||profile["is_default"].toBool())defaultIndex=row;
@@ -508,8 +516,23 @@ void NewSessionDialog::updateAccounts()
     const int selected=m_accountPreset?explicitIndex:currentIndex>=0?currentIndex:lastIndex>=0?lastIndex:defaultIndex>=0?defaultIndex:0;
     // A temporary shell-only list must not replace the intended agent while
     // its computer's authoritative account catalog is still loading.
-    m_account->setCurrentRow(m_accountRequest&&profiles.isEmpty()&&m_preferredAgent!="sh"?-1:selected);
+    const int target=m_accountRequest&&profiles.isEmpty()&&m_preferredAgent!="sh"?-1:selected;
+    // Clearing through the view also marks the empty choice as set, so focus does
+    // not pick the first row: on macOS this list takes the dialog's first focus,
+    // and while loading that row is Run shell.
+    if(target<0)m_account->setCurrentIndex({});else m_account->setCurrentRow(target);
     updateUsage();updateModels();updateForm();
+}
+
+// Opening and Refresh ask for current limits of this computer's accounts. The
+// shared store skips those it checked within its interval unless Refresh forces it.
+void NewSessionDialog::requestUsage(bool force)
+{
+    for(int row=0;row<m_account->count();++row)
+        for(const auto &value:m_account->item(row)->data(MembersRole).toJsonArray()){
+            const auto profile=value.toObject();
+            if(profile["installed"].toBool())m_usageStore->ensure(AccountUsageRef::profile(profile),force);
+        }
 }
 
 void NewSessionDialog::selectAccount(const QString &account)
@@ -525,6 +548,28 @@ QJsonObject NewSessionDialog::cachedUsage(const QJsonObject &profile) const
     if(!cached.isEmpty()&&(usage["status"]=="loading"||usage["status"]=="offline"
         ||cached["checked_at"].toDouble()>usage["checked_at"].toDouble()))usage=cached;
     return usage;
+}
+
+QJsonObject NewSessionDialog::accountUsage(const QJsonArray &members) const
+{
+    QJsonObject best;
+    for(const auto &member:members){
+        const auto usage=cachedUsage(member.toObject());
+        if(best.isEmpty()||AccountCatalog::betterUsage(usage,best))best=usage;
+    }
+    return best;
+}
+
+// New limits change rows in place: the list keeps its rows, choice and scroll.
+void NewSessionDialog::refreshUsage()
+{
+    for(int row=0;row<m_account->count();++row){
+        auto *item=m_account->item(row);auto profile=item->data(ProfileRole).toJsonObject();
+        if(profile.isEmpty())continue;
+        const auto usage=accountUsage(item->data(MembersRole).toJsonArray());
+        if(profile["usage"]!=usage){profile["usage"]=usage;item->setData(ProfileRole,profile);}
+    }
+    updateUsage();
 }
 
 void NewSessionDialog::updateUsage()

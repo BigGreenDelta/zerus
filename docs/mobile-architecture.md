@@ -531,7 +531,8 @@ The local `hgs account ls` catalog is checked every 30 seconds. At most one
 background `hgs account inspect ID` runs at once, with a 25-second deadline and
 a minimum five-minute interval per account. Provider calls never block the
 heartbeat. Shutdown cancels and reaps only the connector-owned CLI child.
-Removed accounts and changed credential fingerprints discard previous usage;
+Removed accounts and changed credential fingerprints discard previous usage; a
+fingerprint changes on sign-in, sign-out or another account, not on token refresh;
 adapters without a fingerprint use the native signature-validated catalog
 identity and sign-in state conservatively. A failed refresh retains prior
 values with `refresh_error` and `stale`, without forwarding provider errors.

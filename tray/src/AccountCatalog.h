@@ -24,6 +24,13 @@ inline QString key(const QJsonObject &p) {
     const auto identityKey = p["provider"].toString() + '\n' + (account.isEmpty() ? "email:" + email : "id:" + account) + '\n' + scope;
     return "account:" + QString::fromLatin1(QCryptographicHash::hash(identityKey.toUtf8(), QCryptographicHash::Sha256).toHex());
 }
+// A quota belongs to the account: select a snapshot, never add quotas from
+// several machines or let a failed probe replace a good snapshot.
+inline bool betterUsage(const QJsonObject &usage, const QJsonObject &previous) {
+    const auto quality = [](const QJsonObject &value) { return value["status"] == "ok" || value["status"] == "configured" ? (value["offline"].toBool() ? 2 : 3) : 1; };
+    return quality(usage) > quality(previous)
+        || (quality(usage) == quality(previous) && usage["checked_at"].toDouble() > previous["checked_at"].toDouble());
+}
 inline bool named(const QString &label) {
     return !label.isEmpty() && label != "Default account" && label != "Native DeepSeek account";
 }
@@ -54,13 +61,7 @@ inline QJsonArray group(const QJsonArray &profiles) {
         if (!machines.contains(p["machine"])) machines.append(p["machine"]);
         group["machines"] = machines;
         const auto usage = p["usage"].toObject();
-        const auto previous = group["usage"].toObject();
-        // A quota belongs to the account: select a snapshot, never add quotas
-        // from several machines or let a failed probe replace a good snapshot.
-        const auto quality = [](const QJsonObject &value) { return value["status"] == "ok" || value["status"] == "configured" ? (value["offline"].toBool() ? 2 : 3) : 1; };
-        if (quality(usage) > quality(previous)
-            || (quality(usage) == quality(previous) && usage["checked_at"].toDouble() > previous["checked_at"].toDouble()))
-            group["usage"] = usage;
+        if (betterUsage(usage, group["usage"].toObject())) group["usage"] = usage;
         if (!named(group["label"].toString()) && named(p["label"].toString())) group["label"] = p["label"];
         group["installed"] = group["installed"].toBool() || p["installed"].toBool();
         groups[positions[id]] = group;

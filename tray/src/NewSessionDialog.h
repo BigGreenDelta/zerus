@@ -2,6 +2,7 @@
 #include <QDialog>
 #include <QMap>
 #include "FleetState.h"
+#include "MachinePlatform.h"
 #include "SessionOrganization.h"
 class QComboBox;
 class QCheckBox;
@@ -47,7 +48,10 @@ private:
     bool projectWorktree(const QString &path) const;
     void loadAccounts(bool refresh = false);
     void updateAccounts();
+    void requestUsage(bool force);
     QJsonObject cachedUsage(const QJsonObject &profile) const;
+    QJsonObject accountUsage(const QJsonArray &members) const;
+    void refreshUsage();
     void updateUsage();
     void updateModels();
     QString agent() const;
@@ -66,6 +70,10 @@ private:
     QStringList m_agents;
     bool m_accountPreset=false;
     bool m_accountCatalogLoaded=false;
+    // Rows group the catalog when it arrives; later limits never regroup them.
+    bool m_regroupAccounts=true,m_forceUsage=false;
+    MachinePlatform::Style m_accountStyle=MachinePlatform::Style::Posix;
+    QJsonArray m_accountGroups;
     QComboBox *m_project,*m_machine,*m_folder,*m_model;
     QListWidget *m_account;
     QPushButton *m_refreshAccounts;

@@ -1211,11 +1211,17 @@ the same provider identity and organization grouping as **Agent accounts**, with
 bindings only from the selected computer. Aliases of one account share a row;
 conflicting account IDs, organizations and unidentified profiles stay separate.
 The selected, remembered or default local profile remains the exact launch binding.
-Opening the chooser, changing a
-selection and refreshing its account catalog never probe providers for limits;
-existing shared or credential-validated native caches supply them. **Run shell** is a single desktop
+Rows show cached limits at once. On desktop, opening the chooser also asks for
+current limits of the chosen computer's accounts, except those checked within
+the last five minutes, and **Refresh** asks for all of them again. Replies update
+rows in place: rows group once per loaded catalog, and the list keeps its rows,
+selection and scroll position. Changing a selection never probes providers.
+A profile's credential fingerprint follows its signed-in account, so token
+refreshes (Kimi's every 15 minutes) and Claude Code's settings writes keep cached
+status and limits; sign-out or another account discards them. **Run shell** is a single desktop
 separate choice. The last successfully launched agent and account per computer
-remain remembered. **Make default on…** sets
+remain remembered; without that agent on the computer, the first agent is chosen.
+Focusing the list while accounts load never chooses **Run shell**. **Make default on…** sets
 the default for new sessions; explicit `--account` wins, and attach, resume and fork
 retain the original profile. Ordinary agent commands outside `hgs` keep their
 native sign-in. Use `hgs [@host] account default native-claude` to restore the native

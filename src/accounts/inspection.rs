@@ -427,13 +427,26 @@ fn dsh(home: &Path) -> Value {
     .unwrap_or(fallback)
 }
 
+// The signature identifies the signed-in account, so it is also the catalog's
+// auth revision. Token refreshes rewrite Kimi credentials every 15 minutes and
+// Claude's every few hours, and Claude Code rewrites .claude.json constantly:
+// hashing those bytes discarded every cached status and limit within minutes.
+// Sign-out and another account still change it.
 pub(super) fn signature(home: &Path, provider: &str) -> String {
     let mut fingerprint = Sha256::new();
     fingerprint.update(home.as_os_str().as_encoded_bytes());
     fingerprint.update(provider.as_bytes());
     if provider == "claude" {
-        fingerprint.update(b"desktop-session-v1");
-        if let Ok(bytes) = fs::read(home.join(".claude.json")) { fingerprint.update(bytes); }
+        fingerprint.update(b"desktop-session-v2");
+        if let Ok(bytes) = fs::read(home.join(".claude.json")) {
+            match serde_json::from_slice::<Value>(&bytes) {
+                Ok(settings) => {
+                    fingerprint.update(settings["oauthAccount"].to_string());
+                    fingerprint.update(settings["primaryApiKey"].to_string());
+                }
+                Err(_) => fingerprint.update(bytes),
+            }
+        }
     }
     for name in [
         "auth.json",
@@ -442,13 +455,42 @@ pub(super) fn signature(home: &Path, provider: &str) -> String {
         ".credentials.yaml",
     ] {
         if let Ok(bytes) = fs::read(home.join(name)) {
-            fingerprint.update(&bytes);
+            match signed_in(provider, name, &bytes) {
+                Some(account) => fingerprint.update(account),
+                None => fingerprint.update(&bytes),
+            }
         }
     }
-    if provider == "claude" {
-        fingerprint.update(read_json(&home.join(".claude.json"))["oauthAccount"].to_string());
-    }
     format!("{:x}", fingerprint.finalize())
+}
+// The lasting part of credentials whose tokens rotate, or None to use all bytes.
+// Kimi tokens are JWTs that name their user; claims are read only to tell
+// accounts apart, never to authenticate.
+fn signed_in(provider: &str, name: &str, bytes: &[u8]) -> Option<String> {
+    let credentials = serde_json::from_slice::<Value>(bytes).ok()?;
+    match (provider, name) {
+        ("kimi", "credentials/kimi-code.json") => {
+            use base64::Engine;
+            ["access_token", "refresh_token"].iter().find_map(|key| {
+                let payload = credentials[*key].as_str()?.split('.').nth(1)?;
+                let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(payload.trim_end_matches('='))
+                    .ok()?;
+                let claims = serde_json::from_slice::<Value>(&decoded).ok()?;
+                let user = json!([claims["user_id"], claims["sub"]]);
+                (!text(&claims, "user_id").is_empty() || !text(&claims, "sub").is_empty())
+                    .then(|| user.to_string())
+            })
+        }
+        ("claude", ".credentials.json") => {
+            let mut oauth = credentials["claudeAiOauth"].as_object()?.clone();
+            for key in ["accessToken", "refreshToken", "expiresAt", "refreshTokenExpiresAt"] {
+                oauth.remove(key);
+            }
+            Some(Value::Object(oauth).to_string())
+        }
+        _ => None,
+    }
 }
 fn cache_path(config: &Config, id: &str, home: &Path) -> PathBuf {
     config.dir.join("account-status").join(format!(
@@ -642,5 +684,64 @@ mod tests {
         let mut identified = json!({"status":"ok","identity":{"email":"other@example.test"}});
         retain_cached_identity(&mut identified, &cached, "same-auth");
         assert_eq!(identified["identity"]["email"], "other@example.test");
+    }
+
+    fn jwt(claims: Value) -> String {
+        use base64::Engine;
+        let part = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+        format!("{}.{}.signature", part(json!({"alg":"none"})), part(claims))
+    }
+
+    #[test]
+    fn kimi_token_refresh_keeps_the_account_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("credentials")).unwrap();
+        let sign_in = |user: &str, issued: u64| {
+            let token = |kind: &str| jwt(json!({"user_id":user,"sub":user,"device_id":"device","iat":issued,"jti":format!("{kind}-{issued}")}));
+            let credentials = json!({"access_token":token("access"),"refresh_token":token("refresh"),
+                "expires_at":issued + 900,"expires_in":900,"scope":"kimi-code","token_type":"Bearer"});
+            fs::write(home.join("credentials/kimi-code.json"), credentials.to_string()).unwrap();
+        };
+        sign_in("user-a", 1_000);
+        let first = signature(home, "kimi");
+        sign_in("user-a", 1_900);
+        assert_eq!(signature(home, "kimi"), first);
+        sign_in("user-b", 1_900);
+        assert_ne!(signature(home, "kimi"), first);
+        fs::remove_file(home.join("credentials/kimi-code.json")).unwrap();
+        assert_ne!(signature(home, "kimi"), first);
+        // Credentials without a readable account keep the byte-for-byte rule.
+        fs::write(home.join("credentials/kimi-code.json"), r#"{"access_token":"opaque-1"}"#).unwrap();
+        let opaque = signature(home, "kimi");
+        fs::write(home.join("credentials/kimi-code.json"), r#"{"access_token":"opaque-2"}"#).unwrap();
+        assert_ne!(signature(home, "kimi"), opaque);
+    }
+
+    #[test]
+    fn claude_signature_follows_the_signed_in_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let settings = |account: &str, startups: u64| {
+            let settings = json!({"numStartups":startups,"projects":{"/workspace/example":{"lastCost":startups}},
+                "oauthAccount":{"accountUuid":account,"emailAddress":format!("{account}@example.test")}});
+            fs::write(home.join(".claude.json"), settings.to_string()).unwrap();
+        };
+        let credentials = |token: &str, expiry: u64| {
+            let credentials = json!({"claudeAiOauth":{"accessToken":token,"refreshToken":format!("refresh-{token}"),
+                "expiresAt":expiry,"refreshTokenExpiresAt":expiry + 1,"scopes":["user:inference"],"subscriptionType":"max"}});
+            fs::write(home.join(".credentials.json"), credentials.to_string()).unwrap();
+        };
+        settings("account-a", 1);
+        credentials("token-1", 1_000);
+        let first = signature(home, "claude");
+        settings("account-a", 2);
+        credentials("token-2", 2_000);
+        assert_eq!(signature(home, "claude"), first);
+        settings("account-b", 2);
+        assert_ne!(signature(home, "claude"), first);
+        settings("account-a", 3);
+        fs::remove_file(home.join(".credentials.json")).unwrap();
+        assert_ne!(signature(home, "claude"), first);
     }
 }
