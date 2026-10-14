@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 /** Real conversation controls with synthetic retained history; no relay or agent mutations. */
 class ConversationNavigationSmokeInstrumentation : Instrumentation() {
+    private var fixtureModel:ZerusViewModel?=null
     override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
     override fun onStart() {
         val result = Bundle()
@@ -35,7 +36,7 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
                 "Use fresh isolated emulator app data; this runner never clears existing state."
             }
             smoke(store)
-            result.putString("stream", "Conversation navigation passed: actual latest taps with unchanged content, owned pending read and duplicate lock, installed page tail, incomplete-head failure/retry, draft preservation, and Sessions Read all visibility. Zero deliveries.\n")
+            result.putString("stream", "Conversation navigation passed: actual latest taps, owned pending read and duplicate lock, installed page tail, incomplete-head retry, same-key read metadata resampling, retained unseen replies, opening divider retirement/alias non-resurrection, draft preservation, and Sessions Read all visibility. Zero deliveries.\n")
             finish(Activity.RESULT_OK,result)
         } catch(error:Throwable) {
             result.putString("stream", "Conversation navigation failed: ${error.stackTraceToString()}\n")
@@ -50,9 +51,24 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
     private fun await(description:String,condition:()->Boolean) {
         val deadline = SystemClock.elapsedRealtime()+15_000
         while(!condition()) {
-            check(SystemClock.elapsedRealtime()<deadline) { "Timed out: $description" }
+            check(SystemClock.elapsedRealtime()<deadline) { "Timed out: $description; ${diagnostic()}" }
             SystemClock.sleep(40)
         }
+    }
+    private fun diagnostic():String {
+        val state=fixtureModel?.let { model -> main {
+            "loading=${model.olderLoading},newer=${model.hasNewer},error=${model.olderError},count=${model.selected?.target?.let(model::unreadCount)}"
+        } }.orEmpty()
+        var current=find(uiAutomation.rootInActiveWindow) { it.contentDescription?.toString()=="Jump to latest messages" }
+        val chain=mutableListOf<String>()
+        repeat(5) {
+            current?.let { node ->
+                node.refresh()
+                chain+="${node.className}[enabled=${node.isEnabled},clickable=${node.isClickable},text=${node.text},description=${node.contentDescription}]"
+                current=node.parent
+            }
+        }
+        return "$state; action=${chain.joinToString(" -> ")}"
     }
     private fun find(root:AccessibilityNodeInfo?,predicate:(AccessibilityNodeInfo)->Boolean):AccessibilityNodeInfo? {
         if(root==null) return null
@@ -70,7 +86,13 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
     }
     private fun button(label:String):AccessibilityNodeInfo {
         var result=node(label)
-        while(!result.isClickable && result.isEnabled && result.parent!=null) result=checkNotNull(result.parent)
+        // Refresh each ancestor: Android can cache an enabled action owner
+        // while its freshly queried label already belongs to the pending UI.
+        while(true) {
+            result.refresh()
+            if(result.isClickable || !result.isEnabled || result.parent==null) break
+            result=checkNotNull(result.parent)
+        }
         check(result.isClickable || !result.isEnabled) { "No action owner for $label" }
         return result
     }
@@ -120,9 +142,10 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
                     check(!payload.has("around_incoming_seq")) { "Explicit Latest reopened unread history" }
                     gate.get()?.let { check(it.await(30,TimeUnit.SECONDS)) }
                     val complete=mode.get()!="incomplete"
-                    val start=if(mode.get()=="larger") 11 else 71
+                    val start=if(mode.get() in setOf("larger","reindexed")) 11 else 71
+                    val epoch=if(mode.get()=="reindexed") "fixture-rebuilt-epoch" else "fixture-epoch"
                     JSONObject().put("request_id",input.string("request_id")).put("name",target.session)
-                        .put("run_id",target.run).put("conversation_id",target.conversation).put("history_epoch","fixture-epoch")
+                        .put("run_id",target.run).put("conversation_id",target.conversation).put("history_epoch",epoch)
                         .put("events",JSONArray((start..80).map(::row))).put("next_before","fixture-cursor-$start")
                         .put("next_after","fixture-cursor-80").put("has_more_before",true).put("has_more_after",false)
                         .put("head",JSONObject().put("complete",complete).put("incoming_seq",80).put("total_incoming",80))
@@ -137,6 +160,7 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
         }.build()
         val activity=startActivitySync(Intent(targetContext,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
         val model=main { activity.javaClass.getDeclaredMethod("getModel").apply { isAccessible=true }.invoke(activity) as ZerusViewModel }
+        fixtureModel=model
         try {
             await("private storage") { main { model.storageReady } }
             main {
@@ -205,9 +229,59 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
             mode.set("larger");tap("Jump to latest messages")
             await("retry reaches latest") { main { !model.olderLoading && model.olderError.isBlank() && !model.hasNewer } && visibleText("Synthetic navigation row 80.") }
             check(main { model.conversationEvents.size==70 && model.conversationEvents.first().id=="history:fixture-11" })
+            // Viewing the tail may already have read its replies. A genuine
+            // local review reminder keeps this explicit action eligible without
+            // racing the automatic 350 ms read or resetting its watermark.
+            main { model.reviewLater(target,model.captureReadAttention(target)) }
             await("enabled conversation Read all") { button("Read all").isEnabled }
             tap("Read all")
             await("cleared conversation unread replies") { main { !model.readAllPending(target) } && !button("Read all").isEnabled }
+            check(main { model.firstUnreadEventId.isBlank() }) { "Read opening divider remained after the complete head was read" }
+            check(main { model.draft(target).text=="Retained fixture draft" && model.outgoing.isEmpty() })
+            fun replayRetainedAlias(accepted:Boolean=false,live:Boolean=false)=main {
+                val frame=checkNotNull(model.javaClass.getDeclaredField("activeFrame").apply { isAccessible=true }.get(model))
+                frame.javaClass.getDeclaredField("unreadBoundary").apply { isAccessible=true }.set(frame,"history:fixture-71")
+                if(live) set(model,"setFirstUnreadEventId","journal:fixture:legacy-71")
+                if(accepted) model.javaClass.getDeclaredField("pendingHistoryPublication").apply { isAccessible=true }.set(model,target.key)
+                model.javaClass.declaredMethods.single { it.name=="publishPagingMetadata" }
+                    .apply { isAccessible=true }.invoke(model,frame)
+                if(live) {
+                    check(model.firstUnreadEventId=="history:fixture-71") { "An accepted page lost its live opening divider alias" }
+                    set(model,"setFirstUnreadEventId","")
+                } else check(model.firstUnreadEventId.isBlank()) { "A retained frame alias resurrected the read divider" }
+            }
+            replayRetainedAlias()
+            replayRetainedAlias(accepted=true)
+
+            // A verified reindex may change read metadata while retaining every
+            // display key and pixel. Keep an unread strip mounted throughout,
+            // so a changed viewport height cannot accidentally resample it.
+            fun observeHead(epoch:String)=main {
+                val page=HistoryPage(target,epoch,emptyList(),null,null,false,false,100,100,true,false,false,JSONObject())
+                model.javaClass.getDeclaredMethod("observeHistoryHead",HistoryPage::class.java,Boolean::class.javaPrimitiveType)
+                    .apply { isAccessible=true }.invoke(model,page,true)
+            }
+            observeHead("fixture-epoch")
+            await("retained visible read watermark") { main { model.unreadCount(target)==20 } && visibleText("Synthetic navigation row 80.") }
+            check(main { model.firstUnreadEventId.isBlank() }) { "A newer unread head resurrected the old opening divider" }
+            replayRetainedAlias()
+            replayRetainedAlias(accepted=true)
+            replayRetainedAlias(accepted=true,live=true)
+            check(main { model.unreadCount(target)==20 }) { "Divider alias handling changed unread evidence" }
+            SystemClock.sleep(600)
+            val stableRows=main { model.conversationEvents }
+            mode.set("reindexed")
+            observeHead("fixture-rebuilt-epoch")
+            main {
+                val rows=stableRows.map { it.copy(historyEpoch="fixture-rebuilt-epoch") }
+                val window=HistoryWindow(target,"fixture-rebuilt-epoch",rows,rows.first().historyCursor,
+                    rows.last().historyCursor,true,true,false)
+                model.javaClass.getDeclaredMethod("publishWindow",Target::class.java,HistoryWindow::class.java,
+                    Boolean::class.javaPrimitiveType,Boolean::class.javaPrimitiveType,String::class.java)
+                    .apply { isAccessible=true }.invoke(model,target,window,true,false,null)
+            }
+            await("same-key canonical metadata resampled") { main { model.unreadCount(target)==20 && model.historyEpoch=="fixture-rebuilt-epoch" } }
+            check(main { model.conversationEvents.map { it.id }==stableRows.map { it.id } })
             check(main { model.draft(target).text=="Retained fixture draft" && model.outgoing.isEmpty() })
 
             middleWindow();gate.set(CountDownLatch(1))

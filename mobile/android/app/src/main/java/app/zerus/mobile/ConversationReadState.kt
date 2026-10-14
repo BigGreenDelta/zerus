@@ -56,6 +56,8 @@ data class ConversationReadState(val records:List<ConversationReadRecord> = empt
 object ConversationReadPolicies {
     fun key(target:Target)=JSONArray(listOf(target.connectionId,target.computerId,target.session,target.conversation,target.archiveId,target.agentId,target.parentConversation)).toString()
     fun incoming(event:Event)=event.nativeType in setOf("AgentMessage","Stop") && event.role != "You" && event.role != "You (answer)" && event.outgoingId.isBlank()
+    /** Resample visible content when canonical read evidence changes, independently of its text or geometry. */
+    fun visibilityEvidence(rows:List<Event>)=rows.filter(::incoming).map { Triple(it.id,it.historyEpoch,it.incomingSeq) }
     fun unread(record:ConversationReadRecord?,event:Event)=incoming(event) && if(record?.epoch?.isNotBlank()==true && record.epoch == event.historyEpoch && event.incomingSeq != null)
         event.incomingSeq > record.readThrough else event.id !in record?.seen.orEmpty()
     fun lowerBound(record:ConversationReadRecord?,rows:List<Event>?):Int? {

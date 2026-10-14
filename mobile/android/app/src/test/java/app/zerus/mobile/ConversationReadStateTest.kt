@@ -31,6 +31,22 @@ class ConversationReadStateTest {
         assertFalse(ConversationReadPolicies.incoming(Event("tool","Tool","text","",nativeType="ToolFinished")))
         assertTrue(ConversationReadPolicies.incoming(Event("reply","AgentMessage","text","",nativeType="AgentMessage")))
     }
+    @Test fun canonicalEvidenceChangesRequireResamplingEvenWhenVisibleIdsStayTheSame() {
+        val old=Event("reply","AgentMessage","Same visible text","",nativeType="AgentMessage",historyEpoch="old",incomingSeq=10)
+        val state=ConversationReadState().head(target,"old",10,10,true).visible(target,listOf(old))
+        val fresh=old.copy(historyEpoch="new",incomingSeq=12)
+        val rebuilt=state.head(target,"new",12,12,true)
+        assertEquals(12,ConversationReadPolicies.lowerBound(rebuilt.record(target),listOf(fresh)))
+        assertNotEquals(ConversationReadPolicies.visibilityEvidence(listOf(old)),ConversationReadPolicies.visibilityEvidence(listOf(fresh)))
+        val resampled=rebuilt.visible(target,listOf(fresh))
+        assertEquals(0,ConversationReadPolicies.lowerBound(resampled.record(target),listOf(fresh)))
+    }
+    @Test fun sameEpochSequencePromotionIsReadEvidenceButStreamingTextAloneIsNot() {
+        val row=Event("reply","AgentMessage","Streaming text","",nativeType="AgentMessage",historyEpoch="epoch")
+        assertNotEquals(ConversationReadPolicies.visibilityEvidence(listOf(row)),ConversationReadPolicies.visibilityEvidence(listOf(row.copy(incomingSeq=12))))
+        assertEquals(ConversationReadPolicies.visibilityEvidence(listOf(row)),ConversationReadPolicies.visibilityEvidence(listOf(row.copy(text="More streaming text",at=20.0))))
+        assertTrue(ConversationReadPolicies.visibilityEvidence(listOf(row.copy(role="You"),row.copy(nativeType="ToolFinished"))).isEmpty())
+    }
     @Test fun encryptedIndexContainsOnlyNavigationDisplayFields() {
         val raw=JSONObject().put("state","running").put("account_id","secret-account").put("token","secret-token").put("mobile_capabilities",JSONObject().put("operations","send"))
         val session=Session(target,"Title","codex","busy","Project","Preview",0,raw)

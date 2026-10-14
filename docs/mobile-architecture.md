@@ -656,7 +656,11 @@ the larger of its loaded count and last known canonical count as a lower bound,
 or an unknown state when neither is available. The read watermark remains valid
 for retained rows in the same epoch while offline. A native incoming-sequence anchor locates the
 first unread message beyond the latest page. The unread divider stays attached
-to that message when legacy inspection IDs gain canonical aliases.
+to that message when legacy inspection IDs gain canonical aliases. It retires
+when the phone confirms that the current complete head is read, and later replies
+do not resurrect that opening divider. Visible canonical epoch and incoming
+sequence changes trigger a new read observation even when message IDs and layout
+stay unchanged; streaming text alone does not restart the visibility dwell.
 
 Typing updates the editor immediately. An ordered background writer coalesces
 draft edits and performs serialization, encryption and disk writes away from

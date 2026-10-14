@@ -485,6 +485,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         readWriter?.let { readState=it.edit { state -> state.review(target,true) } };refreshReadAttention();flushDrafts()
     }
     private fun refreshReadAttention() {
+        // Retire the opening divider once this exact current head is read.
+        // Keep its capture latched so a later reply cannot resurrect an old divider.
+        selected?.target?.let { if(unreadCount(it)==0) { firstUnreadEventId="";unreadBoundaryCaptured=true } }
         sessions=sessions.map { row ->
             val later=reviewLater(row.target)
             // A reply or request read on another device is read here too.
@@ -722,9 +725,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         preparePresentation()
     }
     private fun publishPagingMetadata(frame:Frame) {
-        frame.unreadBoundary?.let { firstUnreadEventId=it }
         frame.window?.let { window -> hasOlder=window.hasBefore;hasNewer=window.hasAfter;historyEpoch=window.epoch;historyComplete=frame.indexComplete;historyIndexing=frame.indexing }
-        if(pendingHistoryPublication==frame.target.key) { pendingHistoryPublication="";olderLoading=false;readPositionReady=true }
+        if(pendingHistoryPublication==frame.target.key) {
+            // A page may retarget an existing opening divider through an alias.
+            // Repreparing a retained frame must never restore a retired divider.
+            if(firstUnreadEventId.isNotBlank()) frame.unreadBoundary?.let { firstUnreadEventId=it }
+            pendingHistoryPublication="";olderLoading=false;readPositionReady=true
+        }
     }
     private fun preparePresentation() {
         val frame = activeFrame ?: return
