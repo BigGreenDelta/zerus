@@ -41,6 +41,7 @@ class NativeHarness(unittest.TestCase):
         cls.sock = str(cls.host / 'host.sock')
         cls.workspace = cls.root / 'workspace'
         cls.workspace.mkdir()
+        (cls.root / 'holds').mkdir()
         package = Path(DSH).resolve().parent.parent
         bridge = REPO / 'src/dsh/bridge.mjs'
         if getattr(cls, 'LEGACY_ADAPTER', False):
@@ -57,7 +58,7 @@ class NativeHarness(unittest.TestCase):
             {'id': 'tool-subagent', 'config': {'backgroundMode': 'continuable'}},
             {'id': 'agent-default-model', 'config': {'provider': 'hgs-test', 'model': 'test-a'}},
             {'insert': [
-                {'id': 'hgs-test-model', 'name': str(REPO / 'tests/fixtures/dsh-model.mjs')},
+                {'id': 'hgs-test-model', 'name': str(REPO / 'tests/fixtures/dsh-model.mjs'), 'config': {'holds': str(cls.root / 'holds')}},
                 {'id': 'hgs-native-dsh', 'name': str(bridge), 'config': {'socket': cls.sock, 'recoveryPolicy': str(cls.state / 'recovery/policy.json')}},
             ]},
         ]
@@ -372,6 +373,27 @@ class NativeHarness(unittest.TestCase):
         self.assertNotIn('PRIVATE_TEST_REASONING',json.dumps(child_data))
         with self.assertRaises(RuntimeError):
             self.rpc('inspect',{'sessionId':other['conversation_id'],'agentId':child})
+
+    def test_starting_child_has_no_history_until_it_records_its_descriptor(self):
+        # The parent catalogs a one-shot child before its first step records the
+        # descriptor after a durability checkpoint. The fixture holds that step.
+        parent,other=self.create(),self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
+        def child_inspect(child):
+            result=subprocess.run([str(HGS),'inspect',parent['name'],'--agent',child],env=self.env,text=True,capture_output=True,timeout=35)
+            self.assertEqual(result.returncode,0,result.stderr);return json.loads(result.stdout)
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        try:
+            data=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'] else None)
+            child=next(iter(data['subagents']))
+            starting=child_inspect(child)
+            self.assertEqual(starting['events'],[]);self.assertFalse(starting['send_supported'])
+            self.assertEqual(starting['parent_conversation_id'],parent['conversation_id'])
+            with self.assertRaises(RuntimeError):
+                self.rpc('inspect',{'sessionId':other['conversation_id'],'agentId':child})
+        finally:
+            (self.root/'holds'/hold).touch()
+        done=self.wait(lambda: next((e for e in child_inspect(child)['events'] if e['type']=='AgentMessage'),None))
+        self.assertIn(hold,done['detail'])
 
     def test_continuable_child_send_is_addressed_and_idempotent(self):
         parent, other = self.create(), self.create()
