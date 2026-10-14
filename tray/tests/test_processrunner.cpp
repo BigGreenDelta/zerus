@@ -234,9 +234,13 @@ void TestProcessRunner::launchBackendMatchesPlatform()
 
 void TestProcessRunner::childInheritsOnlyStandardDescriptors()
 {
-#ifndef Q_OS_MACOS
-    QSKIP("Only the macOS posix_spawn backend closes inherited descriptors");
+#ifndef Q_OS_UNIX
+    QSKIP("Unix descriptors only");
 #else
+    // posix_spawn closes them on macOS, Qt elsewhere (ChildProcess.h).
+#ifndef Q_OS_MACOS
+    if (!ChildProcess::inheritsStdioOnly) QSKIP("This Qt cannot close inherited descriptors");
+#endif
     // A descriptor opened without O_CLOEXEC elsewhere in the GUI must not leak.
     const int leaked = ::open("/dev/null", O_RDONLY); QVERIFY(leaked > 2);
     const auto result = runAndWait(shell(QStringLiteral("for fd in 0 1 2 %1; do [ -e /dev/fd/$fd ] && printf '%s ' $fd; done; :").arg(leaked)));
