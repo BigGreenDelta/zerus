@@ -1549,7 +1549,9 @@ machine: in single quotes on Unix machines, and with backslashes for a session o
 this Windows computer, in double quotes when a path has spaces or shell-special
 characters, or in single quotes when it has `$` or a backtick, which PowerShell
 would expand inside double quotes. Remote drops first copy files to the session host, limited to eight
-files, 10 MiB each and 20 MiB total.
+files, 10 MiB each and 20 MiB total. The copy is bound to the session's run and
+conversation. An untracked shell (`hgs sh -d`) has neither: its copy is bound to
+the live session's creation time and refused when a tracked run owns the session.
 Changing tab, session or connection during transfer cancels insertion.
 **Open externally** and **Copy connect command** retain access from other clients.
 
