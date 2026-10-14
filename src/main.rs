@@ -32,7 +32,10 @@ fn main() {
     let code = match cli::dispatch(std::env::args().skip(1).collect()) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("hgs: {}", err.message);
+            // One write (eprintln! writes each piece on its own), so that no
+            // frame a pseudoconsole paints shows the prefix without the message.
+            let line = format!("hgs: {}\n", err.message);
+            eprint!("{line}");
             err.code
         }
     };

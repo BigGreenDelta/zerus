@@ -18,7 +18,10 @@ directory, one that `HGS_STATE_DIR` names and that is not this user's default
 (`XDG_STATE_HOME\hgs\sessions` or `~\.local\state\hgs\sessions`):
 
 - `HGS_HOST_ALLOW_UNSTAGED=1`: the host serves without the marker and from any
-  executable, and creates sessions without the marker.
+  executable, and creates sessions without the marker. The processes of those
+  sessions inherit it, so their supervisors (`hgs --run`) and tracking hooks
+  (`hgs __state hook`) run where local sessions are off; every other command
+  stays a control console's there.
 - `HGS_HOST_IMAGE=<absolute path of an hgs.exe>`: `__host call --start` starts that
   executable. Any build works, so a test can pair one CLI with another host.
 
@@ -98,10 +101,11 @@ process's environment minus the variables of a session it runs in, plus the
 launch's own; the launching side sets `HGS_EXECUTABLE` to the stable CLI and the
 host sets `HGS_HOST_SESSION`, `HGS_HOST_PANE` and `TERM`. Programs are found with
 `PATHEXT`; an npm command shim runs Node.js on its script, and any other batch
-file is refused. Tracked Claude Code, Codex and Kimi sessions are refused until
-their Windows hook form is settled (spec D12; `HGS_TRACKING=0` runs them
-untracked), and attaching a terminal (`hgs a`, a launch without `-d`) waits for
-the attach client (M5). In a new Git Bash window, as above:
+file is refused. Claude Code, Codex and Kimi run tracked, with hgs's hooks in
+their configuration ([below](#tracked-agents); `HGS_TRACKING=0` runs them
+untracked).
+`hgs a` and a launch without `-d` attach the console they run in
+([below](#attaching-a-terminal)). In a new Git Bash window, as above:
 
 ```sh
 cargo build --locked && cargo build --locked --example fake_agent
@@ -164,29 +168,124 @@ With recovery enabled (`hgs recovery set`), `hgs recovery get` asks a running ho
 to supervise the stable CLI's `hgs.exe recovery worker` (D14); without a host
 nothing starts one.
 
+## Tracked agents
+
+A tracked Claude Code, Codex or Kimi session writes hgs's hooks into the agent's
+configuration in the forms of spec D12 (`src/state/hooks.rs`), which spike S6
+confirmed with the real agents. Hooks, once written, are kept: try them only with
+a private agent home, the home variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`KIMI_CODE_HOME`) naming a directory of the test, never the agent's own. In a
+window prepared as in "Local sessions through the CLI", with a fake agent named
+`claude` that answers hgs's version probe:
+
+```sh
+cp target/debug/examples/fake_agent.exe "$root/bin/claude.exe"
+mkdir "$root/claude-home"
+export CLAUDE_CONFIG_DIR="$(cygpath -w "$root/claude-home")"
+FAKE_AGENT_PROBE_TEXT='2.1.296 (Claude Code)' FAKE_AGENT_PROMPT='claude> ' \
+    "$hgs" claude "$project" --new -n tracked -d
+cat "$root/claude-home/settings.json"     # exec form: the stable CLI, args __state hook
+"$hgs" inspect claude/project/tracked      # conversation_id from the SessionStart hook
+"$hgs" kill claude/project/tracked
+```
+
+Hooks name the stable CLI with forward slashes. Claude Code from 2.1.296 gets its
+exec form (`command` and `args`, no shell), an older one the shell form
+`"C:/…/hgs.exe" __state hook` with Git Bash; Codex gets the shell form as `command`
+and `& "C:/…/hgs.exe" __state hook; exit $LASTEXITCODE` as `commandWindows`, which
+it runs with PowerShell (`-NoProfile -Command`); Kimi gets the shell form in its
+`config.toml` block and runs it with `%COMSPEC% /d /s /c`. PowerShell cannot run the
+shell form. Before anything is written, the supervisor refuses a Claude Code whose
+version cannot be read or that is older and finds no Git Bash, and a stable CLI
+path that a hook command would read differently; `HGS_TRACKING=0` runs such an
+agent untracked. The fake agent runs each configuration's hooks the way its agent
+does.
+
+## Attaching a terminal
+
+`hgs a SESSION` and a launch without `-d` attach the console they run in to the
+session (spec D13; `src/host/attach.rs`), as the GUI's embedded terminal runs
+`hgs.exe a NAME --existing --run-id ID` on a pseudoconsole of its own. Standard
+input and output must both be a console (Windows Terminal, the console host, a
+pseudoconsole) that takes terminal sequences. The mintty window that the Git
+Bash shortcut opens gives pipes, which are refused before anything is created,
+resumed or attached (`attaching needs a console`, exit 1): use Git Bash inside
+Windows Terminal, or `winpty`. The client gets a repaint of the pane, then its
+output as it comes, written with `WriteConsoleW`; the console keeps its own
+scrollback, as there is no alternate screen around the session. The pane takes
+the size of the client that was active last, and an attached launch starts the
+session at the console's size.
+
+| Keys | What happens |
+|---|---|
+| `Ctrl+B d`, `Ctrl+B Ctrl+D` | detach: `[detached (from session NAME)]`, exit 0 |
+| `Ctrl+B Ctrl+B` | one Ctrl+B reaches the agent (tmux `send-prefix`) |
+| `Ctrl+B`, then any other key | both reach the agent unchanged |
+
+Keys inside a bracketed paste are never bindings, and ESC with Ctrl+B in one read
+is Meta+Ctrl+B. Ctrl+C reaches the agent as a key; Ctrl+Break is ignored. At the
+end the client resets what the session may have left on (mouse, paste, focus and
+keypad modes, the alternate screen, a hidden cursor), restores the console modes
+it found and moves below the last row. The session's end prints `[exited]` (exit
+0). The host's death prints `hgs: the session host died; terminal restored,
+sessions on this box are gone` (exit 1), as the tmux backend reports a dead
+server. `--existing` never creates or resumes a session, and `--run-id` refuses a
+changed run (`session run changed; refresh before reconnecting`, exit 1). While a
+client is attached, `hgs ls --json` lists it in `clients` by an opaque ID such as
+`c1`; the local box also carries `local_host` (`state`: `not-installed`,
+`stopped`, `running` or `unavailable`; `pid`, `protocol`, `conpty`, `integrity`
+and `windows_session` of a running host, null otherwise). In a window prepared as
+above that is a console, before its `rm -rf`:
+
+```sh
+"$hgs" fake_agent "$project" --new -n four -d -- --prompt 'fake> '
+"$hgs" a fake_agent/project/four       # type, then Ctrl+B d
+"$hgs" ls --json --local               # local_host; clients while attached
+"$hgs" fake_agent "$project" --new -n five -- --prompt 'fake> '  # created and attached
+```
+
 ## Running the tests
 
 ```sh
 cargo test --locked -- host:: state::backend state::control_console_tests platform::windows::tests </dev/null
 cargo build --locked
 cargo build --locked --example fake_agent
+cargo test --locked --no-run --bin hgs   # names the test binary, target/debug/deps/hgs-<hash>.exe
+HGS_TEST_BIN="$(cygpath -w "$PWD/target/debug/hgs.exe")" target/debug/deps/hgs-<hash>.exe host::attach </dev/null
 python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
 python -m unittest discover -s tests -p test_windows_host.py -v -k Staged </dev/null
 python -m unittest discover -s tests -p test_windows_lifecycle.py -v </dev/null
+python -m unittest discover -s tests -p test_windows_hooks.py -v </dev/null
 ```
 
 The Rust filter `host::supervisor` includes
 `a_supervisor_reports_its_console_and_pauses_its_group`, which runs the test binary
 as a supervisor on a pseudoconsole of an in-process host and its raw-input agent.
+`host::attach::console_tests::hgs_attaches_inside_a_pseudoconsole` runs the
+`hgs.exe` that `HGS_TEST_BIN` names (it is skipped without it, as a unit test
+cannot tell whether a build it finds is current) as `hgs a` on a pseudoconsole of
+the test against an isolated host of that build: the repaint, keys and the prefix
+bindings, a resize, `--existing --run-id`, the session's end and the host's
+death, and the console modes before, during and after each attach. Run it from
+the test binary itself: `cargo test` keeps its tests in a job that forbids
+breakaway, where hgs starts no host (D4), so under `cargo test` it skips.
 `tests/test_windows_host.py`, `tests/test_windows_host_survival.py` and
 `tests/test_windows_lifecycle.py` take the build from `HGS_TEST_BIN` (default
 `target/debug/hgs.exe`) and the fake agent from `HGS_TEST_FAKE_AGENT` (default
 `target/debug/examples/fake_agent.exe`); their fake agent cases skip without one.
 The lifecycle cases install into a temporary profile as `Staged` does and launch
 from the build under test, which plays the portable copy: sessions must still run
-the staged stable CLI. The `windows-desktop` CI job runs the host and survival
-modules against the release `hgs.exe`
-([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)).
+the staged stable CLI. Their `Attach` cases run `hgs a` and an attached launch on
+a pseudoconsole of the test (`PseudoConsole`), which reads the last frame as the
+GUI does: once the program has exited, it closes the pseudoconsole and reads its
+output to the end. `Listings` checks `local_host` in the local box.
+`tests/test_windows_hooks.py` runs the hook shell form through `CreateProcess`,
+`cmd.exe` as Kimi runs it, and Git Bash when installed, Codex's PowerShell form
+through `pwsh` and Windows PowerShell as Codex runs it (as an isolated test host's
+hooks, so local sessions need not be enabled), and tracked fake agents with
+private homes in a profile whose folder name has spaces and Cyrillic. The
+`windows-desktop` CI job runs the host and survival modules against the release
+`hgs.exe` ([CI](ci-and-aur.md#windows-client-desktop-and-portable-zip)).
 
 ## Writing host tests
 

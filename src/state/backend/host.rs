@@ -10,6 +10,8 @@
 //! | `pane_info`, `probe` | `pane_info`, its fields in `PaneField` order, flags as `1` or `0` |
 //! | `on_terminal` | `pane_info`, and the agent's parent is the pane's supervisor |
 //! | `start`, `launch -d` | `create_session`, starting the host when none runs |
+//! | `attach`, `launch` | `attach` on a connection of its own (role `attach`); `launch` creates first |
+//! | `attachable` | none: this process's console and its attach modes |
 //! | `set_run_marker` | `set_environment` of `RUN_MARKER` |
 //! | `set_client`, `viewer` | `set_environment`, `show_environment` of the session variable `HGS_CLIENT` (a launch's `HGS_CLIENT` is in the supervisor's environment only) |
 //! | `rename` | `rename` |
@@ -47,20 +49,35 @@
 //! **Recovery worker (D14).** `supervise_recovery` asks the running host to
 //! supervise the recovery worker; without a host it does nothing.
 //!
-//! Attaching a terminal (`attach`, `launch` without `-d`) comes with the attach
-//! client (M5) and is refused until then.
+//! **Attach (D13).** `attach` and a launch without `-d` run the attach client
+//! (`host::attach`) on this process's console, which both standard input and
+//! output must be and which must take the attach modes (otherwise nothing is
+//! created or attached, and `attachable` refuses before the CLI resumes a saved
+//! session for an attach, as tmux refuses a client without a terminal). A
+//! launch creates the session at the console's
+//! size, then attaches by its session ID; one that ended before the attach
+//! counts as exited. With a run ID (`hgs a --existing --run-id`) the host
+//! checks the run marker as it attaches and a changed run is refused with
+//! `RUN_CHANGED`. A detach (`Ctrl+B d`, `Ctrl+B Ctrl+D`) and the session's end
+//! exit 0; a lost host connection exits 1 and, when no host runs any more,
+//! reports `HOST_DIED` as the tmux backend reports a dead server. Other
+//! refusals print the host's message and exit 1, as a failed `tmux attach`.
 // Only Windows builds use the host backend; its mapping is tested everywhere.
 #![cfg_attr(not(windows), allow(dead_code))]
 use super::{
     ClientExit, ClientRow, DryRun, InputClaim, InputState, Key, LaunchSpec, Listing, PaneField,
     PaneInfo, PanePath, PaneRow, Paste, SessionRow, StageErrors, Target, TerminalBackend,
+    RUN_CHANGED,
 };
 use crate::{
     cli::{Error, Result as CliResult},
     host::{
+        attach::{self, Outcome, Terminal, NOT_A_CONSOLE},
+        client::AttachStream,
         protocol::{
-            self, Captured, CreateSession, Created, Done, EnvValue, ErrorBody, ErrorCode,
-            HostStatus, InputReady, Listed, Op, PaneDetails, Resolved, Signal, Size, RUN_MARKER,
+            self, Attach, Attached, Captured, CreateSession, Created, Done, EnvValue, ErrorBody,
+            ErrorCode, HostStatus, InputReady, Listed, Op, PaneDetails, Resolved, Signal, Size,
+            RUN_MARKER,
         },
         spawn::{self, Environment},
     },
@@ -73,9 +90,10 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-/// What `attach` and an attached launch report until the attach client exists.
-pub(crate) const ATTACH_UNAVAILABLE: &str =
-    "attaching a terminal to a Windows session is not available yet; start the session with -d";
+/// What an attach client reports when its host has gone: the tmux backend's
+/// message for a dead server, naming the session host.
+pub(crate) const HOST_DIED: &str =
+    "hgs: the session host died; terminal restored, sessions on this box are gone";
 /// The variable that names the viewing peer (tmux keeps it in the session's
 /// environment).
 const CLIENT: &str = "HGS_CLIENT";
@@ -141,6 +159,12 @@ pub(crate) trait Connector: Sync {
     fn call(&self, op: Op) -> std::result::Result<Value, Failure>;
     /// Send a `create_session`, starting the host when none runs (D3).
     fn create(&self, op: Op) -> std::result::Result<Value, Failure>;
+    /// Attach to a session on a connection of its own, which then carries
+    /// the stream (D13); never starts a host.
+    fn attach(&self, request: Attach) -> std::result::Result<(Attached, AttachStream), Failure>;
+    /// This process's console for an attach client; None when standard input
+    /// or output is not one.
+    fn terminal(&self) -> Option<Box<dyn Terminal>>;
     /// This process's environment block, which a new session starts from (D8).
     fn environment(&self) -> Result<Environment>;
     /// The stable CLI (D2, D8).
@@ -192,6 +216,107 @@ impl<C: Connector> HostBackend<C> {
         self.call(Op::PaneInfo {
             target: target_of(target),
         })
+    }
+
+    /// Start the session `spec` describes at `size`; the host's answer.
+    fn create(&self, spec: &LaunchSpec, size: Size) -> Result<Created> {
+        let environment = session_environment(
+            self.connector.environment()?,
+            &spec.env,
+            &self.connector.stable_cli()?,
+        )?;
+        let request = create_request(spec, environment, size, || uuid::Uuid::new_v4().to_string());
+        let created = self
+            .connector
+            .create(Op::CreateSession(request))
+            .map_err(Failure::message)?;
+        serde_json::from_value::<Created>(created)
+            .map_err(|error| format!("invalid session host answer: {error}"))
+    }
+
+    /// This process's console for an attach client (D13), refused when it is
+    /// not a console or cannot take the attach modes, as a check before
+    /// anything starts: the modes themselves wait for the attach, so that
+    /// Ctrl+C still interrupts a slow start.
+    fn console(&self) -> CliResult<Box<dyn Terminal>> {
+        let terminal = self
+            .connector
+            .terminal()
+            .ok_or_else(|| Error::new(1, NOT_A_CONSOLE))?;
+        terminal
+            .enter()
+            .map_err(|error| Error::new(1, error.to_string()))?;
+        terminal.leave();
+        Ok(terminal)
+    }
+
+    /// The attach client of `hgs a` and of a launch without `-d` (D13), on
+    /// `terminal`, until a detach, the session's end or the host's loss.
+    /// `created` says that this process has just created the session, so
+    /// that a session gone before the attach has exited.
+    fn interactive(
+        &self,
+        terminal: &dyn Terminal,
+        target: protocol::Target,
+        run_id: Option<&str>,
+        created: bool,
+    ) -> CliResult<ClientExit> {
+        let exit = |code, server_died| ClientExit { code, server_died };
+        let size = terminal.size().unwrap_or(SIZE);
+        // The attach modes first: a console that cannot take them refuses
+        // before the pane takes this client's size.
+        terminal
+            .enter()
+            .map_err(|error| Error::new(1, error.to_string()))?;
+        let attached = self.connector.attach(Attach {
+            target,
+            size,
+            run_id: run_id.map(str::to_owned),
+        });
+        let (attached, stream) = match attached {
+            Ok(attached) => attached,
+            Err(failure) => {
+                terminal.leave();
+                return match failure {
+                    Failure::Host(error)
+                        if run_id.is_some() && error.code == ErrorCode::Refused =>
+                    {
+                        Err(Error::new(1, RUN_CHANGED))
+                    }
+                    // tmux attaches a new session's client as it creates
+                    // it, and reports a program that ended at once so.
+                    Failure::Host(error) if created && error.code == ErrorCode::NotFound => {
+                        println!("[exited]");
+                        Ok(exit(0, false))
+                    }
+                    failure => {
+                        eprintln!("{}", failure.message());
+                        Ok(exit(1, false))
+                    }
+                };
+            }
+        };
+        let outcome = attach::relay(&stream, terminal, &attached.name, size);
+        drop(stream);
+        terminal.leave();
+        match outcome {
+            Outcome::Detached | Outcome::Exited(_) => Ok(exit(0, false)),
+            Outcome::Failed(error) => Err(Error::new(1, format!("the console failed: {error}"))),
+            Outcome::Lost(reason) => {
+                if matches!(self.connector.call(Op::HostStatus), Err(Failure::NoHost)) {
+                    eprintln!("{HOST_DIED}");
+                    Ok(exit(1, true))
+                } else {
+                    // Whole, as `main` prints errors: the client exits next.
+                    let message = format!(
+                        "hgs: lost the connection to the session host ({reason}); \
+                         the session continues, attach again"
+                    );
+                    eprintln!("{message}");
+                    Ok(exit(1, false))
+                }
+            }
+        }
     }
 
     /// D14: ask the running host to supervise the recovery worker. Nothing
@@ -326,11 +451,12 @@ pub(crate) fn session_environment(
 }
 
 /// The `create_session` request for `spec` with `environment`, the session's
-/// whole block. `HGS_LAUNCH_ID` among the launch's variables is the launch ID;
-/// otherwise `fresh` gives one.
+/// whole block, at `size`. `HGS_LAUNCH_ID` among the launch's variables is the
+/// launch ID; otherwise `fresh` gives one.
 pub(crate) fn create_request(
     spec: &LaunchSpec,
     environment: Vec<String>,
+    size: Size,
     fresh: impl FnOnce() -> String,
 ) -> CreateSession {
     let launch_id = spec
@@ -346,7 +472,7 @@ pub(crate) fn create_request(
         cwd: spec.cwd.clone(),
         env: environment,
         argv: spec.command.clone(),
-        size: SIZE,
+        size,
     }
 }
 
@@ -485,19 +611,7 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
         self.pane_info(target, fields).ok()
     }
     fn start(&self, spec: &LaunchSpec) -> Result<()> {
-        let environment = session_environment(
-            self.connector.environment()?,
-            &spec.env,
-            &self.connector.stable_cli()?,
-        )?;
-        let request = create_request(spec, environment, || uuid::Uuid::new_v4().to_string());
-        let created = self
-            .connector
-            .create(Op::CreateSession(request))
-            .map_err(Failure::message)?;
-        serde_json::from_value::<Created>(created)
-            .map(drop)
-            .map_err(|error| format!("invalid session host answer: {error}"))
+        self.create(spec, SIZE).map(drop)
     }
     fn set_run_marker(&self, name: &str, run_id: &str) -> Result<()> {
         self.act(Op::SetEnvironment {
@@ -622,15 +736,30 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
         self.staged().remove(buffer);
     }
 
+    /// D13: an attached launch needs this process's console before anything
+    /// starts, and the session starts at its size.
     fn launch(&self, spec: &LaunchSpec) -> CliResult<ClientExit> {
-        if !spec.detached {
-            return Err(Error::new(2, ATTACH_UNAVAILABLE));
+        if spec.detached {
+            self.start(spec).map_err(|error| Error::new(1, error))?;
+            return Ok(ClientExit {
+                code: 0,
+                server_died: false,
+            });
         }
-        self.start(spec).map_err(|error| Error::new(1, error))?;
-        Ok(ClientExit {
-            code: 0,
-            server_died: false,
-        })
+        let terminal = self.console()?;
+        let size = terminal.size().unwrap_or(SIZE);
+        let created = self
+            .create(spec, size)
+            .map_err(|error| Error::new(1, error))?;
+        self.interactive(
+            &*terminal,
+            protocol::Target::Session(created.session),
+            None,
+            true,
+        )
+    }
+    fn attachable(&self) -> CliResult<()> {
+        self.console().map(drop)
     }
     fn set_client(&self, target: Target, client: &str) {
         let _ = self.act(Op::SetEnvironment {
@@ -639,8 +768,12 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
             value: Some(client.into()),
         });
     }
-    fn attach(&self, _target: Target) -> CliResult<ClientExit> {
-        Err(Error::new(2, ATTACH_UNAVAILABLE))
+    fn attach(&self, target: Target, run_id: Option<&str>) -> CliResult<ClientExit> {
+        let terminal = self
+            .connector
+            .terminal()
+            .ok_or_else(|| Error::new(1, NOT_A_CONSOLE))?;
+        self.interactive(&*terminal, target_of(target), run_id, false)
     }
     /// The host's message goes to the user's terminal, and the exit code is
     /// 1, as tmux reports a failed `kill-session`.
@@ -743,6 +876,23 @@ mod windows {
             }
         }
 
+        fn attach(
+            &self,
+            request: Attach,
+        ) -> std::result::Result<(Attached, AttachStream), Failure> {
+            let state = server::existing_state_dir()
+                .map_err(|error| Failure::Unreachable(error.to_string()))?
+                .ok_or(Failure::NoHost)?;
+            client::connect(&state, Role::Attach)?
+                .attach(request)
+                .map_err(Failure::Host)
+        }
+
+        fn terminal(&self) -> Option<Box<dyn Terminal>> {
+            crate::host::attach::Console::open()
+                .map(|console| Box::new(console) as Box<dyn Terminal>)
+        }
+
         fn environment(&self) -> Result<Environment> {
             Environment::current().map_err(|e| e.to_string())
         }
@@ -806,6 +956,22 @@ mod tests {
             let answer = (self.answer)(&op);
             self.requests.lock().unwrap().push((true, op));
             answer
+        }
+        fn attach(
+            &self,
+            request: Attach,
+        ) -> std::result::Result<(Attached, AttachStream), Failure> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((false, Op::Attach(request)));
+            Err(Failure::Unreachable(
+                "this fake host takes no clients".into(),
+            ))
+        }
+        /// Standard input and output are pipes, as in a test.
+        fn terminal(&self) -> Option<Box<dyn Terminal>> {
+            None
         }
         fn environment(&self) -> Result<Environment> {
             Environment::parse([
@@ -1524,6 +1690,7 @@ mod tests {
                 true,
             ),
             vec!["A=1".into()],
+            SIZE,
             || unreachable!("a launch ID was given"),
         );
         assert_eq!(
@@ -1540,9 +1707,20 @@ mod tests {
         let request = create_request(
             &spec(&["HGS_LAUNCH_ID="], &command, true),
             Vec::new(),
+            Size {
+                cols: 120,
+                rows: 40,
+            },
             || "made-up".into(),
         );
         assert_eq!(request.launch_id, "hgs-start-made-up");
+        assert_eq!(
+            request.size,
+            Size {
+                cols: 120,
+                rows: 40
+            }
+        );
         assert_eq!(
             listed_launch_id("hgs-start-0b6f4c9e-3c1d-4b8f-9a35-6f2e2d6f6a10"),
             ""
@@ -1596,19 +1774,19 @@ mod tests {
     }
 
     #[test]
-    fn attaching_is_refused_before_anything_starts() {
+    fn without_a_console_attaching_is_refused_before_anything_starts() {
         let backend = HostBackend::new(Fake::done());
         for result in [
             backend
                 .launch(&spec(&[], &[r"C:\hgs.exe", "--run", "0", "x"], false))
                 .map(|exit| exit.code),
-            backend.attach(Target::Name("x/p")).map(|exit| exit.code),
+            backend
+                .attach(Target::Name("x/p"), Some("run-1"))
+                .map(|exit| exit.code),
+            backend.attachable().map(|()| 0),
         ] {
             let error = result.unwrap_err();
-            assert_eq!(
-                (error.code, error.message.as_str()),
-                (2, ATTACH_UNAVAILABLE)
-            );
+            assert_eq!((error.code, error.message.as_str()), (1, NOT_A_CONSOLE));
         }
         assert!(requests(&backend).is_empty());
     }

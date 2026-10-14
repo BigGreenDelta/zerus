@@ -1789,6 +1789,13 @@ A computer that runs no sessions of its own (`hgs.exe` on Windows) adds
 appears only when false; a missing key means true, so Linux and macOS snapshots
 are unchanged. [Windows control console](#windows).
 
+On Windows the local box also carries `local_host`, the session host as found
+(never started): `state` is `not-installed`, `stopped`, `running` or `unavailable`
+(with `error`), and `pid`, `protocol`, `conpty` (`bundled` or `inbox`), `integrity`
+and `windows_session` describe a running host and are null otherwise. Its sessions
+list attached clients in `clients` by opaque IDs such as `c1` instead of tty paths.
+Linux and macOS snapshots have no `local_host`.
+
 Tracked live sessions add resumability and activity. Saved sessions use
 `state: paused|stopped`, zero attached clients and an empty clients array.
 Archives add `archive_id` and `archived_at`; missing state remains compatible with

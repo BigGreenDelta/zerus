@@ -70,6 +70,9 @@ def open_host(pid, created):
 
 @unittest.skipUnless(os.name == "nt", "the session host runs on Windows only")
 class HostCase(unittest.TestCase):
+    # The temporary profile's folder name, below the case's temporary folder.
+    PROFILE = "home"
+
     def setUp(self):
         if not HGS.is_file():
             raise AssertionError(f"{HGS} is missing; run cargo build --locked")
@@ -77,7 +80,7 @@ class HostCase(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.state = self.root / "state"
-        self.home = self.root / "home"
+        self.home = self.root / self.PROFILE
         self.work = self.root / "work"
         for path in (self.state, self.home, self.work):
             path.mkdir()

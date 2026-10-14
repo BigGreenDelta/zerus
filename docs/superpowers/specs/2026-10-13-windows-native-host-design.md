@@ -86,7 +86,10 @@ exports `HGS_STATE_DIR`, so the variable alone proves nothing). There
 `HGS_HOST_ALLOW_UNSTAGED=1` lets the host serve without the marker and from any
 image, and `HGS_HOST_IMAGE` names the executable `__host call --start` starts;
 elsewhere the first is ignored and the second is an error
-([testing the host](../../windows-host-testing.md)).
+([testing the host](../../windows-host-testing.md)). The processes of such a test
+host's sessions inherit the override: their `--run` supervisors and `__state`
+tracking hooks run without the marker, while every other command, and both of these
+without the override, stay refused as on a Phase 1 control console.
 
 The compile-time `platform::LOCAL_SESSIONS` (`src/platform/mod.rs:27`) becomes a
 run-time check: always true on Unix; on Windows true when the marker exists. Its
@@ -97,7 +100,10 @@ is running": saved sessions live in the state directory, and a host crash must n
 turn the computer back into a control console. On Windows the local box also carries
 `local_host` with `state` (`not-installed`, `stopped`, `running`, `unavailable`),
 `pid`, `protocol`, `conpty` (`bundled` or `inbox`), `integrity` and `windows_session`.
-Unix output is unchanged.
+Unix output is unchanged. Implemented in M5 (`host::admin::Host::listing_json`): every
+key is present, the five facts are null unless a host answers, an `unavailable` host
+adds `error`, and a stopped host of a computer without the marker is `not-installed`;
+the control-console box carries it too.
 
 **One CLI over the state directory.** Once enabled, the GUI runs the stable CLI, not
 the `hgs.exe` in its own folder. When the GUI's bundled `hgs.exe` is newer than the
@@ -433,10 +439,9 @@ ID is in the supervisor's own job (the session job). Editors and pagers are `vi`
 ### D12. Hooks on Windows
 
 Hook bytes, once written, are kept (`src/state/hooks.rs:152-162,211-221`), so the
-first Windows form must be final. Until it is settled, Windows refuses tracked
-Claude Code, Codex and Kimi launches before anything is written
-(`state::tracking_available`); untracked sessions (`HGS_TRACKING=0`, any other
-program) run. The form:
+first Windows form had to be final. Spike S6 settled it (results below), and
+tracked Claude Code, Codex and Kimi sessions run on Windows as on Unix;
+`HGS_TRACKING=0` runs them untracked. The form:
 
 - the command names the stable CLI (D8) by its absolute path with forward slashes in
   double quotes, followed by `__state hook`, which Git Bash, `cmd.exe` and a direct
@@ -452,6 +457,70 @@ program) run. The form:
 Spikes never write hooks into real agent configuration: every spike uses private
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME`. Spike S6 fixes the exact form
 per agent version.
+
+Implemented in M4.3 (`src/state/hooks.rs`) and enabled once S6 passed. What each
+agent runs, read on 2026-10-14 from Claude Code 2.1.296's settings schema and hook runner
+(strings of the win32 build), Codex 0.162.0's source (`hooks/src/engine`,
+`config/src/hook_config.rs`) and Kimi Code 2.1.1's bundled source
+(`externalHooks/internal/runHook.ts`):
+
+- **Claude Code** documents the exec form: "When present, `command` is resolved as
+  an executable and spawned directly with these arguments — no shell." Without
+  `args` it runs the command with Git Bash, and without Git Bash with PowerShell
+  (`-Command`), which reads `"C:/…/hgs.exe" __state hook` as a string followed by
+  unexpected tokens: the shell form cannot run there. hgs reads `claude --version`
+  once, when it first writes hooks into a configuration: from 2.1.296 (the oldest
+  version reviewed with the exec form) it writes
+  `{"type":"command","command":"C:/…/hgs.exe","args":["__state","hook"],"timeout":5}`;
+  an older version gets the shell form when Git Bash is found as Claude Code finds
+  it (`CLAUDE_CODE_GIT_BASH_PATH`, Git for Windows in Program Files, the `git` on
+  PATH) and is refused otherwise. A version that cannot be read is refused, as a
+  form chosen without it would be kept.
+- **Codex** prefers `commandWindows` on Windows and runs a command hook with the
+  session's shell (`build_hooks_config` in `core/src/session/mod.rs`, from 0.140 to
+  0.162), which `default_user_shell` makes PowerShell there: `pwsh`, else Windows
+  PowerShell, as `-NoProfile -Command COMMAND`. Only a session without one ready
+  local environment, which hgs never starts, or a computer without PowerShell uses
+  `cmd.exe /C "COMMAND"`.
+  PowerShell reads the shell form's quoted program as a string, runs it only with
+  its call operator, and turns a native exit code other than 0 or 1 into 1. hgs
+  writes the shell form as `command` and
+  `& "C:/…/hgs.exe" __state hook; exit $LASTEXITCODE` as `commandWindows`; the
+  command never reads `$input`, so PowerShell leaves the payload on standard input
+  to hgs (PowerShell 7's console host reads it only for a command that uses
+  `$input`). A stable CLI path with `“`, `”` or `„`, which PowerShell also reads as
+  double quotes, is refused.
+- **Kimi Code** runs `[[hooks]] command` with Node.js `spawn(command, {shell: true})`,
+  that is `%COMSPEC% /d /s /c "COMMAND"`; it gets the shell form. On Windows the
+  block's marker lines may end with CR LF; Unix keeps its LF-only search.
+- The shell form refuses a stable CLI path that has `%`, `!`, `$`, `` ` `` or `"`
+  (read differently by `cmd.exe` or bash inside double quotes) or that is not an
+  absolute drive or UNC path; spaces, Cyrillic, `&`, `^`, `(`, `)`, `;` and `'` are
+  fine. Existing hgs entries are repeated exactly for new events, exec form
+  included, and Unix keeps its forms and recognition byte for byte.
+
+**S6 results (2026-10-14).** Real Claude Code 2.1.296, Codex 0.162.0 and Kimi Code
+2.1.1 ran through the host with private homes on Windows 11 Pro 10.0.26200 (bundled
+ConPTY 1.25.260930003, Windows PowerShell 5.1.26100, real-time scanning off). All
+eight scenarios passed; the real homes were unchanged and no process was left.
+
+- Claude Code's exec form delivers SessionStart, UserPromptSubmit, PreToolUse,
+  PostToolUse, Stop and SessionEnd: UserPromptSubmit about 0.1 s and Stop 0.22-0.37 s
+  after the prompt. Pause takes 0.1 s, SessionStart confirms a resume 0.9 s later,
+  and terminate (0.1 s) archives the session. The shell form runs under Git Bash;
+  with `"shell": "powershell"` it never runs.
+- Codex runs `commandWindows` with Windows PowerShell 5.1 and prefers it to a Unix
+  `command`; the shell form as the only `command` never runs. UserPromptSubmit
+  arrives about 1-2 s and Stop 2-3 s after the prompt (5.6 s for a turn with a
+  tool); a resumed conversation is confirmed only by Codex's next message.
+- Kimi runs the shell form through `cmd /d /s /c`. Pause takes 4.9 s and
+  SessionStart confirms a resume after 5.6 s; a CRLF `config.toml` with a complete
+  hgs block gets no second block.
+- A prompt with Cyrillic and Latin diacritics reaches hgs intact through each
+  runner (no shell, PowerShell, `cmd.exe`).
+- The whole hook path (a Stop replayed through `hgs __state hook`) takes a median of
+  37-38 ms, p95 at most 41 ms; a bare `hgs.exe` start takes 25 ms. Hooks under
+  real-time scanning remain S7's question.
 
 ### D13. Attach
 
@@ -475,6 +544,33 @@ per agent version.
   inside its own pseudoconsole. This doubles the ConPTY layer but needs no GUI
   protocol change; the host-as-sole-responder rule (D6) keeps queries answered once.
 - `clients` in `ls --json` lists opaque client IDs on Windows (no tty paths).
+
+Implemented in M5 (`src/host/attach.rs`, `state::backend::host`):
+
+- The client writes the repaint and the relayed output as they come; it draws no
+  screen of its own, so there is no alternate screen around the session and the
+  client console keeps its scrollback. A host notice has no status line to show on
+  and is ignored.
+- Prefix keys: `Ctrl+B d` and `Ctrl+B Ctrl+D` detach, `Ctrl+B Ctrl+B` sends one
+  Ctrl+B, and any other key after Ctrl+B passes through with the Ctrl+B, unchanged
+  (tmux would run or swallow a binding; the client has no others, and dropping keys
+  would lose input). Keys inside a bracketed paste are text, as in tmux; ESC and
+  Ctrl+B in one read are Meta+Ctrl+B.
+- Standard input and output must both be a console that takes the attach modes;
+  pipes, files and a legacy console are refused before anything is created,
+  resumed or attached (`TerminalBackend::attachable`), as tmux refuses a client
+  without a terminal. The input mode also sets `ENABLE_WINDOW_INPUT`; the window
+  size is also polled, because a classic console window sends no event when only
+  its height changes. Ctrl+C and Ctrl+Break events are ignored while attached.
+- At the end the client resets the modes a session may leave on its terminal (as
+  tmux does on detach), leaves the alternate screen only when the session had
+  entered it, moves below the last row and prints tmux's `[detached (from session
+  NAME)]` or `[exited]` (exit 0). A lost connection exits 1; when no host answers
+  any more the client prints `hgs: the session host died; terminal restored, sessions
+  on this box are gone`, the tmux backend's message naming the session host.
+- An attached launch creates the session at the console's size, then attaches by
+  session ID; a session that ended before the attach counts as exited. With
+  `--run-id` the host checks the run marker again as it attaches.
 
 ### D14. Workers
 
@@ -571,14 +667,16 @@ spike records its results in Beads and adjusts this document.
 | S6 | after M3 | Hook forms per agent version: Claude exec form and Git Bash form, Codex Windows command, Kimi command shell; hook latency with real-time scanning. | D12 |
 | S7 | after M3 | Start cost of `hgs.exe` and hooks under real-time scanning; SQLite journal writes within the 5 s hook timeout. | D12, M4 |
 
-Status on 2026-10-13: S1 is done (results in D6, D7, D8). S2 and S5 probes are done
-(results in D10, D11) and are confirmed through the host after M3. S4 is folded into
-the M3/M7 host survival tests. S7's baseline on the development PC: `hgs.exe` starts
-in about 11 ms warm and 132 ms for a freshly built image, and a Git Bash hook takes
-about 55 ms; that PC has no real-time scanning, so the scanning half of S7 needs
-another machine. S3 and S6 are pending.
+Status on 2026-10-14: S1 is done (results in D6, D7, D8). S3 is done (2026-10-13;
+its report is kept outside the repository, and the M4 parser changes it called for
+landed in PR #33). S6 is done (2026-10-14; results in D12). S2 and S5 probes are
+done (results in D10, D11) and are confirmed through the host after M3. S4 is folded
+into the M3/M7 host survival tests. S7's baseline on the development PC: `hgs.exe`
+starts in about 11 ms warm and 132 ms for a freshly built image, and a Git Bash hook
+takes about 55 ms; S6 measured a 25 ms start and a 37-38 ms whole hook path there.
+That PC has no real-time scanning, so the scanning half of S7 needs another machine.
 
-D10, D11 and D12 are provisional until their spikes are confirmed.
+D10 and D11 are provisional until their spikes are confirmed through the host.
 
 ## Milestones
 
@@ -612,14 +710,15 @@ one.
   2026-10-14: untracked sessions, PowerShell, listings, rename, kill and the
   backend's input and paste paths; M4.2, the supervisor channel, input evidence,
   pause and terminate, exit evidence and the recovery worker (D9-D11, D14),
-  implemented 2026-10-14 and run with untracked sessions; tracked agents wait for
-  D12): host backend
+  implemented 2026-10-14 and run with untracked sessions; M4.3, the hook forms
+  (D12), implemented 2026-10-14 and enabled for tracked agents once S6 passed the
+  same day): host backend
   client, launch and accounts (D8), supervisor
   and signals (D11), identity, input evidence (D10), hooks (D12), recovery worker
   (D14), Windows dialog fixtures and path-aware screen parsers
   (`src/state/codex_trust.rs:33,49`, `claude_permission.rs:94`,
   `clear_context.rs:90-93`), open-file holders for Codex resume input.
-- **M5 Attach client and listings** (D13, `local_host`).
+- **M5 Attach client and listings** (D13, `local_host`; implemented 2026-10-14).
 - **M6 GUI** (D15 local folders, D16).
 - **M7 Tests, CI, packaging and docs**: a native `examples/fake_agent.rs` (raw input
   recorder, fixture renderer, mode toggles, hook emitter); one backend contract suite

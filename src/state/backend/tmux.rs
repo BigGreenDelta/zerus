@@ -496,7 +496,9 @@ impl TerminalBackend for Tmux {
             ],
         );
     }
-    fn attach(&self, target: Target) -> CliResult<ClientExit> {
+    /// tmux attaches by the session ID the caller resolved after checking the
+    /// run; it has no run check of its own.
+    fn attach(&self, target: Target, _run_id: Option<&str>) -> CliResult<ClientExit> {
         let code = platform::wait_interactive(Command::new("tmux").args([
             "-u",
             "attach-session",

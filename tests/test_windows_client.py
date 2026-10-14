@@ -254,6 +254,38 @@ class WindowsClient(unittest.TestCase):
                 self.assertIn(message, result.stderr)
         self.assertEqual(self.calls(), [])
 
+    def test_only_an_isolated_test_host_session_reaches_state_and_run(self):
+        # Sessions of an isolated test host run `--run` and `__state` (their
+        # hooks) where local sessions are off (src/host/gate.rs): with
+        # HGS_HOST_ALLOW_UNSTAGED=1 and an existing HGS_STATE_DIR that is not
+        # the profile's default one.
+        state, default = self.root / 'state', self.home / '.local' / 'state' / 'hgs' / 'sessions'
+        state.mkdir()
+        default.mkdir(parents=True)
+        session = dict(HGS_SESSION='claude/p/t', HGS_RUN_ID='run')
+        isolated = dict(HGS_HOST_ALLOW_UNSTAGED='1', HGS_STATE_DIR=str(state))
+        result = self.hgs('__state', 'hook', input='{}', **session, **isolated)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('hook did not supply a valid session_id', result.stderr)
+        # Every other command stays a control console's.
+        for args in (['a', 'claude/p'], ['inspect', 'claude/p'], ['kill', 'claude/p'], ['claude']):
+            with self.subTest(isolated=args):
+                result = self.hgs(*args, input='{}', **isolated)
+                self.assertEqual((result.returncode, result.stderr), (2, LOCAL), result.stdout)
+        # Without the override, or for any other state directory, nothing opens.
+        missing = self.root / 'missing'
+        for extra in (dict(HGS_STATE_DIR=str(state)),
+                      dict(HGS_HOST_ALLOW_UNSTAGED='true', HGS_STATE_DIR=str(state)),
+                      dict(HGS_HOST_ALLOW_UNSTAGED='1'),
+                      dict(HGS_HOST_ALLOW_UNSTAGED='1', HGS_STATE_DIR=str(default)),
+                      dict(HGS_HOST_ALLOW_UNSTAGED='1', HGS_STATE_DIR=str(missing))):
+            for args in (['__state', 'hook'], ['--run', '0', 'cmd', '/c', 'exit', '0']):
+                with self.subTest(env=extra, args=args):
+                    result = self.hgs(*args, input='{}', **session, **extra)
+                    self.assertEqual((result.returncode, result.stderr), (2, LOCAL), result.stdout)
+        self.assertFalse(missing.exists())
+        self.assertEqual(self.calls(), [])
+
     def test_local_box_is_control_only(self):
         box = self.json('ls', '--json', '--local')
         self.assertEqual({key: box[key] for key in ('host', 'ok', 'projects', 'sessions', 'peers', 'local_sessions')},

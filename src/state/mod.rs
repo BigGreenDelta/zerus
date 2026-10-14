@@ -104,21 +104,18 @@ pub(super) fn local_sessions() -> Result<()> {
     }
 }
 
-/// Why a Windows computer refuses tracked agents for now.
-const TRACKING_UNAVAILABLE: &str = "tracked Claude Code, Codex and Kimi sessions are not \
-    available on Windows yet: their tracking hooks are not settled. Set HGS_TRACKING=0 to run \
-    the agent untracked";
-
-/// Whether tracked agents (Claude Code, Codex and Kimi under the `--run`
-/// supervisor) run here. Not on Windows until their hook form is settled (spec
-/// D12): hook commands, once written into an agent's configuration, are kept
-/// for ever, so no provisional form may ever be written.
-pub(crate) fn tracking_available() -> Result<()> {
-    if cfg!(windows) {
-        Err(TRACKING_UNAVAILABLE.into())
-    } else {
-        Ok(())
+/// `local_sessions` for `dispatch`, which the processes of a session reach:
+/// `hgs __state` from its tracking hooks and a tracked `--run` supervisor. On
+/// Windows it also admits a session of an isolated test host, which may run
+/// where local sessions are off (`host::gate::test_session`, spec D2); every
+/// other entry point stays a control console's there.
+pub(crate) fn session_operations() -> Result<()> {
+    let enabled = local_sessions();
+    #[cfg(windows)]
+    if enabled.is_err() && crate::host::gate::test_session() {
+        return Ok(());
     }
+    enabled
 }
 
 /// Whether the automatic recovery worker holds its lock; unknown without local
@@ -498,7 +495,7 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
 pub fn dispatch(args: &[String]) -> Result<i32> {
-    local_sessions()?;
+    session_operations()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());
     };
@@ -700,6 +697,40 @@ mod control_console_tests {
         );
         let error = with_launch_binding("claude/p", |_| Ok(())).unwrap_err();
         assert_eq!(error.to_string(), UNSUPPORTED);
+
+        // The sessions of an isolated test host reach `dispatch` (their hooks)
+        // without the marker: under the override, for an existing state
+        // directory that HGS_STATE_DIR names and that is not the profile's
+        // default one. Nothing else opens.
+        use crate::host::gate::ALLOW_UNSTAGED;
+        let hook = || dispatch(&["hook".into()]);
+        for name in ["HGS_SESSION", "HGS_RUN_ID"] {
+            std::env::remove_var(name);
+        }
+        let state = PathBuf::from(std::env::var_os("HGS_STATE_DIR").unwrap());
+        std::env::set_var(ALLOW_UNSTAGED, "1");
+        assert_eq!(hook().unwrap_err(), UNSUPPORTED);
+        std::fs::create_dir_all(&state).unwrap();
+        assert_eq!(hook(), Ok(0));
+        assert_eq!(session_operations(), Ok(()));
+        assert_eq!(local_sessions().unwrap_err(), UNSUPPORTED);
+        assert_eq!(
+            merge_snapshot(json!({"sessions":[]})).unwrap_err(),
+            UNSUPPORTED
+        );
+        assert_eq!(startup_failure("claude/p").unwrap_err(), UNSUPPORTED);
+        std::env::set_var(ALLOW_UNSTAGED, "true");
+        assert_eq!(hook().unwrap_err(), UNSUPPORTED);
+        std::env::set_var(ALLOW_UNSTAGED, "1");
+        let profile = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
+        let default = profile.join(r".local\state\hgs\sessions");
+        std::fs::create_dir_all(&default).unwrap();
+        std::env::set_var("HGS_STATE_DIR", &default);
+        assert_eq!(hook().unwrap_err(), UNSUPPORTED);
+        std::env::set_var("HGS_STATE_DIR", &state);
+        std::env::remove_var(ALLOW_UNSTAGED);
+        assert_eq!(hook().unwrap_err(), UNSUPPORTED);
+
         // The marker alone opens the entry points.
         let layout = crate::host::staging::Layout::current().unwrap();
         assert!(crate::host::staging::enable(&layout.marker).unwrap());
@@ -722,6 +753,7 @@ mod control_console_tests {
             .env("HGS_STATE_DIR", dir.path().join("state"))
             .env_remove("HGS_CONFIG_DIR")
             .env_remove("XDG_STATE_HOME")
+            .env_remove(crate::host::gate::ALLOW_UNSTAGED)
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap();
