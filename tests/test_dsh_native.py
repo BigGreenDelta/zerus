@@ -428,6 +428,8 @@ class NativeHarness(unittest.TestCase):
         stored=json.loads(result.stdout)
         self.assertEqual(stored['events'],[]);self.assertFalse(stored['send_supported']);self.assertTrue(stored['read_only'])
         self.assertEqual(stored['parent_conversation_id'],parent['conversation_id'])
+        # A never-started child is a finished one-shot child, not an unknown one.
+        self.assertEqual(stored['phase'],'idle');self.assertEqual(stored['child_mode'],'one-shot')
         native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
         self.assertFalse(native['live']);self.assertEqual(native['page']['records'],[])
         done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['phase']=='idle' else None)
