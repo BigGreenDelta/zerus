@@ -964,7 +964,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         emit refreshRequested();
     });
-    connect(&m_client, &HgsClient::questionAnswered, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &receipt) {
+    connect(&m_client, &HgsClient::questionAnswered, this, [this](quint64 request, const QString &, const QString &name, const QJsonObject &receipt) {
         const auto pending = m_pendingAnswers.value(request);
         // Hook review and Codex's native installer continue in Terminal.
         const bool openTerminal = !pending.key.isEmpty() && pending.key == m_selectedKey
@@ -972,8 +972,22 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             && pending.questionHash == receipt.value("question_hash").toString()
             && m_details.value("run_id") == receipt.value("run_id")
             && receipt.value("open_terminal").toBool();
+        // After Update now, the receipt says whether Codex still runs its
+        // installer or has exited; older hosts omit it.
+        QString updateNotice;
+        if (!pending.key.isEmpty() && pending.questionId.startsWith("codex-update:")
+            && pending.questionHash == receipt.value("question_hash").toString()) {
+            const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == pending.key; });
+            const QString target = entry == m_entries.cend() ? name : tr("%1 (%2)").arg(entry->session.name, entry->machine);
+            const QString phase = receipt.value("codex_update").toString();
+            if (phase == "installing")
+                updateNotice = tr("Codex in %1 is installing its update in Terminal. Resume the session after Codex exits.").arg(target);
+            else if (phase == "exited")
+                updateNotice = tr("Codex in %1 exited after its update. Check the result in Terminal, then resume the session.").arg(target);
+        }
         finishQuestion(request, true);
         if (openTerminal) { m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession(); }
+        if (!updateNotice.isEmpty()) showNotice(updateNotice);
     });
     connect(&m_client, &HgsClient::questionAnswerFailed, this, [this](quint64 request, const QString &, const QString &, const QString &error, bool uncertain) {
         finishQuestion(request, false, error, uncertain);
