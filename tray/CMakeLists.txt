@@ -193,10 +193,10 @@ if(LINUX)
         PRIVATE Qt6::Widgets KF6::StatusNotifierItem KF6::IdleTime)
 endif()
 # Windows Terminal and console windows (hgs-tray.exe --console-run hosts the
-# latter), tray-icon notifications and the swarm worker the tray runs itself
-# (Windows has no user service manager).
+# latter), tray-icon notifications, the swarm worker the tray runs itself
+# (Windows has no user service manager) and the note while it picks its hgs.
 add_library(hgs-tray-windows STATIC src/WindowsTerminalBackend.cpp src/ConsoleHost.cpp
-    src/WindowsAttentionNotifier.cpp src/SwarmWorkerSupervisor.cpp)
+    src/WindowsAttentionNotifier.cpp src/SwarmWorkerSupervisor.cpp src/StartupNotice.cpp)
 target_link_libraries(hgs-tray-windows PUBLIC hgs-tray-core Qt6::Widgets)
 if(NOT WIN32)
     set_target_properties(hgs-tray-windows PROPERTIES EXCLUDE_FROM_ALL TRUE)

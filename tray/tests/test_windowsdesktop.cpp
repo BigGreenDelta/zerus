@@ -5,6 +5,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QProcess>
+#include <QScreen>
 #include <QSignalSpy>
 #include <QSystemTrayIcon>
 #include <QTemporaryDir>
@@ -17,6 +18,7 @@
 #include "ConsoleHost.h"
 #include "FakeCli.h"
 #include "SessionCommands.h"
+#include "StartupNotice.h"
 #include "SwarmWorkerSupervisor.h"
 #include "TrayIcon.h"
 #include "WindowsConsole.h"
@@ -29,7 +31,8 @@
 // Windows desktop pieces whose logic is portable: the Windows Terminal and console
 // commands (Windows Terminal is never started and no console window is shown:
 // that would open windows on the desktop; the console host runs hidden), terminal
-// templates, tray-icon notifications and the supervised swarm worker.
+// templates, tray-icon notifications, the supervised swarm worker and the note
+// while the tray picks its hgs.
 namespace {
 class RecordingTrayIcon : public TrayIcon {
 public:
@@ -95,6 +98,7 @@ private slots:
     void workerIsRestartedAfterExitAndStopsWithTheTray();
     void stoppingEndsARunningWorker();
     void restartedWorkersStayInAKillOnCloseJob();
+    void startupNoticeAppearsOnlyForASlowCheck();
 };
 
 void TestWindowsDesktop::terminalStartsTheProgramDirectly()
@@ -486,6 +490,32 @@ void TestWindowsDesktop::restartedWorkersStayInAKillOnCloseJob()
     QVERIFY(!worker.workerContained());
     QCOMPARE(contained, QList<bool>(contained.size(), true));
 #endif
+}
+
+void TestWindowsDesktop::startupNoticeAppearsOnlyForASlowCheck()
+{
+    // A quick check shows nothing.
+    {
+        StartupNotice notice(60000);
+        notice.step("status");
+        QTest::qWait(50);
+        QVERIFY(!notice.isVisible());
+    }
+    StartupNotice notice(50);
+    notice.step("status");
+    QVERIFY(!notice.isVisible());
+    QTRY_VERIFY(notice.isVisible());
+    QCOMPARE(notice.text(), QString("Starting Zerus…"));
+    // A passive note: no title bar, and the focus stays where it is.
+    QCOMPARE(notice.windowType(), Qt::SplashScreen);
+    QVERIFY(notice.windowFlags().testFlag(Qt::FramelessWindowHint));
+    QVERIFY(notice.testAttribute(Qt::WA_ShowWithoutActivating));
+    // A refresh changes the visible note, which stays centred.
+    notice.step("install");
+    QVERIFY(notice.isVisible());
+    QCOMPARE(notice.text(), QString("Starting Zerus…\nUpdating the hgs command line for local sessions"));
+    const QPoint offset = notice.geometry().center() - notice.screen()->availableGeometry().center();
+    QVERIFY2(offset.manhattanLength() <= 2, qPrintable(QString("%1,%2").arg(offset.x()).arg(offset.y())));
 }
 
 QTEST_MAIN(TestWindowsDesktop)
