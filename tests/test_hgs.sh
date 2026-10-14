@@ -914,6 +914,28 @@ session = next(s for s in json.load(open(sys.argv[1]))['sessions'] if s['name'] 
 assert session['launch_id'] == sys.argv[2], session
 PY
   then pass=$((pass+1)); echo "ok   launch token survives listing and collision"; else fail=$((fail+1)); echo "FAIL launch token was lost or overwritten"; fi
+  # A session that ends before a listing shows it, leaving no record, still ends the
+  # GUI's launch placeholder: the listing reports its launch as ended (no supervisor ran,
+  # so no exit code). The running group-test launch is not reported.
+  gone_launch=5f0e3a1c-2b7d-4e8a-9c6f-1d2e3f4a5b6c
+  out="$(SHELL="$(command -v false)" "$HGS" sh "$P" --new -d -n gone --launch-id "$gone_launch" 2>&1)"; rc=$?
+  if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q "started sh/sample-project/gone" \
+     && python3 - "$HGS" "$gone_launch" "$launch_id" <<'PY'
+import json, subprocess, sys, time
+deadline = time.monotonic() + 10
+while True:
+    box = json.loads(subprocess.run([sys.argv[1], 'ls', '--json', '--local'], capture_output=True, text=True,
+                                    check=True).stdout)
+    ended = {launch['launch_id']: launch for launch in box.get('ended_launches', [])}
+    if sys.argv[2] in ended or time.monotonic() > deadline:
+        break
+    time.sleep(0.1)
+assert ended.get(sys.argv[2]) == {'launch_id': sys.argv[2], 'name': 'sh/sample-project/gone', 'code': None,
+                                  'output': ''}, box
+assert sys.argv[3] not in ended, box
+assert all(session['name'] != 'sh/sample-project/gone' for session in box['sessions']), box
+PY
+  then pass=$((pass+1)); echo "ok   a launch whose session is gone is listed as ended"; else fail=$((fail+1)); echo "FAIL a launch whose session is gone is not listed as ended"; printf '%s\n' "$out" | sed 's/^/     /'; fi
   t kill-session -t '=sh/sample-project/group-test' 2>/dev/null || true
 fi
 

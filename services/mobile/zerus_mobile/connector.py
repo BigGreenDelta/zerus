@@ -460,6 +460,9 @@ class Connector:
         if not isinstance(snapshot, dict) or not isinstance(snapshot.get("sessions"), list):
             raise ConnectorError("native snapshot has invalid format")
         snapshot.pop("peers", None)  # Native SSH aliases and peer-of-peer inventory stay local.
+        # Ended launches carry the last screen lines of failed starts for the
+        # desktop's placeholders; terminal text never leaves this computer.
+        snapshot.pop("ended_launches", None)
         # Presence ages on every listing; keeping it out of the snapshot preserves
         # the relay's unchanged-snapshot shortcut.
         presence = snapshot.pop("desktop_presence", None)

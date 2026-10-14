@@ -92,16 +92,25 @@ class SessionActions(unittest.TestCase):
             result=subprocess.run([str(HGS),'inspect',self.name],env=self.env,text=True,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
             return json.loads(result.stdout)
+        def marked(signature):
+            # `hgs read` (desktop mark-read, phone mark_read) acknowledges only the current attention.
+            data=dict(run_id=self.run_id,conversation_id=self.conversation_id,reply_id=None,attention_signature=signature)
+            return self.request('read',data)['applied']['attention_signature']
         pending()
         # The panel, then Yes before the command shows its elapsed time.
         for column,fixture in enumerate(['claude-bash-safety.txt','claude-approval-starting.txt'],start=2):
             show(fixture,column)
             self.assertEqual((listed()['phase'],inspected()['phase']),('approval','approval'),fixture)
             self.assertIn('pending_approval',json.loads(self.record_path.read_text()))
+            signature=listed()['attention_signature']
+            self.assertTrue(marked(signature),fixture)
+            self.assertIn('pending_approval',json.loads(self.record_path.read_text()))
         show('claude-approval-running.txt',5)
-        self.assertEqual(listed()['phase'],'tool')
+        # Marking read settles it first, so the waiting request is no longer current.
+        self.assertFalse(marked(signature))
         state=json.loads(self.record_path.read_text())
         self.assertEqual((state['phase'],state['activity'],'pending_approval' in state),('tool','busy',False))
+        self.assertEqual((listed()['phase'],listed()['attention_signature']),('tool',None))
         # No or Esc, with the composer or the one-time auto-mode nudge below.
         for column,fixture in enumerate(['claude-approval-denied.txt','claude-approval-denied-nudge.txt'],start=6):
             pending();show(fixture,column)
@@ -110,6 +119,10 @@ class SessionActions(unittest.TestCase):
             state=json.loads(self.record_path.read_text())
             self.assertEqual((state['phase'],state['activity'],state['active_tools'],'pending_approval' in state),
                              ('interrupted','unknown',{},False))
+        pending();show('claude-approval-denied.txt',8)
+        self.assertFalse(marked('0'*64))
+        state=json.loads(self.record_path.read_text())
+        self.assertEqual((state['phase'],'pending_approval' in state),('interrupted',False))
         self.assertEqual(self.received(),b'')
     def test_changed_turn_and_idle_state_receive_nothing(self):
         self.working('codex');data=dict(self.identity(),expected_turn_started=self.record['turn_started']-1)

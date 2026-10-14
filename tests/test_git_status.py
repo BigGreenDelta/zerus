@@ -3,12 +3,12 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
 import time
 import unittest
-import sys
 
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
@@ -155,16 +155,17 @@ class GitStatus(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 4)
 
     def test_checkout_changes_during_remote_verification_are_not_certified(self):
-        fake = Path(self.env['HOME']) / '.local/bin'
-        fake.mkdir(parents=True)
-        program = fake / 'git'
-        real = shutil.which('git')
-        program.write_text('#!' + sys.executable + '\nimport os,sys\nfrom pathlib import Path\n'
-                           'if "ls-remote" in sys.argv:\n Path(' + repr(str(self.repo / 'new-during-check')) + ').write_text("changed")\n'
-                           'os.execv(' + repr(real) + ', [' + repr(real) + '] + sys.argv[1:])\n')
-        program.chmod(0o755)
-        self.env['PATH'] = str(fake) + os.pathsep + self.env['PATH']
-        self.assertEqual(self.status()['state'], 'changed_during_check')
+        # The remote side of ls-remote changes the checkout, so the change lands
+        # after the first status read and before the recheck. Local Git reads stay
+        # unwrapped: a slow PATH wrapper could spend their deadline, and a failed
+        # upstream lookup skips remote verification altogether.
+        hook = self.root / 'upload-pack'
+        hook.write_text('#!/bin/sh\nprintf changed > ' + shlex.quote(str(self.repo / 'new-during-check'))
+                        + '\nexec git upload-pack "$@"\n')
+        hook.chmod(0o755)
+        self.git('-C', str(self.repo), 'config', 'remote.origin.uploadpack', shlex.quote(str(hook)))
+        data = self.status()
+        self.assertEqual((data['state'], data['remote_state']), ('changed_during_check', 'verified'))
         refreshed = self.status()
         self.assertEqual((refreshed['state'], refreshed['changed_files']), ('ok', 1))
 
