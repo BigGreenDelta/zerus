@@ -94,13 +94,16 @@ class SessionActions(unittest.TestCase):
         from pathlib import Path
         path=Path(staged['files'][0]['path']);self.assertEqual(path.read_bytes(),b'untracked fixture')
         self.assertTrue(path.is_relative_to(self.state/'attachments'));self.assertEqual(path.stat().st_mode&0o777,0o600)
-        # Another session under that name, an ended one, or a missing creation time.
+        # Another session under that name, an unknown name, or a missing creation time.
         self.assertIn('Session changed',self.request('attachment',dict(data,expected_created=created-1),ok=False,name=shell))
-        self.assertIn('Session changed',self.request('attachment',data,ok=False,name='sh/ended'))
+        self.assertIn('Session changed',self.request('attachment',data,ok=False,name='sh/unknown'))
         self.assertIn('no saved binding',self.request('attachment',{k:v for k,v in data.items() if k!='expected_created'},ok=False,name=shell))
         # A tracked run whose identity the caller has not loaded yet.
         tracked=int(self.tmux('display-message','-p','-t','='+self.name+':','#{session_created}'))
         self.assertIn('Wait for the session identity',self.request('attachment',dict(data,expected_created=tracked),ok=False))
+        # The shell ended after the listing that named it.
+        self.tmux('kill-session','-t','='+shell)
+        self.assertIn('Session changed',self.request('attachment',data,ok=False,name=shell))
         self.assertEqual(self.received(),b'')
 
 if __name__=='__main__':unittest.main()
