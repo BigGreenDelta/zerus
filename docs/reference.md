@@ -1419,7 +1419,9 @@ A continuation goes only to an agent that the failure stopped. When the agent
 keeps working after a provider error that followed an accepted continuation, the
 episode returns to **Recovery in progress** with the same attempt count: nothing
 further is scheduled or delivered while it works, and its answer completes the
-episode.
+episode. An account has one recovery request in flight at a time, until the agent
+accepts the continuation and makes progress, so a long working turn does not hold
+the account's other sessions at **Waiting to retry**.
 
 Provider failures replace Working or Compacting with a specific state such as
 **Usage limit reached**, **Model at capacity** or **Sign-in failed** and appear

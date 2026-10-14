@@ -344,6 +344,19 @@ fn working_on_continuation(job: &Value, s: &Value) -> bool {
         && job["attempt"].as_u64().unwrap_or(0) > 0
         && ["working", "tool", "compacting"].contains(&string(s, "phase"))
 }
+/// An account has one recovery request in flight at a time, until the agent
+/// accepts its continuation and then makes progress: from there the provider
+/// serves the account again, and a long working turn must not hold the
+/// account's other sessions at "Waiting to retry".
+fn occupies(job: &Value, s: &Value) -> bool {
+    match string(job, "state") {
+        "dispatching" => true,
+        "retrying" => !(job["acknowledged"] == true
+            && s["phase"] != "error"
+            && seconds(s, "provider_status_at") > seconds(job, "user_at")),
+        _ => false,
+    }
+}
 fn schedule(job: &mut Value, s: &Value, time: f64) {
     job["action"] = json!(adapter(s));
     let category = class(&s["provider_error"]);
@@ -636,7 +649,7 @@ fn tick() -> Result<()> {
         let mut occupied = std::collections::BTreeSet::new();
         for s in &snapshots {
             let job = load_job(string(s, "name"));
-            if job["state"] == "dispatching" || job["state"] == "retrying" {
+            if occupies(&job, s) {
                 occupied.insert(json!([s["agent"], s["account_id"]]).to_string());
             }
         }
@@ -1385,6 +1398,33 @@ mod tests {
         failed["provider_error"] = json!({"source":"provider_hook","message_id":"limit-3","at":60.0,"detail":"429 Too many requests"});
         let next = advance(job, &failed, &on(), 61.0);
         assert_eq!((&next["state"], &next["attempt"], &next["class_attempt"]), (&json!("waiting"), &json!(1), &json!(1)));
+    }
+    #[test]
+    fn an_accepted_continuation_releases_the_account_once_the_agent_progresses() {
+        let mut s = snapshot("claude");
+        let mut job = advance(Value::Null, &s, &on(), 11.0);
+        assert!(!occupies(&job, &s));
+        job["state"] = json!("dispatching");
+        assert!(occupies(&job, &s));
+        job["state"] = json!("retrying");
+        job["sent_at"] = json!(20.0);
+        job["acknowledged"] = json!(false);
+        s["phase"] = json!("working");
+        s["provider_error"] = Value::Null;
+        s["provider_status_at"] = json!(25.0);
+        assert!(occupies(&job, &s), "delivery is unconfirmed");
+        job["acknowledged"] = json!(true);
+        job["user_at"] = json!(21.0);
+        s["provider_status_at"] = json!(21.0);
+        assert!(occupies(&job, &s), "the agent accepted it but nothing followed yet");
+        s["provider_status_at"] = json!(21.5);
+        assert!(!occupies(&job, &s), "the provider serves the account again");
+        s["phase"] = json!("error");
+        assert!(occupies(&job, &s));
+        for state in ["waiting", "succeeded", "cancelled", "uncertain", "blocked", "exhausted"] {
+            job["state"] = json!(state);
+            assert!(!occupies(&job, &s), "{state}");
+        }
     }
     #[test]
     fn late_acknowledgement_cannot_restart_an_uncertain_episode() {
