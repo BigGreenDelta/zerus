@@ -2487,7 +2487,8 @@ void TestSessionsWindow::refreshErrorsStayInComposerAndFooterWithoutMovingViews(
         {"runtime_state","live"},{"process_state","running"},{"phase","idle"},{"activity","idle"},
         {"events",QJsonArray{}},{"cursor",0}};
     const auto fixture = programInspecting("inline-status", details); QVERIFY(!fixture.isEmpty());
-    SessionsWindow window(fixture); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    // A poll that succeeds clears the injected failure before the views are checked.
+    SessionsWindow window(fixture); window.setFleet(fleet()); keepDetailsPollsOut(window); window.show(); window.showSession({}, "codex/hgs/dashboard");
     auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
     QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
@@ -5594,7 +5595,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     local.sessions.append(old); local.sessions.append(recent); state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program());
     auto *client = window.findChild<HgsClient *>(); QSignalSpy inspected(client, &HgsClient::inspectionReady);
-    window.setFleet(state); window.show();
+    window.setFleet(state); keepDetailsPollsOut(window); window.show();
     auto *list = window.findChild<QListWidget *>("sessionList");
     auto filter = [&](const QString &id) -> QPushButton * {
         for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == id) return button;
@@ -5616,7 +5617,9 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     QTest::mouseDClick(list->viewport(), Qt::LeftButton, {}, list->visualItemRect(list->item(0)).center());
     QCOMPARE(terminal.size(), 0); QCOMPARE(writes.size(), 0);
     // Wait for this archive's fixture reply before injecting late replies. A
-    // fixed delay can let a slow subprocess replace the injected details.
+    // fixed delay can let a slow subprocess replace the injected details. Selecting
+    // the archive started the only inspection of it: with polls kept out, none
+    // follows that reply to replace the injected prompt with the fixture's details.
     QTRY_VERIFY(std::any_of(inspected.cbegin(), inspected.cend(), [&](const QList<QVariant> &reply) {
         return reply[0].toString().isEmpty() && reply[1].toString() == recent.name
             && reply[3].toString() == recent.archiveId;
