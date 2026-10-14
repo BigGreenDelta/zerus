@@ -16,7 +16,7 @@ from unittest.mock import patch
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
 SSH = r'''#!/usr/bin/env python3
-import json, os, pathlib, shlex, subprocess, sys, time
+import json, os, pathlib, shlex, stat, subprocess, sys, time
 root = pathlib.Path(os.environ['MOBILE_PEERS_TEST_ROOT'])
 alias = sys.argv[-2]
 args = shlex.split(sys.argv[-1])[1:]
@@ -35,9 +35,17 @@ if (root / ('old-' + alias)).exists() or (root / ('flip-' + alias)).exists():
 if (root / ('delay-' + alias)).exists() and args[:2] == ['swarm', '__mobile-peer-identity']:
     time.sleep(4)
 if (root / 'discovery-hang').exists() and args[:2] == ['swarm', '__mobile-peer-identity']:
+    # Pipes beyond stdio would be another transport's ends.
+    inherited = []
+    for name in os.listdir('/dev/fd'):
+        try:
+            if int(name) > 2 and stat.S_ISFIFO(os.fstat(int(name)).st_mode):
+                inherited.append(int(name))
+        except OSError:
+            pass  # The listing's own descriptor is closed by now.
     # The test reads the file as soon as it exists: publish it whole.
     staged = root / ('discovery-pids-' + alias + '.tmp')
-    staged.write_text(json.dumps([os.getpid(), os.getppid()]))
+    staged.write_text(json.dumps(dict(pids=[os.getpid(), os.getppid()], inherited=inherited)))
     staged.replace(root / ('discovery-pids-' + alias))
     time.sleep(30); sys.exit(0)
 if args[:2] == ['swarm', '__mobile-peer-local']:
@@ -412,22 +420,43 @@ time.sleep(10)
         (self.root / 'a/machines.local.json').write_text('{"machines":{}}')
         (self.root / 'discovery-hang').touch()
         env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(self.root / 'a/state'))
-        process = subprocess.Popen([str(HGS), 'swarm', 'mobile-peers', '--json'], env=env,
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
         paths = [self.root / ('discovery-pids-' + alias) for alias in ['b', 'c', 'd']]
         # Each peer's identity transport starts after the local identity and its own
-        # support probe, all separate processes: allow the 10 s discovery deadline.
-        until = time.monotonic() + 10
-        while not all(path.exists() for path in paths) and time.monotonic() < until:
-            time.sleep(.01)
-        self.assertTrue(all(path.exists() for path in paths))
-        pids = [pid for path in paths for pid in json.loads(path.read_text())]
+        # support probe, all separate processes, each stage within its own 3 s cap.
+        # A stage stalled beyond its cap leaves that peer offline and the gateway
+        # then finishes: bounded discovery, not the reaping under test. Only such
+        # a finished discovery is started again, as is one that reaped its own
+        # transports before this test could kill it.
+        stalled, receipts, owned = [], [], False
+        for _ in range(3):
+            for path in paths:
+                path.unlink(missing_ok=True)
+            process = subprocess.Popen([str(HGS), 'swarm', 'mobile-peers', '--json'], env=env,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.addCleanup(lambda process=process: process.kill() if process.poll() is None else None)
+            # The gateway's own exit ends the wait; the bound only guards a hang.
+            until = time.monotonic() + 20
+            while not all(path.exists() for path in paths) and process.poll() is None and time.monotonic() < until:
+                time.sleep(.01)
+            receipts += [json.loads(path.read_text()) for path in paths if path.exists()]
+            if all(path.exists() for path in paths):
+                pids = [pid for path in paths for pid in json.loads(path.read_text())['pids']]
+                owned = process.poll() is None and all(self.running(pid) for pid in pids)
+                if owned:
+                    break
+                # Its own deadline already stops them; the discovery deadline bounds the rest.
+                process.wait(timeout=10)
+            self.assertIsNotNone(process.poll(), 'discovery outlived its deadline')
+            stalled.append((process.returncode, process.communicate(timeout=5)[1].decode(errors='replace'),
+                            [path.name for path in paths if not path.exists()]))
+        self.assertTrue(owned, stalled)
         process.kill()
         process.wait(timeout=5)
         process.stdout.close()
         process.stderr.close()
         self.assert_owned_transports_exit(pids)
+        # Concurrent workers never hand one transport another's pipe ends.
+        self.assertEqual([receipt['inherited'] for receipt in receipts], [[]] * len(receipts))
 
     def test_supervisor_rejects_arbitrary_helpers_and_deadline_overrides(self):
         original = dict(schema=1, via='b', helper='help', request=None, parent_pid=os.getpid(), deadline_ms=int(time.monotonic()*1000)+2000)
