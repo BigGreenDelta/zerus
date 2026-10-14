@@ -9,7 +9,7 @@ use crate::{
     store::{Credential, Role, Store},
 };
 use axum::{
-    body::Body,
+    body::{Body, BodyDataStream},
     extract::{ConnectInfo, Request, State},
     http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
@@ -70,7 +70,10 @@ async fn discard(request: Request, maximum: usize) {
     if request.headers().contains_key(header::EXPECT) {
         return;
     }
-    let mut stream = request.into_body().into_data_stream();
+    drain(request.into_body().into_data_stream(), maximum).await;
+}
+/// Reads and drops about `maximum` more bytes for at most two seconds.
+async fn drain(mut stream: BodyDataStream, maximum: usize) {
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
         let mut discarded = 0usize;
         while let Some(Ok(chunk)) = stream.next().await {
@@ -189,13 +192,13 @@ impl App {
                 .try_acquire_many_owned(length.unwrap_or(0) as u32)
                 .map_err(|_| Error::BUSY)
         };
-        match admission {
-            Ok(permit) => budget.keep(permit),
+        let admission = match admission {
+            Ok(permit) => permit,
             Err(error) => {
                 discard(request, maximum).await;
                 return Err(error);
             }
-        }
+        };
         let mut raw = Vec::with_capacity(length.unwrap_or(65536).min(maximum));
         let mut body = request.into_body().into_data_stream();
         let deadline =
@@ -209,10 +212,15 @@ impl App {
             };
             let chunk = chunk.map_err(|_| Error::BAD)?;
             if raw.len().saturating_add(chunk.len()) > maximum {
+                // A stream over its limit releases the payload and its large
+                // lane or body budget before the rest is discarded.
+                drop((raw, chunk, admission));
+                drain(body, maximum).await;
                 return Err(Error::LARGE);
             }
             raw.extend_from_slice(&chunk);
         }
+        budget.keep(admission);
         let depth = self.cfg.max_json_depth;
         let values = self.cfg.max_json_values;
         self.work(budget, move || json::parse(&raw, depth, values))

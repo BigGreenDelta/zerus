@@ -2727,6 +2727,69 @@ async fn http_rate_and_lane_refusals_are_answered_after_bounded_drain() {
 }
 
 #[tokio::test]
+async fn http_streamed_body_over_limit_releases_lane_before_bounded_drain() {
+    use tokio::io::AsyncWriteExt;
+    let f = Fixture::new().await;
+    let app = App::new(f.store.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(serve(listener, app, stop.clone()));
+    let node = s(&f.credentials, "node_token");
+    let head = format!("POST /v1/node/heartbeat HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {node}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+    let chunk = |data: &[u8]| {
+        let mut framed = format!("{:x}\r\n", data.len()).into_bytes();
+        framed.extend_from_slice(data);
+        framed.extend_from_slice(b"\r\n");
+        framed
+    };
+    let piece = chunk(&[b' '; 64 * 1024]);
+    let too_large = |response: &str| refused(response, "413", "payload exceeds limit");
+    // A streamed heartbeat crosses its 1 MiB cap while the client is still
+    // sending. The client finishes its upload and reads 413, not a reset.
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    for _ in 0..20 {
+        stream
+            .write_all(&piece)
+            .await
+            .expect("the relay reads the rest of a stream it refuses");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    stream.write_all(b"0\r\n\r\n").await.unwrap();
+    let response = answer(stream).await;
+    assert!(too_large(&response), "{response}");
+    // A stream that stops after crossing the cap is answered at the discard
+    // deadline. Its discard no longer holds the sole large payload lane: an
+    // unknown-length upload is admitted meanwhile and fails only as JSON.
+    let mut stalled = tokio::net::TcpStream::connect(address).await.unwrap();
+    stalled.write_all(head.as_bytes()).await.unwrap();
+    for _ in 0..17 {
+        stalled.write_all(&piece).await.unwrap();
+    }
+    let mut admitted = None;
+    for _ in 0..40 {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(&chunk(b"{")).await.unwrap();
+        stream.write_all(b"0\r\n\r\n").await.unwrap();
+        let response = answer(stream).await;
+        if !response.starts_with("HTTP/1.1 429 ") {
+            admitted = Some(response);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let admitted = admitted.expect("the refused stream released the large payload lane");
+    assert!(refused(&admitted, "400", "invalid request"), "{admitted}");
+    let response = answer(stalled).await;
+    assert!(too_large(&response), "{response}");
+    stop.cancel();
+    server.await.unwrap().unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
 async fn mark_read_payload_is_exact_and_capability_gated() {
     let f = Fixture::new().await;
     let id = Uuid::new_v4().to_string();
