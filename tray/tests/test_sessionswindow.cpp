@@ -269,6 +269,7 @@ private slots:
     void activityAttachmentsOpenLikeDownloads();
     void fileReferenceOpeningOutlivesDialog_data();
     void fileReferenceOpeningOutlivesDialog();
+    void terminalDropQuotesPathsForTheMachine();
     void folderShellFollowsTheMachinePlatform();
     void remoteFileDownloads_data();
     void remoteFileDownloads();
@@ -4111,7 +4112,13 @@ void TestSessionsWindow::terminalDropKeepsActivityDraftAndDoesNotSubmit()
     QCOMPARE(tabs->currentWidget(),terminal);QCOMPARE(composer->editor()->toPlainText(),QString("Keep Activity draft"));
     QCOMPARE(composer->findChildren<QWidget *>("attachmentRow").size(),0);QCOMPARE(sent.size(),0);
     QByteArray pasted;for(const auto &item:output)pasted+=item.first().toByteArray();
-    QVERIFY(pasted.contains("report'\\''s draft.pdf"));QVERIFY(!pasted.contains('\r'));QVERIFY(!pasted.contains('\n'));
+#ifdef Q_OS_WIN
+    // This Windows computer reads native paths (terminalDropQuotesPathsForTheMachine).
+    QVERIFY(pasted.contains(('"'+QDir::toNativeSeparators(path)+'"').toUtf8()));
+#else
+    QVERIFY(pasted.contains("report'\\''s draft.pdf"));
+#endif
+    QVERIFY(!pasted.contains('\r'));QVERIFY(!pasted.contains('\n'));
     output.clear();QDragEnterEvent second(QPoint(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&second);
     tabs->setCurrentIndex(0);QDropEvent stale(QPointF(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&stale);
     QVERIFY(!stale.isAccepted());
@@ -4690,6 +4697,60 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
     }
     QTRY_COMPARE(opened.urls.size(), 1);
     QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(folder ? directory.path() : path));
+}
+
+void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
+{
+    // The local Windows machine reads native paths in double quotes; a peer's staged
+    // copies and a POSIX local machine keep single quotes.
+    const auto program=m_dir->filePath("terminal-quoting-hgs");QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write("#!/usr/bin/env python3\nimport json,os,runpy,sys\na=sys.argv[1:]\nif a and a[0].startswith('@'):a=a[1:]\n"
+        "if a[:1]==['a']:\n if os.name!='nt':\n  import tty;tty.setraw(0)\n"
+        " sys.stdout.write('\\x1b[?2004h');sys.stdout.flush();sys.stdin.buffer.read();sys.exit(0)\n"
+        "if a[:1]==['attachment']:\n p=json.load(sys.stdin)\n"
+        " print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],"
+        "status='staged',files=[dict(path=\"/srv/inbox/report's draft.pdf\") for _ in p['attachments']])));sys.exit(0)\n"
+        "sys.argv[0]="+FakeCli::pythonString(script())+";runpy.run_path(sys.argv[0],run_name='__main__')\n");
+    fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    QStringList paths;
+    for(const auto &name:{QString("plain.txt"),QString("report's draft.pdf"),QString("a&b.txt")}) {
+        QFile file(m_dir->filePath(name));QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture");paths<<file.fileName();
+    }
+    QMimeData mime;QList<QUrl> urls;for(const auto &path:paths)urls<<QUrl::fromLocalFile(path);mime.setUrls(urls);
+    const auto native=[](QString path){return path.replace('/','\\');};
+    const auto drop=[&](SessionsWindow &window,const QString &host,const QString &name) {
+        window.showSession(host,name);
+        auto *terminal=window.findChild<TerminalView *>();auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");
+        tabs->setCurrentWidget(terminal);if(!QTest::qWaitFor([&]{return terminal->isConnected();},10000))return QByteArray();QTest::qWait(150);
+        QSignalSpy output(terminal->terminalScreen(),&TerminalScreen::output);
+        auto *panel=window.findChild<QWidget *>("sessionDetailPanel");
+        QDragEnterEvent enter(QPoint(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&enter);
+        QDropEvent event(QPointF(10,10),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(panel,&event);
+        if(!event.isAccepted())return QByteArray();
+        QByteArray pasted;
+        (void)QTest::qWaitFor([&]{pasted.clear();for(const auto &item:output)pasted+=item.first().toByteArray();return pasted.contains(".txt")||pasted.contains(".pdf");},20000);
+        return pasted;
+    };
+    for(const auto &platform:{QString("windows"),QString("linux")}) {
+        auto state=fleet();auto local=state.local();local.metrics["platform"]=platform;
+        state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+        auto mac=*state.peer("mac");mac.sessions[0].runId="run-mac";mac.sessions[0].conversationId="conversation-mac";
+        state.setPeer(mac,QDateTime::currentMSecsSinceEpoch());
+        SessionsWindow window(FakeCli::program(program));window.setFleet(state);window.resize(1100,760);window.show();
+        const auto pasted=QString::fromUtf8(drop(window,{},"codex/hgs/dashboard"));
+        if(platform=="windows") {
+            QVERIFY2(pasted.contains(native(paths[0])+" \""+native(paths[1])+"\" \""+native(paths[2])+"\" "),qPrintable(pasted));
+            QVERIFY(!pasted.contains('/'));QVERIFY(!pasted.contains('\''+native(paths[1])));
+        } else {
+            QVERIFY2(pasted.contains('\''+paths[0]+"' '"+QString(paths[1]).replace("'","'\\''")+"' '"+paths[2]+"' "),qPrintable(pasted));
+            QVERIFY(!pasted.contains('"'));
+        }
+        // A peer's staged copies keep POSIX quoting whatever this computer runs.
+        const auto remote=QString::fromUtf8(drop(window,"mac","claude/infra/review"));
+        QVERIFY2(remote.contains("'/srv/inbox/report'\\''s draft.pdf' '/srv/inbox/report'\\''s draft.pdf' '/srv/inbox/report'\\''s draft.pdf' "),
+                 qPrintable(remote));
+        QVERIFY(!remote.contains('"'));QVERIFY(!remote.contains('\\'+QString("srv")));
+    }
 }
 
 void TestSessionsWindow::folderShellFollowsTheMachinePlatform()

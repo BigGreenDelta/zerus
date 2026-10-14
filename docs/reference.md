@@ -1481,8 +1481,11 @@ behavior. The vendored terminal engine is libvterm 0.3.3 under MIT; builds do no
 download it. Rendering updates changed cells and the cursor rather than scanning
 the full screen for every small change.
 
-Dropping files into Terminal inserts paths without Enter. Remote drops first copy
-files to the session host, limited to eight files, 10 MiB each and 20 MiB total.
+Dropping files into Terminal inserts paths without Enter, quoted for the session's
+machine: in single quotes on Unix machines, and with backslashes for a session on
+this Windows computer, in double quotes when a path has spaces or shell-special
+characters. Remote drops first copy files to the session host, limited to eight
+files, 10 MiB each and 20 MiB total.
 Changing tab, session or connection during transfer cancels insertion.
 **Open externally** and **Copy connect command** retain access from other clients.
 

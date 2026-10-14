@@ -1955,9 +1955,15 @@ QString SessionsWindow::terminalDropTarget() const
 
 void SessionsWindow::pasteTerminalPaths(const QStringList &paths)
 {
+    // A local Windows session gets native paths, in double quotes when needed (no
+    // Windows name contains one); POSIX machines, including every peer, single quotes.
+    const auto *entry=selected();
+    const bool windows=entry&&MachinePlatform::of(m_fleet.local().metrics,entry->host.isEmpty())==MachinePlatform::Style::Windows;
+    static const QRegularExpression plain("^[\\w.:\\\\~+-]+$",QRegularExpression::UseUnicodePropertiesOption);
     QStringList quoted;
     for(auto path:paths) {
         if(path.contains(QRegularExpression("[\\x00-\\x1f\\x7f]"))) {showNotice(tr("File names containing control characters cannot be pasted into Terminal."),true);return;}
+        if(windows){path=MachinePlatform::native(path,MachinePlatform::Style::Windows);quoted<<(plain.match(path).hasMatch()?path:'"'+path+'"');continue;}
         path.replace('\'',QStringLiteral("'\\''"));quoted<<'\''+path+'\'';
     }
     m_terminal->pasteText(quoted.join(' ')+" ");m_terminal->setFocus(Qt::OtherFocusReason);
