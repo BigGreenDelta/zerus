@@ -232,6 +232,8 @@ required environment is already available. Never put private keys in wrappers.
 
 The tray's **Open Zerus**, a left click or `hgs-tray --sessions` opens the workspace.
 On macOS, use `~/Applications/hgs-tray.app/Contents/MacOS/hgs-tray --sessions`.
+On Windows, starting `hgs-tray.exe` without options opens it too; `--background`
+starts in the tray only ([Windows](#windows)).
 Repeated launch raises the existing window. Closing it leaves the tray and agents
 running. The executable, bundle path, bundle ID and service names remain `hgs-tray`
 for compatibility. Windows, notifications, the tray, `--version` and the Linux launcher
@@ -621,8 +623,10 @@ session Working.
 File links retain their visible path and source position. Relative references
 resolve against that session's folder. On Windows, references may also name a drive
 path (`C:\work\a.cpp:12`, `C:/work/a.cpp` or `file:///C:/work/a.cpp`); a share
-(`\\server\share\…`) never opens. Local references can open the file or its
-parent folder; remote references identify the host and offer **Download…** and
+(`\\server\share\…`) never opens. The file dialog shows and copies a path on this
+Windows computer with backslashes (`C:\work\a.cpp`); remote machines keep their
+`/` separators. Local references can open the file or its parent folder; remote
+references identify the host and offer **Download…** and
 **Download and open…**, with a local Save dialog, plus an SSH terminal. Downloads
 use that machine's configured SSH profile and SFTP, stream directly to disk and
 replace the chosen destination only after a successful transfer. Errors remain
@@ -1217,6 +1221,8 @@ without connecting; `hgs machine resolve ALIAS` exposes the same result.
 interactive host-key verification. **Install hgs** builds the CLI remotely from
 a selected checkout while preserving existing state. Unsaved machine drafts do
 not change configuration; **Discard draft** removes the draft explicitly.
+Zerus lists a machine's sessions and connection state under its alias, even when
+that machine calls itself something else (its `HGS_SELF` or host name).
 
 Multiple machine filters narrow both sessions and content search. Label color,
 Bright/Soft mode and appearance previews are local. **All machines** clears the
@@ -1720,9 +1726,11 @@ No reverse connection is created by default. Explicit peer setup uses
 | `--icon-color COLOR` | Override tray mark/counter foreground |
 | `--open-mode MODE` | Linux auto/tab/window/clipboard; macOS terminal/clipboard; Windows auto/tab/window/console/clipboard |
 | `--selftest` | Headless hgs connectivity check |
-| `--sessions` | Open the workspace |
+| `--sessions` | Open the workspace; on Windows also the default |
+| `--background` | Start in the tray only; the default on Linux and macOS. Not together with `--sessions` |
 
-A single-instance socket forwards repeated launches to the running GUI.
+A single-instance socket forwards repeated launches to the running GUI: one that
+would open the workspace opens it there.
 The desktop version appears in the rail and Settings. **Settings → About** also
 shows the configured `hgs` CLI version, read when About opens; an unavailable or
 unrecognized response remains explicit instead of using a compiled-in value.
@@ -1812,8 +1820,14 @@ this computer as a control console without SSH settings. Settings → Mobile
 connection is hidden, automatic recovery settings are saved to the first
 reachable remote machine, no desktop presence is recorded, and this computer is
 listed at most once every 15 seconds. Attention notices are tray notifications
-with a taskbar badge. After a main-thread watchdog abort, Windows Error Reporting
-restarts the app with the same options.
+with a taskbar badge. A start without options opens the workspace, because
+Windows 11 first hides a new notification icon in the overflow; `--background`
+starts in the notification area only, as a Startup-folder shortcut should.
+Starting `hgs-tray.exe` again opens the running app's workspace, unless with
+`--background`. After a main-thread watchdog abort, Windows Error Reporting
+restarts the app with the same settings in the background (`--background`,
+never `--sessions`): a window that opens by itself after a crash would be a
+surprise.
 
 **Updates.** The portable zip has no installer or self-update, and only nightly
 releases carry it. Settings → Updates therefore uses the nightly channel by
@@ -1875,6 +1889,11 @@ Tracked live sessions add resumability and activity. Saved sessions use
 `state: paused|stopped`, zero attached clients and an empty clients array.
 Archives add `archive_id` and `archived_at`; missing state remains compatible with
 older live-session snapshots. `ok: false` indicates an unavailable host.
+A peer's entry in `hgs ls --json` and the answer of `hgs @alias ls --json` forward
+that machine's own listing, so their `host` is the name the machine gives itself
+(its first `HGS_SELF` name, otherwise its host name), which may differ from the
+alias; an unreachable peer's entry names the alias. Key a peer by the alias you
+asked for, as Zerus does; the local entry's `peers` lists those aliases.
 
 A running Zerus desktop records input idle time and screen lock with
 `hgs presence set --json` (`{"idle_seconds": 12, "locked": false}` on stdin) every

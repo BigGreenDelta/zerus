@@ -277,6 +277,8 @@ int main(int argc, char *argv[])
     QApplication::setWindowIcon(appIcon);
 #endif
 
+    // Whether Sessions opens: here once the tray runs, or in a tray already running.
+    const bool openSessions = cfg.opensSessions(AppConfig::currentPlatform());
     // Второй запуск не поднимает вторую иконку: стучимся в сокет первого и выходим.
 #ifdef Q_OS_WIN
     const QString singleInstanceKey = SingleInstance::key(QDir::homePath());
@@ -292,7 +294,14 @@ int main(int argc, char *argv[])
         QLocalSocket probe;
         probe.connectToServer(singleInstanceKey);
         if (probe.waitForConnected(200)) {
-            probe.write(cfg.showSessions ? "sessions\n" : "show\n");
+            // Started by the user, this process may bring a window to the front;
+            // without passing that on, the running tray's window opens behind
+            // the others and only its taskbar button flashes.
+            ULONG owner = 0;
+            if (openSessions
+                && GetNamedPipeServerProcessId(reinterpret_cast<HANDLE>(probe.socketDescriptor()), &owner))
+                AllowSetForegroundWindow(owner);
+            probe.write(openSessions ? "sessions\n" : "show\n");
             probe.waitForBytesWritten(200);
         }
         errOut << QStringLiteral("hgs-tray: already running\n");
@@ -315,7 +324,7 @@ int main(int argc, char *argv[])
         QLocalSocket probe;
         probe.connectToServer(singleInstanceKey);
         if (probe.waitForConnected(200)) {
-            probe.write(cfg.showSessions ? "sessions\n" : "show\n");
+            probe.write(openSessions ? "sessions\n" : "show\n");
             probe.waitForBytesWritten(200);
             errOut << QStringLiteral("hgs-tray: already running\n");
             return 0;
@@ -357,16 +366,17 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN
     // No service manager: Windows Error Reporting restarts the tray after the
     // watchdog's abort (once it has run for a minute), with the same settings
-    // from the command line, and abort() must not wait for a message box on the
-    // hung desktop. A command line too long to register restarts without options
-    // (tray.conf then applies), which beats no restart at all.
+    // from the command line, in the background (AppConfig::restartArguments), and
+    // abort() must not wait for a message box on the hung desktop. A command line
+    // too long to register restarts with --background alone (tray.conf then
+    // applies), which beats no restart at all.
     {
         QStringList restart;
         for (const QString &argument : AppConfig::restartArguments(args))
             restart << WindowsCommandLine::argument(argument);
         std::wstring line = restart.join(QLatin1Char(' ')).toStdWString();
         if (line.size() >= RESTART_MAX_CMD_LINE)
-            line.clear();
+            line = L"--background";
         RegisterApplicationRestart(line.c_str(), RESTART_NO_PATCH | RESTART_NO_REBOOT);
     }
     _set_abort_behavior(0, _WRITE_ABORT_MSG);
@@ -397,6 +407,6 @@ int main(int argc, char *argv[])
         takeActivation();
 #endif
     UpdateController::instance()->checkOnStart();
-    if (cfg.showSessions) agent.showSessions();
+    if (openSessions) agent.showSessions();
     return app.exec();
 }

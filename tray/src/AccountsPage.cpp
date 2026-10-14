@@ -386,8 +386,10 @@ void AccountsPage::updateRefreshState()
     m_refresh->setToolTip(caption); m_refresh->setAccessibleName(caption);
     QSet<QString> loadedHosts;for(const auto &value:m_displayProfiles)loadedHosts.insert(value.toObject()["host"].toString());
     if (accountHosts(m_fleet, m_explicitHost).isEmpty()) { m_summary->setText(remoteOnlyHint()); return; }
-    m_summary->setText(!m_hasSnapshot ? tr("Loading accounts…") : tr("%1 accounts, %2 machines loaded").arg(m_list->count()).arg(loadedHosts.size())
-        + (pending ? tr(" (Updating… %1 remaining)").arg(pending) : QString()));
+    const int accounts = m_list->count(), machines = loadedHosts.size();
+    const auto loaded = tr("%1, %2").arg(accounts == 1 ? tr("1 account") : tr("%1 accounts").arg(accounts),
+        machines == 1 ? tr("1 machine loaded") : tr("%1 machines loaded").arg(machines));
+    m_summary->setText(!m_hasSnapshot ? tr("Loading accounts…") : loaded + (pending ? tr(" (Updating… %1 remaining)").arg(pending) : QString()));
 }
 void AccountsPage::ensureCatalogs(bool force)
 {

@@ -16,6 +16,12 @@ Requirements
 Use
 - Extract the whole folder and run hgs-tray.exe. Keep the files together:
   hgs-tray.exe uses the hgs.exe next to it.
+- hgs-tray.exe opens the Zerus window. Closing it keeps Zerus running in the
+  notification area, where Windows 11 first hides a new icon behind the ^
+  arrow; run hgs-tray.exe again to bring the window back. To start Zerus at
+  sign-in, put a shortcut to hgs-tray.exe in the Startup folder
+  (shell:startup) and add a space and --background at the end of its Target
+  field: Zerus then starts in the notification area without its window.
 - To use the CLI in a terminal, run hgs.exe from this folder or add the folder
   to PATH. In PowerShell, a program in the current folder needs the .\ prefix
   and a machine argument needs quotes:

@@ -295,14 +295,15 @@ void MachinesPage::renderRows() {
         const auto row = value.toObject(); const auto name = row.value("alias").toString(); const auto *box = m_fleet.peer(name);
         const bool live = box && box->ok && QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(name) < FleetState::kPeerStaleMs;
         if (live) ++online;
-        const QString state = !row.value("enabled").toBool() ? tr("Disabled") : live ? tr("Connected, %1 sessions").arg(box->sessions.size()) : tr("Not connected");
+        const QString state = !row.value("enabled").toBool() ? tr("Disabled") : !live ? tr("Not connected")
+            : box->sessions.size() == 1 ? tr("Connected, 1 session") : tr("Connected, %1 sessions").arg(box->sessions.size());
         auto *item = new QListWidgetItem(MachineAppearance::icon(name), name + '\n' + state, m_list); item->setData(Qt::UserRole, name);
     }
     const int savedCount=m_list->count()-(console?1:0);
     if(m_new){auto *draft=new QListWidgetItem(tr("New machine\nUnsaved connection"),m_list);draft->setData(Qt::UserRole,"@new");draft->setToolTip(tr("This connection is a draft. Save it to add the machine to Zerus."));}
     const auto selected=m_new?QStringLiteral("@new"):m_selected;
     for (int i = 0; i < m_list->count(); ++i) if (m_list->item(i)->data(Qt::UserRole).toString() == selected) m_list->setCurrentRow(i);
-    m_summary->setText(tr("%1 connected, %2 machines").arg(online).arg(savedCount));
+    m_summary->setText(savedCount == 1 ? tr("%1 connected, 1 machine").arg(online) : tr("%1 connected, %2 machines").arg(online).arg(savedCount));
 }
 void MachinesPage::loadSelection() {
     m_loading = true; QJsonObject row;

@@ -614,7 +614,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
         auto *source = new QLabel(local ? tr("File on this machine") : tr("File on %1").arg(machine));
         source->setTextFormat(Qt::PlainText); layout->addWidget(source);
-        auto *address = new QLineEdit(path.isEmpty() ? target.path : path); address->setReadOnly(true);
+        // This computer shows and copies its paths with native separators; a peer's
+        // stay POSIX. path keeps the Qt form that QFileInfo and QUrl read.
+        const auto shown = MachinePlatform::native(path.isEmpty() ? target.path : path, MachinePlatform::of(m_fleet.local().metrics, local));
+        auto *address = new QLineEdit(shown); address->setReadOnly(true);
         address->setObjectName("sessionFilePath");
         auto *copy = new QPushButton;copy->setObjectName("copySessionFilePath");
         configureWorkspaceIconButton(copy,"copy",tr("Copy path"),m_dark);

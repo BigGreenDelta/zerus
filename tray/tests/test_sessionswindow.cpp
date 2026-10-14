@@ -227,6 +227,7 @@ private slots:
     void backgroundShellRowKeepsActiveAndOpensItsProcesses();
     void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
     void connectionStatusSurvivesNoticesAndRetries();
+    void peerNamedDifferentlyListsSessionsUnderItsAlias();
     void refreshErrorsStayInComposerAndFooterWithoutMovingViews();
     void remoteSessionLoadingIsDelayedAndFollowsSelection();
     void backgroundPollKeepsActivityAndComposerStable();
@@ -2562,6 +2563,40 @@ void TestSessionsWindow::connectionStatusSurvivesNoticesAndRetries()
     if (!preview.isEmpty()) { window.setConnectionError("timed out"); QTest::qWait(50); QVERIFY(window.grab().save(preview)); }
 }
 
+void TestSessionsWindow::peerNamedDifferentlyListsSessionsUnderItsAlias()
+{
+    // Saved as "winpeer", the machine calls itself "zpeer" (its HGS_SELF), and
+    // `hgs @winpeer ls --json` forwards its own listing. The window is fed as
+    // TrayAgent feeds it: the client's polls in flight and each answer's box.
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto peerCli = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(peerCli, "#!/usr/bin/env python3\nimport sys\n"
+        "if sys.argv[1:]!=['@winpeer','ls','--json']:print('unexpected call',file=sys.stderr);sys.exit(1)\n"
+        "print('{\"host\":\"zpeer\",\"ok\":true,\"projects\":{},\"sessions\":[{\"name\":\"codex/win/build\",\"cmd\":\"codex\","
+        "\"project\":\"win\",\"tag\":\"build\",\"state\":\"running\",\"activity\":\"idle\"}]}')\n"));
+    HgsClient client(FakeCli::program(peerCli)); QList<BoxState> answers;
+    connect(&client, &HgsClient::peerReady, this, [&answers](const BoxState &box) { answers << box; });
+    auto state = fleet(); auto local = state.local(); local.peersKnown = true; local.peers = {"mac", "winpeer"};
+    state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.setFleet(state); window.show();
+    auto *status = window.findChild<QLabel *>("workspaceConnectionStatus"); QVERIFY(status);
+    auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
+    client.requestPeer("winpeer"); window.setPollingHosts(client.pollingHosts());
+    QVERIFY(status->text().contains("winpeer: connecting…"));
+    QTRY_COMPARE(answers.size(), 1);
+    state.setPeer(answers.first(), QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(state); window.setPollingHosts(client.pollingHosts());
+    QVERIFY2(status->text().isEmpty(), qPrintable(status->text()));
+    QVERIFY(!state.peer("zpeer")); QVERIFY(state.peer("winpeer") && state.peer("winpeer")->ok);
+    QListWidgetItem *row = nullptr;
+    for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->data(SessionRoles::Key).toString().endsWith("\ncodex/win/build")) row = list->item(i);
+    QVERIFY(row);
+    QCOMPARE(row->data(SessionRoles::Key).toString(), QString("winpeer\ncodex/win/build"));
+    QCOMPARE(row->data(SessionRoles::MachineName).toString(), QString("winpeer"));
+    QCOMPARE(row->data(SessionRoles::GitHost).toString(), QString("winpeer"));
+}
+
 void TestSessionsWindow::filtersSelectionAndOffline()
 {
     SessionsWindow window(program()); window.setFleet(fleet()); window.show();
@@ -4802,29 +4837,42 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog_data()
 {
     QTest::addColumn<bool>("folder");
     QTest::addColumn<QString>("name");
-    QTest::newRow("file") << false << "sample image.png";
-    QTest::newRow("folder") << true << "sample image.png";
+    QTest::addColumn<QString>("platform");
+    QTest::newRow("file") << false << "sample image.png" << "linux";
+    QTest::newRow("folder") << true << "sample image.png" << "linux";
     // An agent's script is shown in its folder rather than run.
-    QTest::newRow("program") << false << "deploy.sh";
+    QTest::newRow("program") << false << "deploy.sh" << "linux";
+    // A Windows computer shows and copies backslashes, yet opens the Qt path.
+    QTest::newRow("windows-file") << false << "sample image.png" << "windows";
+    QTest::newRow("windows-folder") << true << "sample image.png" << "windows";
+    // Before the first poll the platform is the GUI's own.
+    QTest::newRow("unreported-platform") << false << "sample image.png" << "";
 }
 
 void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
 {
-    QFETCH(bool, folder); QFETCH(QString, name);
+    QFETCH(bool, folder); QFETCH(QString, name); QFETCH(QString, platform);
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
     const auto path = directory.filePath(name);
     QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("synthetic file"); file.close();
+    const auto shown = platform == "windows" ? QString(path).replace('/', '\\')
+        : platform.isEmpty() ? QDir::toNativeSeparators(path) : path;
     FolderUrlRecorder opened;
-    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); QTest::qWait(80);
+    auto state = fleet(); auto local = state.local();
+    if (platform.isEmpty()) local.metrics.remove("platform"); else local.metrics["platform"] = platform;
+    state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.setFleet(state); window.show(); QTest::qWait(80);
     auto *activity = window.findChild<ActivityView *>("mainActivity");
     QSignalSpy copied(&window, &SessionsWindow::copyTextRequested);
     QPointer<QDialog> dialog;
     QTimer::singleShot(0, &window, [&] {
         dialog = window.findChild<QDialog *>("sessionFileDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([&] { if (dialog && dialog->isVisible()) dialog->reject(); });
+        QCOMPARE(dialog->findChild<QLineEdit *>("sessionFilePath")->text(), shown);
         dialog->findChild<QPushButton *>("copySessionFilePath")->click();
         QVERIFY(dialog->isVisible());
-        QCOMPARE(copied.size(), 1); QCOMPARE(copied.first().at(0).toString(), path);
+        QCOMPARE(copied.size(), 1); QCOMPARE(copied.first().at(0).toString(), shown);
         QVERIFY(opened.urls.isEmpty());
         auto *button = dialog->findChild<QPushButton *>(folder ? "openSessionFileFolder" : "openSessionFile");
         QVERIFY(button); button->click();
@@ -4841,6 +4889,17 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
     }
     QTRY_COMPARE(opened.urls.size(), 1);
     QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(folder ? directory.path() : path));
+    if (platform != "windows") return;
+    // A peer's paths stay POSIX whatever this computer is.
+    window.showSession("mac", "claude/infra/review"); QTest::qWait(50);
+    QTimer::singleShot(0, &window, [&] {
+        auto *remote = window.findChild<QDialog *>("sessionFileDialog"); QVERIFY(remote);
+        const auto close = qScopeGuard([&] { remote->reject(); });
+        QCOMPARE(remote->findChild<QLineEdit *>("sessionFilePath")->text(), QString("/Users/remote/docs/README.md"));
+        remote->findChild<QPushButton *>("copySessionFilePath")->click();
+    });
+    activity->fileReferenceActivated("/Users/remote/docs/README.md");
+    QCOMPARE(copied.size(), 2); QCOMPARE(copied.last().at(0).toString(), QString("/Users/remote/docs/README.md"));
 }
 
 void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
