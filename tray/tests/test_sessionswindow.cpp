@@ -348,6 +348,8 @@ private slots:
     void nativeUiOpensBrowserWithoutPlugin();
     void newSessionGroupFollowsLaunchIdentity_data();
     void newSessionGroupFollowsLaunchIdentity();
+    void launchPlaceholderReportsASessionThatEndedUnlisted_data();
+    void launchPlaceholderReportsASessionThatEndedUnlisted();
     void folderBrowserIgnoresStaleResponses();
     void projectOrderAndDefaultBadge();
     void projectsEmbeddedAndRemote();
@@ -7498,6 +7500,72 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     // The listed folder already belongs to the project, whatever path confirmed it.
     const bool added=std::any_of(resultGroup->folders.cbegin(),resultGroup->folders.cend(),[&](const SessionOrganization::Folder &f){return f.machine==machine&&f.path=="/remote/work tree";});
     QVERIFY(!added);
+}
+
+void TestSessionsWindow::launchPlaceholderReportsASessionThatEndedUnlisted_data()
+{
+    QTest::addColumn<QString>("host"); QTest::addColumn<QString>("mode");
+    QTest::newRow("local-ended") << QString() << QString("ended");
+    QTest::newRow("peer-ended") << QString("mac") << QString("ended");
+    QTest::newRow("unknown-exit") << QString("mac") << QString("unknown");
+    QTest::newRow("hidden-status") << QString() << QString("hidden");
+    QTest::newRow("listed-launch") << QString("mac") << QString("listed");
+    QTest::newRow("other-machine") << QString() << QString("other");
+    QTest::newRow("unavailable") << QString() << QString("unavailable");
+}
+
+void TestSessionsWindow::launchPlaceholderReportsASessionThatEndedUnlisted()
+{
+    QFETCH(QString, host); QFETCH(QString, mode);
+    // A detached launch reported started five minutes ago; no session or record appeared.
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSettings().setValue("workspace/pendingLaunches", QJsonDocument(QJsonObject{{token, QJsonObject{{"host", host},
+        {"cmd", "claude"}, {"tag", "failing"}, {"group", "ungrouped"}, {"target", "/remote/infra"}, {"add_folder", false},
+        {"show_pending", mode != "hidden"}, {"created", QDateTime::currentSecsSinceEpoch() - 300}}}}).toJson(QJsonDocument::Compact));
+    auto state = fleet();
+    SessionsWindow window(program()); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList"); auto *notice = window.findChild<QLabel *>("notice");
+    QVERIFY(list); QVERIFY(notice);
+    auto placeholder = [&]() -> QListWidgetItem * {
+        for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::LaunchId).toString() == token) return list->item(i);
+        return nullptr;
+    };
+    QCOMPARE(placeholder() != nullptr, mode != "hidden");
+    if (placeholder()) QCOMPARE(placeholder()->data(SessionRoles::Status).toString(), QString("Waiting for session"));
+    // The machine reports that the launch's session ended without a listed session or record.
+    const QString reporter = mode != "other" ? host : host.isEmpty() ? QString("mac") : QString();
+    auto box = reporter.isEmpty() ? state.local() : *state.peer(reporter);
+    box.endedLaunches.insert(token, QJsonObject{{"launch_id", token}, {"name", "claude/infra/failing"},
+        {"code", mode == "unknown" ? QJsonValue() : QJsonValue(3)},
+        {"output", mode == "unknown" ? QString() : QString("hgs: tracking needs trusted hooks\ncannot start: example failure")}});
+    if (mode == "listed") {
+        // A session that carries the launch ID under another name is not an ended launch.
+        SessionInfo renamed; renamed.name = "claude/infra/renamed"; renamed.cmd = "claude"; renamed.project = "infra";
+        renamed.tag = "renamed"; renamed.state = "running"; renamed.launchId = token; box.sessions.append(renamed);
+    }
+    // A listing that reports its machine unavailable is no evidence.
+    if (mode == "unavailable") box.ok = false;
+    if (reporter.isEmpty()) state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    else state.setPeer(box, QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(state);
+    const bool ends = mode != "listed" && mode != "other" && mode != "unavailable";
+    QCOMPARE(placeholder() == nullptr, ends || mode == "hidden");
+    QCOMPARE(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token), !ends);
+    if (mode == "ended") {
+        QCOMPARE(notice->text(), QString("Session failing ended before it appeared (exit code 3).\n"
+            "hgs: tracking needs trusted hooks\ncannot start: example failure"));
+        QVERIFY(notice->isVisible()); QVERIFY(notice->property("error").toBool());
+    } else if (mode == "unknown") {
+        QCOMPARE(notice->text(), QString("Session failing ended before it appeared."));
+    } else {
+        // A hidden launch status stays hidden; a launch that may still appear keeps waiting.
+        QVERIFY(!notice->text().contains("ended before it appeared"));
+    }
+    if (mode == "ended" || mode == "unknown") {
+        // The next listing changes nothing: the launch is no longer pending.
+        notice->clear(); window.setFleet(state);
+        QVERIFY(notice->text().isEmpty()); QVERIFY(!placeholder());
+    }
 }
 
 void TestSessionsWindow::folderBrowserIgnoresStaleResponses()

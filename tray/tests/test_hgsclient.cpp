@@ -39,6 +39,7 @@ private slots:
     void parsesOfflineBox();
     void parsesControlOnlyComputer();
     void parsesLocalSessionHost();
+    void parsesEndedLaunches();
     void sessionHostActionsUseJsonAndReportFailures();
     void parsesFleetArray();
     void rejectsGarbage();
@@ -1048,6 +1049,23 @@ void TestHgsClient::parsesLocalSessionHost()
     QVERIFY(posix.localHost.isEmpty());
     const auto fleet = HgsClient::parseFleet(R"([{"host":"windows-pc","ok":true,"local_host":{"state":"stopped"}},{"host":"mac","ok":true}])", &err);
     QCOMPARE(fleet[0].localHost.value("state").toString(), QString("stopped")); QVERIFY(fleet[1].localHost.isEmpty());
+}
+
+void TestHgsClient::parsesEndedLaunches()
+{
+    // Launches whose session ended before a listing showed it, without a record, by launch ID.
+    QString err;
+    const auto box = HgsClient::parseBox(R"({"host":"arch","ok":true,"sessions":[],"ended_launches":[
+        {"launch_id":"0b6f4c9e-3c1d-4b8f-9a35-6f2e2d6f6a10","name":"claude/project/one","code":3,"output":"cannot start"},
+        {"launch_id":"4400baad-7d90-480a-8451-5f3e456e2ae9","name":"sh/project/two","code":null,"output":""},
+        {"name":"sh/project/without-id"}]})", &err);
+    QVERIFY(err.isEmpty());
+    QCOMPARE(box.endedLaunches.size(), 2);
+    const auto one = box.endedLaunches.value("0b6f4c9e-3c1d-4b8f-9a35-6f2e2d6f6a10");
+    QCOMPARE(one.value("code").toInt(), 3); QCOMPARE(one.value("output").toString(), QString("cannot start"));
+    QVERIFY(box.endedLaunches.value("4400baad-7d90-480a-8451-5f3e456e2ae9").value("code").isNull());
+    // Older CLIs and listings without one carry none.
+    QVERIFY(HgsClient::parseBox(R"({"host":"arch","ok":true,"sessions":[]})", &err).endedLaunches.isEmpty());
 }
 
 void TestHgsClient::sessionHostActionsUseJsonAndReportFailures()

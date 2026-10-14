@@ -99,9 +99,9 @@ fn validate(request: &Request) -> Result<()> {
     }
 }
 fn checked(name: &str, request: &Request) -> Result<Value> {
-    if opencode::exists(name) {return Err("OpenCode uses its native API without a tmux Terminal".into());}
+    if opencode::exists(name) {return Err(backend::OPENCODE_TERMINAL.text().into());}
     if dsh::exists(name) {
-        return Err("DeepSeek uses a structured native API without a tmux Terminal".into());
+        return Err(backend::DEEPSEEK_TERMINAL.text().into());
     }
     let record = read(name)?;
     if string(&record, "run_id") != request.expected_run_id

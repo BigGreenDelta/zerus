@@ -376,9 +376,10 @@ the CLI: tests drive only `hgs` commands and observe only their output and JSON
 and the records of the native fake agent (`examples/fake_agent.rs`, linked or
 copied as `claude`), never the backend or the internal Rust `TerminalBackend`
 trait. It covers listing without starting the backend; launches (folder,
-arguments, launch ID, one session per name, untracked commands); `a --existing
-[--run-id]` resolution and attach from a terminal client (input, client size,
-several clients, `Ctrl+B Ctrl+B`, detach, the session ending); the exact bytes of
+arguments, launch ID, one session per name, untracked commands, a launch whose
+session ended without a conversation); `a --existing [--run-id]` resolution and
+attach from a terminal client (input, client size, several clients,
+`Ctrl+B Ctrl+B`, detach, the session ending); the exact bytes of
 `send` and Terminal input (one bracketed paste, then one Enter, no replay, keys in
 both cursor modes); state read from the screen (styled capture, wide glyphs,
 cursor, size, bracketed paste, an echoed draft against a dim placeholder) and
