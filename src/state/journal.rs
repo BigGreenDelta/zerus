@@ -529,6 +529,12 @@ fn message_events(db: &Connection, name: &str, conversation: Option<&str>, earli
 }
 
 pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, include_processes: bool) -> Result<Value> {
+    // An approval answered in Terminal sends no hook; settling it takes the lock.
+    if archive_id.is_none() && record_path(name).exists() {
+        if let Ok(record) = read(name) {
+            claude_approval::reconcile(record);
+        }
+    }
     let _guard = lock(None)?;
     let untracked = || {
         let mut value = json!({"name": name, "tracked": false, "events": [], "cursor": 0});

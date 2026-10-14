@@ -2,7 +2,8 @@
 //! main-agent PermissionRequest stays visible while Claude shows a chooser. A
 //! complete panel that matches the request exposes its native options verbatim;
 //! options reaching beyond this one request are marked for a second
-//! confirmation in the desktop. Zerus never chooses an option on its own.
+//! confirmation in the desktop. Zerus never chooses an option on its own. An
+//! answer given in Terminal sends no hook; only the screen's proof settles it.
 use super::*;
 use sha2::{Digest,Sha256};
 use std::path::Path;
@@ -391,25 +392,112 @@ pub(super) fn answer(record:&Value,question:&Value,answers:&Value)->Result<()> {
         .filter(|n|(1..=panel.labels.len()).contains(n)).ok_or("Choose one of Claude's options")?-1;
     let navigation_settle=if safety_panel(&screen).is_some(){std::time::Duration::from_millis(250)}else{std::time::Duration::ZERO};
     kimi_tui_choice::answer_queued(record,question,chosen,panel.labels.len(),snapshot,acknowledged,navigation_settle)?;
-    // A denial ends Claude's turn without another hook. Record it as an
-    // interruption so the composer can verify Claude's prompt again.
-    let _ = settle(record,&label(&panel.labels[chosen]));
+    let _ = settle(record,label(&panel.labels[chosen]).starts_with("No"));
     Ok(())
 }
-fn settle(original:&Value,chosen:&str)->Result<()> {
+/// Claude sends no hook when an approval is answered: a denial ends its turn,
+/// and an approved tool reports PostToolUse only when it finishes. Record a
+/// denial as an interruption so the composer can verify Claude's prompt again,
+/// and an approval as the tool's work. Only the same pending request settles.
+fn settle(original:&Value,denied:bool)->Result<Option<Value>> {
     let _guard=lock(None)?;
-    let Some(mut record)=read_run(string(original,"name"),string(original,"run_id"))? else {return Ok(())};
-    if record["pending_approval"]!=original["pending_approval"]||record["phase"]!="approval" {return Ok(());}
+    let Some(mut record)=read_run(string(original,"name"),string(original,"run_id"))? else {return Ok(None)};
+    if record["pending_approval"]!=original["pending_approval"]||record["pending_approval_at"]!=original["pending_approval_at"]
+        ||record["phase"]!="approval" {return Ok(None);}
     record.as_object_mut().unwrap().remove("pending_approval");
     record.as_object_mut().unwrap().remove("pending_approval_at");
-    if chosen.starts_with("No") {
+    if denied {
         record["activity"]=json!("unknown");record["phase"]=json!("interrupted");
         record["main_done"]=json!(false);record["active_tools"]=json!({});
     } else {
         let tools=record["active_tools"].as_object().is_some_and(|tools|!tools.is_empty());
         record["phase"]=json!(if tools {"tool"} else {"working"});
     }
-    write(&mut record)
+    write(&mut record)?;
+    Ok(Some(record))
+}
+
+// Claude prints this row below the tool it denied, as it does for Escape.
+const INTERRUPTED:&str="Interrupted · What should Claude do instead?";
+const BACKGROUND_HINT:&str="(ctrl+b to run in background)";
+
+// Rows Claude may draw below its transcript, above the next full-width rule.
+fn blank(row:&str)->bool {row.trim().is_empty()}
+/// The summary of a finished turn, such as "✻ Sautéed for 1m 3s · done 7:47 PM".
+fn finished(row:&str)->bool {
+    static SUMMARY:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    let row=row.trim();
+    !row.contains('…')&&SUMMARY.get_or_init(||regex::Regex::new(r"^[^\w\s] \w+ for [0-9]").unwrap()).is_match(row)
+}
+/// The spinner of a working turn, such as "✢ Actualizing… (3s · ↓ 52 tokens)".
+fn spinning(row:&str)->bool {
+    static SPINNER:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    SPINNER.get_or_init(||regex::Regex::new(r"^[^\w\s] \S.*…").unwrap()).is_match(row.trim())
+}
+/// A right-aligned indicator, such as the effort level above the composer.
+fn aside(row:&str)->bool {row.len()-row.trim_start().len()>=20}
+
+/// The rows from `start` up to the next full-width rule, Claude's composer or
+/// a later panel, all match `trailing`: nothing newer follows in the transcript.
+fn last_in_transcript(rows:&[&str],start:usize,trailing:impl Fn(&str)->bool)->bool {
+    rows[start..].iter().position(|row|rule(row.trim(),'─'))
+        .is_some_and(|end|rows[start..start+end].iter().all(|row|blank(row)||trailing(row)))
+}
+
+/// Claude ended the turn on this denial: its interruption row is the last row
+/// of the transcript. A new turn would show its prompt, tool or spinner below.
+fn denied(screen:&str)->bool {
+    let rows:Vec<&str>=screen.lines().collect();
+    rows.iter().rposition(|row|row.trim().strip_prefix('⎿').is_some_and(|text|text.trim()==INTERRUPTED))
+        .is_some_and(|row|last_in_transcript(&rows,row+1,|row|finished(row)||aside(row)))
+}
+
+/// The approved command runs: Claude follows the request's own command row
+/// with its elapsed time, such as "(3s)" or "(4s · 5 lines)", only while the
+/// command runs. Below it, only the background hint and the spinner remain.
+fn running(request:&Value,screen:&str)->bool {
+    static ELAPSED:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    let elapsed=ELAPSED.get_or_init(||regex::Regex::new(r"^(?:(.*) )?\((?:[0-9]+h )?(?:[0-9]+m )?[0-9]+s(?: · [^()]*)?\)$").unwrap());
+    let command=string(&request["tool_input"],"command");
+    if request["tool_name"]!="Bash"||command.trim().is_empty() {return false;}
+    let rows:Vec<&str>=screen.lines().collect();
+    let shown=|row:&str|row.trim().strip_prefix('⎿').and_then(|text|text.trim_start().strip_prefix('$'))
+        .and_then(|text|text.strip_prefix([' ','\u{a0}'])).map(str::to_owned);
+    let Some(start)=rows.iter().rposition(|row|shown(row).is_some()) else {return false};
+    let mut text=String::new();
+    for (index,row) in rows.iter().enumerate().skip(start) {
+        let row=if index==start {shown(row).unwrap_or_default()} else {row.trim().to_owned()};
+        if rule(&row,'─') {return false;}
+        if let Some(found)=elapsed.captures(&row) {
+            text.push_str(found.get(1).map_or("",|part|part.as_str()));
+            return compact(&text)==compact(command)
+                &&last_in_transcript(&rows,index+1,|row|row.trim()==BACKGROUND_HINT||spinning(row)||aside(row));
+        }
+        text.push_str(&row);text.push('\n');
+    }
+    false
+}
+
+/// How the pending request was answered in Terminal, when the screen proves
+/// it: Some(false) for a denial, Some(true) for the approved command running.
+/// A visible chooser, or a screen that may precede the panel, proves nothing.
+fn answered(record:&Value,screen:&str)->Option<bool> {
+    let request=request(record)?;
+    if screen.trim().is_empty()||visible(screen) {None}
+    else if denied(screen) {Some(false)}
+    else if running(request,screen) {Some(true)}
+    else {None}
+}
+
+/// Settle a request answered in Terminal, as an Activity answer does. Without
+/// proof on the screen the session stays at Needs approval until a hook.
+pub(super) fn reconcile(record:Value)->Value {
+    if !eligible(&record)||request(&record).is_none() {return record;}
+    let screen=kimi_tui_choice::identity(&record).and_then(|current|kimi_tui_choice::capture(&current));
+    match screen.ok().and_then(|screen|answered(&record,&screen)) {
+        Some(approved) => settle(&record,!approved).ok().flatten().unwrap_or(record),
+        None => record,
+    }
 }
 
 #[cfg(test)] mod tests {
@@ -643,6 +731,59 @@ fn settle(original:&Value,chosen:&str)->Result<()> {
     #[test] fn any_bottom_chooser_counts_as_visible_for_dismissal() {
         for screen in [MODEL_SWITCH,PAUSED,BASH,OUTSIDE] {assert!(chooser_visible(screen),"{screen}");}
         for screen in [IDLE,DENIED,""] {assert!(!chooser_visible(screen),"{screen}");}
+    }
+
+    // Claude Code 2.1.296 after an approval answered in Terminal: No or Esc
+    // with the composer (120 columns) or the one-time auto-mode nudge (100
+    // columns) below; Yes before and while the command runs (80 columns).
+    const ANSWERED_NO:&str=include_str!("../../tests/fixtures/claude-approval-denied.txt");
+    const ANSWERED_NO_NUDGE:&str=include_str!("../../tests/fixtures/claude-approval-denied-nudge.txt");
+    const ANSWERED_YES:&str=include_str!("../../tests/fixtures/claude-approval-starting.txt");
+    const RUNNING:&str=include_str!("../../tests/fixtures/claude-approval-running.txt");
+    const LONG:&str="sleep 6 && printf %s fixture-output-with-a-rather-long-name-to-wrap-the-row > /work/example/projects/a-really-long-directory-name/approved.txt\necho second line";
+    // The same Claude Code while the request streams, before its panel.
+    const STREAMING:&str="❯ Use the tool now.\n\n\n· Sublimating…\n                                                  ● high · /effort\n────────────────────────────────────────────────────────────\n❯\u{a0}\n────────────────────────────────────────────────────────────\n  ⏸ manual mode on · esc to interrupt · ← for agents\n";
+
+    #[test] fn terminal_denial_is_the_interruption_that_ends_the_transcript() {
+        let bash=record("Bash",json!({"command":LONG}));
+        for screen in [ANSWERED_NO,ANSWERED_NO_NUDGE,DENIED] {assert_eq!(answered(&bash,screen),Some(false),"{screen}");}
+        // The collapsed row no longer names the tool; the ended turn is enough.
+        assert_eq!(answered(&record("Read",json!({"file_path":PATH})),ANSWERED_NO),Some(false));
+        let summary="✻ Crunched for 0s · done 7:47 PM";
+        assert!(ANSWERED_NO.contains(summary));
+        assert_eq!(answered(&bash,&ANSWERED_NO.replace(summary,"✻ Sautéed for 1m 3s · done 7:48 PM")),Some(false));
+        // A newer turn below an earlier interruption: its prompt, tool or spinner.
+        for later in ["❯ Try again","● Bash(ls)","✢ Actualizing… (0s · ↓ 52 tokens)","Ordinary output"] {
+            assert_eq!(answered(&bash,&ANSWERED_NO.replace(summary,&format!("{summary}\n\n{later}"))),None,"{later}");
+        }
+        let earlier=format!("  ⎿  {INTERRUPTED}\n\n✻ Cooked for 0s · done 7:40 PM\n\n{STREAMING}");
+        assert_eq!(answered(&bash,&earlier),None);
+        // Another interruption text, or no rule closing the transcript.
+        assert_eq!(answered(&bash,&ANSWERED_NO.replace(" · What should Claude do instead?","")),None);
+        let cut=ANSWERED_NO.split_once(summary).unwrap().0;
+        assert_eq!(answered(&bash,cut),None);
+        // A numbered chooser below the ended turn still waits for an answer.
+        let numbered=ANSWERED_NO_NUDGE.replace("❯ Yes, set","❯ 1. Yes, set").replace("  No, keep","  2. No, keep");
+        assert_eq!((denied(&numbered),answered(&bash,&numbered)),(true,None));
+    }
+
+    #[test] fn terminal_approval_is_the_requested_command_running() {
+        let bash=record("Bash",json!({"command":LONG,"description":"Wait and write"}));
+        assert_eq!(answered(&bash,RUNNING),Some(true));
+        assert!(RUNNING.contains("echo second line (3s)\n     (ctrl+b to run in background)\n"));
+        for (from,to) in [("(3s)","(1m 4s · 5 lines)"),(" (3s)","\n     (3s)"),("     (ctrl+b to run in background)\n","")] {
+            assert_eq!(answered(&bash,&RUNNING.replace(from,to)),Some(true),"{to}");
+        }
+        // Before the command starts or after it ends, no elapsed time proves it.
+        assert_eq!(answered(&bash,ANSWERED_YES),None);
+        assert_eq!(answered(&bash,&RUNNING.replace(" (3s)","").replace("     (ctrl+b to run in background)\n","")),None);
+        assert_eq!(answered(&bash,STREAMING),None);
+        // Another command, another tool, or anything newer below the command.
+        let mut other=bash.clone();other["pending_approval"]["tool_input"]["command"]=json!(LONG.replace("second","third"));
+        assert_eq!(answered(&other,RUNNING),None);
+        let mut fetch=bash.clone();fetch["pending_approval"]["tool_name"]=json!("WebFetch");
+        assert_eq!(answered(&fetch,RUNNING),None);
+        assert_eq!(answered(&bash,&RUNNING.replace("(ctrl+b to run in background)","(ctrl+b to run in background)\n● Read(file)")),None);
     }
 
     #[test] fn hash_ignores_the_highlight_but_not_the_request() {
