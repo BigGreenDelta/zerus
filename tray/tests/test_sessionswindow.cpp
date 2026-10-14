@@ -168,6 +168,19 @@ static void settleSelectedInspection(MessageComposer *composer, HgsClient *clien
     })(), 10000);
 }
 
+// The window also polls the selected session. A fixture inspection replies with
+// what the fixture said when it started, so one still running when a test injects
+// details lands afterwards and replaces them. On Windows it can even arrive before a
+// confirmation accepted from a short timer returns: Qt posts such timer events, and
+// they share a batch with queued process replies (zerus-a0ak, zerus-a857). Call
+// this before show(): the window then inspects only on show, selection and Refresh.
+// HgsClient runs one inspection per session, so once the reply to the test's own
+// inspection is in (settleSelectedInspection), none is pending and no poll follows.
+static void keepDetailsPollsOut(SessionsWindow &window)
+{
+    window.setDetailsPollForTests(500, 24 * 60 * 60 * 1000);
+}
+
 class TestSessionsWindow : public QObject {
     Q_OBJECT
 private slots:
@@ -3292,10 +3305,15 @@ else: print('{}')
     }
     const auto writeDetails = [&] { QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson())); };
     writeDetails();
-    SessionsWindow window(FakeCli::program(program)); window.resize(1080, 760); window.setFleet(fleet()); window.show();
-    window.showSession({}, "kimi/docs/research");
+    SessionsWindow window(FakeCli::program(program)); window.resize(1080, 760); window.setFleet(fleet());
+    keepDetailsPollsOut(window); window.show(); window.showSession({}, "kimi/docs/research");
     auto *client = window.findChild<HgsClient *>(); auto *card = window.findChild<QuestionCard *>();
     QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());
+    // A change made while the confirmation is open must stay the latest evidence. An
+    // inspection that read details.json before it would restore the reviewed identity,
+    // on Windows even before the accepted confirmation returns, and the answer would be
+    // sent. Settle one here, so none is running when the confirmation opens.
+    settleSelectedInspection(window.findChild<MessageComposer *>("messageComposer"), client, {}, "kimi/docs/research", details);
     auto *list = window.findChild<QListWidget *>("sessionList");
     const QString key = list->currentItem()->data(Qt::UserRole).toString();
     auto *tabs = card->findChild<QTabBar *>("questionTabs");
@@ -3433,9 +3451,13 @@ else: print('{}')
         {"runtime_state", "live"}, {"process_state", "running"}, {"phase", "input"}, {"activity", "busy"},
         {"pending_questions", QJsonArray{question}}, {"cache_hint", QJsonObject{{"status", "cold"}, {"tokens", 490252}}}};
     QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson()));
-    SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet()); window.show(); window.showSession({}, "kimi/docs/research");
+    SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet()); keepDetailsPollsOut(window); window.show(); window.showSession({}, "kimi/docs/research");
     auto *card = window.findChild<QuestionCard *>(); auto *client = window.findChild<HgsClient *>();
     QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());
+    // A change made while the answer's draft is saved must stay the latest evidence.
+    // An inspection that read details.json before it would restore the reviewed
+    // question, and the held answer would be sent. Settle one before submitting.
+    settleSelectedInspection(window.findChild<MessageComposer *>("messageComposer"), client, {}, "kimi/docs/research", details);
     const auto key = window.findChild<QListWidget *>("sessionList")->currentItem()->data(Qt::UserRole).toString();
     for (auto *button : card->findChildren<QAbstractButton *>("questionOption"))
         if (button->property("optionId") == QString("cache_%1").arg(choice)) button->click();
