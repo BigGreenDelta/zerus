@@ -72,6 +72,19 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    // A Windows session host lists the session until its supervisor has recorded
+    // the exit, which takes the state lock, and ended (spec D11): wait for that
+    // without the lock. tmux dropped it with kill-session already.
+    #[cfg(windows)]
+    while listed(&live()?, name, string(&original, "run_id")) {
+        if Instant::now() >= deadline {
+            return Err(
+                "terminal closed, but its supervisor has not ended; its saved binding was kept"
+                    .into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let _guard = lock(None)?;
     if let Some(archived) = archive::records()?.into_iter().find(|entry| {
         entry["name"] == original["name"]
@@ -122,6 +135,14 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     Ok(0)
 }
 
+/// Whether `snapshot` still lists `name` with a pane of run `run_id`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn listed(snapshot: &Snapshot, name: &str, run_id: &str) -> bool {
+    snapshot
+        .get(name)
+        .is_some_and(|panes| panes.iter().any(|(_, _, run)| run == run_id))
+}
+
 fn forget_archive_preflight(archived: &Value, current: Option<&Value>, scope: Option<&session_action::Scope>) -> Result<()> {
     if let Some(current)=current {
         if !string(current,"restore_archive_id").is_empty() && current["restore_archive_id"] == archived["archive_id"] {
@@ -139,5 +160,15 @@ fn forget_archive_preflight(archived: &Value, current: Option<&Value>, scope: Op
         let replacement=json!({"run_id":"new","restore_archive_id":"archive"});
         assert!(forget_archive_preflight(&archived,Some(&replacement),None).is_err());
         assert!(forget_archive_preflight(&archived,None,None).is_ok());
+    }
+    #[test] fn only_the_terminated_run_keeps_the_wait() {
+        let pane=|run: &str| ("%1".to_owned(),"0".to_owned(),run.to_owned());
+        let snapshot=Snapshot::from([("a".to_owned(),vec![pane("run-1")]),("b".to_owned(),vec![pane("run-2")])]);
+        assert!(listed(&snapshot,"a","run-1"));
+        // Another run under the name, or none, ends the wait; the binding checks
+        // after it refuse a replacement.
+        assert!(!listed(&snapshot,"a","run-2"));
+        assert!(!listed(&snapshot,"c","run-1"));
+        assert!(!listed(&Snapshot::new(),"a","run-1"));
     }
 }
