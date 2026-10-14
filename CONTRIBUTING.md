@@ -148,9 +148,13 @@ cargo test --locked </dev/null
 cargo +1.85.0 clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 cargo build --locked --example fake_ssh
+cargo build --locked --example fake_agent
 HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_FAKE_SSH="$(cygpath -w "$PWD/target/debug/examples/fake_ssh.exe")" \
   python -m unittest discover -s tests -p test_windows_client.py -v </dev/null
+HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
+HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" \
+  python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
 export QT_ROOT_DIR="$(cygpath -w ~/Qt/6.10.3/msvc2022_64)"
 bash scripts/ci/gui.sh </dev/null
 python scripts/package-windows.py --cli target/release/hgs.exe \
@@ -161,7 +165,9 @@ python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --ru
 `tests/test_windows_client.py` runs `hgs.exe` against `examples/fake_ssh.rs`,
 injected through `HGS_SSH`, with `HOME` and `USERPROFILE` in a temporary folder;
 it never uses your SSH configuration and skips itself on other systems. The
-native session host of Windows Phase 2 has its own isolated recipe and tests:
+native session host of Windows Phase 2 has its own isolated recipe and tests,
+`tests/test_windows_host.py` and the survival tests in
+`tests/test_windows_host_survival.py`:
 [testing the Windows session host](docs/windows-host-testing.md). On Windows,
 `scripts/ci/gui.sh` re-enters itself in the Visual Studio x64 environment
 (`scripts/ci/msvc-env.py`), builds with Ninja and `cl` against `QT_ROOT_DIR` and runs

@@ -625,6 +625,7 @@ jobs:
           cargo +1.85.0 clippy --locked --all-targets -- -D warnings 2>&1 | tee artifacts/test-results/clippy.log
           cargo build --release --locked
           cargo build --locked --example fake_ssh
+          cargo build --locked --example fake_agent
       - name: Save Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -640,6 +641,17 @@ jobs:
           HGS_TEST_FAKE_SSH=$(cygpath -w "$PWD/target/debug/examples/fake_ssh.exe")
           export HGS_TEST_BIN HGS_TEST_FAKE_SSH
           python -m unittest discover -s tests -p test_windows_client.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-client.log
+      # Isolated session hosts of the release build (docs/windows-host-testing.md).
+      # A step that runs inside a job that forbids breakaway cannot start a host
+      # that outlives it: __host call --start then fails with that reason (spec
+      # D4) instead of starting one, and every wait in the suites has a deadline.
+      - name: Windows session host tests
+        timeout-minutes: 20
+        run: |
+          HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
+          HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
+          export HGS_TEST_BIN HGS_TEST_FAKE_AGENT
+          python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null 2>&1 | tee artifacts/test-results/windows-host.log
       # Only trusted main checks save it; PR, manual and candidate runs restore
       # it. The key covers the Qt release, modules and installer lock.
       - name: Restore Qt 6.10.3 for MSVC
