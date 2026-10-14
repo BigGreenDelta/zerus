@@ -1764,8 +1764,10 @@ void TestSessionsWindow::coldCacheConfirmationPreservesDraftAndPinsConversation(
     SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());
     window.setDetailsPollForTests(500,24*60*60*1000);window.show();window.showSession({},"codex/hgs/dashboard");
     auto *client=window.findChild<HgsClient *>();QSignalSpy replies(client,&HgsClient::inspectionReady);qsizetype issued=-1;
-    QTRY_VERIFY(issued>=0||(client->requestInspection({},"codex/hgs/dashboard")&&(issued=replies.size(),true)));
-    QTRY_VERIFY(std::any_of(replies.cbegin()+issued,replies.cend(),[](const QList<QVariant> &reply){return reply.at(1).toString()=="codex/hgs/dashboard";}));
+    // Fixture processes start slowly under load on Windows: the window's inspection
+    // may run until HgsClient's 5 s limit before the test's own can start.
+    QTRY_VERIFY_WITH_TIMEOUT(issued>=0||(client->requestInspection({},"codex/hgs/dashboard")&&(issued=replies.size(),true)),15000);
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(replies.cbegin()+issued,replies.cend(),[](const QList<QVariant> &reply){return reply.at(1).toString()=="codex/hgs/dashboard";}),15000);
     auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *send=composer->findChild<QPushButton *>("sendMessage");
     setComposerText(composer, "Preserve this draft");QVERIFY(send->isEnabled());const QString key=composer->sessionKey();
     // Act on the confirmation once it is actually shown; a zero timer could fire
@@ -3751,9 +3753,10 @@ void TestSessionsWindow::questionFooterHasRoomAndKeepsAnswers()
     auto *client=window.findChild<HgsClient *>();QSignalSpy inspections(client,&HgsClient::inspectionReady);
     window.showSession({},session.name);
     qsizetype issued=-1;
-    QTRY_VERIFY(issued>=0 || (client->requestInspection({},session.name) && (issued=inspections.size(),true)));
-    QTRY_VERIFY(std::any_of(inspections.cbegin()+issued,inspections.cend(),[&](const QList<QVariant> &reply){
-        return reply[0].toString().isEmpty() && reply[1].toString()==session.name && reply[3].toString().isEmpty();}));
+    // Under load the window's inspection may run until HgsClient's 5 s limit.
+    QTRY_VERIFY_WITH_TIMEOUT(issued>=0 || (client->requestInspection({},session.name) && (issued=inspections.size(),true)),15000);
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(inspections.cbegin()+issued,inspections.cend(),[&](const QList<QVariant> &reply){
+        return reply[0].toString().isEmpty() && reply[1].toString()==session.name && reply[3].toString().isEmpty();}),15000);
     QJsonArray questions;
     for(int i=0;i<3;++i)questions<<QJsonObject{{"id",QString("q_%1").arg(i)},{"header",QString("Choice %1").arg(i+1)},
         {"question","Choose the intended behavior when the requested font weight is unavailable and the text uses the regular face."},{"allow_other",true},
