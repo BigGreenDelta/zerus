@@ -140,13 +140,14 @@ fn navigate(
                 // even the tmux server between the liveness check above and
                 // the terminal checks below. Keep polling the pinned process.
                 let exiting = key == "Enter" && expect_exit && Instant::now() < deadline;
+                // Native startup can briefly leave input mode after Enter
+                // while replacing the trust dialog with its main screen.
+                // Wait without sending more keys; acknowledge only after
+                // the pinned process owns a verified input terminal again.
+                let settling = exiting || (key == "Enter" && string(question, "source") == "claude_folder_trust"
+                    && Instant::now() < deadline);
                 if let Err(error) = input::checked_terminal(&active, false) {
-                    // Native startup can briefly leave input mode after Enter
-                    // while replacing the trust dialog with its main screen.
-                    // Wait without sending more keys; acknowledge only after
-                    // the pinned process owns a verified input terminal again.
-                    if exiting || (key == "Enter" && string(question, "source") == "claude_folder_trust"
-                        && Instant::now() < deadline) {
+                    if settling {
                         continue;
                     }
                     return Err(error);
@@ -165,7 +166,14 @@ fn navigate(
                         Some(next) => queued && next.0 != question["question_hash"],
                     };
                     if gone {
-                        return Ok(());
+                        // The agent can replace the dialog and leave input
+                        // mode between the check above and this capture. Only
+                        // a terminal verified after this screen acknowledges.
+                        match input::checked_terminal(&active, false) {
+                            Ok(()) => return Ok(()),
+                            Err(_) if settling => continue,
+                            Err(error) => return Err(error),
+                        }
                     }
                 } else if let Some(next) = next {
                     if next.0 != question["question_hash"] {

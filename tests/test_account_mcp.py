@@ -33,13 +33,42 @@ class ManagedProfileMcp(unittest.TestCase):
         self.env.update(HOME=str(self.home), HGS_CONFIG_DIR=str(self.config), HGS_STATE_DIR=str(self.root / 'state'),
                         HGS_SELF='test', HGS_PEERS='', HGS_TAB='0', SHELL='/bin/sh', PATH=str(self.bin) + os.pathsep + self.env['PATH'])
         self.script('tmux', f'#!/bin/sh\nexec {TMUX} -S "{self.socket}" -f /dev/null "$@"\n')
-        self.addCleanup(lambda: subprocess.run([TMUX, '-S', str(self.socket), 'kill-server'], capture_output=True))
-        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(self.stop)
         # Each fake agent records the configuration it finds at startup, then exits.
+        # A complete copy is renamed into place, so the observed file is never read half written.
         for agent, variable, name in [('codex', 'CODEX_HOME', 'config.toml'), ('claude', 'CLAUDE_CONFIG_DIR', '.claude.json'),
                                       ('kimi', 'KIMI_CODE_HOME', 'mcp.json')]:
+            observed = f'{self.root}/{agent}-observed'
             self.script(agent, '#!/bin/sh\ncase "$1" in --help|-h|--version) echo "' + agent + ' 0.0.0"; exit 0;; esac\n'
-                        f'cp "${variable}/{name}" "{self.root}/{agent}-observed" 2>/dev/null || : > "{self.root}/{agent}-missing"\nsleep 1\n')
+                        f'cp "${variable}/{name}" "{observed}.tmp" 2>/dev/null && mv "{observed}.tmp" "{observed}" '
+                        f'|| : > "{self.root}/{agent}-missing"\nsleep 1\n')
+
+    def stop(self):
+        # A detached session outlives its launch command: its tracked supervisor records the
+        # agent's exit in the state folder, also after kill-server returns. Remove the fixture
+        # only after this private server's pane processes, with the same start identity, ended.
+        def alive(pids):
+            if not pids:
+                return {}
+            # One keyword per -o: POSIX ps (macOS) takes the rest of an argument after '=' as its header.
+            status = subprocess.run(['ps', '-p', ','.join(pids), '-o', 'pid=', '-o', 'stat=', '-o', 'lstart='],
+                                    capture_output=True, text=True, timeout=5, env=dict(self.env, LC_ALL='C', TZ='UTC'))
+            rows = [line.split() for line in status.stdout.splitlines()]
+            # An unreadable listing must fail here rather than skip the wait.
+            self.assertTrue(all(len(row) > 2 and row[0] in pids for row in rows), status.stdout)
+            return {row[0]: ' '.join(row[2:]) for row in rows if not row[1].startswith(('Z', 'X'))}
+        panes = subprocess.run([TMUX, '-S', str(self.socket), 'list-panes', '-a', '-F', '#{pane_pid}'],
+                               capture_output=True, text=True, timeout=5)
+        try:
+            owned = alive([pid for pid in panes.stdout.split() if pid.isdigit()])
+        finally:
+            subprocess.run([TMUX, '-S', str(self.socket), 'kill-server'], capture_output=True, timeout=5)
+        deadline = time.monotonic() + 10
+        while owned and time.monotonic() < deadline:
+            time.sleep(0.02)
+            owned = {pid: start for pid, start in alive(list(owned)).items() if owned[pid] == start}
+        self.assertFalse(owned, 'private tmux panes survived kill-server')
+        self.temp.cleanup()
 
     def script(self, name, text):
         path = self.bin / name

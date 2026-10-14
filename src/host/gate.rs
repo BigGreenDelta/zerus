@@ -187,7 +187,7 @@ pub(crate) fn call_image(
 }
 
 #[cfg(windows)]
-pub(crate) use self::windows::{explicit_state_dir, host_image, unstaged_allowed};
+pub(crate) use self::windows::{explicit_state_dir, host_image, test_session, unstaged_allowed};
 
 #[cfg(windows)]
 mod windows {
@@ -243,6 +243,17 @@ mod windows {
     pub(crate) fn unstaged_allowed(state: &Path) -> bool {
         override_requested(env::var_os(ALLOW_UNSTAGED).as_deref())
             && isolated(explicit_state_dir(), state, &default_state_dirs())
+    }
+
+    /// Whether this process runs under the test override that admits an
+    /// unstaged host, for an existing isolated state directory: the sessions of
+    /// such a host may run `--run` on a computer without local sessions.
+    pub(crate) fn test_session() -> bool {
+        override_requested(env::var_os(ALLOW_UNSTAGED).as_deref())
+            && crate::host::server::existing_state_dir()
+                .ok()
+                .flatten()
+                .is_some_and(|state| unstaged_allowed(&state))
     }
 }
 

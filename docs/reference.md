@@ -1333,11 +1333,13 @@ keep that output private.
 
 Activity supports creation, messages/images, busy-session submission, questions,
 approvals, per-session model/effort, pause/resume, rename, goals, todos and child
-views. Request receipts prevent duplicate submission. Uncertain delivery requires
-inspection. Model changes do not replace profile defaults. Stopping one session
-does not terminate neighboring agents or the shared host. Closing Zerus leaves
-the host running; Forget retains native history. Linux user systemd runs the host
-in an independent scope so GUI service restart cannot kill the engine.
+views. A new child view stays empty until the child's first step records its
+native identity. Request receipts prevent duplicate submission. Uncertain
+delivery requires inspection. Model changes do not replace profile defaults.
+Stopping one session does not terminate neighboring agents or the shared host.
+Closing Zerus leaves the host running; Forget retains native history. Linux user
+systemd runs the host in an independent scope so GUI service restart cannot kill
+the engine.
 
 Native fork, global DeepSeek history search, schedule management and account
 transfer are currently handled in Native UI. Native context reset awaits a
