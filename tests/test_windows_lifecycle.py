@@ -32,6 +32,7 @@ HGS_TEST_BIN names the hgs.exe under test (default target/debug/hgs.exe), the
 agent (default target/debug/examples/fake_agent.exe, `cargo build --locked
 --example fake_agent`). Cases share the hermetic rules of test_windows_host.py.
 """
+import csv
 import ctypes
 import json
 import os
@@ -273,6 +274,22 @@ def read_events(path, kind=None):
     return [event for event in map(json.loads, lines) if kind is None or event["kind"] == kind]
 
 
+def deny_execute(case, path):
+    """Deny this user the right to run `path`, as for an agent installed by another
+    account; the case gives it back when it ends."""
+    user = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True,
+                          creationflags=HIDDEN, stdin=subprocess.DEVNULL, check=True).stdout
+    sid = next(csv.reader([user.strip()]))[1]
+
+    def icacls(*args):
+        return subprocess.run(["icacls", str(path), *args], capture_output=True, text=True,
+                              creationflags=HIDDEN, stdin=subprocess.DEVNULL)
+
+    denied = icacls("/deny", f"*{sid}:(X)")
+    case.assertEqual(denied.returncode, 0, denied.stdout + denied.stderr)
+    case.addCleanup(icacls, "/remove:d", f"*{sid}")
+
+
 @unittest.skipUnless(os.name == "nt", "local sessions on Windows run on Windows only")
 @unittest.skipUnless(FAKE_AGENT.is_file(), "build the fake agent: cargo build --locked --example fake_agent")
 class LifecycleCase(HostCase):
@@ -395,6 +412,31 @@ class Launch(LifecycleCase):
         again = self.hgs("fake_agent", str(self.project), "--new", "-n", "one", "-d", rc=1)
         self.assertIn("already exists", again.stderr)
         self.assertEqual(len(self.events("start")), 1)
+
+    def test_a_program_that_cannot_start_fails_its_launch(self):
+        # The GUI's launch: detached, with a launch ID. The supervisor cannot start
+        # the program, says why on the pane and ends at once, before any record
+        # exists. The launch fails with what it said instead of reporting a start
+        # that the GUI would wait for (zerus-ziq3.10).
+        denied = self.bin / "denied_agent.exe"
+        shutil.copy2(FAKE_AGENT, denied)
+        deny_execute(self, denied)
+        for program, code, said in (("missing_agent", 127, "hgs: missing_agent: not found on PATH"),
+                                    ("denied_agent", 126, "hgs: denied_agent: Access is denied. (os error 5)")):
+            with self.subTest(program=program):
+                name = f"{program}/project/x"
+                result = self.hgs(program, str(self.project), "--new", "-n", "x", "-d", "--launch-id",
+                                  str(uuid.uuid4()), rc=1)
+                self.status()  # Remember the host process for the cleanup.
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"hgs: session {name} ended immediately (exit {code}):\n", result.stderr)
+                self.assertIn(said, result.stderr)
+                self.assertNotIn(name, self.sessions())
+                self.assertIn(f"ended: exit {code} ", (self.state / "host.log").read_text(errors="replace"))
+        # A program that runs is started once it has run for the startup time.
+        started = time.monotonic()
+        self.launch("runs")
+        self.assertGreaterEqual(time.monotonic() - started, 3)
 
     def prompt(self, pane):
         """Whether PowerShell in `pane` waits at an empty prompt, which may wrap: the screen ends with it."""

@@ -1184,11 +1184,13 @@ class FailedStartup(Harness):
         self.gate = self.root / "launch-gate"
         self.ready = self.root / "wrapper-ready"
         self.launcher = self.project / "run_codex.sh"
+        # A project launcher may prompt, unlock secrets or exit. It records every
+        # run with its identity and never special-cases a capability probe.
         self.launcher.write_text("#!" + sys.executable + r'''
-import os, pathlib, signal, sys
+import json, os, pathlib, signal, sys
 home = pathlib.Path.home()
-if sys.argv[1:] == ["--help"]:
-    os.execvp("codex", ["codex", "--help"])
+with open(home / "launcher-runs.jsonl", "a") as log:
+    log.write(json.dumps({"argv": sys.argv[1:], "run_id": os.environ.get("HGS_RUN_ID")}) + "\n")
 gate = home / "launch-gate"
 if gate.exists():
     status = gate.read_text()
@@ -1214,6 +1216,15 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
     def attempts(self):
         return [json.loads(path.read_text()) for path in (self.root / "state/attempts").glob("*.json")]
 
+    def assert_launcher_runs(self, *runs):
+        """The launcher ran once per supervised run, never to detect capabilities."""
+        log = self.root / "launcher-runs.jsonl"
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        self.assertEqual([call["run_id"] for call in calls], list(runs))
+        for call in calls:
+            self.assertNotIn("--help", call["argv"])
+            self.assertEqual(call["argv"].count("--no-daemon"), 1)
+
     def assert_unconfirmed_not_saved(self, name):
         self.assertIsNone(self.binding(name)["conversation_id"])
         self.assertFalse((self.root / "argv.jsonl").exists(), "wrapper failed before the agent started")
@@ -1221,6 +1232,22 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
         self.assertFalse([row for row in rows if row["name"] == name])
         self.hgs("resume", name, "-d", rc=1)
+
+    def test_capability_detection_never_runs_the_launcher(self):
+        # Without the probe the launcher's Codex is unknown: it gets the flag that
+        # reviewed releases require. --bare still detects the native Codex.
+        (self.root / "old-codex").touch()
+        name = self.launch()
+        self.wait(lambda: self.binding(name).get("conversation_id"))
+        self.assert_launcher_runs(self.binding(name)["run_id"])
+        bare = self.hgs("codex", "-n", "bare", "--bare", "-d", cwd=self.project).strip().removeprefix("hgs: started ")
+        self.wait(lambda: self.binding(bare).get("conversation_id"))
+        self.assertEqual(self.binding(bare)["base"], ["codex"])
+        launches = [json.loads(line)["argv"] for line in (self.root / "argv.jsonl").read_text().splitlines()]
+        self.assertEqual(len(launches), 2)
+        self.assertEqual(launches[0].count("--no-daemon"), 1)
+        self.assertNotIn("--no-daemon", launches[1])
+        self.assert_launcher_runs(self.binding(name)["run_id"])
 
     def test_cancelled_wrapper_retries_same_command_without_fresh(self):
         self.gate.write_text("wait")
@@ -1255,6 +1282,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.wait(lambda: self.binding(name).get("run_id") != confirmed["run_id"] and
                   self.binding(name).get("activity") == "idle")
         self.assertEqual(self.binding(name)["conversation_id"], confirmed["conversation_id"])
+        self.assert_launcher_runs(failed["run_id"], confirmed["run_id"], self.binding(name)["run_id"])
 
     def test_new_can_retry_a_failed_unconfirmed_name(self):
         self.gate.write_text("7")
@@ -1265,6 +1293,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.assertEqual(self.launch("--new"), name)
         self.wait(lambda: self.binding(name).get("conversation_id"))
         self.assertEqual([record["run_id"] for record in self.attempts()], [failed["run_id"]])
+        self.assert_launcher_runs(failed["run_id"], self.binding(name)["run_id"])
 
     def test_failed_wrapper_can_retry_requested_id_under_same_name(self):
         self.gate.write_text("7")
@@ -1276,6 +1305,9 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.wait(lambda: self.binding(name).get("conversation_id") == requested and
                   self.binding(name).get("activity") == "idle")
         self.assertEqual([record["run_id"] for record in self.attempts()], [failed["run_id"]])
+        self.assert_launcher_runs(failed["run_id"], self.binding(name)["run_id"])
+        argv = json.loads((self.root / "launcher-runs.jsonl").read_text().splitlines()[-1])["argv"]
+        self.assertEqual(argv[argv.index("resume"):argv.index("resume") + 2], ["resume", requested])
 
     def test_repeated_failed_attempts_are_preserved_separately(self):
         failed = []
@@ -1292,6 +1324,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.assertEqual({record["exit_code"] for record in attempts}, {7, 130})
         self.assertEqual(len({record["attempt_id"] for record in attempts}), 2)
         self.assertEqual(len(list((self.root / "history").glob("*.jsonl"))), 1)
+        self.assert_launcher_runs(*[record["run_id"] for record in failed], self.binding(name)["run_id"])
 
     def test_living_unconfirmed_wrapper_is_not_replaced(self):
         self.gate.write_text("wait")
@@ -1306,6 +1339,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.assertEqual(self.binding(name), before)
         self.assertEqual(self.attempts(), [])
         self.t("has-session", "-t", "=" + name)
+        self.assert_launcher_runs(before["run_id"])
 
     def test_living_orphan_unconfirmed_child_is_not_replaced(self):
         self.gate.write_text("7")
@@ -1323,6 +1357,7 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
             self.assertEqual(self.binding(name), failed)
             self.assertIsNone(orphan.poll())
             self.assertEqual(self.attempts(), [])
+            self.assert_launcher_runs(failed["run_id"])
         finally:
             orphan.terminate()
             orphan.wait(timeout=5)
@@ -1934,8 +1969,6 @@ class Rename(Harness):
         launcher.write_text("#!" + sys.executable + r'''
 import os, pathlib, sys, time
 home = pathlib.Path.home()
-if sys.argv[1:] == ["--help"]:
-    os.execvp("codex", ["codex", "--help"])
 (home / "rename-ready").touch()
 while (home / "rename-gate").exists():
     time.sleep(0.01)

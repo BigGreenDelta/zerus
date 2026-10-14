@@ -281,15 +281,30 @@ fn executable_path() -> Result<PathBuf> {
     }
     Ok(env::current_exe()?)
 }
+/// Refuse a launch or attach inside a session pane, `-d` or not; only `fork -d`
+/// and `resume -d` start a session from inside one.
 fn nested_guard(dry: bool) -> Result<()> {
     if !dry && terminal().inside() {
         let name = terminal().enclosing_session();
-        return Err(Error::new(
-            2,
-            format!("already inside tmux session {name}; open a new tab"),
-        ));
+        return Err(Error::new(2, nested_refusal(cfg!(unix), Some(&name), None)));
     }
     Ok(())
+}
+/// Why a command refuses to run inside a session pane (`$TMUX` on Unix,
+/// `HGS_HOST_PANE` in the Windows session host, spec D8): the enclosing
+/// `session` when it is looked up ("" when unknown) and the detached command to
+/// `retry` with. Only tmux is named, so Windows sessions are not.
+fn nested_refusal(tmux: bool, session: Option<&str>, retry: Option<&str>) -> String {
+    let inside = match (tmux, session) {
+        (true, Some(name)) => format!("tmux session {name}"),
+        (true, None) => "tmux".to_owned(),
+        (false, Some(name)) if !name.is_empty() => format!("session {name}"),
+        (false, _) => "a session".to_owned(),
+    };
+    match retry {
+        Some(command) => format!("already inside {inside}; use {command} or open a new tab"),
+        None => format!("already inside {inside}; open a new tab"),
+    }
 }
 
 #[cfg(test)]
@@ -1231,7 +1246,7 @@ fn fork_session(config: &Config, args: &[String], client: &str, mut dry: bool) -
     if !detached && !dry && terminal().inside() {
         return Err(Error::new(
             2,
-            "already inside tmux; use fork -d or open a new tab",
+            nested_refusal(cfg!(unix), None, Some("fork -d")),
         ));
     }
     env::set_var("HGS_CLIENT", client);
@@ -1294,7 +1309,7 @@ fn pause_resume(
     if command == "resume" && !detached && !dry && terminal().inside() {
         return Err(Error::new(
             2,
-            "already inside tmux; use resume -d or open a new tab",
+            nested_refusal(cfg!(unix), None, Some("resume -d")),
         ));
     }
     let mut state_args = vec![session.into()];
@@ -2115,6 +2130,76 @@ mod tests {
             }
             assert_eq!(folder_name(&link.to_string_lossy()), "site");
         }
+    }
+
+    #[test]
+    fn inside_a_session_only_tmux_is_named_and_a_launch_is_refused_even_detached() {
+        // Unix keeps tmux's wording byte for byte.
+        assert_eq!(
+            nested_refusal(true, Some("sh/MyProj/work-1"), None),
+            "already inside tmux session sh/MyProj/work-1; open a new tab"
+        );
+        assert_eq!(
+            nested_refusal(true, Some(""), None),
+            "already inside tmux session ; open a new tab"
+        );
+        assert_eq!(
+            nested_refusal(true, None, Some("fork -d")),
+            "already inside tmux; use fork -d or open a new tab"
+        );
+        assert_eq!(
+            nested_refusal(true, None, Some("resume -d")),
+            "already inside tmux; use resume -d or open a new tab"
+        );
+        // A Windows host session is named as the host resolves it, without tmux.
+        assert_eq!(
+            nested_refusal(false, Some("sh/MyProj/work-1"), None),
+            "already inside session sh/MyProj/work-1; open a new tab"
+        );
+        assert_eq!(
+            nested_refusal(false, Some(""), None),
+            "already inside a session; open a new tab"
+        );
+        assert_eq!(
+            nested_refusal(false, None, Some("fork -d")),
+            "already inside a session; use fork -d or open a new tab"
+        );
+        assert_eq!(
+            nested_refusal(false, None, Some("resume -d")),
+            "already inside a session; use resume -d or open a new tab"
+        );
+
+        // On either platform a launch inside a session is refused with or
+        // without -d, as inside tmux; a dry run is not.
+        struct Inside;
+        impl TerminalBackend for Inside {
+            fn inside(&self) -> bool {
+                true
+            }
+            fn enclosing_session(&self) -> String {
+                "sh/MyProj/work-1".into()
+            }
+        }
+        struct Outside;
+        impl TerminalBackend for Outside {}
+        let launch = |words: &[&str], dry| {
+            let args = words.iter().map(|word| word.to_string()).collect::<Vec<_>>();
+            LaunchOptions::parse(&args, dry)
+        };
+        state::backend::with_fake(&Inside, || {
+            for words in [&["MyProj", "-n", "x", "-d"][..], &["MyProj", "-n", "x"]] {
+                let error = launch(words, false).err().unwrap();
+                assert_eq!(error.code, 2);
+                assert_eq!(
+                    error.message,
+                    nested_refusal(cfg!(unix), Some("sh/MyProj/work-1"), None)
+                );
+            }
+            assert!(launch(&["MyProj", "-n", "x", "-d"], true).is_ok());
+        });
+        state::backend::with_fake(&Outside, || {
+            assert!(launch(&["MyProj", "-n", "x", "-d"], false).is_ok());
+        });
     }
 
     #[test]
