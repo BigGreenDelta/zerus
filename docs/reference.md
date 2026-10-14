@@ -1486,7 +1486,8 @@ the full screen for every small change.
 Dropping files into Terminal inserts paths without Enter, quoted for the session's
 machine: in single quotes on Unix machines, and with backslashes for a session on
 this Windows computer, in double quotes when a path has spaces or shell-special
-characters. Remote drops first copy files to the session host, limited to eight
+characters, or in single quotes when it has `$` or a backtick, which PowerShell
+would expand inside double quotes. Remote drops first copy files to the session host, limited to eight
 files, 10 MiB each and 20 MiB total.
 Changing tab, session or connection during transfer cancels insertion.
 **Open externally** and **Copy connect command** retain access from other clients.

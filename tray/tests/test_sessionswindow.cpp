@@ -4706,8 +4706,9 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
 
 void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
 {
-    // The local Windows machine reads native paths in double quotes; a peer's staged
-    // copies and a POSIX local machine keep single quotes.
+    // The local Windows machine reads native paths in double quotes, or in single
+    // quotes when PowerShell would expand `$` or a backtick; a peer's staged copies and
+    // a POSIX local machine keep single quotes.
     const auto program=m_dir->filePath("terminal-quoting-hgs");QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
     fixture.write("#!/usr/bin/env python3\nimport json,os,runpy,sys\na=sys.argv[1:]\nif a and a[0].startswith('@'):a=a[1:]\n"
         "if a[:1]==['a']:\n if os.name!='nt':\n  import tty;tty.setraw(0)\n"
@@ -4718,7 +4719,7 @@ void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
         "sys.argv[0]="+FakeCli::pythonString(script())+";runpy.run_path(sys.argv[0],run_name='__main__')\n");
     fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
     QStringList paths;
-    for(const auto &name:{QString("plain.txt"),QString("report's draft.pdf"),QString("a&b.txt")}) {
+    for(const auto &name:{QString("plain.txt"),QString("report's draft.pdf"),QString("a&b.txt"),QString("cost $5's `q`.txt")}) {
         QFile file(m_dir->filePath(name));QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture");paths<<file.fileName();
     }
     QMimeData mime;QList<QUrl> urls;for(const auto &path:paths)urls<<QUrl::fromLocalFile(path);mime.setUrls(urls);
@@ -4744,10 +4745,12 @@ void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
         SessionsWindow window(FakeCli::program(program));window.setFleet(state);window.resize(1100,760);window.show();
         const auto pasted=QString::fromUtf8(drop(window,{},"codex/hgs/dashboard"));
         if(platform=="windows") {
-            QVERIFY2(pasted.contains(native(paths[0])+" \""+native(paths[1])+"\" \""+native(paths[2])+"\" "),qPrintable(pasted));
+            QVERIFY2(pasted.contains(native(paths[0])+" \""+native(paths[1])+"\" \""+native(paths[2])+"\" '"
+                                     +native(paths[3]).replace("'","''")+"' "),qPrintable(pasted));
             QVERIFY(!pasted.contains('/'));QVERIFY(!pasted.contains('\''+native(paths[1])));
         } else {
-            QVERIFY2(pasted.contains('\''+paths[0]+"' '"+QString(paths[1]).replace("'","'\\''")+"' '"+paths[2]+"' "),qPrintable(pasted));
+            QVERIFY2(pasted.contains('\''+paths[0]+"' '"+QString(paths[1]).replace("'","'\\''")+"' '"+paths[2]+"' '"
+                                     +QString(paths[3]).replace("'","'\\''")+"' "),qPrintable(pasted));
             QVERIFY(!pasted.contains('"'));
         }
         // A peer's staged copies keep POSIX quoting whatever this computer runs.

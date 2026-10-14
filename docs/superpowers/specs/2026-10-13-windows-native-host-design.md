@@ -645,7 +645,9 @@ machine: Linux and macOS GUIs, and every peer, behave as today.
   `SessionCommands.h:109`), with the local-only folders of D15.
 - Terminal file drops into a local Windows session use native separators and double
   quotes around a path with whitespace or shell-special characters (Windows names
-  cannot contain `"`); remote drops keep POSIX quoting. The local folder shell opens
+  cannot contain `"`), or single quotes with `'` doubled around a path with `$` or a
+  backtick, which PowerShell expands inside double quotes; remote drops keep POSIX
+  quoting. The local folder shell opens
   PowerShell in that folder through Windows Terminal, or a console started there when
   Windows Terminal is missing or cannot pass the path unchanged. On a Windows GUI,
   file references accept `C:\…`, `C:/…` (with `:line[:col]`) and `file:///C:/…`,
