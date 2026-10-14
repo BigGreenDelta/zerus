@@ -202,12 +202,18 @@ struct Launch {
     name: String,
     /// When the newest of its evidence was written.
     at: f64,
+    /// Whether its supervisor reported how it ended.
+    reported: bool,
     code: Option<i64>,
     output: String,
 }
 
 /// The launch evidence a listing read before it listed the terminal.
-pub(crate) struct Evidence(BTreeMap<String, Launch>);
+pub(crate) struct Evidence {
+    folder: PathBuf,
+    now: f64,
+    launches: BTreeMap<String, Launch>,
+}
 
 impl Evidence {
     pub(crate) fn read() -> Self {
@@ -216,8 +222,13 @@ impl Evidence {
 
     fn read_in(folder: &Path, now: f64) -> Self {
         let mut launches = BTreeMap::new();
+        let evidence = |launches| Self {
+            folder: folder.to_owned(),
+            now,
+            launches,
+        };
         let Ok(entries) = fs::read_dir(folder) else {
-            return Self(launches);
+            return evidence(launches);
         };
         for entry in entries.flatten() {
             let file = entry.file_name().to_string_lossy().into_owned();
@@ -251,11 +262,12 @@ impl Evidence {
             }
             launch.at = launch.at.max(at);
             if end {
+                launch.reported = true;
                 launch.code = value["code"].as_i64();
                 launch.output = string(&value, "output").to_owned();
             }
         }
-        Self(launches)
+        evidence(launches)
     }
 
     /// `ended_launches` of a listing of `sessions`: the launches that none of
@@ -268,10 +280,21 @@ impl Evidence {
             .filter(|id| !id.is_empty())
             .collect();
         let mut ended: Vec<(String, Launch)> = self
-            .0
+            .launches
             .into_iter()
             .filter(|(id, _)| !listed.contains(id.as_str()))
             .collect();
+        // A supervisor reports how its session ended before the session leaves
+        // the terminal: a launch that ended after this evidence was read and
+        // before the terminal listed has its report now.
+        if ended.iter().any(|(_, launch)| !launch.reported) {
+            let mut later = Self::read_in(&self.folder, self.now).launches;
+            for (id, launch) in &mut ended {
+                if let Some(report) = later.remove(id.as_str()).filter(|_| !launch.reported) {
+                    *launch = report;
+                }
+            }
+        }
         ended.sort_by(|a, b| b.1.at.total_cmp(&a.1.at).then_with(|| a.0.cmp(&b.0)));
         ended.truncate(LISTED);
         ended
@@ -384,6 +407,31 @@ mod tests {
         assert_eq!(
             Evidence::read_in(&folder.join("missing"), now).ended(&[]),
             Vec::<Value>::new()
+        );
+    }
+
+    #[test]
+    fn a_listing_reports_how_a_launch_ended_after_its_evidence_was_read() {
+        let folder = tempfile::tempdir().unwrap();
+        let now = 1_800_000_000.0;
+        write_started(folder.path(), ONE, "claude/project/one", now - 3.0).unwrap();
+        let evidence = Evidence::read_in(folder.path(), now);
+        // Its supervisor reported and exited before the terminal listed.
+        write_ended(
+            folder.path(),
+            ONE,
+            Some("claude/project/one"),
+            3,
+            "cannot start",
+            now - 1.0,
+        )
+        .unwrap();
+        assert_eq!(
+            evidence.ended(&[]),
+            vec![
+                json!({"launch_id": ONE, "name": "claude/project/one", "code": 3,
+                        "output": "cannot start"})
+            ]
         );
     }
 
