@@ -66,6 +66,35 @@ class Recovery(unittest.TestCase):
         self.command('recovery','action',payload=dict(name=self.name,id=job['id'],action='cancel'))
         self.tick();self.assertEqual(self.inspect()['recovery']['state'],'cancelled');self.assertEqual(self.received(),raw)
 
+    def test_rate_limit_hooks_while_the_agent_keeps_working_never_restart_the_loop(self):
+        # A rate-limit hook can arrive right after the agent accepts the
+        # continuation while the agent keeps working and later answers.
+        self.prepare('claude')
+        self.record['provider_error'].update(detail='429 Too many requests',error_kind='rate_limit');self.write_record()
+        policy=json.loads(self.policy.read_text());policy.update(version=3,schedules=dict(rate_limit=[15,30,60,300,0]))
+        self.policy.write_text(json.dumps(policy))
+        self.tick();job=self.inspect()['recovery'];self.assertEqual(job['class'],'rate_limit')
+        self.command('recovery','action',payload=dict(name=self.name,id=job['id'],action='now'))
+        self.tick();self.wait_for(lambda:self.received().endswith(b'\r'));raw=self.received()
+        sent=self.inspect()['recovery'];self.assertEqual(sent['state'],'retrying')
+        self.hook('UserPromptSubmit',prompt=sent['receipt']['text'])
+        self.hook('StopFailure',error='rate_limit',error_details='429 Too many requests')
+        self.tick();failed=self.inspect()['recovery'];self.assertEqual(failed['state'],'waiting')
+        # Even a retry that is already due never reaches a working agent.
+        self.command('recovery','action',payload=dict(name=self.name,id=job['id'],action='now'))
+        self.hook('PreToolUse',tool_name='Bash',tool_use_id='toolu_fixture',tool_input=dict(command='true'))
+        self.tick();working=self.inspect()
+        self.assertEqual(working['phase'],'tool');self.assertEqual(working['recovery']['state'],'retrying',working['recovery'])
+        self.hook('StopFailure',error='rate_limit',error_details='429 Too many requests');self.tick()
+        self.hook('PostToolUse',tool_name='Bash',tool_use_id='toolu_fixture');self.tick()
+        current=self.inspect()['recovery'];self.assertEqual(current['state'],'retrying',current)
+        self.assertEqual((current['attempt'],current['attempts']),(1,dict(rate_limit=1)))
+        self.hook('Stop',last_assistant_message='Fixture answer')
+        for _ in range(2):
+            self.tick();finished=self.inspect()['recovery']
+            self.assertEqual((finished['state'],finished['attempt']),('succeeded',1),finished)
+        self.assertEqual(self.received(),raw);self.assertEqual(raw.count(b'[HGS automatic recovery]'),1)
+
     def test_codex_delivery_acknowledgement_and_cancel(self):self.exercise('codex')
     def test_claude_delivery_acknowledgement_and_cancel(self):self.exercise('claude')
     def test_kimi_delivery_acknowledgement_and_cancel(self):self.exercise('kimi')
