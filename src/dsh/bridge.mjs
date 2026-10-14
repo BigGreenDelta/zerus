@@ -432,7 +432,11 @@ export function apply(ctx, config) {
         recovery.get(p.sessionId)?.finish(undefined);
         const agent = ctx.agents.get(p.sessionId);
         if (!agent) throw new Error('Resume this session before sending a message');
-        if (needsSignIn(control.selectionFor(agent).current, await accountStatus()))
+        // Read as list and inspect do. A top-level Agent upstream composed has an
+        // installed selection; another one, such as a webhook root, gets none here.
+        const selection = selectionOf(agent, control.selections.has(agent) ? undefined
+          : (await api.projections({ sessionId: p.sessionId }, new AbortController().signal))?.values);
+        if (needsSignIn(selection, await accountStatus()))
           throw new Error('Sign in to DeepSeek in the native UI before sending a message');
         return api.prompt(p, new AbortController().signal);
       }

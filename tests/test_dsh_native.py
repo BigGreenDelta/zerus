@@ -532,6 +532,27 @@ class NativeHarness(unittest.TestCase):
             self.rpc('settings',{'sessionId':child,'provider':'hgs-test','model':'test-a'})
         self.assertEqual(self.cli('inspect',parent)['model'],'test-b')
 
+    def test_send_reads_an_uncomposed_root_without_installing_a_selection(self):
+        # A webhook root runs its creation route without the model selection
+        # upstream installs while composing a session. The send sign-in check
+        # only reads one: an installed selection would route the request to
+        # the profile default. A model change remains a top-level setting.
+        parent=self.create();root='webhook-'+str(uuid.uuid4())
+        route={'provider':'hgs-test','model':'test-b'}
+        self.cli('send',parent,self.payload(parent,text='UNCOMPOSED_ROOT_FIXTURE '+root,attachments=[]))
+        row=self.wait(lambda: next((r for r in self.rpc('list')['items'] if r['sessionId']==root),None))
+        self.assertIsNone(row.get('parentSessionId'));self.assertEqual(row['selection'],route)
+        self.rpc('send',{'sessionId':root,'requestId':str(uuid.uuid4()),'mode':'steer',
+                         'content':[{'type':'text','text':'Uncomposed root message'}]})
+        def replied():
+            native=self.rpc('inspect',{'sessionId':root})
+            return native if 'Native reply: Uncomposed root message' in json.dumps(native['page']['records']) else None
+        used=self.wait(replied)['baseline']['values']['modelSelection']['lastUsed']
+        self.assertEqual({k:v for k,v in used.items() if k!='reasoningEffort'},route)
+        chosen={'provider':'hgs-test','model':'test-a','reasoningEffort':'off'}
+        self.assertEqual(self.rpc('settings',{'sessionId':root,**chosen})['selected'],chosen)
+        self.assertEqual(next(r for r in self.rpc('list')['items'] if r['sessionId']==root)['selection'],chosen)
+
     def test_continuable_child_send_is_addressed_and_idempotent(self):
         parent, other = self.create(), self.create()
         self.cli('send', parent, self.payload(parent, text='SUBAGENT CONTINUABLE', attachments=[]))
