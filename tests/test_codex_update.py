@@ -286,7 +286,7 @@ class CodexUpdate(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('HGS_CODEX_TEST_BIN'), 'Set HGS_CODEX_TEST_BIN for the isolated native Codex update test')
 class NativeCodexUpdate(unittest.TestCase):
-    """The real picker from a cached newer version; only skip choices are answered."""
+    """The real picker from a cached newer version; Update now runs only a fake npm."""
     script = fixtures.InputTransport.script
     tmux = fixtures.InputTransport.tmux
     write_record = fixtures.InputTransport.write_record
@@ -362,9 +362,10 @@ class NativeCodexUpdate(unittest.TestCase):
         # A fake npm first on Codex's own PATH stands in for the installer.
         self.script('npm', FAKE_NPM.replace('{python}', sys.executable))
         environ = pathlib.Path('/proc', str(self.record['pid']), 'environ')
-        paths = [self.env['PATH']]
-        if environ.exists():
-            paths.append(dict(item.split('=', 1) for item in environ.read_text().split('\0') if '=' in item)['PATH'])
+        if not environ.exists():
+            # Never select Update now unless Codex's own PATH is verified.
+            self.skipTest("Codex's own PATH needs /proc to verify")
+        paths = [self.env['PATH'], dict(item.split('=', 1) for item in environ.read_text().split('\0') if '=' in item)['PATH']]
         for path in paths:
             self.assertEqual(shutil.which('npm', path=path), str(self.bin / 'npm'))
         self.assertEqual(self.card['questions'][0]['options'][0]['label'], 'Update now (runs `npm install -g @openai/codex`)')
@@ -375,7 +376,9 @@ class NativeCodexUpdate(unittest.TestCase):
                          ('answered', True, 'installing'))
         self.wait_for(lambda: (self.root / 'npm-args').exists())
         self.assertEqual((self.root / 'npm-args').read_text(), 'install -g @openai/codex')
-        self.assertIn('Updating Codex via `npm install -g @openai/codex`...', self.tmux('capture-pane', '-p', '-t', self.pane))
+        # Narrow panes wrap the announcement, possibly inside a word.
+        self.assertIn('UpdatingCodexvia`npminstall-g@openai/codex`...',
+                      ''.join(self.tmux('capture-pane', '-p', '-t', self.pane).split()))
         (self.root / 'release').touch()
 
         def exited():
