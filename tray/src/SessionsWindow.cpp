@@ -49,6 +49,7 @@
 #include "MachineFilter.h"
 #include "MachineAppearance.h"
 #include "MachinePlatform.h"
+#include "LocalLaunchWarning.h"
 #include "DashboardPage.h"
 #include "AccountsPage.h"
 #include "SessionSearch.h"
@@ -2163,7 +2164,7 @@ void SessionsWindow::populateBatchActions(QMenu *menu)
             showNotice(tr("Pausing sessions on %1…").arg(machine)); renderDetails();
         });
         connect(resume, &QAction::triggered, this, [this, host, machine, saved]() {
-            if (m_pending) return;
+            if (m_pending || !LocalSessionHost::confirmLaunch(this, m_fleet.local(), host) || m_pending) return;
             m_pending = true; m_restoreKey.clear(); m_client.resumeAll(host, saved);
             showNotice(tr("Resuming sessions on %1…").arg(machine)); renderDetails();
         });
@@ -3641,7 +3642,7 @@ void SessionsWindow::startFresh()
     auto *confirm = dialog.addButton(tr("Start fresh"), QMessageBox::DestructiveRole);
     auto *cancel = dialog.addButton(QMessageBox::Cancel); dialog.setDefaultButton(cancel); dialog.setEscapeButton(cancel);
     dialog.exec();
-    if (dialog.clickedButton() != confirm) return;
+    if (dialog.clickedButton() != confirm || !LocalSessionHost::confirmLaunch(this, m_fleet.local(), original.host)) return;
     entry = selected();
     if (!entry || entry->key != original.key || entry->session.runId != original.session.runId
         || entry->session.conversationId != original.session.conversationId || !canStartStopped(*entry)) {
@@ -3676,6 +3677,7 @@ void SessionsWindow::startToSend(const QString &key, const QString &text, const 
     const bool startFresh = dialog.clickedButton() == fresh;
     const bool compactFirst = dialog.clickedButton() == compact;
     if (!startFresh && !compactFirst && dialog.clickedButton() != resume) return;
+    if (!LocalSessionHost::confirmLaunch(this, m_fleet.local(), original.host)) return;
     entry = selected();
     if (!entry || entry->key != key || entry->session.runId != original.session.runId
         || entry->session.conversationId != original.session.conversationId || !canStartStopped(*entry)) {
@@ -4345,9 +4347,15 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         return;
     case SessionMenuAction::OpenTerminal:
         if (entry->session.cmd == "dsh") { showNativeUi(*entry); return; }
-        if (entry->online && m_open->isEnabled() && entry->session.state != "archived" && NativeSessionCapabilities::terminal(entry->session,m_details))
-            emit terminalOpenRequested(entry->host, entry->session.name,
-                entry->host.isEmpty() && entry->session.attached && !entry->session.clients.isEmpty() ? entry->session.clients.first() : QString());
+        if (!entry->online || !m_open->isEnabled() || entry->session.state == "archived" || !NativeSessionCapabilities::terminal(entry->session,m_details)) return;
+        // This terminal opens also in clipboard mode, and `hgs a` resumes a saved session.
+        if (entry->session.state != "running") {
+            if (!confirmLocalStart(*entry)) return;
+            entry = selected();
+            if (!entry->online || !m_open->isEnabled() || !NativeSessionCapabilities::terminal(entry->session,m_details)) return;
+        }
+        emit terminalOpenRequested(entry->host, entry->session.name,
+            entry->host.isEmpty() && entry->session.attached && !entry->session.clients.isEmpty() ? entry->session.clients.first() : QString());
         return;
     case SessionMenuAction::ChangeState:
     case SessionMenuAction::Terminate:
@@ -4381,13 +4389,31 @@ void SessionsWindow::openSession()
 {
     const auto *e = selected(); if (!e || !e->online || !m_open->isEnabled() || e->session.state == "archived") return;
     if (e->session.cmd == "dsh") { m_client.openNativeUi(e->host,e->session.name); return; }
+    // `hgs a` resumes a saved session; a copied command starts nothing.
+    if (!m_clipboard && e->session.state != "running") {
+        if (!confirmLocalStart(*e)) return;
+        e = selected(); if (!e->online || !m_open->isEnabled()) return;
+    }
     emit sessionActivated(e->host, e->session.name,
         e->host.isEmpty() && e->session.attached && !e->session.clients.isEmpty() ? e->session.clients.first() : QString());
+}
+
+bool SessionsWindow::confirmLocalStart(const Entry &original)
+{
+    if (!LocalSessionHost::confirmLaunch(this, m_fleet.local(), original.host)) return false;
+    const auto *e = selected();
+    if (e && e->key == original.key && e->session.state == original.session.state && e->session.runId == original.session.runId
+        && e->session.conversationId == original.session.conversationId && e->session.archiveId == original.session.archiveId) return true;
+    showNotice(tr("The session changed. Open its actions again."), true); return false;
 }
 
 void SessionsWindow::changeSession()
 {
     const auto *e = selected(); if (!e || !e->online || m_pending || !m_pause->isEnabled()) return;
+    if (e->session.state != "running") {
+        if (!confirmLocalStart(*e)) return;
+        e = selected(); if (!e->online || m_pending || !m_pause->isEnabled()) return;
+    }
     m_pending = true; m_restoreKey.clear();
     if (e->session.state == "archived") {
         m_restoreKey = e->host + '\n' + e->session.name;
@@ -4453,7 +4479,10 @@ void SessionsWindow::forkSession()
     auto *error = label({}, "hint"); error->setWordWrap(true); layout->addWidget(error);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); auto *create = buttons->button(QDialogButtonBox::Ok); create->setText(tr("Fork session")); layout->addWidget(buttons);
     const auto validate = [&] { QString problem = SessionTag::problem(name->text()); if (problem.isEmpty() && occupied(name->text())) problem = tr("This session name is already in use."); error->setText(problem); create->setEnabled(problem.isEmpty()); };
-    connect(name, &QLineEdit::textChanged, &dialog, validate); connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(name, &QLineEdit::textChanged, &dialog, validate); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        if (LocalSessionHost::confirmLaunch(&dialog, m_fleet.local(), original.host)) dialog.accept();
+    });
     validate(); name->selectAll(); name->setFocus();
     if (dialog.exec() != QDialog::Accepted || !SessionTag::problem(name->text()).isEmpty() || occupied(name->text())) return;
     if (!selectSessionEntry(original) || !m_forkAction->isEnabled()) return;

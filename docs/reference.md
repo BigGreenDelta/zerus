@@ -1804,7 +1804,11 @@ On Windows the local box also carries `local_host`, the session host as found
 (with `error`), and `pid`, `protocol`, `conpty` (`bundled` or `inbox`), `integrity`
 and `windows_session` describe a running host and are null otherwise. Its sessions
 list attached clients in `clients` by opaque IDs such as `c1` instead of tty paths.
-Linux and macOS snapshots have no `local_host`.
+Linux and macOS snapshots have no `local_host`. When `windows_session` differs from
+the desktop app's own Windows session (a host started over SSH, for example), the app
+asks before a launch, resume, restore or fork on this computer goes into that host,
+whose agents cannot show windows such as a browser sign-in on the desktop; Cancel
+keeps drafts and dialogs as they were.
 
 Tracked live sessions add resumability and activity. Saved sessions use
 `state: paused|stopped`, zero attached clients and an empty clients array.

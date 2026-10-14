@@ -3,6 +3,7 @@
 #include <QJsonObject>
 #include <QSysInfo>
 #include "MachinePlatform.h"
+#include "LocalSessionHost.h"
 
 using MachinePlatform::Style;
 
@@ -29,6 +30,9 @@ private slots:
     void leafOfWindowsPaths_data();
     void leafOfWindowsPaths();
     void nativeSeparatorsOnlyForWindows();
+    void otherWindowsSession_data();
+    void otherWindowsSession();
+    void ownWindowsSessionOnlyOnWindows();
 };
 
 void TestMachinePlatform::peersArePosixAndTheLocalMachineFollowsItsPlatform()
@@ -306,6 +310,81 @@ void TestMachinePlatform::nativeSeparatorsOnlyForWindows()
     QCOMPARE(MachinePlatform::native(MachinePlatform::clean("c:/Work/", Style::Windows), Style::Windows), QString("c:\\Work"));
     QCOMPARE(MachinePlatform::native("/home/user/project", Style::Posix), QString("/home/user/project"));
     QCOMPARE(MachinePlatform::native("C:/work", Style::Posix), QString("C:/work"));
+}
+
+// Spec D5: a launch on this computer warns only when its running session host
+// reports another Windows session than the GUI's own.
+void TestMachinePlatform::otherWindowsSession_data()
+{
+    QTest::addColumn<QString>("platform");
+    QTest::addColumn<QString>("host");
+    QTest::addColumn<QJsonObject>("localHost");
+    QTest::addColumn<qint64>("own");      // -1: the GUI has no Windows session.
+    QTest::addColumn<qint64>("expected"); // -1: no warning.
+    const auto running = [](const QJsonValue &session) {
+        return QJsonObject{{"state", "running"}, {"pid", 4242}, {"protocol", 1}, {"conpty", "bundled"},
+                           {"integrity", "medium"}, {"windows_session", session}};
+    };
+    const auto idle = [](const QString &state) {
+        return QJsonObject{{"state", state}, {"pid", QJsonValue::Null}, {"protocol", QJsonValue::Null},
+                           {"conpty", QJsonValue::Null}, {"integrity", QJsonValue::Null}, {"windows_session", QJsonValue::Null}};
+    };
+    auto elevated = idle("unavailable"); elevated["error"] = "the session host on this computer runs elevated";
+    QTest::newRow("other session") << "windows" << QString() << running(2) << qint64(1) << qint64(2);
+    QTest::newRow("services session") << "windows" << QString() << running(0) << qint64(1) << qint64(0);
+    QTest::newRow("from the services session") << "windows" << QString() << running(3) << qint64(0) << qint64(3);
+    QTest::newRow("same session") << "windows" << QString() << running(1) << qint64(1) << qint64(-1);
+    QTest::newRow("not installed") << "windows" << QString() << idle("not-installed") << qint64(1) << qint64(-1);
+    QTest::newRow("no host runs") << "windows" << QString() << idle("stopped") << qint64(1) << qint64(-1);
+    QTest::newRow("unavailable host") << "windows" << QString() << elevated << qint64(1) << qint64(-1);
+    QTest::newRow("null session") << "windows" << QString() << running(QJsonValue::Null) << qint64(1) << qint64(-1);
+    QTest::newRow("missing session") << "windows" << QString()
+        << QJsonObject{{"state", "running"}, {"pid", 4242}} << qint64(1) << qint64(-1);
+    QTest::newRow("older CLI") << "windows" << QString() << QJsonObject() << qint64(1) << qint64(-1);
+    QTest::newRow("no own session") << "windows" << QString() << running(2) << qint64(-1) << qint64(-1);
+    QTest::newRow("remote machine") << "windows" << QString("mac") << running(2) << qint64(1) << qint64(-1);
+    QTest::newRow("linux machine") << "linux" << QString() << running(2) << qint64(1) << qint64(-1);
+    QTest::newRow("macos machine") << "macos" << QString() << running(2) << qint64(1) << qint64(-1);
+}
+
+void TestMachinePlatform::otherWindowsSession()
+{
+    QFETCH(QString, platform); QFETCH(QString, host); QFETCH(QJsonObject, localHost);
+    QFETCH(qint64, own); QFETCH(qint64, expected);
+    BoxState local; local.host = "workstation"; local.ok = true;
+    local.metrics = QJsonObject{{"platform", platform}}; local.localHost = localHost;
+    const auto session = own < 0 ? std::nullopt : std::optional<qint64>(own);
+    QCOMPARE(LocalSessionHost::otherWindowsSession(local, host, session).value_or(-1), expected);
+    // The injected session of the GUI gives the same answer.
+    LocalSessionHost::setOwnWindowsSessionForTests(session);
+    QCOMPARE(LocalSessionHost::otherWindowsSession(local, host).value_or(-1), expected);
+    LocalSessionHost::resetOwnWindowsSessionForTests();
+}
+
+void TestMachinePlatform::ownWindowsSessionOnlyOnWindows()
+{
+    BoxState local; local.host = "workstation"; local.ok = true; local.metrics = QJsonObject{{"platform", "windows"}};
+    local.localHost = QJsonObject{{"state", "running"}, {"pid", 4242}, {"windows_session", 7}};
+#ifdef Q_OS_WIN
+    const auto own = LocalSessionHost::ownWindowsSession(); QVERIFY(own.has_value());
+    QCOMPARE(LocalSessionHost::otherWindowsSession(local, {}).value_or(-1), qint64(*own == 7 ? -1 : 7));
+#else
+    // Linux and macOS GUIs have no Windows session, so a launch never warns, even
+    // when a box reports a Windows host in another session.
+    QVERIFY(!LocalSessionHost::ownWindowsSession());
+    QVERIFY(!LocalSessionHost::otherWindowsSession(local, {}));
+    auto unreported = local; unreported.metrics = QJsonObject();
+    QVERIFY(!LocalSessionHost::otherWindowsSession(unreported, {}));
+#endif
+    LocalSessionHost::setOwnWindowsSessionForTests(1);
+    QCOMPARE(LocalSessionHost::ownWindowsSession().value_or(-1), qint64(1));
+    QCOMPARE(LocalSessionHost::otherWindowsSession(local, {}).value_or(-1), qint64(7));
+    LocalSessionHost::setOwnWindowsSessionForTests(std::nullopt);
+    QVERIFY(!LocalSessionHost::ownWindowsSession());
+    LocalSessionHost::resetOwnWindowsSessionForTests();
+#ifndef Q_OS_WIN
+    QVERIFY(!LocalSessionHost::ownWindowsSession());
+#endif
 }
 
 QTEST_APPLESS_MAIN(TestMachinePlatform)

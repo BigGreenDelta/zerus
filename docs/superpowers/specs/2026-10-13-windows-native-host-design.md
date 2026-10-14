@@ -189,8 +189,14 @@ integrity level at least the host's; a lower-integrity client is refused with a 
 message ("the session host on this computer runs elevated"). The host reports its
 integrity level and Windows session ID in the hello and in `local_host`, and the GUI
 warns before launching into a host that runs in another Windows session (for example
-one started over SSH; a follow-up task after M6). Elevated SSH testing uses an
-isolated `HGS_STATE_DIR`.
+one started over SSH; implemented 2026-10-14): when the local machine is Windows
+(D16), its `local_host` runs and reports a `windows_session` other than the GUI's
+own (`ProcessIdToSessionId`), New session, Resume, Restore, Resume all, Start fresh,
+starting a stopped session to send, Fork and opening a saved session's terminal on
+this computer ask "Launch anyway?" first. Cancel leaves drafts and dialogs as they
+were. Remote machines, Linux and macOS GUIs, no running host (the launch starts one
+in this session) and the same session never ask (`tray/src/LocalSessionHost.h`,
+`LocalLaunchWarning.h`). Elevated SSH testing uses an isolated `HGS_STATE_DIR`.
 
 **Security.** The first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE` and
 `PIPE_REJECT_REMOTE_CLIENTS` and a protected DACL granting access only to the user SID.
@@ -631,7 +637,8 @@ machine: Linux and macOS GUIs, and every peer, behave as today.
   Windows, is a control console and its CLI reports `local_host`, running
   `hgs.exe session-host install`; the page shows the host's state, PID, ConPTY,
   integrity, Windows session and error. M6 has no disable action
-  (`hgs session-host uninstall` remains).
+  (`hgs session-host uninstall` remains). Launches on this computer warn when that
+  host runs in another Windows session (D5).
 - Once enabled, the GUI runs the stable CLI from its next start and refreshes it when
   its bundled build is newer (D2).
 - Path model per machine (`tray/src/MachinePlatform.h`): the local machine is Windows

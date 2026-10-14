@@ -162,6 +162,10 @@ private:
     void jumpToLatestActivity(QListWidgetItem *item);
     void openSession();
     void changeSession();
+    // Spec D5: asks before resuming or restoring this selected session starts its
+    // agent in a session host of another Windows session. False after Cancel, or
+    // when the selection changed while the warning was open.
+    bool confirmLocalStart(const Entry &original);
     void terminateSession();
     void archiveSession();
     // After the last session in a linked worktree is archived, offer (never run)

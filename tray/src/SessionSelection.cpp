@@ -1,5 +1,6 @@
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "LocalLaunchWarning.h"
 #include "SessionList.h"
 #include "MessageComposer.h"
 #include "WorkspaceIcons.h"
@@ -226,6 +227,11 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
         dialog.setDefaultButton(QMessageBox::Cancel); dialog.setEscapeButton(QMessageBox::Cancel); dialog.exec();
         if (dialog.clickedButton() != confirm) return;
     }
+    // Spec D5: one question before resuming or restoring sessions of this computer.
+    if (action == SelectionAction::Resume
+        && std::any_of(targets.cbegin(), targets.cend(), [](const Entry &entry) { return entry.host.isEmpty(); })
+        && (!LocalSessionHost::confirmLaunch(this, m_fleet.local(), {}) || m_pending || m_settingsRequest || !m_renameKey.isEmpty()))
+        return;
     if (action == SelectionAction::MarkRead || action == SelectionAction::ReviewLater) {
         int changed = 0;
         for (const auto &entry : targets) {
