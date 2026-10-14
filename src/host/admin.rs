@@ -11,7 +11,8 @@
 //! the staged files.
 //!
 //! Argument handling and the reports are portable and tested everywhere; the
-//! host connection and the command itself are Windows-only.
+//! host connection and the command itself are Windows-only. `local_host` is the
+//! same finding as `hgs ls --json` reports it in the local box (D2).
 use super::{
     protocol::{HelloReply, HostStatus},
     staging::{self, CliReport, Image, ImageReport, InstallReport, Layout, Pair},
@@ -73,6 +74,45 @@ pub enum Host {
 }
 
 impl Host {
+    /// The host as found where local sessions are `enabled` or not: a stopped
+    /// host of a computer that is not enabled is not installed.
+    pub fn found(self, enabled: bool) -> Self {
+        match self {
+            Self::Stopped if !enabled => Self::NotInstalled,
+            host => host,
+        }
+    }
+
+    /// `local_host` in the local box of `hgs ls --json` (D2): the state and the
+    /// running host's process, protocol, ConPTY, integrity level and Windows
+    /// session, null while no host answers; an unavailable host adds its error.
+    pub fn listing_json(&self) -> Value {
+        match self {
+            Self::Running { hello, status } => json!({
+                "state": self.state(),
+                "pid": hello.pid,
+                "protocol": hello.protocol,
+                "conpty": status.conpty,
+                "integrity": hello.integrity.name,
+                "windows_session": hello.windows_session,
+            }),
+            _ => {
+                let mut value = json!({
+                    "state": self.state(),
+                    "pid": null,
+                    "protocol": null,
+                    "conpty": null,
+                    "integrity": null,
+                    "windows_session": null,
+                });
+                if let Self::Unavailable(error) = self {
+                    value["error"] = json!(error);
+                }
+                value
+            }
+        }
+    }
+
     pub fn state(&self) -> &'static str {
         match self {
             Self::NotInstalled => "not-installed",
@@ -277,10 +317,7 @@ impl Status {
                 version,
             },
             image,
-            host: match host {
-                Host::Stopped if !enabled => Host::NotInstalled,
-                host => host,
-            },
+            host: host.found(enabled),
         }
     }
 
@@ -336,7 +373,7 @@ impl Status {
 }
 
 #[cfg(windows)]
-pub(crate) use self::native::dispatch;
+pub(crate) use self::native::{dispatch, local_host};
 
 #[cfg(windows)]
 mod native {
@@ -399,6 +436,14 @@ mod native {
 
     fn print_json(value: &Value) {
         println!("{value}");
+    }
+
+    /// `local_host` for the local box of `hgs ls --json` (D2): the host of
+    /// `state` as found, never started.
+    pub(crate) fn local_host(state: &Path) -> Value {
+        query(state)
+            .found(platform::local_sessions())
+            .listing_json()
     }
 
     pub(crate) fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
@@ -652,6 +697,47 @@ mod tests {
         assert_eq!(
             unavailable.json("1.2.3")["host"],
             json!({"state": "unavailable", "error": "busy"})
+        );
+    }
+
+    #[test]
+    fn listings_carry_the_local_host_with_every_field() {
+        let none = |state: &str| {
+            json!({"state": state, "pid": null, "protocol": null, "conpty": null,
+                   "integrity": null, "windows_session": null})
+        };
+        // Enablement, not the host, decides between not installed and stopped.
+        assert_eq!(
+            Host::Stopped.found(false).listing_json(),
+            none("not-installed")
+        );
+        assert_eq!(Host::Stopped.found(true).listing_json(), none("stopped"));
+        assert_eq!(Host::NotInstalled.listing_json(), none("not-installed"));
+        let mut unavailable = none("unavailable");
+        unavailable["error"] = json!("the session host on this computer runs elevated");
+        assert_eq!(
+            Host::Unavailable("the session host on this computer runs elevated".into())
+                .found(true)
+                .listing_json(),
+            unavailable
+        );
+        // A running host of a computer whose marker is gone still runs.
+        let running = Host::Running {
+            hello: Box::new(HelloReply {
+                integrity: Integrity::from_rid(Integrity::HIGH),
+                windows_session: 2,
+                ..hello()
+            }),
+            status: HostStatus {
+                sessions: 1,
+                clients: 1,
+                conpty: "inbox".into(),
+            },
+        };
+        assert_eq!(
+            running.found(false).listing_json(),
+            json!({"state": "running", "pid": 4242, "protocol": 1, "conpty": "inbox",
+                   "integrity": "high", "windows_session": 2})
         );
     }
 }

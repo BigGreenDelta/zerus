@@ -213,6 +213,12 @@ impl AttachStream {
         write_json(&*self.link, Kind::Control, &Control::Detach)
     }
 
+    /// End this side of the connection: a thread waiting in `next` gets the
+    /// end, and later sends fail.
+    pub(crate) fn close(&self) {
+        self.link.shutdown();
+    }
+
     /// The next output or control message; None once the host closed the
     /// connection (after `Control::Exit`, a detach, or the host's death).
     pub(crate) fn next(&self) -> Result<Option<Event>, FrameError> {

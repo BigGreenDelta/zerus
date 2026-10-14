@@ -11,8 +11,14 @@ killed with the CLI, and driven through `hgs __host backend`, which runs one
 operation of the terminal backend hgs uses for them (`src/state/backend/host.rs`).
 
 Tracked agents (Claude Code, Codex, Kimi) are refused on Windows until their hook
-form is settled (spec D12), and attaching a terminal waits for the attach client
-(M5); both refusals are checked here.
+form is settled (spec D12); that refusal is checked here.
+
+`Attach` runs `hgs a` and a launch without `-d` on a pseudoconsole of its own, as
+the GUI's embedded terminal runs `hgs.exe a NAME --existing --run-id ID` (spec
+D13): keys and the prefix bindings reach the agent, the pane follows the client's
+size, a changed run is refused, and the session's end and the host's death end
+the client. Without a console `hgs a` refuses. `Listings` checks `local_host` in
+the local box of `hgs ls --json` (spec D2).
 
 `Supervisor` covers the supervisor channel (spec D10, D11, D14) with untracked
 sessions: input checks of the console the supervisor reports (a pager the agent
@@ -30,8 +36,10 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import threading
 import time
 import unittest
 import uuid
@@ -52,6 +60,178 @@ if os.name == "nt":
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     WAIT_OBJECT_0 = 0
     WAIT_TIMEOUT = 0x102
+
+    class COORD(ctypes.Structure):
+        _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+    class STARTUPINFOW(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR), ("lpDesktop", wintypes.LPWSTR),
+                    ("lpTitle", wintypes.LPWSTR), ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD),
+                    ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD), ("dwXCountChars", wintypes.DWORD),
+                    ("dwYCountChars", wintypes.DWORD), ("dwFillAttribute", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD), ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD),
+                    ("lpReserved2", ctypes.c_void_p), ("hStdInput", wintypes.HANDLE),
+                    ("hStdOutput", wintypes.HANDLE), ("hStdError", wintypes.HANDLE)]
+
+    class STARTUPINFOEXW(ctypes.Structure):
+        _fields_ = [("StartupInfo", STARTUPINFOW), ("lpAttributeList", ctypes.c_void_p)]
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE), ("dwProcessId", wintypes.DWORD),
+                    ("dwThreadId", wintypes.DWORD)]
+
+    KERNEL32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    KERNEL32.CreatePipe.argtypes = (ctypes.POINTER(wintypes.HANDLE), ctypes.POINTER(wintypes.HANDLE),
+                                    ctypes.c_void_p, wintypes.DWORD)
+    KERNEL32.ReadFile.argtypes = (wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                  ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p)
+    KERNEL32.WriteFile.argtypes = (wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                                   ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p)
+    KERNEL32.InitializeProcThreadAttributeList.argtypes = (ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                                                           ctypes.POINTER(ctypes.c_size_t))
+    KERNEL32.UpdateProcThreadAttribute.argtypes = (ctypes.c_void_p, wintypes.DWORD, ctypes.c_size_t,
+                                                   ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p,
+                                                   ctypes.c_void_p)
+    KERNEL32.DeleteProcThreadAttributeList.argtypes = (ctypes.c_void_p,)
+    KERNEL32.CreateProcessW.argtypes = (wintypes.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                        wintypes.BOOL, wintypes.DWORD, ctypes.c_void_p, wintypes.LPCWSTR,
+                                        ctypes.c_void_p, ctypes.POINTER(PROCESS_INFORMATION))
+    CONPTY = hasattr(KERNEL32, "CreatePseudoConsole")
+    if CONPTY:
+        KERNEL32.CreatePseudoConsole.argtypes = (COORD, wintypes.HANDLE, wintypes.HANDLE, wintypes.DWORD,
+                                                 ctypes.POINTER(ctypes.c_void_p))
+        KERNEL32.CreatePseudoConsole.restype = ctypes.c_long
+        KERNEL32.ResizePseudoConsole.argtypes = (ctypes.c_void_p, COORD)
+        KERNEL32.ResizePseudoConsole.restype = ctypes.c_long
+        KERNEL32.ClosePseudoConsole.argtypes = (ctypes.c_void_p,)
+        KERNEL32.ClosePseudoConsole.restype = None
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
+    EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+    CREATE_UNICODE_ENVIRONMENT = 0x00000400
+    STARTF_USESTDHANDLES = 0x00000100
+else:
+    CONPTY = False
+
+# Terminal sequences, which a pseudoconsole mixes into what it draws.
+SEQUENCE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b.")
+
+
+def squeeze(data):
+    """Text a pseudoconsole drew, without terminal sequences, blanks or line breaks:
+    ConPTY may draw blanks as cursor moves."""
+    text = SEQUENCE.sub(b"", data).decode("utf-8", "replace")
+    return "".join(character for character in text if character.isprintable() and not character.isspace())
+
+
+class PseudoConsole:
+    """A program on a pseudoconsole of its own, as the GUI's embedded terminal runs
+    `hgs.exe a`: the test types into it, resizes it and reads what it draws. The
+    program's standard handles are the pseudoconsole's, never the test's."""
+
+    def __init__(self, argv, env, cwd, size=(100, 30)):
+        self.output = bytearray()
+        self.lock = threading.Lock()
+        self.console = ctypes.c_void_p()
+        self.process = None
+        console_input, self.input = wintypes.HANDLE(), wintypes.HANDLE()
+        self.reader, console_output = wintypes.HANDLE(), wintypes.HANDLE()
+        if not KERNEL32.CreatePipe(ctypes.byref(console_input), ctypes.byref(self.input), None, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not KERNEL32.CreatePipe(ctypes.byref(self.reader), ctypes.byref(console_output), None, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            result = KERNEL32.CreatePseudoConsole(COORD(*size), console_input, console_output, 0,
+                                                  ctypes.byref(self.console))
+            if result != 0:
+                raise OSError(f"CreatePseudoConsole failed with {result & 0xFFFFFFFF:#010x}")
+            needed = ctypes.c_size_t()
+            KERNEL32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(needed))
+            attributes = ctypes.create_string_buffer(needed.value)
+            if not KERNEL32.InitializeProcThreadAttributeList(attributes, 1, 0, ctypes.byref(needed)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                if not KERNEL32.UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                                                          self.console, ctypes.sizeof(ctypes.c_void_p), None, None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                startup = STARTUPINFOEXW()
+                startup.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
+                # NULL standard handles become the pseudoconsole's.
+                startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES
+                startup.lpAttributeList = ctypes.cast(attributes, ctypes.c_void_p)
+                variables = sorted(env.items(), key=lambda item: item[0].upper())
+                block = "".join(f"{key}={value}\0" for key, value in variables)
+                environment = ctypes.create_string_buffer((block + "\0").encode("utf-16-le") + b"\0\0")
+                command = ctypes.create_unicode_buffer(subprocess.list2cmdline([str(word) for word in argv]))
+                information = PROCESS_INFORMATION()
+                if not KERNEL32.CreateProcessW(None, command, None, None, False,
+                                               EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                                               environment, str(cwd), ctypes.byref(startup),
+                                               ctypes.byref(information)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            finally:
+                KERNEL32.DeleteProcThreadAttributeList(attributes)
+            self.process = information.hProcess
+            KERNEL32.CloseHandle(information.hThread)
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            # The pseudoconsole holds its own copies.
+            KERNEL32.CloseHandle(console_input)
+            KERNEL32.CloseHandle(console_output)
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        buffer = ctypes.create_string_buffer(4096)
+        read = wintypes.DWORD()
+        while KERNEL32.ReadFile(self.reader, buffer, len(buffer), ctypes.byref(read), None) and read.value:
+            with self.lock:
+                self.output += buffer.raw[:read.value]
+
+    def keys(self, data):
+        written = wintypes.DWORD()
+        if not KERNEL32.WriteFile(self.input, data, len(data), ctypes.byref(written), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def resize(self, cols, rows):
+        result = KERNEL32.ResizePseudoConsole(self.console, COORD(cols, rows))
+        if result != 0:
+            raise OSError(f"ResizePseudoConsole failed with {result & 0xFFFFFFFF:#010x}")
+
+    def shown(self):
+        with self.lock:
+            return squeeze(bytes(self.output))
+
+    def shows(self, text):
+        return squeeze(text.encode()) in self.shown()
+
+    def wait(self, timeout=LIMIT):
+        """The program's exit code once it has exited."""
+        if KERNEL32.WaitForSingleObject(self.process, int(timeout * 1000)) != WAIT_OBJECT_0:
+            raise AssertionError(f"the program did not end; it shows {self.shown()!r}")
+        code = wintypes.DWORD()
+        if not KERNEL32.GetExitCodeProcess(self.process, ctypes.byref(code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return code.value
+
+    def close(self):
+        """Close the pseudoconsole (its programs get CTRL_CLOSE_EVENT) and end
+        what is left."""
+        if self.console:
+            KERNEL32.ClosePseudoConsole(self.console)
+            self.console = ctypes.c_void_p()
+        if self.process:
+            if KERNEL32.WaitForSingleObject(self.process, 5000) != WAIT_OBJECT_0:
+                KERNEL32.TerminateProcess(self.process, 1)
+            KERNEL32.CloseHandle(self.process)
+            self.process = None
+        for handle in ("input", "reader"):
+            if getattr(self, handle):
+                if handle == "reader" and getattr(self, "thread", None):
+                    self.thread.join(LIMIT)
+                KERNEL32.CloseHandle(getattr(self, handle))
+                setattr(self, handle, None)
 
 
 def image_of(pid):
@@ -258,9 +438,9 @@ class Launch(LifecycleCase):
         # Tracked agents wait for their Windows hook form (D12); nothing starts.
         refused = self.hgs("claude", str(self.project), "--new", "-n", "t", "-d", rc=2)
         self.assertIn("HGS_TRACKING=0", refused.stderr)
-        # Attaching a terminal waits for the attach client (M5), and is refused first.
-        refused = self.hgs("fake_agent", str(self.project), "--new", "-n", "attached", rc=2)
-        self.assertIn("not available yet", refused.stderr)
+        # Attaching a terminal needs a console (D13): pipes are refused first.
+        refused = self.hgs("fake_agent", str(self.project), "--new", "-n", "attached", rc=1)
+        self.assertIn("attaching needs a console", refused.stderr)
         # Sessions name only the stable CLI (D8).
         portable = dict(self.env, HGS_EXECUTABLE=str(HGS))
         refused = self.hgs("fake_agent", str(self.project), "--new", "-n", "portable", "-d", env=portable, rc=1)
@@ -269,8 +449,9 @@ class Launch(LifecycleCase):
         self.assertEqual(self.sessions(), {})
 
         name, _ = self.launch("one")
-        refused = self.hgs("a", name, rc=2)
-        self.assertIn("not available yet", refused.stderr)
+        refused = self.hgs("a", name, rc=1)
+        self.assertIn("attaching needs a console", refused.stderr)
+        self.assertEqual(self.sessions()[name]["attached"], 0)
 
     def test_dry_runs_print_the_session_host_requests(self):
         self.assertEqual(self.hgs("ls", "--json", "--local", "--dry-run").stdout, "session-host list\n")
@@ -558,6 +739,145 @@ class Supervisor(LifecycleCase):
         written = heartbeat.stat().st_mtime_ns
         time.sleep(8)
         self.assertEqual(heartbeat.stat().st_mtime_ns, written, "no worker runs without a host")
+
+
+class Listings(LifecycleCase):
+    def local_box(self):
+        return json.loads(self.hgs("ls", "--json", "--local").stdout)
+
+    def test_the_local_box_reports_the_session_host(self):
+        none = dict(pid=None, protocol=None, conpty=None, integrity=None, windows_session=None)
+        # Enabled, no host yet: local_sessions stays absent, which means true (D2).
+        box = self.local_box()
+        self.assertNotIn("local_sessions", box)
+        self.assertEqual(box["local_host"], dict(state="stopped", **none))
+        self.assertEqual(self.status(), {"running": False})
+
+        self.launch("one")
+        status = self.status()
+        host = self.local_box()["local_host"]
+        self.assertEqual({key: host[key] for key in ("state", "pid", "protocol", "integrity", "windows_session")},
+                         dict(state="running", pid=status["host"]["pid"], protocol=status["host"]["protocol"],
+                              integrity=status["host"]["integrity"]["name"],
+                              windows_session=status["host"]["windows_session"]))
+        self.assertEqual(host["conpty"], status["status"]["conpty"])
+        self.assertIn(host["conpty"], ("bundled", "inbox"))
+        self.hgs("kill", "fake_agent/project/one")
+        self.wait_for("the idle exit", lambda: not self.status()["running"], timeout=LIMIT + 10)
+        self.wait_for_hosts()
+
+        # Disabled: a control console, whose host is not installed.
+        result = subprocess.run([str(HGS), "session-host", "uninstall", "--json"], env=self.env,
+                                capture_output=True, text=True, timeout=LIMIT, creationflags=HIDDEN,
+                                stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        box = self.local_box()
+        self.assertIs(box["local_sessions"], False)
+        self.assertEqual(box["local_host"], dict(state="not-installed", **none))
+
+
+@unittest.skipUnless(CONPTY, "pseudoconsoles need Windows 10 1809 or later")
+class Attach(LifecycleCase):
+    """`hgs a` and an attached launch on a pseudoconsole (spec D13)."""
+
+    INPUT = {"text", "paste", "enter", "esc", "ctrl-c", "control", "key", "reply"}
+
+    def console(self, *args, size=(100, 30)):
+        console = PseudoConsole([HGS, *args], self.env, self.work, size)
+        self.addCleanup(console.close)
+        return console
+
+    def received(self):
+        """Every byte the fake agent read, in order."""
+        return bytes.fromhex("".join(event["hex"] for event in self.events()
+                                     if event["kind"] in self.INPUT and "hex" in event))
+
+    def row(self, name):
+        return self.sessions()[name]
+
+    def test_keys_the_prefix_and_the_size_reach_the_agent_until_ctrl_b_d(self):
+        name, ready = self.launch("one")
+        console = self.console("a", name)
+        self.wait_for("the repaint", lambda: console.shows("fake>"))
+        console.keys(b"hi")
+        self.wait_for("the keys", lambda: self.received().endswith(b"hi"))
+        # Listed with an opaque client ID instead of a tty (D13).
+        row = self.row(name)
+        self.assertEqual(row["attached"], 1, row)
+        self.assertEqual(len(row["clients"]), 1, row)
+        self.assertRegex(row["clients"][0], r"^c[0-9]+$")
+        # Ctrl+B Ctrl+B sends one Ctrl+B; Ctrl+B and another key pass through.
+        console.keys(b"\x02\x02")
+        console.keys(b"\x02x")
+        self.wait_for("the prefix keys", lambda: self.received().endswith(b"hi\x02\x02x"))
+        # The pane follows the client's window.
+        console.resize(120, 40)
+        self.wait_for("the resize", lambda: any((event["cols"], event["rows"]) == (120, 40)
+                                                for event in self.events("resize")))
+        console.keys(b"\x02d")
+        self.assertEqual(console.wait(), 0)
+        self.assertTrue(console.shows(f"[detached (from session {name})]"), console.shown())
+        time.sleep(0.5)
+        self.assertTrue(self.received().endswith(b"hi\x02\x02x"), self.received())
+        self.assertEqual((self.row(name)["attached"], self.row(name)["clients"]), (0, []))
+        self.assertTrue(self.alive(ready))
+
+    def test_run_ids_ctrl_b_ctrl_d_and_the_session_end(self):
+        name, ready = self.launch("one", "--exit-keys", "quit")
+        self.backend({"op": "set_run_marker", "name": name, "run_id": "run-1"})
+        # The GUI's form: a changed run is refused, the current one attaches.
+        console = self.console("a", name, "--existing", "--run-id", "run-2")
+        self.assertEqual(console.wait(), 1)
+        self.assertTrue(console.shows("session run changed; refresh before reconnecting"), console.shown())
+        console = self.console("a", name, "--existing", "--run-id", "run-1")
+        self.wait_for("the repaint", lambda: console.shows("fake>"))
+        console.keys(b"\x02\x04")
+        self.assertEqual(console.wait(), 0)
+        self.assertTrue(console.shows("[detached"), console.shown())
+
+        # The session's end ends the client as tmux's [exited] does.
+        console = self.console("a", name)
+        self.wait_for("the repaint", lambda: console.shows("fake>"))
+        console.keys(b"quit")
+        self.assertEqual(console.wait(), 0)
+        self.assertTrue(console.shows("[exited]"), console.shown())
+        self.wait_for("the end", lambda: name not in self.sessions())
+        # --existing never restores or starts a session.
+        console = self.console("a", name, "--existing")
+        self.assertEqual(console.wait(), 1)
+        self.assertTrue(console.shows("session is no longer running; resume it explicitly"), console.shown())
+        self.assertEqual(len(self.events("start")), 1)
+
+    def test_a_launch_without_d_attaches_at_the_console_size(self):
+        name = "fake_agent/project/live"
+        console = self.console("fake_agent", str(self.project), "--new", "-n", "live", "--",
+                               "--record", str(self.record), "--ready", str(self.ready), "--prompt", "fake> ",
+                               "--exit-keys", "quit", size=(110, 35))
+        self.wait_for("the agent", lambda: read_json(self.ready))
+        self.status()  # Remember the host process for the cleanup.
+        self.wait_for("the prompt", lambda: console.shows("fake>"))
+        pane = self.pane(name)["pane"]
+        size = self.backend({"op": "pane_info", "target": {"pane": pane}, "fields": ["width", "height"]})["text"]
+        self.assertEqual(size.split(), ["110", "35"])
+        console.keys(b"quit")
+        self.assertEqual(console.wait(), 0)
+        self.assertTrue(console.shows("[exited]"), console.shown())
+
+    def test_the_host_death_restores_the_console_and_is_reported(self):
+        name, _ = self.launch("one")
+        console = self.console("a", name)
+        self.wait_for("the repaint", lambda: console.shows("fake>"))
+        host = self.status()["host"]
+        handle = open_host(host["pid"], host["created"])
+        self.assertTrue(handle, "the host runs")
+        try:
+            self.assertTrue(KERNEL32.TerminateProcess(handle, 1))
+            self.assertEqual(KERNEL32.WaitForSingleObject(handle, LIMIT * 1000), WAIT_OBJECT_0)
+        finally:
+            KERNEL32.CloseHandle(handle)
+        self.assertEqual(console.wait(), 1)
+        self.assertTrue(console.shows("hgs: the session host died; terminal restored, sessions on this box are gone"),
+                        console.shown())
 
 
 if __name__ == "__main__":

@@ -1771,11 +1771,16 @@ fn the_recovery_worker_is_supervised_once_asked_and_stops_with_the_host() {
 mod terminal_backend {
     use super::*;
     use crate::{
-        host::spawn::Environment,
+        host::{
+            attach::Terminal,
+            client::AttachStream,
+            protocol::{HostStatus, Response},
+            spawn::Environment,
+        },
         state::backend::{
             self as terminal,
-            host::{Connector, Failure, HostBackend},
-            LaunchSpec, PaneField, StageErrors, TerminalBackend,
+            host::{Connector, Failure, HostBackend, HOST_DIED},
+            LaunchSpec, PaneField, StageErrors, TerminalBackend, RUN_CHANGED,
         },
     };
     use serde_json::Value;
@@ -1783,6 +1788,8 @@ mod terminal_backend {
     struct Direct {
         host: Arc<Host<FakeLauncher>>,
         creates: Arc<AtomicU32>,
+        /// The console of this process, when it has one.
+        screen: Option<Arc<Screen>>,
     }
 
     impl Connector for Direct {
@@ -1792,6 +1799,16 @@ mod terminal_backend {
         fn create(&self, op: Op) -> Result<Value, Failure> {
             self.creates.fetch_add(1, Ordering::SeqCst);
             self.call(op)
+        }
+        fn attach(&self, request: Attach) -> Result<(Attached, AttachStream), Failure> {
+            connect_as(&self.host, CLIENT_PID, Role::Attach)
+                .attach(request)
+                .map_err(Failure::Host)
+        }
+        fn terminal(&self) -> Option<Box<dyn Terminal>> {
+            self.screen
+                .clone()
+                .map(|screen| Box::new(FakeTerminal(screen)) as Box<dyn Terminal>)
         }
         fn environment(&self) -> Result<Environment, String> {
             // A launch from inside another session.
@@ -1823,6 +1840,7 @@ mod terminal_backend {
         let backend = HostBackend::new(Direct {
             host: host.clone(),
             creates: creates.clone(),
+            screen: None,
         });
         assert!(backend.listing().unwrap().sessions.is_empty());
         assert!(!backend.session_exists("fake_agent/p/a"));
@@ -1956,5 +1974,406 @@ mod terminal_backend {
         eventually("the end", || backend.listing().unwrap().sessions.is_empty());
         assert!(!backend.session_exists("fake_agent/p/b"));
         assert_eq!(backend.attached_counts().unwrap(), None);
+    }
+
+    /// The attach client's console as a test drives it: what is typed, what
+    /// the client shows, the window's size and the attach modes.
+    #[derive(Default)]
+    struct Screen {
+        typed: Mutex<VecDeque<io::Result<Vec<u8>>>>,
+        typing: Condvar,
+        shown: Mutex<String>,
+        size: Mutex<Option<Size>>,
+        entered: AtomicBool,
+        leaves: AtomicU32,
+    }
+
+    impl Screen {
+        fn new(size: Size) -> Arc<Self> {
+            let screen = Self::default();
+            *lock(&screen.size) = Some(size);
+            Arc::new(screen)
+        }
+
+        fn keys(&self, bytes: &[u8]) {
+            lock(&self.typed).push_back(Ok(bytes.to_vec()));
+            self.typing.notify_all();
+        }
+
+        /// The console goes away.
+        fn fail(&self) {
+            lock(&self.typed).push_back(Err(io::Error::other("the console closed")));
+            self.typing.notify_all();
+        }
+
+        fn shown(&self) -> String {
+            lock(&self.shown).clone()
+        }
+
+        fn resize(&self, size: Size) {
+            *lock(&self.size) = Some(size);
+        }
+    }
+
+    struct FakeTerminal(Arc<Screen>);
+
+    impl Terminal for FakeTerminal {
+        fn size(&self) -> Option<Size> {
+            *lock(&self.0.size)
+        }
+        fn enter(&self) -> io::Result<()> {
+            self.0.entered.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn leave(&self) {
+            if self.0.entered.swap(false, Ordering::SeqCst) {
+                self.0.leaves.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn read(&self, timeout: Duration) -> io::Result<Vec<u8>> {
+            let deadline = Instant::now() + timeout;
+            let mut typed = lock(&self.0.typed);
+            loop {
+                if let Some(keys) = typed.pop_front() {
+                    return keys;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Ok(Vec::new());
+                }
+                typed = self
+                    .0
+                    .typing
+                    .wait_timeout(typed, left)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            }
+        }
+        fn write(&self, text: &str) -> io::Result<()> {
+            lock(&self.0.shown).push_str(text);
+            Ok(())
+        }
+    }
+
+    type Exit = Result<(i32, bool), (i32, String)>;
+
+    fn ended(result: crate::cli::Result<terminal::ClientExit>) -> Exit {
+        result
+            .map(|exit| (exit.code, exit.server_died))
+            .map_err(|error| (error.code, error.message))
+    }
+
+    fn attached_clients(host: &Arc<Host<FakeLauncher>>) -> u64 {
+        connect(host)
+            .call::<Listed>(Op::List)
+            .unwrap()
+            .sessions
+            .first()
+            .map_or(0, |session| session.attached)
+    }
+
+    fn console_backend(
+        host: &Arc<Host<FakeLauncher>>,
+        size: Size,
+    ) -> (Arc<HostBackend<Direct>>, Arc<Screen>, Arc<AtomicU32>) {
+        let screen = Screen::new(size);
+        let creates = Arc::new(AtomicU32::new(0));
+        let backend = Arc::new(HostBackend::new(Direct {
+            host: host.clone(),
+            creates: creates.clone(),
+            screen: Some(screen.clone()),
+        }));
+        (backend, screen, creates)
+    }
+
+    fn attach_in_thread(
+        backend: &Arc<HostBackend<Direct>>,
+        target: &'static str,
+        run_id: Option<&'static str>,
+    ) -> thread::JoinHandle<Exit> {
+        let backend = backend.clone();
+        thread::spawn(move || ended(backend.attach(terminal::Target::Name(target), run_id)))
+    }
+
+    #[test]
+    fn the_attach_client_relays_keys_and_sizes_until_a_detach() {
+        let (host, launcher) = new_host();
+        let mut client = connect(&host);
+        client.call::<Created>(create("l", "claude/p/a")).unwrap();
+        let program = launcher.program(0);
+        program.write(b"screen text\r\n\x1b[?2004h");
+        eventually("the screen", || {
+            capture(&mut client, pane("claude/p/a")).starts_with("screen text")
+        });
+        let (backend, screen, _) = console_backend(&host, Size { cols: 90, rows: 25 });
+        let attached = attach_in_thread(&backend, "claude/p/a", None);
+
+        // A repaint at the client's size, in the attach modes; the listing
+        // names the client by its opaque ID (D13).
+        eventually("the repaint", || screen.shown().contains("screen text"));
+        assert!(screen.entered.load(Ordering::SeqCst));
+        assert_eq!(program.sizes().last(), Some(&Size { cols: 90, rows: 25 }));
+        eventually("the client", || attached_clients(&host) == 1);
+        let listing = backend.listing().unwrap();
+        assert_eq!(
+            listing
+                .clients
+                .iter()
+                .map(|client| (client.session.as_str(), client.terminal.as_str()))
+                .collect::<Vec<_>>(),
+            [("claude/p/a", "c1")]
+        );
+
+        // Typing, the prefix sent as a key, and another key after the prefix.
+        screen.keys(b"hi");
+        assert_eq!(program.input_until(b"hi"), b"hi");
+        screen.keys(b"\x02\x02");
+        screen.keys(b"\x02x");
+        assert_eq!(program.input_until(b"x"), b"\x02\x02x");
+        // The pane follows the window's size.
+        screen.resize(Size {
+            cols: 100,
+            rows: 30,
+        });
+        eventually("the resize", || {
+            program.sizes().last()
+                == Some(&Size {
+                    cols: 100,
+                    rows: 30,
+                })
+        });
+        // A character the console writes in two pieces shows whole.
+        let wide = "\u{4e2d}".as_bytes();
+        program.write(&wide[..2]);
+        thread::sleep(Duration::from_millis(30));
+        program.write(&wide[2..]);
+        eventually("the character", || screen.shown().contains('\u{4e2d}'));
+        assert!(!screen.shown().contains('\u{fffd}'));
+
+        // Ctrl+B d detaches: the terminal is reset, tmux's line shows, the
+        // modes come back and the session runs on without the d.
+        screen.keys(b"\x02d");
+        assert_eq!(attached.join().unwrap(), Ok((0, false)));
+        let shown = screen.shown();
+        assert!(
+            shown.ends_with("\x1b[30;1H\r\n[detached (from session claude/p/a)]\r\n"),
+            "{shown:?}"
+        );
+        assert!(shown.contains("\x1b[?2004l") && !shown.contains("\x1b[?1049l"));
+        assert!(!screen.entered.load(Ordering::SeqCst));
+        assert_eq!(screen.leaves.load(Ordering::SeqCst), 1);
+        eventually("the detach", || attached_clients(&host) == 0);
+        assert_eq!(program.read_input(Duration::from_millis(100)), b"");
+        assert!(lock(&program.exit).is_none());
+    }
+
+    #[test]
+    fn runs_detach_keys_and_the_session_end_decide_how_a_client_ends() {
+        let (host, launcher) = new_host();
+        let mut client = connect(&host);
+        client.call::<Created>(create("l", "claude/p/a")).unwrap();
+        client
+            .call::<Done>(Op::SetEnvironment {
+                target: pane("claude/p/a"),
+                name: RUN_MARKER.into(),
+                value: Some("run-1".into()),
+            })
+            .unwrap();
+        let program = launcher.program(0);
+        let (backend, screen, _) = console_backend(&host, Size { cols: 80, rows: 24 });
+
+        // `--existing --run-id` of another run: refused as the CLI refuses it.
+        assert_eq!(
+            ended(backend.attach(terminal::Target::Session("$0"), Some("run-2"))),
+            Err((1, RUN_CHANGED.into()))
+        );
+        assert!(!screen.entered.load(Ordering::SeqCst));
+        assert_eq!(attached_clients(&host), 0);
+        // A session that does not exist: the host's message and 1, as a
+        // failed tmux attach.
+        assert_eq!(
+            ended(backend.attach(terminal::Target::Name("claude/p/none"), None)),
+            Ok((1, false))
+        );
+
+        // The run that runs: Ctrl+B Ctrl+D detaches.
+        let attached = attach_in_thread(&backend, "claude/p/a", Some("run-1"));
+        eventually("the client", || attached_clients(&host) == 1);
+        screen.keys(b"\x02\x04");
+        assert_eq!(attached.join().unwrap(), Ok((0, false)));
+        assert!(screen
+            .shown()
+            .ends_with("[detached (from session claude/p/a)]\r\n"));
+
+        // A console that goes away detaches the client and fails.
+        let attached = attach_in_thread(&backend, "claude/p/a", None);
+        eventually("the client", || attached_clients(&host) == 1);
+        screen.fail();
+        let (code, message) = attached.join().unwrap().unwrap_err();
+        assert_eq!(code, 1);
+        assert!(message.contains("the console closed"), "{message}");
+        eventually("the detach", || attached_clients(&host) == 0);
+        assert!(!screen.entered.load(Ordering::SeqCst));
+
+        // The session's end ends the client as tmux's [exited].
+        let attached = attach_in_thread(&backend, "claude/p/a", None);
+        eventually("the client", || attached_clients(&host) == 1);
+        program.write(b"\x1b[?1049hfull screen");
+        eventually("the output", || screen.shown().contains("full screen"));
+        program.exit(3);
+        assert_eq!(attached.join().unwrap(), Ok((0, false)));
+        let shown = screen.shown();
+        assert!(shown.ends_with("[exited]\r\n"), "{shown:?}");
+        assert!(shown.contains("\x1b[?1049l\x1b[r"), "{shown:?}");
+        // Every attach, the refused ones included, gave its modes back.
+        assert_eq!(screen.leaves.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn an_attached_launch_starts_at_the_console_size() {
+        let (host, launcher) = new_host();
+        let (backend, screen, creates) = console_backend(
+            &host,
+            Size {
+                cols: 120,
+                rows: 40,
+            },
+        );
+        let launch = |backend: &Arc<HostBackend<Direct>>, tag: &str| {
+            let backend = backend.clone();
+            let spec = LaunchSpec {
+                name: format!("fake_agent/p/{tag}"),
+                cwd: WORK.into(),
+                env: Vec::new(),
+                command: strings(&[PROGRAM, "--run", "0", "fake_agent"]),
+                detached: false,
+            };
+            thread::spawn(move || ended(backend.launch(&spec)))
+        };
+        let launched = launch(&backend, "a");
+        eventually("the program", || launcher.count() == 1);
+        let program = launcher.program(0);
+        assert_eq!(
+            program.sizes()[0],
+            Size {
+                cols: 120,
+                rows: 40
+            }
+        );
+        eventually("the client", || attached_clients(&host) == 1);
+        program.write(b"fake> ");
+        eventually("the prompt", || screen.shown().contains("fake> "));
+        program.exit(0);
+        assert_eq!(launched.join().unwrap(), Ok((0, false)));
+        assert!(screen.shown().ends_with("[exited]\r\n"));
+        assert_eq!(creates.load(Ordering::SeqCst), 1);
+        eventually("the end", || {
+            connect(&host)
+                .call::<Listed>(Op::List)
+                .unwrap()
+                .sessions
+                .is_empty()
+        });
+
+        // A program that ends at once has exited when its client comes.
+        launcher.0.exit_at_once.store(true, Ordering::SeqCst);
+        assert_eq!(launch(&backend, "b").join().unwrap(), Ok((0, false)));
+        assert_eq!(launcher.count(), 2);
+    }
+
+    /// A host that answers one attach, shows a screen, reads one key and then
+    /// dies. `running` says whether a host answers afterwards.
+    struct Dying {
+        screen: Arc<Screen>,
+        running: bool,
+    }
+
+    impl Connector for Dying {
+        fn call(&self, op: Op) -> Result<Value, Failure> {
+            assert_eq!(op, Op::HostStatus);
+            if !self.running {
+                return Err(Failure::NoHost);
+            }
+            Ok(serde_json::to_value(HostStatus {
+                sessions: 1,
+                clients: 0,
+                conpty: "inbox".into(),
+            })
+            .unwrap())
+        }
+        fn create(&self, _: Op) -> Result<Value, Failure> {
+            unreachable!("nothing is created")
+        }
+        fn attach(&self, request: Attach) -> Result<(Attached, AttachStream), Failure> {
+            let (client, host) = memory_pair();
+            thread::spawn(move || {
+                host.read_frame().unwrap().unwrap();
+                let hello = HelloReply {
+                    protocol: 1,
+                    ..identity()
+                };
+                write_json(&host, Kind::Json, &HelloAnswer::Accepted(hello)).unwrap();
+                host.read_frame().unwrap().unwrap();
+                let attached = Attached {
+                    client: "c1".into(),
+                    session: "$0".into(),
+                    name: "claude/p/a".into(),
+                    pane: "%0".into(),
+                };
+                write_json(&host, Kind::Json, &Response::ok(1, &attached)).unwrap();
+                host.write_frame(Kind::Stream, b"\x1b[?1049hagent screen")
+                    .unwrap();
+                let typed = host.read_frame().unwrap().unwrap();
+                assert_eq!(
+                    (typed.kind, typed.payload.as_slice()),
+                    (Kind::Stream, &b"x"[..])
+                );
+            });
+            Connection::hello(Arc::new(client), Role::Attach)
+                .map_err(|error| Failure::Unreachable(error.to_string()))?
+                .attach(request)
+                .map_err(Failure::Host)
+        }
+        fn terminal(&self) -> Option<Box<dyn Terminal>> {
+            Some(Box::new(FakeTerminal(self.screen.clone())))
+        }
+        fn environment(&self) -> Result<Environment, String> {
+            unreachable!("nothing is created")
+        }
+        fn stable_cli(&self) -> Result<String, String> {
+            unreachable!("nothing is created")
+        }
+        fn parent(&self, _: u32) -> Option<u32> {
+            None
+        }
+        fn var(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_lost_host_restores_the_terminal_and_a_dead_one_is_reported() {
+        assert!(HOST_DIED.ends_with("terminal restored, sessions on this box are gone"));
+        for running in [false, true] {
+            let screen = Screen::new(Size { cols: 80, rows: 24 });
+            let backend = HostBackend::new(Dying {
+                screen: screen.clone(),
+                running,
+            });
+            let attached = {
+                thread::spawn(move || {
+                    ended(backend.attach(terminal::Target::Name("claude/p/a"), None))
+                })
+            };
+            eventually("the screen", || screen.shown().contains("agent screen"));
+            screen.keys(b"x");
+            // Only a host that no longer runs died, as tmux's server.
+            assert_eq!(attached.join().unwrap(), Ok((1, !running)));
+            let shown = screen.shown();
+            assert!(shown.contains("agent screen\x1b[?1049l\x1b[r"), "{shown:?}");
+            assert!(!shown.contains("[detached") && !shown.contains("[exited]"));
+            assert!(!screen.entered.load(Ordering::SeqCst));
+            assert_eq!(screen.leaves.load(Ordering::SeqCst), 1);
+        }
     }
 }
