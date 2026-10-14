@@ -21,9 +21,10 @@ the client. Without a console `hgs a` refuses. `Listings` checks `local_host` in
 the local box of `hgs ls --json` (spec D2).
 
 `AgentInstall` runs `hgs account install` with only fakes and System32 on PATH:
-npm runs through Node.js's `npm.cmd`, Claude Code and Kimi Code use their
-vendors' PowerShell installers, never install.sh, and an agent in Kimi Code's
-install folder is found before PATH lists it.
+npm runs through Node.js's `npm.cmd` (missing npm is reported), Claude Code and
+Kimi Code use their vendors' PowerShell installers, never install.sh, a failed
+download runs nothing and leaves no file, and an agent in Kimi Code's install
+folder is found before PATH lists it.
 
 `Supervisor` covers the supervisor channel (spec D10, D11, D14) with untracked
 sessions: input checks of the console the supervisor reports (a pager the agent
@@ -44,6 +45,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -861,6 +863,24 @@ class AgentInstall(LifecycleCase):
         result = self.hgs("account", "install", "codex")
         self.assertIn("Installing codex on this machine.", result.stdout)
         self.assertEqual((self.bin / "npm-args.txt").read_text().strip(), "install -g @openai/codex")
+
+    def test_without_npm_codex_asks_for_node_js(self):
+        result = self.hgs("account", "install", "codex", rc=1)
+        self.assertIn("Install Node.js and npm on this machine, then retry Install agent.", result.stderr)
+
+    def test_a_failed_installer_download_runs_nothing_and_leaves_no_file(self):
+        # hgs runs System32 curl, which no fake replaces; a proxy port that refuses
+        # every connection fails the download before anything leaves this computer.
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        temp = self.root / "temp"
+        temp.mkdir()
+        env = {key: value for key, value in self.env.items() if key.upper() not in ("NO_PROXY", "ALL_PROXY")}
+        env.update(HTTPS_PROXY=f"http://127.0.0.1:{port}", TEMP=str(temp), TMP=str(temp))
+        result = self.hgs("account", "install", "kimi", rc=1, env=env)
+        self.assertIn("Could not download the agent installer. Nothing was executed.", result.stderr)
+        self.assertEqual(list(temp.iterdir()), [])
 
     def test_claude_and_kimi_use_the_vendors_powershell_installers(self):
         for provider, url in (("claude", "https://claude.ai/install.ps1"),
