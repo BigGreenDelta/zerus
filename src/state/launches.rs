@@ -12,6 +12,14 @@
 //!   exit code and the last lines of its screen, after them the error that
 //!   stopped the supervisor.
 //!
+//! The session host's sessions write through a pseudoconsole, whose output
+//! reaches the host a moment later, until the console closes after the
+//! supervisor has exited: what the supervisor read of its screen may lack the
+//! last lines. There its report is `draining`, and the host, once the
+//! session's output has drained, replaces the lines with the screen's last
+//! lines, which include the supervisor's error, before the session leaves its
+//! listing (`drained`).
+//!
 //! A supervisor whose run confirmed a conversation removes `ID.json` instead:
 //! from then on its record carries the launch ID. `hgs ls --json --local` reads
 //! the evidence (`Evidence::read`) before it lists the terminal's sessions and
@@ -40,12 +48,18 @@ const LINES: usize = 8;
 const BYTES: usize = 2048;
 /// An agent's last output reaches the terminal's screen a moment after the
 /// agent has exited (on Windows through its pseudoconsole): the screen is read
-/// after this pause and again until it stays the same.
+/// after this pause and again until it stays the same. The session host still
+/// replaces those lines once its pseudoconsole has drained (`drained`).
 const SETTLE: Duration = Duration::from_millis(100);
 const SETTLE_READS: usize = 5;
 
 fn folder() -> PathBuf {
-    root().join("launches")
+    folder_in(&root())
+}
+
+/// Where the launches of the state directory `state` keep their evidence.
+pub(crate) fn folder_in(state: &Path) -> PathBuf {
+    state.join("launches")
 }
 
 /// A launch ID as `--launch-id` takes it: a UUID in its canonical form, which
@@ -129,9 +143,12 @@ pub(crate) fn finished(elapsed: Duration, outcome: std::result::Result<i32, (i32
         code,
         &ending(&screen(), error),
         now(),
+        backend::current().completes_launch_reports(),
     );
 }
 
+/// The report of launch `id`; `draining` when the terminal replaces `output`
+/// with what the screen showed last once the session's output has drained.
 fn write_ended(
     folder: &Path,
     id: &str,
@@ -139,14 +156,40 @@ fn write_ended(
     code: i32,
     output: &str,
     at: f64,
+    draining: bool,
 ) -> Result<()> {
-    atomic(
-        &ended_path(folder, id),
-        &format!(
-            "{}\n",
-            json!({"launch_id": id, "name": name, "code": code, "output": output, "ended_at": at})
-        ),
-    )
+    let mut report =
+        json!({"launch_id": id, "name": name, "code": code, "output": output, "ended_at": at});
+    if draining {
+        report["draining"] = json!(true);
+    }
+    atomic(&ended_path(folder, id), &format!("{report}\n"))
+}
+
+/// Called by the session host as the session of launch `id` ends, once its
+/// output has drained, with `output`, the last lines of its screen: a
+/// `draining` report that its supervisor left in `folder` gets them in place
+/// of what the supervisor read, and is complete. Other files stay as they are,
+/// and nothing here fails the host.
+// Only the Windows session host calls it; its tests run everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn drained(folder: &Path, id: &str, output: &str) {
+    if !valid(id) {
+        return;
+    }
+    let path = ended_path(folder, id);
+    let Some(mut report) = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(|report| string(report, "launch_id") == id && report["draining"] == true)
+    else {
+        return;
+    };
+    report["output"] = json!(output);
+    if let Some(fields) = report.as_object_mut() {
+        fields.remove("draining");
+    }
+    let _ = atomic(&path, &format!("{report}\n"));
 }
 
 /// Whether the run of this supervisor (`HGS_SESSION`, `HGS_RUN_ID`, which the
@@ -204,6 +247,8 @@ struct Launch {
     at: f64,
     /// Whether its supervisor reported how it ended.
     reported: bool,
+    /// Whether that report waits for the session host's last lines.
+    draining: bool,
     code: Option<i64>,
     output: String,
 }
@@ -263,6 +308,7 @@ impl Evidence {
             launch.at = launch.at.max(at);
             if end {
                 launch.reported = true;
+                launch.draining = value["draining"] == true;
                 launch.code = value["code"].as_i64();
                 launch.output = string(&value, "output").to_owned();
             }
@@ -285,12 +331,15 @@ impl Evidence {
             .filter(|(id, _)| !listed.contains(id.as_str()))
             .collect();
         // A supervisor reports how its session ended before the session leaves
-        // the terminal: a launch that ended after this evidence was read and
-        // before the terminal listed has its report now.
-        if ended.iter().any(|(_, launch)| !launch.reported) {
+        // the terminal, and the session host completes a draining report
+        // before then too: a launch that ended, or whose report the host
+        // completed, after this evidence was read and before the terminal
+        // listed has its report now.
+        let unfinished = |launch: &Launch| !launch.reported || launch.draining;
+        if ended.iter().any(|(_, launch)| unfinished(launch)) {
             let mut later = Self::read_in(&self.folder, self.now).launches;
             for (id, launch) in &mut ended {
-                if let Some(report) = later.remove(id.as_str()).filter(|_| !launch.reported) {
+                if let Some(report) = later.remove(id.as_str()).filter(|_| unfinished(launch)) {
                     *launch = report;
                 }
             }
@@ -356,12 +405,13 @@ mod tests {
             3,
             "cannot start",
             now - 20.0,
+            false,
         )
         .unwrap();
         // Started and gone, without a supervisor's word.
         write_started(folder, TWO, "sh/project/two", now - 10.0).unwrap();
         // Ended in a terminal of its own: only its supervisor wrote.
-        write_ended(folder, THREE, None, 1, "", now - 5.0).unwrap();
+        write_ended(folder, THREE, None, 1, "", now - 5.0, false).unwrap();
         let ended = |sessions: &[Value]| Evidence::read_in(folder, now).ended(sessions);
         assert_eq!(
             ended(&[]),
@@ -389,7 +439,7 @@ mod tests {
         // Evidence older than a week, of an invalid or other ID, or unreadable,
         // is not listed.
         write_started(folder, ONE, "claude/project/one", now - KEPT - 60.0).unwrap();
-        write_ended(folder, ONE, None, 3, "", now - KEPT - 1.0).unwrap();
+        write_ended(folder, ONE, None, 3, "", now - KEPT - 1.0, false).unwrap();
         fs::write(folder.join("not-a-launch.json"), "{}").unwrap();
         fs::write(
             started_path(folder, "00000000-0000-0000-0000-000000000000"),
@@ -424,6 +474,7 @@ mod tests {
             3,
             "cannot start",
             now - 1.0,
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -464,7 +515,7 @@ mod tests {
     fn pruning_removes_only_evidence_older_than_a_week() {
         let folder = tempfile::tempdir().unwrap();
         write_started(folder.path(), ONE, "sh/project/one", 0.0).unwrap();
-        write_ended(folder.path(), ONE, None, 1, "", 0.0).unwrap();
+        write_ended(folder.path(), ONE, None, 1, "", 0.0, false).unwrap();
         fs::write(folder.path().join("notes.txt"), "kept").unwrap();
         let week = Duration::from_secs_f64(KEPT);
         prune(
@@ -480,5 +531,100 @@ mod tests {
         assert!(!ended_path(folder.path(), ONE).exists());
         assert!(folder.path().join("notes.txt").exists());
         prune(&folder.path().join("missing"), SystemTime::now());
+    }
+
+    #[test]
+    fn the_session_host_completes_a_draining_report_with_its_drained_lines() {
+        let folder = tempfile::tempdir().unwrap();
+        let folder = folder.path();
+        let read = |id: &str| fs::read_to_string(ended_path(folder, id)).unwrap();
+        // Where the terminal completes no report (tmux), the report is as it was.
+        write_ended(folder, ONE, Some("claude/p/one"), 3, "half", 1.5, false).unwrap();
+        let complete = format!(
+            "{{\"code\":3,\"ended_at\":1.5,\"launch_id\":\"{ONE}\",\"name\":\"claude/p/one\",\
+             \"output\":\"half\"}}\n"
+        );
+        assert_eq!(read(ONE), complete);
+        // The session host's supervisor leaves it draining.
+        write_ended(folder, TWO, None, 1, "half", 2.5, true).unwrap();
+        assert_eq!(
+            read(TWO),
+            format!(
+                "{{\"code\":1,\"draining\":true,\"ended_at\":2.5,\"launch_id\":\"{TWO}\",\
+                 \"name\":null,\"output\":\"half\"}}\n"
+            )
+        );
+        // The host replaces the lines with its own, which end with the
+        // supervisor's error, and the report is complete.
+        drained(folder, TWO, "half\nwhole\nhgs: cannot start");
+        assert_eq!(
+            read(TWO),
+            format!(
+                "{{\"code\":1,\"ended_at\":2.5,\"launch_id\":\"{TWO}\",\"name\":null,\
+                 \"output\":\"half\\nwhole\\nhgs: cannot start\"}}\n"
+            )
+        );
+        let completed = read(TWO);
+        drained(folder, TWO, "later");
+        assert_eq!(read(TWO), completed);
+        // A report that is not draining, another launch's, a missing one or an
+        // invalid ID stays as it is.
+        drained(folder, ONE, "other");
+        assert_eq!(read(ONE), complete);
+        let foreign = json!({"launch_id": ONE, "code": 1, "output": "", "draining": true});
+        fs::write(ended_path(folder, THREE), foreign.to_string()).unwrap();
+        drained(folder, THREE, "other");
+        assert_eq!(read(THREE), foreign.to_string());
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let invalid = json!({"launch_id": nil, "output": "", "draining": true});
+        fs::write(ended_path(folder, nil), invalid.to_string()).unwrap();
+        drained(folder, nil, "other");
+        assert_eq!(read(nil), invalid.to_string());
+        let missing = "6a1c0d2e-58f4-4d1b-9c0e-2b7f1e9a4c33";
+        drained(folder, missing, "other");
+        assert!(!ended_path(folder, missing).exists());
+        drained(&folder.join("missing"), TWO, "other");
+        assert!(!folder.join("missing").exists());
+    }
+
+    #[test]
+    fn a_listing_reports_the_lines_the_session_host_completed_after_its_evidence_was_read() {
+        let folder = tempfile::tempdir().unwrap();
+        let now = 1_800_000_000.0;
+        write_started(folder.path(), ONE, "claude/project/one", now - 3.0).unwrap();
+        write_started(folder.path(), TWO, "claude/project/two", now - 3.0).unwrap();
+        write_ended(
+            folder.path(),
+            ONE,
+            Some("claude/project/one"),
+            3,
+            "half",
+            now - 2.0,
+            true,
+        )
+        .unwrap();
+        write_ended(
+            folder.path(),
+            TWO,
+            Some("claude/project/two"),
+            1,
+            "as read",
+            now - 1.0,
+            true,
+        )
+        .unwrap();
+        let evidence = Evidence::read_in(folder.path(), now);
+        // The host completed the report of ONE before its session left the
+        // terminal; TWO's host never did (it was of an earlier version).
+        drained(folder.path(), ONE, "half\nwhole");
+        assert_eq!(
+            evidence.ended(&[]),
+            vec![
+                json!({"launch_id": TWO, "name": "claude/project/two", "code": 1,
+                        "output": "as read"}),
+                json!({"launch_id": ONE, "name": "claude/project/one", "code": 3,
+                        "output": "half\nwhole"}),
+            ]
+        );
     }
 }
