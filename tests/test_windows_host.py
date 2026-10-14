@@ -281,6 +281,29 @@ class Lifecycle(HostCase):
             "argv": [str(comspec)], "size": {"cols": 80, "rows": 24}})
         self.assertEqual((code, response["error"]["code"]), (1, "exists"))
 
+    def test_a_launch_reports_how_its_session_ended(self):
+        # What a launch reads to report a program that could not start
+        # (zerus-ziq3.10): the exit and the last lines of the pane, a long line
+        # whole although it wrapped.
+        launch_id = f"{self.unique}-ends"
+        created, _ = self.cmd("cmd/ends")
+        self.assertEqual(self.ok({"op": "launch_status", "launch_id": f"{self.unique}-1"}),
+                         {"session": created["session"], "pane": created["pane"], "name": "cmd/ends",
+                          "dead": False, "ended": False, "code": None, "output": ""})
+        said = "cannot start: " + "x" * 120
+        comspec = Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"
+        quick = self.create("cmd/quick", [comspec, "/d", "/q", "/c", f"echo {said}& exit 3"],
+                            launch_id=launch_id)
+        state = self.wait_for("the end", lambda: (lambda state: state["ended"] and state)(
+            self.ok({"op": "launch_status", "launch_id": launch_id})))
+        self.assertEqual({key: state[key] for key in ("session", "pane", "name", "dead", "code")},
+                         {"session": quick["session"], "pane": quick["pane"], "name": "cmd/quick", "dead": True,
+                          "code": 3})
+        self.assertEqual(state["output"].splitlines()[-1], said, state)
+        self.assertIn("ended: exit 3 ", (self.state / "host.log").read_text(errors="replace"))
+        self.assertEqual(self.error({"op": "launch_status", "launch_id": f"{self.unique}-none"})["code"],
+                         "not_found")
+
     def test_a_second_host_is_refused_by_the_lock(self):
         self.cmd("cmd/lock")
         first = self.status()["host"]["pid"]

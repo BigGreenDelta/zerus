@@ -10,10 +10,10 @@ use super::{
     protocol::{
         Attach, Attached, Captured, ConsoleEvidence, ConsoleProcess, Control, CreateSession,
         Created, Done, EnvValue, ErrorBody, ErrorCode, Hello, HelloAnswer, HelloReply, InputClaim,
-        InputReady, Integrity, Key, Kind, Listed, Op, PaneDetails, Protocols, Resolved, Role,
-        Signal, Size, SupervisorOp, SupervisorRegistration, Target, RUN_MARKER,
+        InputReady, Integrity, Key, Kind, LaunchState, Listed, Op, PaneDetails, Protocols,
+        Resolved, Role, Signal, Size, SupervisorOp, SupervisorRegistration, Target, RUN_MARKER,
     },
-    registry::{Host, Linger, Next},
+    registry::{last_lines, Host, Linger, Next},
     server::serve_connection,
     session::{
         self, foreground, paste_bytes, Attachment, Console, LaunchPlan, Launched, Launcher, Out,
@@ -262,6 +262,9 @@ struct Launches {
     fail: AtomicBool,
     /// The next programs have exited by the time their launch returns.
     exit_at_once: AtomicBool,
+    /// The next program writes this and has exited with this code by the
+    /// time its launch returns, as a supervisor that cannot start its agent.
+    fail_at_once: Mutex<Option<(u32, Vec<u8>)>>,
     /// While set, a launch waits (`waiting` counts those that do).
     held: Mutex<bool>,
     released: Condvar,
@@ -304,7 +307,11 @@ impl Launcher for FakeLauncher {
                     .unwrap_or_else(PoisonError::into_inner);
             }
         }
-        let exited = self.0.exit_at_once.load(Ordering::SeqCst).then_some(0);
+        let failure = lock(&self.0.fail_at_once).take();
+        let exited = match &failure {
+            Some((code, _)) => Some(*code),
+            None => self.0.exit_at_once.load(Ordering::SeqCst).then_some(0),
+        };
         let names = [
             "TERM",
             "COLORTERM",
@@ -338,6 +345,9 @@ impl Launcher for FakeLauncher {
             exit_on_hang_up: AtomicBool::new(true),
             members: Mutex::new(Vec::new()),
         });
+        if let Some((_, said)) = failure {
+            program.write(&said);
+        }
         lock(&self.0.programs).push(program.clone());
         Ok(Launched {
             pid: program.pid,
@@ -1522,6 +1532,92 @@ fn a_session_that_ends_at_once_still_leaves_the_listing() {
         assert_eq!((again.pane, again.existing), (created.pane, true));
     }
     assert_eq!(launcher.count(), 1000);
+}
+
+fn launch_status(connection: &mut Connection, launch_id: &str) -> Result<LaunchState, ErrorBody> {
+    connection.call(Op::LaunchStatus {
+        launch_id: launch_id.into(),
+    })
+}
+
+#[test]
+fn a_launch_reports_how_its_session_ended_with_its_last_lines() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    // A launch the host does not know.
+    let error = launch_status(&mut client, "launch-x").unwrap_err();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (ErrorCode::NotFound, "can't find launch: launch-x")
+    );
+
+    // A running session.
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let running = LaunchState {
+        session: "$0".into(),
+        pane: "%0".into(),
+        name: "claude/p/a".into(),
+        dead: false,
+        ended: false,
+        code: None,
+        output: String::new(),
+    };
+    assert_eq!(launch_status(&mut client, "l"), Ok(running.clone()));
+
+    // A supervisor that cannot start its agent says why and exits at once;
+    // the message, longer than the pane is wide, reads whole.
+    let said = "hgs: cannot read the Claude Code version (claude --version: Access is \
+                denied. (os error 5)), which decides its tracking hook form";
+    *lock(&launcher.0.fail_at_once) = Some((1, format!("\r\n\r\n{said}\r\n").into_bytes()));
+    let created: Created = client.call(create("m", "claude/p/b")).unwrap();
+    let ended = |client: &mut Connection| launch_status(client, "m").unwrap();
+    eventually("the end", || ended(&mut client).ended);
+    assert_eq!(
+        ended(&mut client),
+        LaunchState {
+            session: created.session.clone(),
+            pane: created.pane.clone(),
+            name: "claude/p/b".into(),
+            dead: true,
+            ended: true,
+            code: Some(1),
+            output: said.into(),
+        }
+    );
+    // A retried create still finds it, and starts nothing.
+    let again: Created = client.call(create("m", "claude/p/b")).unwrap();
+    assert_eq!((again.session, again.existing), (created.session, true));
+    assert_eq!(launcher.count(), 2);
+
+    // A session that ends later reports its exit too; the other one runs on.
+    launcher.program(0).write(b"bye\r\n");
+    eventually("the output", || {
+        capture(&mut client, pane("claude/p/a")).starts_with("bye")
+    });
+    launcher.program(0).exit(0);
+    eventually("the end", || launch_status(&mut client, "l").unwrap().ended);
+    assert_eq!(
+        launch_status(&mut client, "l"),
+        Ok(LaunchState {
+            dead: true,
+            ended: true,
+            code: Some(0),
+            output: "bye".into(),
+            ..running
+        })
+    );
+}
+
+#[test]
+fn an_ended_screen_keeps_its_last_lines() {
+    let screen = "one\n\n  two  \nthree\n\n\n";
+    assert_eq!(last_lines(screen, 8, 2048), "one\n  two\nthree");
+    assert_eq!(last_lines(screen, 2, 2048), "  two\nthree");
+    assert_eq!(last_lines(screen, 8, 7), "o\nthree");
+    assert_eq!(last_lines("\n\n", 8, 2048), "");
+    // A cut never splits a character.
+    assert_eq!(last_lines("aé", 8, 1), "");
+    assert_eq!(last_lines("aé", 8, 2), "é");
 }
 
 #[test]

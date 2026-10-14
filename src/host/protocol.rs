@@ -510,6 +510,13 @@ pub const RUN_MARKER: &str = "@hgs_run";
 pub enum Op {
     /// Start a session (`Created`), or report the one this launch ID started.
     CreateSession(CreateSession),
+    /// How the session a launch ID started is doing (`LaunchState`), also for
+    /// a while after it ended; `not_found` for a launch this host does not
+    /// know. A launch reads it to tell a program that could not start from
+    /// one that runs.
+    LaunchStatus {
+        launch_id: String,
+    },
     /// Sessions, panes and clients in one round trip (`Listed`).
     List,
     /// A target's session and pane (`Resolved`), or `not_found`.
@@ -749,6 +756,27 @@ pub struct Created {
     pub pid: u32,
     /// Whether an earlier request with this launch ID had started it.
     pub existing: bool,
+}
+
+/// `launch_status`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchState {
+    /// `$N`
+    pub session: String,
+    /// `%N`
+    pub pane: String,
+    pub name: String,
+    /// The root process has exited (`dead` of its pane).
+    pub dead: bool,
+    /// The session has ended: its console has closed and its output drained.
+    pub ended: bool,
+    /// Once the session has ended, its root process's exit code when known.
+    #[serde(default)]
+    pub code: Option<i32>,
+    /// Once the session has ended, the last lines its pane showed, wrapped
+    /// rows joined: what a program that could not start said.
+    #[serde(default)]
+    pub output: String,
 }
 
 /// One session of `list`: what `tmux list-sessions` reports today.
@@ -1356,6 +1384,15 @@ mod tests {
                 request(21, Op::RecoveryWorker),
                 r#"{"id":21,"op":"recovery_worker"}"#,
             ),
+            (
+                request(
+                    22,
+                    Op::LaunchStatus {
+                        launch_id: "launch-1".into(),
+                    },
+                ),
+                r#"{"id":22,"op":"launch_status","launch_id":"launch-1"}"#,
+            ),
         ];
         for (request, text) in &cases {
             golden(request, text);
@@ -1612,6 +1649,21 @@ mod tests {
                 r#"{"id":17,"ok":{"sessions":1,"clients":0,"conpty":"bundled"}}"#,
             ),
             (Response::ok(11, &Done {}), r#"{"id":11,"ok":{}}"#),
+            (
+                Response::ok(
+                    22,
+                    &LaunchState {
+                        session: "$2".into(),
+                        pane: "%3".into(),
+                        name: "claude/p/a".into(),
+                        dead: true,
+                        ended: true,
+                        code: Some(126),
+                        output: "hgs: claude: Access is denied. (os error 5)".into(),
+                    },
+                ),
+                r#"{"id":22,"ok":{"session":"$2","pane":"%3","name":"claude/p/a","dead":true,"ended":true,"code":126,"output":"hgs: claude: Access is denied. (os error 5)"}}"#,
+            ),
         ];
         for (response, text) in &cases {
             golden(response, text);
