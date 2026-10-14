@@ -640,10 +640,15 @@ class Lifecycle(Harness):
         name = self.start()
         sid = self.binding(name)["conversation_id"]
         self.hgs("pause", name)
+        paused_run = self.binding(name)["run_id"]
         self.script("claude", "#!/bin/sh\nexit 7\n")
         self.hgs("resume", name, "-d")
-        self.wait(lambda: self.binding(name).get("expected_id") == sid)
-        time.sleep(0.2)
+        # The session ends only after its supervisor has recorded the resumed
+        # run, the agent's failure and any fresh fallback.
+        self.wait(lambda: subprocess.run([str(self.bin / "tmux"), "has-session", "-t", "=" + name],
+                  env=self.env, capture_output=True).returncode != 0)
+        self.assertNotEqual(self.binding(name)["run_id"], paused_run)
+        self.assertEqual(self.binding(name)["expected_id"], sid)
         self.assertEqual(self.binding(name)["conversation_id"], sid)
         snapshot = json.loads(self.hgs("ls", "--local", "--json"))
         self.assertEqual(snapshot["sessions"][0]["state"], "stopped")
