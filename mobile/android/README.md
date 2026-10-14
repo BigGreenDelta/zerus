@@ -276,6 +276,13 @@ one durable authorized apply attempt when native readiness is observed, includin
 when another session is open. Uncertain actions expose their original receipt;
 they are never retried automatically.
 
+Model and effort shows the selected model in a compact dropdown, so a long
+native model catalog cannot hide the Effort controls. Supported effort levels
+wrap into single-choice buttons with 48 dp touch targets; the selected level
+is highlighted and repeated beside the Effort heading. Default retains the
+native default choice. Changing these selections only edits the form; Apply
+keeps the existing exact-session, pending-request and readiness checks.
+
 Terminal uses a separate saved input buffer and a fresh exact native binding.
 Snapshots poll adaptively while visible; input sends literal text or fixed keys,
 with confirmation for Ctrl+C and Ctrl+D. Submitted means native input handoff,

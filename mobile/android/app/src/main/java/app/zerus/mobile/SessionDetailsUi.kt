@@ -7,7 +7,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ContentCopy
@@ -410,10 +409,11 @@ import org.json.JSONObject
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Settings apply to ${target.session}.",style = MaterialTheme.typography.bodySmall)
         if(snapshot.pendingId.isNotBlank()) Text("Pending: ${snapshot.pendingModel} / ${snapshot.pendingEffort.ifBlank { "Default" }}",style = MaterialTheme.typography.bodySmall)
-        Text("Model",fontWeight = FontWeight.SemiBold)
-        snapshot.models.forEach { option -> NativeSettingChoice(option.label,selectedModel == option.id) { selectedModel = option.id; if(selectedEffort !in option.efforts) selectedEffort = "" } }
-        Text("Effort",fontWeight = FontWeight.SemiBold)
-        (listOf("") + efforts).distinct().forEach { effort -> NativeSettingChoice(effort.ifBlank { "Default" },selectedEffort == effort) { selectedEffort = effort } }
+        NativeSettingsChoices(snapshot.models,selectedModel,efforts,selectedEffort,
+            onModelChange = { id ->
+                selectedModel = id
+                if(selectedEffort !in snapshot.models.first { it.id == id }.efforts) selectedEffort = ""
+            },onEffortChange = { selectedEffort = it })
         Text(when(snapshot.applyWhen) { "ready" -> "Apply when the agent is ready."; "resume" -> "Save for the next resume."; "now" -> "Apply now."; else -> "The machine determines when these settings apply." },style = MaterialTheme.typography.bodySmall)
         if(snapshot.supported && snapshot.notice.isNotBlank()) Text(snapshot.notice,style = MaterialTheme.typography.bodySmall)
         if(reason.isNotBlank()) Text(reason,style = MaterialTheme.typography.bodySmall)
@@ -422,13 +422,6 @@ import org.json.JSONObject
     } },dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
-@Composable private fun NativeSettingChoice(label: String, selected: Boolean, onClick: () -> Unit) {
-    Surface(modifier = Modifier.fillMaxWidth().selectable(selected,role = Role.RadioButton,onClick = onClick)) {
-        Row(Modifier.heightIn(min = 48.dp).padding(horizontal = 8.dp),verticalAlignment = Alignment.CenterVertically) {
-            RadioButton(selected,null); Spacer(Modifier.width(8.dp)); Text(label,Modifier.weight(1f))
-        }
-    }
-}
 internal fun actionLabel(operation: String,target: Target? = null) = when(operation) {
     "pause" -> "Pause"; "resume" -> "Resume"; "archive" -> "Archive"; "rename" -> "Rename"; "fork" -> "Fork"
     "terminate" -> "Terminate"; "restore" -> "Restore"; "forget" -> if(target?.archiveId?.isNotBlank() == true) "Forget archived version" else "Forget session"; "send_now" -> "Send queued message"
