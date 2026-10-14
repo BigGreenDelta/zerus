@@ -50,7 +50,9 @@ class Adapter extends LlmAdapter {
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'approval-call',name:'hgs_test_approval',arguments:'{}'}};
       yield {type:'finish',reason:{kind:'tool-calls'}};return;
     }
-    if (text.includes('SUBAGENT') && last?.role !== 'tool') {
+    // One child per prompt: a continuable child's completion reaches the
+    // parent as a later message of its own, after the call's tool result.
+    if (text.includes('SUBAGENT') && !options.messages.slice(options.messages.indexOf(prompt) + 1).some(m => m.role === 'tool')) {
       const args=JSON.stringify({description:'Native child fixture',prompt:'Child result fixture'+(text.match(/ (?:HOLD|DISPOSING|UNSTARTED|CORRUPT|UNRECORDED)_CHILD_\w+/)?.[0]??''),run_in_background:text.includes('CONTINUABLE')});
       yield {type:'block-start',index:0,blockType:'tool-call'};
       yield {type:'tool-call-delta',index:0,id:'child-call',name:'subagent',argumentsDelta:args};
