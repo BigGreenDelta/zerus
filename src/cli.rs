@@ -294,6 +294,12 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         return mobile_peers(&config, &args);
     }
     if args.first().is_some_and(|a| a == "--run") {
+        // A control console (local sessions off) still refuses it as in Phase 1;
+        // an isolated test host's sessions may run it (spec D2).
+        #[cfg(windows)]
+        if !platform::local_sessions() && !crate::host::gate::test_session() {
+            return Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED));
+        }
         return run(&args[1..]);
     }
     let mut target = String::new();
