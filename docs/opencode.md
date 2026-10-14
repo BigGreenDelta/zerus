@@ -104,8 +104,8 @@ child-session controls, archive/fork, context reset and compaction are not yet
 supported. Clients keep those controls unavailable with a reason. Configure
 native permissions and provider credentials on the host; additional managed
 OpenCode accounts are outside this initial native-account contract. Accounts can
-remove the native configuration from a machine's Zerus catalog and add it back;
-its files, credentials and sessions on the host stay unchanged.
+rename the native configuration, remove it from a machine's Zerus catalog and add
+it back; its files, credentials and sessions on the host stay unchanged.
 
 Pause keeps the native host and exact native conversation available; it does not
 stop other conversations. Use each OpenCode session's own Pause/Resume controls;

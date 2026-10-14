@@ -555,7 +555,8 @@ agent runs, read on 2026-10-14 from Claude Code 2.1.296's settings schema and ho
 
 **S6 results (2026-10-14).** Real Claude Code 2.1.296, Codex 0.162.0 and Kimi Code
 2.1.1 ran through the host with private homes on Windows 11 Pro 10.0.26200 (bundled
-ConPTY 1.25.260930003, Windows PowerShell 5.1.26100, real-time scanning off). All
+ConPTY 1.25.260930003, Windows PowerShell 5.1.26100, Kaspersky real-time protection
+on). All
 eight scenarios passed; the real homes were unchanged and no process was left.
 
 - Claude Code's exec form delivers SessionStart, UserPromptSubmit, PreToolUse,
@@ -573,8 +574,8 @@ eight scenarios passed; the real homes were unchanged and no process was left.
 - A prompt with Cyrillic and Latin diacritics reaches hgs intact through each
   runner (no shell, PowerShell, `cmd.exe`).
 - The whole hook path (a Stop replayed through `hgs __state hook`) takes a median of
-  37-38 ms, p95 at most 41 ms; a bare `hgs.exe` start takes 25 ms. Hooks under
-  real-time scanning remain S7's question.
+  37-38 ms, p95 at most 41 ms; a bare `hgs.exe` start takes 25 ms, both under
+  Kaspersky's real-time protection (S7).
 
 ### D13. Attach
 
@@ -758,12 +759,16 @@ spike records its results in Beads and adjusts this document.
 
 Status on 2026-10-14: S1 is done (results in D6, D7, D8). S3 is done (2026-10-13;
 its report is kept outside the repository, and the M4 parser changes it called for
-landed in PR #33). S6 is done (2026-10-14; results in D12). S2 and S5 probes are
+landed in PR #33). S6 and S7 are done (2026-10-14; results in D12 and below). S2
+and S5 probes are
 done (results in D10, D11) and are confirmed through the host after M3. S4 is folded
-into the M3/M7 host survival tests. S7's baseline on the development PC: `hgs.exe`
-starts in about 11 ms warm and 132 ms for a freshly built image, and a Git Bash hook
-takes about 55 ms; S6 measured a 25 ms start and a 37-38 ms whole hook path there.
-That PC has no real-time scanning, so the scanning half of S7 needs another machine.
+into the M3/M7 host survival tests. S7 on the development PC, whose real-time
+antivirus is Kaspersky (Security Center reports it enabled and up to date; Defender
+does not run there, and no exclusion for the test folders is known): `hgs.exe`
+starts in about 11 ms warm and 132 ms for a freshly built image, a Git Bash hook
+takes about 55 ms, and S6 measured a 25 ms start and a 37-38 ms whole hook path
+(p95 at most 41 ms), all far inside the 5 s hook timeout. Defender's real-time
+scanning itself remains unmeasured.
 
 D10 and D11 are provisional until their spikes are confirmed through the host.
 

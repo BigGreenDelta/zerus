@@ -165,11 +165,21 @@ void TestAccountsPage::openCodeNativeConfigurationDoesNotOfferUnsupportedAccount
     auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_COMPARE(list->count(),5);
     page.showAccount({},"native-opencode");QTRY_COMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["provider"].toString(),QString("opencode"));
     QSignalSpy install(&page,&AccountsPage::installRequested),login(&page,&AccountsPage::loginRequested);
-    for(const auto *name:{"loginAccount","installAccountAgent","accountPermissions","renameAccount","copyAccount"}) {
+    for(const auto *name:{"loginAccount","installAccountAgent","accountPermissions","copyAccount"}) {
         auto *button=page.findChild<QPushButton *>(name);QVERIFY(button);QVERIFY(!button->isEnabled());button->click();
     }
     QVERIFY(install.isEmpty());QVERIFY(login.isEmpty());QVERIFY(!page.findChild<QPushButton *>("defaultAccount")->isVisible());
     QVERIFY(page.findChild<QPushButton *>("installAccountAgent")->toolTip().contains("OpenCode"));
+    // Owner decision 2026-10-14: its Zerus label is renamed like other accounts.
+    auto *rename=page.findChild<QPushButton *>("renameAccount");QVERIFY(rename->isEnabled());QVERIFY(rename->toolTip().isEmpty());
+    QTimer::singleShot(0,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("renameAccountDialog");QVERIFY(dialog);
+        dialog->findChild<QLineEdit *>("accountName")->setText("Local models");dialog->accept();
+    });
+    rename->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("renamed")));QFile renamed(m_dir.filePath("renamed"));QVERIFY(renamed.open(QIODevice::ReadOnly));
+    const auto call=QJsonDocument::fromJson(renamed.readAll()).object();QCOMPARE(call["host"].toString(),QString());
+    QCOMPARE(call["args"].toArray(),QJsonArray({"account","rename","native-opencode","--label","Local models","--revision","rev1"}));
     // Owner decision 2026-10-14: its Zerus entry is removed and added back like other accounts.
     auto *remove=page.findChild<QPushButton *>("removeAccount");QTRY_VERIFY(remove->isEnabled());
     QTimer::singleShot(0,&page,[&]{
