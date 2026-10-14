@@ -625,12 +625,16 @@ The M3 variable `HGS_HOST_RECOVERY_WORKER` is gone.
   (`src/swarm/catalog.rs:78`, so `//server/share` too), and `organizationReady`
   replaces the local organization (`SessionsWindow.cpp:1195-1199`). Local Windows
   folders stay in the GUI's organization model but never reach the swarm:
-  `SwarmController::sharedOrganization` strips drive and UNC folders before sending,
-  and `presentation` merges them back for the local machine only (an empty
-  `machine_id` or the snapshot's `node_id`), dropping those whose project was
-  deleted. `flatten` skips drive and UNC folder paths while other invalid paths still
-  fail, so an older or newer GUI never breaks an apply. A test checks that a Unix
-  peer's sync never drops them. A shared catalog kind for Windows paths is Phase 3.
+  `SwarmController::sharedOrganization` strips the drive and UNC folders of the local
+  machine (an empty `machine_id` or the snapshot's `node_id`; every one before the
+  first snapshot) before sending, and `presentation` merges those back, dropping the
+  ones whose project was deleted. `flatten` skips the drive and UNC folder paths of
+  the local machine (by alias or ID), so a GUI of any version that sends them never
+  breaks an apply; other invalid paths, a peer's drive path among them, still fail.
+  A peer's `//server/share` is a POSIX path, which a Windows GUI can store
+  (`QDir::cleanPath` keeps the leading `//` there): it is shared, renamed and removed
+  like any folder. A test checks that a Unix peer's sync never drops local Windows
+  folders. A shared catalog kind for Windows paths is Phase 3.
 
 ### D16. GUI
 
