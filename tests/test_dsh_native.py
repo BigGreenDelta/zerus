@@ -582,7 +582,8 @@ class NativeHarness(unittest.TestCase):
         # address. A compact or interrupt request that names a live child, here
         # held in its first step, is refused before it runs a command on the
         # child, records compaction state or touches goals or the parent's turn.
-        parent=self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
+        # The held child's goal is armed, so a disarm would show.
+        parent=self.create();hold='HOLD_CHILD_ARMED_'+uuid.uuid4().hex
         self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
         def child_row():
             return next((r for r in self.rpc('list')['items']
@@ -594,7 +595,7 @@ class NativeHarness(unittest.TestCase):
         try:
             child=self.wait(child_row)['sessionId']
             running=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('interrupt_supported') else None)
-            before=goals()
+            before=self.wait(lambda: g if (g:=goals())[1] and g[1]['activation']=='armed' else None)
             # Each request carries the parent's host generation and current turn.
             with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
                 self.rpc('compact',{'sessionId':child,'generation':running['host_generation'],'requestId':request_id})
