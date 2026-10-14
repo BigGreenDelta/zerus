@@ -3,8 +3,11 @@
 import datetime
 import json
 import os
+import pathlib
+import shutil
 import signal
 import subprocess
+import sys
 import time
 import unittest
 import uuid
@@ -70,6 +73,22 @@ try:
    elif buf[0]==27 and len(buf)<3:break
    else:buf=buf[1:]
 finally:termios.tcsetattr(fd,termios.TCSANOW,original)
+'''
+
+
+# Stands in for `npm install -g @openai/codex` until the test releases it or
+# Codex is gone, and records any input that reaches the installer.
+FAKE_NPM = r'''#!{python}
+import os,pathlib,select,sys,time
+root=pathlib.Path(os.environ['INPUT_FIXTURE']);(root/'npm-args').write_text(' '.join(sys.argv[1:]))
+print('fake npm: installing',flush=True);end=time.monotonic()+30;parent=os.getppid()
+while not (root/'release').exists() and os.getppid()==parent and time.monotonic()<end:
+ if select.select([0],[],[],.05)[0]:
+  try:value=os.read(0,65536)
+  except OSError:break
+  if not value:break
+  with (root/'npm-received').open('ab') as f:f.write(value)
+print('fake npm: done',flush=True)
 '''
 
 
@@ -303,8 +322,10 @@ class NativeCodexUpdate(unittest.TestCase):
         self.version_file.write_text(json.dumps(dict(latest_version='999.0.0', last_checked_at=checked, dismissed_version=None)))
         width, height = os.environ.get('HGS_CODEX_TEST_SIZE', '110x35').split('x')
         # The npm install context selects a stable command without a package manager.
+        # A private npm prefix keeps even a misplaced real npm out of global packages.
         self.tmux('new-session', '-d', '-s', self.name, '-x', width, '-y', height,
-                  'env', 'CODEX_HOME=' + str(self.native_home), 'CODEX_MANAGED_BY_NPM=1', binary, '--no-daemon',
+                  'env', 'CODEX_HOME=' + str(self.native_home), 'CODEX_MANAGED_BY_NPM=1',
+                  'NPM_CONFIG_PREFIX=' + str(self.root / 'npm-prefix'), binary, '--no-daemon',
                   '-c', 'tui.animations=false', '-C', str(self.root))
         self.pane = self.tmux('display-message', '-p', '-t', '=' + self.name + ':', '#{pane_id}').strip()
         self.tmux('set-option', '-t', '=' + self.name + ':', '@hgs_run', self.run_id)
@@ -336,6 +357,34 @@ class NativeCodexUpdate(unittest.TestCase):
         self.card = self.inspect()['pending_questions'][0]
         self.assertEqual(self.answer(self.payload('skip_version'))['status'], 'answered')
         self.wait_for(lambda: json.loads(self.version_file.read_text()).get('dismissed_version') == '999.0.0')
+
+    def test_native_update_now_hands_off_to_the_installer(self):
+        # A fake npm first on Codex's own PATH stands in for the installer.
+        self.script('npm', FAKE_NPM.replace('{python}', sys.executable))
+        environ = pathlib.Path('/proc', str(self.record['pid']), 'environ')
+        paths = [self.env['PATH']]
+        if environ.exists():
+            paths.append(dict(item.split('=', 1) for item in environ.read_text().split('\0') if '=' in item)['PATH'])
+        for path in paths:
+            self.assertEqual(shutil.which('npm', path=path), str(self.bin / 'npm'))
+        self.assertEqual(self.card['questions'][0]['options'][0]['label'], 'Update now (runs `npm install -g @openai/codex`)')
+        # Codex leaves raw mode at once; its announcement delivers the choice
+        # while the installer still runs.
+        receipt = self.answer(self.payload('update_now'))
+        self.assertEqual((receipt['status'], receipt['open_terminal'], receipt['codex_update']),
+                         ('answered', True, 'installing'))
+        self.wait_for(lambda: (self.root / 'npm-args').exists())
+        self.assertEqual((self.root / 'npm-args').read_text(), 'install -g @openai/codex')
+        self.assertIn('Updating Codex via `npm install -g @openai/codex`...', self.tmux('capture-pane', '-p', '-t', self.pane))
+        (self.root / 'release').touch()
+
+        def exited():
+            stat = subprocess.run(['ps', '-p', str(self.record['pid']), '-o', 'stat='],
+                                  capture_output=True, text=True).stdout.strip()
+            return not stat or stat.startswith(('Z', 'X'))
+        self.wait_for(exited)
+        self.assertFalse((self.root / 'npm-received').exists())
+        self.assertFalse((self.root / 'npm-prefix').exists())
 
 
 if __name__ == '__main__':
