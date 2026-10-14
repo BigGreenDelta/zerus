@@ -1,0 +1,35 @@
+
+  >_ OpenAI Codex (v0.162.0)
+     ~/project
+  permissions: YOLO mode
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol default · ~/project
+  ? for shortcuts                                                                    ⚠ 1 warning · f2 to view

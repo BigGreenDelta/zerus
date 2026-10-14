@@ -853,7 +853,9 @@ adds an amber **Session cleared** boundary to Activity and keeps the earlier loc
 timeline above it: the agent no longer sees that history, but you can still read
 and search it. Resuming or opening another conversation starts a new timeline.
 Codex can defer its new-session hook until the next message; its verified empty
-native reset panel also confirms the clear, including `/clear` in Terminal. Old
+native reset panel also confirms the clear, including `/clear` in Terminal. Only
+the header directly above the empty composer counts: the same header above an
+earlier message and its answer does not. Old
 context and prompt-cache values are hidden until the new conversation reports
 native usage. The saved native identity changes only on the real hook, and an
 unconfirmed command does not reset counters.
