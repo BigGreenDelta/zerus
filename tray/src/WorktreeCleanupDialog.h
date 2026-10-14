@@ -197,7 +197,7 @@ private:
         if(ok) {
             ++m_done;m_changed=true;setRowState(path,result["status"]=="forgotten"?tr("Forgotten"):tr("Removed"));
             if(!result["branch_error"].toString().isEmpty())m_branchNotes<<tr("%1: %2").arg(name,result["branch_error"].toString());
-        } else {m_failures<<tr("%1 was not removed: %2").arg(name,error);setRowState(path,tr("Not removed"));}
+        } else {m_failures<<tr("%1 removal was not confirmed: %2").arg(name,error);setRowState(path,tr("Not confirmed"));}
         next();
     }
     HgsClient *m_client;QString m_host,m_machine,m_path,m_focus,m_error,m_results;QJsonObject m_data,m_current;

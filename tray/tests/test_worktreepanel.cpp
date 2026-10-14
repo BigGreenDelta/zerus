@@ -411,7 +411,7 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
                 box->findChild<QCheckBox *>("confirmIgnoredWorktreeFiles")->setChecked(true);box->findChild<QPushButton *>("confirmRemoveWorktrees")->click();});
             remove->click();
             auto *status=dialog->findChild<QLabel *>("worktreeCleanupStatus");QTRY_VERIFY(status->text().contains("Removed 1 worktree."));
-            QVERIFY(status->text().contains("missing was not removed: Worktree changed since the review."));
+            QVERIFY(status->text().contains("missing removal was not confirmed: Worktree changed since the review."));
             const auto commands=calls();const auto first=commands.indexOf("worktrees remove --path /linked"),second=commands.indexOf("worktrees remove --path /missing");
             QVERIFY(first>=0&&second>first);QVERIFY(commands.mid(first,second-first).contains("--fingerprint /linked-print"));QVERIFY(commands.mid(first,second-first).contains("--delete-branch"));
             QCOMPARE(commands.count("worktrees remove"),2);checked=true;dialog->reject();
