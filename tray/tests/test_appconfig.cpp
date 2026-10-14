@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QDir>
 #include <QFile>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTextStream>
 #include "AppConfig.h"
@@ -40,6 +41,7 @@ private slots:
     void windowsModesKeepSharedValuesAndAddConsole();
     void homeVariableLocatesTrayConfig();
     void bundledHgsIsPreferredOnWindows();
+    void enabledWindowsRunsTheStableCli();
     void singleInstanceNameIsPerUserOnWindows();
     void restartKeepsSettingsButNotOneShotOptions();
 
@@ -537,6 +539,56 @@ void TestAppConfig::bundledHgsIsPreferredOnWindows()
     QTemporaryDir empty; QVERIFY(empty.isValid());
     const QString fallback = AppConfig::resolveHgsPath({}, empty.path());
     QVERIFY(fallback == "hgs" || QFileInfo(fallback).isAbsolute());
+}
+
+void TestAppConfig::enabledWindowsRunsTheStableCli()
+{
+    // Spec D2: `session-host status --json` of the bundled hgs.exe decides.
+    const QString bundled = "C:/Program Files/Zerus/hgs.exe", stable = "C:/Users/user/.local/bin/hgs.exe";
+    const QString built = QString(64, 'a'), other = QString(64, 'b');
+    const auto status = [](bool enabled, const QString &version, const QJsonValue &sha256, const QJsonValue &staged) {
+        return QJsonObject{{"enabled", enabled}, {"version", version},
+            {"marker", "C:\\Users\\user\\.config\\hgs\\local-sessions"},
+            {"cli", QJsonObject{{"path", "C:\\Users\\user\\.local\\bin\\hgs.exe"}, {"installed", !sha256.isNull()},
+                                {"sha256", sha256}, {"version", staged}}},
+            {"image", QJsonValue::Null}, {"host", QJsonObject{{"state", "stopped"}}}};
+    };
+    const auto choose = [&](const QJsonObject &answer, const QString &sha256 = QString(64, 'a'), const QString &configured = {}) {
+        const auto choice = AppConfig::chooseHgs(answer, bundled, sha256, configured);
+        return QStringList{choice.path, choice.refresh ? "refresh" : "keep", choice.fallback};
+    };
+    const QStringList asBundled{bundled, "keep", bundled}, asStable{stable, "keep", stable},
+        refreshed{stable, "refresh", stable};
+    // Not enabled, or no answer (an older hgs.exe): the bundled build. An
+    // uninstalled computer keeps its staged files and still runs the bundled one.
+    QCOMPARE(choose(status(false, "1.52.0", QJsonValue::Null, QJsonValue::Null)), asBundled);
+    QCOMPARE(choose(status(false, "1.52.0", other, "1.51.0")), asBundled);
+    QCOMPARE(choose({}), asBundled);
+    // Enabled: the stable CLI, in the form resolveHgsPath gives.
+    QCOMPARE(choose(status(true, "1.52.0", built.toUpper(), "1.52.0")), asStable);
+    // A different build at least as new is staged first; a refresh that fails
+    // keeps the staged CLI.
+    QCOMPARE(choose(status(true, "1.52.0", other, "1.51.9")), refreshed);
+    QCOMPARE(choose(status(true, "1.52.0", other, "1.52.0")), refreshed);
+    QCOMPARE(choose(status(true, "1.52.0-dev.12", other, "1.52.0-dev.9")), refreshed);
+    QCOMPARE(choose(status(true, "1.52.0", other, "1.52.0-dev.30")), refreshed);
+    QCOMPARE(choose(status(true, "2.0.0", other, "1.99.99")), refreshed);
+    // A newer staged build stays.
+    QCOMPARE(choose(status(true, "1.52.0", other, "1.53.0")), asStable);
+    QCOMPARE(choose(status(true, "1.52.0-dev.9", other, "1.52.0")), asStable);
+    QCOMPARE(choose(status(true, "1.52.0-dev.9", other, "1.52.0-dev.12")), asStable);
+    QCOMPARE(choose(status(true, "1.52.0-alpha", other, "1.52.0-beta")), asStable);
+    // A staged build of unknown version counts as older.
+    QCOMPARE(choose(status(true, "1.52.0", other, QJsonValue::Null)), refreshed);
+    // A bundled build that names no version, or cannot be read, refreshes nothing.
+    QCOMPARE(choose(status(true, "", other, "1.51.0")), asStable);
+    QCOMPARE(choose(status(true, "1.52.0", other, "1.51.0"), QString()), asStable);
+    // Enabled without a staged CLI: staged first, and the bundled build runs
+    // when that fails.
+    QCOMPARE(choose(status(true, "1.52.0", QJsonValue::Null, QJsonValue::Null)), (QStringList{stable, "refresh", bundled}));
+    // An explicit --hgs or hgs= is used as given.
+    QCOMPARE(choose(status(true, "1.52.0", other, "1.51.0"), built, "D:/tools/hgs.exe"),
+             (QStringList{"D:/tools/hgs.exe", "keep", "D:/tools/hgs.exe"}));
 }
 
 void TestAppConfig::singleInstanceNameIsPerUserOnWindows()

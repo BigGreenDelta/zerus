@@ -3,12 +3,57 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QTextStream>
 
+#include <algorithm>
+#include <optional>
+
 namespace {
 QString g_configPathOverride;  // пусто -- override не установлен, см. setConfigPathOverrideForTests
+
+// An hgs version ("1.52.0", "1.52.0-dev.12"); build metadata is ignored.
+struct Version {
+    quint64 core[3] = {};
+    QStringList prerelease;
+};
+
+std::optional<Version> parseVersion(const QString &text)
+{
+    static const QRegularExpression format(QStringLiteral(
+        "^([0-9]+)\\.([0-9]+)\\.([0-9]+)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+[0-9A-Za-z.-]+)?$"));
+    const auto match = format.match(text);
+    if (!match.hasMatch()) return std::nullopt;
+    Version version;
+    for (int part = 0; part < 3; ++part) version.core[part] = match.captured(part + 1).toULongLong();
+    version.prerelease = match.captured(4).split(QLatin1Char('.'), Qt::SkipEmptyParts);
+    return version;
+}
+
+// SemVer precedence: negative, zero or positive.
+int compareVersions(const Version &a, const Version &b)
+{
+    for (int part = 0; part < 3; ++part)
+        if (a.core[part] != b.core[part]) return a.core[part] < b.core[part] ? -1 : 1;
+    // A pre-release precedes its release.
+    const auto &x = a.prerelease, &y = b.prerelease;
+    if (x.isEmpty() || y.isEmpty()) return int(x.isEmpty()) - int(y.isEmpty());
+    for (qsizetype i = 0; i < std::min(x.size(), y.size()); ++i) {
+        bool xNumber = false, yNumber = false;
+        const auto xValue = x[i].toULongLong(&xNumber), yValue = y[i].toULongLong(&yNumber);
+        // Numeric identifiers compare as numbers and precede alphanumeric ones.
+        if (xNumber && yNumber) {
+            if (xValue != yValue) return xValue < yValue ? -1 : 1;
+        } else if (xNumber != yNumber) {
+            return xNumber ? -1 : 1;
+        } else if (const int order = x[i].compare(y[i])) {
+            return order < 0 ? -1 : 1;
+        }
+    }
+    return x.size() == y.size() ? 0 : x.size() < y.size() ? -1 : 1;
+}
 }
 
 QString AppConfig::configPath()
@@ -73,6 +118,26 @@ QString AppConfig::resolveHgsPath(const QString &configured, const QString &appl
         return bundled.absoluteFilePath();
     const QString found = QStandardPaths::findExecutable(QStringLiteral("hgs"));
     return found.isEmpty() ? QStringLiteral("hgs") : found;
+}
+
+AppConfig::HgsChoice AppConfig::chooseHgs(const QJsonObject &status, const QString &bundled,
+                                          const QString &bundledSha256, const QString &configured)
+{
+    if (!configured.isEmpty()) return {configured, false, configured};
+    const auto cli = status.value(QStringLiteral("cli")).toObject();
+    const auto path = cli.value(QStringLiteral("path")).toString();
+    // The marker decides, not the staged files: they stay after an uninstall.
+    if (!status.value(QStringLiteral("enabled")).toBool() || path.isEmpty()) return {bundled, false, bundled};
+    // The '/' form, as resolveHgsPath gives on Windows.
+    const auto stable = MachinePlatform::clean(path, MachinePlatform::Style::Windows);
+    const auto staged = cli.value(QStringLiteral("sha256")).toString();
+    if (!cli.value(QStringLiteral("installed")).toBool() || staged.isEmpty()) return {stable, true, bundled};
+    const bool differs = !bundledSha256.isEmpty() && bundledSha256.compare(staged, Qt::CaseInsensitive) != 0;
+    const auto version = parseVersion(status.value(QStringLiteral("version")).toString());
+    const auto stagedVersion = parseVersion(cli.value(QStringLiteral("version")).toString());
+    // A staged build of unknown version counts as older.
+    const bool newer = version && (!stagedVersion || compareVersions(*version, *stagedVersion) >= 0);
+    return {stable, differs && newer, stable};
 }
 
 AppConfig::Platform AppConfig::currentPlatform()

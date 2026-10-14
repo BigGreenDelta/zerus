@@ -36,6 +36,9 @@
 #ifdef Q_OS_WIN
 #include "ConsoleHost.h"
 #include "WindowsCommandLine.h"
+#include <QCryptographicHash>
+#include <QFile>
+#include <QJsonObject>
 #include <QLockFile>
 #include <QStandardPaths>
 #include <qt_windows.h>
@@ -88,6 +91,43 @@ void attachParentConsole()
             std::fflush(stderr);
             SetConsoleOutputCP(previous);
         });
+}
+
+// `hgs session-host <action> --json`, before the tray starts; empty when it fails.
+QJsonObject sessionHost(const QString &hgs, const QString &action)
+{
+    HgsClient client(hgs);
+    QJsonObject answer;
+    QEventLoop loop;
+    QObject::connect(&client, &HgsClient::sessionHostReady, &loop, [&](quint64, const QJsonObject &data) {
+        answer = data;
+        loop.quit();
+    });
+    QObject::connect(&client, &HgsClient::sessionHostFailed, &loop, [&](quint64, const QString &error) {
+        QTextStream(stderr) << QStringLiteral("hgs-tray: hgs session-host %1: %2\n").arg(action, error);
+        loop.quit();
+    });
+    client.requestSessionHost(action);
+    loop.exec();
+    return answer;
+}
+
+// The hgs this tray runs until it restarts (spec D2, AppConfig::chooseHgs): on a
+// computer with local sessions the stable CLI, staged again from hgs (the bundled
+// build) first when that differs and is at least as new.
+QString stableHgs(const QString &hgs, const QString &configured)
+{
+    const QJsonObject status = configured.isEmpty() ? sessionHost(hgs, QStringLiteral("status")) : QJsonObject();
+    QString sha256;
+    // Only an enabled computer compares builds.
+    QFile file(hgs);
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (status.value(QStringLiteral("enabled")).toBool() && file.open(QIODevice::ReadOnly) && hash.addData(&file))
+        sha256 = QString::fromLatin1(hash.result().toHex());
+    const AppConfig::HgsChoice choice = AppConfig::chooseHgs(status, hgs, sha256, configured);
+    if (choice.refresh && sessionHost(hgs, QStringLiteral("install")).isEmpty())
+        return choice.fallback;
+    return choice.path;
 }
 } // namespace
 #endif
@@ -206,7 +246,9 @@ int main(int argc, char *argv[])
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     QApplication app(argc, argv);
 #ifdef Q_OS_WIN
-    // One hgs.exe for every operation: bundled next to hgs-tray.exe, else PATH.
+    // One hgs.exe for every operation: bundled next to hgs-tray.exe, else PATH;
+    // the stable CLI once local sessions are enabled (stableHgs below).
+    const bool hgsConfigured = !cfg.hgsPath.isEmpty();
     cfg.hgsPath = AppConfig::resolveHgsPath(cfg.hgsPath, QCoreApplication::applicationDirPath());
 #endif
     ScrollbarTheme scrollbarTheme(app);
@@ -287,6 +329,10 @@ int main(int argc, char *argv[])
         return 4;
     }
 
+#ifdef Q_OS_WIN
+    // Once this instance owns the tray: a second one never stages anything.
+    cfg.hgsPath = stableHgs(cfg.hgsPath, hgsConfigured ? cfg.hgsPath : QString());
+#endif
     // KSNI derives its persistent tray ID from the initial display name. Rename
     // the UI only after constructing the icon to preserve Plasma's visibility setting.
     TrayAgent agent(cfg);
