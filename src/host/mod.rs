@@ -14,15 +14,17 @@
 //! attached clients), `registry` (sessions and requests), `channel` (the
 //! host's end of the supervisor channel and its judgement of input evidence),
 //! `supervisor` (the `--run` supervisor's end), `server`'s connection protocol,
-//! `client`'s connection, `worker` (D14) and `log`.
+//! `client`'s connection, `attach` (the attach client of `hgs a`, D13),
+//! `worker` (D14) and `log`.
 //! Windows only: `pipe`, `token`, `conpty`, `job`, `console` (sessions on
 //! ConPTY), `server::serve`, `client::{connect, connect_or_start}`,
-//! `supervisor::open` and `command` (`hgs.exe __host`).
+//! `supervisor::open`, `attach::Console` and `command` (`hgs.exe __host`).
 // On Unix nothing outside the tests uses the host; the Windows lifecycle (M4)
 // and attach client (M5) use more of it than the host process does today.
 #![cfg_attr(not(all(windows, test)), allow(dead_code))]
 
 pub(crate) mod admin;
+pub(crate) mod attach;
 mod channel;
 pub(crate) mod client;
 #[cfg(windows)]

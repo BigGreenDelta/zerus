@@ -22,6 +22,8 @@ use crate::cli::{Error, Result as CliResult};
 
 /// What an operation reports on a computer without a session terminal.
 const UNSUPPORTED: &str = "Local sessions are not supported on this computer yet";
+/// What `hgs a --existing --run-id` reports when the session runs another run.
+pub(crate) const RUN_CHANGED: &str = "session run changed; refresh before reconnecting";
 
 /// What a command acts on.
 #[derive(Clone, Copy, Debug)]
@@ -322,9 +324,18 @@ pub(crate) trait TerminalBackend: Sync {
     fn launch(&self, _spec: &LaunchSpec) -> CliResult<ClientExit> {
         Err(Error::new(2, UNSUPPORTED))
     }
+    /// Refuse an attach this process cannot make (`hgs a`, a launch without
+    /// `-d`) before a saved session is resumed for it; tmux finds out as it
+    /// attaches.
+    fn attachable(&self) -> CliResult<()> {
+        Ok(())
+    }
     /// Record which peer views the session, for `hgs paste`.
     fn set_client(&self, _target: Target, _client: &str) {}
-    fn attach(&self, _target: Target) -> CliResult<ClientExit> {
+    /// Attach this terminal to a session. With `run_id` (`hgs a --existing
+    /// --run-id`, checked by the caller before) a terminal that can check the
+    /// run marker again as it attaches refuses a changed run with `RUN_CHANGED`.
+    fn attach(&self, _target: Target, _run_id: Option<&str>) -> CliResult<ClientExit> {
         Err(Error::new(2, UNSUPPORTED))
     }
     /// `hgs kill`: end the session named exactly `name`; the exit code.
@@ -497,7 +508,9 @@ mod unavailable_tests {
         assert_eq!(terminal.send("%1", &[Key::Named("Enter")]).unwrap_err(), UNSUPPORTED);
         assert_eq!(terminal.kill_session(Target::Name("claude/p")).unwrap_err(), UNSUPPORTED);
         for result in [
-            terminal.attach(Target::Name("claude/p")).map(|exit| exit.code),
+            terminal
+                .attach(Target::Name("claude/p"), None)
+                .map(|exit| exit.code),
             terminal.kill("claude/p"),
         ] {
             let error = result.unwrap_err();

@@ -97,7 +97,10 @@ is running": saved sessions live in the state directory, and a host crash must n
 turn the computer back into a control console. On Windows the local box also carries
 `local_host` with `state` (`not-installed`, `stopped`, `running`, `unavailable`),
 `pid`, `protocol`, `conpty` (`bundled` or `inbox`), `integrity` and `windows_session`.
-Unix output is unchanged.
+Unix output is unchanged. Implemented in M5 (`host::admin::Host::listing_json`): every
+key is present, the five facts are null unless a host answers, an `unavailable` host
+adds `error`, and a stopped host of a computer without the marker is `not-installed`;
+the control-console box carries it too.
 
 **One CLI over the state directory.** Once enabled, the GUI runs the stable CLI, not
 the `hgs.exe` in its own folder. When the GUI's bundled `hgs.exe` is newer than the
@@ -526,6 +529,33 @@ the supervisor again before it writes anything. Once S6 passes, the switch
   protocol change; the host-as-sole-responder rule (D6) keeps queries answered once.
 - `clients` in `ls --json` lists opaque client IDs on Windows (no tty paths).
 
+Implemented in M5 (`src/host/attach.rs`, `state::backend::host`):
+
+- The client writes the repaint and the relayed output as they come; it draws no
+  screen of its own, so there is no alternate screen around the session and the
+  client console keeps its scrollback. A host notice has no status line to show on
+  and is ignored.
+- Prefix keys: `Ctrl+B d` and `Ctrl+B Ctrl+D` detach, `Ctrl+B Ctrl+B` sends one
+  Ctrl+B, and any other key after Ctrl+B passes through with the Ctrl+B, unchanged
+  (tmux would run or swallow a binding; the client has no others, and dropping keys
+  would lose input). Keys inside a bracketed paste are text, as in tmux; ESC and
+  Ctrl+B in one read are Meta+Ctrl+B.
+- Standard input and output must both be a console that takes the attach modes;
+  pipes, files and a legacy console are refused before anything is created,
+  resumed or attached (`TerminalBackend::attachable`), as tmux refuses a client
+  without a terminal. The input mode also sets `ENABLE_WINDOW_INPUT`; the window
+  size is also polled, because a classic console window sends no event when only
+  its height changes. Ctrl+C and Ctrl+Break events are ignored while attached.
+- At the end the client resets the modes a session may leave on its terminal (as
+  tmux does on detach), leaves the alternate screen only when the session had
+  entered it, moves below the last row and prints tmux's `[detached (from session
+  NAME)]` or `[exited]` (exit 0). A lost connection exits 1; when no host answers
+  any more the client prints `hgs: the session host died; terminal restored, sessions
+  on this box are gone`, the tmux backend's message naming the session host.
+- An attached launch creates the session at the console's size, then attaches by
+  session ID; a session that ended before the attach counts as exited. With
+  `--run-id` the host checks the run marker again as it attaches.
+
 ### D14. Workers
 
 The host supervises the recovery worker (`hgs.exe recovery worker`, from the stable
@@ -673,7 +703,7 @@ one.
   (D14), Windows dialog fixtures and path-aware screen parsers
   (`src/state/codex_trust.rs:33,49`, `claude_permission.rs:94`,
   `clear_context.rs:90-93`), open-file holders for Codex resume input.
-- **M5 Attach client and listings** (D13, `local_host`).
+- **M5 Attach client and listings** (D13, `local_host`; implemented 2026-10-14).
 - **M6 GUI** (D15 local folders, D16).
 - **M7 Tests, CI, packaging and docs**: a native `examples/fake_agent.rs` (raw input
   recorder, fixture renderer, mode toggles, hook emitter); one backend contract suite

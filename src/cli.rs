@@ -823,6 +823,10 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
             raw["desktop_presence"] = presence;
         }
         raw["preferences"] = crate::swarm::preferences(config);
+        #[cfg(windows)]
+        {
+            raw["local_host"] = crate::host::admin::local_host(&config.state);
+        }
         return Ok(raw);
     }
     let mut projects = serde_json::Map::new();
@@ -844,6 +848,12 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
         raw["desktop_presence"] = presence;
     }
     raw["preferences"] = crate::swarm::preferences(config);
+    // Windows: the session host as found, never started (spec D2). Unix
+    // listings stay as they were.
+    #[cfg(windows)]
+    {
+        raw["local_host"] = crate::host::admin::local_host(&config.state);
+    }
     state::merge_snapshot(raw).map_err(|e| Error::new(1, e))
 }
 fn local_list(config: &Config) -> Result<()> {
@@ -975,12 +985,9 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
         return Err(Error::new(1, "invalid tmux session identity"));
     }
     if run_id.is_some_and(|expected| fields[1] != expected) {
-        return Err(Error::new(
-            1,
-            "session run changed; refresh before reconnecting",
-        ));
+        return Err(Error::new(1, crate::state::backend::RUN_CHANGED));
     }
-    attach_target(config, session, client, Target::Session(fields[0]))
+    attach_target(config, session, client, Target::Session(fields[0]), run_id)
 }
 
 fn attach(config: &Config, session: &str, client: &str, dry: bool) -> Result<i32> {
@@ -992,6 +999,7 @@ fn attach(config: &Config, session: &str, client: &str, dry: bool) -> Result<i32
         return Ok(0);
     }
     nested_guard(false)?;
+    terminal().attachable()?;
     if !session_exists(session) && config.state.is_dir() {
         env::set_var("HGS_CLIENT", client);
         let rc = state_command("resume", &[session.into()])?;
@@ -999,13 +1007,19 @@ fn attach(config: &Config, session: &str, client: &str, dry: bool) -> Result<i32
             return Ok(rc);
         }
     }
-    attach_target(config, session, client, Target::Name(session))
+    attach_target(config, session, client, Target::Name(session), None)
 }
 
-fn attach_target(config: &Config, session: &str, client: &str, target: Target) -> Result<i32> {
+fn attach_target(
+    config: &Config,
+    session: &str,
+    client: &str,
+    target: Target,
+    run_id: Option<&str>,
+) -> Result<i32> {
     terminal().set_client(target, client);
     let _tab = TabGuard::begin(config, session, &platform::tab_color(config, "local"));
-    let exit = terminal().attach(target)?;
+    let exit = terminal().attach(target, run_id)?;
     report_startup_failure(session);
     Ok(exit.code)
 }
@@ -1042,7 +1056,13 @@ fn attach_requested(
             )
         })?;
     state::check_requested_session(session, agent, id).map_err(|error| Error::new(1, error))?;
-    attach_target(config, session, client, Target::Session(target.value()))
+    attach_target(
+        config,
+        session,
+        client,
+        Target::Session(target.value()),
+        None,
+    )
 }
 fn kill(config: &Config, args: &[String], mut dry: bool) -> Result<i32> {
     let session = require(args, 0, "usage: hgs kill <session> [--archive <id>]")?;
@@ -1910,6 +1930,9 @@ fn launch(
     if !options.fresh
         && (requested_saved || (options.resume_id.is_none() && binding_exists(config, &session)?))
     {
+        if !options.detached && !options.dry {
+            terminal().attachable()?;
+        }
         env::set_var("HGS_CLIENT", client);
         if let Some(id) = &options.resume_id {
             env::set_var("HGS_REQUESTED_ID", id);
