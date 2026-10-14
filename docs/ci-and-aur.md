@@ -732,8 +732,10 @@ cursor and lifecycle state. The tests resume synthetic
 history, then verify GUI-command clear, Terminal clear, the deferred native
 identity transition, stale usage suppression, a single durable clear boundary,
 preserved process/run identity, unsent native drafts and foreign-directory
-rejection. A new session in a folder outside the fixture home, which Codex
-prints in full in its header, answers a first message from the localhost
+rejection. A resumed conversation whose `SessionStart` is still deferred must
+pause, and clear from the GUI and from Terminal, where the next message's hook
+names the new conversation. A new session in a folder outside the fixture home,
+which Codex prints in full in its header, answers a first message from the localhost
 provider; idle polls must not treat that header above the history as a reset,
 and a later clear must still be confirmed. A separate fixture caches a newer
 version for the startup update picker and verifies its Activity identity,

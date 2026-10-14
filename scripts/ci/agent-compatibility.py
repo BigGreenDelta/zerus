@@ -36,7 +36,8 @@ AGENTS = {
         # without its sandbox and code mode, so none of them is extracted.
         members={'linux-x64': 'package/vendor/x86_64-unknown-linux-musl/bin/codex',
                  WINDOWS: 'package/vendor/x86_64-pc-windows-msvc/bin/codex.exe'},
-        coverage='clear, draft preservation, identity, async question panels, two terminal sizes and animation modes',
+        coverage='clear, draft preservation, identity, resumed clear and pause before SessionStart, async question panels, '
+                 'two terminal sizes and animation modes',
         timeout=180,
         suites=['test_clear_context_native.NativeCodexClear', 'test_codex_update.NativeCodexUpdate',
                 'test_external_agents_native.NativeExternalAgents', 'test_codex_async_questions_native'],
