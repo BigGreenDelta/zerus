@@ -41,6 +41,29 @@ public:
     QSize sizeHint() const override { return {380, count() ? sizeHintForRow(0) * count() + 2 * frameWidth() : 0}; }
     QSize minimumSizeHint() const override { return sizeHint(); }
 };
+// A wrapped hint as tall as its longest alternative at its width. Its height is a
+// minimum rather than height-for-width, which windows cap at part of the screen.
+class ReservedLabel final : public QLabel {
+public:
+    ReservedLabel() { setTextFormat(Qt::PlainText); setWordWrap(true); setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed); }
+    void reserve(const QStringList &texts) { m_texts = texts; fit(); }
+    void fit() {
+        const auto margins = contentsMargins(); int height = 0;
+        const QRect bounds(0, 0, qMax(1, width() - margins.left() - margins.right()), QWIDGETSIZE_MAX);
+        for (const auto &text : m_texts + QStringList{text()})
+            height = qMax(height, fontMetrics().boundingRect(bounds, Qt::TextWordWrap | int(alignment()), text).height());
+        height += margins.top() + margins.bottom();
+        if (height != m_height) { m_height = height; updateGeometry(); }
+    }
+    bool hasHeightForWidth() const override { return false; }
+    QSize sizeHint() const override { return {0, m_height}; }
+    QSize minimumSizeHint() const override { return {0, m_height}; }
+protected:
+    void resizeEvent(QResizeEvent *event) override { QLabel::resizeEvent(event); fit(); }
+private:
+    QStringList m_texts;
+    int m_height = 0;
+};
 using IdentityBadges::providerName;
 QString permissionMode(const QJsonObject &p) {
     return p["permission_mode"] == "bypass" ? "bypass" : p["effective_permission_mode"].toString("unknown");
@@ -664,22 +687,31 @@ void AccountsPage::add()
     provider->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);provider->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     provider->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
     const auto agent=[provider] {return provider->currentItem()?provider->currentItem()->data(AccountChoice::ProviderRole).toString():QString();};
-    auto *saved=new QComboBox;saved->setObjectName("savedAccount");auto *savedLabel=label(tr("Account"));
-    auto *name = new QLineEdit;name->setObjectName("addAccountName"); name->setPlaceholderText(tr("Work, Personal, Team…"));auto *nameLabel=label(tr("Account name"));
-    form->addRow(tr("Machine"), machine); form->addRow(tr("Agent"), provider);form->addRow(savedLabel,saved);form->addRow(nameLabel, name); layout->addLayout(form);
-    auto *hint = label();hint->setObjectName("muted");layout->addWidget(hint);
+    // Every field stays in place for every agent; ones that do not apply are disabled.
+    auto *saved=new QComboBox;saved->setObjectName("savedAccount");
+    saved->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);saved->setMinimumContentsLength(16);
+    auto *name = new QLineEdit;name->setObjectName("addAccountName"); name->setPlaceholderText(tr("Work, Personal, Team…"));
+    form->addRow(tr("Machine"), machine); form->addRow(tr("Agent"), provider);form->addRow(tr("Account"),saved);form->addRow(tr("Account name"), name); layout->addLayout(form);
+    auto *hint = new ReservedLabel;hint->setObjectName("muted");layout->addWidget(hint);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel); auto *create = buttons->addButton(tr("Create and sign in"), QDialogButtonBox::AcceptRole); create->setEnabled(false); layout->addWidget(buttons);
     const auto where=[=] {const auto host=machine->currentData().toString();return host.isEmpty()?m_fleet.local().host:host;};
     const auto update=[=] {
         const bool reuse=!saved->currentData().toJsonObject().isEmpty();const auto host=machine->currentData().toString();const auto chosen=agent();
         // No machine to choose (a control-only computer without remote machines).
         const bool none=machine->count()==0;
-        name->setVisible(!reuse);nameLabel->setVisible(!reuse);
+        if(name->isEnabled()==reuse) {
+            // A saved account keeps its name; a typed new name returns with New account.
+            const QSignalBlocker blocker(name);
+            if(reuse){name->setProperty("typedName",name->text());name->clear();}else name->setText(name->property("typedName").toString());
+            name->setEnabled(!reuse);
+        }
         create->setEnabled(!none && online(host) && !chosen.isEmpty() && (reuse || (!name->text().trimmed().isEmpty() && name->text().size()<=160)));
         create->setText(reuse?tr("Add account"):chosen=="dsh"?tr("Enter API key…"):tr("Create and sign in"));
-        hint->setText(none?remoteOnlyHint():reuse&&chosen=="opencode"?tr("Use OpenCode's native configuration on %1 for new sessions again.").arg(where())
-            :reuse?tr("Use the saved sign-in on %1. The account will be available for new sessions again.").arg(where())
-            :chosen=="dsh"?tr("Configure a DeepSeek API key on the selected machine."):tr("Create a separate account profile on the selected machine, then sign in."));
+        const QString openCode=tr("Use OpenCode's native configuration on %1 for new sessions again.").arg(where()),
+            restore=tr("Use the saved sign-in on %1. The account will be available for new sessions again.").arg(where()),
+            key=tr("Configure a DeepSeek API key on the selected machine."),fresh=tr("Create a separate account profile on the selected machine, then sign in.");
+        hint->reserve({remoteOnlyHint(),openCode,restore,key,fresh});
+        hint->setText(none?remoteOnlyHint():reuse&&chosen=="opencode"?openCode:reuse?restore:chosen=="dsh"?key:fresh);
     };
     const auto populate=[=] {
         const QSignalBlocker blocker(saved);saved->clear();const auto chosen=agent();
@@ -688,10 +720,9 @@ void AccountsPage::add()
             const auto p=value.toObject();const auto email=p["usage"].toObject()["identity"].toObject()["email"].toString();
             saved->addItem(icon,email.isEmpty() || email==p["label"].toString()?p["label"].toString():p["label"].toString()+" ("+email+")",p);
         }
-        const bool any=saved->count()>0;
         // OpenCode has one native configuration per machine and no separate profiles.
-        if(chosen!="opencode")saved->addItem(tr("New account…"),QJsonObject());
-        saved->setCurrentIndex(0);saved->setVisible(any);savedLabel->setVisible(any);update();
+        if(chosen!="opencode")saved->addItem(tr("New account"),QJsonObject());
+        saved->setCurrentIndex(0);saved->setEnabled(saved->count()>1);update();
     };
     const auto providers=[=] {
         const auto host=machine->currentData().toString(),previous=agent();
@@ -725,7 +756,13 @@ void AccountsPage::add()
     connect(provider,&QListWidget::currentItemChanged,&dialog,populate);
     connect(machine,&QComboBox::currentIndexChanged,&dialog,[=]{providers();populate();});providers();populate();
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    dialog.ensurePolished();dialog.adjustSize();
+    dialog.ensurePolished();
+    // The action button is as wide as its longest label, so Cancel never moves.
+    int widest=0;
+    for(const auto &text:{tr("Create and sign in"),tr("Add account"),tr("Enter API key…")}){create->setText(text);widest=qMax(widest,create->sizeHint().width());}
+    create->setMinimumWidth(widest);update();
+    // Wrap the hint at its final width, then size the dialog around it.
+    dialog.adjustSize();hint->fit();dialog.adjustSize();
     if (dialog.exec() != QDialog::Accepted || machine->count() == 0 || !online(machine->currentData().toString()) || agent().isEmpty()) return;
     const auto existing=saved->currentData().toJsonObject();if(!existing.isEmpty()){useSavedProfile(existing);return;}
     if (agent() == "opencode") return;

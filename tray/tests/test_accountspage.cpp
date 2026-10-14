@@ -45,6 +45,7 @@ private slots:
     void nativeDefaultsAndMachineScopedActions();
     void openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations();
     void addAccountUsesProviderRows();
+    void addAccountKeepsItsLayoutAcrossAgents();
     void repliesFromRemovedMachineAreIgnored();
     void explicitMachineOutsidePollingSurvivesRefreshAndExpiresWithFilter();
     void launchCarriesAccountForSelectedMachine();
@@ -189,7 +190,7 @@ void TestAccountsPage::openCodeNativeConfigurationDoesNotOfferUnsupportedAccount
         agents->setCurrentRow(4);
         auto *saved=dialog->findChild<QComboBox *>("savedAccount");QVERIFY(saved->isVisible());QCOMPARE(saved->count(),1);
         QCOMPARE(saved->currentData().toJsonObject()["id"].toString(),QString("native-opencode"));
-        QVERIFY(!dialog->findChild<QLineEdit *>("addAccountName")->isVisible());
+        QVERIFY(!dialog->findChild<QLineEdit *>("addAccountName")->isEnabled());
         for(auto *button:dialog->findChildren<QPushButton *>())if(button->text()=="Add account"&&button->isEnabled()){button->click();return;}
         QFAIL("No add button");
     });
@@ -234,6 +235,49 @@ void TestAccountsPage::addAccountUsesProviderRows()
     add->click();
     QVERIFY(AccountUsage::state({{"status","configured"},{"provider","opencode"}}).contains("native provider configuration"));
     QVERIFY(AccountUsage::state({{"status","configured"},{"provider","dsh"}}).contains("DeepSeek console"));
+}
+
+void TestAccountsPage::addAccountKeepsItsLayoutAcrossAgents()
+{
+    // Choosing another agent changes texts and enabled fields, never the dialog's
+    // size or where its fields and buttons are. Claude has a saved account here;
+    // Codex and Kimi do not.
+    QFile removed(m_dir.filePath("removed-local"));QVERIFY(removed.open(QIODevice::WriteOnly));removed.write("native-claude");removed.close();
+    QFile deepSeek(m_dir.filePath("deepseek"));QVERIFY(deepSeek.open(QIODevice::WriteOnly));deepSeek.close();
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet(false));page.setTheme(true);
+    const auto preview=qEnvironmentVariable("HGS_ACCOUNTS_PREVIEW");
+    if(!preview.isEmpty())page.setStyleSheet("QWidget { background:#171e24; color:#e4e9ee; font-size:14px; } QLabel#heading {font-size:20px;font-weight:600;} QLabel#muted {color:#9babb8;} QPushButton,QComboBox,QLineEdit {padding:9px 13px;border:1px solid #34414b;border-radius:6px;background:#1d262e;} QPushButton:disabled {color:#75808a;} QLineEdit:disabled,QComboBox:disabled {color:#75808a;background:#171e24;} QListWidget {border:1px solid #34414b;border-radius:8px;background:#1d262e;} QListWidget::item:selected {background:#21453c;} ");
+    page.show();
+    auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_VERIFY(list->count()>=4);
+    auto *add=page.findChild<QPushButton *>("addAccount");QTRY_VERIFY(add->isEnabled());
+    QTimer::singleShot(0,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountDialog");QVERIFY(dialog);
+        const auto closeOnFailure=qScopeGuard([dialog]{if(dialog->isVisible())dialog->reject();});
+        auto *agents=dialog->findChild<QListWidget *>("addAccountProvider");QVERIFY(agents);
+        QCOMPARE(agents->item(1)->data(Qt::UserRole+3).toString(),QString("Saved account or a new profile"));
+        auto *saved=dialog->findChild<QComboBox *>("savedAccount");auto *name=dialog->findChild<QLineEdit *>("addAccountName");
+        QList<QWidget *> parts{agents,saved,name};for(auto *button:dialog->findChildren<QPushButton *>())parts<<button;
+        const auto layout=[&]{
+            QCoreApplication::sendPostedEvents();QCoreApplication::processEvents();
+            QStringList out{QString("dialog %1x%2").arg(dialog->width()).arg(dialog->height())};
+            for(auto *part:parts)out<<QString("%1 %2 %3,%4 %5x%6").arg(part->objectName(),part->isVisible()?"shown":"hidden")
+                .arg(part->mapTo(dialog,QPoint()).x()).arg(part->mapTo(dialog,QPoint()).y()).arg(part->width()).arg(part->height());
+            return out;
+        };
+        const auto first=layout();
+        // The dialog opens tall enough for every agent row, whatever the screen allows.
+        QCOMPARE(agents->height(),agents->sizeHint().height());
+        for(const int row:{1,2,3,0,1,0}) {
+            agents->setCurrentRow(row);
+            QCOMPARE(layout(),first);
+            if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(dialog->grab().save(preview+QString("/add-account-%1.png").arg(row)));}
+        }
+        // Claude offers its saved account; a new one uses the name field.
+        agents->setCurrentRow(1);QVERIFY(saved->isEnabled());QVERIFY(!saved->currentData().toJsonObject().isEmpty());QVERIFY(!name->isEnabled());
+        saved->setCurrentIndex(saved->count()-1);QVERIFY(name->isEnabled());QCOMPARE(layout(),first);
+        agents->setCurrentRow(0);QVERIFY(!saved->isEnabled());QVERIFY(name->isEnabled());
+    });
+    add->click();
 }
 
 void TestAccountsPage::permissionBadgesReflectInheritedAndMixedModes()

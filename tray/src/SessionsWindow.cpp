@@ -1581,6 +1581,7 @@ void SessionsWindow::applyTheme()
         QLineEdit#search:focus { border-color:%5; }
         QLineEdit, QComboBox { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:9px 10px; selection-background-color:%10; }
         QLineEdit:focus, QComboBox:focus { border-color:%5; }
+        QLineEdit:disabled, QComboBox:disabled { color:%6; background:%1; }
         QComboBox::drop-down { border:0; width:24px; }
         QComboBox::down-arrow { image:url(:/hgs/chevron-down.svg); width:14px; height:14px; }
         QComboBox QAbstractItemView { background:%3; color:%2; selection-background-color:%10; selection-color:%2; }
