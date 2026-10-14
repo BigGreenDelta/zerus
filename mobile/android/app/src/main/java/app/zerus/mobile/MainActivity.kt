@@ -237,7 +237,7 @@ class MainActivity : ComponentActivity() {
         SessionDetailsSheet(model,selected) { sessionDetails = false }
     }
     val sessionHeaderHeight = with(LocalDensity.current) {
-        maxOf(56.dp,22.sp.toDp() + MaterialTheme.typography.labelSmall.lineHeight.toDp() + 14.dp)
+        maxOf(56.dp,22.sp.toDp() + MaterialTheme.typography.labelSmall.lineHeight.toDp() + 18.dp)
     }
     val project = if (tab == 1) model.selectedProject else model.sessionProjectScope.takeIf { tab == 0 }
     Scaffold(modifier = Modifier.fillMaxSize(), containerColor = Background,

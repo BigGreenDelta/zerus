@@ -48,15 +48,16 @@ import org.json.JSONObject
     Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button,onClickLabel = "Session details",onClick = onDetails),
         verticalArrangement = Arrangement.Center) {
         Text(session.title,maxLines = 1,overflow = TextOverflow.Ellipsis,fontSize = 18.sp,lineHeight = 22.sp)
+        Spacer(Modifier.height(4.dp))
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val machineWidth = maxWidth * .4f
             Row(verticalAlignment = Alignment.CenterVertically,horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                MachineLabel(model.machineName(target.connectionId,target.computerId,target.computerId),
+                    Modifier.widthIn(max = machineWidth),colorHex = model.machineColor(MachineKey(target.connectionId,target.computerId)))
                 Surface(Modifier.weight(1f,fill = false),color = Color(colors.background),shape = RoundedCornerShape(5.dp)) {
                     Text(status + freshness,Modifier.padding(horizontal = 7.dp,vertical = 3.dp),maxLines = 1,
                         overflow = TextOverflow.Ellipsis,style = MaterialTheme.typography.labelSmall,color = Color(colors.foreground))
                 }
-                MachineLabel(model.machineName(target.connectionId,target.computerId,target.computerId),
-                    Modifier.widthIn(max = machineWidth),colorHex = model.machineColor(MachineKey(target.connectionId,target.computerId)))
             }
         }
     }
@@ -84,7 +85,7 @@ import org.json.JSONObject
     if(details || settingsOpen || menu || request != null || terminal || search) ObscureConversation()
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else if (onDetails != null) onDetails() else details = true },
-            modifier = Modifier.weight(1f),contentPadding = PaddingValues(0.dp)) {
+            modifier = Modifier.weight(1f),contentPadding = PaddingValues(start = 8.dp,end = 4.dp)) {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val providerWidth = maxWidth * .45f
                 Row(verticalAlignment = Alignment.CenterVertically,horizontalArrangement = Arrangement.spacedBy(6.dp)) {

@@ -168,12 +168,14 @@ project groups; empty groups are hidden in Sessions. Filter, query, collapsed
 groups, and list position survive opening a conversation and background polling.
 Provider badges match the desktop identity motifs.
 
-An open conversation shows desktop-style labels below its name: status first,
-then its owning computer. Machine names and colours match session cards,
-including phone-local names, offline computers, archives and subagents.
+An open conversation shows desktop-style labels 4 dp below its name: its owning
+computer first, then status, so status caption changes keep the machine anchored.
+Machine names and colours match session cards, including phone-local names,
+offline computers, archives and subagents.
 Tap the name/status header to open Session details. The provider label precedes
-the model in the tools row, followed by compact Read all, Terminal and menu icons
-with 48 dp touch targets. The title bar is 56 dp at ordinary font sizes and grows
+the model in the tools row, inset from the rounded model button to avoid clipping,
+followed by compact Read all, Terminal and menu icons with 48 dp touch targets.
+The title bar is 56 dp at ordinary font sizes and grows
 when enlarged text needs it. Search loaded messages stays in the actions menu.
 The chat shows a compact status strip only for loading, unread replies or pending
 questions.
