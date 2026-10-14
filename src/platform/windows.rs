@@ -130,25 +130,21 @@ pub fn prepare_supervisor() {
 /// The Windows counterpart of the Unix PATH preparation (spec D8): the stable
 /// CLI's folder `<home>\.local\bin`, where Claude Code's installer also puts
 /// `claude.exe`, first; npm's global folder `%APPDATA%\npm`, where `npm install
-/// -g` puts agents, and Kimi Code's `<home>\.kimi-code\bin` last, as on Unix;
-/// each when it exists and PATH does not list it yet. So an agent that `hgs
-/// account install` just installed is found before Windows gives this process
-/// the PATH its installer changed. Agents are looked up on this PATH, and a
-/// session's environment is this process's.
+/// -g` puts agents, and Kimi Code's `%USERPROFILE%\.kimi-code\bin` last, as on
+/// Unix (`kimi_folder`); each when it exists and PATH does not list it yet. So
+/// an agent that `hgs account install` just installed is found before Windows
+/// gives this process the PATH its installer changed. Agents are looked up on
+/// this PATH, and a session's environment is this process's.
 fn prepare_path() {
     static PREPARED: std::sync::Once = std::sync::Once::new();
     PREPARED.call_once(|| {
-        let home = home();
-        let first = home
-            .as_deref()
-            .map(|home| PathBuf::from(below(home, ".local/bin")))
+        let first = home()
+            .map(|home| PathBuf::from(below(&home, ".local/bin")))
             .filter(|folder| folder.is_dir());
         let npm = env::var_os("APPDATA")
             .filter(|value| !value.is_empty())
             .map(|folder| PathBuf::from(folder).join("npm"));
-        let kimi = home
-            .as_deref()
-            .map(|home| PathBuf::from(below(home, ".kimi-code/bin")));
+        let kimi = kimi_folder(env::var("USERPROFILE").ok());
         let last: Vec<PathBuf> = [npm, kimi]
             .into_iter()
             .flatten()
@@ -159,6 +155,14 @@ fn prepare_path() {
             env::set_var("PATH", path);
         }
     });
+}
+/// The folder Kimi Code's `install.ps1` puts `kimi.exe` in, below the user
+/// profile `profile` as the script names it (`$env:USERPROFILE`), not below
+/// HOME, which may name another folder.
+fn kimi_folder(profile: Option<String>) -> Option<PathBuf> {
+    profile
+        .filter(|profile| !profile.is_empty())
+        .map(|profile| PathBuf::from(below(&profile, ".kimi-code/bin")))
 }
 /// `path` with `first` in front and `last` at the end in order, each unless
 /// `path` lists it already (compared without case and trailing separators);
@@ -2019,6 +2023,16 @@ mod tests {
             ]))
         );
         assert_eq!(prepared_path(&path(&[r"C:\Windows"]), None, &[]), None);
+    }
+
+    #[test]
+    fn kimi_code_is_looked_for_below_the_user_profile() {
+        assert_eq!(
+            kimi_folder(Some(r"C:\Users\a".into())),
+            Some(PathBuf::from(r"C:\Users\a\.kimi-code\bin"))
+        );
+        assert_eq!(kimi_folder(Some(String::new())), None);
+        assert_eq!(kimi_folder(None), None);
     }
 
     #[test]
