@@ -44,11 +44,14 @@ fn mobile_stopped() -> bool { MOBILE_STOP.load(std::sync::atomic::Ordering::Rela
 pub(super) struct GitError {
     pub(super) state: &'static str,
     pub(super) detail: String,
+    /// Git's exit code when it completed with a failure.
+    pub(super) code: Option<i32>,
 }
 pub(super) fn error(state: &'static str, detail: impl Into<String>) -> GitError {
     GitError {
         state,
         detail: detail.into(),
+        code: None,
     }
 }
 
@@ -100,14 +103,16 @@ pub(super) fn git(cwd: &Path, args: &[&str], deadline: Instant) -> std::result::
         Ok(out)
     } else {
         let detail = String::from_utf8_lossy(&err).trim().to_owned();
-        Err(error(
+        let mut failure = error(
             if detail.contains("not a git repository") {
                 "not_repo"
             } else {
                 "metadata_error"
             },
             detail,
-        ))
+        );
+        failure.code = status.code();
+        Err(failure)
     }
 }
 

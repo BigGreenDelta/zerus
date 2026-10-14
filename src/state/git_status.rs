@@ -117,7 +117,15 @@ pub(super) fn inspect(path: &Path) -> Value {
     }
     data["remote"] = json!(remote);
     data["remote_ref"] = json!(reference);
-    let tracking = text(&path, &["rev-parse", "--verify", "@{upstream}"], local_deadline).filter(|s| oid(s)).unwrap_or_default();
+    // Only a completed lookup that finds no tracking ref compares the remote with
+    // an empty OID; a failed or timed-out lookup keeps remote_state unknown.
+    let tracking = match git(&path, &["rev-parse", "--verify", "--quiet", "@{upstream}"], local_deadline) {
+        Ok(bytes) => String::from_utf8(bytes).ok().map(|s| s.trim().to_owned()).filter(|s| oid(s)),
+        // With --quiet, a name that does not resolve exits 1 without a message.
+        Err(e) if e.code == Some(1) && e.detail.is_empty() => Some(String::new()),
+        Err(_) => None,
+    };
+    let Some(tracking) = tracking else { return data; };
     let checked = remote_check(&path, Path::new(&common), remote, reference, &tracking, deadline);
     data["remote_state"] = checked["state"].clone();
     data["remote_checked_at"] = checked["at"].clone();

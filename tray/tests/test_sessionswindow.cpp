@@ -168,6 +168,20 @@ static void settleSelectedInspection(MessageComposer *composer, HgsClient *clien
     })(), 10000);
 }
 
+// The window also polls the selected session. A fixture inspection replies with
+// what the fixture said when it started, so one still running when a test injects
+// details lands afterwards and replaces them. On Windows it can even arrive before a
+// confirmation accepted from a short timer returns: Qt posts such timer events, and
+// they share a batch with queued process replies (zerus-a0ak, zerus-a857). Call
+// this before show(): the window then inspects only when something asks it to, such
+// as show, selection, Refresh, a tab change or a changed conversation in a reply.
+// HgsClient runs one inspection per session, so once the reply to the test's own
+// inspection is in (settleSelectedInspection), none is pending and no poll follows.
+static void keepDetailsPollsOut(SessionsWindow &window)
+{
+    window.setDetailsPollForTests(500, 24 * 60 * 60 * 1000);
+}
+
 class TestSessionsWindow : public QObject {
     Q_OBJECT
 private slots:
@@ -2480,7 +2494,8 @@ void TestSessionsWindow::refreshErrorsStayInComposerAndFooterWithoutMovingViews(
         {"runtime_state","live"},{"process_state","running"},{"phase","idle"},{"activity","idle"},
         {"events",QJsonArray{}},{"cursor",0}};
     const auto fixture = programInspecting("inline-status", details); QVERIFY(!fixture.isEmpty());
-    SessionsWindow window(fixture); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    // A poll that succeeds clears the injected failure before the views are checked.
+    SessionsWindow window(fixture); window.setFleet(fleet()); keepDetailsPollsOut(window); window.show(); window.showSession({}, "codex/hgs/dashboard");
     auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
     QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
@@ -3298,10 +3313,15 @@ else: print('{}')
     }
     const auto writeDetails = [&] { QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson())); };
     writeDetails();
-    SessionsWindow window(FakeCli::program(program)); window.resize(1080, 760); window.setFleet(fleet()); window.show();
-    window.showSession({}, "kimi/docs/research");
+    SessionsWindow window(FakeCli::program(program)); window.resize(1080, 760); window.setFleet(fleet());
+    keepDetailsPollsOut(window); window.show(); window.showSession({}, "kimi/docs/research");
     auto *client = window.findChild<HgsClient *>(); auto *card = window.findChild<QuestionCard *>();
     QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());
+    // A change made while the confirmation is open must stay the latest evidence. An
+    // inspection that read details.json before it would restore the reviewed identity,
+    // on Windows even before the accepted confirmation returns, and the answer would be
+    // sent. Settle one here, so none is running when the confirmation opens.
+    settleSelectedInspection(window.findChild<MessageComposer *>("messageComposer"), client, {}, "kimi/docs/research", details);
     auto *list = window.findChild<QListWidget *>("sessionList");
     const QString key = list->currentItem()->data(Qt::UserRole).toString();
     auto *tabs = card->findChild<QTabBar *>("questionTabs");
@@ -3439,9 +3459,13 @@ else: print('{}')
         {"runtime_state", "live"}, {"process_state", "running"}, {"phase", "input"}, {"activity", "busy"},
         {"pending_questions", QJsonArray{question}}, {"cache_hint", QJsonObject{{"status", "cold"}, {"tokens", 490252}}}};
     QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson()));
-    SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet()); window.show(); window.showSession({}, "kimi/docs/research");
+    SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet()); keepDetailsPollsOut(window); window.show(); window.showSession({}, "kimi/docs/research");
     auto *card = window.findChild<QuestionCard *>(); auto *client = window.findChild<HgsClient *>();
     QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());
+    // A change made while the answer's draft is saved must stay the latest evidence.
+    // An inspection that read details.json before it would restore the reviewed
+    // question, and the held answer would be sent. Settle one before submitting.
+    settleSelectedInspection(window.findChild<MessageComposer *>("messageComposer"), client, {}, "kimi/docs/research", details);
     const auto key = window.findChild<QListWidget *>("sessionList")->currentItem()->data(Qt::UserRole).toString();
     for (auto *button : card->findChildren<QAbstractButton *>("questionOption"))
         if (button->property("optionId") == QString("cache_%1").arg(choice)) button->click();
@@ -5578,7 +5602,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     local.sessions.append(old); local.sessions.append(recent); state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program());
     auto *client = window.findChild<HgsClient *>(); QSignalSpy inspected(client, &HgsClient::inspectionReady);
-    window.setFleet(state); window.show();
+    window.setFleet(state); keepDetailsPollsOut(window); window.show();
     auto *list = window.findChild<QListWidget *>("sessionList");
     auto filter = [&](const QString &id) -> QPushButton * {
         for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == id) return button;
@@ -5600,7 +5624,9 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     QTest::mouseDClick(list->viewport(), Qt::LeftButton, {}, list->visualItemRect(list->item(0)).center());
     QCOMPARE(terminal.size(), 0); QCOMPARE(writes.size(), 0);
     // Wait for this archive's fixture reply before injecting late replies. A
-    // fixed delay can let a slow subprocess replace the injected details.
+    // fixed delay can let a slow subprocess replace the injected details. Selecting
+    // the archive started the only inspection of it: with polls kept out, none
+    // follows that reply to replace the injected prompt with the fixture's details.
     QTRY_VERIFY(std::any_of(inspected.cbegin(), inspected.cend(), [&](const QList<QVariant> &reply) {
         return reply[0].toString().isEmpty() && reply[1].toString() == recent.name
             && reply[3].toString() == recent.archiveId;
