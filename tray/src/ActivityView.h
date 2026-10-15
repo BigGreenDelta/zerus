@@ -44,6 +44,8 @@ public:
     // many pixels. The scroll bar stays at the pane edge; 0 fills the pane.
     void setColumnWidth(int width);
     int columnWidth() const { return m_column; }
+    // The current queue.sendNow chord, appended to the Send now tooltip.
+    void setQueueSendNowShortcut(const QString &chord);
     void showSearchResult(const QJsonObject &event, const QString &query);
     void clearSearchResult();
     QWidget *compactionIndicator() const { return m_compaction; }
@@ -112,6 +114,7 @@ private:
     QWidget *m_queue;
     QLabel *m_queueText;
     QPushButton *m_queueSend;
+    QString m_queueShortcut;
     QPushButton *m_latest = nullptr;
     QWidget *m_compaction;
     QString m_sessionKey, m_conversation, m_html, m_fallbackPrompt;

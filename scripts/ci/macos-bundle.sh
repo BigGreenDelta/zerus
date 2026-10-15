@@ -9,6 +9,7 @@ version="$(cat VERSION)"
 # A nightly passes its release version; stable bundles use the product version.
 release="${ZERUS_RELEASE_VERSION:-$version}"
 jobs="${ZERUS_BUILD_JOBS:-3}"
+command -v tmux > /dev/null || { echo 'Install tmux before bundle self-tests.' >&2; exit 1; }
 export MACOSX_DEPLOYMENT_TARGET=14.0
 mkdir -p artifacts/test-results
 cargo build --locked --release

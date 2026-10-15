@@ -13,6 +13,7 @@ STABLE = re.compile(r"\d+\.\d+\.\d+")
 NIGHTLY = re.compile(r"\d+\.\d+\.\d+\.r\d+\.g[0-9a-f]{7}\.n(\d+)")
 NIGHTLY_TAG = re.compile(r"nightly-[1-9]\d*")
 DIGEST = re.compile(r"[0-9a-f]{64}")
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def _require(condition, message):
@@ -22,6 +23,15 @@ def _require(condition, message):
 
 def macos_asset(version):
     return f"zerus-{version}-macos-arm64.zip"
+
+
+def macos_dmg(version):
+    return f"zerus-{version}-macos-arm64.dmg"
+
+
+def macos_assets(macos):
+    """Asset names from already validated metadata, including legacy ZIP-only releases."""
+    return [macos["asset"], *([macos["dmg"]["asset"]] if "dmg" in macos else [])]
 
 
 def cask_for(channel):
@@ -72,16 +82,21 @@ def cask_version_key(version, channel="stable"):
 def validate_macos_info(info, version, channel="stable"):
     """Check the provenance recorded by the signing job for a schema 2 candidate."""
     macos = info.get("macos")
-    _require(isinstance(macos, dict) and set(macos) == {"asset", "qt_version", "team_id", "notarization_id",
-                                                        "minimum_system_version"}, "Missing macOS provenance.")
+    fields = {"asset", "qt_version", "team_id", "notarization_id", "minimum_system_version"}
+    _require(isinstance(macos, dict) and set(macos) in (fields, fields | {"dmg"}), "Missing macOS provenance.")
     _require(macos["asset"] == macos_asset(version), "Unexpected macOS provenance: asset name.")
     _require(isinstance(macos["qt_version"], str) and STABLE.fullmatch(macos["qt_version"]),
              "Unexpected macOS provenance: Qt version.")
     _require(isinstance(macos["team_id"], str) and re.fullmatch(r"[A-Z0-9]{10}", macos["team_id"]),
              "Unexpected macOS provenance: Team ID.")
     _require(isinstance(macos["notarization_id"], str) and
-             re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", macos["notarization_id"]),
+             UUID.fullmatch(macos["notarization_id"]),
              "Unexpected macOS provenance: notarization ID.")
+    if "dmg" in macos:
+        dmg = macos["dmg"]
+        _require(isinstance(dmg, dict) and set(dmg) == {"asset", "notarization_id"} and
+                 dmg["asset"] == macos_dmg(version) and isinstance(dmg["notarization_id"], str) and
+                 UUID.fullmatch(dmg["notarization_id"]), "Unexpected macOS disk image provenance.")
     _require(macos["minimum_system_version"] == MINIMUM_SYSTEM, "Unexpected macOS provenance: minimum system version.")
     _require(info.get("homebrew_casks") == [cask_for(channel)], "Unexpected Homebrew cask family.")
     return macos
@@ -93,18 +108,21 @@ def add_macos(output, source, version, info, channel="stable"):
     Everything is checked before the candidate changes, so a rejected artifact
     leaves no partial macOS files behind.
     """
-    expected = {macos_asset(version), "macos-info.json"}
+    manifest = source / "macos-info.json"
+    _require(manifest.is_file() and not manifest.is_symlink(), "Missing regular macOS metadata.")
+    metadata = json.loads(manifest.read_text())
+    cask = cask_for(channel)
+    validate_macos_info(dict(info, macos=metadata, homebrew_casks=[cask]), version, channel)
+    expected = {*macos_assets(metadata), "macos-info.json"}
     entries = list(source.iterdir())
     _require({path.name for path in entries} == expected and
              all(path.is_file() and not path.is_symlink() for path in entries),
              "Unexpected signed macOS artifact contents.")
-    metadata = json.loads((source / "macos-info.json").read_text())
-    cask = cask_for(channel)
-    validate_macos_info(dict(info, macos=metadata, homebrew_casks=[cask]), version, channel)
     tag = info.get("release_tag") if channel == "nightly" else None
     render_cask(version, "0" * 64, channel, tag)
     archive = output / macos_asset(version)
-    shutil.copyfile(source / macos_asset(version), archive)
+    for name in macos_assets(metadata):
+        shutil.copyfile(source / name, output / name)
     with archive.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     (output / "homebrew").mkdir()

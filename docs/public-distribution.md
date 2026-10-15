@@ -429,12 +429,15 @@ needed on the website.
 
 Stable releases and nightly prereleases from candidate schema 2 also carry the
 notarized `zerus-<version>-macos-arm64.zip` of the `zerus` or `zerus@nightly`
-Homebrew cask. Like the Windows zip it stays on GitHub, where Homebrew
-downloads it: the mirror checks its sealed name and GitHub digest but neither
+Homebrew cask. New candidates also declare `macos.dmg` with the separately
+notarized `zerus-<version>-macos-arm64.dmg` and its notarization ID; older ZIP-only
+schema-2 releases remain valid. Like the Windows ZIP, both macOS formats stay on
+GitHub: the mirror checks their sealed names and GitHub digests but neither
 stores it (it never deletes and has a fixed disk budget) nor lists it in catalog
 artifacts, which existing desktop clients would reject as an unknown kind.
 **Deploy the current `update_feed.py` to the mirror before setting
-`MACOS_CASKS_ENABLED`**; an older mirror rejects such a release and keeps the
+`MACOS_CASKS_ENABLED`, and deploy the DMG-aware version before the first DMG
+release**; an older mirror rejects such a release and keeps the
 previous catalog.
 
 Downloaded assets are checked against GitHub sizes/digests and sealed checksums.

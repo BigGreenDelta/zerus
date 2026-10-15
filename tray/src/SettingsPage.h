@@ -8,6 +8,7 @@
 #include "MobileDeliverySettings.h"
 #include "DownloadCacheSettings.h"
 #include "speech/SpeechSettings.h"
+#include "KeyboardSettings.h"
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -30,7 +31,7 @@ public:
     explicit SettingsPage(const QString &executable,QWidget *parent=nullptr):QWidget(parent){
         setObjectName("settingsPage");auto *outer=new QVBoxLayout(this);outer->setContentsMargins(24,20,24,20);outer->setSpacing(20);
         auto *title=new QLabel(tr("Settings"));title->setObjectName("heading");outer->addWidget(title);
-        auto *body=new QHBoxLayout;body->setSpacing(24);nav=new QListWidget;nav->setObjectName("settingsSections");nav->setFixedWidth(180);nav->addItems({tr("Appearance"),tr("Sessions"),tr("Automatic recovery"),tr("Processes"),tr("Updates"),tr("Mobile connection"),tr("Files"),tr("Voice input"),tr("About")});body->addWidget(nav);
+        auto *body=new QHBoxLayout;body->setSpacing(24);nav=new QListWidget;nav->setObjectName("settingsSections");nav->setFixedWidth(180);nav->addItems({tr("Appearance"),tr("Sessions"),tr("Automatic recovery"),tr("Processes"),tr("Updates"),tr("Mobile connection"),tr("Files"),tr("Voice input"),tr("Keyboard"),tr("About")});body->addWidget(nav);
         pages=new QStackedWidget;pages->setMinimumWidth(0);body->addWidget(pages,1);outer->addLayout(body,1);
         auto makePage=[&](const QString &heading){auto *content=new QWidget;content->setMaximumWidth(850);auto *layout=new QVBoxLayout(content);layout->setContentsMargins(0,0,12,0);layout->setSpacing(18);auto *h=new QLabel(heading);h->setObjectName("heading");layout->addWidget(h);addPage(content);return layout;};
         auto *appearance=makePage(tr("Appearance"));auto *theme=new QComboBox;theme->setObjectName("workspaceTheme");theme->addItem(tr("Follow system appearance"),"system");theme->addItem(tr("Dark"),"dark");theme->addItem(tr("Light"),"light");theme->setCurrentIndex(qMax(0,theme->findData(QSettings().value("workspace/theme","system"))));appearance->addWidget(new QLabel(tr("Theme")));appearance->addWidget(theme);
@@ -105,6 +106,7 @@ public:
         mobileLayout->addWidget(new RelaySettings::Panel);mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         files=new DownloadCacheSettings;addPage(files);
         speechSection=pages->count();speech=new SpeechSettings(executable);speech->setMaximumWidth(850);addPage(speech);
+        keyboardSection=pages->count();keyboard=new KeyboardSettings(ShortcutRegistry::instance());keyboard->setMaximumWidth(850);addPage(keyboard);
         aboutSection=pages->count();
         auto *about=makePage(tr("About"));auto *installedVersion=new QLabel(tr("Zerus %1").arg(UpdateController::installedVersion()));installedVersion->setObjectName("aboutZerusVersion");installedVersion->setTextInteractionFlags(Qt::TextSelectableByMouse);about->addWidget(installedVersion);
         cliVersion=new QLabel(tr("hgs CLI version unavailable"));cliVersion->setObjectName("aboutHgsVersion");
@@ -130,6 +132,7 @@ public:
     }
     void openUpdates(){nav->setCurrentRow(4);}
     void openAbout(){nav->setCurrentRow(aboutSection);}
+    void openKeyboard(){nav->setCurrentRow(keyboardSection);}
     void openRecovery(){nav->setCurrentRow(2);sync->refresh();}
     void setWindowLayerState(bool on,bool enabled,const QString &hint){const QSignalBlocker block(onTop);onTop->setChecked(on);onTop->setEnabled(enabled);onTopHint->setText(hint);}
     void refresh(){sync->refresh();mobileDelivery->refresh();if(nav->currentRow()==aboutSection)refreshCliVersion();if(nav->currentRow()==speechSection)speech->refresh();}
@@ -141,12 +144,20 @@ public:
         activityFullWidth->setChecked(ActivityWidth::fullWidth());activityWidth->setEnabled(!activityFullWidth->isChecked());
         updateResets();
     }
+    // Keyboard zoom changes the content scale; the window applies it itself.
+    void syncContentScale(){
+        auto *scale=findChild<QSlider *>("workspaceContentScale");if(!scale)return;
+        {const QSignalBlocker block(scale);scale->setValue(qRound(ContentScale::factor()*20));}
+        if(auto *value=findChild<QLabel *>("workspaceContentScaleValue"))value->setText(QStringLiteral("%1%").arg(scale->value()*5));
+        updateResets();
+    }
 private:
     void refreshCliVersion(){cliVersion->setText(tr("hgs CLI: checking…"));versionClient->requestVersion();}
     HgsClient *versionClient;QLabel *cliVersion;MobileDeliverySettings *mobileDelivery;
     SpeechSettings *speech;
     DownloadCacheSettings *files;
-    int speechSection=-1,aboutSection=-1;
+    KeyboardSettings *keyboard;
+    int speechSection=-1,keyboardSection=-1,aboutSection=-1;
     // An icon button restoring a slider's default, shown only after a change.
     // It keeps its space while hidden, so the rows below do not move. Focus
     // moves to the slider first: a focused button that hides itself would

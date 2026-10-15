@@ -12,13 +12,31 @@ version="$(cat VERSION)"
 read -r cask release team < <(python3 - "$signed/macos-info.json" "$channel" <<'PY'
 import json, re, sys
 sys.path.insert(0, "scripts")
-from macos_release import cask_for
+from macos_release import cask_for, validate_macos_info
 info = json.load(open(sys.argv[1]))
 release = re.fullmatch(r"zerus-(.+)-macos-arm64\.zip", info["asset"]).group(1)
+validate_macos_info({"macos": info, "homebrew_casks": [cask_for(sys.argv[2])]}, release, sys.argv[2])
+if "dmg" not in info:
+    raise SystemExit("The signed candidate must include its notarized disk image.")
 print(cask_for(sys.argv[2]), release, info["team_id"])
 PY
 )
 asset="$signed/zerus-$release-macos-arm64.zip"
+image="$signed/zerus-$release-macos-arm64.dmg"
+codesign --verify --strict "$image"
+xcrun stapler validate "$image"
+spctl --assess --type open --context context:primary-signature --verbose=2 "$image"
+dmg_mount="$(mktemp -d "${RUNNER_TEMP:?}/zerus-dmg-mount.XXXXXX")"
+trap 'hdiutil detach "$dmg_mount" >/dev/null 2>&1 || true; rmdir "$dmg_mount" 2>/dev/null || true' EXIT
+hdiutil attach -readonly -nobrowse -mountpoint "$dmg_mount" "$image"
+test -L "$dmg_mount/Applications"
+test "$(readlink "$dmg_mount/Applications")" = /Applications
+test -d "$dmg_mount/Zerus.app"
+test ! -L "$dmg_mount/Zerus.app"
+python3 scripts/check-macos-bundle.py "$dmg_mount/Zerus.app" --version "$version" --release "$release" --team-id "$team" --selftest
+hdiutil detach "$dmg_mount"
+rmdir "$dmg_mount"
+trap - EXIT
 digest="$(shasum -a 256 "$asset" | cut -d ' ' -f 1)"
 mkdir -p artifacts/homebrew
 python3 - "$release" "$digest" "$channel" "$tag" "artifacts/homebrew/$cask.rb" <<'PY'
