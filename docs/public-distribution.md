@@ -445,10 +445,12 @@ bash scripts/ci/gui.sh
 ```
 
 The update controller, the Updates settings page and the update entries in the
-sessions window and tray menu are part of the regular desktop build.
-`test_updates` and the `test_sessionswindow` shards cover them with the rest of
-the Qt suite; see [CONTRIBUTING.md](../CONTRIBUTING.md). Deploy only the
-reviewed current-main GUI within the existing update authorization, through
+sessions window and tray menu are part of the regular desktop build, so the
+desktop script runs their checks with the rest of the Qt suite (see
+[CONTRIBUTING.md](../CONTRIBUTING.md)): `test_updates` covers the controller
+and `test_sessionswindow` the route from the sessions window to the Updates
+page. Deploy only the reviewed current-main GUI within the existing update
+authorization, with `tray/install.sh`, which replaces a running GUI through
 `tray/update-installed.py`. An older worktree GUI must not replace a newer
 desktop. Source commits, pushes and hosted CI dispatch remain separately
 controlled.
