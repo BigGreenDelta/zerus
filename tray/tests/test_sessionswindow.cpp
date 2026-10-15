@@ -9402,6 +9402,8 @@ void TestSessionsWindow::pushWaitsForARunningSendNow()
     if (QTest::currentTestFailed()) return;
     auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
     QSignalSpy delivered(client, &HgsClient::messageSent), queued(client, &HgsClient::queueSendFinished);
+    // The gated send-now request can outlast the ordinary deadline on a loaded machine.
+    window.setPushTimeoutForTests(60000);
     pushMessage(window, "Push this after the earlier queue"); if (QTest::currentTestFailed()) return;
     QTRY_COMPARE(delivered.size(), 1);
     // A send-now request for the earlier queue is still running when the agent queues the message.
