@@ -17,6 +17,9 @@ cargo +1.85.0 clippy --locked --all-targets -- -D warnings
 cargo +1.85.0 test --locked
 ```
 
+[`tests/ORACLE.md`](tests/ORACLE.md) maps every test of the Python reference
+relay to the Rust contract or other test that replaces it.
+
 The server is the default `server` feature. Without it the library is only the
 API v1 codec (`json`), envelope validation (`protocol`) and `error`, with none
 of the HTTP, database or TLS crates, for the outbound connector:
@@ -42,12 +45,12 @@ path dependency or include from outside `src/`
 
 ### PostgreSQL tests
 
-The storage contracts (`tests/contracts.rs`, `tests/maintenance_contracts.rs`,
-`tests/python_receipts.rs`, `tests/directory_create.rs` and
-`tests/administration.rs`) and the connector HTTP suites run on PostgreSQL. Point
-`ZERUS_RELAY_TEST_DATABASE_URL` at a **disposable** server whose role may create
-databases: each test creates its own `relay_test_<uuid>` database and drops it
-afterwards, also when it fails, and credentials are not logged. The Python
+The storage and HTTP contracts (every `tests/*.rs` but the database-free
+`codec.rs`, `vectors.rs`, `alerts.rs` and `private_files.rs`) and the connector
+HTTP suites run on PostgreSQL. Point `ZERUS_RELAY_TEST_DATABASE_URL` at a
+**disposable** server whose role may create databases: each test creates its
+own `relay_test_<uuid>` database and drops it afterwards, also when it fails,
+and credentials are not logged. The Python
 fixtures also drop theirs after Ctrl+C; a killed or interrupted `cargo test` can
 leave some behind. Without the variable the Rust contracts fall back to a
 private SQLite file (`tests/python_receipts.rs`, which has only a PostgreSQL

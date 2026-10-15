@@ -157,7 +157,9 @@ table records what the Python connector forwards today.
 ## Coverage of the in-process connector tests
 
 Status: **covered** (same contract black-box), **partial** (the rest is
-planned where named), **planned** (slice or vector named).
+planned where named), **planned** (slice or vector named). A "Relay only"
+row names the Rust relay contract that replaces a relay case;
+[`ORACLE.md`](../relay/tests/ORACLE.md) maps every test of the Python reference relay.
 
 ### `test_connector.py` (`ConnectorTests`)
 
@@ -219,7 +221,8 @@ Rust, since its retry spacing needs the `test-hooks` clock scale.
 
 ### `test_mobile_attachments.py` (inline attachments of a send)
 
-The other `AttachmentRelayTests` are relay cases (R4).
+The other `AttachmentRelayTests` are relay cases, mapped in
+[`ORACLE.md`](../relay/tests/ORACLE.md).
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
@@ -238,7 +241,8 @@ The other `AttachmentRelayTests` are relay cases (R4).
 
 ### `test_mobile_context.py` (`ContextConnectorTests`, `ContextFixtureTests`)
 
-`ContextRelayTests` has no connector case.
+`ContextRelayTests` has no connector case;
+[`ORACLE.md`](../relay/tests/ORACLE.md) maps it.
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
@@ -260,7 +264,8 @@ The other `AttachmentRelayTests` are relay cases (R4).
 
 ### `test_mobile_controls.py` (`CoreConnectorTests`, `CoreFixtureTests`)
 
-`CoreRelayTests` has no connector case.
+`CoreRelayTests` has no connector case;
+[`ORACLE.md`](../relay/tests/ORACLE.md) maps it.
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
@@ -298,7 +303,8 @@ The other `AttachmentRelayTests` are relay cases (R4).
 
 ### `test_mobile_read.py`
 
-`MarkReadValidation.test_relay_oracle_validates_the_same_envelope` is a relay case.
+`MarkReadValidation.test_relay_oracle_validates_the_same_envelope` is a relay
+case, mapped in [`ORACLE.md`](../relay/tests/ORACLE.md).
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
@@ -373,8 +379,9 @@ H3's `test_bb_history_pages` kept only its inspection bounds, renamed
 | `test_mobile_terminal.TerminalTransport.test_ambiguous_native_ack_never_replays` | `test_bb_terminal.test_unconfirmed_input_is_uncertain_and_never_replays` | covered |
 | `test_mobile_terminal.TerminalTransport.test_payload_is_literal_bounded_and_rejects_hidden_control` | `test_bb_terminal.test_literal_text_is_bounded_and_rejects_hidden_controls`, `test_every_allowlisted_key_and_no_other` | covered |
 | `test_mobile_terminal.TerminalFixture.test_real_fixture_subprocess_roundtrip_does_not_execute_text` | `test_bb_terminal.test_input_runs_once_after_a_fresh_preflight` (shell syntax stays literal stdin) | covered |
-| `test_mobile_terminal.TerminalRateBudget.test_four_frames_per_second_receipts_and_node_uplink_for_two_minutes` | Relay only: R4 | planned |
-| `test_mobile_terminal.TerminalRetention.test_sustained_reads_and_abandoned_results_expire_without_mutation_eviction` | Journal half: `test_bb_terminal.test_screens_leave_the_journal_after_two_minutes_and_inputs_stay`, `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay`; 5,100 sustained reads against the read cap: P2 `journal/caps.sql` in a Rust unit test (C1); relay half: R4 | partial |
+| `test_mobile_terminal.TerminalRateBudget.test_four_frames_per_second_receipts_and_node_uplink_for_two_minutes` | Relay only: `operation_contracts::terminal_frames_fit_each_credentials_rate_budget` | covered |
+| `test_mobile_terminal.TerminalJournalRetention.test_sustained_screens_leave_the_journal_and_inputs_stay` (the Journal half, split out of `TerminalRetention`) | `test_bb_terminal.test_screens_leave_the_journal_after_two_minutes_and_inputs_stay`, `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay`; the read cap that sustained reads meet without taking mutation capacity: P2 `journal/caps.sql` in `connector/tests/journal_vectors.rs` (`python_written_and_legacy_journals_reopen_as_python_reopens_them`) | covered |
+| `test_mobile_terminal.TerminalRetention.test_sustained_reads_and_abandoned_results_expire_without_mutation_eviction` (the relay half) | Relay only: `operation_contracts::sustained_screens_and_abandoned_reads_expire_without_evicting_input`, `terminal_input_needs_a_fresh_computer_and_expires_before_delivery` | covered |
 | `test_mobile_history.HistoryTests.test_large_unicode_history_keeps_full_question_identity_and_newest_user` | `test_bb_inspection_bounds.test_large_inspection_loses_only_whole_oldest_rows_and_says_so` | covered |
 | `test_mobile_history.HistoryTests.test_mandatory_metadata_too_large_fails_without_cropping` | `test_bb_inspection_bounds.test_oversized_disclosures_fail_without_cropping` | covered |
 | `test_mobile_history.HistoryTests.test_small_results_unchanged_and_no_event_is_partially_cropped` | `test_bb_inspection_bounds.test_small_inspection_is_unchanged`, `test_vector_inspections_keep_their_recorded_rows` | covered |
@@ -394,7 +401,7 @@ H3's `test_bb_history_pages` kept only its inspection bounds, renamed
 | `test_mobile_speech.SpeechConnectorTests.test_mismatched_job_is_uncertain_and_old_cli_never_runs_speech` | `test_bb_speech.SpeechJobTests.test_unconfirmed_jobs_are_uncertain_and_never_replay`, `SpeechConfigurationTests.test_speech_and_its_configuration_are_separate_capabilities` | covered |
 | `test_mobile_speech.SpeechConnectorTests.test_status_is_exact_and_read_receipts_are_pruned` | `test_bb_speech.SpeechJobTests.test_reads_and_cancellation`, `test_bb_read_classes` | covered |
 | `test_mobile_speech.SpeechHttpServiceTests.test_maximum_recording_crosses_http_cli_socket_once_and_is_erased` | Connector half: `test_bb_speech.SpeechJobTests.test_recordings_are_bounded_to_two_minutes`; relay, CLI and speech service: R2 end to end | partial |
-| `test_mobile_speech.SpeechHttpServiceTests.test_status_and_cancel_are_bound_to_phone_and_computer` | Relay only: R4 | planned |
+| `test_mobile_speech.SpeechHttpServiceTests.test_status_and_cancel_are_bound_to_phone_and_computer` | Relay only: `operation_contracts::speech_and_management_status_belong_to_the_original_phone_and_computer`, `contracts::speech_jobs_preserve_owner_identity_and_discard_audio_after_ack` | covered |
 | `test_mobile_speech_config.SpeechConfigValidationTests.test_voice_routes_preserve_optional_exact_profile_revision` | `test_bb_speech.SpeechJobTests.test_vector_rejections_never_reach_native` | covered |
 | `test_mobile_speech_config.SpeechConfigValidationTests.test_all_operations_are_computer_scoped_and_exact` | the same | covered |
 | `test_mobile_speech_config.SpeechConfigValidationTests.test_plaintext_credentials_and_unbounded_envelopes_are_rejected` | the same | covered |
@@ -403,8 +410,8 @@ H3's `test_bb_history_pages` kept only its inspection bounds, renamed
 | `test_mobile_speech_config.SpeechConfigConnectorTests.test_malformed_result_never_persists_a_key_or_replays` | `test_bb_speech.SpeechConfigurationTests.test_unexpected_native_content_never_becomes_a_receipt` | covered |
 | `test_mobile_speech_config.SpeechConfigConnectorTests.test_redacted_management_reads_expire` | `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay` | covered |
 | `test_mobile_speech_config.SpeechConfigConnectorTests.test_transport_stderr_does_not_enter_durable_receipts` | `test_bb_speech.SpeechConfigurationTests.test_unexpected_native_content_never_becomes_a_receipt` | covered |
-| `test_mobile_speech_config.SpeechConfigHttpTests.test_sealed_mutation_is_erased_and_keeps_no_replay_receipt` | Relay only: R4 | planned |
-| `test_mobile_speech_config.SpeechConfigHttpTests.test_status_is_owned_by_original_phone_and_computer` | Relay only: R4 | planned |
+| `test_mobile_speech_config.SpeechConfigHttpTests.test_sealed_mutation_is_erased_and_keeps_no_replay_receipt` | Relay only: `contracts::speech_config_receipts_erase_bodies_and_expire_reads`; the plaintext key refused before persistence: `operation_contracts::speech_and_management_status_belong_to_the_original_phone_and_computer` | covered |
+| `test_mobile_speech_config.SpeechConfigHttpTests.test_status_is_owned_by_original_phone_and_computer` | Relay only: `operation_contracts::speech_and_management_status_belong_to_the_original_phone_and_computer` | covered |
 | `test_mobile_speech_config.SpeechConfigHttpTests.test_real_cli_management_roundtrip_without_inference_runtime` | Connector and CLI: `test_bb_speech.SpeechConfigurationTests.test_real_cli_manages_a_profile_without_inference`; relay half: R2 | covered |
 | `test_mobile_launch.LaunchTransport.test_exact_marker_required_and_duplicate_cannot_launch_again` | `test_bb_launch.LaunchTests.test_launch_runs_once_and_returns_its_exact_target`, `test_without_the_launch_abi_nothing_runs` | covered |
 | `test_mobile_launch.LaunchTransport.test_preflight_old_cli_invalid_fields_and_wrong_provider_do_not_launch` | `test_bb_launch.LaunchTests.test_failed_preflights_never_launch`, `test_without_the_launch_abi_nothing_runs` | covered |
@@ -474,7 +481,7 @@ H3's `test_bb_history_pages` kept only its inspection bounds, renamed
 | `test_mobile_archives.ArchiveConnectorTests.test_archive_and_live_same_name_have_distinct_project_assignments` | `test_bb_archives.test_a_live_session_and_its_archive_belong_to_their_own_projects` | covered |
 | `test_mobile_archives.ArchiveConnectorTests.test_archive_id_without_state_still_requires_exact_archive_selection` | `test_bb_archives.test_an_archive_id_without_state_is_still_an_archive` | covered |
 | `test_mobile_archives.ArchiveConnectorTests.test_ordinary_inspect_rejects_raced_archive_or_different_name_response` | `test_bb_archives.test_answers_for_another_target_fail_without_fallback` | covered |
-| `test_mobile_archives.ArchiveRelayTests` (2 tests) | Relay only: R4 | planned |
+| `test_mobile_archives.ArchiveRelayTests` (2 tests) | Relay only: `operation_contracts::archive_ids_are_exact_on_reads_and_refused_on_ordinary_mutations`, `archived_rows_never_change_the_live_event_baseline` | covered |
 | `test_mobile_archives.ArchiveFixtureTests.test_optional_synthetic_states_and_archive_pass_through` | `test_bb_archives.test_a_live_session_and_its_archive_use_distinct_native_arguments` | covered |
 
 ### Peers and the one-hop gateway
