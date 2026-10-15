@@ -741,7 +741,7 @@ fn attention_cards(detail: &Value, key: &(String, String, String)) -> Option<Val
         return None;
     }
     let questions = detail.get("pending_questions")?.as_array()?;
-    let mut cards: Vec<(String, String)> = Vec::new();
+    let mut cards: Vec<(String, String, bool)> = Vec::new();
     for card in questions {
         let Some(card) = card.as_object() else {
             continue;
@@ -764,15 +764,70 @@ fn attention_cards(detail: &Value, key: &(String, String, String)) -> Option<Val
             .is_some_and(|delivery| {
                 delivery.get("status").and_then(Value::as_str) == Some("submitted")
             });
+        // Phones decide whether to notify; blocking items keep their exact shape.
+        let optional = card.get("optional") == Some(&Value::Bool(true))
+            && field("source") == Some("codex_async");
         if !submitted {
-            cards.push((id.into(), hash.into()));
+            cards.push((id.into(), hash.into(), optional));
         }
     }
-    cards.sort();
+    // Python's stable sort by (question_id, question_hash).
+    cards.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
     Some(Value::Array(
         cards
             .into_iter()
-            .map(|(id, hash)| json!({"question_id": id, "question_hash": hash}))
+            .map(|(id, hash, optional)| {
+                let mut item = json!({"question_id": id, "question_hash": hash});
+                if optional {
+                    item["optional"] = Value::Bool(true);
+                }
+                item
+            })
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::attention_cards;
+    use serde_json::json;
+
+    #[test]
+    fn only_optional_codex_async_cards_carry_the_optional_marker() {
+        let key = (
+            "codex/example".to_owned(),
+            "run".to_owned(),
+            "conv".to_owned(),
+        );
+        let card = |id: &str, extra: serde_json::Value| {
+            let mut card = json!({"run_id": "run", "conversation_id": "conv",
+                "question_id": id, "question_hash": format!("h-{id}"),
+                "questions": [{"question": "private"}]});
+            card.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            card
+        };
+        let detail = json!({"run_id": "run", "conversation_id": "conv",
+        "runtime_state": "live", "process_state": "running", "pending_questions": [
+            card("codex-async:c:0", json!({"source": "codex_async", "optional": true})),
+            card("blocking", json!({"source": "hook"})),
+            card("not-codex", json!({"source": "hook", "optional": true})),
+            card("loose", json!({"source": "codex_async", "optional": 1})),
+            card("done", json!({"source": "codex_async", "optional": true,
+                "answer_delivery": {"status": "submitted"}})),
+            card("other-run", json!({"run_id": "old", "source": "codex_async",
+                "optional": true})),
+        ]});
+        assert_eq!(
+            attention_cards(&detail, &key),
+            Some(json!([
+                {"question_id": "blocking", "question_hash": "h-blocking"},
+                {"question_id": "codex-async:c:0", "question_hash": "h-codex-async:c:0",
+                 "optional": true},
+                {"question_id": "loose", "question_hash": "h-loose"},
+                {"question_id": "not-codex", "question_hash": "h-not-codex"},
+            ]))
+        );
+    }
 }

@@ -293,7 +293,7 @@ class Connector:
         self.archives: set[tuple[str, str]] = set()
         self.snapshot_seen_at = 0.0
         self.snapshot_ready = asyncio.Event()
-        self.attention_cache: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+        self.attention_cache: dict[tuple[str, str, str], list[dict[str, str | bool]]] = {}
         self.attention_cursor = 0
         self.project_fallback_id = fallback_id
         self.project_cache = None
@@ -561,7 +561,9 @@ class Connector:
         A stable fleet of N eligible sessions is scanned every ceil(N/2) polls.
         The nominal interval is ceil(N/2) * poll_interval, plus CLI/network time.
         Each optional inspection has a one-second timeout; expired/changed
-        identities discard cached attention. Only IDs and hashes leave the node.
+        identities discard cached attention. Only IDs, hashes and an
+        `optional: true` marker on optional Codex async questions leave the
+        node, never question content.
         """
         eligible = []
         for row in snapshot["sessions"]:
@@ -606,7 +608,11 @@ class Connector:
                     delivery = card.get("answer_delivery")
                     if isinstance(delivery, dict) and delivery.get("status") == "submitted":
                         continue
-                    cards.append({field: card[field] for field in ("question_id", "question_hash")})
+                    item = {field: card[field] for field in ("question_id", "question_hash")}
+                    # Phones decide whether to notify; blocking items keep their exact shape.
+                    if card.get("optional") is True and card.get("source") == "codex_async":
+                        item["optional"] = True
+                    cards.append(item)
                 self.attention_cache[key] = sorted(cards, key=lambda card: (card["question_id"], card["question_hash"]))
             except ConnectorError:
                 self.attention_cache.pop(key, None)

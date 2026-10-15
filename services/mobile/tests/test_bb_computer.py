@@ -223,6 +223,38 @@ class AttentionTests(ComputerCase):
                          "dropped attention", process)
         self.assertEqual(attention()["codex/0"], [{"question_id": "question-0", "question_hash": "hash-0"}])
 
+    async def test_optional_codex_async_questions_carry_one_boolean(self):
+        row = codex(0)
+
+        def card(question_id: str, **changes) -> dict:
+            return {"run_id": row["run_id"], "conversation_id": row["conversation_id"], "question_id": question_id,
+                    "question_hash": f"hash-{question_id}", "questions": [{"question": "never export"}], **changes}
+        detail = {**row, "pending_questions": [
+            card("codex-async:call:0", source="codex_async", optional=True, can_skip=True, can_answer=False),
+            card("blocking", source="hook", optional=False),
+            card("not-codex", source="hook", optional=True),
+            card("loose", source="codex_async", optional="true"),
+            card("answered", source="codex_async", optional=True, answer_delivery={"status": "submitted"})]}
+        self.hgs.script([{"argv": ["inspect", "codex/0"], "stdout": detail}]
+                        + default_rules(listing(sessions=[row])))
+        process = await self.launch()
+
+        def attention():
+            return self.snapshots()[-1]["sessions"][0].get("mobile_attention")
+
+        await self.until(attention, 15, "attention on the Codex session", process)
+        # Exact shapes: only the optional Codex async item gains the boolean;
+        # blocking items stay {question_id, question_hash}.
+        self.assertEqual(attention(), [
+            {"question_id": "blocking", "question_hash": "hash-blocking"},
+            {"question_id": "codex-async:call:0", "question_hash": "hash-codex-async:call:0", "optional": True},
+            {"question_id": "loose", "question_hash": "hash-loose"},
+            {"question_id": "not-codex", "question_hash": "hash-not-codex"}])
+        self.assertIs(attention()[1]["optional"], True)
+        self.assert_private_fields_withheld()
+        for field in (b"can_skip", b"can_answer", b"codex_async"):
+            self.assertNotIn(field, self.relay.heartbeats()[-1].raw)
+
 
 if __name__ == "__main__":
     unittest.main()
