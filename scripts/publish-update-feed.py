@@ -7,10 +7,13 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-import zipfile
 
-from update_feed import (ChannelMismatch, GitHub, candidates, check_android_sequence, check_previous,
-                         mirror_lock, publish, require, validate_and_fetch)
+if sys.version_info < (3, 11):
+    # Checked before the mirror modules load: no incidental traceback.
+    print('Mirror requires Python 3.11 or newer; previous catalogs retained',file=sys.stderr);raise SystemExit(1)
+
+from update_feed import (MIRROR_FAILURES, ChannelMismatch, GitHub, candidates, check_android_sequence,
+                         check_previous, mirror_lock, publish, require, validate_and_fetch)
 
 CHANNELS={'android/dev','android/stable','android/nightly','desktop/stable','desktop/nightly'}
 
@@ -98,10 +101,14 @@ def main():
         print(json.dumps({'results':reports},sort_keys=True));return 0
     except BlockingIOError:
         print('Mirror already running',file=sys.stderr);return 1
-    except (ValueError,OSError,KeyError,TypeError,UnicodeError,zipfile.BadZipFile):
+    except MIRROR_FAILURES:
         # Never print exceptions from network/subprocesses: signed CDN URLs and
         # credential context do not belong in a scheduled job's logs.
         print('Mirror validation or transport failed; previous catalogs retained',file=sys.stderr);return 1
+    except Exception as error:
+        # Defects keep their text out of logs too; the class name locates them.
+        # KeyboardInterrupt and SystemExit are not Exceptions and still propagate.
+        print(f'Mirror failed unexpectedly ({type(error).__name__}); previous catalogs retained',file=sys.stderr);return 1
 
 
 if __name__=='__main__':sys.exit(main())
