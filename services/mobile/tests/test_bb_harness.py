@@ -213,6 +213,15 @@ class HarnessTests(BlackBoxCase):
         self.assertEqual(starts[0]["stdin"], '{"request_id": "r-1"}')
         self.assertLessEqual(set(starts[0]["fds"]), {0, 1, 2})
         self.assertEqual([self.hgs.finished(call["pid"])["exit"] for call in starts], [0, 2, 3])
+        # A rule's uses follow its id, not its position, so a prepended rule
+        # neither spends nor refunds another rule's `times`.
+        self.hgs.prepend({"argv": ["other"]})
+        renewed = [(await asyncio.to_thread(run, "echo", "x")).returncode for _ in range(2)]
+        self.assertEqual(renewed, [0, 2])
+        # Concurrent calls never both take the last use of a rule.
+        self.hgs.script([{"argv": ["once"], "times": 1, "stdout": {"ok": True}}])
+        racing = await asyncio.gather(*(asyncio.to_thread(run, "once") for _ in range(8)))
+        self.assertEqual(sorted(result.returncode for result in racing), [0] + [2] * 7)
 
     def test_configurations_may_name_only_loopback_or_reserved_hosts(self):
         for changes in ({"server_url": "https://relay.zerus.dev"}, {"identity_url": "https://zerus.dev.guthub.dev"},
@@ -229,14 +238,16 @@ class HarnessTests(BlackBoxCase):
         self.assertEqual(remote_address("010200C0:0009"), "192.0.2.1:9")
         if not sys.platform.startswith("linux"):
             self.skipTest("the socket guard reads /proc")
+        # Other modules may share this test process: compare with its sockets now.
+        baseline = set(foreign_connections(os.getpid()))
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
             try:
                 udp.connect(("192.0.2.1", 9))  # TEST-NET-1; connecting UDP sends nothing.
             except OSError:
                 self.skipTest("no route for the reserved documentation network")
-            self.assertIn("udp 192.0.2.1:9", foreign_connections(os.getpid()))
+            self.assertEqual(set(foreign_connections(os.getpid())) - baseline, {"udp 192.0.2.1:9"})
         with socket.create_server(("127.0.0.1", 0)) as server, socket.create_connection(server.getsockname()):
-            self.assertEqual(foreign_connections(os.getpid()), [])
+            self.assertEqual(set(foreign_connections(os.getpid())) - baseline, set())
 
 
 if __name__ == "__main__":

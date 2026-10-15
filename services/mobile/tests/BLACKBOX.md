@@ -28,7 +28,7 @@ Outside Python mode only the modules listed under `rust` in `ported.json` run;
 the others skip. `test_bb_harness.py` checks the harness itself and always
 runs.
 
-The 38 tests took 23-25 s on a Linux workstation against the Python
+The 39 tests took 23-28 s on a Linux workstation against the Python
 connector (2026-10-15); each test starts its own connector processes.
 
 ## Isolation
@@ -78,12 +78,13 @@ scripted `hgs` processes it started; no tmux server or agent is involved.
 
 | Divergence | Test | Python | Rust |
 |---|---|---|---|
+| b: a result the relay rejects | `test_bb_requests.test_rejected_result_blocks_later_claims_in_python` | A 400, 413 or 422 upload refusal is retried before every poll, so it blocks every later claim. | Skipped; the retirement after three spaced attempts is planned for H2 with the `test-hooks` clock scale. |
 | h (amended): SIGTERM | `test_bb_signals` | Dies at once (exit -15); the in-flight native call finishes on its own; restart journals the mutation uncertain. | Stops claiming, lets the in-flight call finish, journals its real outcome, exits 0. |
 
-Neither may kill the native mutation child, and no request is claimed after
-the signal. SIGINT is not covered: Python's KeyboardInterrupt cancels the
-request and SIGKILLs the hgs child, which amended divergence h does not
-address.
+Under h, neither may kill the native mutation child, and no request is
+claimed after the signal. SIGINT is not covered: Python's KeyboardInterrupt
+cancels the request and SIGKILLs the hgs child, which amended divergence h
+does not address.
 
 ## Heartbeat key review
 
@@ -116,7 +117,7 @@ planned where named), **planned** (slice or vector named).
 | `test_timeout_is_uncertain_for_mutation_and_never_retried` | H2 with the Rust `test-hooks` native timeout; Python's 45 s default is too slow for a black-box run | planned |
 | `test_timeout_read_fails_without_marking_mutation` | same | planned |
 | `test_output_bounds_and_safe_native_errors` | H2 (output cap through `test-hooks`; failing and invalid native output) | planned |
-| `test_cancelled_mutation_is_durable_and_uncertain` | `test_bb_signals` (the process-level stop; divergence h) | covered |
+| `test_cancelled_mutation_is_durable_and_uncertain` | `test_bb_signals` covers the process-level stop (SIGTERM, divergence h), which in Python leaves the row running for restart recovery; the cancellation itself runs only on SIGINT, which awaits an owner decision | partial |
 | `test_abrupt_process_exit_after_native_execution_cannot_repeat_write` | `test_bb_restart.test_crash_after_native_success_restarts_as_uncertain_without_repeating` | covered |
 | `test_journal_excludes_second_connector` | `test_bb_journal.test_second_connector_on_the_same_journal_is_refused`, `test_first_start_creates_a_private_journal_bound_to_its_credentials` | covered |
 | `test_outbox_survives_restart_and_retries_identical_result` | `test_bb_restart.test_undelivered_result_survives_restart_and_uploads_unchanged` | covered |
@@ -127,9 +128,9 @@ planned where named), **planned** (slice or vector named).
 | `test_attention_round_robin_budget_and_exact_identity_cache` | H3 | planned |
 | `test_https_and_explicit_loopback_only_http` | `test_bb_startup.test_invalid_configuration_is_refused_before_any_state_or_network`, `test_loopback_http_requires_its_explicit_development_flag`; the full matrix: P2 `config.jsonl` | covered |
 
-The poison pill of divergence b (a result the relay rejects with 400, 413 or
-422 blocks every later claim in Python) is planned for H2 as a Python-only
-assertion beside the Rust retirement test; the Rust retry spacing needs the
+The poison pill of divergence b is pinned for Python by
+`test_bb_requests.test_rejected_result_blocks_later_claims_in_python`; the Rust
+retirement test is planned for H2, since its retry spacing needs the
 `test-hooks` clock scale.
 
 ### `test_connector_retention.py`

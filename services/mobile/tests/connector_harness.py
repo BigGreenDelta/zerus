@@ -208,8 +208,8 @@ class ScriptedHgs:
         self._ids = 0
 
     def script(self, rules: list[dict]) -> None:
-        """Replace the script; the next call reads it. Rules get fresh ids, so
-        `times` counts only calls this version answered."""
+        """Replace the script; the next call reads it. A rule without an `id`
+        gets a fresh one, so its `times` counts only calls answered since."""
         self.rules = []
         for rule in rules:
             self._ids += 1
@@ -228,7 +228,9 @@ class ScriptedHgs:
         log = self.root / "calls.jsonl"
         if not log.exists():
             return []
-        return [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+        # A call may be appending its line right now: skip an unterminated end.
+        lines = log.read_bytes().split(b"\n")[:-1]
+        return [json.loads(line) for line in lines if line.strip()]
 
     def calls(self, *prefix: str) -> list[dict]:
         return [event for event in self.events() if event["event"] == "start"
@@ -758,6 +760,9 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
         for process in self.processes:
             if self.relay.token in process.output():
                 findings.append(f"connector {process.index} wrote its node token to its log")
+        calls = self.hgs.root / "calls.jsonl"
+        if calls.exists() and self.relay.token in calls.read_text(errors="replace"):
+            findings.append("native hgs received the node token in its argv, stdin or environment")
         if findings:
             self.fail("Black-box contract findings:\n" + "\n".join(findings))
 
@@ -786,11 +791,15 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
 
     def write_config(self, config: dict | None = None, *, text: str | None = None) -> Path:
         if text is None:
-            for key in ("server_url", "identity_url"):
-                host = urlsplit(config[key]).hostname if isinstance(config.get(key), str) else None
-                if host is not None and host not in ("127.0.0.1", "localhost", "::1") and not host.endswith(".invalid"):
-                    raise AssertionError("black-box connectors may name only a loopback relay")
             text = json.dumps(config)
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        for key in ("server_url", "identity_url") if isinstance(parsed, dict) else ():
+            host = urlsplit(parsed[key]).hostname if isinstance(parsed.get(key), str) else None
+            if host is not None and host not in ("127.0.0.1", "localhost", "::1") and not host.endswith(".invalid"):
+                raise AssertionError("black-box connectors may name only a loopback relay")
         path = self.scratch / f"connector-{len(self.processes)}.json"
         path.write_text(text)
         path.chmod(0o600)

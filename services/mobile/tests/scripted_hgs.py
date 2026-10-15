@@ -6,7 +6,8 @@ directory named by ZERUS_SCRIPTED_HGS_DIR, answers with the first matching rule
 and appends `start` and `end` events to `calls.jsonl` there.
 
 A rule matches with `argv` (exact) or `prefix` (leading arguments); `times`
-limits how many calls it answers. It may set:
+limits how many calls it answers under its `id` (its index without one). It
+may set:
 
 - `stdout` (a JSON value) or `stdout_text`, `stderr` (text) and `exit` (status);
 - `delay` (seconds to work before answering);
@@ -18,6 +19,7 @@ Strings in `stdout` that are exactly `{{stdin}}`, `{{stdin.FIELD}}` or
 `{{argv.N}}` become the parsed stdin, one of its fields or one argument.
 An unmatched call exits 2.
 """
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -26,9 +28,18 @@ import sys
 import time
 
 
-def record(log, event):
-    # One write per line: O_APPEND keeps concurrent callers' lines whole.
+def append(log, event):
     os.write(log, (json.dumps(event, sort_keys=True) + "\n").encode())
+
+
+def record(log, event):
+    # One write per line under the log's lock, so a reader holding the lock
+    # sees whole lines; an unlocked reader drops an unterminated last line.
+    fcntl.flock(log, fcntl.LOCK_EX)
+    try:
+        append(log, event)
+    finally:
+        fcntl.flock(log, fcntl.LOCK_UN)
 
 
 def open_descriptors():
@@ -78,26 +89,32 @@ def main():
     except ValueError:
         stdin = None
     script = json.loads((root / "script.json").read_text())
-    previous = {}
-    if (root / "calls.jsonl").exists():
-        for line in (root / "calls.jsonl").read_text().splitlines():
-            event = json.loads(line)
-            if event.get("event") == "start" and event.get("rule") is not None:
-                previous[event["rule"]] = previous.get(event["rule"], 0) + 1
-    chosen = None
-    for index, rule in enumerate(script.get("rules", [])):
-        if matches(rule, argv) and ("times" not in rule or previous.get(index, 0) < rule["times"]):
-            chosen = index
-            break
-    started = time.time()
-    record(log, {"event": "start", "pid": os.getpid(), "ppid": os.getppid(), "argv": argv,
-                 "stdin": text, "env": dict(os.environ), "fds": descriptors,
-                 "rule": chosen, "at": started})
-    if chosen is None:
+    rules = script.get("rules", [])
+    # Count earlier answers and record this call's start under one lock, so
+    # concurrent calls never both take the last use of a `times` rule.
+    fcntl.flock(log, fcntl.LOCK_EX)
+    try:
+        previous = {}
+        with open(root / "calls.jsonl", "rb") as earlier:
+            for line in earlier.read().splitlines():
+                event = json.loads(line)
+                if event.get("event") == "start" and event.get("rule") is not None:
+                    previous[event["rule"]] = previous.get(event["rule"], 0) + 1
+        chosen = rule = None
+        for index, candidate in enumerate(rules):
+            key = candidate.get("id", index)
+            if matches(candidate, argv) and ("times" not in candidate or previous.get(key, 0) < candidate["times"]):
+                chosen, rule = key, candidate
+                break
+        append(log, {"event": "start", "pid": os.getpid(), "ppid": os.getppid(), "argv": argv,
+                     "stdin": text, "env": dict(os.environ), "fds": descriptors,
+                     "rule": chosen, "at": time.time()})
+    finally:
+        fcntl.flock(log, fcntl.LOCK_UN)
+    if rule is None:
         sys.stderr.write("scripted hgs: unsupported operation\n")
         record(log, {"event": "end", "pid": os.getpid(), "argv": argv, "exit": 2, "at": time.time()})
         return 2
-    rule = script["rules"][chosen]
     if rule.get("delay"):
         time.sleep(float(rule["delay"]))
     if "stdout" in rule:

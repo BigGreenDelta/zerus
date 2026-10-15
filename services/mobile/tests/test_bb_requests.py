@@ -3,8 +3,8 @@ import hashlib
 import json
 import unittest
 
-from connector_harness import (BlackBoxCase, CONTEXT_KEYS, CONVERSATION_ID, FakeRelay, JSON_DEPTH, JSON_VALUES,
-                               RUN_ID, SESSION, canonical, inspection, json_limits)
+from connector_harness import (BlackBoxCase, CONTEXT_KEYS, CONVERSATION_ID, FakeRelay, IMPLEMENTATION, JSON_DEPTH,
+                               JSON_VALUES, RUN_ID, SESSION, canonical, inspection, json_limits)
 
 
 class RequestTests(BlackBoxCase):
@@ -122,6 +122,36 @@ class RequestTests(BlackBoxCase):
         self.assertEqual(len(self.relay.uploads(retired["request_id"])), 1)
         self.relay.rules.remove(rule)
         self.assertEqual(await self.submit(retired, process, redeliver=True), body)
+        self.assertEqual(len(self.hgs.calls("send")), 1)
+
+    async def test_rejected_result_blocks_later_claims_in_python(self):
+        # Divergence b: Python re-raises a 400, 413 or 422 upload refusal
+        # before it polls, so one result the relay rejects blocks every claim.
+        if IMPLEMENTATION != "python":
+            self.skipTest("divergence b: the Rust retirement after three spaced attempts is planned for H2")
+        rejected = self.request("send", text="result the relay rejects")
+        rule = self.relay.rule("POST", rf"/v1/node/requests/{rejected['request_id']}/result", 400)
+        process = await self.launch()
+        await self.relay.queue(rejected)
+        await self.until(lambda: self.relay.uploads(rejected["request_id"]), what="the refused upload", process=process)
+        later = self.request("inspect")
+        await self.relay.queue(later)
+
+        def polls():
+            return sum(exchange.method == "GET" and exchange.path == "/v1/node/requests"
+                       for exchange in self.relay.exchanges)
+
+        before = polls()
+        await self.until(lambda: len(self.relay.uploads(rejected["request_id"])) >= 2, what="the retried upload",
+                         process=process)
+        self.assertEqual((polls(), self.relay.state(later["request_id"]), self.hgs.calls("inspect")),
+                         (before, "queued", []))
+        # Claiming resumes once the relay accepts the stored result.
+        self.relay.rules.remove(rule)
+        [accepted] = await self.until(lambda: self.relay.results(later["request_id"]), 15, "the later request",
+                                      process)
+        self.assertEqual(accepted["state"], "completed")
+        self.assertEqual(self.relay.state(rejected["request_id"]), "completed")
         self.assertEqual(len(self.hgs.calls("send")), 1)
 
     async def test_redirects_are_never_followed(self):
