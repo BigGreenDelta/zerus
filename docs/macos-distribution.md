@@ -12,6 +12,7 @@ zerus-setup
 
 The first public macOS build is
 [nightly 0.42.2.r1291.g5d2e5d0.n17](https://github.com/ufna/zerus/releases/tag/nightly-38794972859).
+For Dev builds from successful main CI, install `ufna/zerus/zerus@dev` instead.
 The stable `zerus` cask will appear with the first owner-triggered signed stable
 release; it is not yet available. After that, install it with
 `brew install --cask ufna/zerus/zerus`.
@@ -398,6 +399,27 @@ ufna/zerus/zerus@nightly` also downloaded and verified the public package withou
 installing over the developer's app. The desktop/nightly mirror synchronized
 successfully and serves the same release and source commit; macOS downloads
 remain on GitHub.
+
+The first public macOS Dev build, `0.42.3-dev.693`, was qualified on 2026-10-16
+from clean source `f16d73bcd0730157b43a3ca2b8476f0319bf6193`.
+[CI 38813489733](https://github.com/ufna/zerus/actions/runs/38813489733)
+passed the full platform matrix, all 68 production Qt suites, Apple signing and
+notarization, and clean Homebrew installation and removal. Both the read-only
+mounted DMG and the installed cask passed bundle identity and CLI/GUI self-tests.
+[Publisher 38820507139](https://github.com/ufna/zerus/actions/runs/38820507139)
+published the sealed candidate through the bounded Dev mirror and verified its
+public ZIP/DMG bytes before adding `zerus@dev` to the tap. No GitHub Release was
+created for this Dev build.
+
+Independent downloads on macOS matched the published sizes and SHA-256 values;
+the public cask matched the reviewed template and ZIP digest. Gatekeeper and
+stapler accepted the downloaded DMG, and its read-only mounted application passed
+the self-tests with the exact clean source and Dev identity. `brew fetch --cask
+ufna/zerus/zerus@dev` verified the public package without installing it. The
+compiled desktop update controller also parsed the live Dev catalog and exposed
+its correct ZIP and DMG links. The shared developer GUI was left unchanged;
+its coordinated installation remains a separate rollout. The stable `zerus`
+cask remains unavailable until an owner-triggered signed stable release.
 
 Still requiring interactive or subsequent release qualification:
 

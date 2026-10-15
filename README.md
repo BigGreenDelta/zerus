@@ -186,7 +186,8 @@ the window. [Integration details](docs/reference.md#deepseek).
 On Arch Linux x86_64, install the stable bundle with `yay -S zerus-ade-bin`, then
 run `zerus-setup` as your normal user.
 [Source and development packages](docs/installation.md#arch-linux) are also available.
-On macOS and other Linux distributions, [build from source](docs/installation.md#local-installation);
+On Apple Silicon macOS, use the [signed DMG or Homebrew cask](docs/installation.md#macos-dmg).
+Other Linux distributions [build from source](docs/installation.md#local-installation);
 see [other platforms](#other-platforms).
 
 [Install Zerus and the CLI](docs/installation.md), then use **New session** to
@@ -218,6 +219,9 @@ as pull requests.
 notarized nightly from the [DMG](docs/installation.md#macos-dmg) or
 [Homebrew tap](docs/installation.md#macos-homebrew):
 `brew install --cask ufna/zerus/zerus@nightly`, then `zerus-setup`.
+For Dev builds from successful main CI, use `ufna/zerus/zerus@dev` instead.
+**Settings > Updates** checks versions and provides the update command or DMG.
+The stable `zerus` cask will appear with the first signed stable release.
 Source builds remain available through the same installer.
 
 **Windows**: nightly releases include a portable x86_64
