@@ -202,13 +202,15 @@ sys.exit(result.returncode)
   self.assertEqual(result.returncode,0,result.stderr)
   self.tmux('paste-buffer','-p','-r','-d','-b','fixture-draft','-t',self.pane)
   time.sleep(.15)
-  self.tmux('send-keys','-t',self.pane,'-N',str(len(value)+1),'Left')
-  if cursor!='start':self.tmux('send-keys','-t',self.pane,'-N',str(len(value)//2 if cursor=='middle' else len(value)+1),'Right')
+  # The paste leaves the caret at the end. Move it only leftwards and exactly as
+  # far as needed: a frame Claude draws while still applying these keys never
+  # shows the caret at the requested place, as a caret passing through would.
+  position=0 if cursor=='start' else len(value)//2 if cursor=='middle' else len(value)
+  if position<len(value):self.tmux('send-keys','-t',self.pane,'-N',str(len(value)-position),'Left')
   # Claude applies the paste and queued caret keys after tmux returns. A loaded
   # host can still be moving the caret when hgs starts, which hgs rightly
   # reports as a changed terminal: begin once Claude shows the whole draft
   # with its caret at the requested place.
-  position=0 if cursor=='start' else len(value)//2 if cursor=='middle' else len(value)
   self.wait_for(lambda:(rows:=self.draft_rows()) and shows_prefix(rows[0],value.rstrip(' ')) and shows_prefix(rows[1],value[:position]))
  def draft_rows(self):
   # The focused Other editor's rows, and its rows up to Claude's inverse caret.
