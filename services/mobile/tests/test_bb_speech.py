@@ -67,8 +67,8 @@ class SpeechCase(OperationCase, BlackBoxCase):
         self.hgs.script(default_rules(listing(), help_text(*self.markers)))
 
     def answer(self, argv, action, stdout=None, **rule) -> None:
-        self.hgs.prepend({"argv": argv, "stdin_has": {"action": action}, **({} if stdout is None else {"stdout": stdout}),
-                          **rule})
+        self.hgs.prepend({"argv": argv, "stdin_fields": {"action": action},
+                          **({} if stdout is None else {"stdout": stdout}), **rule})
 
     def computer(self, operation: str, *, own: bool = False, **payload) -> dict:
         """A computer-scoped submission; `own` puts its request_id in the payload."""

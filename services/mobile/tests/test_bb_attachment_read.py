@@ -57,7 +57,7 @@ class ScriptedAnswerTests(BlackBoxCase):
         echo.write_text('#!/bin/sh\nprintf "%s|" "$@"\ncat\necho delegated >&2\nexit 4\n')
         echo.chmod(0o700)
         self.hgs.script([{"argv": ["file"], "stdout_path": str(answer)},
-                         {"argv": ["pick"], "stdin_has": {"action": "input"}, "stdout": {"picked": "input"}},
+                         {"argv": ["pick"], "stdin_fields": {"action": "input"}, "stdout": {"picked": "input"}},
                          {"argv": ["pick"], "stdout": {"picked": "other"}},
                          {"prefix": ["real"], "exec": str(echo)}])
         self.assertEqual((await asyncio.to_thread(self.run_hgs, "file")).stdout, b'{"exact": "bytes"}  ')

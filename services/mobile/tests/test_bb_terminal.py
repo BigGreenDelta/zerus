@@ -31,8 +31,8 @@ def submitted(**changes) -> dict:
 
 
 def terminal(fresh=None, ack=None) -> list[dict]:
-    return [{"argv": TERMINAL, "stdin_has": {"action": "snapshot"}, "stdout": screen() if fresh is None else fresh},
-            {"argv": TERMINAL, "stdin_has": {"action": "input"}, "stdout": submitted() if ack is None else ack}]
+    return [{"argv": TERMINAL, "stdin_fields": {"action": "snapshot"}, "stdout": screen() if fresh is None else fresh},
+            {"argv": TERMINAL, "stdin_fields": {"action": "input"}, "stdout": submitted() if ack is None else ack}]
 
 
 class TerminalTests(OperationCase, BlackBoxCase):
