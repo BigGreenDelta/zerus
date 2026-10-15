@@ -1215,6 +1215,12 @@ projects and computers. Repositories linked from several projects or subfolders
 appear once per computer; filters preserve exact project and machine identities.
 Four groups separate **Cleanup candidates**, **Review work**, **In use** and
 **Not checked**. Main checkouts and ordinary folders are hidden by default.
+Search, sort and refresh share one compact toolbar. **Filters** opens project,
+computer and state controls and the main-checkout toggle; its count shows active
+filters without taking height from the workspace. Folder names are emphasized,
+while a separate muted row with a Git branch icon identifies the branch.
+For a single-computer scope, the coverage line names that computer and the
+redundant computer column is hidden.
 Search matches folder, branch, project and related session names; sorting offers
 largest folders, oldest Git activity or folder names. Sizes are apparent file
 sizes, not a promise of physical disk space reclaimed; incomplete measurements
@@ -1228,15 +1234,22 @@ remain bounded at 512 entries; this is not a scan of every folder on a computer.
 Offline snapshots remain readable but cannot be selected for removal. Expired
 checks are refreshed; changed fingerprints invalidate previous selections.
 
-**Inspect changes** reads changed/untracked file names, tracked diffs and up to
+Use **Read files and commits** (the inspector's refresh button) to view
+changed/untracked file names, tracked diffs and up to
 30 original commits absent from the base history. The base comparison is a
 two-way diff and can include later changes on the base. **Local files** previews
 ignored entries and their contents; **Sessions** opens the exact related
 conversation on its owning computer. Reads are bounded (200 changed files or
-directory entries per page and 128 KiB per text preview), with truncation shown. **Browse all files** and **Next files** continue beyond
+directory entries per page and 128 KiB per text preview), with truncation shown. **Browse all files** and **Next** continue beyond
 the largest ignored entries or the first directory page. Binary
 files are identified, and symlinks are not followed. Git refs are local snapshots;
 inspection never fetches. No-base and failed checks are reported explicitly.
+
+The inspector keeps its longer metadata under **Details**. Local file names use
+the available column width; browsing and pagination share one small navigation
+row. The empty text preview stays hidden until a file is opened, and both the
+file list and the opened preview keep usable, resizable space. Related sessions
+have session icons and retain their exact conversation targets.
 
 **Select candidates** selects only currently visible, verified cleanup candidates.
 Folders with local files outside Git require individual selection, even when

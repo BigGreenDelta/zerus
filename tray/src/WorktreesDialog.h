@@ -70,5 +70,5 @@ private:
     QTreeWidget *m_tree;
     WorktreeInspectionPanel *m_details;
     QLabel *m_status;
-    QPushButton *m_refresh, *m_cleanup, *m_remove, *m_copy;
+    QPushButton *m_refresh, *m_cleanup, *m_remove, *m_copy, *m_filters;
 };

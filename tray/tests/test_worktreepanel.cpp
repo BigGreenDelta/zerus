@@ -17,6 +17,8 @@
 #include <QPlainTextEdit>
 #include <QTreeWidgetItemIterator>
 #include <QSplitter>
+#include <QTabWidget>
+#include <QHeaderView>
 #include "WorktreeBatchCleanupDialog.h"
 
 static int launchAccountRow(const QListWidget *list,const QString &id) {
@@ -95,7 +97,12 @@ if c=='worktrees':
   for i in range(0,len(o)-1,2):v[o[i]]=o[i+1]
   time.sleep(0.05)
   r={'state':'ok','path':v.get('--path',''),'common_dir':v.get('--common-dir','')}
-  if '--file' in v:r['file']={'path':v['--file'],'text':'important local notes','binary':False,'truncated':False}
+  if '--file' in v:
+   if v['--file']=='.':
+    offset=int(v.get('--offset','0'))
+    r['file']={'path':'.','offset':offset,'entries':[{'path':'notes.txt' if offset==0 else 'last.txt'}],'truncated':offset==0}
+    if offset==0:r['file']['next_offset']=200
+   else:r['file']={'path':v['--file'],'text':'important local notes','binary':False,'truncated':False}
   else:
    r.update({'review':json.load(open('review.json'))['worktrees'][1],
     'files':[{'path':'notes.txt','status':'??'}],'changes':{'text':'tracked diff'},
@@ -258,6 +265,81 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         for(auto *widget:dialog.findChildren<QWidget *>())if(widget->isVisible()&&widget->isWindow()==false&&qobject_cast<QPushButton *>(widget))QVERIFY2(dialog.rect().contains(QRect(widget->mapTo(&dialog,QPoint()),widget->size())),qPrintable(widget->objectName()));
         auto *split=dialog.findChild<QSplitter *>();QVERIFY(split->widget(0)->geometry().right()<split->widget(1)->geometry().left());QVERIFY(split->widget(1)->width()>=300);QVERIFY(dialog.findChild<QPlainTextEdit *>("worktreeChangesDiff")->height()>=100);
         const auto preview=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+QString("/workspace-%1.png").arg(fontSize)));
+        QVERIFY(!calls().contains("worktrees remove"));
+    }
+    void compactWorkspaceKeepsLocalFilesUsable_data(){
+        QTest::addColumn<int>("fontSize"); QTest::addColumn<int>("width"); QTest::addColumn<int>("height");
+        QTest::newRow("normal")<<10<<1180<<760;
+        QTest::newRow("small")<<10<<920<<620;
+        QTest::newRow("large-font")<<15<<1000<<760;
+    }
+    void compactWorkspaceKeepsLocalFilesUsable(){
+        QFETCH(int,fontSize); QFETCH(int,width); QFETCH(int,height);
+        auto reviewed=review(); auto rows=reviewed["worktrees"].toArray(); auto row=rows[1].toObject();
+        QJsonArray ignored; for(int i=0;i<12;++i) ignored.append(QJsonObject{{"path",QString("local-notes/important-%1.txt").arg(i)},{"bytes",2048}});
+        row["ignored"]=ignored; row["ignored_count"]=25; row["branch"]="fix/preserve-important-work"; rows[1]=row; reviewed["worktrees"]=rows;
+        QFile response(dir.filePath("review.json")); QVERIFY(response.open(QIODevice::WriteOnly)); response.write(QJsonDocument(reviewed).toJson()); response.close();
+        SessionOrganization projects; const auto project=projects.createGroup("Example project"); projects.addFolder(project,"mac","/repo");
+        auto machines=fleet(); auto remote=*machines.peer("mac"); remote.sessions[0].gitRoot="/linked"; machines.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
+        HgsClient client(FakeCli::program(script())); WorktreesDialog dialog(&client,projects,machines,false);
+        auto font=dialog.font(); font.setPointSize(fontSize); dialog.setFont(font);
+        // Include the production padding that made the original layout unusable.
+        dialog.setStyleSheet(QString("QWidget {font-size:%1pt;} QDialog {background:#1b1f25;} QLabel {color:#e2e9ef;}"
+            "QLineEdit,QComboBox {padding:9px 10px; color:#e2e9ef; background:#252d36; border:1px solid #3d4854;}"
+            "QPushButton {padding:8px 13px; min-height:18px; color:#e2e9ef; background:#252d36; border:1px solid #3d4854;}"
+            "QTreeWidget,QListWidget,QPlainTextEdit {color:#e2e9ef; background:#20272e; selection-background-color:#416a63;}"
+            "QHeaderView::section {padding:10px; color:#a1adbb; background:#252d36;}"
+            "QTabWidget::pane {border:0; border-top:1px solid #3d4854; background:#1b1f25;}"
+            "QTabBar::tab {background:#1b1f25; color:#a1adbb; padding:8px 9px; border-bottom:2px solid transparent;}"
+            "QTabBar::tab:selected {color:#e2e9ef; border-bottom:2px solid #8bd6c1;}"
+            "QMenu {background:#252d36; color:#e2e9ef;} QCheckBox {color:#e2e9ef;}").arg(fontSize));
+        dialog.resize(width,height); dialog.show();
+        QTRY_VERIFY(dialog.findChild<QPushButton *>("selectCleanupCandidates")->isEnabled());
+        auto *tree=dialog.findChild<QTreeWidget *>("worktreeOverviewList"); tree->setCurrentItem(overviewRow(tree,"/linked"));
+        auto *tabs=dialog.findChild<QTabWidget *>(); tabs->setCurrentIndex(2);
+        auto *local=dialog.findChild<QTreeWidget *>("worktreeLocalFiles"); QTRY_COMPARE(local->topLevelItemCount(),12);
+        QVERIFY(dialog.findChild<QLabel *>("worktreeInspectionStatus")->text().contains("12 of 25"));
+        auto *preview=dialog.findChild<QPlainTextEdit *>("worktreeLocalFilePreview"); QTest::qWait(30);
+        QVERIFY2(dialog.width()<=width && dialog.height()<=height,"Layout grew beyond the requested window");
+        QVERIFY2(tree->mapTo(&dialog,QPoint()).y()<dialog.fontMetrics().lineSpacing()*5+40,"Filters displaced the workspace");
+        QVERIFY(!dialog.findChild<QWidget *>("worktreeSummaryArea")->isVisible());
+        QVERIFY(tree->currentItem()->data(0,Qt::AccessibleDescriptionRole).toString().contains("Branch: fix/preserve-important-work"));
+        const auto first=local->visualItemRect(local->topLevelItem(0)), third=local->visualItemRect(local->topLevelItem(2));
+        QVERIFY2(local->viewport()->rect().contains(first) && local->viewport()->rect().contains(third),"Local file rows are clipped");
+        QVERIFY(!preview->isVisible());
+        QVERIFY(local->columnWidth(0)>local->width()/2);
+        const auto raster=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");
+        if(!raster.isEmpty()) QVERIFY(dialog.grab().save(raster+QString("/compact-local-%1-%2.png").arg(fontSize).arg(width)));
+        QTest::mouseClick(local->viewport(),Qt::LeftButton,Qt::NoModifier,first.center());
+        QCOMPARE(local->currentItem(),local->topLevelItem(0));
+        QTest::mouseDClick(local->viewport(),Qt::LeftButton,Qt::NoModifier,first.center());
+        QTRY_VERIFY(preview->toPlainText().contains("important local notes"));
+        QVERIFY(preview->isVisible()); QTRY_VERIFY(preview->viewport()->height()>=preview->fontMetrics().lineSpacing()*3);
+        if(!raster.isEmpty()) QVERIFY(dialog.grab().save(raster+QString("/compact-preview-%1-%2.png").arg(fontSize).arg(width)));
+        auto *browse=dialog.findChild<QPushButton *>("browseAllWorktreeFiles"); QTest::mouseClick(browse,Qt::LeftButton);
+        auto *next=dialog.findChild<QPushButton *>("nextWorktreeFiles"); QTRY_VERIFY(next->isVisible());
+        QTRY_COMPARE(local->topLevelItemCount(),1); QCOMPARE(local->topLevelItem(0)->text(0),QString("notes.txt"));
+        QVERIFY(!dialog.findChild<QLabel *>("worktreeInspectionStatus")->text().contains("largest"));
+        QVERIFY(dialog.rect().contains(QRect(next->mapTo(&dialog,QPoint()),next->size())));
+        QTest::mouseClick(next,Qt::LeftButton); QTRY_COMPARE(local->topLevelItem(0)->text(0),QString("last.txt")); QTRY_VERIFY(!next->isVisible());
+        QTest::mouseClick(dialog.findChild<QPushButton *>("showLocalWorktreeFiles"),Qt::LeftButton); QCOMPARE(local->topLevelItemCount(),12);
+        const auto workspaceTop=tree->mapTo(&dialog,QPoint()).y();
+        auto *filters=dialog.findChild<QPushButton *>("worktreeFilters"); auto *menu=dialog.findChild<QMenu *>("worktreeFiltersMenu"); bool popupChecked=false;
+        QTimer::singleShot(0,&dialog,[&]{
+            QVERIFY(menu->isVisible()); auto *computer=dialog.findChild<QComboBox *>("worktreeComputerFilter"); QVERIFY(computer->isVisible());
+            QTest::mouseClick(computer,Qt::LeftButton); auto *choices=computer->view(); QTRY_VERIFY(choices->isVisible());
+            const auto target=computer->model()->index(computer->findData("mac"),0);
+            choices->scrollTo(target);
+            QTRY_VERIFY(choices->viewport()->rect().contains(choices->visualRect(target).center()));
+            QTest::mouseMove(choices->viewport(),choices->visualRect(target).center());
+            QTest::mouseClick(choices->viewport(),Qt::LeftButton,Qt::NoModifier,choices->visualRect(target).center());
+            QTRY_COMPARE(computer->currentData().toString(),QString("mac")); popupChecked=true; menu->hide();
+        });
+        QTest::mouseClick(filters,Qt::LeftButton); QTRY_VERIFY(popupChecked); QCOMPARE(filters->text(),QString("Filters (1)"));
+        QCOMPARE(tree->mapTo(&dialog,QPoint()).y(),workspaceTop); QVERIFY(local->viewport()->height()>=first.height()*3);
+        auto *details=dialog.findChild<QPushButton *>("toggleWorktreeDetails"); QTest::mouseClick(details,Qt::LeftButton); QVERIFY(dialog.findChild<QWidget *>("worktreeSummaryArea")->isVisible()); QTest::mouseClick(details,Qt::LeftButton);
+        tabs->setCurrentIndex(3); auto *sessions=dialog.findChild<QListWidget *>("worktreeRelatedSessions"); QCOMPARE(sessions->count(),1); QVERIFY(!sessions->item(0)->icon().isNull());
+        QCOMPARE(sessions->item(0)->data(Qt::UserRole).toString(),QString("kimi/repo/two"));
         QVERIFY(!calls().contains("worktrees remove"));
     }
     void clientCachesCoalescesAndScopesSnapshots(){

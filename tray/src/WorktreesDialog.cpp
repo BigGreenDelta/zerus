@@ -3,6 +3,7 @@
 #include "WorktreeBatchCleanupDialog.h"
 #include "WorktreeInspectionPanel.h"
 #include "WorktreeReviewUi.h"
+#include "WorkspaceIcons.h"
 #include <QCheckBox>
 #include <QLineEdit>
 #include <QSplitter>
@@ -23,6 +24,53 @@
 #include <QSignalBlocker>
 #include <QTreeWidget>
 #include <QVBoxLayout>
+#include <QFormLayout>
+#include <QMenu>
+#include <QWidgetAction>
+#include <QStyledItemDelegate>
+
+namespace {
+// Keep the native selection/check box, but give folder and branch different
+// visual roles without creating a widget for every catalog row.
+class WorktreeNameDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        auto size = QStyledItemDelegate::sizeHint(option, index);
+        if (index.parent().isValid())
+            size.setHeight(qMax(size.height(), option.fontMetrics.lineSpacing() * 2 + 8));
+        return size;
+    }
+    void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        if (!index.parent().isValid()) { QStyledItemDelegate::paint(painter, option, index); return; }
+        QStyleOptionViewItem base(option); initStyleOption(&base, index);
+        const auto *style = option.widget ? option.widget->style() : QApplication::style();
+        const auto area = style->subElementRect(QStyle::SE_ItemViewItemText, &base, option.widget).adjusted(4, 0, -4, 0);
+        base.text.clear();
+        style->drawControl(QStyle::CE_ItemViewItem, &base, painter, option.widget);
+        const auto row = index.data(Qt::UserRole + 1).toJsonObject();
+        const auto branch = index.data(Qt::UserRole + 4).toJsonObject()["branch"].toString();
+        const auto textColor = option.palette.color(option.state & QStyle::State_Selected ? QPalette::HighlightedText : QPalette::Text);
+        const int line = option.fontMetrics.lineSpacing(), iconSize = qMin(20, line);
+        const int top = area.center().y() - line - 1;
+        painter->save(); painter->setClipRect(option.rect);
+        auto titleFont = option.font; titleFont.setWeight(QFont::DemiBold);
+        painter->setFont(titleFont); painter->setPen(textColor);
+        painter->drawText(QRect(area.left(), top, area.width(), line), Qt::AlignVCenter,
+            QFontMetrics(titleFont).elidedText(QFileInfo(row["path"].toString()).fileName(), Qt::ElideMiddle, area.width()));
+        painter->setFont(option.font);
+        painter->setOpacity(option.state & QStyle::State_Selected ? 1.0 : 0.72);
+        workspaceIcon(row["kind"] == "folder" || row["kind"] == "bare" ? "folder" : "git-branch", textColor)
+            .paint(painter, QRect(area.left(), top + line + 2, iconSize, iconSize));
+        const auto label = row["kind"] == "folder" ? QObject::tr("Ordinary folder")
+            : row["kind"] == "bare" ? QObject::tr("Bare repository")
+            : branch.isEmpty() ? QObject::tr("Detached HEAD") : branch;
+        painter->drawText(QRect(area.left() + iconSize + 5, top + line + 2, qMax(0, area.width() - iconSize - 5), line),
+            Qt::AlignVCenter, option.fontMetrics.elidedText(label, Qt::ElideMiddle, qMax(0, area.width() - iconSize - 5)));
+        painter->restore();
+    }
+};
+}
 
 QString WorktreesDialog::key(const QString &host, const QString &path)
 {
@@ -36,34 +84,41 @@ WorktreesDialog::WorktreesDialog(HgsClient *client, const SessionOrganization &p
     DialogButtons::install();
     setObjectName("worktreesDialog"); setWindowTitle(tr("Worktrees"));
     setMinimumSize(820, 580); resize(1180, 760);
-    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(20, 18, 20, 18); layout->setSpacing(10);
-    auto *heading = new QLabel(tr("Worktree cleanup")); heading->setObjectName("heading");
-    auto *headingRow = new QHBoxLayout; headingRow->addWidget(heading); headingRow->addStretch();
-    m_refresh = new QPushButton(tr("Check again")); m_refresh->setObjectName("refreshWorktreeOverview"); headingRow->addWidget(m_refresh); layout->addLayout(headingRow);
-    auto *hint = new QLabel(tr("Inspect finished work and remove selected folders across your projects."));
-    hint->setObjectName("muted"); hint->setWordWrap(true); layout->addWidget(hint);
-    auto *filters = new QHBoxLayout;
+    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(14, 12, 14, 12); layout->setSpacing(8);
+    auto *toolbar = new QWidget; toolbar->setObjectName("worktreeToolbar");
+    toolbar->setStyleSheet("QLineEdit, QComboBox { padding:5px 8px; min-height:18px; } QPushButton { padding:5px 10px; min-height:18px; }");
+    auto *searchRow = new QHBoxLayout(toolbar); searchRow->setContentsMargins(0,0,0,0); searchRow->setSpacing(8);
+    m_search = new QLineEdit; m_search->setObjectName("worktreeSearch"); m_search->setPlaceholderText(tr("Search worktrees…")); m_search->setAccessibleName(tr("Search folder, branch, project or session")); searchRow->addWidget(m_search, 1);
+    m_filters = new QPushButton(tr("Filters")); m_filters->setObjectName("worktreeFilters"); m_filters->setAutoDefault(false);
+    auto *filterMenu = new QMenu(m_filters); filterMenu->setObjectName("worktreeFiltersMenu");
+    auto *filterWidget = new QWidget; auto *filters = new QFormLayout(filterWidget);
+    filters->setContentsMargins(12,10,12,10); filters->setSpacing(8);
     m_project = new QComboBox; m_project->setObjectName("worktreeProjectFilter"); m_project->setAccessibleName(tr("Project"));
     m_computer = new QComboBox; m_computer->setObjectName("worktreeComputerFilter"); m_computer->setAccessibleName(tr("Computer"));
     for (auto *filter : {m_project, m_computer}) { filter->setMinimumContentsLength(10); filter->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); }
-    filters->addWidget(new QLabel(tr("Project"))); filters->addWidget(m_project, 1); filters->addWidget(new QLabel(tr("Computer"))); filters->addWidget(m_computer, 1); layout->addLayout(filters);
-    auto *searchRow = new QHBoxLayout;
-    m_search = new QLineEdit; m_search->setObjectName("worktreeSearch"); m_search->setPlaceholderText(tr("Search folder, branch, project or session")); searchRow->addWidget(m_search, 1);
+    filters->addRow(tr("Project"), m_project); filters->addRow(tr("Computer"), m_computer);
     m_category = new QComboBox; m_category->setObjectName("worktreeStateFilter"); m_category->addItem(tr("All states"), -1);
     for (int group = 0; group < 4; ++group) m_category->addItem(WorktreeReviewUi::categoryName(group), group);
-    searchRow->addWidget(m_category);
+    m_category->setAccessibleName(tr("Worktree state")); filters->addRow(tr("State"), m_category);
+    m_showMain = new QCheckBox(tr("Show main checkouts and ordinary folders")); m_showMain->setObjectName("showMainWorktreeFolders"); filters->addRow(m_showMain);
+    auto *filterAction = new QWidgetAction(filterMenu); filterAction->setDefaultWidget(filterWidget); filterMenu->addAction(filterAction);
+    m_filters->setMenu(filterMenu); searchRow->addWidget(m_filters);
     m_sort = new QComboBox; m_sort->setObjectName("worktreeSort"); m_sort->setAccessibleName(tr("Sort worktrees"));
-    m_sort->addItems({tr("Largest first"), tr("Oldest activity first"), tr("Folder name")}); searchRow->addWidget(m_sort); layout->addLayout(searchRow);
+    m_sort->addItems({tr("Largest first"), tr("Oldest activity first"), tr("Folder name")});
+    m_sort->setMinimumContentsLength(8); m_sort->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); m_sort->setMaximumWidth(210); searchRow->addWidget(m_sort);
+    m_refresh = new QPushButton; m_refresh->setObjectName("refreshWorktreeOverview"); configureWorkspaceIconButton(m_refresh, "refresh", tr("Check again"), palette().color(QPalette::Window).lightness() < 128); searchRow->addWidget(m_refresh);
+    layout->addWidget(toolbar);
     m_status = new QLabel; m_status->setObjectName("worktreeOverviewStatus"); m_status->setTextFormat(Qt::PlainText); m_status->setWordWrap(true); layout->addWidget(m_status);
-    auto *split = new QSplitter; split->setChildrenCollapsible(false);
+    auto *split = new QSplitter; split->setObjectName("worktreeWorkspaceSplit"); split->setChildrenCollapsible(false);
     m_tree = new QTreeWidget; m_tree->setObjectName("worktreeOverviewList"); m_tree->setColumnCount(4);
-    m_tree->setHeaderLabels({tr("Folder / branch"), tr("What remains"), tr("Size"), tr("Computer")});
+    m_tree->setHeaderLabels({tr("Worktree / branch"), tr("What remains"), tr("Size"), tr("Computer")});
+    m_tree->setItemDelegateForColumn(0, new WorktreeNameDelegate(m_tree));
     m_tree->setTextElideMode(Qt::ElideMiddle); m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_tree->setMinimumWidth(360); m_tree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
-    m_tree->header()->setSectionResizeMode(1, QHeaderView::Stretch); m_tree->setColumnWidth(0, 210); m_tree->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents); m_tree->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_tree->setMinimumWidth(360); m_tree->header()->setStretchLastSection(false); m_tree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+    m_tree->header()->setSectionResizeMode(1, QHeaderView::Stretch); m_tree->setColumnWidth(0, 230);
+    m_tree->header()->setSectionResizeMode(2, QHeaderView::Interactive); m_tree->setColumnWidth(2,110); m_tree->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     split->addWidget(m_tree); m_details = new WorktreeInspectionPanel(client); m_details->setMinimumWidth(300); split->addWidget(m_details); split->setSizes({650, 450}); layout->addWidget(split, 1);
     m_details->sessionRequested = [this](const QString &host, const QString &name) { accept(); if (sessionRequested) sessionRequested(host, name); };
-    m_showMain = new QCheckBox(tr("Show main checkouts and ordinary folders")); m_showMain->setObjectName("showMainWorktreeFolders"); layout->addWidget(m_showMain);
     auto *buttons = new QDialogButtonBox;
     m_copy = buttons->addButton(tr("Copy path"), QDialogButtonBox::ActionRole); m_copy->setObjectName("copyOverviewWorktreePath");
     m_cleanup = buttons->addButton(tr("Select candidates"), QDialogButtonBox::ActionRole); m_cleanup->setObjectName("selectCleanupCandidates");
@@ -286,15 +341,22 @@ bool WorktreesDialog::canClean(const Source &source) const
 
 void WorktreesDialog::render()
 {
+    const int filterCount = int(!m_project->currentData().toString().isEmpty()) + int(!m_computer->currentData().toString().isEmpty())
+        + int(m_category->currentData().toInt() >= 0) + int(m_showMain->isChecked());
+    m_filters->setText(filterCount ? tr("Filters (%1)").arg(filterCount) : tr("Filters"));
+    m_filters->setToolTip(tr("%1 · %2 · %3").arg(m_project->currentText(), m_computer->currentText(), m_category->currentText()));
     const auto selected = m_tree->currentItem() ? m_tree->currentItem()->data(0, Qt::UserRole + 2).toString() : QString();
     const auto scroll = m_tree->verticalScrollBar()->value();
     QMap<QString, QStringList> repositories;
+    QSet<QString> scopeMachines;
     for (auto it = m_sources.cbegin(); it != m_sources.cend(); ++it) {
         const auto &source = it.value();
         if (!m_project->currentData().toString().isEmpty() && !source.projectIds.contains(m_project->currentData().toString())) continue;
         if (!m_computer->currentData().toString().isEmpty() && source.machine != m_computer->currentData().toString()) continue;
+        scopeMachines.insert(source.machine);
         const auto common = source.catalog["common_dir"].toString(); repositories[key(source.host, common.isEmpty() ? source.path : common)].append(it.key());
     }
+    m_tree->setColumnHidden(3,scopeMachines.size()==1);
     QJsonArray rendered; int linked = 0, checked = 0, candidates = 0; qint64 candidateBytes = 0; bool candidateComplete = true, partial = false;
     for (const auto &links : repositories) {
         auto sourceKey = links.first(); for (const auto &link : links) if (m_sources[link].fresh && m_sources[link].error.isEmpty()) { sourceKey = link; break; }
@@ -345,7 +407,12 @@ void WorktreesDialog::render()
                     item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
                     item->setCheckState(0, m_checked.value(identity) == reviewFingerprint && !reviewFingerprint.isEmpty() ? Qt::Checked : Qt::Unchecked);
                 } else { item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable); m_checked.remove(identity); }
-                for (int column = 0; column < 4; ++column) item->setToolTip(column, entry["row"].toObject()["path"].toString() + '\n' + columns[1]);
+                const auto branch = entry["review"].toObject()["branch"].toString();
+                const auto kind = entry["row"].toObject()["kind"].toString();
+                const auto description = tr("Folder: %1\n%2").arg(entry["row"].toObject()["path"].toString(),
+                    kind == "folder" || kind == "bare" ? columns[1] : tr("Branch: %1\n%2").arg(branch.isEmpty() ? tr("Detached HEAD") : branch, columns[1]));
+                item->setData(0, Qt::AccessibleDescriptionRole, description);
+                for (int column = 0; column < 4; ++column) item->setToolTip(column, description);
                 if (identity == selected) m_tree->setCurrentItem(item);
             }
             if (heading) { heading->setText(0, tr("%1 (%2)").arg(WorktreeReviewUi::categoryName(group)).arg(count)); heading->setExpanded(true); }
@@ -356,7 +423,8 @@ void WorktreesDialog::render()
     const bool checking = !m_requests.isEmpty() || m_reviewRequest;
     m_status->setText(m_sources.isEmpty() ? tr("Add a project folder to see its worktrees.") :
         tr("%1 of %2 worktrees checked · %3 repositories%4").arg(checked).arg(linked).arg(repositories.size()).arg(checking ? tr(" · Checking…") : QString())
-        + tr("\n%1 cleanup candidates · %2%3 estimated").arg(candidates).arg(candidateComplete ? QString() : tr("at least "), QLocale().formattedDataSize(candidateBytes))
+        + (scopeMachines.size()==1 ? " · "+*scopeMachines.cbegin() : QString())
+        + tr(" · %1 cleanup candidates · %2%3 estimated").arg(candidates).arg(candidateComplete ? QString() : tr("at least "), QLocale().formattedDataSize(candidateBytes))
         + (partial ? tr(" · Catalog is incomplete; some folders are not shown.") : QString()));
     showDetails(); reviewSelection();
 }
