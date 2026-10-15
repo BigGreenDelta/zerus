@@ -817,6 +817,12 @@ Enter is never sent again. **Skip** and **Skip until next version** continue
 startup, and Codex records the dismissal itself. Only reviewed npm, Bun, Vite+,
 pnpm, Homebrew and standalone Unix commands are recognized; other or clipped
 commands stay in Terminal.
+
+After **Update now**, the desktop shows a notice for that state: Codex is still
+installing its update, or it has exited and the session needs a resume. An
+older host's receipt has no `codex_update`; the desktop then only switches to
+Terminal.
+
 After a resume, Codex asks **Resume paused goal?** when the conversation's goal
 is paused, stalled or limited by usage. Activity shows the goal from Codex's goal
 database once the centered dialog over the transcript shows the same goal and

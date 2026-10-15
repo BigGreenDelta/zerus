@@ -3710,13 +3710,21 @@ elif sys.argv[1]=='answer':
 void TestSessionsWindow::terminalChoiceOpensOnlyTheRequestingTerminal_data()
 {
     QTest::addColumn<QString>("prefix");QTest::addColumn<QString>("source");QTest::addColumn<QString>("item");QTest::addColumn<QString>("option");
-    QTest::newRow("hook review")<<"codex-hooks-trust:"<<"codex_hooks_trust"<<"hooks_trust"<<"review";
-    QTest::newRow("codex update")<<"codex-update:"<<"codex_update"<<"codex_update"<<"update_now";
+    QTest::addColumn<QString>("installer");QTest::addColumn<QString>("notice");
+    QTest::newRow("hook review")<<"codex-hooks-trust:"<<"codex_hooks_trust"<<"hooks_trust"<<"review"<<QString()<<QString();
+    // Hosts before the installer state keep the receipt without codex_update.
+    QTest::newRow("codex update")<<"codex-update:"<<"codex_update"<<"codex_update"<<"update_now"<<QString()<<QString();
+    QTest::newRow("codex update installing")<<"codex-update:"<<"codex_update"<<"codex_update"<<"update_now"<<"installing"
+        <<"Codex in codex/hgs/dashboard (arch) is installing its update in Terminal. Resume the session after Codex exits.";
+    QTest::newRow("codex update exited")<<"codex-update:"<<"codex_update"<<"codex_update"<<"update_now"<<"exited"
+        <<"Codex in codex/hgs/dashboard (arch) exited after its update. Check the result in Terminal, then resume the session.";
+    QTest::newRow("unknown installer state")<<"codex-update:"<<"codex_update"<<"codex_update"<<"update_now"<<"verifying"<<QString();
+    QTest::newRow("installer state of another choice")<<"codex-hooks-trust:"<<"codex_hooks_trust"<<"hooks_trust"<<"review"<<"installing"<<QString();
 }
 
 void TestSessionsWindow::terminalChoiceOpensOnlyTheRequestingTerminal()
 {
-    QFETCH(QString,prefix);QFETCH(QString,source);QFETCH(QString,item);QFETCH(QString,option);
+    QFETCH(QString,prefix);QFETCH(QString,source);QFETCH(QString,item);QFETCH(QString,option);QFETCH(QString,installer);QFETCH(QString,notice);
     QTemporaryDir directory;QFile file(directory.filePath("hgs"));QVERIFY(file.open(QIODevice::WriteOnly));
     file.write(QString(R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
@@ -3731,10 +3739,12 @@ if args[0]=='inspect':
  'activity':'busy','phase':'approval','pending_questions':[question] if not (root/'done').exists() else [],'events':[],'cursor':0}))
 elif args[0]=='answer':
  p=json.load(sys.stdin);time.sleep(.15);(root/'done').touch()
- print(json.dumps({'status':'answered','request_id':p['request_id'],'name':args[1],
+ receipt={'status':'answered','request_id':p['request_id'],'name':args[1],
  'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],'question_id':p['question_id'],
- 'question_hash':p['expected_question_hash'],'open_terminal':True}))
-)PY").arg(prefix,source,item,option).toUtf8());file.close();QVERIFY(FakeCli::makeRunnable(file.fileName()));
+ 'question_hash':p['expected_question_hash'],'open_terminal':True}
+ if '%5':receipt['codex_update']='%5'
+ print(json.dumps(receipt))
+)PY").arg(prefix,source,item,option,installer).toUtf8());file.close();QVERIFY(FakeCli::makeRunnable(file.fileName()));
     SessionsWindow window(FakeCli::program(file.fileName()));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
     auto *card=window.findChild<QuestionCard *>();auto *client=window.findChild<HgsClient *>();
     auto *list=window.findChild<QListWidget *>("sessionList");auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");
@@ -3746,13 +3756,19 @@ elif args[0]=='answer':
     const QJsonArray answer{QJsonObject{{"question_id",item},{"selected_option_ids",QJsonArray{option}},{"text",""}}};
     const QString id=prefix+QString(64,QChar('a')),secondId=prefix+QString(64,QChar('b'));
     QTRY_VERIFY(offers(id));
+    auto *noticeLabel=window.findChild<QLabel *>("notice");QVERIFY(noticeLabel);
     card->answerRequested(key,id,answer);QTRY_COMPARE(answered.size(),1);
     QCOMPARE(tabs->currentWidget()->objectName(),QString("terminalView"));
+    // Codex's installer state is explained beside Terminal; nothing else is announced.
+    QCOMPARE(noticeLabel->text(),notice);QCOMPARE(noticeLabel->isVisible(),!notice.isEmpty());
+    window.findChild<QPushButton *>("dismissNotice")->click();QVERIFY(noticeLabel->isHidden());
     // A delayed review acknowledgement must not steal another session's tab.
     QVERIFY(QFile::remove(directory.filePath("done")));QFile second(directory.filePath("second"));QVERIFY(second.open(QIODevice::WriteOnly));second.close();tabs->setCurrentIndex(0);
     window.showSession({},"kimi/docs/research");window.showSession({},"codex/hgs/dashboard");QTRY_VERIFY(offers(secondId));
     card->answerRequested(key,secondId,answer);window.showSession({},"kimi/docs/research");tabs->setCurrentIndex(0);
     QTRY_COMPARE(answered.size(),2);QVERIFY(tabs->currentWidget()->objectName()!="terminalView");
+    // It still names the session whose Codex is updating.
+    QCOMPARE(noticeLabel->text(),notice);
 }
 
 void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
