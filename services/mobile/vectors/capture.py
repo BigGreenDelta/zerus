@@ -293,10 +293,15 @@ LAUNCH_ACCOUNTS = {"profiles": ACCOUNTS["profiles"] + [{"id": "native-shell", "p
 
 
 def inspection():
-    """An attention inspection: one open question, one already answered, one of another run."""
+    """An attention inspection: one open question, one optional Codex async question, one optional
+    marker of the wrong type, one already answered and one of another run."""
     return {"name": SESSION, "run_id": RUN, "conversation_id": CONVERSATION, "runtime_state": "live",
             "process_state": "running", "pending_questions": [
                 {"run_id": RUN, "conversation_id": CONVERSATION, "question_id": "q-open", "question_hash": "h-open"},
+                {"run_id": RUN, "conversation_id": CONVERSATION, "question_id": "codex-async:call-optional:0",
+                 "question_hash": "h-optional", "source": "codex_async", "optional": True, "can_skip": True},
+                {"run_id": RUN, "conversation_id": CONVERSATION, "question_id": "q-loose", "question_hash": "h-loose",
+                 "source": "codex_async", "optional": 1},
                 {"run_id": RUN, "conversation_id": CONVERSATION, "question_id": "q-done", "question_hash": "h-done",
                  "answer_delivery": {"status": "submitted"}},
                 {"run_id": "other-run", "conversation_id": CONVERSATION, "question_id": "q-other", "question_hash": "h"}]}

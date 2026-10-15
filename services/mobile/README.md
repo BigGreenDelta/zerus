@@ -316,6 +316,16 @@ a new error emits a generic event. Async question fingerprints come from the
 connector's bounded round-robin inspection, so notifications can lag by a scan
 cycle when many sessions are running.
 
+Each `mobile_attention` item is `{question_id, question_hash}`. An optional
+Codex async question, one the agent keeps working without (`source`
+`codex_async` with `optional` exactly `true` in `hgs inspect`), also carries
+`optional: true`; blocking items never carry the key. Question text and other
+card fields never leave the computer. Both relays fingerprint whole items and
+treat optional items like any other: they emit the same `attention` event and
+alert, and the phone decides whether an optional item notifies. A connector
+without the marker omits the key, so the first heartbeat after upgrading emits
+one `attention` event for each session with a pending optional question.
+
 
 ## Native projects and attachments
 
