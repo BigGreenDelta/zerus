@@ -477,7 +477,8 @@ the docked width are local preferences.
 
 Search names, IDs, folders, branches and models immediately. From two characters,
 content search also reads public Codex, Claude and Kimi messages and saved tool
-events on each host. Machine and state filters narrow results; the all-sessions
+events on each host, and DeepSeek messages through a running native host
+([DeepSeek](#deepseek)). Machine and state filters narrow results; the all-sessions
 view includes archives. Results open the recorded message; **Back to latest
 activity** returns to the live timeline. **Limited history searched**, **Some
 history unavailable** and excerpt labels describe incomplete coverage. Internal
@@ -1750,14 +1751,21 @@ If the reply is lost, forking again under the same name adopts the result from t
 same host; after a host change Zerus refuses to repeat it. A native failure after
 creation can leave an unbound session in Native UI.
 
-Global DeepSeek history search, schedule management and account transfer stay
-in Native UI. Native context reset awaits a supported Session Controller
-operation. Resident adapters advertise each operation; one started by an older
-Zerus keeps fork in Native UI until its next ordinary start. Other harness
-versions need contract verification; updates never restart live hosts or agents
-automatically.
+Content search covers bound DeepSeek sessions through the native store's
+literal, case-insensitive event scan, which works without the optional full-text
+index. Results contain the person's and the agent's text only; injected context
+and reasoning are excluded. Searching never starts, resumes or reloads a host; a
+stopped host or an older adapter reports that history as unavailable.
+
+Schedule management and account transfer stay in Native UI. Native context
+reset awaits a supported Session Controller operation. Resident adapters
+advertise each operation; one started by an older Zerus keeps fork in Native UI
+and its history unavailable to search until its next ordinary start. Other
+harness versions need contract verification; updates never restart live hosts
+or agents automatically.
 `python3 tests/test_dsh_native.py -v` exercises the official engine with a local
-keyless model, covering history, lifecycle, questions, settings, fork and browser login.
+keyless model, covering history, lifecycle, questions, settings, fork, search
+and browser login.
 
 ## Automatic recovery
 

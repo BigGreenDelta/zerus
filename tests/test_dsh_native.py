@@ -867,6 +867,31 @@ class NativeHarness(unittest.TestCase):
                                                     'conversation_id': target['conversation_id']})
         self.assertEqual(self.bindings()[source['name']], source)
 
+    def test_history_search_returns_exact_public_deepseek_messages(self):
+        needle = 'NEEDLE' + uuid.uuid4().hex[:8]
+        target, other = self.create(), self.create()
+        self.cli('send', target, self.payload(target, text=f'Find {needle} here', attachments=[]))
+        self.cli('send', other, self.payload(other, text='Nothing to find', attachments=[]))
+        for b in (target, other):
+            self.wait(lambda: any(e['type'] == 'AgentMessage' for e in self.cli('inspect', b)['events']))
+        result = self.hgs('search', '--query', needle.lower())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        hits = data['results']
+        self.assertEqual({(h['name'], h['run_id'], h['conversation_id'], h['agent']) for h in hits},
+                         {(target['name'], target['run_id'], target['conversation_id'], 'dsh')})
+        self.assertEqual(sorted(h['role'] for h in hits), ['assistant', 'user'])
+        user = next(h for h in hits if h['role'] == 'user')
+        self.assertEqual(user['content'], f'Find {needle} here')
+        self.assertEqual(user['event']['source'], 'dsh_native')
+        self.assertGreater(user['at'], 0)
+        self.assertNotIn('PRIVATE_TEST_REASONING', result.stdout)
+        self.assertEqual(data['unavailable_sessions'], 0)
+        # Context the harness injects as user messages is not the person's.
+        injected = json.loads(self.hgs('search', '--query', 'Current runtime context').stdout)
+        self.assertFalse([h for h in injected['results'] if h['agent'] == 'dsh'])
+
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -863,6 +863,31 @@ pub(super) fn fork(
     Ok(target)
 }
 
+/// Public messages matching `query` in exact bound sessions, by binding name:
+/// `Some((events, truncated))`, or `None` when that history is unavailable.
+/// Searching never starts, resumes or reloads a host.
+pub(super) fn history_search(records: &[&Value], query: &str, per_session: usize) -> BTreeMap<String, Option<(Vec<Value>, bool)>> {
+    let mut homes: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    for record in records {
+        homes.entry(string(record, "agent_home")).or_default().push(record);
+    }
+    let mut found = BTreeMap::new();
+    for group in homes.values() {
+        let ids: Vec<&str> = group.iter().map(|record| string(record, "conversation_id")).collect();
+        let answer = rpc(group[0], "search-history", json!({"query":query,"sessionIds":ids,"perSession":per_session})).ok();
+        for record in group {
+            // The host's time budget skips later sessions: limited, not unavailable.
+            let session = answer.as_ref().and_then(|answer| answer["sessions"].as_array()?.iter()
+                .find(|session| session["sessionId"] == record["conversation_id"] && ["ok", "skipped"].contains(&string(session, "status"))));
+            found.insert(string(record, "name").to_owned(), session.map(|session| {
+                let rows: Vec<Value> = session["events"].as_array().into_iter().flatten().map(|event| json!({"event":event})).collect();
+                (native_events(&json!(rows)), session["truncated"] == true || session["status"] == "skipped")
+            }));
+        }
+    }
+    found
+}
+
 pub(super) fn processes(name: &str, output: Option<&str>, stop: Option<&str>, run: Option<&str>, conversation: Option<&str>, generation: Option<&str>) -> Result<i32> {
     let record=binding(name)?;
     if (output.is_some() || stop.is_some()) && (run!=Some(string(&record,"run_id")) || conversation!=Some(string(&record,"conversation_id"))) {

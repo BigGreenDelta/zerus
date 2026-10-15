@@ -302,12 +302,60 @@ export function apply(ctx, config) {
     forking.set(p.requestId, work);
     return work;
   }
+  // Text parts and identities only: reasoning and stream records stay private.
+  const publicSources = new Set(['user', 'user-question-reply']);
+  function publicMessage(event) {
+    const assistant = event.type === 'assistant/message';
+    const message = assistant ? event.data?.message : event.data;
+    const content = typeof message?.content === 'string' ? message.content
+      : (Array.isArray(message?.content) ? message.content : []).filter(part => part?.type === 'text' && typeof part.text === 'string')
+        .map(part => ({ type: 'text', text: part.text }));
+    const body = { id: message?.id, role: message?.role, content };
+    return { type: event.type, seq: event.seq, time: event.time,
+      data: assistant ? { message: body } : { ...body, source: { kind: event.data?.source?.kind } } };
+  }
+  // Exact bound sessions only, through the store's literal case-insensitive
+  // event scan. It works without the optional full-text index and never
+  // resumes an Agent. Each hit is re-read so callers see the complete event,
+  // including its source, and only public message parts.
+  async function searchHistory(p) {
+    const query = typeof p.query === 'string' ? p.query.trim() : '';
+    if (!query || query.length > 500 || query.includes('\0')) throw new Error('Invalid search query');
+    if (!Array.isArray(p.sessionIds) || p.sessionIds.length > 500 || p.sessionIds.some(id => typeof id !== 'string'))
+      throw new Error('Invalid search sessions');
+    const perSession = Math.min(Math.max(Number.isSafeInteger(p.perSession) ? p.perSession : 20, 1), 50);
+    // Interactive search waits for every host; later sessions report skipped.
+    const deadline = Date.now() + 5000;
+    const sessions = [];
+    for (const sessionId of new Set(p.sessionIds)) {
+      if (Date.now() > deadline) { sessions.push({ sessionId, status: 'skipped' }); continue; }
+      try {
+        const matches = await ctx.sessionQuery.filterEvents(sessionId, [
+          { kind: 'type', values: ['user/message', 'assistant/message'] }, { kind: 'text', text: query }]);
+        // Newest first. Injected context is a user message too, so reads are
+        // bounded separately from the person's and the agent's own messages.
+        const events = [];
+        let read = 0;
+        for (const match of [...matches].reverse()) {
+          if (events.length === perSession || read === perSession * 2 || Date.now() > deadline) break;
+          read += 1;
+          const { target } = await ctx.sessionQuery.readEvent({ sessionId, seq: match.seq, before: 0, after: 0 });
+          if (target?.seq === match.seq && (target.type === 'assistant/message' || publicSources.has(target.data?.source?.kind)))
+            events.push(publicMessage(target));
+        }
+        sessions.push({ sessionId, status: 'ok', events, truncated: read < matches.length });
+      } catch (error) {
+        sessions.push({ sessionId, status: error?.code === 'SESSION_QUERY_SESSION_NOT_FOUND' ? 'missing' : 'unavailable' });
+      }
+    }
+    return { generation, sessions };
+  }
   async function execute(request) {
     if (closing) throw new Error('Native host is stopping');
     const p = request.params ?? {};
     switch (request.method) {
       case 'ping': return { protocol: 1, version: '0.2.0-rc.2', generation, accountPermissions: true, sessionActions: true,
-        nativeOperations: ['fork'] };
+        nativeOperations: ['fork', 'history-search'] };
       case 'list': {
         const list = await api.list({}, new AbortController().signal);
         const status = await accountStatus();
@@ -321,6 +369,7 @@ export function apply(ctx, config) {
       }
       case 'inspect': return inspect(p);
       case 'fork': return fork(p);
+      case 'search-history': return searchHistory(p);
       case 'job-output':
       case 'job-stop': {
         if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh Processes');
