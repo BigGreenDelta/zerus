@@ -89,6 +89,7 @@ class SendTests(SessionCase):
             {"text": "x", "attachments": [attachment(1, "line\nname")]},
             {"text": "x", "attachments": [attachment(1, path="/etc/passwd")]},
             {"text": "x", "attachments": [attachment(1, url="https://example.invalid/file")]},
+            {"text": "x", "attachments": [attachment(1, data_uri="file:///example/private")]},
             {"text": "x", "attachments": [{**attachment(1), "data_base64": "eA===="}]},
             {"text": "x", "attachments": [{**attachment(1), "data_base64": "not base64"}]},
             {"text": "x", "attachments": [{**attachment(1), "data_base64": ""}]},

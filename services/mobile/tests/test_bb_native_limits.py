@@ -32,18 +32,23 @@ SECRET = "bb-private-native-secret"
 
 
 def exited(pid: int) -> bool:
-    """The process is gone or a zombie: it can run no further."""
+    """The process is gone or a zombie: it can run no further. Without
+    /proc (macOS) only a reaped process counts, which the connector does."""
     try:
         with open(f"/proc/{pid}/stat") as stat:
             return stat.read().rsplit(")", 1)[1].split()[0] == "Z"
     except FileNotFoundError:
-        return True
-    except OSError:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if os.path.isdir("/proc/self"):
             return True
-        return False
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    return False
 
 
 def exact_output(size: int) -> dict:
@@ -214,26 +219,31 @@ class RefusedResultTests(SessionCase):
         self.assertEqual(self.relay.state(request["request_id"]), "claimed")
         self.assertTrue(self.refused(request["request_id"]))
 
+    async def assert_refused_error(self, error, kept: str | None) -> None:
+        # One test per error, each with its own relay: the request a blocked
+        # Python connector leaves queued must not reach a second connector,
+        # which could claim it before its first capability probe (divergence a).
+        self.hgs.script(self.rules({"prefix": ["session-action"], "stdout": ack(status="failed", error=error)}))
+        process = await self.launch()
+        request = self.envelope("pause", {})
+        await self.relay.queue(request)
+        if IMPLEMENTATION == "python":
+            await self.assert_blocks_python(request, 400, process)
+        else:
+            [receipt] = await self.until(lambda: self.relay.results(request["request_id"]), 20,
+                                         "the sanitised upload", process)
+            self.assertEqual(receipt["state"], "failed")
+            self.assertIsInstance(receipt["error"], str)
+            self.assertLessEqual(len(receipt["error"]), 4096)
+            if kept is not None:
+                self.assertEqual(receipt["error"], kept)
+
     async def test_a_native_error_beyond_4096_characters(self):
         long = "\u00e9" * 4097
-        for index, (error, kept) in enumerate(((long, long[:4096]), ({"detail": "not text"}, None))):
-            with self.subTest(type(error).__name__):
-                self.hgs.script(self.rules({"prefix": ["session-action"], "stdout": ack(status="failed", error=error)}))
-                # A journal of its own: Python's stays blocked by its refused row.
-                process = await self.launch(self.config(state_dir=str(self.scratch / f"state-{index}")))
-                request = self.envelope("pause", {})
-                await self.relay.queue(request)
-                if IMPLEMENTATION == "python":
-                    await self.assert_blocks_python(request, 400, process)
-                else:
-                    [receipt] = await self.until(lambda: self.relay.results(request["request_id"]), 20,
-                                                 "the sanitised upload", process)
-                    self.assertEqual(receipt["state"], "failed")
-                    self.assertIsInstance(receipt["error"], str)
-                    self.assertLessEqual(len(receipt["error"]), 4096)
-                    if kept is not None:
-                        self.assertEqual(receipt["error"], kept)
-                process.stop()
+        await self.assert_refused_error(long, long[:4096])
+
+    async def test_a_native_error_that_is_not_text(self):
+        await self.assert_refused_error({"detail": "not text"}, None)
 
     async def test_a_receipt_beyond_the_relay_limit(self):
         # The plain JSON of this receipt is exactly MAX_RESULT, which Python

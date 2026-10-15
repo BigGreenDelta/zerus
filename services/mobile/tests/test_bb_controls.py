@@ -304,6 +304,15 @@ class DeliverySettingTests(SessionCase):
                 self.assertEqual(receipt, self.uncertain("native delivery setting acknowledgement did not match"))
                 await self.assert_replays(request, receipt, process)
 
+    async def test_invalid_values_or_fields_never_reach_native(self):
+        self.hgs.script(self.rules({"prefix": ["swarm", "preference"], "stdout": {"ok": True, "mobile_delivery": "away"}}))
+        process = await self.launch()
+        for payload in ({}, None, ["away"], {"value": "AWAY"}, {"value": 5}, {"value": "away", "request_id": "fixture"}):
+            with self.subTest(payload=payload):
+                request = self.envelope("set_mobile_delivery", payload, session="", identity=False)
+                self.assertEqual(await self.outcome(request, process), self.failed("invalid phone notification timing"))
+        self.assertEqual(self.native_calls(), [])
+
     async def test_hgs_without_the_preference_abi_advertises_and_runs_nothing(self):
         self.hgs.script(self.rules({"prefix": ["swarm", "preference"], "stdout": {"ok": True}}, markers=()))
         process = await self.launch()

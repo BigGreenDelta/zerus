@@ -221,7 +221,7 @@ The other `AttachmentRelayTests` are relay cases.
 |---|---|---|
 | `MobileDeliveryConnectorTests.test_exact_native_command_and_receipt_are_returned_once` | `test_bb_controls.test_each_value_runs_its_fixed_command_once`; its 10 s budget: `test_bb_native_limits.test_a_mutation_out_of_its_budget_is_uncertain_and_never_retried` | covered |
 | `MobileDeliveryConnectorTests.test_mismatched_acknowledgement_is_uncertain_and_never_replayed` | `test_bb_controls.test_a_mismatched_acknowledgement_is_uncertain_and_never_repeated` | covered |
-| `MobileDeliveryConnectorTests.test_invalid_values_sessions_or_fields_never_spawn` | the `set_mobile_delivery` vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` | covered |
+| `MobileDeliveryConnectorTests.test_invalid_values_sessions_or_fields_never_spawn` | `test_bb_controls.test_invalid_values_or_fields_never_reach_native` (empty, missing and non-object payloads, extra fields), the `set_mobile_delivery` vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` | covered |
 | `MobileDeliveryConnectorTests.test_unsupported_native_cli_fails_before_any_mutation` | `test_bb_controls.test_hgs_without_the_preference_abi_advertises_and_runs_nothing` | covered |
 | `MobileDeliveryFixtureTests.test_only_the_gateway_advertises_and_its_snapshot_reports_the_value` | `test_bb_controls.test_each_value_runs_its_fixed_command_once` (advertised), `test_the_snapshot_reports_the_setting_with_or_without_an_hgs_version`; a peer never advertising it: H4 | partial |
 
