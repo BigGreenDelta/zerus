@@ -249,6 +249,9 @@ fn checked_input(
     if claude_resume::current(&record).is_some() {
         return Err("Claude is waiting for a conversation resume choice. Choose an option in Activity or Terminal before sending a message.".into());
     }
+    if claude_usage_limit::current(&record).is_some() {
+        return Err("Claude is waiting for a usage-limit choice. Choose an option in Activity or Terminal before sending a message.".into());
+    }
     if claude_permission::current(&record).is_some() {
         return Err("Claude is waiting for a permission mode choice. Choose an option in Activity or Terminal before sending a message.".into());
     }

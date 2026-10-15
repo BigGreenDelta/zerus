@@ -311,7 +311,7 @@ pub(super) fn dismissable(record: &Value, live: bool) -> bool {
         && !awaiting_start(record)
         && !compact_context::pending(record)
 }
-const STARTUP_CHOICES: [&str; 3] = ["claude_resume", "claude_permission_mode", "claude_folder_trust"];
+const STARTUP_CHOICES: [&str; 4] = ["claude_resume", "claude_permission_mode", "claude_folder_trust", "claude_usage_limit"];
 /// Esc can end a launch at a startup chooser; Activity answers those instead.
 pub(super) fn startup_choice(cards: &Value) -> bool {
     cards.as_array().into_iter().flatten().any(|card| STARTUP_CHOICES.contains(&string(card,"source")))
@@ -325,7 +325,7 @@ fn checked_chooser(name: &str, request: &Request) -> Result<Value> {
         return Err("the exact agent process is no longer running; resume it explicitly".into());
     }
     if !dismissable(&record,true) {return Err("Claude is no longer waiting in a chooser; refresh before clearing".into());}
-    if claude_resume::current(&record).is_some() || claude_permission::current(&record).is_some() || claude_trust::current(&record).is_some() {
+    if claude_resume::current(&record).is_some() || claude_permission::current(&record).is_some() || claude_trust::current(&record).is_some() || claude_usage_limit::current(&record).is_some() {
         return Err("Answer Claude's startup choice in Activity or Terminal before clearing".into());
     }
     input::checked_terminal(&record,false)?;

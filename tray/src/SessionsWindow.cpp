@@ -2988,10 +2988,20 @@ void SessionsWindow::renderAccountUsage()
 {
     const auto *entry=selected();const bool visible=m_pages->currentIndex()==0 && entry && entry->session.tracked && entry->session.archiveId.isEmpty() && m_subagentId.isEmpty();
     // Hide only when it should go: hiding and showing again would close an open popover on every refresh.
-    m_usageStrip->setVisible(visible);if(!visible){m_usageLimit->setActive(false);m_usageRefresh->setRefreshing(false);return;}
+    m_usageStrip->setVisible(visible);if(!visible){m_recovery->setUsageNotice({});m_usageLimit->setActive(false);m_usageRefresh->setRefreshing(false);return;}
     m_accountUsageData=m_usageStore->data(AccountUsageRef::bound(entry->host,entry->session));m_accountUsage->setData(m_accountUsageData);
-    const auto warning=AccountUsage::exhausted(m_accountUsageData);m_usageWarning->setText(warning);
-    m_usageLimit->setLabels(AccountUsage::exhaustedSummary(m_accountUsageData),tr("Limit"));m_usageLimit->setDetail(warning);
+    QString notice;
+    const auto failure=m_details.value("provider_error").toObject();
+    if(entry->online && entry->session.cmd=="claude" && m_details.value("run_id").toString()==entry->session.runId
+        && m_details.value("conversation_id").toString()==entry->session.conversationId
+        && m_details.value("provider_status_at").toDouble()>=entry->session.providerStatusAt
+        && (m_details.value("phase")=="error" || m_details.value("attention_id").toString().startsWith("claude-usage-limit:"))
+        && (failure.value("error_kind")=="quota" || failure.value("error_kind")=="session_limit"))
+        notice=AccountUsage::limitRecoveryNotice(m_accountUsageData,failure.value("at").toDouble());
+    m_recovery->setUsageNotice(notice);
+    const auto exhausted=AccountUsage::exhausted(m_accountUsageData);const auto warning=exhausted.isEmpty()?notice:exhausted;m_usageWarning->setText(warning);
+    m_usageLimit->setTone(exhausted.isEmpty()?ChipTone::Neutral:ChipTone::Danger);
+    m_usageLimit->setLabels(exhausted.isEmpty()?tr("Usage available"):AccountUsage::exhaustedSummary(m_accountUsageData),exhausted.isEmpty()?tr("Usage"):tr("Limit"));m_usageLimit->setDetail(warning);
     m_usageLimit->setActive(!warning.isEmpty());
     m_usageRefresh->setRefreshing(m_accountUsageData["refreshing"].toBool());
     m_usageRefresh->setEnabled(entry->online && !m_accountUsageData["refreshing"].toBool());
