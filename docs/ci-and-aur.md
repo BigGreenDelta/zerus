@@ -480,7 +480,9 @@ nothing unverified is kept. The result is aqtinstall's layout,
 and `qconfig.pri` patches find nothing to change in 6.10.3, and `qtenv2.bat` is
 for interactive shells. Compared with an aqtinstall 3.3.0 installation of the
 same release (on Linux, 2026-10-15), all other 11807 entries matched, except
-for the line endings of `qconfig.pri`, which aqtinstall rewrites in text mode. The
+for the line endings of `qconfig.pri`, which aqtinstall rewrites in text mode. On
+Windows that rewrite keeps the archive's CRLF in `qconfig.pri` but gave the LF
+`lib/*.prl` files CRLF, which only qmake reads; they now stay LF. The
 installer also writes `zerus-qt.json`, the archive list it installed, and the
 `Use Qt` step checks it with `--check`, so a restored cache must match the pin
 too.

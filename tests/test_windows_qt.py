@@ -265,7 +265,10 @@ class WindowsQtInstallation(unittest.TestCase):
         path = f"desktop/qt6_6103/qt6_6103/{package}/6.10.3-0-202603310407{module}-Windows-X86_64.7z"
         output = self.repository / path
         output.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([self.tool.program, "a", "-bd", "-snl", str(output), *sorted(os.listdir(content))],
+        # 7-Zip's own wildcard, not file names: p7zip (the 7z of the macOS runners)
+        # follows a link named on its command line, failing on a dangling one, and
+        # stores a link only when a wildcard finds it.
+        subprocess.run([self.tool.program, "a", "-bd", "-snl", str(output), "*"],
                        cwd=content, check=True, capture_output=True)
         payload = output.read_bytes()
         return {"path": path, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(), "target": target}
