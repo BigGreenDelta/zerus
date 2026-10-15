@@ -8989,6 +8989,9 @@ void TestSessionsWindow::goToOpensAndActivatesItems()
         return GoToItem{};
     };
     goTo->hide();
+    // Hiding the popup directly does not hand activation back on every
+    // platform plugin (macOS offscreen); window chords need the active window.
+    window.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window));
     // A session on another computer opens and becomes the selection.
     const auto review = find(GoToItem::Session, "infra / review"); QCOMPARE(review.id, QString("mac\nclaude/infra/review"));
     emit goTo->activated(review);
@@ -9007,6 +9010,7 @@ void TestSessionsWindow::goToOpensAndActivatesItems()
     emit goTo->activated(empty);
     QCOMPARE(pages->currentIndex(), 1);
     // Recently opened sessions come first with an empty query.
+    window.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window));
     pressCommand(&window, "go.sessions");
     pressCommand(&window, "go.anywhere");
     QTRY_VERIFY(goTo->isVisible());
