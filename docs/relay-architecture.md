@@ -3,8 +3,9 @@
 The current server runtime is Rust; see [its implementation and qualification
 contract](../services/mobile/relay/README.md). API v1, database identities and
 no-replay guarantees below remain authoritative. Sections describing Python
-executors, the GIL, parser allocation and the 2026-10-09 measurements describe
-the reference implementation and historical deployment, not Rust performance.
+executors, the GIL, parser allocation, the Python store interface, the
+SQLite-to-PostgreSQL migration and the 2026-10-09 measurements describe the
+reference implementation and historical deployment, not Rust performance.
 
 This is the implementation contract for the October 2026 relay audit remediation
 (`zerus-6ir`, `zerus-bp9`, `zerus-bou`, `zerus-cvz`, coordinated by `zerus-rvc`).
@@ -231,7 +232,8 @@ startup subscription race; initialize the listener before the first state
 query. See [NOTIFY](https://www.postgresql.org/docs/18/sql-notify.html) and
 [LISTEN](https://www.postgresql.org/docs/18/sql-listen.html). Pool reset removes
 listeners, so do not return the dedicated connection to the pool between
-waits; see the [asyncpg pool contract](https://magicstack.github.io/asyncpg/current/api/index.html#connection-pools).
+waits. The Rust relay keeps a separate `PgListener` connection; the historical
+Python store followed the [asyncpg pool contract](https://magicstack.github.io/asyncpg/current/api/index.html#connection-pools).
 
 Run global retention on a separate cadence, with an elected/locked PostgreSQL
 maintenance worker and bounded batches (initially 256 rows). Index deadlines
@@ -249,10 +251,12 @@ rejection and credential revocation checks.
 ## Store contract and implementation boundaries
 
 HTTP handlers and push workers access an async store, never a raw connection.
-The synchronous SQLite `Store` remains available for offline administration and
-existing fixtures; its adapter serializes bounded operations off the event loop.
-Production uses `PostgresStore` with bounded pool acquisition and statement
-timeouts. Credentials and DSNs are read from private runtime configuration.
+Credentials and DSNs are read from private runtime configuration.
+
+Historical: the Python reference implemented this boundary. Its synchronous
+SQLite `Store` remains for compatibility fixtures, behind an adapter that
+serializes bounded operations off the event loop. Its production `PostgresStore`,
+with bounded pool acquisition and statement timeouts, was removed after v0.42.2.
 
 The agreed high-level interface is:
 
@@ -287,7 +291,12 @@ the store owns durable quotas, distributed leases and identity/state transitions
 
 ## Migration and cutover
 
-Provide an offline, explicit SQLite-to-PostgreSQL migration command. It reads a
+Historical: the cutover below completed on 2026-10-09. The offline
+`migrate-sqlite` command was removed after v0.42.2, the last stable release that
+contains it; SQLite installations still move with that release, as described in
+[SQLite installations](mobile-deployment.md#sqlite-installations).
+
+The command was specified as follows. It reads a
 consistent SQLite backup and imports into an empty target in a transaction,
 refusing a nonempty or mismatched target. Preserve all IDs, token/code hashes,
 request body hashes, states, timestamps, push registrations and event IDs; reset
@@ -378,8 +387,8 @@ retained mutation ledger still need operational sizing as traffic grows.
 ## Measured envelope, 2026-10-09
 
 These synthetic loopback results validate the bounded implementation; they are
-not a production fleet benchmark. The reusable probes are
-[`relay_scale.py`](../services/mobile/tests/relay_scale.py) and
+not a production fleet benchmark. The probes were `relay_scale.py`, removed
+with the Python PostgreSQL store after v0.42.2, and
 [`relay_load.py`](../services/mobile/tests/relay_load.py). Python 3.12.13 ran two
 HTTP processes against an isolated PostgreSQL instance. The scale dataset had
 100,000 mutation tombstones and 100,000 event rows. Maintenance and provider

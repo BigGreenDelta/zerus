@@ -249,7 +249,16 @@ impl Store {
     }
     pub async fn revoke_computer(&self, id: &str) -> Result<()> {
         let mut t = self.db.begin().await?;
-        let c=t.one("SELECT c.* FROM computers c LEFT JOIN computer_aliases a ON a.computer_id=c.id WHERE c.id=? OR a.alias=? LIMIT 1",args![id,id]).await?.ok_or(Error::NOT_FOUND)?;
+        // An alias wins, as in routing: a bound direct enrollment keeps its
+        // superseded computer row under the same ID.
+        let alias=t.one("SELECT c.* FROM computer_aliases a JOIN computers c ON c.id=a.computer_id WHERE a.alias=? LIMIT 1",args![id]).await?;
+        let c = match alias {
+            Some(c) => c,
+            None => t
+                .one("SELECT * FROM computers WHERE id=?", args![id])
+                .await?
+                .ok_or(Error::NOT_FOUND)?,
+        };
         self.db.payload_usage(&mut t, s(&c, "workspace_id")).await?;
         registry::revoke_computer(&self.db, &mut t, &c).await?;
         let topic = format!("workspace:{}", s(&c, "workspace_id"));
