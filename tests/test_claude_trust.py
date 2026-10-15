@@ -107,6 +107,9 @@ class FolderTrust(unittest.TestCase):
         self.assertTrue(self.card['can_answer'])
         self.assertIn('17 tool permissions', self.card['questions'][0]['body'])
         self.assertIn('/work/example', self.card['questions'][0]['body'])
+        # No conversation to fork yet; model settings wait for the chooser.
+        self.assertEqual((state['fork_supported'], state['fork_reason']), (False, 'Wait for a confirmed conversation before forking'))
+        self.assertNotIn('fork', state['allowed_actions']);self.assertEqual(state['settings_apply_when'], 'ready')
         p = fixtures.InputTransport.payload(self)
         self.assertIn('trust approval', fixtures.InputTransport.send(self, p, success=False))
         self.assertEqual(self.received(), b'')

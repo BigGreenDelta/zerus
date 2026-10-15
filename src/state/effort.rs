@@ -893,6 +893,21 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         "effort_scope":"session"})
 }
 
+/// A live session's summary while a chooser that only the terminal shows
+/// waits for an answer. Its saved record stays idle, but `hgs effort` and an
+/// immediate settings change refuse the chooser (`input::checked_settings`):
+/// effort changes wait for it, and settings changes are scheduled for Ready.
+/// Earlier reasons keep precedence.
+pub(super) fn wait_for_chooser(output: &mut Value, reason: &str) {
+    if output["settings_apply_when"] == "now" {
+        output["settings_apply_when"] = json!("ready");
+    }
+    if output["effort_change_supported"] == true {
+        output["effort_change_supported"] = json!(false);
+        output["effort_change_reason"] = json!(reason);
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -2256,6 +2271,23 @@ mod tests {
         assert_eq!(effort_reason(&kimi, false, true), "Waiting for the provider's model and effort settings");
         kimi["agent"] = json!("opencode");
         assert_eq!(effort_reason(&kimi, true, true), "Use the provider's Terminal to change effort");
+    }
+    #[test]
+    fn a_terminal_chooser_schedules_settings_and_keeps_earlier_reasons() {
+        let reason = "Wait until the agent's question is answered";
+        let output = |when: &str, effort: &str| {
+            let mut output = json!({"settings_apply_when":when,"settings_change_supported":true,"settings_change_reason":"",
+                "effort_change_supported":effort.is_empty(),"effort_change_reason":effort});
+            wait_for_chooser(&mut output, reason);
+            output
+        };
+        assert_eq!(output("now", ""), json!({"settings_apply_when":"ready","settings_change_supported":true,
+            "settings_change_reason":"","effort_change_supported":false,"effort_change_reason":reason}));
+        // A busy or stopped session keeps its own timing and reasons.
+        for (when, effort) in [("ready", "Wait for Ready to change effort"), ("resume", "Resume the session to change effort")] {
+            assert_eq!(output(when, effort), json!({"settings_apply_when":when,"settings_change_supported":true,
+                "settings_change_reason":"","effort_change_supported":false,"effort_change_reason":effort}));
+        }
     }
     #[test]
     fn provider_settings_ignore_text_and_thinking_content() {

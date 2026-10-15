@@ -30,6 +30,24 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         "fork_source_name":record.get("fork_source_name").unwrap_or(&Value::Null)})
 }
 
+/// A live session's summary while a chooser that only the terminal shows
+/// waits for an answer. Its saved record stays idle, but the fork's
+/// `input::checked_ready` refuses the chooser, so the fork and the listed fork
+/// action wait for it. An earlier reason keeps its precedence.
+pub(super) fn wait_for_chooser(output: &mut Value, reason: &str) {
+    if output["fork_supported"] != true {
+        return;
+    }
+    output["fork_supported"] = json!(false);
+    output["fork_reason"] = json!(reason);
+    if let Some(actions) = output["allowed_actions"].as_array_mut() {
+        actions.retain(|action| action != "fork");
+    }
+    if let Some(reasons) = output["action_reasons"].as_object_mut() {
+        reasons.insert("fork".into(), json!(reason));
+    }
+}
+
 fn fork_argv(record: &Value, new_id: Option<&str>) -> Result<Vec<String>> {
     let agent = string(record, "agent");
     let mut argv = recipes::resume_argv(
@@ -300,6 +318,26 @@ mod tests {
             // A stopped session forks its saved context.
             assert_eq!(unavailable(&record, false), None, "{case}");
         }
+    }
+    #[test]
+    fn a_terminal_chooser_keeps_earlier_fork_reasons() {
+        let reason = "Wait until the agent's question is answered";
+        let mut stale = telemetry::stale_hook_child();
+        stale["base"] = json!(["kimi"]);
+        let mut output = summary(&stale, true);
+        output["allowed_actions"] = json!(["rename", "fork"]);
+        output["action_reasons"] = json!({});
+        wait_for_chooser(&mut output, reason);
+        assert_eq!((&output["fork_supported"], &output["fork_reason"]), (&json!(false), &json!(reason)));
+        assert_eq!(output["allowed_actions"], json!(["rename"]));
+        assert_eq!(output["action_reasons"], json!({"fork": reason}));
+        // A trust or update panel before the first message: the conversation
+        // is unconfirmed, which stays the reason.
+        stale["conversation_id"] = json!("");
+        let mut output = summary(&stale, true);
+        wait_for_chooser(&mut output, reason);
+        assert_eq!(output, summary(&stale, true));
+        assert_eq!(output["fork_reason"], "Wait for a confirmed conversation before forking");
     }
     #[test]
     fn forks_use_exact_parent_and_preserve_safe_launch_options() {

@@ -458,44 +458,67 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     if live_pane {
         // Native startup choosers have no hook. A later recognized panel wins;
         // an unrecognized chooser before a conversation stays visible read-only.
-        type Current = fn(&Value) -> Option<Value>;
-        let choosers: [(Current, &str, &str); 10] = [
-            (claude_approval::current, "approval", "Claude is waiting for your tool or safety approval"),
-            (claude_resume::current, "approval", "Claude is waiting for your conversation resume choice"),
-            (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
-            (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
-            (codex_trust::current, "approval", "Codex is waiting for folder trust approval"),
-            (codex_hooks_trust::current, "approval", "Codex is waiting for hook trust review"),
-            (codex_update::current, "input", "Codex is waiting for an update choice"),
-            (codex_goal_resume::current, "input", "Codex is waiting for your paused goal choice"),
-            (kimi_trust::current, "approval", "Kimi is waiting for folder trust approval"),
-            (kimi_cache_hint::current, "input", "Kimi is waiting for your context choice"),
-        ];
-        let mut recognized = false;
-        for (current, phase, detail) in choosers {
-            if let Some(question) = current(record) {
-                recognized = true;
-                output["activity"] = json!("busy");
-                output["phase"] = json!(phase);
-                output["attention_id"] = question["question_id"].clone();
-                output["status_detail"] = json!(detail);
-            }
+        let recognized = terminal_chooser(record);
+        if let Some((question, phase, detail)) = &recognized {
+            output["activity"] = json!("busy");
+            output["phase"] = json!(phase);
+            output["attention_id"] = question["question_id"].clone();
+            output["status_detail"] = json!(detail);
         }
         // A resumed conversation reported this panel as an unknown terminal state.
         if output["attention_id"].as_str().is_some_and(|id| id.starts_with("codex-goal-resume:")) {
             output["activity_detail"] = output["status_detail"].clone();
             output["resume_message_reason"] = json!(codex_goal_resume::WAIT);
         }
-        let fallback = if recognized { None } else { startup_choice::current(record) };
+        let fallback = if recognized.is_some() { None } else { startup_choice::current(record) };
+        let shown = recognized.is_some() || fallback.is_some();
         if let Some(question) = fallback {
             output["activity"] = json!("busy");
             output["phase"] = json!("input");
             output["attention_id"] = question["question_id"].clone();
             output["status_detail"] = json!(startup_choice::detail(record, &question));
         }
+        if shown {
+            wait_for_chooser(&mut output);
+        }
     }
     recovery::enrich(record, &mut output);
     output
+}
+
+/// The native chooser the terminal shows, which no hook reports: its
+/// question, the phase the summary shows and its detail. A later recognized
+/// panel wins. Dispatch refuses each of them (`input::checked_input`).
+pub(super) fn terminal_chooser(record: &Value) -> Option<(Value, &'static str, &'static str)> {
+    type Current = fn(&Value) -> Option<Value>;
+    let choosers: [(Current, &str, &str); 10] = [
+        (claude_approval::current, "approval", "Claude is waiting for your tool or safety approval"),
+        (claude_resume::current, "approval", "Claude is waiting for your conversation resume choice"),
+        (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
+        (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
+        (codex_trust::current, "approval", "Codex is waiting for folder trust approval"),
+        (codex_hooks_trust::current, "approval", "Codex is waiting for hook trust review"),
+        (codex_update::current, "input", "Codex is waiting for an update choice"),
+        (codex_goal_resume::current, "input", "Codex is waiting for your paused goal choice"),
+        (kimi_trust::current, "approval", "Kimi is waiting for folder trust approval"),
+        (kimi_cache_hint::current, "input", "Kimi is waiting for your context choice"),
+    ];
+    choosers
+        .into_iter()
+        .filter_map(|(current, phase, detail)| current(record).map(|question| (question, phase, detail)))
+        .last()
+}
+
+/// A chooser only the terminal shows leaves the saved activity idle, so the
+/// summary offered the actions that need Ready before it recognized the
+/// chooser. Dispatch refuses the chooser, as for clear and compaction: a live
+/// fork and an effort change wait until it is answered, and a settings change
+/// is scheduled for Ready instead of applied now.
+fn wait_for_chooser(output: &mut Value) {
+    if let Some(reason) = clear_context::answer_first(string(output, "phase")) {
+        fork::wait_for_chooser(output, reason);
+        effort::wait_for_chooser(output, reason);
+    }
 }
 
 const MESSAGE_EVENTS_LIMIT: usize = 100;
@@ -1216,6 +1239,38 @@ pub(super) fn settle_children(record: &mut Value) {
 #[cfg(test)]
 mod attention_regressions {
     use super::*;
+
+    #[test]
+    fn a_terminal_chooser_holds_back_forks_and_immediate_settings_as_dispatch_does() {
+        // A Ready saved record; the summary shows a chooser only the terminal
+        // reports. Dispatch refuses it, so inspect and the listing agree.
+        let mut record = telemetry::stale_hook_child();
+        record["base"] = json!(["kimi"]);
+        let shown = |phase: &str| {
+            let mut output = fork::summary(&record, true);
+            for part in [session_action::summary(&record, true, &None),
+                json!({"phase":phase,"settings_apply_when":"now","effort_change_supported":true,"effort_change_reason":""})] {
+                output.as_object_mut().unwrap().extend(part.as_object().unwrap().clone());
+            }
+            wait_for_chooser(&mut output);
+            output
+        };
+        let ready = shown("idle");
+        assert_eq!((&ready["fork_supported"], &ready["fork_reason"]), (&json!(true), &json!("")));
+        assert!(ready["allowed_actions"].as_array().unwrap().contains(&json!("fork")));
+        assert_eq!((&ready["settings_apply_when"], &ready["effort_change_supported"]), (&json!("now"), &json!(true)));
+        for (phase, reason) in [("input", "Wait until the agent's question is answered"),
+            ("approval", "Wait until the agent's approval request is answered")] {
+            let output = shown(phase);
+            assert_eq!((&output["fork_supported"], &output["fork_reason"]), (&json!(false), &json!(reason)), "{phase}");
+            assert!(!output["allowed_actions"].as_array().unwrap().contains(&json!("fork")), "{phase}");
+            assert_eq!(output["action_reasons"]["fork"], reason, "{phase}");
+            // The change is scheduled for Ready; `hgs effort` refuses it.
+            assert_eq!(output["settings_apply_when"], "ready", "{phase}");
+            assert_eq!((&output["effort_change_supported"], &output["effort_change_reason"]), (&json!(false), &json!(reason)), "{phase}");
+            assert!(output["allowed_actions"].as_array().unwrap().contains(&json!("rename")), "{phase}");
+        }
+    }
 
     #[test]
     fn claude_pasted_content_keeps_only_the_text_the_person_sent() {
