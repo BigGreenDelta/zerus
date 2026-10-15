@@ -2093,6 +2093,13 @@ print(p.read_text() if 'inspect' in sys.argv and p.exists() else '{}')
     auto *menuClear=window.findChild<QAction *>("clearSessionAction");
     QVERIFY(!cacheClear->isEnabled());QVERIFY(!detailsClear->isEnabled());QVERIFY(!menuClear->isEnabled());
     QCOMPARE(cacheClear->toolTip(),working+'.');QCOMPARE(detailsClear->toolTip(),working+'.');QCOMPARE(menuClear->toolTip(),working+'.');
+    // An offline host's last report no longer explains the actions.
+    auto offline=fleet();auto peer=*offline.peer("mac");peer.ok=false;offline.setPeer(peer,QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(offline);QVERIFY(!cacheClear->isEnabled());QVERIFY(!detailsClear->isEnabled());
+    QCOMPARE(cacheClear->toolTip(),QString::fromUtf8("Clear this agent’s conversation, like /clear in Terminal. Your unsent message stays here."));
+    QCOMPARE(detailsClear->toolTip(),QString("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
+    QCOMPARE(menuClear->toolTip(),detailsClear->toolTip());
+    window.setFleet(fleet());apply();QCOMPARE(cacheClear->toolTip(),working+'.');QCOMPARE(detailsClear->toolTip(),working+'.');
     // A Claude chooser still allows Dismiss and clear, so that action keeps its usual text.
     details["clear_context_dismiss"]=true;apply();
     QVERIFY(detailsClear->isEnabled());QVERIFY(!cacheClear->isEnabled());QCOMPARE(cacheClear->toolTip(),working+'.');

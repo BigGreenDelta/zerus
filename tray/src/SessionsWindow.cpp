@@ -3073,7 +3073,9 @@ void SessionsWindow::renderDetails()
     const auto cacheWarning=entry?CacheStatus::warning(m_details):QString();m_cacheWarning->setText(cacheWarning);m_cacheWarning->setVisible(!cacheWarning.isEmpty());
     m_cacheDetail->setText(CacheStatus::details(m_details,recorded));m_cacheClear->setVisible(!cacheWarning.isEmpty());
     m_cacheClear->setEnabled(entry && entry->online && !m_clearRequest && m_details.value("clear_context_supported").toBool());
-    explainContextAction(m_cacheClear,entry?contextActionReason(m_details,"clear"):QString());
+    // An offline host's last inspection no longer explains the action.
+    const bool reported=entry && entry->online;
+    explainContextAction(m_cacheClear,reported?contextActionReason(m_details,"clear"):QString());
     const bool mainContext=m_subagentId.isEmpty();
     m_detailsClear->setVisible(mainContext);m_detailsContext->setVisible(mainContext);
     const bool canClear=mainContext && entry && entry->online && entry->session.state!="archived"
@@ -3082,7 +3084,7 @@ void SessionsWindow::renderDetails()
         && (m_details.value("clear_context_supported").toBool() || m_details.value("clear_context_dismiss").toBool());
     m_detailsClear->setEnabled(canClear);
     // A Claude chooser still allows Dismiss and clear.
-    const auto clearReason=entry && !m_details.value("clear_context_dismiss").toBool()?contextActionReason(m_details,"clear"):QString();
+    const auto clearReason=reported && !m_details.value("clear_context_dismiss").toBool()?contextActionReason(m_details,"clear"):QString();
     explainContextAction(m_detailsClear,clearReason);explainContextAction(m_clearAction,clearReason);
     m_detailsClear->setText(m_clearRequest?tr("Clearing…"):tr("Clear session"));
     // A live agent clears natively; a stopped one starts fresh instead.
