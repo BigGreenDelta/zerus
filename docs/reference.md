@@ -474,6 +474,21 @@ the option disabled with a window-menu/rules workaround. Files and terminals
 opened from Zerus may appear behind it. Missing Git metadata does not turn
 a folder into a repository.
 
+The project button beside the machine chooser focuses Sessions on one or more
+logical projects. Check projects to apply changes immediately; selected projects
+appear as removable chips. **All projects** clears this restriction. Right-click
+a project band for **Only this project**, **Add to project filter** (or **Remove
+from project filter**) and **Show all projects**. Multiple projects form a union,
+narrowed by the machine, state, folder and search filters. Selection stays local
+to the open workspace while navigating sections; an explicit session link or
+Overview scope opens its requested context. Renaming a project retains selection,
+and new projects do not join an explicit selection automatically.
+
+The project chooser shows parent-session counts for the current state, machine
+and folder scope before project selection or text search, including zero counts.
+Its open checkboxes and selection stay in place during polling. A removed selected
+project remains as **Unavailable project** until removed from the filter.
+
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
 each session once. Desktop and Android use the same filter IDs and membership
@@ -505,7 +520,7 @@ the docked width are local preferences.
 Search names, IDs, folders, branches and models immediately. From two characters,
 content search also reads public Codex, Claude and Kimi messages and saved tool
 events on each host, and DeepSeek messages through a running native host
-([DeepSeek](#deepseek)). Machine and state filters narrow results; the all-sessions
+([DeepSeek](#deepseek)). Project, machine and state filters narrow results; the all-sessions
 view includes archives. Results open the recorded message; **Back to latest
 activity** returns to the live timeline. **Limited history searched**, **Some
 history unavailable** and excerpt labels describe incomplete coverage. Internal
@@ -1596,7 +1611,7 @@ restriction. A temporary connectivity error retains the last snapshot and makes
 unavailable controls explicit.
 
 The machine chooser shows each computer's session count, including zero, and an
-All machines total. Counts follow the current session state filter and folder
+All machines total. Counts follow the current session state, project and folder
 scope before machine selection or text search; child rows and unconfirmed launch
 placeholders do not add sessions. An open chooser updates counts without replacing
 its checkboxes or changing the selection. Offline computers retain their last

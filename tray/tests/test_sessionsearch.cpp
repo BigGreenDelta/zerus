@@ -21,6 +21,7 @@ private slots:
     void activeScopeIncludesDraftsAndRefreshesMembership();
     void staleQueriesCannotReplaceCurrentResults();
     void multipleMachinesScopeSearch();
+    void projectScopeKeepsExactLiveArchiveAndRemoteMembership();
     void folderScopeFollowsTheMachinePathStyle();
     void selectionSurvivesFleetPollsAndExplicitRefresh();
     void errorsFollowHostScopeAndRecoverWhenPeerConnects();
@@ -99,6 +100,20 @@ QJsonArray TestSessionSearch::calls() const
     QJsonArray result; for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) result.append(QJsonDocument::fromJson(line).array());
     return result;
 }
+void TestSessionSearch::projectScopeKeepsExactLiveArchiveAndRemoteMembership()
+{
+    SessionSearch search(FakeCli::program(script())); search.show();
+    search.setScope(fleet(),"all",{}); search.setQuery("needle");
+    search.setProjectScope({"\ncodex/docs/live\narchive-one", "mac\nkimi/remote"},true);
+    QTRY_COMPARE(list(search)->count(),2);
+    QVERIFY(list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("Archive"));
+    search.setHostsScope(fleet(),"all",{"@local"}); QCOMPARE(list(search)->count(),1);
+    search.setProjectScope({},true); QCOMPARE(list(search)->count(),0); // An empty project has no matches.
+    search.setProjectScope({},false); QCOMPARE(list(search)->count(),3);
+    search.setProjectScope({"\ncodex/docs/live"},true); QCOMPARE(list(search)->count(),1);
+    QVERIFY(!list(search)->item(0)->data(Qt::AccessibleTextRole).toString().contains("Archive"));
+}
+
 void TestSessionSearch::resultsKeepArchivesRunsAndRemoteIdentities()
 {
     SessionSearch search(FakeCli::program(script())); search.resize(340, 500); search.show();

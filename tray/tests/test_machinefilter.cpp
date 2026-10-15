@@ -10,6 +10,9 @@
 #include <QTemporaryDir>
 #include <QVBoxLayout>
 #include "MachineFilter.h"
+#include "ProjectFilter.h"
+#include <QScrollArea>
+#include <QScrollBar>
 #include "MachineAppearance.h"
 
 class TestMachineFilter : public QObject {
@@ -76,6 +79,44 @@ private slots:
         QVERIFY(choices["mac"]->accessibleName().contains("4 sessions"));
         const auto current=menu->findChildren<QCheckBox *>("machineFilterChoice"); QVERIFY(current.contains(choices["mac"]));
         QCOMPARE(choices["empty"]->property("sessionCount").toInt(),0); menu->close();
+    }
+    void projectChoicesKeepIdentityCountsAndMissingSelection_data() {
+        QTest::addColumn<bool>("dark"); QTest::newRow("light") << false; QTest::newRow("dark") << true;
+    }
+    void projectChoicesKeepIdentityCountsAndMissingSelection() {
+        QFETCH(bool,dark);
+        QWidget page; auto *layout=new QVBoxLayout(&page); auto *filter=new ProjectFilter;
+        layout->addWidget(filter->button()); layout->addWidget(filter); layout->addStretch();
+        SessionOrganization org; const auto first=org.createGroup("Same name"),second=org.createGroup("Same name");
+        org.setColor(first,"#ff8800"); filter->setProjects(org.groups()); filter->setTheme(dark);
+        filter->setSessionCounts({{first,4},{second,2}},"Active / selected machines"); page.resize(260,400); page.show();
+        QSignalSpy changed(filter,&ProjectFilter::selectionChanged);
+        auto *menu=filter->button()->menu(); menu->popup(page.mapToGlobal(QPoint(0,30))); QTRY_VERIFY(menu->isVisible());
+        QMap<QString,QCheckBox *> choices;
+        for(auto *choice:menu->findChildren<QCheckBox *>("projectFilterChoice")) choices[choice->property("project").toString()]=choice;
+        QCOMPARE(choices.size(),3); choices[first]->click(); choices[second]->click(); QVERIFY(menu->isVisible());
+        QCOMPARE(filter->selection(),(QSet<QString>{first,second})); QCOMPARE(changed.size(),2);
+        filter->setSessionCounts({{first,1},{second,0}},"Archive");
+        QCOMPARE(choices[first]->property("sessionCount").toInt(),1); QCOMPARE(choices[second]->property("sessionCount").toInt(),0);
+        QCOMPARE(menu->findChild<QPushButton *>("allProjectFilters")->text(),QString("All projects (1)"));
+        QVERIFY(choices[first]->isChecked()); QVERIFY(choices[second]->isChecked()); QCOMPARE(changed.size(),2);
+        org.renameGroup(first,"Renamed & retained"); filter->setProjects(org.groups());
+        QCOMPARE(choices[first]->text(),QString("Renamed && retained (1)"));
+        QCOMPARE(menu->findChildren<QCheckBox *>("projectFilterChoice").size(),3);
+        QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        for(auto *chip:filter->findChildren<QPushButton *>("projectFilterChip")) if(chip->property("project")==first) chip->click();
+        QCOMPARE(filter->selection(),QSet<QString>{second}); QVERIFY(!choices[first]->isChecked());
+        filter->setConcealed(true); filter->setProjects(org.groups()); QVERIFY(filter->isHidden());
+        filter->setConcealed(false); QVERIFY(!filter->isHidden());
+        org.removeGroup(second); filter->setProjects(org.groups()); QCOMPARE(filter->selection(),QSet<QString>{second});
+        QCOMPARE(choices[second]->text(),QString("Unavailable project (0)"));
+        menu->hide(); menu->popup(page.mapToGlobal(QPoint(0,30)));
+        menu->findChild<QPushButton *>("allProjectFilters")->click(); QVERIFY(filter->selection().isEmpty()); QVERIFY(filter->isHidden()); QVERIFY(menu->isVisible()); menu->hide();
+        // A large catalog stays bounded and scrollable. New entries never join an explicit selection.
+        filter->setSelection({first}); for(int i=0;i<60;++i) org.createGroup(QString("Project %1").arg(i)); filter->setProjects(org.groups());
+        menu->popup(page.mapToGlobal(QPoint(0,30))); QCOMPARE(filter->selection(),QSet<QString>{first});
+        auto *scroll=menu->findChild<QScrollArea *>("projectFilterChoices"); QVERIFY(scroll); QVERIFY(scroll->height()<=324);
+        QTRY_VERIFY(scroll->verticalScrollBar()->maximum()>0); menu->hide();
     }
     void controlOnlyComputerIsNoFilterChoice() {
         QWidget page; auto *layout=new QVBoxLayout(&page); auto *filter=new MachineFilter;

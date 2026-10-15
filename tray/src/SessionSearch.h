@@ -16,6 +16,7 @@ public:
     void setQuery(const QString &query);
     void setScope(const FleetState &fleet, const QString &filter, const QString &host, const QSet<QString> &drafts = {});
     void setHostsScope(const FleetState &fleet, const QString &filter, const QSet<QString> &hosts, const QSet<QString> &drafts = {});
+    void setProjectScope(const QSet<QString> &sessionKeys, bool enabled);
     void setTheme(bool dark);
     void setFolderScope(const QString &host,const QString &path,bool checkout);
     bool active() const { return !m_query.isEmpty(); }
@@ -34,7 +35,8 @@ private:
     HgsClient m_client;
     FleetState m_fleet;
     QString m_query, m_filter, m_selectedHit;
-    QSet<QString> m_hosts;
+    QSet<QString> m_hosts, m_projectKeys;
+    bool m_projectScope = false;
     QSet<QString> m_drafts;
     QString m_folderHost,m_folderPath;bool m_folderCheckout=false;
     QString m_pressedCurrentKey;
