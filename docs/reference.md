@@ -926,6 +926,13 @@ the current settings without retrying the stale request or showing a failure.
 `hgs [@host] settings SESSION --json` exposes the same scoped operation.
 
 Native clear/compact operations are capability-gated and require exact identity.
+When they are unavailable, `hgs inspect` reports why in `clear_context_reason` and
+`compact_context_reason`, empty while the action is available. A busy session names
+what keeps it from Ready: the main agent's turn and tools, and each working subagent
+with its current tool, up to three, then a count. The desktop shows the reason as
+the tooltip of the disabled **Clear context**, **Clear session** and
+**Compact and continue** actions, and as a line in the cold-cache confirmation.
+Hosts from before these fields leave the actions disabled without a reason.
 **Clear session** requires confirmation naming the session and host, preserves
 unsent drafts and rechecks identity. While Claude shows an approval, question or
 another chooser, **Clear session** asks for a separate **Dismiss and clear**

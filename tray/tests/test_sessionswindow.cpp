@@ -40,6 +40,7 @@
 #include <memory>
 #include <QTemporaryDir>
 #include <QTextBrowser>
+#include <QTextDocument>
 #include <QTextTable>
 #include <QTabWidget>
 #include <QTabBar>
@@ -260,6 +261,7 @@ private slots:
     void nativeColdCacheChoiceKeepsExactAnswer_data();
     void nativeColdCacheChoiceKeepsExactAnswer();
     void coldCacheClearKeepsDraftAndPinsIdentity();
+    void coldCacheExplainsUnavailableContextActions();
     void stoppedSessionStartsFreshOrSendsAfterStart();
     void localStartsAskAboutAnotherWindowsSession();
     void clearInspectionUpdatesActivityAndCountersImmediately();
@@ -2037,6 +2039,96 @@ else: print('{}')
     auto *progress=window.findChild<ActivityView *>("mainActivity")->compactionIndicator();auto *context=window.findChild<QWidget *>("activityContext");
     QVERIFY(progress->isVisible());QVERIFY(qAbs(progress->mapToGlobal(progress->rect().center()).y()-context->mapToGlobal(context->rect().center()).y())<=2);
     const auto preview=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(window.grab().save(preview+"/compaction-footer.png"));}
+}
+
+void TestSessionsWindow::coldCacheExplainsUnavailableContextActions()
+{
+    QTemporaryDir temp;const auto program=temp.filePath("hgs");
+    QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import pathlib,sys
+p=pathlib.Path(__file__).parent/'details.json'
+print(p.read_text() if 'inspect' in sys.argv and p.exists() else '{}')
+)PY");fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    // The main turn finished, but a workflow child still works: the host names it.
+    const QString working=QString::fromUtf8("Wait until the agent reports Ready. Still working: subagent “<b>workflow-subagent</b>” running Bash");
+    // What a tooltip displays: Qt renders a tooltip that looks like HTML as rich text.
+    const auto shownTip=[](const QString &tip){if(!Qt::mightBeRichText(tip))return tip;QTextDocument document;document.setHtml(tip);return document.toPlainText();};
+    QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},{"runtime_state","live"},{"process_state","running"},
+        {"activity","busy"},{"phase","working"},{"compact_context_supported",false},{"clear_context_supported",false},
+        {"compact_context_reason",working},{"clear_context_reason",working},{"cache_hint",QJsonObject{{"status","cold"},{"tokens",756000}}}};
+    // Inspections read details.json at any time: replace it atomically and write it
+    // before selecting the session.
+    const auto writeDetails=[&]{QVERIFY(FakeCli::replace(temp.filePath("details.json"),QJsonDocument(details).toJson()));};
+    writeDetails();
+    SessionsWindow window(FakeCli::program(program));keepDetailsPollsOut(window);window.resize(1080,760);window.setFleet(fleet());
+    window.show();window.showSession("mac","claude/infra/review");
+    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    const auto apply=[&]{writeDetails();settleSelectedInspection(composer,client,"mac","claude/infra/review",details);};
+    apply();setComposerText(composer,"Keep this draft");const auto key=composer->sessionKey();
+    auto *send=composer->findChild<QPushButton *>("sendMessage");QVERIFY(send->isEnabled());
+    // Opens the send confirmation once it is shown, records its context actions and cancels.
+    struct Shown{bool seen=false,compact=false,clear=false,plain=false;QString compactTip,clearTip,line;} shown;
+    const auto confirm=[&]{
+        shown={};auto *poll=new QTimer(&window);poll->setInterval(5);QElapsedTimer age;age.start();
+        QObject::connect(poll,&QTimer::timeout,&window,[poll,age,&window,&shown,shownTip]{
+            auto *dialog=window.findChild<QMessageBox *>("coldCacheConfirm");
+            if(!(dialog&&dialog->isVisible())&&age.elapsed()<5000)return;
+            poll->stop();poll->deleteLater();if(!dialog||!dialog->isVisible())return;
+            shown.seen=true;shown.line=dialog->informativeText();
+            // The reported names stay literal text.
+            const auto labels=dialog->findChildren<QLabel *>();
+            shown.plain=std::any_of(labels.cbegin(),labels.cend(),[&](const QLabel *label){return label->text()==shown.line;})
+                && std::all_of(labels.cbegin(),labels.cend(),[&](const QLabel *label){
+                    return label->text()!=shown.line||label->textFormat()==Qt::PlainText;});
+            for(auto *button:dialog->buttons()){
+                if(button->text()=="Compact and continue"){shown.compact=button->isEnabled();shown.compactTip=shownTip(button->toolTip());}
+                if(button->text()=="Clear context"){shown.clear=button->isEnabled();shown.clearTip=shownTip(button->toolTip());}
+            }
+            dialog->button(QMessageBox::Cancel)->click();});
+        poll->start();send->click();};
+    confirm();QVERIFY(shown.seen);QVERIFY(!shown.compact);QVERIFY(!shown.clear);QVERIFY(shown.plain);
+    QCOMPARE(shown.compactTip,working+'.');QCOMPARE(shown.clearTip,working+'.');
+    QCOMPARE(shown.line,"Compact and continue and Clear context are unavailable. "+working+'.');
+    QVERIFY(!composer->isSending(key));QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));
+    // The persistent clear controls carry the same reason.
+    auto *cacheClear=window.findChild<QPushButton *>("cacheClearContext");auto *detailsClear=window.findChild<QPushButton *>("clearSessionFromDetails");
+    auto *menuClear=window.findChild<QAction *>("clearSessionAction");
+    QVERIFY(!cacheClear->isEnabled());QVERIFY(!detailsClear->isEnabled());QVERIFY(!menuClear->isEnabled());
+    QCOMPARE(shownTip(cacheClear->toolTip()),working+'.');QCOMPARE(shownTip(detailsClear->toolTip()),working+'.');QCOMPARE(shownTip(menuClear->toolTip()),working+'.');
+    // An offline host's last report no longer explains the actions.
+    auto offline=fleet();auto peer=*offline.peer("mac");peer.ok=false;offline.setPeer(peer,QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(offline);QVERIFY(!cacheClear->isEnabled());QVERIFY(!detailsClear->isEnabled());
+    QCOMPARE(cacheClear->toolTip(),QString::fromUtf8("Clear this agent’s conversation, like /clear in Terminal. Your unsent message stays here."));
+    QCOMPARE(detailsClear->toolTip(),QString("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
+    QCOMPARE(menuClear->toolTip(),detailsClear->toolTip());
+    window.setFleet(fleet());apply();QCOMPARE(shownTip(cacheClear->toolTip()),working+'.');QCOMPARE(shownTip(detailsClear->toolTip()),working+'.');
+    // A Claude chooser still allows Dismiss and clear, so that action keeps its usual text.
+    details["clear_context_dismiss"]=true;apply();
+    QVERIFY(detailsClear->isEnabled());QVERIFY(!cacheClear->isEnabled());QCOMPARE(shownTip(cacheClear->toolTip()),working+'.');
+    const QString usualClear="Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept.";
+    QCOMPARE(detailsClear->toolTip(),usualClear);QCOMPARE(menuClear->toolTip(),usualClear);
+    details.remove("clear_context_dismiss");
+    // Each action names its own reason; an available one keeps its usual text.
+    const QString resuming="The agent has not confirmed the resumed conversation yet";
+    details["compact_context_reason"]=resuming;details["clear_context_supported"]=true;details["clear_context_reason"]="";apply();
+    confirm();QVERIFY(shown.seen);QVERIFY(!shown.compact);QVERIFY(shown.clear);
+    QCOMPARE(shown.compactTip,resuming+'.');QVERIFY(shown.clearTip.isEmpty());
+    QCOMPARE(shown.line,"Compact and continue is unavailable. "+resuming+'.');
+    const QString usualCache=QString::fromUtf8("Clear this agent’s conversation, like /clear in Terminal. Your unsent message stays here.");
+    QVERIFY(cacheClear->isEnabled());QCOMPARE(cacheClear->toolTip(),usualCache);QCOMPARE(detailsClear->toolTip(),usualClear);
+    const QString unconfirmed="The last compaction was not confirmed. Check Terminal.";
+    details["compact_context_supported"]=true;details["compact_context_reason"]="";
+    details["clear_context_supported"]=false;details["clear_context_reason"]=unconfirmed;apply();
+    confirm();QVERIFY(shown.seen);QVERIFY(shown.compact);QVERIFY(!shown.clear);
+    QCOMPARE(shown.compactTip,QString("Run native /compact, then send this draft only after successful completion."));
+    QCOMPARE(shown.clearTip,unconfirmed);QCOMPARE(shown.line,"Clear context is unavailable. "+unconfirmed);
+    // An older host reports no reason: the actions stay disabled without one.
+    details["compact_context_supported"]=false;details.remove("compact_context_reason");details.remove("clear_context_reason");apply();
+    confirm();QVERIFY(shown.seen);QVERIFY(!shown.compact);QVERIFY(!shown.clear);QVERIFY(shown.line.isEmpty());
+    QCOMPARE(shown.compactTip,QString("Run native /compact, then send this draft only after successful completion."));QVERIFY(shown.clearTip.isEmpty());
+    QCOMPARE(cacheClear->toolTip(),usualCache);QCOMPARE(detailsClear->toolTip(),usualClear);QCOMPARE(menuClear->toolTip(),usualClear);
+    QVERIFY(!composer->isSending(key));QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));
 }
 
 void TestSessionsWindow::processPollingFollowsVisibilityAndSettings()
