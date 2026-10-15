@@ -16,6 +16,14 @@
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- The GUI must get CPU like an app started from Finder. Without ProcessType
+         launchd spawns a daemon and clamps every thread, the main one included, to
+         priority 20: below ordinary load at 31, even niced load. Ten `nice` busy
+         loops starved the whole window until the watchdog aborted it, while other
+         apps stayed responsive. A QoS request from inside the process stays under
+         that clamp; only Interactive lifts it. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
     <!-- Только после крэша (смерть по сигналу: SIGABRT, SIGSEGV...), не после любого
          выхода: у launchd нет аналога RestartPreventExitStatus, а трей штатно выходит с
          кодом 4, когда строки меню нет, -- KeepAlive=true крутил бы его в цикле. Крэш

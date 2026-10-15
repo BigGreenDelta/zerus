@@ -139,6 +139,17 @@ zerus-setup --autostart   # start Zerus at login
 zerus-setup --workers     # recovery and swarm background workers
 ```
 
+Through 0.42.2, `--autostart` wrote a LaunchAgent that launchd runs as a background
+daemon: whenever other programs keep every core busy, the Zerus window stops
+responding and is restarted after 30 seconds. Run `zerus-setup --autostart` again
+after upgrading to update it. It applies at your next login; to apply it now, quit
+Zerus from its menu and reload the agent:
+
+```sh
+launchctl bootout "gui/$(id -u)/com.hgdev.hgs-tray"
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.hgdev.hgs-tray.plist
+```
+
 `brew upgrade --cask zerus` (or `zerus@nightly`) replaces the application but never
 quits it, unloads its LaunchAgents or stops tmux and native agents. When the
 installed bundle is another build than the running GUI, Zerus shows **Restart to

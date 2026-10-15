@@ -1811,6 +1811,12 @@ and installs it under `~/Applications/hgs-tray.app` with
 for the tray. Signing precedes bundle replacement; matching code hashes avoid
 unnecessary replacement. Ad-hoc signing is not a Developer ID distribution
 signature. LaunchAgent crash recovery is independent of native agent engines.
+The LaunchAgent runs with `ProcessType` `Interactive` and the GUI thread requests
+user-interactive QoS, as for an app started from Finder. Without that key launchd
+starts a daemon and clamps all its threads below ordinary CPU load, niced load
+included: a busy machine then starves the whole window until the main-thread
+watchdog aborts it, and no QoS request from inside the process lifts the clamp.
+`launchctl print "gui/$(id -u)/com.hgdev.hgs-tray"` shows `spawn type = interactive`.
 Finder, the Dock and Spotlight start the bundle without the LaunchAgent's `--hgs`
 and with PATH `/usr/bin:/bin:/usr/sbin:/sbin`; the desktop then finds the CLI in
 the standard install directories listed under **Desktop option** below.

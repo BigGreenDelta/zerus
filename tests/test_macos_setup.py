@@ -5,6 +5,7 @@ import io
 import os
 from pathlib import Path
 import plistlib
+import re
 import runpy
 import shutil
 import subprocess
@@ -88,6 +89,12 @@ class MacSetup(unittest.TestCase):
     def launchctl_calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
+    def test_tray_agent_template_runs_as_an_interactive_job(self):
+        # Without ProcessType launchd starts the GUI as a daemon and clamps all its
+        # threads below ordinary CPU load; the whole window then stops responding.
+        template = re.sub(r"<!--.*?-->", "", (ROOT / "tray/packaging/com.hgdev.hgs-tray.plist").read_text(), flags=re.S)
+        self.assertEqual(plistlib.loads(template.encode()).get("ProcessType"), "Interactive")
+
     def test_default_setup_creates_links_into_the_bundle(self):
         self.run_setup()
         for name, target in (("hgs", "Contents/MacOS/hgs"), ("hgs_state.py", "Contents/Resources/setup/hgs_state.py")):
@@ -164,7 +171,24 @@ class MacSetup(unittest.TestCase):
                          [str(self.app.resolve() / "Contents/MacOS/hgs-tray"), "--hgs",
                           str(self.app.resolve() / "Contents/MacOS/hgs")])
         self.assertEqual(definition["StandardErrorPath"], str(self.home / "Library/Logs/hgs-tray.log"))
+        self.assertEqual(definition["ProcessType"], "Interactive")
         self.assertFalse([call for call in self.launchctl_calls() if LABELS["tray"] in call and "bootstrap" in call])
+
+    @unittest.skipUnless(sys.platform == "darwin", "LaunchAgents are installed on macOS only")
+    def test_autostart_makes_an_earlier_tray_agent_interactive_without_restarting_it(self):
+        self.run_setup("--autostart")
+        definition = plistlib.loads(self.agent("tray").read_bytes())
+        del definition["ProcessType"]
+        self.agent("tray").write_bytes(plistlib.dumps(definition))
+        with self.state.open("a") as state:   # the earlier agent is loaded
+            state.write(LABELS["tray"] + "\n")
+        calls = len(self.launchctl_calls())
+        result = self.run_setup("--autostart")
+        self.assertEqual(plistlib.loads(self.agent("tray").read_bytes())["ProcessType"], "Interactive")
+        # bootstrap alone fails for a loaded label: the hint reloads it.
+        self.assertIn(f"launchctl bootout gui/{os.getuid()}/{LABELS['tray']}", result.stdout)
+        repeated = self.launchctl_calls()[calls:]
+        self.assertFalse([call for call in repeated if call.split()[0] in {"bootout", "kickstart", "bootstrap"}], repeated)
 
     @unittest.skipUnless(sys.platform == "darwin", "LaunchAgents are installed on macOS only")
     def test_workers_are_opt_in(self):
