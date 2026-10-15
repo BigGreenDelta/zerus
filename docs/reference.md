@@ -1255,15 +1255,18 @@ background. Coverage reports checked/known worktrees and incomplete catalogs.
 After the first bounded repository review, unchecked known rows are checked
 individually, including rows beyond the native 64-row review limit. Catalogs
 remain bounded at 512 entries; this is not a scan of every folder on a computer.
-Offline snapshots remain readable but cannot be selected for removal.
+Offline snapshots remain readable and selectable for review; removal stays
+unavailable until the owning computer supplies a fresh check.
 Browsing data is retained for one hour, across closing and reopening the manager.
 The coverage line shows when catalogs were updated; **Refresh** rereads them and
 clears the selected cleanup candidates. The open manager refreshes hourly, and
 worktree creation/removal invalidates the affected computer/repository cache.
-External Git changes can be picked up with **Refresh**. Cleanup selections still
-require checks less than five minutes old: refresh before selecting expired
-candidates. Removal always repeats native safety checks; a cached browsing verdict
-never authorizes deletion. Changed fingerprints invalidate previous selections.
+External Git changes can be picked up with **Refresh**. **Select candidates** uses
+checks less than five minutes old. Selecting rows is independent of deletion
+eligibility: Ctrl/Cmd-click, Shift-click and checkboxes select multiple folders in
+any group. **Review cleanup** always checks the selected targets afresh; native
+removal repeats those checks under the repository and session locks. A cached
+browsing verdict never authorizes deletion.
 
 Selecting a folder loads its files and commits after a short navigation debounce.
 The inspector distinguishes loading, an empty list and a failed read with retry.
@@ -1289,10 +1292,12 @@ have session icons and retain their exact conversation targets.
 **Select candidates** selects only currently visible, verified cleanup candidates.
 Folders with local files outside Git require individual selection, even when
 Git reports them clean and merged. **Review cleanup** shows the exact selected
-folders across repositories and computers, estimated space and branch handling.
+folders across repositories and computers, branch handling and why any folder
+must stay. Folders outside the candidates group can be selected and removed too.
 Local data needs a separate explicit checkbox; deletion checks its reviewed
 metadata fingerprint again. A missing folder only loses its Git registration.
-Each result remains visible, and failures or uncertain replies are not replayed. **Stop after this folder**
+After complete success the dialog closes and the overview shows the result.
+Partial results and errors remain open; uncertain replies are not replayed. **Stop after this folder**
 lets the current operation finish and leaves the remaining folders untouched.
 
 Integration evidence distinguishes ancestor commits, identical file trees and
@@ -1300,7 +1305,7 @@ cherry-pick-equivalent patches. Equivalent content is useful when reviewing
 squash/cherry-pick workflows, but only Git ancestry permits optional branch
 removal. Original branches otherwise remain available.
 
-Removal is always explicit and is reviewed on the computer that owns the
+Manual removal is explicit and is reviewed on the computer that owns the
 checkout. **Clean up…** in Projects or the session inspector lists the linked
 worktrees of the repository as **Ready** (preselected), **Review** (removable but
 with notes such as local ignored files, unmerged commits, archived sessions or activity in the last
@@ -1310,27 +1315,50 @@ review runs at most every five minutes while the panel is visible and never
 removes anything. A worktree row's menu offers **Remove worktree…** or
 **Forget missing worktree…** for that checkout alone.
 
-A worktree is blocked when it is the main checkout or bare, is locked, has
-uncommitted or untracked files, contains another worktree, has initialized
+A worktree is protected when it is the main checkout or bare, is locked,
+contains another worktree or Git repository, has initialized
 submodules, has a detached commit that no branch, tag or remote branch contains,
 or is used by a process of this user or by a running, paused or saved Zerus
 session (archive the sessions first). Git's own removal would silently delete a
-nested worktree inside an ignored folder; Zerus refuses it.
+nested worktree inside an ignored folder; Zerus refuses it. An incomplete local
+file inventory, unreadable session bindings or special files also block removal.
+Uncommitted and untracked files require a separate **Permanently discard**
+confirmation in the manager. That consent is bound to the exact file contents
+and staged Git blobs (bounded to 64 MiB and two seconds), and does not override
+any other protection. A changed or incomplete proof requires a new review.
 
 Confirmation lists the folders, the ignored data deleted with them (such as build
 output) and any branches that will be deleted. Each removal then repeats the
 review under the repository lock used by creation, compares the reviewed
-fingerprint and runs `git worktree remove` without force, one worktree at a time.
+fingerprint and runs `git worktree remove`, one worktree at a time. It uses
+`--force` only for that explicit content-bound discard, never automatically.
 **Also delete merged branches** (off by default, remembered locally) uses
 `git branch -d` only for branches merged into the main checkout's branch or
 `origin/HEAD`; other branches are kept. A failure is reported for that worktree
 and never retried automatically.
 
-When **Move to archive** succeeds for the last session in a linked worktree, the
-status bar briefly offers **Clean up worktree…**, which opens the same review for
-that worktree. The CLI is `hgs [@host] worktrees review --path PATH
+After **Terminate**, explicit **Move to archive**, or a confirmed clean native
+exit, the owning CLI automatically removes only verified Zerus-created
+checkouts that are clean, have no local ignored data, have no remaining session
+or process, and are proven integrated by ancestry, identical tree or equivalent
+patches. It never fetches or deletes the branch. Ownership requires both a
+private creation receipt and the matching nonce in Git's per-worktree metadata;
+older or externally created worktrees remain manual. Folder/branch naming is
+not ownership evidence. Automatic cleanup has bounded checks and never changes
+a successful archive into a failed termination. A lost removal acknowledgement
+is reported as unconfirmed, with no automatic replay.
+
+The desktop reports successful automatic cleanup, or keeps **Review remaining
+worktree…** with the reason for keeping it after Terminate/Archive. This action
+does not expire after a minute. Archives keep the exact branch/head needed to
+recreate an automatically removed checkout on explicit **Restore**; a changed
+branch or occupied destination is refused. Browsing and dry runs never recreate
+a folder. Plain Pause never cleans up.
+
+The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE
---common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch]
+--common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH]
+[--discard-fingerprint HASH] [--delete-branch]
 --json`. Explicit inspection is `hgs [@host] worktrees inspect --path WORKTREE
 --common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.

@@ -162,7 +162,7 @@ class Worktrees(Repository,unittest.TestCase):
         self.assertEqual(len(self.catalog()['worktrees']),2)
 
 class Cleanup(Repository,unittest.TestCase):
-    """Review and guarded removal: nothing is forced and every check repeats before removal."""
+    """Guarded removal, with an explicit content-bound exception for manual discard."""
     def setUp(self):
         super().setUp();(self.repo/'.gitignore').write_text('target/\nartifacts/\n');self.commit(self.repo,'ignore build output',add=True)
     def commit(self,path,message,add=False):
@@ -325,5 +325,40 @@ class Cleanup(Repository,unittest.TestCase):
         locked=self.linked('locked');self.git('-C',str(self.repo),'worktree','lock',str(locked));shutil.rmtree(locked)
         row=self.row(locked);self.assertEqual(row['verdict'],'blocked');self.assertNotEqual(self.remove(locked,row['fingerprint']).returncode,0)
         self.assertTrue((self.repo/'.git/worktrees/locked').exists())
+
+    def test_manual_discard_requires_exact_content_and_preserves_unmerged_branch(self):
+        tree=self.linked('discard');(tree/'work.txt').write_text('committed');self.commit(tree,'unmerged work',add=True)
+        (tree/'work.txt').write_text('modified');(tree/'notes').mkdir();(tree/'notes/private.txt').write_text('local notes')
+        row=self.row(tree);self.assertEqual(row['verdict'],'blocked');self.assertTrue(row['discardable'])
+        self.assertNotEqual(self.remove(tree,row['fingerprint']).returncode,0)
+        before=(tree/'notes/private.txt').stat();(tree/'notes/private.txt').write_text('other notes');os.utime(tree/'notes/private.txt',ns=(before.st_atime_ns,before.st_mtime_ns))
+        stale=self.remove(tree,row['fingerprint'],extra=('--discard-fingerprint',row['discard_fingerprint']));self.assertNotEqual(stale.returncode,0);self.assertTrue(tree.exists())
+        row=self.row(tree);result=self.remove(tree,row['fingerprint'],extra=('--discard-fingerprint',row['discard_fingerprint'],'--delete-branch'))
+        self.assertEqual(result.returncode,0,result.stderr);self.assertFalse(tree.exists());self.assertFalse(json.loads(result.stdout)['branch_deleted'])
+        self.assertTrue(self.git('-C',str(self.repo),'show-ref','refs/heads/feature/discard'))
+
+    def test_manual_discard_cannot_override_local_consent_or_hard_blockers(self):
+        tree=self.linked('protected');(tree/'untracked.txt').write_text('keep');(tree/'target').mkdir();(tree/'target/notes').write_text('keep too')
+        row=self.row(tree);self.assertTrue(row['discardable'])
+        self.assertNotEqual(self.remove(tree,row['fingerprint'],extra=('--discard-fingerprint',row['discard_fingerprint'])).returncode,0)
+        self.git('-C',str(self.repo),'worktree','lock',str(tree));locked=self.row(tree);self.assertFalse(locked['discardable'])
+        self.assertNotEqual(self.remove(tree,locked['fingerprint'],extra=('--discard-fingerprint',row['discard_fingerprint'],'--ignored-fingerprint',row['ignored_fingerprint'])).returncode,0)
+        self.assertTrue((tree/'untracked.txt').exists())
+
+    def test_discard_refuses_unbounded_or_special_files_and_staged_changes_invalidate_proof(self):
+        tree=self.linked('proof');file=tree/'data';file.write_text('first');self.git('-C',str(tree),'add','data')
+        row=self.row(tree);self.assertTrue(row['discardable']);file.write_text('other');self.git('-C',str(tree),'add','data');file.write_text('first')
+        self.assertNotEqual(self.row(tree)['discard_fingerprint'],row['discard_fingerprint'])
+        with open(tree/'large','wb') as stream:stream.truncate(65*1024*1024)
+        self.assertFalse(self.row(tree)['discardable']);(tree/'large').unlink()
+        if hasattr(os,'mkfifo'):
+            os.mkfifo(tree/'pipe');self.assertFalse(self.row(tree)['discardable'])
+
+    def test_unreadable_binding_and_ignored_nested_repository_never_authorize_discard(self):
+        tree=self.linked('inventory');(tree/'notes.txt').write_text('keep');(tree/'artifacts').mkdir()
+        self.git('init','-q',str(tree/'artifacts/nested'))
+        row=self.row(tree);self.assertIn('nested_repository',codes(row['reasons']));self.assertFalse(row['discardable'])
+        shutil.rmtree(tree/'artifacts');state=self.root/'state';state.mkdir(exist_ok=True);broken=state/('f'*64+'.json');broken.write_text('{broken')
+        row=self.row(tree);self.assertIn('sessions_unavailable',codes(row['reasons']));self.assertFalse(row['discardable'])
 
 if __name__=='__main__':unittest.main()

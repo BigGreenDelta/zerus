@@ -718,6 +718,16 @@ void HgsClient::runWrite(const QString &op, const QStringList &args, int timeout
         const bool ok = !timedOut && !error && result.exitCode == 0 && result.exitStatus == QProcess::NormalExit;
         emit writeDone(op, ok, timedOut ? QStringLiteral("timed out") : error ? result.errorString
                                         : QString::fromLocal8Bit(result.standardError).trimmed());
+        if (ok && (op.startsWith("archive ") || op.startsWith("terminate "))) {
+            QJsonObject cleanup; int count = 0;
+            for (const auto &line : result.standardError.split('\n')) if (line.startsWith("ZERUS_WORKTREE_CLEANUP ")) {
+                cleanup = QJsonDocument::fromJson(line.mid(23)).object(); ++count;
+            }
+            if (count == 1 && !cleanup["path"].toString().isEmpty() && !cleanup["common_dir"].toString().isEmpty()) {
+                if (cleanup["status"] == "removed") invalidateWorktreeCache(host, cleanup["common_dir"].toString());
+                emit worktreeCleanupFinished(host, op, cleanup);
+            }
+        }
         // A failed batch can have completed some sessions. Refresh its own machine
         // even on failure, without mixing it up with concurrent project edits.
         if (sessionWrite)
@@ -740,7 +750,7 @@ void HgsClient::terminateSession(const QString &host, const QString &name, const
     QStringList args{"terminate",name};
     if(!run.isEmpty())args<<"--expected-run-id"<<run;
     if(!host.isEmpty())args.prepend('@'+host);
-    runWrite(QStringLiteral("terminate %1").arg(name),args,host.isEmpty()?15000:45000,true,host);
+    runWrite(QStringLiteral("terminate %1").arg(name),args,host.isEmpty()?45000:60000,true,host);
 }
 
 void HgsClient::killSession(const QString &host, const QString &name)
@@ -809,7 +819,7 @@ void HgsClient::archiveSession(const QString &host, const QString &name)
 {
     QStringList args{QStringLiteral("archive"), name};
     if (!host.isEmpty()) args.prepend(QLatin1Char('@') + host);
-    runWrite(QStringLiteral("archive %1").arg(name), args, host.isEmpty() ? 5000 : 15000, true, host);
+    runWrite(QStringLiteral("archive %1").arg(name), args, host.isEmpty() ? 30000 : 45000, true, host);
 }
 
 void HgsClient::renameSession(const QString &host, const QString &name, const QString &newName, const QString &archiveId)
@@ -1171,12 +1181,13 @@ quint64 HgsClient::inspectWorktree(const QString &host,const QString &path,const
     return request;
 }
 
-quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch,const QString &ignoredFingerprint)
+quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch,const QString &ignoredFingerprint,const QString &discardFingerprint)
 {
     const auto request=++m_worktreeRequest;const auto token=QUuid::createUuid().toString(QUuid::WithoutBraces);
     QStringList args{"worktrees","remove","--path",path,"--common-dir",commonDir,"--fingerprint",fingerprint,"--request-id",token,"--json"};
     if(deleteBranch)args<<"--delete-branch";if(!host.isEmpty())args.prepend('@'+host);
     if(!ignoredFingerprint.isEmpty())args<<"--ignored-fingerprint"<<ignoredFingerprint;
+    if(!discardFingerprint.isEmpty())args<<"--discard-fingerprint"<<discardFingerprint;
     const auto forget=[this,host,commonDir]{invalidateWorktreeCache(host,commonDir);};
     runHgs(m_hgs,args,330000,this,[this,request,token,path,forget](const QByteArray &out){
         forget();const auto data=QJsonDocument::fromJson(out).object();

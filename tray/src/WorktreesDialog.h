@@ -61,7 +61,7 @@ private:
     QMap<QString, QJsonObject> m_reviews;
     QMap<QString, QString> m_reviewErrors;
     QSet<QString> m_reviewAttempted;
-    QMap<QString, QString> m_checked;
+    QSet<QString> m_checked;
     qint64 m_autoRefreshAt = 0;
     quint64 m_generation = 0, m_reviewRequest = 0, m_reviewGeneration = 0;
     QString m_reviewKey, m_reviewWorktree;
@@ -71,6 +71,6 @@ private:
     QCheckBox *m_showMain;
     QTreeWidget *m_tree;
     WorktreeInspectionPanel *m_details;
-    QLabel *m_status;
+    QLabel *m_status, *m_result;
     QPushButton *m_refresh, *m_cleanup, *m_remove, *m_copy, *m_filters;
 };

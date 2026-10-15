@@ -168,8 +168,8 @@ private:
     bool confirmLocalStart(const Entry &original);
     void terminateSession();
     void archiveSession();
-    // After the last session in a linked worktree is archived, offer (never run)
-    // a review of that worktree for removal. Host, session, root, common dir.
+    // Native lifecycle cleanup reports its result after Archive or Terminate.
+    // Keep a review action for remaining work. Host, session, root, common dir.
     QStringList m_archivedWorktree;
     QPushButton *m_worktreeCleanup = nullptr;
     int m_worktreeCleanupRevision = 0;
