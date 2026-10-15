@@ -12,8 +12,9 @@ ROOT = Path(__file__).resolve().parents[2]
 # A Unix child of the desktop inherits every descriptor not yet close-on-exec
 # (tray/src/ChildProcess.h). In tray/src each QProcess therefore goes through
 # ChildProcess::inheritStdioOnly(), directly or through a function that passes
-# its QProcess parameter there, in the function that creates it and before it
-# starts. Only these files may start children otherwise:
+# its QProcess parameter there, in the function that creates it (for a member,
+# a constructor of its class) and before it starts. Only these files may start
+# children otherwise:
 CHILD_PROCESS_EXEMPT = {
     "tray/src/ChildProcess.h": "implements inheritStdioOnly() and startDetached()",
     "tray/src/WindowsTerminalBackend.cpp": "the app links it only on Windows, where inheritStdioOnly() does nothing",
@@ -116,6 +117,25 @@ def configurers(code, kind):
     return found
 
 
+def constructors(code):
+    """(start, end) of each constructor body here, out of line (Tool::Tool) or in its class."""
+    classes = "|".join(set(re.findall(r"\b(?:class|struct)\s+(?:[A-Z_]+\s+)?([A-Za-z_]\w*)\s*(?:final\s*)?[:{]", code)))
+    bodies = []
+    for match in re.finditer(rf"\b([A-Za-z_]\w*)\s*::\s*\1\s*\(" + (rf"|(?<![\w:~.>*&])(?:{classes})\s*\(" if classes else ""), code):
+        at = closing(code, match.end() - 1)
+        # Member initializers such as m_process{new QProcess(this)} may use braces as well.
+        while (item := re.compile(r"\s*(?:noexcept\s*)?([:,]\s*[\w:<>]+\s*)?([({])").match(code, at)) and item[1]:
+            at = closing(code, item.start(2))
+        if item and item[2] == "{":
+            bodies.append((item.start(2), closing(code, item.start(2))))
+    return bodies
+
+
+def configuring_constructor(code, names, helpers):
+    """(start, end) of the first constructor body here that passes one of the names to inheritStdioOnly()."""
+    return next(((first, last) for first, last in constructors(code) if configured(code, names, helpers, first, last)), None)
+
+
 def creations(code, kind):
     """(offset, end, variable names) of each QProcess made here; names are empty when none receives it."""
     made = [(match.start(), match.end(), [match[1]]) for match in
@@ -201,24 +221,29 @@ def child_process_findings(files):
                 continue
             scope = function_end(code, start)
             limit = min([scope or len(code)] + [later for later, _, other in made[index + 1:] if set(other) & set(names)])
-            at = configured(code, names, helpers, end, limit)
-            if not at and scope is None:
-                # A member: the class may configure it in its other sources (Tool.h and Tool.cpp).
-                stem = name.rsplit(".", 1)[0]
-                at = [0 for other, text in files.items() if other != name and CHILD_PROCESS_SOURCES.fullmatch(other)
-                      and other.rsplit(".", 1)[0] == stem and configured(code_only(text), names, helpers, 0, len(text))]
             if executed := re.compile(rf"(?<![\w.])(?<!->)(?:this\s*->\s*)?(?:{variables(names)})\s*(?:\.|->)\s*execute\s*\(") \
                     .search(code, end, limit):
                 found.append((executed.start(), "QProcess::execute() bypasses ChildProcess::inheritStdioOnly(), also on an object; "
                                                 "use a QProcess passed to inheritStdioOnly() and waitForFinished()"))
-            started = re.compile(rf"(?<![\w.])(?<!->)(?:this\s*->\s*)?({variables(names)})\s*(\.|->)\s*"
-                                 rf"(startDetached|startCommand|start|open)\s*\(").search(code, end, limit)
-            if not at:
+            # The configuration belongs in the rest of the function, or for a member in a constructor of its class,
+            # here or in its other sources (Tool.h and Tool.cpp).
+            where, text, first = name, code, end
+            if scope is None:
+                stem, limit = name.rsplit(".", 1)[0], end
+                for other in [name, *(other for other in files if other != name and CHILD_PROCESS_SOURCES.fullmatch(other)
+                                      and other.rsplit(".", 1)[0] == stem)]:
+                    other_code = code if other == name else code_only(files[other])
+                    if body := configuring_constructor(other_code, names, helpers):
+                        where, text, (first, limit) = other, other_code, body
+                        break
+            if not (at := configured(text, names, helpers, first, limit)):
                 found.append((start, f"QProcess {names[0]} is not passed to ChildProcess::inheritStdioOnly() "
                                      "in the function that creates it"))
-            elif started and started.start() < at[0]:
-                found.append((started.start(), f"{plain(started[1])}{started[2]}{started[3]}() comes before "
-                                               f"ChildProcess::inheritStdioOnly({plain(started[1])})"))
+            elif started := re.compile(rf"(?<![\w.])(?<!->)(?:this\s*->\s*)?({variables(names)})\s*(\.|->)\s*"
+                                       rf"(startDetached|startCommand|start|open)\s*\(").search(text, first, at[0]):
+                problems.append((where, text.count("\n", 0, started.start()) + 1,
+                                 f"{plain(started[1])}{started[2]}{started[3]}() comes before "
+                                 f"ChildProcess::inheritStdioOnly({plain(started[1])})"))
         problems += [(name, code.count("\n", 0, offset) + 1, reason) for offset, reason in found]
     return [f"{name}:{line}: {reason} {SEE_CHILD_PROCESS}." for name, line, reason in sorted(problems)]
 

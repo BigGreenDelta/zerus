@@ -138,6 +138,24 @@ class ProcessObjectTest(unittest.TestCase):
         self.assertEqual(findings(initialized), [])
         self.assertEqual(findings(initialized.replace("ChildProcess::", "// ")), [f"{NAME}:1: " + UNCONFIGURED.format("m_process")])
 
+    def test_a_member_is_configured_by_a_constructor_before_it_starts_there(self):
+        header = "#pragma once\n#include <QProcess>\n\nclass Tool : public QObject\n{\n    QProcess m_process;\n};\n"
+        later = ("Tool::Tool(QObject *parent) : QObject(parent)\n{\n}\n"
+                 "void Tool::run() { m_process.start(); }\n"
+                 "void Tool::restart()\n{\n    ChildProcess::inheritStdioOnly(m_process);\n    m_process.start();\n}\n")
+        self.assertEqual(findings(header, "tray/src/Tool.h", {"tray/src/Tool.cpp": later}),
+                         ["tray/src/Tool.h:6: " + UNCONFIGURED.format("m_process")])
+        early = ("Tool::Tool(QObject *parent) noexcept : QObject(parent), m_count{0}\n{\n    m_process.start();\n"
+                 "    ChildProcess::inheritStdioOnly(m_process);\n}\n")
+        self.assertEqual(findings(header, "tray/src/Tool.h", {"tray/src/Tool.cpp": early}), [
+            "tray/src/Tool.cpp:3: m_process.start() comes before ChildProcess::inheritStdioOnly(m_process) (tray/src/ChildProcess.h)."])
+        inline = ("class Tool : public QObject\n{\npublic:\n    void run() { m_process.start(); }\n"
+                  "    explicit Tool(QObject *parent = nullptr) : QObject(parent)\n    {\n"
+                  "        ChildProcess::inheritStdioOnly(m_process);\n    }\n\nprivate:\n    QProcess m_process;\n};\n")
+        self.assertEqual(findings(inline, "tray/src/Tool.h"), [])
+        self.assertEqual(findings(inline.replace("explicit Tool(", "void stop("), "tray/src/Tool.h"),
+                         ["tray/src/Tool.h:11: " + UNCONFIGURED.format("m_process")])
+
     def test_an_alias_from_a_header_is_a_process_where_it_is_included(self):
         header = {"tray/src/Worker.h": "#pragma once\n#include <QProcess>\n\nusing Worker = QProcess;\n"}
         text = "#include \"Worker.h\"\n\nvoid Launcher::run()\n{\n    Worker worker;\n    worker.start();\n}\n"

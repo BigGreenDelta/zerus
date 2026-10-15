@@ -40,7 +40,8 @@ job durations live in ignored `artifacts/test-results/`. Set
 ([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects
 `QProcess::startDetached()` and `QProcess::execute()`, and every `QProcess` must go to
 `ChildProcess::inheritStdioOnly()`, directly or through a function that passes its
-parameter there, in the function that creates it and before it starts.
+parameter there, in the function that creates it (for a member, a constructor of its
+class) and before it starts.
 `CHILD_PROCESS_EXEMPT` in the script names the files that may start children
 otherwise, each with its reason.
 
