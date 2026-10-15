@@ -126,6 +126,26 @@ private slots:
         if(protect)QVERIFY(notice->text().contains(output.contains("KillMode=")?QStringLiteral("KillMode=control-group"):QStringLiteral("KillMode=unknown")));
 #endif
     }
+    void reloadOffersRestartOnceProtectionApplies(){
+#ifdef Q_OS_LINUX
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto executable=temporaryRoot(dir)+"/systemctl",answer=temporaryRoot(dir)+"/answer";
+        const auto reply=[&answer](const QByteArray &mode){QFile file(answer);return file.open(QIODevice::WriteOnly)&&file.write("LoadState=loaded\nActiveState=active\nSubState=running\nKillMode="+mode+"\n")>0;};
+        QVERIFY(reply("control-group"));
+        QFile program(executable);QVERIFY(program.open(QIODevice::WriteOnly));
+        program.write("#!/bin/sh\nexec cat '"+answer.toUtf8()+"'\n");program.close();
+        QVERIFY(QFile::setPermissions(executable,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        // Reload starts a second probe, which must find the same systemctl.
+        const auto previous=qgetenv("PATH");qputenv("PATH",temporaryRoot(dir).toUtf8()+":"+previous);
+        const auto restore=qScopeGuard([previous]{qputenv("PATH",previous);});
+        RelaySettings::Panel panel(temporaryRoot(dir)+"/connector.json");
+        auto *restartRow=panel.findChild<QWidget*>("connectorRestartCommand");auto *protectRow=panel.findChild<QWidget*>("connectorProtectCommand");
+        auto *reload=panel.findChild<QPushButton*>("reloadRelayConfiguration");QVERIFY(restartRow&&protectRow&&reload);
+        QTRY_VERIFY(!protectRow->isHidden());QVERIFY(restartRow->isHidden());
+        // The user ran the protection command; Reload configuration probes again.
+        QVERIFY(reply("process"));reload->click();
+        QTRY_VERIFY(!restartRow->isHidden());QVERIFY(protectRow->isHidden());
+#endif
+    }
     void atomicPrivateSavePreservesUnrelatedConfiguration(){
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto path=temporaryRoot(dir)+"/connector.json";
         auto old=original(temporaryRoot(dir)+"/existing-state");QVERIFY(write(path,old.object));

@@ -178,11 +178,8 @@ server running starts one inside this service. `KillMode=process` limits systemd
 to the connector process itself when the service stops, restarts or exits; the
 default `control-group` mode also kills that tmux server and every agent in it.
 Restart the connector with `systemctl --user restart zerus-mobile-connector.service`;
-native agents keep running. Do not stop it while agents run: tmux builds with
-systemd support, such as Arch's, put panes in `tmux-spawn-*.scope` units that are
-`PartOf=` the unit holding the tmux server, so `systemctl --user stop` ends those
-panes whatever the kill mode. `systemctl --user show -p ConsistsOf
-zerus-mobile-connector.service` lists them.
+native agents keep running. Do not stop it while agents run; see
+[Protect running agents](#protect-running-agents).
 
 ### Protect running agents
 
@@ -203,6 +200,13 @@ applies from its next stop or restart. The last command reports the effective
 value and must print `KillMode=process`. A drop-in that already sets it is enough;
 one that sorts later, such as `override.conf` from `systemctl --user edit`, takes
 precedence over this file.
+
+Prefer `restart` to `stop`, whatever the kill mode. tmux builds with systemd
+support, such as Arch's, put every pane in a `tmux-spawn-*.scope` unit that is
+`PartOf=` the unit holding the tmux server, whichever client created the pane, so
+`systemctl --user stop` ends those panes. Stop a protected connector only when
+`systemctl --user show -p ConsistsOf zerus-mobile-connector.service` lists no
+`tmux-spawn-*.scope` units.
 
 ## Configure the connector from the desktop
 
@@ -287,8 +291,8 @@ worker does not understand the immutable route stored with a peer request.
 2. Temporarily block new phone request submissions while existing connector
    claims and result uploads drain. Check both relay queues and the connector's
    durable journal for running work and undelivered receipts. Then block claim
-   polling and stop only the connector service, after checking that it holds no
-   agent panes (see [Protect running agents](#protect-running-agents)).
+   polling and stop only the connector service, once it holds no agent panes
+   (see [Protect running agents](#protect-running-agents)).
 3. Take and verify a PostgreSQL backup. Stop every old relay worker before
    starting the new version; apply its additive registry schema and start all
    workers from the same reviewed image. Keep the existing database, credentials,

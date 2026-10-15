@@ -111,7 +111,7 @@ private:
         killMode->setVisible(loaded);restartCommand->setVisible(safe);protectCommand->setVisible(loaded&&!safe);
         static const QList<QByteArray> known{"control-group","mixed","none"};
         killMode->setText(safe?tr("A restart stops only the connector process (KillMode=process). Native agents keep running.")
-            :tr("The service reports KillMode=%1, not process: restarting it can also stop agents launched from the phone. Protect them first. This command adds a drop-in and reloads the user service manager without restarting anything; then reload this panel.").arg(known.contains(mode)?QString::fromLatin1(mode):tr("unknown")));
+            :tr("The service reports KillMode=%1, not process: restarting it can also stop agents launched from the phone. Protect them first. This command adds a drop-in and reloads the user service manager without restarting anything; then choose Reload configuration.").arg(known.contains(mode)?QString::fromLatin1(mode):tr("unknown")));
     }
     void probeService(){
 #ifdef Q_OS_LINUX
