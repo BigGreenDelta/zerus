@@ -124,3 +124,118 @@ class NativeClaudeSafety(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipUnless(native.CLAUDE, 'Set HGS_CLAUDE_TEST_BIN for real native workflow approvals')
+class NativeClaudeWorkflowSafety(unittest.TestCase):
+    """Real Agent workflow, real child hooks and safety panel; localhost API only."""
+    tool_name = 'Bash'
+    native_permission_mode = 'bypassPermissions'
+    script = native.NativeClaudeQuestions.script
+    tmux = native.NativeClaudeQuestions.tmux
+    write_record = native.NativeClaudeQuestions.write_record
+    wait_for = native.NativeClaudeQuestions.wait_for
+    screen = native.NativeClaudeQuestions.screen
+    inspect = native.NativeClaudeQuestions.inspect
+    answer = questions.Questions.answer
+    payload = questions.Questions.payload
+    choose = NativeClaudeSafety.choose
+    native_tool_input = NativeClaudeSafety.native_tool_input
+
+    def native_settings(self, work):
+        import sys
+        config = self.root / '.claude.json'
+        config.write_text(json.dumps(dict(json.loads(config.read_text()), hasSeenAutoDefaultNudge=True)))
+        script = self.root / 'capture-hook.py'
+        script.write_text('import fcntl,json,pathlib,sys\n'
+                          'event=json.load(sys.stdin)\n'
+                          'with pathlib.Path(__file__).with_name("native-hooks.jsonl").open("a") as out:\n'
+                          ' fcntl.flock(out,fcntl.LOCK_EX)\n'
+                          ' out.write(json.dumps(event)+"\\n")\n')
+        command = shlex.quote(sys.executable) + ' ' + shlex.quote(str(script))
+        return {'hooks': {name: [{'hooks': [{'type': 'command', 'command': command}]}]
+                          for name in ('PreToolUse', 'PermissionRequest', 'PostToolUse', 'PostToolUseFailure', 'SubagentStop')}}
+
+    def native_response_blocks(self, body):
+        messages = body.get('messages', [])
+        child = any('WORKFLOW_CHILD_FIXTURE' in str(m.get('content', '')) and m.get('role') == 'user' for m in messages)
+        tool_id = 'toolu_child_fixture' if child else 'toolu_parent_fixture'
+        answered = any(isinstance(m.get('content'), list) and any(
+            part.get('type') == 'tool_result' and part.get('tool_use_id') == tool_id
+            for part in m['content']) for m in messages)
+        if answered:
+            return [dict(type='text', text='Fixture complete.')]
+        if child:
+            return [dict(type='tool_use', id=tool_id, name='Bash', input=self.tool_input)]
+        if any(t.get('name') == 'Agent' for t in body.get('tools', [])):
+            return [dict(type='tool_use', id=tool_id, name='Agent', input=dict(
+                description='fixture-checks', subagent_type='general-purpose',
+                prompt='WORKFLOW_CHILD_FIXTURE: run the requested fixture tool.', run_in_background=True))]
+        return [dict(type='text', text='Fixture complete.')]
+
+    def hook(self, event):
+        # Base setup synthesizes main-agent hooks for older contracts. This
+        # fixture instead replays the real native child's hooks verbatim below.
+        pass
+
+    def replay_hooks(self):
+        path = self.root / 'native-hooks.jsonl'
+        events = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        for event in events[self.hook_offset:]:
+            self.assertEqual(event['session_id'], self.conversation_id)
+            questions.Questions.hook(self, event)
+        self.hook_offset = len(events)
+        return events
+
+    def setUp(self):
+        self.hook_offset = 0
+        native.NativeClaudeQuestions.setUp(self)
+        events = self.replay_hooks()
+        requests = [e for e in events if e['hook_event_name'] == 'PermissionRequest']
+        self.assertEqual(len(requests), 1, events)
+        self.child_id = requests[0].get('agent_id')
+        self.assertTrue(self.child_id, events)
+        self.assertEqual(requests[0]['tool_input']['command'], self.tool_input['command'])
+        self.card = self.inspect()['pending_questions'][0]
+        self.assertEqual(self.card['agent_id'], self.child_id)
+        self.assertTrue(self.card['can_answer'], self.card)
+        self.assertIn('Bash command · from the ', self.card['questions'][0]['body'])
+
+    def test_workflow_approve_once_and_native_completion(self):
+        original = self.card['question_hash']
+        time.sleep(1.1)
+        self.assertEqual(self.inspect()['pending_questions'][0]['question_hash'], original)
+        payload = self.choose('Yes')
+        self.answer(payload)
+        self.wait_for(lambda: (self.root / 'work/approved.txt').exists())
+        self.assertEqual(self.answer(payload)['status'], 'answered')
+        self.replay_hooks()
+        self.assertEqual(self.inspect()['pending_questions'], [])
+        self.assertNotEqual(json.loads(self.record_path.read_text())['phase'], 'interrupted')
+
+    def test_workflow_deny_does_not_interrupt_parent_or_siblings(self):
+        # An unrelated live sibling and parent's active tool are retained.
+        record = json.loads(self.record_path.read_text())
+        parent_tools = record['active_tools']
+        record.update(phase='idle', main_done=True)
+        record.setdefault('subagents', {})['fixture-sibling'] = dict(name='sibling', state='working')
+        self.record_path.write_text(json.dumps(record))
+        payload = self.choose('No')
+        self.answer(payload)
+        self.assertFalse((self.root / 'work/approved.txt').exists())
+        record = json.loads(self.record_path.read_text())
+        self.assertEqual(record['active_tools'], parent_tools)
+        self.assertEqual(record['subagents']['fixture-sibling']['state'], 'working')
+        self.assertNotEqual(record['phase'], 'interrupted')
+        self.assertEqual(self.answer(payload)['status'], 'answered')
+
+    def test_wrapped_workflow_deny_at_87_columns(self):
+        self.test_workflow_deny_does_not_interrupt_parent_or_siblings()
+
+    def test_workflow_duplicate_command_is_not_routed_to_arbitrary_child(self):
+        questions.Questions.hook(self, dict(hook_event_name='PermissionRequest', agent_id='fixture-other-child',
+                                          tool_name='Bash', tool_input=self.tool_input))
+        self.assertFalse(self.inspect()['pending_questions'][0]['can_answer'])
+        self.answer(self.choose('Yes'), success=False)
+        self.assertIn('Do you want to proceed?', self.screen())
+        self.assertFalse((self.root / 'work/approved.txt').exists())

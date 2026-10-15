@@ -760,6 +760,22 @@ the decision. Without a matching permission request, or when the full command
 is clipped, the card offers **Open Terminal**. With a complete matching request,
 Activity can submit the native **Yes** or **No** choice. Claude's unattended
 denial countdown stays visible without replacing the request as it ticks.
+Desktop keeps the card's scroll, chosen option and review delay through these
+countdown updates. A changed command, warning or set of choices requires a new
+review.
+
+Bash approvals from Claude's subagents and workflows use the same Activity
+choices when one recorded child permission request matches the complete visible
+command. The answer is bound to that child request as well as the parent run and
+conversation; a repeated command is a new request. Identical pending requests
+from multiple children, missing hook evidence and clipped commands remain
+read-only. Other child tool approvals still require Terminal. A child's answer
+never interrupts the parent or clears a sibling's request; completion follows
+that child's own native events. Parent progress alone does not settle child
+permissions. Pending evidence is bounded without evicting an ambiguous request;
+if its limit is exceeded, approvals remain in Terminal until the next native
+session starts. Read-only native choices are visibly disabled, with **Open
+Terminal** as their action.
 
 Claude Code can also ask its own questions without an agent tool call, such as
 whether to switch models after a safeguard stop. Activity shows the question and

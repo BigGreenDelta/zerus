@@ -130,6 +130,7 @@ pub(super) fn from_hook(record: &Value, event: &Value) -> Option<Value> {
 }
 
 pub(super) fn observe(record: &mut Value, event: &Value) {
+    claude_approval::observe_children(record,event);
     if !string(event, "agent_id").is_empty() {
         return;
     }

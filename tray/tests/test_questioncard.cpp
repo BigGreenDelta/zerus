@@ -151,6 +151,8 @@ private slots:
     void contentHeightPreservesActivityAndPinsFreeformAnswer();
     void currentQuestionAndOtherAnswerResizeTheForm();
     void reviewCountdownAndNextNavigation();
+    void nativeCountdownPreservesScrollChoiceAndReview();
+    void terminalOnlyChoicesDoNotPretendToAcceptAnswers();
     void claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes();
     void unreadableApprovalPointsToTerminal();
     void optionalQuestionsHaveExplicitSkipAndKeepDrafts();
@@ -444,6 +446,61 @@ void TestQuestionCard::claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes()
     option(card,"4")->click();QTRY_VERIFY(submit(card)->isEnabled());submit(card)->click();QCOMPARE(sent.size(),2);
     QCOMPARE(sent.last()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"4"});
     const auto preview=qEnvironmentVariable("HGS_APPROVAL_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(card.grab().save(preview+"/claude-approval.png"));}
+}
+
+void TestQuestionCard::nativeCountdownPreservesScrollChoiceAndReview()
+{
+    QuestionCard card; card.resize(700, 450); card.show(); card.activateWindow(); QApplication::setActiveWindow(&card);
+    card.setReviewDelayForTests(600);
+    auto approval = request("claude-approval:child", "child-request-one");
+    approval["source"] = "claude_tool_approval"; approval["approval"] = true; approval["approval_choices"] = true;
+    QString body = "Bash command · from the \"fixture-checks\" workflow\n\n";
+    for (int i = 0; i < 45; ++i) body += QString("printf fixture-%1\n").arg(i);
+    const auto items = [&](int seconds) { return QJsonArray{QJsonObject{{"id", "approval"}, {"question", "Do you want to proceed?"},
+        {"body", body + QString("⚠ Claude Code will automatically deny this request in %1:%2, to avoid blocking progress on an unattended session").arg(seconds / 60).arg(seconds % 60, 2, 10, QLatin1Char('0'))}, {"allow_other", false},
+        {"options", QJsonArray{QJsonObject{{"id", "1"}, {"label", "Yes"}, {"scope", "once"}},
+                               QJsonObject{{"id", "2"}, {"label", "No"}, {"scope", "once"}}}}}}; };
+    approval["questions"] = items(120); setQuestionReady(card, "session", approval);
+    auto *scroll = card.findChild<QScrollArea *>("questionContent"); QVERIFY(scroll);
+    QTRY_VERIFY(scroll->verticalScrollBar()->maximum() > 100);
+    scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum());
+    auto *choice = option(card, "2"); QVERIFY(choice); choice->setFocus();
+    QTest::mouseClick(choice, Qt::LeftButton);
+    QVERIFY(choice->isChecked()); QVERIFY(!submit(card)->isEnabled());
+    const int position = scroll->verticalScrollBar()->value();
+    auto *bodyLabel = card.findChild<QLabel *>("questionBody"); QVERIFY(bodyLabel);
+    bodyLabel->setSelection(bodyLabel->text().indexOf("printf fixture-30"), 17);
+    const auto selectedText = bodyLabel->selectedText();
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    QElapsedTimer elapsed; elapsed.start();
+    while (elapsed.elapsed() < 1200) {
+        approval["questions"] = items(119 - int(elapsed.elapsed() / 100)); card.setQuestion("session", approval);
+        QCOMPARE(card.findChild<QScrollArea *>("questionContent"), scroll);
+        QCOMPARE(option(card, "2"), choice); QVERIFY(choice->isChecked());
+        QCOMPARE(scroll->verticalScrollBar()->value(), position);
+        QCOMPARE(bodyLabel->selectedText(), selectedText);
+        QTest::qWait(100);
+    }
+    QVERIFY(submit(card)->isEnabled()); QCOMPARE(sent.size(), 0);
+    const auto preview = qEnvironmentVariable("HGS_APPROVAL_PREVIEW");
+    if (!preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(card.grab().save(preview + "/workflow-choice.png")); }
+    QTest::mouseClick(submit(card), Qt::LeftButton); QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(), QJsonArray{"2"});
+    // A real changed warning/command gets a new identity and a fresh review.
+    approval["question_hash"] = "child-request-two"; setQuestionReady(card, "session", approval);
+    QVERIFY(!option(card, "2")->isChecked()); QVERIFY(!submit(card)->isEnabled());
+}
+
+void TestQuestionCard::terminalOnlyChoicesDoNotPretendToAcceptAnswers()
+{
+    QuestionCard card; card.show();
+    auto question = request(); question["source"] = "claude_terminal_choice"; question["can_answer"] = false;
+    question["answer_unavailable_reason"] = "Answer this in Terminal.";
+    setQuestionReady(card, "session", question);
+    QVERIFY(!option(card, "opt_0_0")->isEnabled()); QVERIFY(submit(card)->isHidden());
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    option(card, "opt_0_0")->click(); QVERIFY(!option(card, "opt_0_0")->isChecked()); QCOMPARE(sent.size(), 0);
+    QVERIFY(card.findChild<QPushButton *>("questionOpenTerminal")->isEnabled());
 }
 
 void TestQuestionCard::unreadableApprovalPointsToTerminal()

@@ -79,6 +79,7 @@ private:
         QAbstractButton *other = nullptr;
         QLineEdit *text = nullptr;
     };
+    bool refreshNativeBody(const QJsonObject &question);
     void rebuild();
     void capture();
     bool saveDraft(const QString &key, bool asynchronous = true, std::function<void(bool)> done = {});

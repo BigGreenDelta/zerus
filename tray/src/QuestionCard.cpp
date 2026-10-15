@@ -328,7 +328,8 @@ void QuestionCard::setQuestion(const QString &sessionKey, const QJsonObject &que
     const QString key = draftIdentity(sessionKey, question);
     ensureDraft(key, sessionKey);
     const bool restored = restoreSubmittedAnswer(key, question);
-    const bool changed = restored || key != m_key || question.value("questions") != m_question.value("questions");
+    const bool changed = restored || key != m_key || (question.value("questions") != m_question.value("questions")
+        && !refreshNativeBody(question));
     m_session = sessionKey; m_id = id; m_key = key; m_question = question;
     const double created=question.value("created_at").toDouble();
     const auto asked=created>0 && created<253402300800. ? QDateTime::fromSecsSinceEpoch(qint64(created)).toLocalTime() : QDateTime();
@@ -429,6 +430,38 @@ void QuestionCard::setSubmitted(const QString &sessionKey, const QString &questi
     draft.notice = tr("Answer submitted. Waiting for Codex to record it. You can check the queue above or open Terminal.");
     saveDraft(key);
     m_sendingKeys.remove(identity(sessionKey, questionId)); updateControls();
+}
+
+// These native cards hash every decision-bearing row. Only Claude's exact
+// unattended timer is excluded by the backend. Keep the existing form mounted
+// for a same-identity body refresh: selection, reading position and the review
+// delay must survive every tick. Changes to choices or other schema rebuild.
+bool QuestionCard::refreshNativeBody(const QJsonObject &question)
+{
+    static const QSet<QString> sources{"claude_tool_approval", "claude_terminal_safety", "claude_terminal_choice"};
+    if (!sources.contains(question.value("source").toString()) || question.value("source") != m_question.value("source")
+        || question.value("question_hash").toString().isEmpty()
+        || question.value("question_hash") != m_question.value("question_hash")) return false;
+    const auto oldItems = m_question.value("questions").toArray(), items = question.value("questions").toArray();
+    if (oldItems.size() != items.size() || items.size() != m_pages->count()) return false;
+    QList<QLabel *> bodies;
+    for (int i = 0; i < items.size(); ++i) {
+        auto oldItem = oldItems[i].toObject(), item = items[i].toObject();
+        const auto body = item.take("body"), oldBody = oldItem.take("body");
+        if (item != oldItem) return false;
+        auto *label = m_pages->widget(i)->findChild<QLabel *>("questionBody");
+        if (body != oldBody && (!label || body.toString().isEmpty())) return false;
+        bodies.append(label);
+    }
+    for (int i = 0; i < items.size(); ++i) {
+        auto *body = bodies[i]; const auto text = items[i].toObject().value("body").toString();
+        if (!body || body->text() == text) continue;
+        const int start = body->selectionStart(); const auto selected = body->selectedText();
+        body->setText(text);
+        if (start >= 0 && !selected.isEmpty() && text.mid(start, selected.size()) == selected)
+            body->setSelection(start, selected.size());
+    }
+    return true;
 }
 
 void QuestionCard::rebuild()
@@ -658,15 +691,17 @@ void QuestionCard::updateControls()
     if (locked && focus && (focus == m_submit || focus==m_approve || focus==m_deny || m_pages->isAncestorOf(focus)))
         setFocus(Qt::OtherFocusReason);
     bool complete = false; answers(&complete);
+    const bool supported = m_question.value("can_answer").toBool();
+    static const QSet<QString> terminalOnly{"claude_tool_approval", "claude_terminal_choice", "claude_native_question", "claude_terminal_safety", "startup_terminal_choice"};
+    const bool readOnly = !supported && terminalOnly.contains(m_question.value("source").toString());
     for (const auto &form : m_forms) {
-        for (auto *button : form.options) button->setEnabled(!locked);
-        if (form.other) form.other->setEnabled(!locked);
+        for (auto *button : form.options) button->setEnabled(!locked && !readOnly);
+        if (form.other) form.other->setEnabled(!locked && !readOnly);
         if (form.text) {
             const bool custom = form.options.isEmpty() || (form.other && form.other->isChecked());
-            form.text->setVisible(custom); form.text->setEnabled(custom && !locked);
+            form.text->setVisible(custom); form.text->setEnabled(custom && !locked && !readOnly);
         }
     }
-    const bool supported = m_question.value("can_answer").toBool();
     const bool approval=m_question.value("approval").toBool();
     const bool choices=approval&&m_question.value("approval_choices").toBool();
     const QString broader=choices?broaderSelection():QString();
@@ -688,8 +723,8 @@ void QuestionCard::updateControls()
     m_skip->setVisible(optional);
     m_skip->setEnabled(optional && m_available && m_question.value("can_skip").toBool() && !locked && !draft.uncertain);
     // Without native options, an approval can only be answered in Terminal.
-    const bool buttons=approval&&!choices&&!m_forms.isEmpty()&&!m_forms.first().options.isEmpty();
-    m_submit->setVisible((!approval||(choices&&supported))&&page==m_forms.size()-1);
+    const bool buttons=approval&&!choices&&supported&&!m_forms.isEmpty()&&!m_forms.first().options.isEmpty();
+    m_submit->setVisible(!readOnly&&(!approval||(choices&&supported))&&page==m_forms.size()-1);
     m_approve->setVisible(buttons);m_deny->setVisible(buttons);
     const bool canApprove=buttons&&m_available&&supported&&!locked&&!draft.uncertain;
     m_approve->setEnabled(canApprove&&m_reviewSeconds==0);m_deny->setEnabled(canApprove);
