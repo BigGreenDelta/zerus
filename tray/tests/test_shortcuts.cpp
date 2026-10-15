@@ -1,14 +1,17 @@
 #include "Shortcuts.h"
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPlainTextEdit>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
+#include <QWindow>
 #include <QtTest>
 
 using Shortcuts::Platform;
@@ -52,6 +55,8 @@ private slots:
     void routerAppliesTextFieldRule();
     void cutStartsASequenceOnlyWithoutSelection();
     void routerIgnoresOtherWindows();
+    void routerYieldsOnTheRealInputPath();
+    void comboBoxKeepsItsPopupKeys();
 private:
     QTemporaryDir m_settings;
 };
@@ -347,6 +352,76 @@ void TestShortcuts::routerIgnoresOtherWindows()
     QTest::keyClick(field, Qt::Key_K, Qt::ControlModifier);
     QCOMPARE(w.previous, 0);
     QCOMPARE(w.find, 0);
+}
+
+// Keys from the platform reach the window's QWindow first, then the focus widget
+// and its ancestors. A yielded chord must not affect the overrides after it.
+void TestShortcuts::routerYieldsOnTheRealInputPath()
+{
+    Window w; int escapes = 0;
+    auto *escape = new QAction(&w.window); escape->setShortcut(QKeySequence(Qt::Key_Escape));
+    QObject::connect(escape, &QAction::triggered, &w.window, [&escapes] { ++escapes; }); w.window.addAction(escape);
+    QVERIFY(QTest::qWaitForWindowActive(&w.window));
+    QWindow *window = w.window.windowHandle();
+    w.terminal->setFocus(); QTRY_VERIFY(w.terminal->hasFocus());
+    QTest::keyClick(window, Qt::Key_Tab, Qt::ControlModifier);
+    QCOMPARE(w.tabs, 1);
+    QTest::keyClick(window, Qt::Key_K, Qt::ControlModifier);
+    QTest::keyClick(window, Qt::Key_Up, Qt::AltModifier);
+    QTest::keyClick(window, Qt::Key_C, Qt::ControlModifier);
+    QTest::keyClick(window, Qt::Key_Escape); // The terminal claims Escape like the message field does.
+    QCOMPARE(w.find, 0); QCOMPARE(w.previous, 0); QCOMPARE(escapes, 0);
+    QCOMPARE(w.terminal->received, (QList<QKeyCombination>{QKeyCombination(Qt::ControlModifier, Qt::Key_K),
+        QKeyCombination(Qt::AltModifier, Qt::Key_Up), QKeyCombination(Qt::ControlModifier, Qt::Key_C), QKeyCombination(Qt::Key_Escape)}));
+    QTest::keyClick(window, Qt::Key_Tab, Qt::ControlModifier);
+    QCOMPARE(w.tabs, 2);
+    // A text field yields bound chords and keeps its own.
+    w.editor->setFocus(); QTRY_VERIFY(w.editor->hasFocus());
+    QTest::keyClick(window, Qt::Key_K, Qt::ControlModifier);
+    QCOMPARE(w.find, 1);
+    QTest::keyClick(window, Qt::Key_A);
+    QCOMPARE(w.editor->toPlainText(), QString("a"));
+}
+
+namespace {
+// Records the keys a combo box receives without opening its popup.
+class RecordingCombo : public QComboBox {
+public:
+    QList<QKeyCombination> received;
+protected:
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        const int key = event->key();
+        if (key != Qt::Key_Control && key != Qt::Key_Alt && key != Qt::Key_Shift && key != Qt::Key_Meta)
+            received.append(Shortcuts::combination(event));
+    }
+};
+}
+
+void TestShortcuts::comboBoxKeepsItsPopupKeys()
+{
+    QWidget window; auto *layout = new QVBoxLayout(&window);
+    auto *combo = new RecordingCombo; combo->addItems({"one", "two"}); layout->addWidget(combo);
+    int commands = 0, find = 0;
+    for (const char *chord : {"Alt+Down", "Alt+Up", "F4", "Ctrl+K"}) {
+        auto *action = new QAction(&window);
+        action->setShortcut(QKeySequence::fromString(chord, QKeySequence::PortableText));
+        QObject::connect(action, &QAction::triggered, &window, [&, chord] { ++(QByteArray(chord) == "Ctrl+K" ? find : commands); });
+        window.addAction(action);
+    }
+    ShortcutRouter router(&window, Platform::Linux); qApp->installEventFilter(&router);
+    const auto removeRouter = qScopeGuard([&router] { qApp->removeEventFilter(&router); });
+    window.show(); QVERIFY(QTest::qWaitForWindowActive(&window));
+    combo->setFocus(); QTRY_VERIFY(combo->hasFocus());
+    QTest::keyClick(window.windowHandle(), Qt::Key_Down, Qt::AltModifier);
+    QTest::keyClick(window.windowHandle(), Qt::Key_Up, Qt::AltModifier);
+    QTest::keyClick(window.windowHandle(), Qt::Key_F4);
+    QCOMPARE(commands, 0);
+    QCOMPARE(combo->received, (QList<QKeyCombination>{QKeyCombination(Qt::AltModifier, Qt::Key_Down),
+        QKeyCombination(Qt::AltModifier, Qt::Key_Up), QKeyCombination(Qt::Key_F4)}));
+    // Other bound chords still reach the window.
+    QTest::keyClick(window.windowHandle(), Qt::Key_K, Qt::ControlModifier);
+    QCOMPARE(find, 1);
 }
 
 QTEST_MAIN(TestShortcuts)

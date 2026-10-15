@@ -8485,11 +8485,11 @@ void TestSessionsWindow::updatesEntryOpensExactSettingsPage(){
 }
 
 namespace {
-// Presses a chord where the keyboard is: the window's focus widget, or the window.
+// Presses a chord on the platform input path: the window's QWindow first, then
+// its focus widget and that widget's ancestors, as with a real keyboard.
 void pressChord(QWidget *window, Qt::Key key, Qt::KeyboardModifiers modifiers = Qt::NoModifier)
 {
-    QWidget *focus = QApplication::focusWidget();
-    QTest::keyClick(focus && focus->window() == window ? focus : window, key, modifiers);
+    QTest::keyClick(window->windowHandle(), key, modifiers);
 }
 QStackedWidget *workspacePages(QWidget &window)
 {
@@ -8553,6 +8553,15 @@ void TestSessionsWindow::shortcutsMoveBetweenSessions()
     QCOMPARE(list->item(2)->data(SessionRoles::ChildId).toString(), QString("agent-a"));
     QCOMPARE(list->currentRow(), 1);
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Draft for the dashboard");
+    // From the message field the chords switch sessions; each session keeps its own draft.
+    composer->editor()->setFocus(); QTRY_VERIFY(composer->editor()->hasFocus());
+    pressChord(&window, Qt::Key_Down, Qt::AltModifier);
+    QCOMPARE(currentSessionKey(list), QString("\nkimi/docs/research")); QCOMPARE(composer->sessionKey(), QString("\nkimi/docs/research"));
+    QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
+    QCOMPARE(composer->editor()->toPlainText(), QString()); QVERIFY(composer->editor()->hasFocus());
+    pressChord(&window, Qt::Key_Up, Qt::AltModifier);
+    QCOMPARE(currentSessionKey(list), QString("\ncodex/hgs/dashboard"));
+    QTRY_COMPARE(composer->editor()->toPlainText(), QString("Draft for the dashboard")); QVERIFY(composer->editor()->hasFocus());
     list->setFocus(); QTRY_VERIFY(list->hasFocus());
     pressChord(&window, Qt::Key_Down, Qt::AltModifier);
     QCOMPARE(currentSessionKey(list), QString("\nkimi/docs/research"));
@@ -8630,11 +8639,18 @@ void TestSessionsWindow::terminalChordReturnsToActivity()
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); auto *list = window.findChild<SessionList *>("sessionList");
     auto *pages = workspacePages(window); auto *screen = terminal->terminalScreen();
     tabs->setCurrentWidget(terminal); screen->setFocus(); QTRY_VERIFY(screen->hasFocus());
+    QSignalSpy output(screen, &TerminalScreen::output);
+    // A chord the window takes from Terminal leaves the keys after it to the agent.
+    pressChord(&window, Qt::Key_0, Qt::ControlModifier);
+    QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("Content scale 100%"));
+    QCOMPARE(tabs->currentWidget(), terminal); QVERIFY(screen->hasFocus()); QCOMPARE(output.size(), 0);
     // Keys an agent needs stay in Terminal, bound or not.
     const QList<QPair<Qt::Key, Qt::KeyboardModifiers>> agentKeys{{Qt::Key_C, Qt::ControlModifier}, {Qt::Key_R, Qt::ControlModifier},
         {Qt::Key_Up, Qt::AltModifier}, {Qt::Key_F2, Qt::NoModifier}, {Qt::Key_Escape, Qt::NoModifier}};
     for (const auto &key : agentKeys) {
-        QTest::keyClick(screen, key.first, key.second);
+        const auto before = output.size();
+        pressChord(&window, key.first, key.second);
+        QVERIFY2(output.size() > before, qPrintable(QKeySequence(key.first | key.second).toString()));
         QCOMPARE(tabs->currentWidget(), terminal); QCOMPARE(currentSessionKey(list), QString("\ncodex/hgs/dashboard"));
         QCOMPARE(pages->currentIndex(), 0); QVERIFY(!window.findChild<QDialog *>("renameSessionDialog"));
     }
@@ -8655,8 +8671,8 @@ void TestSessionsWindow::shortcutsInModalDialogsStayLocal()
         QDialog dialog(&window); dialog.setModal(true); auto *field = new QLineEdit(&dialog);
         dialog.show(); dialog.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&dialog));
         field->setFocus(); QTRY_VERIFY(field->hasFocus());
-        QTest::keyClick(field, Qt::Key_2, Qt::ControlModifier);
-        QTest::keyClick(field, Qt::Key_Comma, Qt::ControlModifier);
+        pressChord(&dialog, Qt::Key_2, Qt::ControlModifier);
+        pressChord(&dialog, Qt::Key_Comma, Qt::ControlModifier);
         QCOMPARE(pages->currentIndex(), 3);
     }
     window.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window));
@@ -8745,9 +8761,9 @@ void TestSessionsWindow::reboundChordsApplyAtOnce()
     ShortcutRegistry::instance().setKeys("go.projects", {QKeySequence("Ctrl+8")});
     QCOMPARE(window.findChild<QAction *>("shortcut:tab.next")->shortcuts(), QList<QKeySequence>{QKeySequence("Ctrl+9")});
     QCOMPARE(projects->toolTip(), QString("Projects (%1)").arg(native("Ctrl+8")));
-    QTest::keyClick(terminal->terminalScreen(), Qt::Key_Tab, Qt::ControlModifier);
+    pressChord(&window, Qt::Key_Tab, Qt::ControlModifier);
     QCOMPARE(tabs->currentWidget(), terminal);
-    QTest::keyClick(terminal->terminalScreen(), Qt::Key_9, Qt::ControlModifier);
+    pressChord(&window, Qt::Key_9, Qt::ControlModifier);
     QCOMPARE(tabs->currentIndex(), 0);
 }
 
@@ -8765,13 +8781,13 @@ void TestSessionsWindow::projectListKeepsItsReorderKeys()
     list->setCurrentRow(1); list->setFocus(); QTRY_VERIFY(list->hasFocus());
     const auto moved = stored().groups()[1].id;
     // Alt+Up and Alt+Down are the list's own keys, although Next and Previous session use them elsewhere.
-    QTest::keyClick(list, Qt::Key_Up, Qt::AltModifier);
+    pressChord(&window, Qt::Key_Up, Qt::AltModifier);
     QCOMPARE(stored().groups()[0].id, moved); QCOMPARE(pages->currentIndex(), 1);
     list->setCurrentRow(list->count() - 1);
-    QTest::keyClick(list, Qt::Key_Down, Qt::AltModifier); // The last project stays last.
+    pressChord(&window, Qt::Key_Down, Qt::AltModifier); // The last project stays last.
     QCOMPARE(pages->currentIndex(), 1);
     auto *other = page->findChild<QCheckBox *>("allSwarmProjects"); other->setFocus(); QTRY_VERIFY(other->hasFocus());
-    QTest::keyClick(other, Qt::Key_Down, Qt::AltModifier);
+    pressChord(&window, Qt::Key_Down, Qt::AltModifier);
     QCOMPARE(pages->currentIndex(), 0);
 }
 

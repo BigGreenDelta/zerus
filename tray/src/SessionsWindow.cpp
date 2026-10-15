@@ -298,7 +298,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         button->setIconSize(QSize(20, 20)); button->setFixedSize(34, 32); return button;
     };
     m_brand = new SwarmButton; m_brand->setObjectName("brandMark");
-    m_brand->setFixedSize(42,44); m_brand->setCheckable(true); m_brand->setToolTip(tr("Home — Zerus %1").arg(version)); m_brand->setAccessibleName(tr("Home dashboard"));
+    m_brand->setFixedSize(42,44); m_brand->setCheckable(true); m_brand->setProperty("caption", tr("Home — Zerus %1").arg(version)); m_brand->setAccessibleName(tr("Home dashboard"));
     connect(m_brand,&QPushButton::clicked,this,[this] { m_pages->setCurrentIndex(3); m_brand->setChecked(true); emit refreshRequested(); });
     side->addWidget(m_brand); side->addSpacing(8);
     auto *create = iconButton("add", tr("New session"), "newSession");

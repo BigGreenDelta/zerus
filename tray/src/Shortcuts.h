@@ -66,7 +66,8 @@ private:
 };
 
 // Lets bound commands win over Terminal and text fields of one window, under
-// the Terminal and text-field rules. Install on qApp.
+// the Terminal and text-field rules. A focused combo box keeps Alt+Up, Alt+Down
+// and F4, which open its list. Install on qApp.
 class ShortcutRouter : public QObject {
 public:
     explicit ShortcutRouter(QWidget *window, Shortcuts::Platform platform = Shortcuts::currentPlatform(), QObject *parent = nullptr);

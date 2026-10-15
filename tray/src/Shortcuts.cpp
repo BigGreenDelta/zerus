@@ -1,6 +1,7 @@
 #include "Shortcuts.h"
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QKeyEvent>
 #include <QLineEdit>
@@ -301,15 +302,31 @@ static bool textField(const QWidget *widget)
         || qobject_cast<const QTextEdit *>(widget);
 }
 
+// A combo box opens its list with Alt+Up, Alt+Down and F4, also where a command
+// uses them. An editable combo box has the focus in its line edit.
+static bool comboPopupKey(const QWidget *focus, QKeyCombination key)
+{
+    if (!qobject_cast<const QComboBox *>(focus)
+        && !(qobject_cast<const QLineEdit *>(focus) && qobject_cast<const QComboBox *>(focus->parentWidget()))) return false;
+    const auto mods = key.keyboardModifiers();
+    return (mods == Qt::AltModifier && (key.key() == Qt::Key_Up || key.key() == Qt::Key_Down))
+        || (mods == Qt::NoModifier && key.key() == Qt::Key_F4);
+}
+
 bool ShortcutRouter::eventFilter(QObject *watched, QEvent *event)
 {
     if (event->type() != QEvent::ShortcutOverride) return false;
+    // Platform input delivers an override to the window's QWindow first, then to
+    // the focus widget and its ancestors: each override starts at a non-widget.
+    // Overrides can reuse one address, so a remembered one must not outlive this.
+    if (!watched->isWidgetType()) { m_yielded = nullptr; return false; }
     QWidget *focus = QApplication::focusWidget();
     if (!m_window || !focus || focus->window() != m_window) return false;
     // A yielded override propagates to the focus widget's ancestors; none may claim it.
-    if (watched != focus) return event == m_yielded;
+    if (watched != focus) return event == m_yielded && static_cast<QWidget *>(watched)->isAncestorOf(focus);
     m_yielded = nullptr;
     const auto key = Shortcuts::combination(static_cast<QKeyEvent *>(event));
+    if (comboPopupKey(focus, key)) { event->accept(); return true; }
     // The action Qt's shortcut map would consider: the focus chain's own actions,
     // then the window's.
     QKeySequence bound;

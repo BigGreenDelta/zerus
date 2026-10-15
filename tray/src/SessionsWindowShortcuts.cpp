@@ -70,12 +70,17 @@ void setActionKeys(const QHash<QString, QAction *> &actions, const QWidget *wind
 // router and Qt's shortcut map then see the keys for the current focus.
 class ClaimedKeys : public QObject {
 public:
+    // Window-scope command actions only: removing a chord from a Composer-scope
+    // action because its own editor has focus would disable that command.
     ClaimedKeys(QWidget *window, const QHash<QString, QAction *> &actions) : QObject(window), m_window(window), m_actions(actions) {}
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override
     {
-        // The override goes to the focus widget, or to the window without one.
-        if (event->type() == QEvent::ShortcutOverride && watched->isWidgetType() && static_cast<QWidget *>(watched)->window() == m_window)
+        if (event->type() != QEvent::ShortcutOverride) return false;
+        // Once per override: where it reaches the focus widget, which comes before
+        // the ancestors it propagates to; without a focus widget, at the window.
+        const QWidget *focus = QApplication::focusWidget();
+        if (focus ? watched == focus && focus->window() == m_window : watched == m_window->windowHandle())
             setActionKeys(m_actions, m_window);
         return false;
     }
@@ -110,12 +115,16 @@ void SessionsWindow::applyShortcuts()
     for (auto it = m_shortcutActions.cbegin(); it != m_shortcutActions.cend(); ++it)
         it.value()->setProperty(RegistryKeys, QVariant::fromValue(registry.keys(it.key())));
     setActionKeys(m_shortcutActions, this);
-    // Captions are the buttons' accessible names, which never carry the chord.
-    m_brand->setToolTip(registry.tooltip(tr("Home — Zerus %1").arg(QCoreApplication::applicationVersion()), "go.overview"));
-    const QList<QPair<QPushButton *, const char *>> buttons{{m_sessionsNav, "go.sessions"}, {m_projectsNav, "go.projects"},
-        {m_machinesNav, "go.machines"}, {m_accountsNav, "go.accounts"}, {m_settingsNav, "go.settings"},
+    // A tooltip is the button's "caption" property or its accessible name, neither
+    // of which carries the chord.
+    const QList<QPair<QPushButton *, const char *>> buttons{{m_brand, "go.overview"}, {m_sessionsNav, "go.sessions"},
+        {m_projectsNav, "go.projects"}, {m_machinesNav, "go.machines"}, {m_accountsNav, "go.accounts"}, {m_settingsNav, "go.settings"},
         {findChild<QPushButton *>("newSession"), "session.new"}, {m_panelNewSession, "session.new"}, {m_inspectorToggle, "panel.toggle"}};
-    for (const auto &button : buttons) if (button.first) button.first->setToolTip(registry.tooltip(button.first->accessibleName(), button.second));
+    for (const auto &[button, id] : buttons) {
+        if (!button) continue;
+        const QString caption = button->property("caption").toString();
+        button->setToolTip(registry.tooltip(caption.isEmpty() ? button->accessibleName() : caption, id));
+    }
     m_activityView->setQueueSendNowShortcut(registry.hint("queue.sendNow"));
 }
 
@@ -206,7 +215,8 @@ void SessionsWindow::stepSession(int direction, bool attention)
         if (!sessionRow(item)) continue;
         const QString key = item->data(SessionRoles::Key).toString();
         const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&key](const Entry &e) { return e.key == key; });
-        if (entry == m_entries.cend() || !entryNeedsAttention(*entry)) continue;
+        // As the attention badge counts: never an archived session.
+        if (entry == m_entries.cend() || entry->session.state == "archived" || !entryNeedsAttention(*entry)) continue;
         revealSession(key); // May rebuild the list.
         for (int row = 0; row < m_sessions->count(); ++row)
             if (sessionRow(m_sessions->item(row)) && m_sessions->item(row)->data(SessionRoles::Key).toString() == key) {
