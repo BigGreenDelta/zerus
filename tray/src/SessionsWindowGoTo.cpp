@@ -2,8 +2,10 @@
 // See docs/superpowers/specs/2026-10-15-keyboard-shortcuts-design.md, "Go to".
 #include "SessionsWindow.h"
 #include "AccountsPage.h"
+#include "ComposerDraftStore.h"
 #include "GoToDialog.h"
 #include "MachinesPage.h"
+#include "MessageComposer.h"
 #include "ProjectsDialog.h"
 #include "SessionList.h"
 #include "SessionPresentation.h"
@@ -13,6 +15,7 @@
 #include <QJsonObject>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <algorithm>
 #include <limits>
@@ -110,6 +113,40 @@ void SessionsWindow::openGoTo()
     // Go to's own chords close the popup again.
     m_goTo->setCloseKeys(ShortcutRegistry::instance().keys(QStringLiteral("go.anywhere")));
     m_goTo->popup();
+}
+
+const SessionsWindow::Entry *SessionsWindow::draftOwner(const QString &draftKey) const
+{
+    const auto owner = ComposerDraftStore::owner(draftKey);
+    // Only search lists an archived session; its draft offers Restore instead.
+    if (owner.kind == ComposerDraftOwner::Kind::Unknown || !owner.archive.isEmpty()) return nullptr;
+    const Entry *named = nullptr;
+    for (const auto &entry : m_entries) {
+        if (entry.session.name != owner.session || entry.session.state == "archived") continue;
+        if (entry.host == owner.machine) return &entry;
+        // A subagent key names the computer, and this one has no host alias.
+        if (!owner.machine.isEmpty() && entry.machine == owner.machine) named = &entry;
+    }
+    return named;
+}
+
+void SessionsWindow::openDraftSession(const QString &draftKey)
+{
+    const auto *entry = draftOwner(draftKey);
+    if (!entry) { showNotice(tr("The session of this draft is not in the session list now."), true); return; }
+    const auto owner = ComposerDraftStore::owner(draftKey);
+    GoToItem item; item.kind = GoToItem::Session; item.id = entry->key;
+    activateGoTo(item);
+    const auto *parent = selected();
+    if (!parent || parent->key != item.id) return;
+    if (!owner.subagent.isEmpty()) {
+        // Open the subagent only while it is in the conversation of the draft.
+        if (childKey(*parent, owner.subagent) == owner.machine + '\n' + owner.session + '\n' + owner.conversation + '\n' + owner.subagent)
+            openSubagent(owner.subagent);
+        return;
+    }
+    if (!m_subagentId.isEmpty()) closeSubagent();
+    if (owner.kind == ComposerDraftOwner::Kind::Message && m_composer->isInputVisible()) m_composer->editor()->setFocus(Qt::OtherFocusReason);
 }
 
 void SessionsWindow::activateGoTo(const GoToItem &item)

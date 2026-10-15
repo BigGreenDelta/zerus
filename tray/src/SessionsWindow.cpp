@@ -1063,6 +1063,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     };
     connect(m_composer, &MessageComposer::draftChanged, this, draftChanged);
     connect(m_subagentComposer, &MessageComposer::draftChanged, this, draftChanged);
+    for (auto *composer : {m_composer, m_subagentComposer}) {
+        composer->canOpenDraftSession = [this](const QString &key) { return draftOwner(key) != nullptr; };
+        connect(composer, &MessageComposer::draftSessionRequested, this, &SessionsWindow::openDraftSession);
+    }
     connect(m_activityView, &ActivityView::messageActionRequested, this, &SessionsWindow::messageAction);
     connect(m_composer, &MessageComposer::settingsTerminalRequested, this, [this](const QString &key) {
         if (key != m_selectedKey || !selected()) return;
