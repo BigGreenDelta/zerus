@@ -4,11 +4,16 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
-import zipfile
+
+if sys.version_info < (3, 11):
+    # Checked before the mirror modules load: no incidental traceback.
+    print('Dev mirror requires Python 3.11 or newer; previous catalogs retained', file=sys.stderr)
+    raise SystemExit(1)
 
 from dev_updates import DevGitHub, check_previous, collect, identity, publish, scoped_path, validate
-from update_feed import check_android_sequence, mirror_lock, require
+from update_feed import MIRROR_FAILURES, check_android_sequence, mirror_lock, require
 
 spec = importlib.util.spec_from_file_location('release_mirror', Path(__file__).with_name('publish-update-feed.py'))
 mirror = importlib.util.module_from_spec(spec)
@@ -77,8 +82,14 @@ def main():
             result = synchronize(client, root, list(dict.fromkeys(args.platform)), args.execute, args.max_mirror_bytes)
         print(json.dumps({'results': result}, sort_keys=True))
         return 0
-    except (ValueError, OSError, KeyError, TypeError, UnicodeError, zipfile.BadZipFile):
-        print('Dev mirror validation or transport failed; previous catalogs retained')
+    except MIRROR_FAILURES:
+        # Never print exception text: signed CDN URLs and credentials stay out of logs.
+        print('Dev mirror validation or transport failed; previous catalogs retained', file=sys.stderr)
+        return 1
+    except Exception as error:
+        # Defects keep their text out of logs too; the class name locates them.
+        print(f'Dev mirror failed unexpectedly ({type(error).__name__}); previous catalogs retained',
+              file=sys.stderr)
         return 1
 
 

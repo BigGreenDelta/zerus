@@ -1,0 +1,77 @@
+{
+  "qt_version": "6.10.3",
+  "repository": "https://download.qt.io/online/qtsdkrepository/windows_x86",
+  "prefix": "6.10.3/msvc2022_64",
+  "packages": [
+    {
+      "directory": "desktop/qt6_6103/qt6_6103",
+      "name": "qt.qt6.6103.win64_msvc2022_64",
+      "archives": [
+        "qtbase",
+        "qtsvg",
+        "qtdeclarative",
+        "qttools",
+        "qttranslations",
+        "d3dcompiler_47",
+        "opengl32sw"
+      ]
+    },
+    {
+      "directory": "desktop/qt6_6103/qt6_6103",
+      "name": "qt.qt6.6103.addons.qtmultimedia.win64_msvc2022_64",
+      "archives": [
+        "qtmultimedia"
+      ]
+    }
+  ],
+  "archives": [
+    {
+      "path": "desktop/qt6_6103/qt6_6103/qt.qt6.6103.win64_msvc2022_64/6.10.3-0-202603310407qtbase-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z",
+      "size": 42748757,
+      "sha256": "4db84dee7fe3c558f242bef0a88852613af76580dc6d2b24596479f47004dad7",
+      "target": "6.10.3/msvc2022_64"
+    },
+    {
+      "path": "desktop/qt6_6103/qt6_6103/qt.qt6.6103.win64_msvc2022_64/6.10.3-0-202603310407qtsvg-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z",
+      "size": 668085,
+      "sha256": "fa5bb334b6b95582f87481a9f54819dc066e8cefed7f4fe9a21a77719630ba04",
+      "target": "6.10.3/msvc2022_64"
+    },
+    {
+      "path": "desktop/qt6_6103/qt6_6103/qt.qt6.6103.win64_msvc2022_64/6.10.3-0-202603310407qtdeclarative-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z",
+      "size": 157478290,
+      "sha256": "7dad584e12dc7641d9940e0ab30fa86092eda3f1c59ee7b5e4a02550986be35c",
+      "target": "6.10.3/msvc2022_64"
+    },
+    {
+      "path": "desktop/qt6_6103/qt6_6103/qt.qt6.6103.win64_msvc2022_64/6.10.3-0-202603310407qttools-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z",
+      "size": 26902888,
+      "sha256": "4d51cd446ff438845c706600aef6bf7349490c358bf7bb27abd32cb5ea3afcb8",
+      "target": "6.10.3/msvc2022_64"
+    },
+    {
+      "path": "desktop/qt6_6103/qt6_6103/qt.qt6.6103.win64_msvc2022_64/6.10.3-0-202603310407qttranslations-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z",
+      "size": 1937577,
+      "sha256": "5002080668c89bc8749a790f0136f12c15a8f6a407649ef0820c7dc555da0bb2",
+      "target": "6.10.3/msvc2022_64"
+    },
+    {
+      "path": "desktop/qt6_6103/qt6_6103/qt.qt6.6103.win64_msvc2022_64/6.10.3-0-202603310407d3dcompiler_47-x64.7z",
+      "size": 1380117,
+      "sha256": "8cd62856944ba5748b4279d2180b5bbf088f8f01fab254909107001b9a7c9341",
+      "target": "6.10.3/msvc2022_64/bin"
+    },
+    {
+      "path": "desktop/qt6_6103/qt6_6103/qt.qt6.6103.win64_msvc2022_64/6.10.3-0-202603310407opengl32sw-64-mesa_11_2_2-signed_sha256.7z",
+      "size": 5474526,
+      "sha256": "0b1e41da5ee1bd3957236e34abe684ef46f97f7cdfb42abb00b17b53f096f97c",
+      "target": "6.10.3/msvc2022_64/bin"
+    },
+    {
+      "path": "desktop/qt6_6103/qt6_6103/qt.qt6.6103.addons.qtmultimedia.win64_msvc2022_64/6.10.3-0-202603310407qtmultimedia-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z",
+      "size": 40276146,
+      "sha256": "ee1024c61c560c5220ee996c998e3c79f8f3374a8c525799d3b34e0738a8ee72",
+      "target": "6.10.3/msvc2022_64"
+    }
+  ]
+}

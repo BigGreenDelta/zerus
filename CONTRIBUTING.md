@@ -141,21 +141,18 @@ You need:
 - Visual Studio 2022 with the x64 C++ tools and a Windows SDK; its own CMake
   (3.22 or later is needed for the Windows tests) and Ninja are used;
 - Rust for MSVC: stable, and 1.85.0 with clippy;
-- Python 3.9 or later for the Qt test fixtures, 3.11 or later for the packaging
-  scripts, and 3.13 for the hash-locked Qt installer;
-- Git for Windows with Git Bash;
+- Python 3.9 or later for the Qt test fixtures and 3.11 or later for the
+  packaging scripts;
+- Git for Windows with Git Bash, and 7-Zip;
 - Qt 6.10.3 `msvc2022_64` with Qt Multimedia (no Qt WebEngine: the embedded
   DeepSeek Native UI is an optional Linux plugin).
-  CI installs it with `scripts/ci/aqt-requirements.txt` (aqtinstall 3.3.0 cannot
-  install Qt 6.11 or later for Windows yet) and one worker from
-  `scripts/ci/aqt-settings.ini`; the same works locally:
+  CI installs the official archives pinned in `packaging/windows/qt.json`, each
+  verified before 7-Zip extracts it. The same works locally and makes
+  `~/Qt/6.10.3/msvc2022_64` (`--seven-zip` names 7-Zip when `7z` is not on
+  `PATH`):
 
 ```sh
-python -m venv ~/aqt
-~/aqt/Scripts/python -m pip install --require-hashes --only-binary :all: \
-    -r scripts/ci/aqt-requirements.txt
-~/aqt/Scripts/python -m aqt -c scripts/ci/aqt-settings.ini \
-    install-qt windows desktop 6.10.3 win64_msvc2022_64 -m qtmultimedia --outputdir ~/Qt
+python scripts/install-qt-windows.py --output ~/Qt
 ```
 
 Clone with `git clone -c core.autocrlf=false`, as CI does: test fixtures and

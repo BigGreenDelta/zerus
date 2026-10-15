@@ -1,6 +1,9 @@
 """Isolated release mirror contract: no GitHub writes or product state."""
+import contextlib
 import copy
+import gzip
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
@@ -10,7 +13,9 @@ import tarfile
 import tempfile
 import unittest
 import urllib.error
+import zlib
 from email.message import Message
+from unittest.mock import patch
 
 SCRIPTS=Path(__file__).resolve().parents[1]/'scripts'
 sys.path.insert(0,str(SCRIPTS))
@@ -19,6 +24,7 @@ spec=importlib.util.spec_from_file_location('publisher',SCRIPTS/'publish-update-
 publisher=importlib.util.module_from_spec(spec);spec.loader.exec_module(publisher)
 
 COMMIT='a'*40
+FAILED='Mirror validation or transport failed; previous catalogs retained\n'
 
 
 def archive(packages):
@@ -229,5 +235,73 @@ class MirrorTest(unittest.TestCase):
     def test_metadata_change_same_release_refused(self):
         self.root.mkdir();self.run_mirror();path=self.root/'updates/v1/desktop/stable.json';original=json.loads(path.read_text());changed={**original,'sourceCommit':'c'*40}
         with self.assertRaises(ValueError):feed.check_previous(path,changed)
+
+
+class Interrupted(io.BytesIO):
+    """A response that fails mid-body, as a dropped HTTP/1.1 connection does."""
+    headers={}
+    def read(self,size=-1):raise http.client.IncompleteRead(b'partial body',65536)
+
+
+def interrupted(client):
+    client.opener=type('Opener',(),{'open':lambda self,request,timeout:Interrupted()})()
+    return client
+
+
+class EntryPointFailureTest(unittest.TestCase):
+    """Scheduled job logs carry one fixed line, never exception text or a traceback."""
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)/'content'
+    def tearDown(self):self.temp.cleanup()
+    def main(self,client=None,**patches):
+        out,err=io.StringIO(),io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sys,'argv',['publisher','--root',str(self.root),'--channel','desktop/stable']))
+            stack.enter_context(patch.object(publisher,'token',return_value='fixture-read-credential'))
+            if client:stack.enter_context(patch.object(publisher,'GitHub',return_value=client))
+            for name,value in patches.items():stack.enter_context(patch.object(publisher,name,side_effect=value))
+            stack.enter_context(contextlib.redirect_stdout(out));stack.enter_context(contextlib.redirect_stderr(err))
+            code=publisher.main()
+        self.assertFalse(self.root.exists())
+        return code,out.getvalue(),err.getvalue()
+    def test_interrupted_github_body_reports_the_fixed_line(self):
+        self.assertEqual(self.main(interrupted(feed.GitHub('fixture-read-credential'))),(1,'',FAILED))
+        with self.assertRaisesRegex(ValueError,'GitHub transport interrupted'):
+            b''.join(interrupted(feed.GitHub()).stream('https://api.github.com/repos/ufna/zerus/releases',2,api=True))
+        class Opener:
+            def open(self,request,timeout):raise http.client.BadStatusLine('fixture private status')
+        client=feed.GitHub();client.opener=Opener()
+        with self.assertRaisesRegex(ValueError,'GitHub transport unavailable'):client.api('/repos/ufna/zerus/releases')
+    def test_truncated_or_malformed_aur_archive_reports_the_fixed_line(self):
+        name='zerus-0.37.0-aur.tar.gz';valid=FakeGitHub().payload[name]
+        for kind,data in (('truncated',valid[:len(valid)//2]),('malformed',gzip.compress(b'not a tar archive '*64)),
+                          ('corrupt deflate',valid[:10]+b'\xff'*(len(valid)-10))):
+            with self.subTest(kind=kind):
+                # Sealed like any release: only parsing the archive itself can fail.
+                client=FakeGitHub();client.payload[name]=data;client.seal()
+                self.assertEqual(self.main(client),(1,'',FAILED))
+                path=Path(self.temp.name)/'aur.tar.gz';path.write_bytes(data)
+                with self.assertRaisesRegex(ValueError,'Invalid AUR metadata archive'):feed.aur_versions(path)
+    def test_every_transport_and_archive_error_class_reports_the_fixed_line(self):
+        detail='https://objects.example.invalid/signed?token=fixture-private-detail'
+        for error in (http.client.IncompleteRead(detail.encode(),1),http.client.BadStatusLine(detail),
+                      tarfile.ReadError(detail),EOFError(detail),zlib.error(detail),ValueError(detail)):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(self.main(synchronize_channels=error),(1,'',FAILED))
+        self.assertEqual(self.main(synchronize_channels=BlockingIOError(detail)),(1,'','Mirror already running\n'))
+    def test_unexpected_defect_reports_only_its_class_and_interrupts_still_propagate(self):
+        self.assertEqual(self.main(synchronize_channels=RuntimeError('fixture-private-detail')),
+                         (1,'','Mirror failed unexpectedly (RuntimeError); previous catalogs retained\n'))
+        for error in (KeyboardInterrupt(),SystemExit(3)):
+            with self.subTest(error=type(error).__name__),self.assertRaises(type(error)):
+                self.main(synchronize_channels=error)
+    def test_python_older_than_311_is_refused_before_mirror_modules_load(self):
+        out,err=io.StringIO(),io.StringIO()
+        check=importlib.util.spec_from_file_location('old_python_publisher',SCRIPTS/'publish-update-feed.py')
+        with patch.object(sys,'version_info',(3,10,14,'final',0)),patch.dict(sys.modules,{'update_feed':None}), \
+             contextlib.redirect_stdout(out),contextlib.redirect_stderr(err),self.assertRaises(SystemExit) as refused:
+            check.loader.exec_module(importlib.util.module_from_spec(check))
+        self.assertEqual((refused.exception.code,out.getvalue(),err.getvalue()),
+                         (1,'','Mirror requires Python 3.11 or newer; previous catalogs retained\n'))
 
 if __name__=='__main__':unittest.main()

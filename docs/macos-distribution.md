@@ -65,7 +65,9 @@ bundle: the embedded DeepSeek Native UI is an optional Linux plugin, so on macOS
 Native UI opens in the browser. `check-macos-bundle.py` rejects any Qt WebEngine
 file. `scripts/install-qt-macos.py` downloads the archives from
 `download.qt.io` (mirrors may serve them), verifies every archive before any
-extraction and extracts them with the system `bsdtar`. The official Qt is
+extraction and extracts them with the system `bsdtar`, through
+`scripts/qt_archives.py`, which the [Windows build](ci-and-aur.md#windows-client-desktop-and-portable-zip)
+shares. Framework links must stay inside the prefix. The official Qt is
 relocatable and needs no path patching.
 
 Qt 6.11.2 is the version macOS CI tests through Homebrew, supports macOS 14 and

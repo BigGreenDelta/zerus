@@ -28,6 +28,7 @@ can select a PR head or another exact revision.
 | --- | --- | --- |
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
 | Quick checks | Always | Privacy, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.85 unit tests |
+| Rust relay | Always | Rust 1.85 format, clippy and contracts, the real PostgreSQL cross-worker contract, every `services/mobile/tests` module against the Rust relay and a disposable PostgreSQL database, the speech suites against the Python reference relay, the deployment image and its 256 MiB envelope |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |
@@ -119,7 +120,7 @@ save them.
 | `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
 | `arch-cargo-v1-` | Arch package | Month, `Cargo.lock` hash | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
-| `windows-qt-6.10.3-` | Windows | Qt modules and installer lock | Exact key missed; desktop build passed | Qt base and Multimedia, no WebEngine |
+| `windows-qt-6.10.3-` | Windows | Hash of the Qt pin and installer | Exact key missed; desktop build passed | The pinned Qt archives, no WebEngine |
 | `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-`, `windows-ccache-v1-` | Arch desktop, Arch package, macOS, Windows | Architecture (macOS, Windows), Qt release (Windows), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100, 100 and 500 MB |
 
 The Windows real-agent job restores the `windows-cli-` family of the Windows
@@ -221,7 +222,7 @@ The Arch base image is digest-pinned, but `pacman -Syu` intentionally uses curre
 Arch packages. This tests rolling-distribution compatibility; it does not promise
 bit-for-bit reproducibility months later. Rust dependencies are locked, fetched
 in `prepare()` and built/tested with `--frozen` inside source packages. The CI
-image, tmux, official DeepSeek fixture and Windows Qt installer pins need periodic
+image, tmux, official DeepSeek fixture and Windows Qt pins need periodic
 maintainer review.
 
 ### Dependency updates and cost
@@ -460,28 +461,49 @@ gives each step a synchronous anonymous pipe as stdin, and Windows OpenSSH never
 exits after using one (the fake client refuses it), so steps that start `hgs.exe`,
 `ssh` or the desktop app read stdin from `/dev/null`.
 
-Qt 6.10.3 for MSVC 2022 x64 with Qt Multimedia comes from `aqt install-qt` with aqtinstall 3.3.0, which cannot resolve the split
-repository layout of Qt 6.11 and later for Windows yet. No unhashed PyPI code runs
-in the job: `scripts/ci/aqt-requirements.txt` locks aqtinstall, py7zr and their
-whole dependency closure to the SHA-256 of each CPython 3.13 `win_amd64` wheel.
-The job installs it with `pip install --require-hashes --only-binary :all:` into a
-virtual environment under `RUNNER_TEMP` that no later step uses; aqtinstall checks
-the Qt archives against the checksums of the Qt repository. `scripts/ci/aqt-settings.ini`
-sets one aqtinstall worker, so the archives are downloaded and extracted in turn;
-the installed tree is the same, so the cache key leaves the file out. Parallel
-workers share the output tree, and on Windows py7zr 1.1.3 then rejects a valid
-member as "Specified path is bad" when another archive creates its parent
-directory during the check: CPython's `realpath` keeps the `\\?\` prefix when a
-missing parent appears between its lookups, and the prefixed path no longer lies
-under the extraction directory. py7zr 1.1.4 strips that prefix; the setting can go
-once a reviewed lock includes such a release. The header of the lock
-records how to regenerate it; review a new lock like the other pins. The Qt
-directory is cached with `actions/cache` under a key that covers the Qt release,
-its modules and the lock. Like every cache, only trusted main checks save it; PR,
-manual and nightly runs restore it (see [build caches](#build-caches)). Such a run
-downloads Qt when no cache entry exists yet. Qt WebEngine is not installed: the
-embedded DeepSeek Native UI is an optional Linux plugin. The desktop build
-compiles through ccache.
+Qt 6.10.3 for MSVC 2022 x64 with Qt Multimedia comes from the official archives
+pinned in `packaging/windows/qt.json`, which `scripts/install-qt-windows.py`
+installs with the shared standard-library installer `scripts/qt_archives.py`
+(also used for [macOS](macos-distribution.md#pinned-qt)). No PyPI package is
+installed for it. The pin lists what aqtinstall 3.3.0 installed for this build
+before: every archive of `qt.qt6.6103.win64_msvc2022_64` (`qtbase`, `qtsvg`,
+`qtdeclarative`, `qttools` with `windeployqt`, `qttranslations`,
+`d3dcompiler_47` and `opengl32sw`) and `qtmultimedia`, each with its URL path in
+the repository, its size, its SHA-256 and the directory its `Extract` operation
+in `Updates.xml` names. The installer downloads every archive (download.qt.io may
+redirect to a mirror), stops reading at the pinned size, checks the SHA-256 and
+lists the members with the runner image's 7-Zip before it extracts any archive.
+A member with an absolute, drive, parent, device or alternate-stream name, or a
+link, stops the installation; so does a link left in the extracted tree that
+resolves outside it. A failed download is retried twice, each failure logged;
+nothing unverified is kept. The result is aqtinstall's layout,
+`RUNNER_TEMP/Qt/6.10.3/msvc2022_64`. Of aqtinstall's fixups only `bin/qt.conf`
+(`Prefix=..`) is repeated: the official Qt is relocatable, the `qmake.exe`, `.prl`
+and `qconfig.pri` patches find nothing to change in 6.10.3, and `qtenv2.bat` is
+for interactive shells. Compared with an aqtinstall 3.3.0 installation of the
+same release (on Linux, 2026-10-15), all other 11807 entries matched, except
+for the line endings of `qconfig.pri`, which aqtinstall rewrites in text mode. On
+Windows that rewrite keeps the archive's CRLF in `qconfig.pri` but gave the LF
+`lib/*.prl` files CRLF, which only qmake reads; they now stay LF. The
+installer also writes `zerus-qt.json`, the archive list it installed, and the
+`Use Qt` step checks it with `--check`, so a restored cache must match the pin
+too.
+
+To update Qt, change the version, `prefix`, package names and directories in
+`qt.json`, then run `python scripts/install-qt-windows.py --lock`: it reads the
+archives and their `Extract` directories from the official `Updates.xml`,
+downloads each archive and records its size and digest once it matches the
+published `.sha256`. From Qt 6.11 each Windows architecture has a repository
+directory of its own (`desktop/qt6_6112/qt6_6112_msvc2022_64` rather than
+aqtinstall's expected `desktop/qt6_6112/qt6_6112`), which a package's `directory`
+names; the 6.11 base package adds `qtdoc`. Review the locked pin like the other
+pins and check `--output` locally (7-Zip on Linux works as well) before
+committing. The Qt directory is cached with `actions/cache` under a key that
+covers the Qt release, the pin and the installer. Like every cache, only trusted
+main checks save it; PR, manual and nightly runs restore it (see
+[build caches](#build-caches)). Such a run downloads Qt when no cache entry exists
+yet. Qt WebEngine is not installed: the embedded DeepSeek Native UI is an
+optional Linux plugin. The desktop build compiles through ccache.
 
 `scripts/ci/gui.sh` re-enters itself through `scripts/ci/msvc-env.py`, which
 locates Visual Studio with `vswhere` and applies `vcvars64.bat` (with its CMake
