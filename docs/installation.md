@@ -107,8 +107,10 @@ installation and upgrades do not restart native agents, tmux or the GUI.
 For Apple Silicon Macs running macOS 14 or later, download
 `zerus-VERSION-macos-arm64.dmg` from the selected [GitHub release](https://github.com/ufna/zerus/releases).
 Open the image, drag **Zerus** into **Applications**, then eject the image and
-open Zerus from Applications. The application and disk image are signed and
-notarized by Apple. Older releases may not contain a macOS download.
+open Zerus from Applications. The application and disk image are signed with
+Developer ID and notarized by Apple. Signed macOS downloads begin with
+[nightly 0.42.2.r1291.g5d2e5d0.n17](https://github.com/ufna/zerus/releases/tag/nightly-38794972859);
+older releases may not contain a macOS download.
 
 To use the bundled CLI and SSH session bridge, run the per-user setup once,
 without sudo:
@@ -120,23 +122,25 @@ without sudo:
 Local tmux sessions require `tmux` (`brew install tmux`). Agent providers are
 installed separately. The Homebrew cask below installs tmux and links the CLI
 automatically. For a manual upgrade, replace the application with the new DMG's
-copy and use **Restart to finish update** in Zerus; native agents keep running.
+copy and restart the Zerus GUI when ready; native agents keep running. DMG
+installations currently update manually.
 
 ## macOS (Homebrew)
 
 Apple Silicon Macs running macOS 14 or later can install the signed and notarized
-application and CLI from the Zerus tap. The casks appear in the tap with the first
-signed builds.
+application and CLI from the Zerus tap. The first public cask is `zerus@nightly`;
+the stable `zerus` cask will appear with the first signed stable release.
 
 ```sh
-brew install --cask ufna/zerus/zerus
+brew install --cask ufna/zerus/zerus@nightly
 zerus-setup
 ```
 
 The tap has two channels. `zerus` follows stable releases; `zerus@nightly` follows
 the daily build from main that passed the full CI, published at the same time as
 the AUR nightly. Both install the same `Zerus.app`, so only one can be installed.
-Settings, agents and conversations are shared. To switch channels:
+Settings, agents and conversations are shared. Once both channels are published,
+switch between them with:
 
 ```sh
 brew uninstall --cask zerus && brew install --cask ufna/zerus/zerus@nightly
@@ -185,7 +189,7 @@ To uninstall, remove the per-user integration first:
 
 ```sh
 zerus-setup --remove
-brew uninstall --cask zerus
+brew uninstall --cask zerus@nightly   # use zerus for a stable installation
 ```
 
 `brew uninstall --zap --cask zerus` (or `zerus@nightly`) additionally removes the Zerus LaunchAgents,

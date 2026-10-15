@@ -214,10 +214,11 @@ distributions [build from source](docs/installation.md#local-installation) with
 the same installer. Zerus is open source: apt, dnf and other packages are welcome
 as pull requests.
 
-**macOS** builds from source with the same installer. A signed and notarized
-Apple Silicon app will be distributed through the
-[Homebrew tap](docs/installation.md#macos-homebrew) once the first signed build
-is published.
+**macOS**: Apple Silicon Macs running macOS 14 or later can install a signed and
+notarized nightly from the [DMG](docs/installation.md#macos-dmg) or
+[Homebrew tap](docs/installation.md#macos-homebrew):
+`brew install --cask ufna/zerus/zerus@nightly`, then `zerus-setup`.
+Source builds remain available through the same installer.
 
 **Windows**: nightly releases include a portable x86_64
 [control console](docs/installation.md#windows) that manages agents on your

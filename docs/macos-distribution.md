@@ -6,15 +6,20 @@ Apple Silicon Macs install Zerus from the tap
 [ufna/homebrew-zerus](https://github.com/ufna/homebrew-zerus):
 
 ```sh
-brew install --cask ufna/zerus/zerus           # stable releases
 brew install --cask ufna/zerus/zerus@nightly   # daily verified builds from main
 zerus-setup
 ```
 
+The first public macOS build is
+[nightly 0.42.2.r1291.g5d2e5d0.n17](https://github.com/ufna/zerus/releases/tag/nightly-38794972859).
+The stable `zerus` cask will appear with the first owner-triggered signed stable
+release; it is not yet available. After that, install it with
+`brew install --cask ufna/zerus/zerus`.
+
 | Cask | Built by | Version | Download |
 | --- | --- | --- | --- |
-| `zerus` | manual `release.yml` candidate, `publish.yml` | `0.42.0` | `releases/download/v0.42.0/` |
-| `zerus@nightly` | daily `nightly.yml`, `publish-nightly.yml` | `0.42.0.r1234.gabcdef0.n56` | `releases/download/nightly-RUN_ID/` |
+| `zerus` | manual `release.yml` candidate, `publish.yml` | `VERSION` | `releases/download/vVERSION/` |
+| `zerus@nightly` | daily `nightly.yml`, `publish-nightly.yml` | `VERSION.rCOUNT.gCOMMIT.nNUMBER` | `releases/download/nightly-RUN_ID/` |
 
 Each cask ships with the AUR packages of the same candidate: `zerus` with the
 stable packages, `zerus@nightly` with `zerus-ade-nightly-bin`. Both install the
@@ -126,11 +131,12 @@ It runs three jobs after full CI:
    The job verifies the Team ID, Gatekeeper and the stapled ticket, then deletes the
    keychain and key files even on failure. A team API key passes its issuer ID; an
    individual API key leaves `APPLE_NOTARY_API_ISSUER_ID` empty.
-   Stapling retries a lost CloudKit connection (`NSURLErrorDomain -1005`, exit
-   68) at most four times, after 5, 15, 30 and 60 seconds, on the same signed
-   file. Other failures stop immediately; an exhausted retry or failed ticket
-   validation prevents release output. Signing and notary submissions are not
-   retried by this policy.
+   Stapling and ticket validation retry a lost CloudKit connection
+   (`NSURLErrorDomain -1005`, exit 68) at most four times, after 5, 15, 30 and
+   60 seconds, on the same signed file. The bundle checker and cask image check
+   use the same validation policy. Other failures stop immediately; an exhausted
+   retry or invalid ticket prevents publication. Signing and notary submissions
+   are not retried by this policy.
 3. **macOS cask installation** (no secrets) checks the DMG signature and ticket,
    mounts it read-only and verifies the contained app, self-tests and Applications
    shortcut. It then renders the channel's cask, runs `brew style`,
@@ -339,6 +345,26 @@ and Gatekeeper accepted both. The read-only mounted app passed the CLI and GUI
 self-tests under library validation and reported the exact clean source commit.
 This local qualification was not published. Both rendered cask templates passed
 `brew style` in disposable local taps.
+
+The first published DMG comes from
+[Nightly 38794972859](https://github.com/ufna/zerus/actions/runs/38794972859),
+version `0.42.2.r1291.g5d2e5d0.n17`, from clean source
+`5d2e5d0955ab34f1e81ebd237a9b7eed2761eb7f`. Its complete CI matrix and all
+67 production Qt test suites passed. Apple accepted separate app and DMG
+submissions; the signing job stapled and verified both. An independent download
+matched the Actions artifact digest, and its read-only mounted app passed
+signature, ticket, Gatekeeper, CLI/GUI self-tests and exact source metadata checks.
+A transient CloudKit connection loss during CI ticket validation was resolved by
+retrying installation verification on the same signed artifact, without a rebuild.
+The clean macOS runner passed Homebrew style, installation, installed bundle and
+Gatekeeper checks, CLI/GUI self-tests, isolated setup/removal and uninstallation.
+[Publisher 38802915468](https://github.com/ufna/zerus/actions/runs/38802915468)
+published the immutable nightly, synchronized AUR and committed the nightly cask
+to `ufna/homebrew-zerus`. Anonymous downloads of the public DMG and ZIP match
+their Actions artifact bytes, `SHA256SUMS` and GitHub digests; the public cask
+matches the reviewed template, version and ZIP digest. `brew fetch --cask
+ufna/zerus/zerus@nightly` also downloaded and verified the public package without
+installing over the developer's app.
 
 Still requiring interactive or subsequent release qualification:
 
