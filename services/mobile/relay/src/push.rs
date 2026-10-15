@@ -152,18 +152,19 @@ impl Push {
     async fn deliver(&self, provider: &str, target: &str, payload: &Value) -> Result<(bool, bool)> {
         if provider == "fcm" {
             if let Some(fcm) = &self.fcm {
+                let message = fcm_message(target, payload)?;
                 let token = self.oauth(fcm).await?;
-                let mut data = serde_json::Map::new();
-                for (k, v) in payload.as_object().ok_or(Error::BAD)? {
-                    data.insert(
-                        k.clone(),
-                        json!(v
-                            .as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| v.to_string())),
-                    );
-                }
-                let response=self.client.post(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send",fcm.project)).bearer_auth(token).json(&json!({"message":{"token":target,"data":data,"android":{"priority":"high","ttl":"300s"}}})).send().await.map_err(|_|Error::UNAVAILABLE)?;
+                let response = self
+                    .client
+                    .post(format!(
+                        "https://fcm.googleapis.com/v1/projects/{}/messages:send",
+                        fcm.project
+                    ))
+                    .bearer_auth(token)
+                    .json(&message)
+                    .send()
+                    .await
+                    .map_err(|_| Error::UNAVAILABLE)?;
                 if response.status().is_success() {
                     return Ok((true, false));
                 }
@@ -172,13 +173,7 @@ impl Push {
                 }
                 let body = bounded_response(response, 65536).await?;
                 let body: Value = serde_json::from_slice(&body)?;
-                let invalid = body["error"]["details"].as_array().is_some_and(|a| {
-                    a.iter().any(|v| {
-                        v["@type"] == "type.googleapis.com/google.firebase.fcm.v1.FcmError"
-                            && v["errorCode"] == "UNREGISTERED"
-                    })
-                });
-                return Ok((false, invalid));
+                return Ok((false, fcm_unregistered(&body)));
             }
         }
         // Registrations from retired providers such as UnifiedPush can never deliver.
@@ -206,6 +201,30 @@ impl Push {
         }
         Ok(())
     }
+}
+/// The FCM v1 message for one wake: string data only, with no notification,
+/// so the provider never carries conversation content or display text.
+pub fn fcm_message(target: &str, payload: &Value) -> Result<Value> {
+    let mut data = serde_json::Map::new();
+    for (k, v) in payload.as_object().ok_or(Error::BAD)? {
+        data.insert(
+            k.clone(),
+            json!(v
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v.to_string())),
+        );
+    }
+    Ok(json!({"message":{"token":target,"data":data,"android":{"priority":"high","ttl":"300s"}}}))
+}
+/// Whether an FCM error response says the registration token is gone.
+pub fn fcm_unregistered(body: &Value) -> bool {
+    body["error"]["details"].as_array().is_some_and(|a| {
+        a.iter().any(|v| {
+            v["@type"] == "type.googleapis.com/google.firebase.fcm.v1.FcmError"
+                && v["errorCode"] == "UNREGISTERED"
+        })
+    })
 }
 async fn bounded_response(r: reqwest::Response, max: usize) -> Result<Vec<u8>> {
     let mut stream = r.bytes_stream();
