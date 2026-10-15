@@ -215,7 +215,9 @@ never hands its chord back to a text field.
   whitespace-normalized) triggers the Send now path for that snapshot. The push is
   dropped with a notice if the session, run or conversation changes, the send
   fails or is uncertain, or 20 seconds pass without such a snapshot (the agent may
-  already have taken the message). A push never resends text.
+  already have taken the message). A push never resends text. A message with
+  attachments but no text is sent without a push, since the queue cannot be
+  matched without text.
 - **Zoom** changes `workspace/contentScale` in 10% steps within its bounds, applies
   it like the Settings slider, keeps the slider in sync and shows the new value
   in a notice.
@@ -280,8 +282,8 @@ Terminal rule, a filter field and **Customize…**, which opens Settings → Key
 - `tray/src/GoToDialog.h/.cpp` (hgs-tray-ui): popup, ranking, provider interface.
 - `tray/src/KeyboardSettings.h/.cpp` (hgs-tray-ui): the Settings section.
 - `tray/src/ShortcutsDialog.h/.cpp` (hgs-tray-ui): the cheat sheet.
-- `MessageComposer`: Composer-scope actions, the Ctrl+X prefix rule and a
-  `pushRequested` signal.
+- `MessageComposer`: Composer-scope actions and the `pushRequested` and
+  `sendNowRequested` signals. The Ctrl+X prefix rule lives in `ShortcutRouter`.
 
 ## Documentation
 
