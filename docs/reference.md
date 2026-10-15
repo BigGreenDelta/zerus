@@ -253,8 +253,9 @@ conversation. Failed restore keeps it. **Forget archive** preserves native histo
 Desktop and Android filter **Archived date**, the time a conversation moved into
 Archive, independently of its creation or last message. Choose All dates, Today,
 7/30 calendar days, or an inclusive From/Through range. Days use the viewing
-device's local time zone, including daylight-saving changes. The most recently
-archived instances appear first. **Refresh** starts a fresh view; **Load more**
+device's local time zone, including daylight-saving changes. Pages request the
+most recently archived instances first; the desktop retains saved row order within
+each project. **Refresh** starts a fresh view; **Load more**
 requests the next page, at most 50 rows per selected online computer. Loaded/total
 status distinguishes an empty archive from a partly loaded one. The Archive
 badge counts loaded rows in the current project/machine scope, with `+` when
