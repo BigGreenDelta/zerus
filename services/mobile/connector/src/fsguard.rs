@@ -96,19 +96,29 @@ pub fn inspect_private_file(path: &Path) -> std::result::Result<Option<Metadata>
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(UNSAFE_FILE),
     };
+    inspect_private_metadata(metadata)
+}
+
+fn inspect_private_metadata(
+    metadata: Metadata,
+) -> std::result::Result<Option<Metadata>, &'static str> {
     let kind = metadata.file_type();
     // A symlink fails O_NOFOLLOW and a directory fails O_RDWR: "not safe".
     if kind.is_symlink() || kind.is_dir() || (kind.is_file() && metadata.mode() & 0o600 != 0o600) {
         return Err(UNSAFE_FILE);
     }
-    if !kind.is_file()
-        || metadata.uid() != euid()
-        || !private_bits(&metadata)
-        || metadata.nlink() != 1
-    {
+    if !kind.is_file() || metadata.uid() != euid() || !private_bits(&metadata) {
         return Err(PRIVATE_FILE);
     }
-    Ok(Some(metadata))
+    match metadata.nlink() {
+        // lstat can finish after SQLite unlinks a rollback journal: its inode
+        // still exists during the lookup but no directory entry names it.
+        // This read-only snapshot is absent, not an unsafe live file. The
+        // runtime's descriptor-based private_file check remains stricter.
+        0 => Ok(None),
+        1 => Ok(Some(metadata)),
+        _ => Err(PRIVATE_FILE),
+    }
 }
 
 /// The exclusive `flock(2)` the Python connector takes on `connector.lock`;
@@ -154,5 +164,58 @@ pub fn probe_lock(path: &Path) -> LockState {
         Ok(()) => LockState::Free,
         Err(error) if error == rustix::io::Errno::WOULDBLOCK => LockState::Held,
         Err(_) => LockState::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn unlinked_inspection_is_absent_but_live_unsafe_files_are_refused() {
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "zerus-journal-inspection-{}-{nonce}",
+            std::process::id()
+        )));
+        DirBuilder::new().mode(0o700).create(&scratch.0).unwrap();
+        let path = scratch.0.join("journal.sqlite3-journal");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        assert!(inspect_private_file(&path).unwrap().is_some());
+
+        let hard_link = scratch.0.join("hard-link");
+        std::fs::hard_link(&path, &hard_link).unwrap();
+        assert_eq!(inspect_private_file(&path).unwrap_err(), PRIVATE_FILE);
+        std::fs::remove_file(hard_link).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert_eq!(inspect_private_file(&path).unwrap_err(), PRIVATE_FILE);
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let link = scratch.0.join("symlink");
+        symlink(&path, &link).unwrap();
+        assert_eq!(inspect_private_file(&link).unwrap_err(), UNSAFE_FILE);
+
+        std::fs::remove_file(&path).unwrap();
+        let unlinked = file.metadata().unwrap();
+        assert_eq!(unlinked.nlink(), 0);
+        assert!(inspect_private_metadata(unlinked).unwrap().is_none());
+        assert!(inspect_private_file(&path).unwrap().is_none());
     }
 }
