@@ -91,6 +91,10 @@ class CodexAsync(unittest.TestCase):
     def inspect(self):
         result=subprocess.run([str(fixtures.HGS),'inspect',self.name],env=self.env,text=True,capture_output=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr);return json.loads(result.stdout)
+    def optional(self):
+        result=subprocess.run([str(fixtures.HGS),'ls','--json','--local'],env=self.env,text=True,capture_output=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+        return next(row for row in json.loads(result.stdout)['sessions'] if row['name']==self.name)['optional_questions']
     def answer(self,card,answer=None,request_id=None):
         payload=dict(request_id=request_id or str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id,question_id=card['question_id'],expected_question_hash=card['question_hash'],answers=[answer or dict(question_id='q_0',text='Accepted answer')])
         result=subprocess.run([str(fixtures.HGS),'answer',self.name,'--json'],input=json.dumps(payload),env=self.env,text=True,capture_output=True,timeout=15)
@@ -121,6 +125,7 @@ class CodexAsync(unittest.TestCase):
         result=self.inspect()
         self.assertIn('pending_questions_error',result)
         self.assertTrue(any(m.get('detail')=='Public activity remains visible' for m in result['provider_messages']))
+        self.assertIsNone(self.optional())  # Unknown, never a count of 0.
 
     def test_answer_from_normal_prompt_has_native_identity_and_removes_only_that_question(self):
         card=self.request();self.assertTrue(card['optional']);self.assertTrue(card['can_answer']);self.assertTrue(card['can_skip'])
@@ -154,10 +159,11 @@ class CodexAsync(unittest.TestCase):
                 self.assertEqual(self.inspect()['pending_questions'],[])
     def test_skip_without_a_panel_sends_nothing_and_survives_a_new_run(self):
         card=self.request();before=self.received()
+        self.assertEqual(self.optional(),{'count':1,'ids':[card['question_id']],'latest_at':card['created_at']})
         result,_=self.answer(card,dict(question_id='q_0',skip=True));self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(self.received(),before);self.assertEqual(self.inspect()['pending_questions'],[])
         self.run_id=str(uuid.uuid4());self.record['run_id']=self.run_id;self.write_record();self.tmux('set-option','-t','='+self.name+':','@hgs_run',self.run_id)
-        self.assertEqual(self.inspect()['pending_questions'],[])
+        self.assertEqual(self.inspect()['pending_questions'],[]);self.assertEqual(self.optional(),{'count':0})
     def test_native_skip_dismisses_panel_and_never_sends_an_answer(self):
         self.configure(panel=True);card=self.request()
         result,_=self.answer(card,dict(question_id='q_0',skip=True));self.assertEqual(result.returncode,0,result.stderr)
@@ -190,6 +196,8 @@ class CodexAsync(unittest.TestCase):
                 receipt=json.loads(result.stdout);self.assertEqual(receipt['status'],'submitted');self.assertNotIn('answered_at',receipt)
                 pending=self.inspect()['pending_questions'];self.assertEqual(len(pending),1)
                 self.assertFalse(pending[0]['can_answer']);self.assertFalse(pending[0]['can_skip'])
+                # Submitted / Awaiting agent no longer counts as waiting for the person.
+                self.assertEqual(self.optional(),{'count':0})
                 delivery=pending[0]['answer_delivery'];self.assertEqual(delivery['request_id'],payload['request_id'])
                 self.assertEqual(delivery['answers'][0]['text'],'Accepted answer')
                 # A fresh question index restores either submission path from

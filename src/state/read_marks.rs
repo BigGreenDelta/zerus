@@ -104,18 +104,64 @@ pub(super) fn signature(session: &Value, questions: Option<&[Value]>) -> Option<
 
 /// Pending native question identities of a live tracked session. Only Codex
 /// asks without changing phase; other providers are read only while waiting.
-/// None when the Codex question index cannot catch up within `budget` (or a
-/// short slice of its own): a listing never runs an unbounded transcript scan.
-/// Errors contribute nothing: a listing never fails on optional indexes.
-pub(super) fn pending_questions(record: &Value, session: &Value, live_pane: bool, budget: Instant) -> Option<Vec<Value>> {
+/// Ok(None) when the Codex question index cannot catch up within `budget` (or
+/// a short slice of its own): a listing never runs an unbounded transcript
+/// scan. Err when the Codex index cannot be read; other providers never ask
+/// optional questions, so their read errors count as no questions.
+pub(super) fn pending_questions(record: &Value, session: &Value, live_pane: bool, budget: Instant) -> Result<Option<Vec<Value>>> {
     if !live_pane
         || (string(record, "agent") != "codex" && !ACTIONABLE.contains(&string(session, "phase")))
         || !process_alive(record)
     {
-        return Some(Vec::new());
+        return Ok(Some(Vec::new()));
     }
     let deadline = budget.max(Instant::now() + QUESTION_SLICE);
-    questions::current_until(record, deadline).unwrap_or(Some(Vec::new()))
+    let questions = questions::current_until(record, deadline);
+    if string(record, "agent") == "codex" {
+        questions
+    } else {
+        Ok(questions.unwrap_or(Some(Vec::new())))
+    }
+}
+
+/// At most this many optional question IDs are listed per session, the newest;
+/// the count stays exact.
+const OPTIONAL_IDS: usize = 32;
+
+/// `optional_questions` of a listing row: the pending optional (Codex async)
+/// questions without a submitted answer, as identities only, never their text.
+/// Unknown questions (None) list null, never a count of 0. Without any, only
+/// the count is listed, which keeps snapshots of many saved sessions small.
+pub(super) fn optional_questions(questions: Option<&[Value]>) -> Value {
+    let Some(questions) = questions else {
+        return Value::Null;
+    };
+    let mut asked = BTreeMap::new();
+    for card in questions {
+        if card["source"] != "codex_async"
+            || card["optional"] != true
+            || card["answer_delivery"]["status"] == "submitted"
+        {
+            continue;
+        }
+        let Some(id) = card["question_id"].as_str().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let at = card["created_at"].as_f64().unwrap_or(0.0);
+        let newest = asked.entry(id).or_insert(at);
+        *newest = newest.max(at);
+    }
+    if asked.is_empty() {
+        return json!({"count": 0});
+    }
+    let mut ordered: Vec<(f64, &str)> = asked.into_iter().map(|(id, at)| (at, id)).collect();
+    ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    let latest = ordered.last().map(|(at, _)| *at).filter(|at| *at > 0.0);
+    let ids: Vec<&str> = ordered[ordered.len().saturating_sub(OPTIONAL_IDS)..]
+        .iter()
+        .map(|(_, id)| *id)
+        .collect();
+    json!({"count": ordered.len(), "ids": ids, "latest_at": latest})
 }
 
 /// While routine ticks of a recurring job are skipped, a reply already read
@@ -143,6 +189,15 @@ pub(super) fn enrich(session: &mut Value, marks: &Value, owner: &str, questions:
     let digest = signature(session, questions);
     session["attention_signature"] = json!(digest);
     session["read"] = mark;
+}
+
+/// Add the C1 fields and `optional_questions` to one listing row, given its
+/// questions as `pending_questions` found them. An unreadable index adds no
+/// attention, as a listing never fails on optional indexes, but leaves the
+/// optional questions unknown.
+pub(super) fn enrich_listing(session: &mut Value, marks: &Value, owner: &str, questions: Result<Option<Vec<Value>>>) {
+    session["optional_questions"] = optional_questions(questions.as_ref().ok().and_then(Option::as_deref));
+    enrich(session, marks, owner, questions.unwrap_or(Some(Vec::new())).as_deref());
 }
 
 const MAX_CONVERSATIONS: usize = 8;
@@ -278,7 +333,8 @@ fn current(name: &str) -> Result<Option<Current>> {
         view["state"] = json!(if record["paused"].as_bool().unwrap_or(false) { "paused" } else { "stopped" });
     }
     drop(guard);
-    let questions = pending_questions(&record, &view, live_pane, question_budget());
+    // As in a listing, an unreadable index adds no attention.
+    let questions = pending_questions(&record, &view, live_pane, question_budget()).unwrap_or(Some(Vec::new()));
     Ok(Some((view, journal::journal_name(&record).to_owned(), questions)))
 }
 
@@ -417,6 +473,72 @@ mod tests {
         let mut submitted = question;
         submitted["answer_delivery"] = json!({"status":"submitted"});
         assert_eq!(signature(&working, Some(&[submitted])), None);
+    }
+
+    const OPTIONAL_CONTRACT: &str =
+        include_str!("../../mobile/android/app/src/test/resources/optional-question-contract.json");
+
+    fn optional_card(call: &str, at: f64) -> Value {
+        json!({"question_id":format!("codex-async:{call}:0"),"source":"codex_async","optional":true,
+            "created_at":at,"question_hash":format!("h-{call}")})
+    }
+
+    #[test]
+    fn optional_questions_follow_the_shared_contract() {
+        let contract: Value = serde_json::from_str(OPTIONAL_CONTRACT).unwrap();
+        for example in contract["listing"].as_array().unwrap() {
+            let questions = example["questions"].as_array().map(Vec::as_slice);
+            assert_eq!(optional_questions(questions), example["optional_questions"], "{}", example["name"]);
+        }
+        // Every row desktops and phones test against has a shape hgs lists.
+        let sequences = contract["desktop_sequences"].as_array().unwrap();
+        let rows = contract["cases"].as_array().unwrap().iter()
+            .chain(sequences.iter().flat_map(|sequence| sequence["steps"].as_array().unwrap()))
+            .map(|row| &row["raw"]);
+        for listed in rows.filter_map(|raw| raw.get("optional_questions")).filter(|listed| !listed.is_null()) {
+            let count = listed["count"].as_u64().unwrap();
+            if count == 0 {
+                assert_eq!(listed, &json!({"count": 0}));
+                continue;
+            }
+            assert_eq!(listed.as_object().unwrap().len(), 3, "{listed}");
+            let ids: Vec<&str> = listed["ids"].as_array().unwrap().iter().map(|id| id.as_str().unwrap()).collect();
+            assert_eq!(ids.len(), (count as usize).min(OPTIONAL_IDS), "{listed}");
+            assert_eq!(ids.iter().collect::<std::collections::BTreeSet<_>>().len(), ids.len(), "{listed}");
+            assert!(listed["latest_at"].is_null() || listed["latest_at"].as_f64().is_some_and(|at| at > 0.0));
+        }
+    }
+
+    #[test]
+    fn optional_questions_list_the_newest_ids_with_an_exact_count() {
+        let cards: Vec<Value> = (0..40).rev().map(|index| optional_card(&format!("call-{index:02}"), 100.0 + f64::from(index))).collect();
+        let listed = optional_questions(Some(&cards));
+        assert_eq!(listed["count"], 40);
+        let ids: Vec<String> = (8..40).map(|index| format!("codex-async:call-{index:02}:0")).collect();
+        assert_eq!(listed["ids"], json!(ids));
+        assert_eq!(listed["latest_at"], 139.0);
+    }
+
+    #[test]
+    fn unreadable_question_indexes_list_unknown_optional_questions_without_new_attention() {
+        let mut working = waiting();
+        working["phase"] = json!("working");
+        let pending = vec![optional_card("call-a", 100.0)];
+        let listed = |questions: Result<Option<Vec<Value>>>| {
+            let mut session = working.clone();
+            enrich_listing(&mut session, &json!({}), "codex/project/review", questions);
+            (session["optional_questions"].clone(), session["attention_signature"].clone())
+        };
+        let (known, asked) = listed(Ok(Some(pending.clone())));
+        assert_eq!(known, json!({"count":1,"ids":["codex-async:call-a:0"],"latest_at":100.0}));
+        assert_eq!(asked, json!(signature(&working, Some(&pending))));
+        assert_eq!(listed(Ok(Some(Vec::new()))), (json!({"count": 0}), Value::Null));
+        // An index read error adds no attention, as before, but is no count of 0.
+        assert_eq!(listed(Err("Conversation transcript identity mismatch".into())), (Value::Null, Value::Null));
+        // An index not complete in time is unknown in both fields.
+        let (unknown, digest) = listed(Ok(None));
+        assert!(unknown.is_null());
+        assert_eq!(digest, json!(signature(&working, None)));
     }
 
     #[test]
