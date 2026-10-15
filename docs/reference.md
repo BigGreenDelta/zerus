@@ -936,10 +936,11 @@ keep them unavailable and are named by profile, such as `2 “code” subagents`
 Applying settings and forking a running session wait for the same Ready, and a
 profile hook entry that Kimi's native subagent catalog has replaced holds back
 none of them. A chooser recognized only on the terminal, such as Kimi's context
-choice after an idle period, keeps both actions, forks and effort changes
+choice after an idle period, keeps clearing, compaction, forks and effort changes
 unavailable until it is answered; `fork_reason` and `effort_change_reason` give the
-same reason. A model settings change made meanwhile is saved as **Pending**
-(`settings_apply_when` is `ready`), and no key reaches the chooser.
+same reason as `clear_context_reason`. A model settings change made meanwhile is
+saved as **Pending** (`settings_apply_when` is `ready`), and no key reaches the
+chooser.
 The desktop shows the reason as the tooltip of the disabled **Clear context**,
 **Clear session** and **Compact and continue** actions, and as a line in the
 cold-cache confirmation.
