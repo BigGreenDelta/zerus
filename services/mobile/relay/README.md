@@ -17,14 +17,32 @@ cargo +1.85.0 clippy --locked --all-targets -- -D warnings
 cargo +1.85.0 test --locked
 ```
 
+The server is the default `server` feature. Without it the library is only the
+API v1 codec (`json`), envelope validation (`protocol`) and `error`, with none
+of the HTTP, database or TLS crates, for the outbound connector:
+
+```sh
+cargo +1.85.0 clippy --locked --no-default-features --lib --test codec -- -D warnings
+cargo +1.85.0 test --locked --no-default-features --test codec
+```
+
+The image and the infra packager copy only `Cargo.toml`, `Cargo.lock`, `.cargo`
+and `src/**/*.rs|*.sql`, so the crate has no build script, declared test target,
+path dependency or include from outside `src/`
+([the source check](../../../tests/test_source_relay_inputs.py)).
+
 The PostgreSQL contract is explicit, never silently treated as passed by a local
 SQLite run. Point `ZERUS_RELAY_TEST_DATABASE_URL` at a **disposable** PostgreSQL
-instance whose fixture role may create databases. The test creates and removes
+instance whose fixture role may create databases. Each test creates and removes
 a uniquely named database; credentials are not logged:
 
 ```sh
 cargo +1.85.0 test --locked --test contracts postgres_cross_worker -- --ignored
+cargo +1.85.0 test --locked --test administration
 ```
+
+The `administration` contract drives the `zerus-relay` command line on
+PostgreSQL when the variable is set and on SQLite otherwise.
 
 From the repository root, with the `services/mobile` test dependencies installed:
 
@@ -33,7 +51,6 @@ export ZERUS_RELAY_BINARY="$PWD/services/mobile/relay/target/debug/zerus-relay"
 export PATH="$PWD/services/mobile/relay/target/debug:$PATH"
 python -m unittest discover -s services/mobile/tests -p test_rust_relay.py -v
 python -m unittest discover -s services/mobile/tests -p 'test*end_to_end.py' -v
-python -m unittest discover -s services/mobile/tests -p test_peer_migration.py -v
 ```
 
 These replay the released Python HTTP assertions against a Rust process and
@@ -41,13 +58,11 @@ exercise the actual Python connector with synthetic native subprocesses. They
 include persisted Python receipts, exact canonical hashes, Unicode, attachments,
 one-hop routing and cancellation. The full reference/connector suite remains
 `python -m unittest discover -s services/mobile/tests -v`. Hosted CI runs it once
-with `ZERUS_RELAY_BINARY`, `ZERUS_DIRECTORY_TEST_HGS` naming the built `hgs` and
-`ZERUS_RELAY_TEST_DSN` naming a disposable loopback `zerus_test_*` PostgreSQL
-database, then repeats `-p 'test_mobile_speech*.py'` without `ZERUS_RELAY_BINARY`.
+with `ZERUS_RELAY_BINARY` set and `ZERUS_DIRECTORY_TEST_HGS` naming the built
+`hgs`, then repeats `-p 'test_mobile_speech*.py'` without `ZERUS_RELAY_BINARY`.
 The reference Python HTTP module is retained as an independent compatibility
 oracle, not selected by the supported server CLI. `zerus-mobile` delegates
-administration/serving to `zerus-relay`; the offline `migrate-sqlite` utility
-remains Python.
+administration and serving to `zerus-relay`.
 
 ## Boundaries
 
@@ -82,6 +97,11 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   are decoded from borrowed raw JSON so the legal object key
   `$serde_json::private::Number` cannot be interpreted as serializer metadata.
   Legacy Python receipt tests cover this key as well as Unicode and large numbers.
+  The encoder sorts keys itself rather than trusting `Map` order, which
+  serde_json's `preserve_order` feature would change; CI rejects that feature.
+  `python_default_len` measures plain `json.dumps` output, as the connector's
+  size bounds do. `tests/codec.rs` compares both forms with CPython on 20,000
+  seeded values and documents the parse limits, including a claim batch's margin.
 - `store/requests.rs` owns queue admission, result reservations, committed claims,
   receipts, expiry and permanent mutation identity tombstones. A prepared
   submission owns one canonical payload plus small typed metadata; SQL work does

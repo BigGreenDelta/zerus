@@ -212,7 +212,16 @@ pub(super) fn attention_message_summary(record: &Value, output: &mut Value, live
             string(record, "conversation_id"),
             true,
         )
-        .and_then(|current| checked_terminal(&current, true))
+        .and_then(|current| {
+            checked_terminal(&current, true).map_err(|error| {
+                // Stop returns ordinary Codex follow-ups to its input as one draft.
+                if prefix == "interrupted" && error == DRAFT && input_queue::returned_by_stop(&current) {
+                    RETURNED_FOLLOW_UPS.into()
+                } else {
+                    error
+                }
+            })
+        })
     } else {
         Err("The agent is not running. Resume it before sending.".into())
     };
@@ -440,6 +449,16 @@ fn codex_model_footer(footer: &str, model: Option<&str>) -> bool {
         && words.next().is_none()
 }
 
+/// Codex's one-line model/folder status: this session's exact model or a GPT
+/// label, then a folder.
+fn codex_status_row(plain: &str, model: Option<&str>) -> bool {
+    let footer = plain.to_ascii_lowercase();
+    (codex_model_footer(plain, model) || footer.trim_start().starts_with("gpt-"))
+        && footer.split_once(" · ").is_some_and(|(_, path)| {
+            shown_path::status_folder(path, crate::platform::home().as_deref())
+        })
+}
+
 fn codex_footer_model(record: &Value) -> Option<&str> {
     if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
         return Some(model);
@@ -552,10 +571,7 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
                 // Windows Codex prints `~\…` or a drive path (`shown_path`).
                 let single_line_footer = placeholder
                     && lines[index + 1..].iter().all(|line| line.trim().is_empty())
-                    && (exact_model || footer.trim_start().starts_with("gpt-"))
-                    && footer.split_once(" · ").is_some_and(|(_, path)| {
-                        shown_path::status_folder(path, crate::platform::home().as_deref())
-                    });
+                    && codex_status_row(&plain, model);
                 return input_background || single_line_footer
                     || lines.last().is_some_and(|line| {
                         let plain: String = styled_row(line).iter().map(|(ch, _)| ch).collect();
@@ -602,10 +618,40 @@ pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
             cursor_y,
             codex_footer_model(record),
         ) {
-            return Err("terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt".into());
+            return Err(DRAFT.into());
         }
     }
     Ok(())
+}
+
+const DRAFT: &str = "terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt";
+/// The send-block reason while Codex's input holds exactly the follow-ups Stop returned.
+const RETURNED_FOLLOW_UPS: &str =
+    "The queued follow-ups are back in Codex's input as an unsent draft. Submit or clear them in Terminal.";
+
+/// The whole draft in Codex's input: its `›` row and indented continuation rows,
+/// then a blank row before the model/folder status row of its footer in the last
+/// two screen rows. The cursor must be above that blank row; any other layout is unread.
+pub(super) fn codex_draft(record: &Value, screen: &str, cursor_y: usize) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    let model = codex_footer_model(record);
+    let footer = (lines.len().saturating_sub(2)..lines.len())
+        .find(|&index| codex_status_row(lines[index], model))?;
+    let (start, first) = lines[..footer]
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, row)| Some((index, row.strip_prefix('›')?)))?;
+    let rows = &lines[start + 1..footer];
+    if !(start..footer - 1).contains(&cursor_y)
+        || rows.last().is_none_or(|row| !row.is_empty())
+        || rows.iter().any(|row| !row.is_empty() && !row.starts_with("  "))
+    {
+        return None;
+    }
+    let first = first.strip_prefix(' ').unwrap_or(first);
+    let rows = rows.iter().map(|row| row.get(2..).unwrap_or(""));
+    Some(std::iter::once(first).chain(rows).collect::<Vec<_>>().join("\n").trim_end().to_owned())
 }
 
 pub(super) fn safe_filename(name: &str, index: usize) -> String {

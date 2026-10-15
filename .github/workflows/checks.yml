@@ -133,9 +133,7 @@ jobs:
         image: postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
-          # Disposable database for the Python PostgreSQL store, peer and
-          # migration modules; the Rust contract creates its own databases.
-          POSTGRES_DB: zerus_test_relay
+          # The Rust contracts create and drop their own databases.
         ports: [5432/tcp]
         options: >-
           --health-cmd pg_isready --health-interval 5s
@@ -152,17 +150,37 @@ jobs:
           cargo +1.85.0 fmt --check
           cargo +1.85.0 clippy --locked --all-targets -- -D warnings
           cargo +1.85.0 test --locked
-      - name: Real PostgreSQL cross-worker contract
+          # The connector links only the protocol library: it builds without the
+          # server stack, and no build may give serde_json insertion-ordered maps.
+          cargo +1.85.0 clippy --locked --no-default-features --lib --test codec -- -D warnings
+          cargo +1.85.0 build --locked --no-default-features --lib
+          cargo +1.85.0 test --locked --no-default-features --test codec
+          library="$(cargo +1.85.0 tree --locked --no-default-features --target all -e normal --prefix none)"
+          if grep -E '^(axum|clap|hyper|reqwest|ring|rustls|sqlx|tokio|tower)[ -]' <<<"$library"; then
+            echo "The protocol library depends on server crates" >&2
+            exit 1
+          fi
+          serde_features() {
+            features="$(cargo +1.85.0 tree --locked --target all -e features -i serde_json "$@")"
+            if ! grep -q 'serde_json feature "arbitrary_precision"' <<<"$features" \
+              || grep -q 'serde_json feature "preserve_order"' <<<"$features"; then
+              echo "serde_json needs arbitrary_precision and must not preserve_order $*" >&2
+              exit 1
+            fi
+          }
+          serde_features
+          serde_features --no-default-features
+      - name: Real PostgreSQL cross-worker and administration contracts
         working-directory: services/mobile/relay
         env:
           ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
-        run: cargo +1.85.0 test --locked --test contracts postgres_cross_worker -- --ignored
-      # Every services/mobile/tests module runs once: relay fixtures use the Rust
-      # process, and the PostgreSQL modules use the service's disposable database.
-      # The speech suites also run against the retained Python reference relay.
+        run: |
+          cargo +1.85.0 test --locked --test contracts postgres_cross_worker -- --ignored
+          cargo +1.85.0 test --locked --test administration
+      # Every services/mobile/tests module runs once, and relay fixtures use the
+      # Rust process. The speech suites also run against the retained Python
+      # reference relay.
       - name: Released HTTP and outbound connector compatibility
-        env:
-          ZERUS_RELAY_TEST_DSN: postgresql://postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/zerus_test_relay
         run: |
           cargo +1.85.0 build --locked --bin hgs
           python3 -m venv "$RUNNER_TEMP/relay-venv"

@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "zerus-mobile"
 version = "0.1.0"
-description = "Zerus outbound computer connector, offline migration and relay compatibility fixtures"
+description = "Zerus outbound computer connector and relay compatibility fixtures"
 requires-python = ">=3.11"
-dependencies = ["aiohttp==3.14.4", "asyncpg==0.31.0"]
+dependencies = ["aiohttp==3.14.4"]
 
 [project.optional-dependencies]
 fcm = ["firebase-admin==7.7.0"]

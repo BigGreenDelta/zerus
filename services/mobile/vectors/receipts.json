@@ -1,0 +1,41 @@
+{
+ "android": {
+  "divergence_c": "a peer attachment_read fails today with 'connector could not record native outcome', which the phone shows as an ordinary attachment error",
+  "shown_prefix_characters": 200,
+  "update_required_substrings": ["unavailable","unsupported operation"]
+ },
+ "provenance": "texts produced by the Python Journal and Connector.execute; json.dumps default separators, ensure_ascii",
+ "receipt_keys": [
+  "state",
+  "result",
+  "error"
+ ],
+ "receipts": {
+  "cancelled_during_route_resolution": {"error":"connector stopped before native route resolution","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"connector stopped before native route resolution\"}"},
+  "cancelled_running_mutation": {"error":"connector stopped before recording the native result","state":"uncertain","stored":"{\"state\": \"uncertain\", \"result\": null, \"error\": \"connector stopped before recording the native result\"}"},
+  "cancelled_running_read": {"error":"connector stopped before recording the native result","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"connector stopped before recording the native result\"}"},
+  "execute:attachment-read-missing-file": {"error":"attachment is not available from this conversation on the computer","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"attachment is not available from this conversation on the computer\"}"},
+  "execute:attachment-read-unavailable": {"android":{"update_required":true},"error":"native attachment read ABI is unavailable","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"native attachment read ABI is unavailable\"}"},
+  "execute:directory-create-route-mismatch": {"error":"directory creation computer does not match its immutable route","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"directory creation computer does not match its immutable route\"}"},
+  "execute:gateway-route-invalid": {"error":"invalid immutable gateway route","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"invalid immutable gateway route\"}"},
+  "execute:gateway-route-unavailable": {"android":{"update_required":true},"error":"guarded native routing is unavailable","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"guarded native routing is unavailable\"}"},
+  "execute:inspect-native-crash": {"error":"connector could not record native outcome","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"connector could not record native outcome\"}"},
+  "execute:process-output-too-large": {"error":"native result exceeds relay size limit","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"native result exceeds relay size limit\"}"},
+  "execute:send-native-crash": {"error":"connector could not record native outcome","state":"uncertain","stored":"{\"state\": \"uncertain\", \"result\": null, \"error\": \"connector could not record native outcome\"}"},
+  "execute:send-native-timeout": {"error":"native command timed out","state":"uncertain","stored":"{\"state\": \"uncertain\", \"result\": null, \"error\": \"native command timed out\"}"},
+  "execute:terminal-input-expired": {"error":"terminal input expired before native delivery","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"terminal input expired before native delivery\"}"},
+  "execute:unsupported-operation": {"android":{"update_required":true},"error":"unsupported operation","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"unsupported operation\"}"},
+  "history_expired_tombstone": {"error":"Native result history expired; this request will not execute again","state":"completed","stored":"{\"state\": \"completed\", \"result\": {\"status\": \"history_expired\"}, \"error\": \"Native result history expired; this request will not execute again\"}"},
+  "replay_in_progress_returned": {"error":"request is already in progress","state":"uncertain","stored":"{\"state\": \"uncertain\", \"result\": null, \"error\": \"request is already in progress\"}"},
+  "restart_recovered_mutation": {"error":"connector stopped before recording the native result","state":"uncertain","stored":"{\"state\": \"uncertain\", \"result\": null, \"error\": \"connector stopped before recording the native result\"}"},
+  "restart_recovered_read": {"error":"connector stopped before recording the native result","state":"failed","stored":"{\"state\": \"failed\", \"result\": null, \"error\": \"connector stopped before recording the native result\"}"}
+ },
+ "upload": {
+  "content_type": "application/json",
+  "example_body": "{\"state\": \"completed\", \"result\": {\"text\": \"caf\\u00e9 \\ud83d\\ude00 \\u2028\"}, \"error\": null}",
+  "example_stored": "{\"state\": \"completed\", \"result\": {\"text\": \"caf\\u00e9 \\ud83d\\ude00 \\u2028\"}, \"error\": null}",
+  "method": "POST",
+  "path": "/v1/node/requests/{request_id}/result",
+  "rule": "the body is json.dumps(json.loads(stored)): the stored text for ordinary values"
+ }
+}

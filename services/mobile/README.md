@@ -183,7 +183,9 @@ list every five seconds and round-robins across replica addresses, with passive
 failure detection and no request replay retries. Verify both replica addresses
 appear before load testing. A Caddy restart is necessary after changing its
 upstream environment. See [Caddy dynamic upstream documentation](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#dynamic-upstreams).
-For an existing SQLite installation, migrate instead of provisioning identities.
+Move an existing SQLite installation with the v0.42.2 migration instead of
+provisioning new identities; see
+[SQLite installations](../../docs/mobile-deployment.md#sqlite-installations).
 
 ## Isolated capacity probes
 
@@ -207,48 +209,12 @@ streams fixture files, samples health latency and reports process RSS, cgroup
 peak memory and OOM events. `--concurrency 2` also exercises early backpressure.
 Other profiles cover dense, deeply nested and mixed Unicode JSON.
 
-The previous `tests/relay_load.py` and `tests/relay_scale.py` remain comparison
-probes for the Python reference implementation. Their historical measurements
-in `docs/relay-architecture.md` do not certify the Rust implementation. Neither
+The previous `tests/relay_load.py` remains a comparison probe for the Python
+reference implementation. Its historical measurements in
+`docs/relay-architecture.md` do not certify the Rust implementation. Neither
 the functional contracts nor a small payload probe establishes fleet capacity;
 measure database/WAL, query pools, bandwidth and notification fanout before
 raising limits or sizing a ten-thousand-computer deployment.
-
-## Offline SQLite migration
-
-Create the restricted application role and assign database/schema ownership as
-described above before importing into an empty target; use that application DSN
-for migration. The offline `zerus-mobile migrate-sqlite` utility remains in the
-Python package; install it in an operator virtual environment for that operation.
-It is not included in the Rust server image.
-
-Rehearse first using synthetic state and a separate empty PostgreSQL database.
-The command refuses nonempty targets, preserves IDs, token/code/body hashes,
-event cursors and claimed/uncertain states, rebuilds accounting and reports
-verification counts/digests without credential values. Existing pending requests
-reserve result capacity. Above-budget workspaces remain intact and cannot admit
-new work until usage allows it; oversized historical results retain their old
-outcome. Verify the imported duplicate UUID, uncertain claim, revoked credential
-and event cursor behavior before approving a cutover.
-
-For a reviewed live cutover, require owner approval and tested backups. Pause
-admission, preserve outstanding claims, stop only relay writers and take a
-consistent SQLite backup. Keep computer agents, tmux and DeepSeek hosts running.
-Never serve old SQLite and PostgreSQL copies simultaneously. Run the installed
-CLI from a private environment that can read the backup and reach the target:
-
-```sh
-zerus-mobile migrate-sqlite --config /private/relay.json \
-  --source /private/relay-final.sqlite3 --source-offline
-```
-
-`--source-offline` is an explicit assertion that SQLite writers are stopped.
-Start the PostgreSQL workers only after verification passes, keeping connector
-URLs and credentials unchanged. Before new writes, rollback can restore the
-unchanged SQLite relay. After new writes, switching to the old backup would lose
-new receipts and risk mutation replay: require a verified reverse migration or
-forward repair. Back up PostgreSQL with a reviewed PostgreSQL backup/restore
-procedure, including the permanent mutation ledger.
 
 ## Push configuration
 

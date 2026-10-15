@@ -1,8 +1,12 @@
+// The leading `::` names the crate, not this library's server `http` module.
+use ::http::StatusCode;
+#[cfg(feature = "server")]
 use axum::{
-    http::{header, StatusCode},
+    http::header,
     response::{IntoResponse, Response},
     Json,
 };
+#[cfg(feature = "server")]
 use serde_json::json;
 
 /// Deliberately contains no driver diagnostics, request values or credentials.
@@ -28,6 +32,7 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+#[cfg(feature = "server")]
 impl From<sqlx::Error> for Error {
     fn from(_: sqlx::Error) -> Self {
         Self::UNAVAILABLE
@@ -43,6 +48,7 @@ impl From<std::io::Error> for Error {
         Self::UNAVAILABLE
     }
 }
+#[cfg(feature = "server")]
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let mut r = (self.0, Json(json!({"error":self.1}))).into_response();

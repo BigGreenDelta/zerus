@@ -1,143 +1,12 @@
-"""Compatibility CLI for the Rust relay and offline SQLite migration."""
+"""Compatibility CLI that delegates administration and serving to the Rust relay."""
 
 from __future__ import annotations
 
 import argparse
-import asyncio
-from dataclasses import fields
-import inspect
-import json
 import os
 from pathlib import Path
-import stat
-
-from aiohttp import web
-
-from .server import Config, create_app
-from .store import Store
-
-BACKEND_OPTIONS = {
-    "database_url",
-    "pool_min",
-    "pool_max",
-    "global_max_bytes",
-    "quota_shards",
-}
-
-
-def private_file(path):
-    path = Path(path)
-    info = path.stat()
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
-        raise ValueError(f"private file must have mode 0600: {path}")
-    return path
-
-
-def configuration(args, parser):
-    options = json.loads(private_file(args.config).read_text()) if args.config else {}
-    if isinstance(options, dict):
-        # Retired UnifiedPush allowlist: existing private configs still load; it is ignored.
-        options.pop("push_hosts", None)
-    allowed = {field.name for field in fields(Config)} | BACKEND_OPTIONS
-    if not isinstance(options, dict) or set(options) - allowed:
-        parser.error("invalid relay configuration")
-    if options.get("fcm_credentials"):
-        options["fcm_credentials"] = str(private_file(options["fcm_credentials"]))
-    if "trusted_proxy_cidrs" in options:
-        import ipaddress
-
-        try:
-            for network in options["trusted_proxy_cidrs"]:
-                ipaddress.ip_network(network)
-        except (ValueError, TypeError):
-            parser.error("invalid trusted_proxy_cidrs")
-        options["trusted_proxy_cidrs"] = tuple(options["trusted_proxy_cidrs"])
-    for key, value in options.items():
-        if key not in {
-            "trusted_proxy_cidrs",
-            "fcm_credentials",
-            "database_url",
-            "background",
-        } and (
-            type(value)
-            not in ((int, float) if key == "maintenance_interval" else (int,))
-            or value <= 0
-        ):
-            parser.error(f"{key} must be a positive number")
-    if "database_url" in options and (
-        not isinstance(options["database_url"], str)
-        or not options["database_url"].startswith(("postgresql://", "postgres://"))
-    ):
-        parser.error("database_url must be a PostgreSQL URL")
-    backend = {key: options.pop(key) for key in list(options) if key in BACKEND_OPTIONS}
-    return options, backend
-
-
-async def open_store(args, backend):
-    if backend.get("database_url"):
-        from .postgres import PostgresStore
-
-        return await PostgresStore.open(
-            backend["database_url"],
-            **{key: value for key, value in backend.items() if key != "database_url"},
-        )
-    if backend:
-        raise ValueError("PostgreSQL backend settings require database_url")
-    return Store(args.database)
-
-
-async def invoke(store, method, *args):
-    value = getattr(store, method)(*args)
-    return await value if inspect.isawaitable(value) else value
-
-
-async def administer(args, backend, parser):
-    store = await open_store(args, backend)
-    try:
-        if args.command == "provision":
-            workspace = await invoke(store, "workspace", args.name)
-            return {
-                "workspace_id": workspace,
-                **await invoke(store, "node", workspace, args.computer_name),
-                **await invoke(store, "invite", workspace),
-            }
-        if args.command == "node":
-            return {
-                "workspace_id": args.workspace,
-                **await invoke(store, "node", args.workspace, args.name),
-            }
-        if args.command == "invite":
-            return {
-                "workspace_id": args.workspace,
-                **await invoke(store, "invite", args.workspace),
-            }
-        if args.command == "revoke-computer":
-            if not await invoke(store, "revoke_computer", args.id):
-                parser.error("computer not found")
-            return {"revoked": True}
-        role = "devices" if args.command == "revoke-device" else "nodes"
-        if not await invoke(store, "revoke", role, args.id):
-            parser.error("credential not found")
-        return {"revoked": True}
-    finally:
-        await invoke(store, "close")
-
-
-async def application(args, options, backend):
-    store = await open_store(args, backend)
-    try:
-        app = create_app(store, Config(**options))
-        if isinstance(store, Store):
-
-            async def close_sqlite(app):
-                store.close()
-
-            app.on_cleanup.append(close_sqlite)
-        # create_app's lifecycle owns the async backend (and SQLite adapter).
-        return app
-    except BaseException:
-        await invoke(store, "close")
-        raise
+import shutil
+import sys
 
 
 def main(argv=None):
@@ -171,23 +40,11 @@ def main(argv=None):
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8787)
-    migrate = commands.add_parser(
-        "migrate-sqlite",
-        help="Atomically import an offline SQLite database into an empty PostgreSQL destination",
-    )
-    migrate.add_argument("--source", required=True)
-    migrate.add_argument(
-        "--source-offline",
-        action="store_true",
-        required=True,
-        help="Confirm all source SQLite relay workers are stopped",
-    )
     for command in (
         provision,
         node,
         invitation,
         serve,
-        migrate,
         *[commands.choices[c] for c in ("revoke-device", "revoke-node", "revoke-computer")],
     ):
         command.add_argument(
@@ -195,36 +52,12 @@ def main(argv=None):
             default=argparse.SUPPRESS,
             help="Private JSON relay configuration",
         )
-    args = parser.parse_args(argv)
+    parser.parse_args(argv)
     os.umask(0o077)
-    if args.command != "migrate-sqlite":
-        import shutil
-        import sys
-        binary = shutil.which("zerus-relay")
-        if binary is None:
-            parser.error("install the Rust zerus-relay binary; see services/mobile/relay/README.md")
-        os.execv(binary, [binary, *(sys.argv[1:] if argv is None else argv)])
-    options, backend = configuration(args, parser)
-    if args.command == "migrate-sqlite":
-        if not backend.get("database_url"):
-            parser.error(
-                "migration requires PostgreSQL database_url in private configuration"
-            )
-        from .migration import migrate_sqlite
-
-        result = asyncio.run(
-            migrate_sqlite(
-                args.source,
-                backend["database_url"],
-                **{
-                    key: value
-                    for key, value in backend.items()
-                    if key in {"global_max_bytes", "quota_shards"}
-                },
-            )
-        )
-    # Deliberate one-time credential output, never server logging.
-    print(json.dumps(result))
+    binary = shutil.which("zerus-relay")
+    if binary is None:
+        parser.error("install the Rust zerus-relay binary; see services/mobile/relay/README.md")
+    os.execv(binary, [binary, *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":
