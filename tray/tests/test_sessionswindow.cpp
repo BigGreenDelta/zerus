@@ -40,6 +40,7 @@
 #include <memory>
 #include <QTemporaryDir>
 #include <QTextBrowser>
+#include <QTextDocument>
 #include <QTextTable>
 #include <QTabWidget>
 #include <QTabBar>
@@ -2050,7 +2051,9 @@ p=pathlib.Path(__file__).parent/'details.json'
 print(p.read_text() if 'inspect' in sys.argv and p.exists() else '{}')
 )PY");fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
     // The main turn finished, but a workflow child still works: the host names it.
-    const QString working=QString::fromUtf8("Wait until the agent reports Ready. Still working: subagent “<workflow-subagent>” running Bash");
+    const QString working=QString::fromUtf8("Wait until the agent reports Ready. Still working: subagent “<b>workflow-subagent</b>” running Bash");
+    // What a tooltip displays: Qt renders a tooltip that looks like HTML as rich text.
+    const auto shownTip=[](const QString &tip){if(!Qt::mightBeRichText(tip))return tip;QTextDocument document;document.setHtml(tip);return document.toPlainText();};
     QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},{"runtime_state","live"},{"process_state","running"},
         {"activity","busy"},{"phase","working"},{"compact_context_supported",false},{"clear_context_supported",false},
         {"compact_context_reason",working},{"clear_context_reason",working},{"cache_hint",QJsonObject{{"status","cold"},{"tokens",756000}}}};
@@ -2068,7 +2071,7 @@ print(p.read_text() if 'inspect' in sys.argv and p.exists() else '{}')
     struct Shown{bool seen=false,compact=false,clear=false,plain=false;QString compactTip,clearTip,line;} shown;
     const auto confirm=[&]{
         shown={};auto *poll=new QTimer(&window);poll->setInterval(5);QElapsedTimer age;age.start();
-        QObject::connect(poll,&QTimer::timeout,&window,[poll,age,&window,&shown]{
+        QObject::connect(poll,&QTimer::timeout,&window,[poll,age,&window,&shown,shownTip]{
             auto *dialog=window.findChild<QMessageBox *>("coldCacheConfirm");
             if(!(dialog&&dialog->isVisible())&&age.elapsed()<5000)return;
             poll->stop();poll->deleteLater();if(!dialog||!dialog->isVisible())return;
@@ -2079,8 +2082,8 @@ print(p.read_text() if 'inspect' in sys.argv and p.exists() else '{}')
                 && std::all_of(labels.cbegin(),labels.cend(),[&](const QLabel *label){
                     return label->text()!=shown.line||label->textFormat()==Qt::PlainText;});
             for(auto *button:dialog->buttons()){
-                if(button->text()=="Compact and continue"){shown.compact=button->isEnabled();shown.compactTip=button->toolTip();}
-                if(button->text()=="Clear context"){shown.clear=button->isEnabled();shown.clearTip=button->toolTip();}
+                if(button->text()=="Compact and continue"){shown.compact=button->isEnabled();shown.compactTip=shownTip(button->toolTip());}
+                if(button->text()=="Clear context"){shown.clear=button->isEnabled();shown.clearTip=shownTip(button->toolTip());}
             }
             dialog->button(QMessageBox::Cancel)->click();});
         poll->start();send->click();};
@@ -2092,17 +2095,17 @@ print(p.read_text() if 'inspect' in sys.argv and p.exists() else '{}')
     auto *cacheClear=window.findChild<QPushButton *>("cacheClearContext");auto *detailsClear=window.findChild<QPushButton *>("clearSessionFromDetails");
     auto *menuClear=window.findChild<QAction *>("clearSessionAction");
     QVERIFY(!cacheClear->isEnabled());QVERIFY(!detailsClear->isEnabled());QVERIFY(!menuClear->isEnabled());
-    QCOMPARE(cacheClear->toolTip(),working+'.');QCOMPARE(detailsClear->toolTip(),working+'.');QCOMPARE(menuClear->toolTip(),working+'.');
+    QCOMPARE(shownTip(cacheClear->toolTip()),working+'.');QCOMPARE(shownTip(detailsClear->toolTip()),working+'.');QCOMPARE(shownTip(menuClear->toolTip()),working+'.');
     // An offline host's last report no longer explains the actions.
     auto offline=fleet();auto peer=*offline.peer("mac");peer.ok=false;offline.setPeer(peer,QDateTime::currentMSecsSinceEpoch());
     window.setFleet(offline);QVERIFY(!cacheClear->isEnabled());QVERIFY(!detailsClear->isEnabled());
     QCOMPARE(cacheClear->toolTip(),QString::fromUtf8("Clear this agent’s conversation, like /clear in Terminal. Your unsent message stays here."));
     QCOMPARE(detailsClear->toolTip(),QString("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
     QCOMPARE(menuClear->toolTip(),detailsClear->toolTip());
-    window.setFleet(fleet());apply();QCOMPARE(cacheClear->toolTip(),working+'.');QCOMPARE(detailsClear->toolTip(),working+'.');
+    window.setFleet(fleet());apply();QCOMPARE(shownTip(cacheClear->toolTip()),working+'.');QCOMPARE(shownTip(detailsClear->toolTip()),working+'.');
     // A Claude chooser still allows Dismiss and clear, so that action keeps its usual text.
     details["clear_context_dismiss"]=true;apply();
-    QVERIFY(detailsClear->isEnabled());QVERIFY(!cacheClear->isEnabled());QCOMPARE(cacheClear->toolTip(),working+'.');
+    QVERIFY(detailsClear->isEnabled());QVERIFY(!cacheClear->isEnabled());QCOMPARE(shownTip(cacheClear->toolTip()),working+'.');
     const QString usualClear="Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept.";
     QCOMPARE(detailsClear->toolTip(),usualClear);QCOMPARE(menuClear->toolTip(),usualClear);
     details.remove("clear_context_dismiss");

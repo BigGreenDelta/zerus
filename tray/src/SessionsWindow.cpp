@@ -3040,7 +3040,9 @@ QString contextReasonSentence(const QString &reason)
 template<typename Control> void explainContextAction(Control *control, const QString &reason)
 {
     if (!control->property("usualToolTip").isValid()) control->setProperty("usualToolTip", control->toolTip());
-    control->setToolTip(reason.isEmpty() ? control->property("usualToolTip").toString() : contextReasonSentence(reason));
+    // Reported names stay literal, as in the cold-cache line.
+    control->setToolTip(reason.isEmpty() ? control->property("usualToolTip").toString()
+        : Qt::convertFromPlainText(contextReasonSentence(reason), Qt::WhiteSpaceNormal));
 }
 }
 
