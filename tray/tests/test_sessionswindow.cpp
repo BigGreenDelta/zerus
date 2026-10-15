@@ -434,6 +434,8 @@ private slots:
     void pushReplacesAnEarlierPush();
     void pushWaitsForARunningSendNow();
     void pushIgnoresTheCodexQueueHeader();
+    void pushFindsAMessageThatStartsWithAnAttachment_data();
+    void pushFindsAMessageThatStartsWithAnAttachment();
     void preview();
     void controlConsolePreview();
 private:
@@ -9432,5 +9434,45 @@ void TestSessionsWindow::pushIgnoresTheCodexQueueHeader()
     fixture.queue("q-follow-up", "• Queued follow-up inputs\n  ↳ Check the build first\n    interrupt"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     fixture.queue("q-match", header + "\n  ↳ Check the build first\n  ↳ interrupt"); inspectPush(window, fixture);
+    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+}
+
+void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment_data()
+{
+    QTest::addColumn<QString>("name"); QTest::addColumn<QString>("mime"); QTest::addColumn<QString>("reference");
+    QTest::addColumn<QString>("instruction"); QTest::addColumn<QString>("path");
+    QTest::newRow("file") << QStringLiteral("notes.txt") << QStringLiteral("text/plain") << QStringLiteral("[File #1]")
+                          << QStringLiteral("Read the attached file at") << QStringLiteral("\"/fixture/hgs/attachments/request-one/notes.txt\"");
+    // The CLI quotes the path as JSON, so Windows backslashes arrive escaped.
+    QTest::newRow("image") << QStringLiteral("shot.png") << QStringLiteral("image/png") << QStringLiteral("[Image #1]")
+                           << QStringLiteral("Inspect the attached image at") << QStringLiteral(R"("C:\\fixture\\hgs\\attachments\\shot.png")");
+}
+
+void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment()
+{
+    QFETCH(QString, name); QFETCH(QString, mime); QFETCH(QString, reference); QFETCH(QString, instruction); QFETCH(QString, path);
+    PushFixture fixture; QVERIFY(fixture.install(script()));
+    SessionsWindow window(FakeCli::program(fixture.script)); openPushSession(window, fleet(), fixture);
+    if (QTest::currentTestFailed()) return;
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
+    // Attached first, then typed.
+    setComposerText(composer, {}); QVERIFY(composer->addAttachment(name, mime, "fixture bytes"));
+    composer->editor()->moveCursor(QTextCursor::End); composer->editor()->insertPlainText("Check this");
+    QCOMPARE(composer->editor()->toPlainText(), reference + " Check this");
+    pressPush(window); if (QTest::currentTestFailed()) return;
+    QTRY_COMPARE(delivered.size(), 1);
+    // The CLI pastes each reference followed by the file's location (src/state/attachments.rs).
+    const QString pasted = reference + " (" + instruction + ' ' + path + ") Check this";
+    // Only an item that begins with the message holds it: not a header row, not
+    // the middle of another item, not another message's attachment.
+    fixture.queue("q-header", "• " + pasted + "\n  ↳ Rename the release branch"); inspectPush(window, fixture);
+    fixture.queue("q-middle", "❯ Compare the release notes " + pasted); inspectPush(window, fixture);
+    fixture.queue("q-continued", "❯ Compare the release notes\n  " + pasted); inspectPush(window, fixture);
+    fixture.queue("q-other", "❯ " + QString(pasted).replace("#1]", "#2]")); inspectPush(window, fixture);
+    QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
+    // The agent's terminal wraps the location onto the next row.
+    fixture.queue("q-match", "❯ Rename the release branch\n❯ " + reference + " (" + instruction + "\n  " + path + ") Check this");
+    inspectPush(window, fixture);
     QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
 }

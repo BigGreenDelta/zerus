@@ -214,10 +214,14 @@ never hands its chord back to a text field.
   path and then arms a push for that session key, run and conversation. When the
   send is confirmed, the next inspection whose queue snapshot has
   `can_send_now` and an item that begins with the message start (the first 24
-  non-space characters, whitespace-normalized) triggers the Send now path for
-  that snapshot. An item is a row that begins with the agent's marker (❯, ↳ or
-  ›) with the indented rows that continue it; header rows such as Codex's
-  "• Messages to be submitted after next tool call …" never hold a message.
+  non-space characters of its first text, whitespace-normalized) triggers the
+  Send now path for that snapshot. Attachment references before that text must
+  begin the item in the same order, each optionally followed by the location the
+  CLI pastes after it (`[File #1] (Read the attached file at "/path")`, or
+  `Inspect the attached image at` for an image). An item is a row that begins
+  with the agent's marker (❯, ↳ or ›) with the indented rows that continue it;
+  header rows such as Codex's "• Messages to be submitted after next tool call
+  …" never hold a message.
   While another send-now request runs, a matching snapshot leaves the push
   armed for a later one. The push is dropped with a notice if the session, run
   or conversation changes, the send fails or is uncertain, or 20 seconds pass

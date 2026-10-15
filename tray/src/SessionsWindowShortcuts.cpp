@@ -91,31 +91,59 @@ private:
     QHash<QString, QAction *> m_actions;
 };
 
-// What a native queue shows of a message as typed: the first 24 non-space
-// characters of its first text between attachment references, whitespace
-// normalized, since the CLI puts each file's location after its reference and
-// the agent's terminal wraps and indents queued text. whole: the text ends there.
-// Empty for a message of attachments only.
-struct MessageStart { QString text; bool whole = false; };
+// What a native queue shows of a message as typed: the attachment references
+// before its first text, and the first 24 non-space characters of that text,
+// whitespace normalized, since the agent's terminal wraps and indents queued
+// text. whole: the text ends there. No text for a message of attachments only.
+struct MessageStart { QStringList references; QString text; bool whole = false; };
 MessageStart messageStart(const QString &message)
 {
     static const QRegularExpression reference(QStringLiteral(R"(\[(?:Image|File) #\d+\])"));
-    for (const auto &part : message.split(reference)) {
-        const QString text = part.simplified();
-        if (text.isEmpty()) continue;
-        qsizetype end = 0;
-        for (int count = 0; end < text.size() && count < 24; ++end) if (!text[end].isSpace()) ++count;
-        return {text.left(end), end == text.size()};
+    MessageStart start; qsizetype offset = 0;
+    for (auto matches = reference.globalMatch(message);;) {
+        const auto match = matches.hasNext() ? matches.next() : QRegularExpressionMatch();
+        const QString text = message.mid(offset, match.hasMatch() ? match.capturedStart() - offset : -1).simplified();
+        if (!text.isEmpty()) {
+            qsizetype end = 0;
+            for (int count = 0; end < text.size() && count < 24; ++end) if (!text[end].isSpace()) ++count;
+            start.text = text.left(end); start.whole = end == text.size();
+            return start;
+        }
+        if (!match.hasMatch()) return {};
+        start.references << match.captured(); offset = match.capturedEnd();
     }
-    return {};
 }
 
-// A queue holds a message when one of its items begins with the message start,
-// and a whole short text also ends a word there ("test" does not match
-// "testing"). An item is a row that begins with an agent's marker (Claude's and
-// Kimi's ❯, Codex's ↳) with the indented rows that continue it, as the terminal
-// wraps it. Header rows such as Codex's "• Messages to be submitted after next
-// tool call (press esc to interrupt and send immediately)" are never items.
+// An item holds a message when it begins with the message's leading references
+// and then its start, and a whole short text also ends a word there ("test" does
+// not match "testing"). The CLI pastes the file's location after a reference,
+// as in [File #1] (Read the attached file at "/path") (terminal_text in
+// src/state/attachments.rs); the location is a JSON string, and wrapping may add
+// a space inside it or before its parenthesis.
+bool itemHolds(const QString &item, const MessageStart &start)
+{
+    static const QRegularExpression location(QStringLiteral(
+        R"( ?\((?:Read the attached file|Inspect the attached image) at "(?:[^"\\]|\\.)*+" ?\))"));
+    const QString shown = item.simplified();
+    qsizetype at = 0;
+    const auto skipSpace = [&shown, &at] { if (at < shown.size() && shown[at] == u' ') ++at; };
+    for (const auto &reference : start.references) {
+        skipSpace();
+        if (!QStringView(shown).sliced(at).startsWith(reference)) return false;
+        at += reference.size();
+        const auto pasted = location.match(shown, at, QRegularExpression::NormalMatch, QRegularExpression::AnchorAtOffsetMatchOption);
+        if (pasted.hasMatch()) at = pasted.capturedEnd();
+    }
+    skipSpace();
+    const QStringView rest = QStringView(shown).sliced(at);
+    return rest.startsWith(start.text) && (!start.whole || rest.size() == start.text.size() || rest[start.text.size()].isSpace());
+}
+
+// A queue holds a message when one of its items does. An item is a row that
+// begins with an agent's marker (Claude's and Kimi's ❯, Codex's ↳) with the
+// indented rows that continue it, as the terminal wraps it. Header rows such as
+// Codex's "• Messages to be submitted after next tool call (press esc to
+// interrupt and send immediately)" are never items.
 bool queueHolds(const QString &queue, const QString &message)
 {
     const auto start = messageStart(message);
@@ -128,12 +156,7 @@ bool queueHolds(const QString &queue, const QString &message)
         else if (continued && row.front().isSpace() && text.front() != u'•') items.last() += ' ' + text;
         else continued = false;
     }
-    for (const auto &item : items) {
-        const QString shown = item.simplified();
-        if (shown.startsWith(start.text) && (!start.whole || shown.size() == start.text.size() || shown[start.text.size()].isSpace()))
-            return true;
-    }
-    return false;
+    return std::any_of(items.cbegin(), items.cend(), [&start](const QString &item) { return itemHolds(item, start); });
 }
 }
 
