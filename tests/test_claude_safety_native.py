@@ -122,10 +122,6 @@ class NativeClaudeSafety(unittest.TestCase):
         self.assertFalse((self.root / 'work/approved.txt').exists())
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 @unittest.skipUnless(native.CLAUDE, 'Set HGS_CLAUDE_TEST_BIN for real native workflow approvals')
 class NativeClaudeWorkflowSafety(unittest.TestCase):
     """Real Agent workflow, real child hooks and safety panel; localhost API only."""
@@ -239,3 +235,7 @@ class NativeClaudeWorkflowSafety(unittest.TestCase):
         self.answer(self.choose('Yes'), success=False)
         self.assertIn('Do you want to proceed?', self.screen())
         self.assertFalse((self.root / 'work/approved.txt').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()
