@@ -446,6 +446,10 @@ void GraphCanvas::selectNode(const QString &id) {
         ensureVisible(node, 40, 40);
     }
 }
+void GraphCanvas::mouseReleaseEvent(QMouseEvent *event) {
+    QGraphicsView::mouseReleaseEvent(event);
+    emit pointerInteractionFinished();
+}
 void GraphCanvas::fitGraph() {
     if (!m_nodes.isEmpty()) {
         const auto bounds = scene()->itemsBoundingRect().adjusted(-24, -24, 24, 24);

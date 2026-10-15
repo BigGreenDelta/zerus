@@ -92,8 +92,42 @@ class TestGraphPage : public QObject {
         QCoreApplication::processEvents();
         QTest::mouseClick(page.canvas()->viewport(), Qt::LeftButton, Qt::NoModifier,
                           page.canvas()->mapFromScene(page.canvas()->nodeRect("review").center()));
-        QVERIFY(!inspector->isHidden());
+        QTRY_VERIFY(!inspector->isHidden());
         QCOMPARE(open.size(), 0);
+    }
+    void openingInspectorRevealsCardAfterReleaseWithoutMovingLayout() {
+        GraphPage page(nullptr, {});
+        page.resize(1100, 760);
+        page.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&page));
+        QVERIFY(page.setProjection({node("review", "Zerus")}, {}));
+        auto *canvas = page.canvas();
+        auto state = canvas->viewState();
+        const auto bounds = canvas->nodeRect("review");
+        state["center"] = QJsonArray{bounds.center().x() - 220, bounds.center().y()};
+        QVERIFY(canvas->restoreViewState(state));
+        QCoreApplication::processEvents();
+        const auto positions = canvas->viewState().value("positions");
+        const auto press = canvas->mapFromScene(bounds.center());
+        QVERIFY(canvas->viewport()->rect().contains(press));
+        QSignalSpy open(&page, &GraphPage::openRequested);
+        QTest::mousePress(canvas->viewport(), Qt::LeftButton, Qt::NoModifier, press);
+        QCoreApplication::processEvents();
+        QVERIFY(page.findChild<QWidget *>("graphInspector")->isHidden());
+        const auto heldCamera = canvas->viewState().value("center");
+        QTest::qWait(40);
+        QCOMPARE(canvas->viewState().value("center"), heldCamera);
+        QTest::mouseRelease(canvas->viewport(), Qt::LeftButton, Qt::NoModifier, press);
+        QTRY_VERIFY(page.findChild<QWidget *>("graphInspector")->isVisible());
+        QCoreApplication::processEvents(); // The reveal follows the splitter layout.
+        QTRY_VERIFY(canvas->viewport()->rect().contains(canvas->mapFromScene(bounds).boundingRect()));
+        QCOMPARE(canvas->viewState().value("positions"), positions);
+        QCOMPARE(open.size(), 0);
+        canvas->horizontalScrollBar()->setValue(canvas->horizontalScrollBar()->value() + 60);
+        const auto manualCamera = canvas->viewState().value("center");
+        QVERIFY(page.setProjection({node("review", "Zerus")}, {}));
+        QCoreApplication::processEvents();
+        QCOMPARE(canvas->viewState().value("center"), manualCamera);
     }
     void projectScopeKeepsOutsideNeighborsAndPinsSurviveFiltering() {
         GraphPage page(nullptr, {});

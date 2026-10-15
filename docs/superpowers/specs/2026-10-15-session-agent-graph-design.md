@@ -467,6 +467,10 @@ revalidates the current route/name/run/conversation/archive; selecting a node al
 does not navigate or mark a message read. The current view retains at most 2000
 card bindings and reports omitted bindings explicitly. This integration is not
 yet part of an installed release.
+Node inspection waits until a pointer gesture ends before opening the side pane,
+so shrinking the canvas cannot move a card beneath a held pointer. The camera
+then reveals the selected card without changing positions; polling never repeats
+that reveal or replaces a manually adjusted camera.
 Verified communication provenance, archive and full native-child
 coverage, final platform/performance qualification and Android transport remain
 unfinished. This milestone is not a usable Graph release;

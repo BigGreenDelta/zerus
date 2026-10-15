@@ -47,11 +47,13 @@ class GraphCanvas : public QGraphicsView {
     void selectionCleared();
     void positionsChanged();
     void viewStateChanged();
+    void pointerInteractionFinished();
 
   protected:
     void wheelEvent(QWheelEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
 
   private:
     friend class GraphNodeItem;

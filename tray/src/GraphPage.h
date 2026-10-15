@@ -58,6 +58,7 @@ class GraphPage : public QWidget {
     void inspectRelation(const QString &id);
     void inspectSelection();
     void arrangeInspector();
+    void revealInspectedNode();
     void rebuildFilters();
     void saveView();
     void arrangeVisible();
@@ -75,6 +76,7 @@ class GraphPage : public QWidget {
     QString m_freshnessSummary, m_freshnessDetails, m_viewError;
     bool m_restoring = false, m_arranging = false, m_viewTouched = false;
     bool m_inspectorWanted = false;
+    bool m_deferredInspector = false;
     bool m_viewLoaded = false, m_haveProjection = false;
     QWidget *m_inspector;
     GraphSummary *m_summary;
@@ -85,5 +87,6 @@ class GraphPage : public QWidget {
     QMenu *m_filterMenu;
     QByteArray m_inspectionSignature;
     QString m_selectedNode, m_selectedRelation, m_project, m_neighborhood;
+    QString m_pendingReveal;
     bool m_attentionOnly = false, m_dark = true, m_overlay = false, m_rendering = false;
 };

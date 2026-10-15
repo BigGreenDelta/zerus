@@ -3,6 +3,7 @@
 #include "SessionCardDelegate.h"
 #include "WorkspacePageHeader.h"
 #include "WorkspaceStyle.h"
+#include <QApplication>
 #include <QFrame>
 #include <QHideEvent>
 #include <QJsonArray>
@@ -22,6 +23,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <functional>
+#include <utility>
 
 namespace {
 QLabel *plain(const QString &text = {}) {
@@ -226,6 +228,8 @@ GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(par
         saveView();
     });
     connect(m_canvas, &GraphCanvas::nodeSelected, this, &GraphPage::inspectNode);
+    connect(m_canvas, &GraphCanvas::pointerInteractionFinished, this,
+            &GraphPage::revealInspectedNode);
     connect(m_canvas, &GraphCanvas::relationSelected, this, &GraphPage::inspectRelation);
     connect(m_list, &QListView::activated, this, [this](const QModelIndex &index) {
         inspectNode(index.data(SessionRoles::Key).toString());
@@ -439,6 +443,7 @@ void GraphPage::render() {
 void GraphPage::inspectNode(const QString &id) {
     if (m_rendering)
         return;
+    const bool opening = !m_inspectorWanted;
     m_selectedNode = id;
     m_selectedRelation.clear();
     m_inspectorWanted = true;
@@ -455,8 +460,41 @@ void GraphPage::inspectNode(const QString &id) {
             break;
         }
     }
-    inspectSelection();
+    if (QApplication::mouseButtons() != Qt::NoButton) {
+        // Resizing the view during QGraphicsItem's press/drag changes the
+        // scene coordinates beneath the pointer, moving a card on release.
+        m_deferredInspector = true;
+        m_pendingReveal = id;
+    } else {
+        inspectSelection();
+        if (opening) m_pendingReveal = id;
+        revealInspectedNode();
+    }
     saveView();
+}
+void GraphPage::revealInspectedNode() {
+    if (m_pendingReveal.isEmpty())
+        return;
+    // Let the splitter finish shrinking the canvas. Never move the camera
+    // beneath a held pointer or recenter on an ordinary projection refresh.
+    QTimer::singleShot(0, this, [this] {
+        if (QApplication::mouseButtons() != Qt::NoButton)
+            return;
+        if (m_deferredInspector) {
+            m_deferredInspector = false;
+            if (m_inspectorWanted && m_pendingReveal == m_selectedNode)
+                inspectSelection();
+            revealInspectedNode();
+            return;
+        }
+        const auto id = std::exchange(m_pendingReveal, QString());
+        if (id.isEmpty() || id != m_selectedNode || !m_inspectorWanted || m_overlay ||
+            !m_canvas->isVisible())
+            return;
+        const auto bounds = m_canvas->nodeRect(id);
+        if (!bounds.isEmpty())
+            m_canvas->ensureVisible(bounds, 24, 24);
+    });
 }
 void GraphPage::inspectRelation(const QString &id) {
     if (m_rendering)
@@ -468,6 +506,8 @@ void GraphPage::inspectRelation(const QString &id) {
     saveView();
 }
 void GraphPage::inspectSelection() {
+    if (m_deferredInspector && QApplication::mouseButtons() != Qt::NoButton)
+        return;
     const auto selectedNode =
         std::find_if(m_nodes.cbegin(), m_nodes.cend(),
                      [this](const Node &node) { return node.card.id == m_selectedNode; });
