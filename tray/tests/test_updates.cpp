@@ -395,7 +395,7 @@ private slots:
         }
         const DesktopInstallation manual{"macos-bundle",{},"0.38.0-dev.49"};
         auto guide=UpdateController::installationGuide(manual,"dev",feed);
-        QVERIFY(guide.command.isEmpty());QVERIFY(guide.instructions.contains("DMG"));QVERIFY(guide.instructions.contains("Restart"));
+        QVERIFY(guide.command.isEmpty());QVERIFY(guide.instructions.contains("DMG"));QVERIFY(guide.instructions.contains("Quit Zerus"));QVERIFY(guide.instructions.contains("open Zerus again"));
         const auto noMac=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");
         for(const auto &installation:{manual,DesktopInstallation{"homebrew-cask","zerus@dev","0.38.0-dev.49"}}){
             QVERIFY(!UpdateController::macosUpdateAvailable(installation,noMac));

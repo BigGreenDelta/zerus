@@ -226,8 +226,8 @@ InstallationGuide UpdateController::installationGuide(const DesktopInstallation 
         if(!feed.valid){guide.instructions=tr("Check for updates to see the available macOS build and update instructions.");return guide;}
         if(feed.macosZipUrl.isEmpty()){guide.instructions=tr("No macOS build is published in this channel yet. Choose another channel.");return guide;}
         if(installation.kind=="macos-bundle"){
-            guide.instructions=feed.macosDmgUrl.isEmpty()?tr("Download and extract the ZIP, then move Zerus into Applications and confirm replacing the app."):tr("Download the DMG, drag Zerus into Applications and confirm replacing the app.");
-            guide.instructions+=tr(" Then choose Restart to finish update. Your agents and tmux sessions keep running.");return guide;
+            guide.instructions=feed.macosDmgUrl.isEmpty()?tr("Download and extract the ZIP."):tr("Download and open the DMG.");
+            guide.instructions+=tr(" Quit Zerus from its menu, move the new Zerus app into Applications and confirm replacing it, then open Zerus again. Your agents and tmux sessions keep running.");return guide;
         }
     }
     const QString value=updateCommand(installation,channel);

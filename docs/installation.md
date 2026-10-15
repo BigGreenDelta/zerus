@@ -121,8 +121,8 @@ without sudo:
 
 Local tmux sessions require `tmux` (`brew install tmux`). Agent providers are
 installed separately. The Homebrew cask below installs tmux and links the CLI
-automatically. For a manual upgrade, replace the application with the new DMG's
-copy and restart the Zerus GUI when ready; native agents keep running.
+automatically. For a manual upgrade, quit Zerus from its menu, replace the app
+with the new DMG's copy and open Zerus again; native agents keep running.
 **Settings > Updates** checks the selected channel and offers **Download DMG**
 with replacement instructions. Dev DMGs come from the verified
 [desktop Dev catalog](https://zerus.dev/updates/v2/desktop/dev.json) on zerus.dev;
