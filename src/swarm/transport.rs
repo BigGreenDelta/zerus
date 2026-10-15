@@ -439,6 +439,10 @@ pub fn worker() -> Result<()> {
         .write(true)
         .open(config.dir.join("swarm/worker.lock"))?;
     // Commands checking for a stale worker probe the lock for an instant.
+    // Unlike the recovery and voice workers (state::service_worker), no client
+    // starts this one detached: only the service runs it on Linux and macOS,
+    // and the desktop on Windows. A lock held for longer belongs to a worker
+    // started by hand.
     let mut attempts = 0;
     while let Err(error) = fs2::FileExt::try_lock_exclusive(&lock) {
         attempts += 1;
