@@ -378,10 +378,49 @@ class WorkerOwnership(unittest.TestCase):
         self.finished(worker)
         self.assertFalse(self.held('worker.lock'))
 
+    def children(self):
+        """This process's hgs children, exited ones included."""
+        found=set()
+        for entry in Path('/proc').iterdir():
+            if not entry.name.isdigit():continue
+            try:stat=(entry/'stat').read_text()
+            except OSError:continue
+            comm,fields=stat[stat.index('(')+1:stat.rindex(')')],stat[stat.rindex(')')+2:].split()
+            if comm=='hgs' and int(fields[1])==os.getpid():found.add(int(entry.name))
+        return found
+
+    def refresh(self):
+        """Runs `recovery get` and returns how many workers it started. A worker
+        started detached exits at once when it is not needed, so this process
+        adopts it as a subreaper and counts it even after it exited."""
+        import ctypes
+        prctl=ctypes.CDLL(None,use_errno=True).prctl
+        before=self.children()
+        self.assertEqual(prctl(36,1,0,0,0),0,'PR_SET_CHILD_SUBREAPER')
+        try:
+            result=subprocess.run([str(fixtures.HGS),'recovery','get'],env=self.env,text=True,capture_output=True,timeout=15)
+            spawned=self.children()-before
+        finally:
+            prctl(36,0,0,0,0)
+            for pid in self.children()-before:
+                try:os.kill(pid,15)
+                except ProcessLookupError:pass
+                os.waitpid(pid,0)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(json.loads(result.stdout)['policy']['enabled'])
+        return len(spawned)
+
     @unittest.skipUnless(sys.platform.startswith('linux'),'lists the fixture workers through /proc')
     def test_policy_refresh_starts_no_worker_while_the_service_worker_waits(self):
         (self.state/'recovery/policy.json').write_text(json.dumps(dict(version=3,revision=1,enabled=True,enabled_at=1)))
+        # Without a worker a refresh starts one, so the count below is observed.
+        self.assertEqual(self.refresh(),1)
+        self.wait_for(lambda:not self.held('worker.lock'))
+        held=self.hold('worker.lock')
+        self.assertEqual(self.refresh(),0,'a running worker needs no detached one')
+        held.close()
         self.hold('service.lock')
+        self.assertEqual(self.refresh(),0)
         result=subprocess.run([str(fixtures.HGS),'recovery','get'],env=self.env,text=True,capture_output=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertTrue(json.loads(result.stdout)['policy']['enabled'])
