@@ -953,11 +953,332 @@ fn normalize(
     }
     value
 }
-pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
-    if agent_id.is_some() {
-        return Err("OpenCode child-session controls are not yet qualified".into());
+// The reviewed release creates children only with its classic `task` tool,
+// for example in the OpenCode TUI or `opencode run` sharing this data home.
+// Their own native messages are the only exact turn evidence the API host has;
+// it does not own those processes, so it never reports such a child as working.
+const CHILD_ROSTER: usize = 64;
+const CHILD_HISTORY: usize = 200;
+
+fn child_unknown(reason: &str) -> Value {
+    json!({"state":"unknown","reason":reason})
+}
+
+/// Exact children by native `parentID`. Any contradictory row makes the whole
+/// membership unavailable rather than silently dropping a child.
+fn children(record: &Value, deadline: Instant) -> Result<Vec<Value>> {
+    let parent = string(record, "conversation_id");
+    let listed = http_until(
+        &host(record)?,
+        "GET",
+        &format!("/session/{parent}/children"),
+        None,
+        deadline,
+    )?;
+    exact_children(record, &listed)
+}
+fn exact_children(record: &Value, listed: &Value) -> Result<Vec<Value>> {
+    let parent = string(record, "conversation_id");
+    let rows = listed.as_array().ok_or("Invalid OpenCode child list")?;
+    if rows.len() > 10000 {
+        return Err("OpenCode child list exceeds bounds".into());
     }
+    let mut seen = std::collections::BTreeSet::new();
+    for row in rows {
+        let id = string(row, "id");
+        if !native_id(id, "ses_")
+            || id == parent
+            || row["parentID"] != record["conversation_id"]
+            || !seen.insert(id)
+        {
+            return Err("OpenCode child list does not match the exact parent conversation".into());
+        }
+    }
+    let mut rows = rows.clone();
+    let created = |row: &Value| row["time"]["created"].as_f64().unwrap_or(0.0);
+    rows.sort_by(|a, b| {
+        created(b)
+            .total_cmp(&created(a))
+            .then_with(|| string(a, "id").cmp(string(b, "id")))
+    });
+    Ok(rows)
+}
+
+/// A child's latest turn ends exactly as the reviewed classic loop decides:
+/// its newest message is a completed assistant step with a terminal finish and
+/// no tool call still awaiting a follow-up step, or an abort/provider error
+/// completed that step. Any other shape stays unknown: another OpenCode process
+/// may still own the turn, or a crashed one abandoned it.
+fn child_turn(child: &str, latest: &Value) -> Value {
+    let info = &latest["info"];
+    if info["sessionID"] != child || !native_id(string(info, "id"), "msg_") {
+        return child_unknown("The child's native message identity did not match");
+    }
+    let open = "Turn end not recorded; another OpenCode process may still be running it";
+    if info["role"] != "assistant" {
+        return child_unknown(open);
+    }
+    let Some(completed) = info["time"]["completed"].as_f64().filter(|t| *t > 0.0) else {
+        return child_unknown(open);
+    };
+    let ended = |kind: &str, detail: String| json!({"state":"finished","kind":kind,"at":completed/1000.0,"native_id":info["id"],"detail":detail});
+    if info["error"].is_object() {
+        if info["error"]["name"] == "MessageAbortedError" {
+            return ended("turn_interrupted", "Native child turn interrupted".into());
+        }
+        let mut failed = ended(
+            "turn_failed",
+            journal::clipped(&json!(error_detail(&info["error"])), 240),
+        );
+        failed["error"] = json!(true);
+        return failed;
+    }
+    let finish = string(info, "finish");
+    let follow_up = latest["parts"].as_array().into_iter().flatten().any(|part| {
+        part["type"] == "tool"
+            && part["metadata"]["providerExecuted"] != true
+            && !(part["state"]["status"] == "error" && part["state"]["metadata"]["interrupted"] == true)
+    });
+    if finish.is_empty() || ["tool-calls", "unknown"].contains(&finish) || follow_up {
+        return child_unknown(open);
+    }
+    ended("turn_completed", "Native child turn completed".into())
+}
+
+fn child_model(info: &Value) -> Value {
+    let (provider, id) = (string(&info["model"], "providerID"), string(&info["model"], "id"));
+    if provider.is_empty() || id.is_empty() {
+        Value::Null
+    } else {
+        json!(format!("{provider}/{id}"))
+    }
+}
+
+/// Parent summaries use only bounded per-child native reads. A child beyond the
+/// roster bound or the time budget remains a member with unknown state.
+fn child_roster(record: &Value, value: &mut Value) {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let listed = match children(record, deadline) {
+        Ok(rows) => rows,
+        Err(error) => {
+            value["subagent_source"] = json!("unavailable");
+            value["subagent_reason"] = json!(error);
+            value["subagent_counts_complete"] = json!(false);
+            value["subagent_total_count"] = Value::Null;
+            value["subagents"] = json!({});
+            return;
+        }
+    };
+    let native = host(record);
+    let evidence = listed
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let id = string(row, "id");
+            if index >= CHILD_ROSTER {
+                return child_unknown("This child is beyond the bounded native roster");
+            }
+            let page = native.clone().and_then(|native| {
+                http_until(
+                    &native,
+                    "GET",
+                    &format!("/session/{id}/message?limit=1"),
+                    None,
+                    deadline,
+                )
+            });
+            match page {
+                Ok(page) => match page.as_array().map(Vec::as_slice) {
+                    Some([latest]) => child_turn(id, latest),
+                    Some([]) => child_unknown("No native turn has been recorded for this child"),
+                    _ => child_unknown("Invalid native child messages"),
+                },
+                Err(error) => child_unknown(&error),
+            }
+        })
+        .collect::<Vec<_>>();
+    summarize_children(value, &listed, &evidence);
+}
+/// Counts never include an active child: the API host does not own the classic
+/// process running one. Unknown states keep the totals incomplete.
+fn summarize_children(value: &mut Value, listed: &[Value], evidence: &[Value]) {
+    let mut roster = serde_json::Map::new();
+    let (mut completed, mut unknown) = (0, 0);
+    for (row, evidence) in listed.iter().zip(evidence) {
+        let id = string(row, "id");
+        let finished = evidence["state"] == "finished";
+        let created = row["time"]["created"].as_f64().unwrap_or(0.0) / 1000.0;
+        let updated = row["time"]["updated"].as_f64().unwrap_or(0.0) / 1000.0;
+        let mut child = json!({"name":journal::clipped(&row["title"],200),"agent_profile":row["agent"],"model":child_model(row),
+            "started":created,"updated":if finished {evidence["at"].as_f64().unwrap_or(updated).max(updated)} else {updated},
+            "state":if finished {"finished"} else {"unknown"},"current_tool":""});
+        if finished {
+            completed += 1;
+            child["detail"] = evidence["detail"].clone();
+            child["completion_source"] = json!("opencode_native_messages");
+            child["tracking_evidence"] = json!({"source":"opencode_native_messages","kind":evidence["kind"],"at":evidence["at"],"native_id":evidence["native_id"]});
+            if evidence["error"] == true {
+                child["display_state"] = json!("error");
+            }
+        } else {
+            unknown += 1;
+            child["detail"] = evidence["reason"].clone();
+        }
+        roster.insert(id.to_owned(), child);
+    }
+    unknown += listed.len().saturating_sub(evidence.len());
+    value["subagent_source"] = json!("opencode_native");
+    value["subagents"] = Value::Object(roster);
+    value["subagent_active_count"] = json!(0);
+    value["subagent_count"] = json!(0);
+    value["subagent_completed_count"] = json!(completed);
+    value["subagent_unknown_count"] = json!(unknown);
+    value["subagent_total_count"] = json!(listed.len());
+    value["subagent_counts_complete"] = json!(unknown == 0);
+}
+
+fn child_events(child: &str, messages: &[Value]) -> Result<Vec<Value>> {
+    let mut rows = Vec::new();
+    let row = |typ: &str, detail: String, tool: &str, at: f64, id: &str, reply: Value| {
+        json!({"type":typ,"detail":detail,"tool":tool,"at":at,"source":"opencode_native","agent_id":child,"message_id":id,"reply_id":reply})
+    };
+    for message in messages {
+        let info = &message["info"];
+        let id = string(info, "id");
+        let parts = message["parts"].as_array().ok_or("Invalid native child message")?;
+        if info["sessionID"] != child
+            || !native_id(id, "msg_")
+            || parts
+                .iter()
+                .any(|p| p["sessionID"] != child || p["messageID"] != id || !native_id(string(p, "id"), "prt_"))
+        {
+            return Err("Native child history belongs to another conversation".into());
+        }
+        let created = info["time"]["created"].as_f64().unwrap_or(0.0) / 1000.0;
+        let at = |part: &Value| {
+            part["time"]["end"]
+                .as_f64()
+                .or(part["state"]["time"]["end"].as_f64())
+                .map(|t| t / 1000.0)
+                .unwrap_or(created)
+        };
+        let text = |part: &Value| part["type"] == "text" && part["synthetic"] != true && part["ignored"] != true;
+        match string(info, "role") {
+            "user" => {
+                let prompt = parts
+                    .iter()
+                    .filter(|p| text(p))
+                    .filter_map(|p| p["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                rows.push(row("UserPromptSubmit", prompt, "", created, id, Value::Null));
+            }
+            "assistant" => {
+                for part in parts {
+                    let part_id = string(part, "id");
+                    if text(part) {
+                        rows.push(row("AgentMessage", string(part, "text").to_owned(), "", at(part), part_id, json!(id)));
+                    } else if part["type"] == "tool" {
+                        let state = &part["state"];
+                        let title = journal::clipped(&state["title"], 32000);
+                        let call = if title.is_empty() { journal::clipped(&json!(state["input"].to_string()), 32000) } else { title };
+                        rows.push(row("PreToolUse", call, string(part, "tool"), at(part), part_id, Value::Null));
+                        let result = match string(state, "status") {
+                            "completed" => Some(journal::clipped(&state["output"], 32000)),
+                            "error" => Some(journal::clipped(&state["error"], 32000)),
+                            _ => None,
+                        };
+                        if let Some(result) = result {
+                            rows.push(row("PostToolUse", result, string(part, "tool"), at(part), &format!("{part_id}:result"), Value::Null));
+                        }
+                    }
+                }
+                let end = info["time"]["completed"].as_f64().map(|t| t / 1000.0);
+                if info["error"].is_object() && info["error"]["name"] != "MessageAbortedError" {
+                    rows.push(row("StopFailure", error_detail(&info["error"]), "", end.unwrap_or(created), &format!("{id}:failure"), Value::Null));
+                } else if let Some(end) = end {
+                    rows.push(row("Stop", String::new(), "", end, &format!("{id}:stop"), Value::Null));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (index, event) in rows.iter_mut().enumerate() {
+        event["seq"] = json!(index + 1);
+    }
+    Ok(rows)
+}
+
+/// Read-only child view. Identity is the exact native child whose recorded
+/// parent is this binding's conversation; its state is its own evidence only.
+fn child(record: &Value, id: &str) -> Result<Value> {
+    let parent = string(record, "conversation_id");
+    if !native_id(id, "ses_") || id == parent {
+        return Err("Invalid OpenCode child identity".into());
+    }
+    let session = verify_session(record)?;
+    let info = rpc(record, "GET", &format!("/api/session/{id}"), None)?["data"].clone();
+    if info["id"] != id || info["parentID"] != record["conversation_id"] {
+        return Err("This OpenCode child does not belong to the exact parent conversation".into());
+    }
+    let page = rpc(
+        record,
+        "GET",
+        &format!("/session/{id}/message?limit={CHILD_HISTORY}"),
+        None,
+    )?;
+    let messages = page.as_array().ok_or("Invalid OpenCode child history")?;
+    if messages.len() > CHILD_HISTORY {
+        return Err("OpenCode child history exceeds its requested bound".into());
+    }
+    let events = child_events(id, messages)?;
+    let evidence = messages.last().map_or_else(
+        || child_unknown("No native turn has been recorded for this child"),
+        |latest| child_turn(id, latest),
+    );
+    let mut value = normalize(record, &session, false, &[], &Value::Null, &Value::Null, true);
+    let finished = evidence["state"] == "finished";
+    let reply = events.iter().rev().find(|e| e["type"] == "AgentMessage");
+    let summary = match string(&evidence, "kind") {
+        "turn_completed" => "Ready",
+        "turn_interrupted" => "Interrupted",
+        "turn_failed" => "Turn failed",
+        _ => "Status unavailable",
+    };
+    for (key,item) in json!({"agent_id":id,"parent_conversation_id":parent,"conversation_id":format!("{parent}/{id}"),
+        "created":info["time"]["created"].as_f64().unwrap_or(0.0)/1000.0,"cwd":info["location"]["directory"],
+        "phase":if finished {"idle"} else {"unknown"},"activity":if finished {"idle"} else {"unknown"},"activity_summary":summary,
+        "activity_detail":if finished {reply.map(|r|r["detail"].clone()).unwrap_or(evidence["detail"].clone())} else {evidence["reason"].clone()},
+        "prompt":events.iter().rev().find(|e| e["type"]=="UserPromptSubmit").map(|r|r["detail"].clone()),
+        "reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
+        "last_event_at":info["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":0.0,
+        "model":info["model"]["id"],"model_provider":info["model"]["providerID"],"settings_model":child_model(&info),"agent_profile":info["agent"],
+        "send_available":false,"send_supported":false,"read_only":true,"settings_change_supported":false,"interrupt_supported":false,
+        "allowed_actions":[],"pending_questions":[],"events":events,"history_truncated":messages.len()==CHILD_HISTORY,
+        "history_scope":"Native OpenCode subagent history","tracking_evidence":if finished {json!({"source":"opencode_native_messages","kind":evidence["kind"],"at":evidence["at"],"native_id":evidence["native_id"]})} else {Value::Null}}).as_object().unwrap() {value[key]=item.clone();}
+    if let Some(map) = value.as_object_mut() {
+        map.remove("attention_id");
+    }
+    value["host_generation"] = host(record)?["generation"].clone();
+    value["attachment_messages"] = json!([]);
+    value["voice_messages"] = json!([]);
+    value["processes"] = json!({"items":[],"complete":false,"source":"opencode_native","reason":"OpenCode child process controls are not available"});
+    Ok(value)
+}
+
+pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     let record = binding(name)?;
+    if let Some(id) = agent_id {
+        return child(&record, id);
+    }
+    parent_view(name, &record, true)
+}
+// Delivery, answer and lifecycle checks need only the parent's own state.
+fn own_state(name: &str) -> Result<Value> {
+    parent_view(name, &binding(name)?, false)
+}
+fn parent_view(name: &str, record: &Value, roster: bool) -> Result<Value> {
+    let record = record.clone();
     let session = verify_session(&record)?;
     let active = rpc(&record, "GET", "/api/session/active", None)?;
     let questions = rpc(&record, "GET", &endpoint(&record, "/question"), None)?;
@@ -981,6 +1302,9 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     let configured = catalog();
     result["model_options"] = configured["model_options"].clone();
     result["processes"] = json!({"items":[],"complete":false,"source":"opencode_native","reason":"Individual OpenCode shell process controls are not yet qualified"});
+    if roster {
+        child_roster(&record, &mut result);
+    }
     let questions = result["pending_questions"]
         .as_array()
         .cloned()
@@ -1135,7 +1459,7 @@ fn send(record: &Value, request: &Value) -> Result<Value> {
         }
         return Err("Delivery uncertain; this request will not be replayed. Inspect native history before creating a new request".into());
     }
-    let current = inspect(string(record, "name"), None)?;
+    let current = own_state(string(record, "name"))?;
     if current["send_available"] != true {
         return Err(
             "OpenCode is stopped, working or waiting for an exact question; no message was sent"
@@ -1163,7 +1487,7 @@ fn send(record: &Value, request: &Value) -> Result<Value> {
     Ok(receipt)
 }
 fn answer(record: &Value, request: &Value) -> Result<Value> {
-    let current = inspect(string(record, "name"), None)?;
+    let current = own_state(string(record, "name"))?;
     let card = current["pending_questions"]
         .as_array()
         .into_iter()
@@ -1255,7 +1579,7 @@ pub(crate) fn interrupt(record: &Value) -> Result<()> {
     {
         return Err("OpenCode turn identity changed".into());
     }
-    let current = inspect(string(record, "name"), None)?;
+    let current = own_state(string(record, "name"))?;
     if current["interrupt_supported"] != true || current["turn_started"] != record["turn_started"] {
         return Err("OpenCode turn changed before interruption".into());
     }
@@ -1282,7 +1606,7 @@ fn action(
     if action == "resume" {
         ensure_host(record)?;
     }
-    let current = inspect(string(record, "name"), None)?;
+    let current = own_state(string(record, "name"))?;
     if !current["allowed_actions"]
         .as_array()
         .is_some_and(|values| values.iter().any(|v| v == action))
@@ -1371,13 +1695,18 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     match command {
         "exists" => {}
         "inspect" => {
-            if args
-                .windows(2)
-                .any(|w| w[0] == "--archive" || w[0] == "--agent")
-            {
-                return Err("OpenCode archive/child inspection is not supported".into());
+            if args.iter().any(|v| v == "--archive") {
+                return Err("OpenCode archive inspection is not supported".into());
             }
-            println!("{}", inspect(name, None)?);
+            let agent = match args.iter().position(|v| v == "--agent") {
+                Some(i) => Some(
+                    args.get(i + 1)
+                        .map(String::as_str)
+                        .ok_or("Choose an OpenCode child session")?,
+                ),
+                None => None,
+            };
+            println!("{}", inspect(name, agent)?);
         }
         "send" => {
             let request = checked_request(&record)?;
@@ -1389,7 +1718,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         }
         "settings" => {
             let request = checked_request(&record)?;
-            if inspect(name, None)?["settings_change_supported"] != true {
+            if own_state(name)?["settings_change_supported"] != true {
                 return Err("OpenCode must be live and idle before changing its model".into());
             }
             if !string(&request, "effort").is_empty() {
@@ -1565,5 +1894,109 @@ mod tests {
         assert_eq!(events[0]["detail"], "literal\\\ntext");
         assert_eq!(events[1]["reply_id"], "msg_two");
         assert_eq!(events[1]["seq"], 7);
+    }
+    // Shapes recorded from the reviewed release's classic task-tool children.
+    fn assistant(child: &str, completed: Option<u64>, finish: Option<&str>, error: Value, parts: Value) -> Value {
+        let mut info = json!({"id":"msg_1406139c9002","sessionID":child,"role":"assistant","time":{"created":1792081476041_u64},"parentID":"msg_1406139c9001","agent":"general"});
+        if let Some(t) = completed { info["time"]["completed"] = json!(t); }
+        if let Some(f) = finish { info["finish"] = json!(f); }
+        if !error.is_null() { info["error"] = error; }
+        json!({"info":info,"parts":parts})
+    }
+    #[test]
+    fn child_turn_requires_the_native_loop_exit_and_keeps_open_turns_unknown() {
+        let child = "ses_ebf9b81dcffe0BQL0Ct6wWuwaX";
+        let text = json!([{"id":"prt_a","sessionID":child,"messageID":"msg_1406139c9002","type":"step-start"},
+            {"id":"prt_b","sessionID":child,"messageID":"msg_1406139c9002","type":"text","text":"Child reply"}]);
+        let done = child_turn(child, &assistant(child, Some(1792081690267), Some("stop"), Value::Null, text.clone()));
+        assert_eq!(done["state"], "finished");
+        assert_eq!(done["kind"], "turn_completed");
+        assert_eq!(done["native_id"], "msg_1406139c9002");
+        // Running in another process, between tool steps, or abandoned.
+        for open in [
+            assistant(child, None, None, Value::Null, text.clone()),
+            assistant(child, Some(1), Some("tool-calls"), Value::Null, text.clone()),
+            assistant(child, Some(1), Some("unknown"), Value::Null, text.clone()),
+            assistant(child, Some(1), None, Value::Null, text.clone()),
+            assistant(child, Some(1), Some("stop"), Value::Null, json!([{"id":"prt_c","type":"tool","tool":"bash","state":{"status":"completed"}}])),
+            json!({"info":{"id":"msg_1406139c9003","sessionID":child,"role":"user","time":{"created":1}},"parts":[]}),
+        ] {
+            assert_eq!(child_turn(child, &open)["state"], "unknown", "{open}");
+        }
+        // Provider-executed and interrupted tool calls do not await a follow-up.
+        let settled = json!([{"id":"prt_d","type":"tool","metadata":{"providerExecuted":true},"state":{"status":"completed"}},
+            {"id":"prt_e","type":"tool","state":{"status":"error","metadata":{"interrupted":true}}}]);
+        assert_eq!(child_turn(child, &assistant(child, Some(1), Some("stop"), Value::Null, settled))["state"], "finished");
+        let aborted = child_turn(child, &assistant(child, Some(1792081883704), None, json!({"name":"MessageAbortedError","data":{"message":"Aborted"}}), text.clone()));
+        assert_eq!(aborted["kind"], "turn_interrupted");
+        assert!(aborted.get("error").is_none());
+        let failed = child_turn(child, &assistant(child, Some(2), None, json!({"name":"APIError","data":{"message":"Fixture provider rejected"}}), text.clone()));
+        assert_eq!(failed["kind"], "turn_failed");
+        assert_eq!(failed["error"], true);
+        assert_eq!(failed["detail"], "Fixture provider rejected");
+        assert_eq!(child_turn(child, &assistant(child, None, None, json!({"name":"APIError"}), text.clone()))["state"], "unknown");
+        // Another session's message never settles this child.
+        assert_eq!(child_turn("ses_other", &assistant(child, Some(1), Some("stop"), Value::Null, text))["state"], "unknown");
+    }
+    #[test]
+    fn child_membership_is_exact_and_counts_never_claim_active_work() {
+        let record = json!({"conversation_id":"ses_parent"});
+        let row = |id: &str, parent: &str, created: u64| json!({"id":id,"parentID":parent,"title":format!("{id} (@general subagent)"),"agent":"general","model":{"id":"local","providerID":"fixture"},"time":{"created":created,"updated":created+5}});
+        let listed = exact_children(&record, &json!([row("ses_old","ses_parent",1000), row("ses_new","ses_parent",2000)])).unwrap();
+        assert_eq!(listed.iter().map(|r| string(r, "id")).collect::<Vec<_>>(), ["ses_new", "ses_old"]);
+        for contradictory in [
+            json!([row("ses_one","ses_other",1)]),
+            json!([row("ses_parent","ses_parent",1)]),
+            json!([row("ses_one","ses_parent",1), row("ses_one","ses_parent",2)]),
+            json!([row("bad/id","ses_parent",1)]),
+            json!({"data":[]}),
+        ] {
+            assert!(exact_children(&record, &contradictory).is_err(), "{contradictory}");
+        }
+        let mut parent = json!({"phase":"working","activity":"busy"});
+        let finished = json!({"state":"finished","kind":"turn_failed","at":3.0,"native_id":"msg_x","detail":"failed","error":true});
+        summarize_children(&mut parent, &listed, &[child_unknown("open"), finished]);
+        // A working parent never makes its children working.
+        assert_eq!(parent["subagents"]["ses_new"]["state"], "unknown");
+        assert_eq!(parent["subagents"]["ses_new"]["detail"], "open");
+        assert_eq!(parent["subagents"]["ses_old"]["state"], "finished");
+        assert_eq!(parent["subagents"]["ses_old"]["display_state"], "error");
+        assert_eq!(parent["subagents"]["ses_old"]["tracking_evidence"]["native_id"], "msg_x");
+        assert_eq!(parent["subagents"]["ses_old"]["model"], "fixture/local");
+        assert_eq!(parent["subagent_active_count"], 0);
+        assert_eq!(parent["subagent_completed_count"], 1);
+        assert_eq!(parent["subagent_unknown_count"], 1);
+        assert_eq!(parent["subagent_total_count"], 2);
+        assert_eq!(parent["subagent_counts_complete"], false);
+        assert_eq!(parent["phase"], "working");
+        let mut idle = json!({});
+        summarize_children(&mut idle, &[], &[]);
+        assert_eq!(idle["subagent_counts_complete"], true);
+        assert_eq!(idle["subagent_total_count"], 0);
+    }
+    #[test]
+    fn child_history_is_bound_to_its_own_session_and_messages() {
+        let child = "ses_child";
+        let user = json!({"info":{"id":"msg_1","sessionID":child,"role":"user","time":{"created":1000}},
+            "parts":[{"id":"prt_1","sessionID":child,"messageID":"msg_1","type":"text","text":"literal\\\nwork"},
+                     {"id":"prt_2","sessionID":child,"messageID":"msg_1","type":"text","text":"hidden","synthetic":true}]});
+        let reply = json!({"info":{"id":"msg_2","sessionID":child,"role":"assistant","time":{"created":2000,"completed":4000},"finish":"stop"},
+            "parts":[{"id":"prt_3","sessionID":child,"messageID":"msg_2","type":"tool","tool":"bash","state":{"status":"completed","title":"Print","input":{"command":"printf x"},"output":"x","time":{"end":3000}}},
+                     {"id":"prt_4","sessionID":child,"messageID":"msg_2","type":"text","text":"Child reply","time":{"end":3500}}]});
+        let events = child_events(child, &[user.clone(), reply.clone()]).unwrap();
+        let kinds = events.iter().map(|e| string(e, "type").to_owned()).collect::<Vec<_>>();
+        assert_eq!(kinds, ["UserPromptSubmit", "PreToolUse", "PostToolUse", "AgentMessage", "Stop"]);
+        assert_eq!(events[0]["detail"], "literal\\\nwork");
+        assert_eq!(events[2]["detail"], "x");
+        assert_eq!(events[3]["reply_id"], "msg_2");
+        assert_eq!(events[3]["message_id"], "prt_4");
+        assert_eq!(events[3]["at"], 3.5);
+        assert!(events.iter().all(|e| e["agent_id"] == child && e["source"] == "opencode_native"));
+        let mut foreign = reply.clone();
+        foreign["parts"][1]["sessionID"] = json!("ses_other");
+        assert!(child_events(child, &[user.clone(), foreign]).is_err());
+        let mut moved = reply;
+        moved["info"]["sessionID"] = json!("ses_other");
+        assert!(child_events(child, &[user, moved]).is_err());
     }
 }
