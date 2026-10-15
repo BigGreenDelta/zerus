@@ -101,6 +101,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     worktrees->setToolTip(tr("View worktrees across projects and computers, and review cleanup.")); headingRow->addWidget(worktrees);
     connect(worktrees, &QPushButton::clicked, this, [this] {
         WorktreesDialog dialog(m_client, *m_projects, m_fleet, m_allProjects->isChecked(), this);
+        dialog.sessionRequested = [this](const QString &host, const QString &name) { emit relatedSessionRequested(host, name, {}); };
         m_worktreeOverview = &dialog;
         dialog.exec();
         m_worktreeOverview.clear();

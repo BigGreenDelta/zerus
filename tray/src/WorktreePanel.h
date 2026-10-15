@@ -1,4 +1,5 @@
 #pragma once
+#include "WorktreeReviewUi.h"
 #include "FleetState.h"
 #include "MachinePlatform.h"
 #include "WorktreeCleanupDialog.h"
@@ -100,7 +101,7 @@ private:
     void updateCleanup(){
         if(m_picker)return;
         const bool available=cleanupAvailable();const auto review=available?m_client->worktreeReview(m_host,commonDir()):QJsonObject();int ready=0;
-        for(const auto &value:review["worktrees"].toArray()){const auto verdict=value.toObject()["verdict"].toString();ready+=verdict=="ready"||verdict=="missing";}
+        for(const auto &value:review["worktrees"].toArray()){const auto verdict=value.toObject()["verdict"].toString();ready+=(verdict=="ready"&&!WorktreeReviewUi::localData(value.toObject()))||verdict=="missing";}
         m_cleanup->setEnabled(available);m_cleanup->setText(ready?tr("Clean up (%1)").arg(ready):tr("Clean up…"));
         m_cleanup->setToolTip(!available?(m_data["state"]!="ok"?tr("Cleanup is available for Git repositories with linked worktrees."):hasLinked()?tr("Waiting for a current worktree catalog."):tr("This repository has no linked worktrees.")):
             ready==1?tr("1 worktree can be removed without losing work. Review it first."):ready?tr("%1 worktrees can be removed without losing work. Review them first.").arg(ready):tr("Review linked worktrees and remove the ones you no longer need."));

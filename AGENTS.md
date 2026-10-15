@@ -121,9 +121,10 @@ publish automatically only after full CI and package checks succeed. Publication
 credentials remain confined to trusted main in the release environment, never PR
 code. Nightly tags/assets are immutable and never become the latest stable release.
 Retry publishers with the same verified candidate; never rebuild or overwrite its
-assets. Pure VCS version bumps do not create AUR commits. Nightly prereleases also
-carry the tested Windows x86_64 portable zip unchanged; it stays GitHub-only (not
-mirrored or in the v1 feed). Stable releases and Dev builds have no Windows asset.
+assets. Pure VCS version bumps do not create AUR commits. Stable releases after
+0.42.2 and nightly prereleases also carry the tested Windows x86_64 portable zip
+unchanged; it stays GitHub-only (not mirrored or in the v1 feed). Dev builds have
+no Windows asset.
 The Homebrew casks `zerus` (stable) and `zerus@nightly` (tap `ufna/homebrew-zerus`)
 ship the signed, notarized Apple Silicon `Zerus.app` from the same stable or nightly
 candidate once `MACOS_CASKS_ENABLED` is set. Apple credentials stay in the main-only

@@ -199,11 +199,12 @@ def publish_github(candidate, info, sums, nightly=False):
                      f"Product version: `{info['product_version']}`. Source commit: `{commit}`. "
                      f"Build run: https://github.com/{REPOSITORY}/actions/runs/{info['workflow_run_id']}.\n\n"
                      f"Native agents are installed separately. Verify downloads using `SHA256SUMS`.\n")
-            if info.get("windows_portable"):
-                notes += (f"\nWindows x86_64: `{info['windows_portable']}` is a portable control console for "
-                          f"remote Linux and macOS machines over OpenSSH; local sessions are not supported on "
-                          f"Windows yet. Extract it and run `hgs-tray.exe`. It is unsigned and has no installer "
-                          f"or automatic updates.\n")
+        # Stable and nightly candidates carry the tested zip; older candidates have none.
+        if info.get("windows_portable"):
+            notes += (f"\nWindows x86_64: `{info['windows_portable']}` is a portable control console for "
+                      f"remote Linux and macOS machines over OpenSSH; enabling local sessions in Machines "
+                      f"also runs agents on the Windows computer itself. Extract it and run `hgs-tray.exe`. "
+                      f"It is unsigned and has no installer or automatic updates.\n")
         with tempfile.TemporaryDirectory(prefix="zerus-notes-") as temporary:
             path = Path(temporary) / "notes.md"
             path.write_text(notes)
