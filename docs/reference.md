@@ -1053,9 +1053,12 @@ entry becomes unknown rather than a fabricated completed result.
 DeepSeek uses each child's exact native API entry within one host generation.
 A child never inherits its parent's running status. Missing, contradictory or
 cross-generation observations remain unknown; desktop and Android counters
-retain the `+` uncertainty marker. The current OpenCode adapter does not expose
-child sessions. Inspection reports native tracking evidence without changing
-reply/read identities or restarting agents.
+retain the `+` uncertainty marker. OpenCode lists the native sessions whose
+recorded parent is the exact conversation and reads each child's own newest
+message: a recorded turn end is finished, anything else stays unknown, because
+another OpenCode process runs those children
+([OpenCode children](opencode.md#child-sessions)). Inspection reports native
+tracking evidence without changing reply/read identities or restarting agents.
 
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
@@ -1582,9 +1585,10 @@ Choose **OpenCode** in New session to use its separate native API adapter.
 Select its native account and an offered `provider/model`, or retain the native
 model default. The initial adapter supports text/voice conversations, native
 questions and permissions, status/history, Stop, model selection, pause/resume,
-rename and forgetting a saved binding. Terminal, attachments, children,
-archive/fork and context reset/compaction remain unavailable with explicit
-capabilities. See [OpenCode setup and reviewed version](opencode.md).
+rename and forgetting a saved binding. Child sessions are read-only. Terminal,
+attachments, child messages, archive/fork and context reset/compaction remain
+unavailable with explicit capabilities. See
+[OpenCode setup and reviewed version](opencode.md).
 
 <a id="deepseek"></a>
 
