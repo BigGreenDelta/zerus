@@ -415,9 +415,7 @@ pub fn describe(pid: u32) -> Option<ProcessImage> {
         });
     }
     bytes.truncate(size);
-    let argc = i32::from_ne_bytes(bytes[..4].try_into().ok()?)
-        .max(0)
-        .min(4096) as usize;
+    let argc = i32::from_ne_bytes(bytes[..4].try_into().ok()?).clamp(0, 4096) as usize;
     let mut rest = &bytes[4..];
     rest = &rest[rest.iter().position(|b| *b == 0)? + 1..];
     while rest.first() == Some(&0) {
