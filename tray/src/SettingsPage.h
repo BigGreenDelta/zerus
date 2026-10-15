@@ -144,6 +144,13 @@ public:
         activityFullWidth->setChecked(ActivityWidth::fullWidth());activityWidth->setEnabled(!activityFullWidth->isChecked());
         updateResets();
     }
+    // Keyboard zoom changes the content scale; the window applies it itself.
+    void syncContentScale(){
+        auto *scale=findChild<QSlider *>("workspaceContentScale");if(!scale)return;
+        {const QSignalBlocker block(scale);scale->setValue(qRound(ContentScale::factor()*20));}
+        if(auto *value=findChild<QLabel *>("workspaceContentScaleValue"))value->setText(QStringLiteral("%1%").arg(scale->value()*5));
+        updateResets();
+    }
 private:
     void refreshCliVersion(){cliVersion->setText(tr("hgs CLI: checking…"));versionClient->requestVersion();}
     HgsClient *versionClient;QLabel *cliVersion;MobileDeliverySettings *mobileDelivery;

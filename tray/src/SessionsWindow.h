@@ -48,6 +48,7 @@ class IdentityBadge;
 class SwarmButton;
 class QToolBar;
 class BusyIndicator;
+class ShortcutRouter;
 
 // A view over hgs snapshots and its durable event journal. Closing this window
 // never owns or terminates an agent. All operations still go through the CLI.
@@ -267,6 +268,25 @@ private:
     void renderQuestion(const Entry &entry, int navigation = 0);
     void setInspectorVisible(bool visible);
     void updateInspectorMinimum();
+    // Keyboard commands of the Window scope (Shortcuts.h), implemented in
+    // SessionsWindowShortcuts.cpp. Every command's action stays enabled; a
+    // command with nothing to do does nothing or shows a notice.
+    void setupShortcuts();
+    void applyShortcuts();
+    void runShortcut(const QString &id);
+    QAction *shortcutAction(const QString &id) const;
+    // Empty queueId: the selected session's current snapshot. False, with a
+    // notice when nothing can be sent, unless a request is already running.
+    bool sendQueuedNow(const QString &queueId = {});
+    void openGoTo();
+    void openShortcutHelp();
+    void stepSession(int direction, bool attention);
+    void stepTab(int direction);
+    void stepFocus(int direction);
+    void stepContentScale(int direction);
+    QWidget *viewFocusTarget() const;
+    QHash<QString, QAction *> m_shortcutActions;
+    ShortcutRouter *m_shortcutRouter = nullptr;
 
     IdentityBadge *m_providerBadge, *m_machineBadge;
     HgsClient m_client;

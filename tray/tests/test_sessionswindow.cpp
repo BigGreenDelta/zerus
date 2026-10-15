@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QAction>
 #include <QApplication>
 #include <QFrame>
 #include <QToolButton>
@@ -88,6 +89,7 @@
 #include "LocalSessionHost.h"
 #include "ProcessRunner.h"
 #include "ProcessSettings.h"
+#include "Shortcuts.h"
 
 class FolderUrlRecorder : public QObject {
     Q_OBJECT
@@ -201,6 +203,8 @@ private slots:
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
     void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QSettings().setValue("downloads/folder", m_dir->filePath("download-cache")); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
+    // Chords a test rebinds end with it.
+    void cleanup() { ShortcutRegistry::instance().resetAll(); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
@@ -395,6 +399,18 @@ private slots:
     void stopNoticesExplainOriginalTargetAndCanBeDismissed();
     void escapeInterruptsFromAnywhereAndNeverCloses();
     void suggestedMessageIsPlaceholderAndTabTakesIt();
+    // Keyboard commands; see docs/superpowers/specs/2026-10-15-keyboard-shortcuts-design.md.
+    void shortcutsSwitchSections();
+    void shortcutsMoveBetweenSessions();
+    void shortcutsFindSessionsNeedingAttention();
+    void shortcutsCycleSessionTabs();
+    void terminalChordReturnsToActivity();
+    void shortcutsInModalDialogsStayLocal();
+    void queueChordUsesTheExistingSendNowPath();
+    void zoomChordsChangeContentScale();
+    void reboundChordsApplyAtOnce();
+    void projectListKeepsItsReorderKeys();
+    void focusChordsCycleSessionAreas();
     void preview();
     void controlConsolePreview();
 private:
@@ -8466,4 +8482,319 @@ void TestSessionsWindow::updatesEntryOpensExactSettingsPage(){
     SessionsWindow window(program());window.show();window.showUpdates();
     auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);QCOMPARE(sections->currentRow(),4);QCOMPARE(sections->currentItem()->text(),QString("Updates"));
     QVERIFY(window.findChild<QWidget *>("settingsPage")->isVisible());window.showSessionList();window.showUpdates();QCOMPARE(sections->currentRow(),4);
+}
+
+namespace {
+// Presses a chord where the keyboard is: the window's focus widget, or the window.
+void pressChord(QWidget *window, Qt::Key key, Qt::KeyboardModifiers modifiers = Qt::NoModifier)
+{
+    QWidget *focus = QApplication::focusWidget();
+    QTest::keyClick(focus && focus->window() == window ? focus : window, key, modifiers);
+}
+QStackedWidget *workspacePages(QWidget &window)
+{
+    auto *dashboard = window.findChild<DashboardPage *>();
+    return dashboard ? qobject_cast<QStackedWidget *>(dashboard->parentWidget()) : nullptr;
+}
+QPushButton *railButton(QWidget &window, const QString &glyph)
+{
+    for (auto *button : window.findChildren<QPushButton *>("railButton")) if (button->property("glyph") == glyph) return button;
+    return nullptr;
+}
+QString currentSessionKey(const QListWidget *list)
+{
+    return list->currentItem() ? list->currentItem()->data(SessionRoles::Key).toString() : QString();
+}
+bool focusedIn(const QWidget *area)
+{
+    const auto *focus = QApplication::focusWidget();
+    return focus && (focus == area || area->isAncestorOf(focus));
+}
+}
+
+void TestSessionsWindow::shortcutsSwitchSections()
+{
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    auto *pages = workspacePages(window); QVERIFY(pages); QCOMPARE(pages->currentIndex(), 0);
+    // Rail buttons in page order: Sessions, Projects, Machines, Overview, Accounts, Settings.
+    const QList<QPushButton *> rail{railButton(window, "sessions"), railButton(window, "projects"), railButton(window, "machines"),
+        window.findChild<QPushButton *>("brandMark"), railButton(window, "accounts"), window.findChild<QPushButton *>("workspaceSettings")};
+    for (auto *button : rail) QVERIFY(button);
+    QPushButton *attention = nullptr;
+    for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) if (button->property("filter") == "attention") attention = button;
+    QVERIFY(attention); attention->click(); QVERIFY(attention->isChecked());
+    const QList<QPair<Qt::Key, int>> chords{{Qt::Key_3, 1}, {Qt::Key_4, 2}, {Qt::Key_5, 4}, {Qt::Key_1, 3}, {Qt::Key_Comma, 5}, {Qt::Key_2, 0}, {Qt::Key_2, 0}};
+    for (const auto &chord : chords) {
+        pressChord(&window, chord.first, Qt::ControlModifier);
+        QCOMPARE(pages->currentIndex(), chord.second);
+        for (int page = 0; page < rail.size(); ++page) QCOMPARE(rail[page]->isChecked(), page == chord.second);
+    }
+    // Unlike a second click on the rail button, the chord keeps the filter.
+    QVERIFY(attention->isChecked());
+}
+
+void TestSessionsWindow::shortcutsMoveBetweenSessions()
+{
+    auto box = fleet().local(); auto first = box.sessions[0];
+    first.activity = "idle"; first.phase = "idle"; first.currentTool.clear();
+    first.subagents = {{"agent-a", QJsonObject{{"name", "Review"}, {"state", "working"}}}};
+    box.sessions = {first, box.sessions[1]};
+    FleetState state; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionOrganization org; const auto release = org.createGroup("Release"); org.createGroup("Research");
+    for (const auto &name : {QStringLiteral("codex/hgs/dashboard"), QStringLiteral("kimi/docs/research")}) org.moveSession(org.observe("arch", name, {}), release);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    QSettings().setValue("workspace/expandedSessions", QStringList{QStringLiteral("\ncodex/hgs/dashboard")});
+    SessionsWindow window(program()); window.setFleet(state); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list); QCOMPARE(list->count(), 4);
+    QVERIFY(list->item(0)->data(SessionRoles::Header).toBool());
+    QCOMPARE(list->item(2)->data(SessionRoles::ChildId).toString(), QString("agent-a"));
+    QCOMPARE(list->currentRow(), 1);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Draft for the dashboard");
+    list->setFocus(); QTRY_VERIFY(list->hasFocus());
+    pressChord(&window, Qt::Key_Down, Qt::AltModifier);
+    QCOMPARE(currentSessionKey(list), QString("\nkimi/docs/research"));
+    pressChord(&window, Qt::Key_Down, Qt::AltModifier); // The last session stays: no wrap.
+    QCOMPARE(currentSessionKey(list), QString("\nkimi/docs/research"));
+    pressChord(&window, Qt::Key_PageUp, Qt::ControlModifier);
+    QCOMPARE(currentSessionKey(list), QString("\ncodex/hgs/dashboard")); QCOMPARE(list->currentRow(), 1);
+    pressChord(&window, Qt::Key_Up, Qt::AltModifier); // The project header is no session.
+    QCOMPARE(list->currentRow(), 1);
+    QTRY_COMPARE(composer->editor()->toPlainText(), QString("Draft for the dashboard"));
+    // From another page the chord shows Sessions and moves from the selection.
+    window.findChild<QPushButton *>("brandMark")->click(); QVERIFY(!list->isVisible());
+    pressChord(&window, Qt::Key_PageDown, Qt::ControlModifier);
+    QVERIFY(list->isVisible()); QCOMPARE(currentSessionKey(list), QString("\nkimi/docs/research"));
+}
+
+void TestSessionsWindow::shortcutsFindSessionsNeedingAttention()
+{
+    auto box = fleet().local(); const auto base = box.sessions[1]; box.sessions.clear();
+    for (const auto &[name, phase] : QList<QPair<QString, QString>>{{"codex/alpha/one", "approval"}, {"codex/beta/two", "idle"}, {"codex/gamma/three", "input"}}) {
+        auto session = base; session.name = name; session.cmd = "codex"; session.project = name.section('/', 1, 1); session.tag = name.section('/', 2);
+        session.phase = phase; box.sessions << session;
+    }
+    FleetState state; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.setFleet(state); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    window.showSession({}, "codex/gamma/three");
+    auto *list = window.findChild<SessionList *>("sessionList"); list->setFocus(); QTRY_VERIFY(list->hasFocus());
+    pressChord(&window, Qt::Key_Down, Qt::AltModifier | Qt::ShiftModifier); // Wraps to the first.
+    QCOMPARE(currentSessionKey(list), QString("\ncodex/alpha/one"));
+    pressChord(&window, Qt::Key_Down, Qt::AltModifier | Qt::ShiftModifier); // Skips the idle session.
+    QCOMPARE(currentSessionKey(list), QString("\ncodex/gamma/three"));
+    pressChord(&window, Qt::Key_Up, Qt::AltModifier | Qt::ShiftModifier);
+    QCOMPARE(currentSessionKey(list), QString("\ncodex/alpha/one"));
+    pressChord(&window, Qt::Key_Up, Qt::AltModifier | Qt::ShiftModifier); // Wraps to the last.
+    QCOMPARE(currentSessionKey(list), QString("\ncodex/gamma/three"));
+    for (auto &session : box.sessions) session.phase = "idle";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    pressChord(&window, Qt::Key_Down, Qt::AltModifier | Qt::ShiftModifier);
+    QCOMPARE(currentSessionKey(list), QString("\ncodex/gamma/three"));
+    QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("No sessions need attention"));
+}
+
+void TestSessionsWindow::shortcutsCycleSessionTabs()
+{
+    for (const bool processes : {false, true}) {
+        QSettings().setValue("processes/enabled", processes);
+        SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&window));
+        window.showSession({}, "codex/hgs/dashboard");
+        auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *terminal = window.findChild<TerminalView *>();
+        auto *processView = window.findChild<ProcessView *>(); QVERIFY(tabs); QVERIFY(terminal); QVERIFY(processView);
+        QVERIFY(!tabs->isTabVisible(2)); // Native UI belongs to DeepSeek sessions.
+        QCOMPARE(tabs->isTabVisible(tabs->indexOf(processView)), processes);
+        QList<QWidget *> order{tabs->widget(0), terminal}; if (processes) order << processView;
+        auto *composer = window.findChild<MessageComposer *>("messageComposer");
+        composer->editor()->setFocus(); QTRY_VERIFY(composer->editor()->hasFocus());
+        for (int step = 1; step <= order.size(); ++step) {
+            pressChord(&window, Qt::Key_Tab, Qt::ControlModifier);
+            QCOMPARE(tabs->currentWidget(), order[step % order.size()]); QVERIFY(focusedIn(tabs->currentWidget()));
+        }
+        for (int step = order.size() - 1; step >= 0; --step) {
+            pressChord(&window, Qt::Key_Backtab, Qt::ControlModifier | Qt::ShiftModifier);
+            QCOMPARE(tabs->currentWidget(), order[step]); QVERIFY(focusedIn(tabs->currentWidget()));
+        }
+    }
+}
+
+void TestSessionsWindow::terminalChordReturnsToActivity()
+{
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *terminal = window.findChild<TerminalView *>();
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); auto *list = window.findChild<SessionList *>("sessionList");
+    auto *pages = workspacePages(window); auto *screen = terminal->terminalScreen();
+    tabs->setCurrentWidget(terminal); screen->setFocus(); QTRY_VERIFY(screen->hasFocus());
+    // Keys an agent needs stay in Terminal, bound or not.
+    const QList<QPair<Qt::Key, Qt::KeyboardModifiers>> agentKeys{{Qt::Key_C, Qt::ControlModifier}, {Qt::Key_R, Qt::ControlModifier},
+        {Qt::Key_Up, Qt::AltModifier}, {Qt::Key_F2, Qt::NoModifier}, {Qt::Key_Escape, Qt::NoModifier}};
+    for (const auto &key : agentKeys) {
+        QTest::keyClick(screen, key.first, key.second);
+        QCOMPARE(tabs->currentWidget(), terminal); QCOMPARE(currentSessionKey(list), QString("\ncodex/hgs/dashboard"));
+        QCOMPARE(pages->currentIndex(), 0); QVERIFY(!window.findChild<QDialog *>("renameSessionDialog"));
+    }
+    pressChord(&window, Qt::Key_QuoteLeft, Qt::ControlModifier);
+    QCOMPARE(tabs->currentIndex(), 0); QTRY_VERIFY(composer->editor()->hasFocus());
+    pressChord(&window, Qt::Key_QuoteLeft, Qt::ControlModifier);
+    QCOMPARE(tabs->currentWidget(), terminal); QTRY_VERIFY(screen->hasFocus());
+    pressChord(&window, Qt::Key_1, Qt::ControlModifier);
+    QCOMPARE(pages->currentIndex(), 3);
+}
+
+void TestSessionsWindow::shortcutsInModalDialogsStayLocal()
+{
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    auto *pages = workspacePages(window); window.findChild<QPushButton *>("brandMark")->click(); QCOMPARE(pages->currentIndex(), 3);
+    {
+        QDialog dialog(&window); dialog.setModal(true); auto *field = new QLineEdit(&dialog);
+        dialog.show(); dialog.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&dialog));
+        field->setFocus(); QTRY_VERIFY(field->hasFocus());
+        QTest::keyClick(field, Qt::Key_2, Qt::ControlModifier);
+        QTest::keyClick(field, Qt::Key_Comma, Qt::ControlModifier);
+        QCOMPARE(pages->currentIndex(), 3);
+    }
+    window.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window));
+    pressChord(&window, Qt::Key_2, Qt::ControlModifier); QCOMPARE(pages->currentIndex(), 0);
+}
+
+void TestSessionsWindow::queueChordUsesTheExistingSendNowPath()
+{
+    QTemporaryDir fixture; QFile fake(fixture.filePath("hgs")), original(script());
+    QVERIFY(original.open(QIODevice::ReadOnly)); QVERIFY(fake.open(QIODevice::WriteOnly));
+    fake.write(original.readAll().replace("if False:pass\n", "if False:pass\n"
+        "elif c=='inspect':print(open(__file__+'.details').read())\n"
+        "elif c=='send-now':\n payload=json.loads(sys.stdin.read())\n"
+        " open(__file__+'.send-now','a').write(payload['queue_id']+'\\n')\n"
+        " print(json.dumps({'status':'submitted','request_id':payload['request_id'],'name':a[1],'run_id':payload['expected_run_id'],"
+        "'conversation_id':payload['expected_conversation_id'],'queue_id':payload['queue_id']}))\n"));
+    fake.close(); QVERIFY(FakeCli::makeRunnable(fake.fileName()));
+    QJsonObject details{{"tracked", true}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"}, {"runtime_state", "live"},
+        {"process_state", "running"}, {"activity", "busy"}, {"phase", "working"}, {"events", QJsonArray{}}, {"cursor", 0},
+        {"input_queue", QJsonObject{{"id", "q1"}, {"text", "❯ run the release checks"}, {"can_send_now", true}, {"hint", "Interrupt and send the queue."}}}};
+    const auto save = [&] { return FakeCli::replace(fake.fileName() + ".details", QJsonDocument(details).toJson(QJsonDocument::Compact)); };
+    const auto requests = [&] {
+        QFile log(fake.fileName() + ".send-now");
+        return log.open(QIODevice::ReadOnly) ? QString::fromUtf8(log.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList();
+    };
+    QVERIFY(save());
+    SessionsWindow window(FakeCli::program(fake.fileName())); keepDetailsPollsOut(window);
+    window.setFleet(fleet()); window.show(); window.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window));
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", details);
+    auto *sendNow = window.findChild<ActivityView *>("mainActivity")->findChild<QPushButton *>("queueSendNow");
+    QTRY_VERIFY(sendNow->isVisible()); QVERIFY(sendNow->isEnabled());
+    QCOMPARE(sendNow->toolTip(), QString("Interrupt and send the queue. (%1)").arg(ShortcutRegistry::instance().hint("queue.sendNow")));
+    setComposerText(composer, "Typed but not sent"); composer->editor()->setFocus(); QTRY_VERIFY(composer->editor()->hasFocus());
+    QSignalSpy sent(composer, &MessageComposer::sendRequested); QSignalSpy finished(client, &HgsClient::queueSendFinished);
+    pressChord(&window, Qt::Key_Return, Qt::ControlModifier | Qt::ShiftModifier);
+    QTRY_COMPARE(finished.size(), 1); QVERIFY(finished[0][1].toBool());
+    QCOMPARE(requests(), QStringList{"q1"}); QCOMPARE(sent.size(), 0);
+    QCOMPARE(composer->editor()->toPlainText(), QString("Typed but not sent"));
+    // A queue that cannot be sent now sends nothing and says so.
+    details["input_queue"] = QJsonObject{{"id", "q2"}, {"text", "❯ later"}, {"can_send_now", false}};
+    QVERIFY(save()); settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", details);
+    pressChord(&window, Qt::Key_Return, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("Nothing queued can be sent now"));
+    QTest::qWait(150); QCOMPARE(requests(), QStringList{"q1"}); QCOMPARE(sent.size(), 0);
+}
+
+void TestSessionsWindow::zoomChordsChangeContentScale()
+{
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); composer->editor()->setFocus(); QTRY_VERIFY(composer->editor()->hasFocus());
+    auto *slider = window.findChild<QSlider *>("workspaceContentScale"); auto *value = window.findChild<QLabel *>("workspaceContentScaleValue");
+    auto *notice = window.findChild<QLabel *>("notice"); QVERIFY(slider); QVERIFY(value);
+    const auto editorPixels = [composer] { return QFontInfo(composer->editor()->font()).pixelSize(); };
+    QCOMPARE(editorPixels(), 13);
+    pressChord(&window, Qt::Key_Equal, Qt::ControlModifier);
+    QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 1.1);
+    QCOMPARE(slider->value(), 22); QCOMPARE(value->text(), QString("110%")); QCOMPARE(notice->text(), QString("Content scale 110%"));
+    QTRY_COMPARE(editorPixels(), 14);
+    pressChord(&window, Qt::Key_0, Qt::ControlModifier);
+    QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 1.0);
+    QCOMPARE(slider->value(), 20); QCOMPARE(value->text(), QString("100%")); QTRY_COMPARE(editorPixels(), 13);
+    for (int i = 0; i < 4; ++i) pressChord(&window, Qt::Key_Minus, Qt::ControlModifier);
+    QCOMPARE(QSettings().value("workspace/contentScale").toDouble(), 0.75); QCOMPARE(notice->text(), QString("Content scale 75%"));
+}
+
+void TestSessionsWindow::reboundChordsApplyAtOnce()
+{
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    window.showSession({}, "codex/hgs/dashboard");
+    const auto native = [](const char *chord) { return QKeySequence::fromString(chord, QKeySequence::PortableText).toString(QKeySequence::NativeText); };
+    auto *projects = railButton(window, "projects"); QVERIFY(projects);
+    QCOMPARE(projects->toolTip(), QString("Projects (%1)").arg(native("Ctrl+3")));
+    QCOMPARE(window.findChild<QPushButton *>("newSession")->toolTip(), QString("New session (%1)").arg(native("Ctrl+N")));
+    auto *inspector = window.findChild<QPushButton *>("toggleInspector"); QVERIFY(inspector->toolTip().endsWith(" (" + native("Ctrl+I") + ")"));
+    pressChord(&window, Qt::Key_I, Qt::ControlModifier); QVERIFY(inspector->isChecked());
+    QCOMPARE(inspector->toolTip(), QString("Collapse side panel (%1)").arg(native("Ctrl+I")));
+    QCOMPARE(inspector->accessibleName(), QString("Collapse side panel"));
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *terminal = window.findChild<TerminalView *>();
+    tabs->setCurrentWidget(terminal); terminal->terminalScreen()->setFocus(); QTRY_VERIFY(terminal->terminalScreen()->hasFocus());
+    ShortcutRegistry::instance().setKeys("tab.next", {QKeySequence("Ctrl+9")});
+    ShortcutRegistry::instance().setKeys("go.projects", {QKeySequence("Ctrl+8")});
+    QCOMPARE(window.findChild<QAction *>("shortcut:tab.next")->shortcuts(), QList<QKeySequence>{QKeySequence("Ctrl+9")});
+    QCOMPARE(projects->toolTip(), QString("Projects (%1)").arg(native("Ctrl+8")));
+    QTest::keyClick(terminal->terminalScreen(), Qt::Key_Tab, Qt::ControlModifier);
+    QCOMPARE(tabs->currentWidget(), terminal);
+    QTest::keyClick(terminal->terminalScreen(), Qt::Key_9, Qt::ControlModifier);
+    QCOMPARE(tabs->currentIndex(), 0);
+}
+
+void TestSessionsWindow::projectListKeepsItsReorderKeys()
+{
+    SessionOrganization projects; projects.createGroup("infra"); projects.createGroup("sample-app");
+    QSettings().setValue("workspace/hideEmptyProjects", false);
+    QSettings().setValue("workspace/organization", QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
+    const auto stored = [] { return SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()); };
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    window.showProjects();
+    auto *pages = workspacePages(window); auto *page = window.findChild<ProjectsDialog *>();
+    auto *list = page->findChild<QListWidget *>("logicalProjects"); QVERIFY(list); QVERIFY(list->count() > 2);
+    list->setCurrentRow(1); list->setFocus(); QTRY_VERIFY(list->hasFocus());
+    const auto moved = stored().groups()[1].id;
+    // Alt+Up and Alt+Down are the list's own keys, although Next and Previous session use them elsewhere.
+    QTest::keyClick(list, Qt::Key_Up, Qt::AltModifier);
+    QCOMPARE(stored().groups()[0].id, moved); QCOMPARE(pages->currentIndex(), 1);
+    list->setCurrentRow(list->count() - 1);
+    QTest::keyClick(list, Qt::Key_Down, Qt::AltModifier); // The last project stays last.
+    QCOMPARE(pages->currentIndex(), 1);
+    auto *other = page->findChild<QCheckBox *>("allSwarmProjects"); other->setFocus(); QTRY_VERIFY(other->hasFocus());
+    QTest::keyClick(other, Qt::Key_Down, Qt::AltModifier);
+    QCOMPARE(pages->currentIndex(), 0);
+}
+
+void TestSessionsWindow::focusChordsCycleSessionAreas()
+{
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *list = window.findChild<SessionList *>("sessionList"); auto *activity = window.findChild<ActivityView *>("mainActivity");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); auto *panel = window.findChild<QFrame *>("sessionInspectorPanel");
+    pressChord(&window, Qt::Key_I, Qt::ControlModifier); QTRY_VERIFY(panel->isVisible());
+    list->setFocus(); QTRY_VERIFY(list->hasFocus());
+    // Session list, the current view, the message field, the side panel, and around.
+    const QList<const QWidget *> areas{list, activity->browser(), composer->editor(), panel};
+    for (int step = 1; step <= areas.size(); ++step) {
+        pressChord(&window, Qt::Key_F6);
+        QVERIFY2(focusedIn(areas[step % areas.size()]), qPrintable(QString::number(step)));
+    }
+    for (int step = areas.size() - 1; step >= 0; --step) {
+        pressChord(&window, Qt::Key_F6, Qt::ShiftModifier);
+        QVERIFY2(focusedIn(areas[step]), qPrintable(QString::number(step)));
+    }
+    // Other pages have no such areas.
+    window.findChild<QPushButton *>("brandMark")->click(); auto *focus = QApplication::focusWidget();
+    pressChord(&window, Qt::Key_F6); QCOMPARE(QApplication::focusWidget(), focus);
 }

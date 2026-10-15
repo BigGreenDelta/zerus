@@ -33,6 +33,7 @@
 #include "QuestionCard.h"
 #include "RecoveryWidgets.h"
 #include "SettingsPage.h"
+#include "Shortcuts.h"
 #include "ContentScale.h"
 #include "ActivityWidth.h"
 #include "UpdateController.h"
@@ -320,8 +321,6 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_machinesNav, &QPushButton::clicked, this, [this]() {
         m_pages->setCurrentIndex(2); m_machinesNav->setChecked(true); m_sessionsNav->setChecked(false); m_projectsNav->setChecked(false);
     });
-    auto *refresh = new QPushButton(this); refresh->hide();
-    connect(refresh, &QPushButton::clicked, this, [this]() { emit refreshRequested(); inspect(); m_machinesPage->reload(); });
     side->addStretch();
     auto *windowPin = m_windowPin = iconButton("unpinned", tr("Keep Zerus above other windows"), "windowPin"); windowPin->setCheckable(true);
     windowPin->setFixedSize(42, 44); windowPin->setIconSize(QSize(24,24)); side->addWidget(windowPin);
@@ -1365,10 +1364,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     statusLayout->addWidget(m_usageStrip,0,Qt::AlignRight);
     workspace->addWidget(statusBar); root->addLayout(workspace, 1);
 
-    auto *searchShortcut = new QShortcut(QKeySequence::Find, this);
-    connect(searchShortcut, &QShortcut::activated, this, [this] { showSessionList(); m_search->setFocus(); m_search->selectAll(); });
-    auto *refreshShortcut = new QShortcut(QKeySequence::Refresh, this); connect(refreshShortcut, &QShortcut::activated, refresh, &QPushButton::click);
-    auto *refreshR = new QShortcut(QKeySequence("Ctrl+R"), this); connect(refreshR, &QShortcut::activated, refresh, &QPushButton::click);
+    // Search, refresh and the other commands are keyboard actions (setupShortcuts()).
     auto *escape = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     // Escape never closes Zerus. A search being typed is cleared first;
     // otherwise, like Escape in Terminal, it stops the selected session's
@@ -1379,13 +1375,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         else if (m_pages->currentIndex() == 0 && m_composer->requestInterrupt()) return;
         else if (!m_search->text().isEmpty()) m_search->clear();
     });
-    connect(m_activityView, &ActivityView::queueSendNowRequested, this, [this](const QString &id) {
-        const auto *entry = selected(); const auto queue = m_details["input_queue"].toObject();
-        if (!entry || !entry->online || m_queueSendRequest || id.isEmpty() || queue["id"] != id || !queue["can_send_now"].toBool()) return;
-        m_queueSendKey = m_selectedKey;
-        m_queueSendRequest = m_client.requestQueueSendNow(entry->host, entry->session.name, m_details["run_id"].toString(), m_details["conversation_id"].toString(), id);
-        renderDetails();
-    });
+    connect(m_activityView, &ActivityView::queueSendNowRequested, this, [this](const QString &id) { if (!id.isEmpty()) sendQueuedNow(id); });
     connect(&m_client, &HgsClient::queueSendFinished, this, [this](quint64 request, bool ok, const QJsonObject &, const QString &error) {
         if (request != m_queueSendRequest) return;
         const bool current = m_queueSendKey == m_selectedKey; m_queueSendRequest = 0; m_queueSendKey.clear();
@@ -1505,6 +1495,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_readTimer.setInterval(400); connect(&m_readTimer, &QTimer::timeout, this, &SessionsWindow::checkViewedReply);
     applyTheme(); applyContentScale(); rebuild();
+    setupShortcuts();
 }
 
 // Only session content follows this preference. Workspace chrome, including
@@ -1864,8 +1855,8 @@ void SessionsWindow::setInspectorVisible(bool visible)
     const QSignalBlocker blocker(m_inspectorToggle); m_inspectorToggle->setChecked(visible);
     m_inspectorToggle->setProperty("glyph", visible ? "collapse-panel" : "inspector");
     m_inspectorToggle->setIcon(workspaceIcon(m_inspectorToggle->property("glyph").toString(), QColor(m_muted)));
-    m_inspectorToggle->setToolTip(visible ? tr("Collapse side panel") : tr("Show tasks, agents, details and worktrees"));
-    m_inspectorToggle->setAccessibleName(m_inspectorToggle->toolTip());
+    m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show tasks, agents, details and worktrees"));
+    m_inspectorToggle->setToolTip(ShortcutRegistry::instance().tooltip(m_inspectorToggle->accessibleName(), "panel.toggle"));
     m_inspectorToggle->show();
     if (restoreFocus) m_inspectorToggle->setFocus(keyboardFocus ? Qt::TabFocusReason : Qt::MouseFocusReason);
     if (visible) {
@@ -2818,7 +2809,7 @@ void SessionsWindow::updateAttentionIndicator()
         .arg(m_dark ? "#ffda76" : "#a66000",m_dark ? "#30250c" : "#ffffff"));
     m_attentionBadge->setVisible(m_attentionCount > 0);
     const QString hint = m_attentionCount ? tr("Sessions — %1 need attention").arg(m_attentionCount) : tr("Sessions");
-    m_sessionsNav->setAccessibleName(hint); m_sessionsNav->setToolTip(hint);
+    m_sessionsNav->setAccessibleName(hint); m_sessionsNav->setToolTip(ShortcutRegistry::instance().tooltip(hint, "go.sessions"));
     m_brand->setProperty("attentionCount",m_attentionCount);
     m_brand->setAppearance(m_dark ? QColor(Qt::white) : QColor(m_accent), QColor(m_dark ? "#ffda76" : "#a66000"),
         m_attentionCount > 0, QSettings().value("workspace/reduceMotion", false).toBool());
