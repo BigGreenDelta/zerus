@@ -2111,37 +2111,19 @@ async fn postgres_cross_worker_contract() {
 #[tokio::test]
 #[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly in CI"]
 async fn postgres_cross_worker_offline_peer_last_seen() {
-    use sqlx::Connection;
-    let base =
-        std::env::var("ZERUS_RELAY_TEST_DATABASE_URL").expect("isolated PostgreSQL required");
-    let mut admin = sqlx::PgConnection::connect(&base).await.unwrap();
-    let name = format!("relay_test_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {name}"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    let mut url = url::Url::parse(&base).unwrap();
-    url.set_path(&name);
-    let cfg = Config {
-        database_url: Some(url.to_string()),
-        background: false,
-        ..Config::default()
-    };
-    let f = Fixture::config(cfg.clone()).await;
-    let second = Store::new(
-        Db::open(std::path::Path::new("unused"), Arc::new(cfg))
-            .await
-            .unwrap(),
-    );
+    let f = Fixture::provision(
+        Backend::postgres(Config {
+            background: false,
+            ..Config::default()
+        })
+        .await,
+    )
+    .await;
+    let second = f.backend.store().await;
     // The gateway writes through one worker; the phone lists through another.
     offline_peer_route_keeps_last_seen(&f, &second).await;
     second.db.close().await;
     f.close().await;
-    sqlx::query(&format!("DROP DATABASE {name}"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    admin.close().await.unwrap();
 }
 
 #[tokio::test]

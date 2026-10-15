@@ -118,6 +118,53 @@ class ConnectorRead(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.execute(payload()))['state'], 'failed')
             call.assert_not_called()
 
+    async def test_peer_file_and_existing_attachment_forward_only_the_bounded_native_limit(self):
+        fleet = self.connector.fleet
+        fleet.supported = True
+        fleet.local_id = str(uuid.uuid4())
+        machine, route, computer = (str(uuid.uuid4()) for _ in range(3))
+        fleet.routes[route] = dict(online=True, machine_id=machine, via='fixture-peer')
+        peer = self.connector.peer_context(machine, fleet.callback(route, machine))
+        fleet.contexts[route] = peer
+        peer.sessions = {SESSION}; peer.snapshot_seen_at = time.monotonic(); peer.snapshot_ready.set()
+        peer.file_read_supported = peer.attachment_read_supported = True
+        data = bytes(range(256)) * 5000
+        limits = []
+
+        async def native(argv, envelope, **options):
+            self.assertEqual(argv, ['swarm', 'mobile-peer', '--json'])
+            self.assertEqual(envelope['target_machine_id'], machine)
+            self.assertEqual(envelope['via'], 'fixture-peer')
+            inner = envelope['argv']
+            if inner[0] == 'inspect':
+                self.assertIsNone(options['max_output_bytes'])
+                return dict(name=SESSION, run_id='run', conversation_id='conversation')
+            if inner == ['ls', '--json', '--local']:
+                self.assertEqual(options['max_output_bytes'], 1024 * 1024)
+                return []
+            limits.append(options['max_output_bytes'])
+            if inner[0] == 'file-read':
+                return native_file(data, envelope['payload'])
+            self.assertEqual(inner[0], 'attachment')
+            return dict(request_id=inner[3], index=0, name='file.xlsx', mime='application/octet-stream',
+                        bytes=len(data), data_base64=base64.b64encode(data).decode())
+
+        try:
+            with patch.object(self.connector, '_native', side_effect=native):
+                for operation in ('file_read', 'attachment_read'):
+                    value = payload()
+                    if operation == 'attachment_read':
+                        value.pop('path'); value.update(message_id=str(uuid.uuid4()), index=0)
+                    response = await self.connector.execute(dict(request_id=value['request_id'], operation=operation,
+                        session=SESSION, payload=value, gateway_route=dict(schema=1, route_id=route,
+                            computer_id=computer, machine_id=machine)))
+                    self.assertEqual(response['state'], 'completed', response)
+                    self.assertEqual(base64.b64decode(response['result']['data_base64']), data[:MAX_READ_BYTES])
+                await peer.native(['ls', '--json', '--local'])
+            self.assertEqual(limits, [file_reads.attachment_reads.NATIVE_OUTPUT_BYTES] * 2)
+        finally:
+            await fleet.close()
+
 
 @unittest.skipUnless(os.environ.get('ZERUS_RELAY_BINARY') and os.environ.get('ZERUS_DIRECTORY_TEST_HGS'),
                      'Explicit isolated Rust relay and native CLI targets required')
