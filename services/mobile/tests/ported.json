@@ -1,1 +1,1 @@
-{"rust": ["test_bb_check", "test_bb_heartbeat", "test_bb_journal", "test_bb_runtime", "test_bb_startup"]}
+{"rust": ["test_bb_check", "test_bb_computer", "test_bb_heartbeat", "test_bb_inspection_bounds", "test_bb_journal", "test_bb_runtime", "test_bb_startup"]}
