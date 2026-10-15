@@ -190,6 +190,7 @@ private slots:
     void copySessionReferencePreservesSelectionAndDraft();
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
     void updatesEntryOpensExactSettingsPage();
+    void fileCacheSettingsNavigation();
     void mobileConnectionSettingsOfferTheSharedDeliveryChoice();
     void controlOnlyComputerOffersOnlyRemoteMachines();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
@@ -198,7 +199,7 @@ private slots:
     void localWindowsSessionExplainsDisabledVoice();
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
-    void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
+    void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QSettings().setValue("downloads/folder", m_dir->filePath("download-cache")); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
@@ -4802,6 +4803,8 @@ void TestSessionsWindow::remoteFileDownloads_data()
     QTest::newRow("closing-dialog-keeps-requested-download-and-open") << 4;
     // A downloaded program is shown in its folder rather than run.
     QTest::newRow("download-and-open-program") << 5;
+    QTest::newRow("automatic-name-collision") << 6;
+    QTest::newRow("automatic-download-failure") << 7;
 }
 
 void TestSessionsWindow::remoteFileDownloads()
@@ -4811,7 +4814,15 @@ void TestSessionsWindow::remoteFileDownloads()
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     const auto restoreDialogs = qScopeGuard([=] { QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDialogs); });
     QTemporaryDir directory; QVERIFY(directory.isValid());
-    const auto destination = directory.filePath(mode == 5 ? "local deploy.sh" : "local résumé's copy.png");
+    const bool automatic = mode == 1 || mode >= 4;
+    const QString path = mode == 5 ? "/remote/project/deploy.sh" : "/remote/project/résumé ' $(literal).png";
+    const auto cache = directory.filePath("Zerus Files"); QSettings().setValue("downloads/folder", cache);
+    const auto destination = automatic ? QDir(cache).filePath(mode == 6 ? "résumé ' $(literal) (1).png" : QFileInfo(path).fileName())
+                                       : directory.filePath("local résumé's copy.png");
+    if (mode == 6) {
+        QVERIFY(QDir().mkpath(cache)); QFile existing(QDir(cache).filePath(QFileInfo(path).fileName()));
+        QVERIFY(existing.open(QIODevice::WriteOnly)); existing.write("existing copy");
+    }
     if (mode == 2) { QFile file(destination); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("previous copy"); }
     const auto fixture = m_dir->filePath("file-download-hgs");
     QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
@@ -4827,13 +4838,12 @@ void TestSessionsWindow::remoteFileDownloads()
 )PY";
     QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
     QFile::remove(fixture + ".calls"); QFile::remove(fixture + ".fail");
-    if (mode == 2) { QFile fail(fixture + ".fail"); QVERIFY(fail.open(QIODevice::WriteOnly)); }
+    if (mode == 2 || mode == 7) { QFile fail(fixture + ".fail"); QVERIFY(fail.open(QIODevice::WriteOnly)); }
     FolderUrlRecorder opened;
     SessionsWindow window(FakeCli::program(fixture)); window.setFleet(fleet()); window.show();
     window.showSession("mac", "claude/infra/review");
     auto *client = window.findChild<HgsClient *>();
     QSignalSpy downloaded(client, &HgsClient::fileDownloaded), failed(client, &HgsClient::fileDownloadFailed);
-    const QString path = "/remote/project/résumé ' $(literal).png";
     QPointer<QDialog> dialog;
     QTimer::singleShot(0, &window, [&] {
         dialog = window.findChild<QDialog *>("sessionFileDialog"); QVERIFY(dialog);
@@ -4841,15 +4851,16 @@ void TestSessionsWindow::remoteFileDownloads()
         QVERIFY(opened.urls.isEmpty()); QVERIFY(!QFile::exists(fixture + ".calls"));
         if (mode == 0 && qEnvironmentVariableIsSet("HGS_TEST_FILE_DIALOG_PREVIEW"))
             QVERIFY(dialog->grab().save(qEnvironmentVariable("HGS_TEST_FILE_DIALOG_PREVIEW")));
-        auto *download = dialog->findChild<QPushButton *>(mode == 1 || mode == 4 || mode == 5 ? "downloadOpenSessionFile" : "downloadSessionFile");
+        auto *download = dialog->findChild<QPushButton *>(automatic ? "downloadOpenSessionFile" : "downloadSessionFile");
         QVERIFY(download); QVERIFY(download->isEnabled());
-        QTimer::singleShot(0, &window, [&] {
+        if (!automatic) QTimer::singleShot(0, &window, [&] {
             auto *save = window.findChild<QFileDialog *>("sessionFileSaveDialog"); QVERIFY(save);
             if (mode == 3) { save->reject(); return; }
             save->setOption(QFileDialog::DontConfirmOverwrite); save->selectFile(destination);
             QMetaObject::invokeMethod(save, "accept", Qt::DirectConnection);
         });
         download->click();
+        if (automatic) QVERIFY(!window.findChild<QFileDialog *>("sessionFileSaveDialog"));
         if (mode == 3) {
             QVERIFY(dialog->isVisible()); QVERIFY(download->isEnabled());
             QVERIFY(!QFile::exists(fixture + ".calls")); QVERIFY(!QFile::exists(destination)); return;
@@ -4860,10 +4871,12 @@ void TestSessionsWindow::remoteFileDownloads()
         window.showSession({}, "codex/hgs/dashboard");
         QTRY_COMPARE(downloaded.size() + failed.size(), 1);
         QVERIFY(opened.urls.isEmpty());
-        if (mode == 2) {
+        if (mode == 2 || mode == 7) {
             QCOMPARE(failed.size(), 1); QVERIFY(dialog->isVisible()); QVERIFY(download->isEnabled());
             QVERIFY(dialog->findChild<QLabel *>("sessionFileHint")->text().contains("Permission denied"));
-            QFile file(destination); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), QByteArray("previous copy")); return;
+            if (mode == 2) { QFile file(destination); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), QByteArray("previous copy")); }
+            else QVERIFY(!QFileInfo::exists(destination));
+            return;
         }
         QCOMPARE(downloaded.size(), 1);
         QFile file(destination); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), QByteArray("synthetic image"));
@@ -4876,7 +4889,7 @@ void TestSessionsWindow::remoteFileDownloads()
     });
     window.findChild<ActivityView *>("mainActivity")->fileReferenceActivated(QString::fromUtf8(QUrl::toPercentEncoding(path, "/")));
     QVERIFY(dialog.isNull());
-    if (mode == 0 || mode == 1 || mode == 4 || mode == 5) {
+    if (mode == 0 || (automatic && mode != 7)) {
         QTRY_COMPARE(downloaded.size(), 1);
         if (mode == 5) { QTRY_COMPARE(opened.revealed, QStringList{destination}); QVERIFY(opened.urls.isEmpty()); }
         else { QTRY_COMPARE(opened.urls.size(), 1); QCOMPARE(opened.urls.first(), QUrl::fromLocalFile(destination)); }
@@ -4886,7 +4899,14 @@ void TestSessionsWindow::remoteFileDownloads()
 #endif
         QFile calls(fixture + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
         const auto args = QJsonDocument::fromJson(calls.readAll().trimmed()).array();
-        QCOMPARE(args, (QJsonArray{"@mac", "download", "--path", path, "--output", destination}));
+        QCOMPARE(args.size(), 6); auto prefix = args; prefix.removeLast();
+        QCOMPARE(prefix, (QJsonArray{"@mac", "download", "--path", path, "--output"}));
+        if (automatic) {
+            const auto staging = args[5].toString();
+            QCOMPARE(QFileInfo(staging).absolutePath(), cache); QVERIFY(QFileInfo(staging).fileName().startsWith(".zerus-part-"));
+            QVERIFY(!QFileInfo::exists(staging));
+        } else QCOMPARE(args[5].toString(), destination);
+        if (mode == 6) { QFile existing(QDir(cache).filePath(QFileInfo(path).fileName())); QVERIFY(existing.open(QIODevice::ReadOnly)); QCOMPARE(existing.readAll(), QByteArray("existing copy")); }
     } else { QVERIFY(opened.urls.isEmpty()); }
 }
 
@@ -8299,6 +8319,25 @@ void TestSessionsWindow::localWindowsSessionExplainsDisabledVoice(){
     local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
     QTRY_VERIFY(!voice->isEnabled());
     QCOMPARE(voice->toolTip(),QString("Voice messages cannot be sent to sessions on this Windows computer yet."));
+}
+
+void TestSessionsWindow::fileCacheSettingsNavigation(){
+    QSettings().setValue("downloads/folder", m_dir->filePath("Zerus Files"));
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.showUpdates();
+    auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    QCOMPARE(sections->item(6)->text(), QString("Files"));
+    QCOMPARE(sections->item(sections->count()-1)->text(), QString("About"));
+    QCOMPARE(sections->item(sections->count()-2)->text(), QString("Voice input"));
+    sections->setCurrentRow(6);
+    auto *files = window.findChild<DownloadCacheSettings *>("downloadCacheSettings"); QVERIFY(files); QVERIFY(files->isVisible());
+    QCOMPARE(files->findChild<QComboBox *>("downloadCachePolicy")->currentText(), QString("Never clear"));
+    QVERIFY(!files->findChild<QDoubleSpinBox *>("downloadCacheSize")->isEnabled());
+    QTRY_VERIFY(files->findChild<QLabel *>("downloadCacheUsage")->text().contains("0 files"));
+    if (qEnvironmentVariableIsSet("HGS_TEST_DOWNLOAD_SETTINGS_PREVIEW")) {
+        files->findChild<QLineEdit *>("downloadCacheFolder")->setText("/Users/example/Downloads/Zerus Files");
+        window.resize(1180, 820); QTest::qWait(80);
+        QVERIFY(window.grab().save(qEnvironmentVariable("HGS_TEST_DOWNLOAD_SETTINGS_PREVIEW")));
+    }
 }
 
 void TestSessionsWindow::updatesEntryOpensExactSettingsPage(){
