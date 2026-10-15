@@ -506,6 +506,7 @@ pub(crate) fn listing(listed: Listed) -> Listing {
             .map(|session| SessionRow {
                 launch_id: listed_launch_id(&session.launch_id),
                 name: session.name,
+                id: session.id,
                 attached: session.attached,
                 created: session.created,
             })
@@ -671,6 +672,7 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
             .into_iter()
             .map(|pane| PaneRow {
                 session: pane.session,
+                session_id: pane.session_id,
                 pane: pane.pane,
                 dead: flag(pane.dead).into(),
                 run_marker: pane.run_marker,
@@ -1296,6 +1298,16 @@ mod tests {
             .map(|client| (client.session.as_str(), client.terminal.as_str()))
             .collect();
         assert_eq!(clients, [("claude/p/a", "c1")]);
+        // Sessions and panes carry the immutable session IDs that a rename keeps.
+        let ids: Vec<_> = listing.sessions.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, ["$1", "$2"]);
+        let pane_ids: Vec<_> = backend
+            .panes()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.session_id)
+            .collect();
+        assert_eq!(pane_ids, ["$1", "$2"]);
         let panes: Vec<_> = backend
             .panes()
             .unwrap()

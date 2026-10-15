@@ -485,6 +485,7 @@ mod tests {
         }
         let row = |name: &str, created| backend::SessionRow {
             name: name.into(),
+            id: String::new(),
             attached: 1,
             created,
             launch_id: String::new(),

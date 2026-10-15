@@ -543,9 +543,11 @@ fn create(args: &[String]) -> Result<Value> {
         complete
     });
     let upstream = upstream.map(|(remote, merge)| format!("{remote}/{}", merge.strip_prefix("refs/heads/").unwrap_or(&merge)));
+    let managed = super::worktree_lifecycle::created(&common, &destination, branch, &head);
     Ok(
         json!({"status":"created", "path":destination, "branch":branch, "base":base, "head":head,
         "upstream":upstream, "common_dir":common, "request_id":options.get("--request-id"),
+        "managed_cleanup":managed.is_ok(), "cleanup_note":managed.err(),
         "machine":crate::config::Config::load().map_err(|e|e.to_string())?.host()}),
     )
 }
