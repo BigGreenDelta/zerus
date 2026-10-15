@@ -242,6 +242,19 @@ inline bool needsAttention(const SessionInfo &s, bool online = true)
     return false;
 }
 
+// Pending optional Codex questions shown on the card; 0 hides the chip. Only a
+// running agent on a reachable machine with a known count shows one. The agent
+// continues without an answer, so these never count as attention or activity.
+inline int optionalQuestionCount(const SessionInfo &s, bool online = true)
+{
+    if (!online || s.state != "running" || s.processState == "exited" || s.optionalQuestions < 0) return 0;
+    return s.optionalQuestions;
+}
+inline QString optionalQuestionsLabel(int count)
+{
+    return count == 1 ? QObject::tr("1 optional question waiting") : QObject::tr("%1 optional questions waiting").arg(count);
+}
+
 inline bool active(const SessionInfo &s, bool online = true, bool hasDraft = false)
 {
     return s.state != "archived" && (hasDraft || needsAttention(s, online) || working(s, online) || scheduled(s, online)

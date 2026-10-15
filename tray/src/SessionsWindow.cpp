@@ -2705,6 +2705,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::LaunchId, row.launch);
         item->setData(SessionRoles::WorkingSince, 0.0);
         item->setData(SessionRoles::Scheduled, false);
+        item->setData(SessionRoles::OptionalQuestions, 0);
         item->setData(SessionRoles::GitStatus, QJsonObject());
         item->setData(SessionRoles::MetaIcon, QString());
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
@@ -2798,6 +2799,8 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
         item->setData(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
         item->setData(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
+        const int optionalQuestions = isTerminating(e) ? 0 : SessionPresentation::optionalQuestionCount(s, e.online);
+        item->setData(SessionRoles::OptionalQuestions, optionalQuestions);
         item->setData(SessionRoles::MachineName, e.machine);
         item->setData(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
         item->setData(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); item->setData(ChildrenRole, childCount(s, false, e.online, includeCompleted));
@@ -2807,6 +2810,7 @@ void SessionsWindow::rebuild()
         if (!s.cwd.isEmpty()) accessibleFields << s.cwd;
         accessibleFields << (s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort));
         if (s.visibleUnreadReply(e.online)) accessibleFields << tr("New reply (not viewed yet)");
+        if (optionalQuestions > 0) accessibleFields << SessionPresentation::optionalQuestionsLabel(optionalQuestions);
         if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
         accessibleFields << desc;
         if (!childCount(s, false, e.online, includeCompleted).isEmpty()) accessibleFields << tr("Subagents: %1").arg(childCount(s, true, e.online, includeCompleted));

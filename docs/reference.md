@@ -1457,6 +1457,15 @@ show only their name, preceded by a folder icon. The opened session's header and
 **Details** show the same line, marked `· worktree` for a linked worktree; the
 full folder path stays in the header tooltip and **Details**.
 
+A running Codex session with pending optional questions, ones the agent keeps
+working without, shows a question-mark chip with their count beside the machine
+badge (`99+` above 99), on its Sessions and Overview cards; a collapsed strip
+tile shows a small `?` mark. Its tooltip and the card's accessible description
+say how many are waiting. The chip never changes the session's status, the
+Needs attention filter, counters or badges, and it is hidden for paused,
+stopped, archived or offline sessions and while the count is unknown. Open the
+session to answer or skip the question in Activity.
+
 Existing Git worktrees appear in Projects and the session inspector. Clicking a
 checkout filters Sessions while preserving the open conversation and draft.
 In **New session**, **Auto** creates a generated `work-…` branch from `HEAD` and a

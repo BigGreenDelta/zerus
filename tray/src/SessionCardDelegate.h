@@ -9,6 +9,7 @@
 #include "SessionElapsed.h"
 #include "WorkspaceIcons.h"
 #include "GitStatusBadge.h"
+#include "OptionalQuestionBadge.h"
 #include <QPainter>
 #include <QStyledItemDelegate>
 #include <QtMath>
@@ -79,13 +80,28 @@ public:
         SessionStatusBadge::Kind kind;
         IdentityBadges::RowEmphasis emphasis;
     };
+    static int machineBadgeWidth(const QModelIndex &index, QFont base, int width) {
+        base.setPixelSize(11); base.setWeight(QFont::Normal);
+        return IdentityBadges::width(IdentityBadges::Machine, index.data(SessionRoles::Host).toString(), base, width / 3 + 10);
+    }
+    // Pending optional questions sit just left of the machine badge. Their
+    // width is reserved before Git marks are fitted, so Git folds first.
+    static QRect optionalQuestionRect(const QRect &row, const QModelIndex &index, QFont base, bool compact) {
+        const int count = index.data(SessionRoles::OptionalQuestions).toInt();
+        if (count <= 0 || index.data(SessionRoles::Header).toBool() || !index.data(SessionRoles::ChildId).toString().isEmpty()
+            || !index.data(SessionRoles::LaunchId).toString().isEmpty()) return {};
+        const QRect card = sessionCardRect(row);
+        const int textX = card.x() + 20, right = card.right() - 11;
+        const int end = right - machineBadgeWidth(index, base, right - textX) - 8;
+        const int w = OptionalQuestionBadge::width(count, base);
+        return end - w >= textX + 24 ? QRect(end - w, card.y() + (compact ? 25 : 29), w, 18) : QRect();
+    }
     static QRect gitStatusRect(const QRect &row, const QModelIndex &index, QFont base, bool compact) {
         if (index.data(SessionRoles::Header).toBool() || !index.data(SessionRoles::ChildId).toString().isEmpty()) return {};
         const QRect card = sessionCardRect(row);
-        const int textX = card.x() + 20, right = card.right() - 11, width = right - textX;
-        QFont metaFont = base; metaFont.setPixelSize(11); metaFont.setWeight(QFont::Normal);
-        const int hostWidth = IdentityBadges::width(IdentityBadges::Machine, index.data(SessionRoles::Host).toString(), metaFont, width / 3 + 10);
-        const int end = right - hostWidth - 8;
+        const int textX = card.x() + 20, right = card.right() - 11;
+        const QRect question = optionalQuestionRect(row, index, base, compact);
+        const int end = question.isEmpty() ? right - machineBadgeWidth(index, base, right - textX) - 8 : question.left() - 4;
         const auto values = GitStatusBadge::fitted(GitStatusBadge::marks(index.data(SessionRoles::GitStatus).toJsonObject()), base, end - textX - 48);
         const int w = GitStatusBadge::width(values, base);
         return w ? QRect(end - w, card.y() + (compact ? 25 : 29), w, 18) : QRect();
@@ -363,10 +379,14 @@ private:
         const QRect machineBadge(right - hostWidth, metadataY, hostWidth, 18);
         IdentityBadges::paint(p, machineBadge, IdentityBadges::Machine, host, dark, index.data(SessionRoles::MachineColor).value<QColor>(), index.data(SessionRoles::MachineName).toString());
         p->setPen(muted);
+        const QRect questionBadge = optionalQuestionRect(option.rect, index, option.font, compact);
+        if (!questionBadge.isEmpty())
+            OptionalQuestionBadge::paint(p, questionBadge, index.data(SessionRoles::OptionalQuestions).toInt(), option.font, dark);
         const QRect gitBadge = gitStatusRect(option.rect, index, option.font, compact);
         if (!gitBadge.isEmpty()) GitStatusBadge::paint(p, gitBadge,
             GitStatusBadge::fitted(GitStatusBadge::marks(index.data(SessionRoles::GitStatus).toJsonObject()), option.font, gitBadge.width()), option.font, dark);
-        const int metadataWidth = qMax(0, (gitBadge.isEmpty() ? machineBadge.left() : gitBadge.left()) - textX - 8);
+        const int metadataWidth = qMax(0, (!gitBadge.isEmpty() ? gitBadge.left() : !questionBadge.isEmpty() ? questionBadge.left()
+            : machineBadge.left()) - textX - 8);
         const QString metaIcon = index.data(SessionRoles::MetaIcon).toString();
         const int iconInset = !metaIcon.isEmpty() && metadataWidth >= 32 ? 18 : 0;
         if (iconInset) workspaceIcon(metaIcon, muted).paint(p, QRect(textX, metadataY + 2, 14, 14));
@@ -521,6 +541,13 @@ private:
         if (!shared.agent.isEmpty())
             IdentityBadges::paint(p, SessionStrip::mix(stripProvider, shared.provider, expansion),
                 IdentityBadges::Provider, shared.agent, dark, {}, {}, full);
+        if (strip > 0 && index.data(SessionRoles::OptionalQuestions).toInt() > 0) {
+            // The card's question chip replaces this mark as the tile grows.
+            p->setOpacity(strip);
+            OptionalQuestionBadge::paintStripMark(p, OptionalQuestionBadge::stripMarkRect(stripProvider), option.font, dark,
+                selected ? QColor(dark ? "#303b47" : "#dde7ef") : hovered ? QColor(dark ? "#242c34" : "#edf1f4") : surface);
+            p->setOpacity(1);
+        }
         if (strip > 0) {
             p->setOpacity(strip);
             p->setFont(nameFont); p->setPen(foreground);
