@@ -111,6 +111,9 @@ class CodexGoalResume(unittest.TestCase):
         state = self.inspect()
         self.assertEqual((state['phase'], state['attention_id']), ('input', self.card['question_id']))
         self.assertEqual(state['activity_detail'], 'Codex is waiting for your paused goal choice')
+        # The resumed conversation is unconfirmed: no fork, and settings wait.
+        self.assertEqual((state['fork_supported'], state['fork_reason']), (False, 'Wait for a confirmed conversation before forking'))
+        self.assertNotIn('fork', state['allowed_actions']);self.assertEqual(state['settings_apply_when'], 'ready')
         self.assertTrue(self.card['question_id'].startswith('codex-goal-resume:'))
         self.assertEqual((self.card['source'], self.card['can_answer']), ('codex_goal_resume', True))
         item = self.card['questions'][0]

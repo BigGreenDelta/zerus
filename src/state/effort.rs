@@ -893,6 +893,28 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         "effort_scope":"session"})
 }
 
+/// A live session's summary while a chooser that only the terminal shows
+/// waits for an answer. Its saved record stays idle, but `hgs effort` and an
+/// immediate settings change refuse the chooser (`input::checked_settings`):
+/// effort changes wait for it, and settings changes are scheduled for Ready,
+/// as `dispatch_settings` schedules them. Earlier reasons keep precedence.
+pub(super) fn wait_for_chooser(output: &mut Value, reason: &str) {
+    if output["settings_apply_when"] == "now" {
+        output["settings_apply_when"] = json!("ready");
+    }
+    if output["effort_change_supported"] == true {
+        output["effort_change_supported"] = json!(false);
+        output["effort_change_reason"] = json!(reason);
+    }
+}
+
+/// Whether a settings change applies now rather than waiting for Ready. A
+/// chooser that only the terminal shows leaves the saved record Ready, but
+/// applying refuses it and no key may reach it, so the change is scheduled.
+fn applies_now(record: &Value, running: bool) -> bool {
+    running && ready(record) && journal::terminal_chooser(record).is_none()
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -2041,9 +2063,10 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         );
     }
     let mut receipt = json!({"request_id":id,"name":name,"digest":digest,"status":"scheduled","run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,"model":model.id,"effort":effort,"scope":"session","at":now()});
+    let immediate = applies_now(&record, running);
     if request.expected_pending_id.is_some() {
         let pending_id = string(&record["pending_settings"], "request_id").to_owned();
-        if running && ready(&record) {
+        if immediate {
             receipt["status"] = json!("in_progress");
             atomic(&receipt_path, &receipt.to_string())?;
             apply_pending(name, record)?;
@@ -2056,7 +2079,7 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         println!("{receipt}");
         return Ok(0);
     }
-    if running && ready(&record) {
+    if immediate {
         let native = Request {
             request_id: id,
             expected_run_id: request.expected_run_id,
@@ -2068,9 +2091,10 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         if !running {
             recipes::argv(&record)?;
         }
-        // No terminal bytes on a busy or stopped session. The UI applies this
-        // explicit request once Ready; send also applies it before the next idle
-        // message. A busy message keeps the currently active settings.
+        // No terminal bytes on a busy or stopped session, or to a chooser. The
+        // UI applies this explicit request once Ready; send also applies it
+        // before the next idle message. A busy message keeps the currently
+        // active settings.
         let original = record.clone();
         record["pending_settings"] = json!({"request_id":id,"model":model.id,"effort":effort,"run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,"receipt_name":name,"receipt_run_id":request.expected_run_id});
         record["resume_settings"] = json!({"model":model.id,"effort":effort});
@@ -2256,6 +2280,28 @@ mod tests {
         assert_eq!(effort_reason(&kimi, false, true), "Waiting for the provider's model and effort settings");
         kimi["agent"] = json!("opencode");
         assert_eq!(effort_reason(&kimi, true, true), "Use the provider's Terminal to change effort");
+    }
+    #[test]
+    fn a_terminal_chooser_schedules_settings_and_keeps_earlier_reasons() {
+        let reason = "Wait until the agent's question is answered";
+        let output = |when: &str, effort: &str| {
+            let mut output = json!({"settings_apply_when":when,"settings_change_supported":true,"settings_change_reason":"",
+                "effort_change_supported":effort.is_empty(),"effort_change_reason":effort});
+            wait_for_chooser(&mut output, reason);
+            output
+        };
+        assert_eq!(output("now", ""), json!({"settings_apply_when":"ready","settings_change_supported":true,
+            "settings_change_reason":"","effort_change_supported":false,"effort_change_reason":reason}));
+        // A busy or stopped session keeps its own timing and reasons.
+        for (when, effort) in [("ready", "Wait for Ready to change effort"), ("resume", "Resume the session to change effort")] {
+            assert_eq!(output(when, effort), json!({"settings_apply_when":when,"settings_change_supported":true,
+                "settings_change_reason":"","effort_change_supported":false,"effort_change_reason":effort}));
+        }
+        // A stopped or working session schedules without reading a chooser.
+        assert!(!applies_now(&telemetry::stale_hook_child(), false));
+        for (case, record) in telemetry::remaining_work() {
+            assert!(!applies_now(&record, true), "{case}");
+        }
     }
     #[test]
     fn provider_settings_ignore_text_and_thinking_content() {

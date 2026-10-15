@@ -142,6 +142,9 @@ class CodexUpdate(unittest.TestCase):
         self.assertIn('install.sh | CODEX_NON_INTERACTIVE=1 sh', item['options'][0]['label'])
         self.assertIn('Codex exits', item['options'][0]['description'])
         self.assertGreater(self.card['created_at'], 0)
+        # No conversation to fork yet; model settings wait for the chooser.
+        self.assertEqual((state['fork_supported'], state['fork_reason']), (False, 'Wait for a confirmed conversation before forking'))
+        self.assertNotIn('fork', state['allowed_actions']);self.assertEqual(state['settings_apply_when'], 'ready')
         self.assertIn('update choice', fixtures.InputTransport.send(self, fixtures.InputTransport.payload(self), success=False))
         self.assertEqual(self.received(), b'')
 

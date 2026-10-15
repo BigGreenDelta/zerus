@@ -207,14 +207,22 @@ pub(super) fn unavailable(record: &Value, live: bool) -> Option<String> {
 /// activity idle; the summary shows it as a question or an approval, and
 /// dispatch refuses it (`input::checked_ready`), so both actions wait for it.
 pub(super) fn unavailable_shown(record: &Value, live: bool, shown: &Value) -> Option<String> {
-    let phase = string(shown,"phase");
-    unavailable(record, live).or_else(|| ["input","approval"].contains(&phase).then(|| waiting(record, phase)))
+    unavailable(record, live).or_else(|| answer_first(string(shown,"phase")).map(Into::into))
+}
+/// What an idle-only action waits for while the session shows a question or
+/// an approval, or `None` for any other phase. Clear, compaction, forks and
+/// effort changes share it for a chooser that only the terminal shows.
+pub(super) fn answer_first(phase: &str) -> Option<&'static str> {
+    match phase {
+        "input" => Some("Wait until the agent's question is answered"),
+        "approval" => Some("Wait until the agent's approval request is answered"),
+        _ => None,
+    }
 }
 fn waiting(record: &Value, phase: &str) -> String {
+    if let Some(reason) = answer_first(phase) { return reason.into(); }
     match phase {
         "compacting" => "Wait for compaction to finish".into(),
-        "input" => "Wait until the agent's question is answered".into(),
-        "approval" => "Wait until the agent's approval request is answered".into(),
         phase => {
             let work = working(record, ["working","tool"].contains(&phase));
             if work.is_empty() { "Wait until the agent reports Ready".into() }

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import signal
+import subprocess
 import unittest
 import uuid
 
@@ -98,6 +99,25 @@ class FolderTrust(unittest.TestCase):
         p = fixtures.InputTransport.payload(self)
         self.assertIn('trust approval', fixtures.InputTransport.send(self, p, success=False))
         self.assertEqual(self.received(), b'')
+
+    def test_fork_and_settings_wait_for_the_choice_as_dispatch_does(self):
+        # Before the first message a fork has no conversation to copy, and
+        # model settings need the empty prompt behind the chooser. Inspect
+        # reports both as dispatch refuses them, and nothing is typed.
+        (self.root/'.codex').mkdir(exist_ok=True)
+        (self.root/'.codex/models_cache.json').write_text(json.dumps({'models':[
+            {'slug':'gpt-6-astra','supported_reasoning_levels':[{'effort':'high'}]}]}))
+        info=self.inspect();reason="Wait for the agent's empty prompt before changing model settings"
+        self.assertEqual((info['fork_supported'],info['fork_reason']),(False,'Wait for a confirmed conversation before forking'))
+        self.assertNotIn('fork',info['allowed_actions'])
+        self.assertEqual((info['settings_change_supported'],info['settings_change_reason'],info['settings_apply_when']),
+                         (False,reason,'ready'))
+        request=dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id='',
+                     model='gpt-6-astra',effort='high')
+        r=subprocess.run([str(fixtures.HGS),'settings',self.name,'--json'],env=self.env,input=json.dumps(request),
+                         text=True,capture_output=True,timeout=12)
+        self.assertNotEqual(r.returncode,0,r.stdout);self.assertIn(reason,r.stderr)
+        self.assertEqual(self.received(),b'')
 
     def test_explicit_trust_navigates_then_submits_once(self):
         self.redraw('selection','1',"› 2. Quit")
