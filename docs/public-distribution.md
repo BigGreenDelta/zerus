@@ -436,23 +436,19 @@ replacement, malformed/unsealed release, or rollback fails closed. Assets,
 including `SHA256SUMS`, are durably linked before the small catalog pointer is
 atomically replaced. Clients receive only `/downloads/<tag>/<name>` URLs.
 
-## Local validation and current-main integration
+## Local validation
 
 ```sh
 python3 -m unittest discover -s tests -p test_update_feed.py -v
 python3 -m unittest discover -s tests -p test_mobile_release.py -v
-python3 scripts/export-desktop-updates.py \
-  --main /path/to/current-main --output artifacts/desktop-updates-main
-cmake -S artifacts/desktop-updates-main/tray \
-  -B artifacts/desktop-updates-main/build -G Ninja -DBUILD_TESTING=ON
-cmake --build artifacts/desktop-updates-main/build \
-  --target hgs-tray test_updates test_sessionswindow
-ctest --test-dir artifacts/desktop-updates-main/build -R updates --output-on-failure
+bash scripts/ci/gui.sh
 ```
 
-The export uses current main read-only and adds only the update controller,
-widget, test and exact integration anchors. It preserves main's product version
-and unrelated desktop features. The main checkout, installed GUI and native
-processes are untouched. Deploy only the reviewed current-main GUI within the existing update authorization.
-An older mobile worktree GUI must not replace a newer desktop. Source commits,
-pushes and hosted CI dispatch remain separately controlled.
+The update controller, the Updates settings page and the update entries in the
+sessions window and tray menu are part of the regular desktop build.
+`test_updates` and the `test_sessionswindow` shards cover them with the rest of
+the Qt suite; see [CONTRIBUTING.md](../CONTRIBUTING.md). Deploy only the
+reviewed current-main GUI within the existing update authorization, through
+`tray/update-installed.py`. An older worktree GUI must not replace a newer
+desktop. Source commits, pushes and hosted CI dispatch remain separately
+controlled.
