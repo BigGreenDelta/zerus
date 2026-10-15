@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from zerus_mobile import voice
 from zerus_mobile.connector import Connector
-from zerus_mobile.server import validate_request
+from relay_oracle import validate_request
 
 
 def command(operation="voice_submit", message_id=None):

@@ -14,7 +14,7 @@ import uuid
 
 from zerus_mobile import speech
 from zerus_mobile.connector import Connector
-from zerus_mobile.server import validate_request
+from relay_oracle import validate_request
 from aiohttp import ClientSession
 from relay_fixture import start_relay
 

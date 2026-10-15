@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, patch
 import uuid
 
 from zerus_mobile.connector import Connector, Journal
-from zerus_mobile.server import AUTHENTICATED_REQUEST_LIMIT, GLOBAL_REQUEST_LIMIT, IP_REQUEST_LIMIT, RateLimits, validate_request
+from relay_oracle import validate_request
+from zerus_mobile.server import AUTHENTICATED_REQUEST_LIMIT, GLOBAL_REQUEST_LIMIT, IP_REQUEST_LIMIT, RateLimits
 from zerus_mobile.store import Store
 
 
