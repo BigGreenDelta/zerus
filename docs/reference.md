@@ -627,7 +627,7 @@ unsent draft. Activity can send again once that input is empty, so submit, edit
 or clear the draft in Terminal first. HGS notes the follow-ups the Codex panel
 lists when Stop sends Escape; while Codex reports that turn interrupted and its
 input holds exactly them, Activity says the queued follow-ups are back in Codex's
-input. An edited draft, any other draft, or follow-ups Stop did not see listed,
+input. An edited draft, any other draft and follow-ups Stop did not see listed
 keep the general notice to return Terminal to an empty prompt.
 Uncertain interruption is not repeated. Stop notices name the original session
 and computer even if you navigate away. If the turn has already ended or is
