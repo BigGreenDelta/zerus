@@ -100,8 +100,9 @@ and 64 KiB of message text. The picker remains bound to its original composition
 if navigation or typing changes; interrupted selection can be canceled in Saved
 drafts. Files remain recoverable with unsent and uncertain messages.
 
-An empty conversation immediately shows “Loading conversation…” while its
-messages load. Background loading status and spinners appear only after five
+An unopened conversation immediately shows “Loading conversation…” while its
+messages load. A resolved empty conversation keeps “No messages yet.” during
+background reads instead of returning to the initial placeholder. Background loading status and spinners appear only after five
 seconds; manual refresh shows progress immediately and reuses any matching
 in-flight read. A thin progress bar accompanies the existing circular refresh
 indicator in catalogs and conversations. Navigation cancels
@@ -111,6 +112,10 @@ reopening. Exact-target encrypted history is cached for seven days, up to 20
 conversations and 20 MiB. Cached messages appear immediately when already
 prepared in memory; cached history permits no action until a fresh inspection
 verifies the conversation. History cache failures do not prevent live reads.
+Catalog parsing, local read-state decoration and session-list filtering, counters
+and grouping run on background workers. The list retains its last projection
+and keyed scroll position while a replacement is prepared; canceled projections
+cannot replace newer search or filter results.
 
 Agent messages and ordinary questions render Markdown with headings, emphasis,
 lists, quotes, links, tables, strikethrough, static tasks and code blocks. Code and

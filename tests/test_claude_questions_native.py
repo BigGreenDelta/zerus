@@ -20,6 +20,16 @@ WRAPPED_ITEMS=[dict(ITEMS[0],options=[dict(label='Stable',description='Use stabl
    dict(label='Preview',description='Use preview build 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')]),ITEMS[1],
  dict(ITEMS[2],question='What else should we know? Compare /work/example/projects/a-really-long-directory-name/contracts/template-with-a-long-name.html after step 1. review.'),ITEMS[3]]
 
+def shows_prefix(rows,text):
+ """Whether Other editor rows show exactly text. A row ends at a hard newline
+ or, unless it is blank, at a wrap; tmux trims, and Ink may swallow, the
+ spaces before either boundary."""
+ if not text.startswith(rows[0]):return False
+ rest=text[len(rows[0]):]
+ if len(rows)==1:return rest==''
+ spaces=len(rest)-len(rest.lstrip(' '))
+ return any(shows_prefix(rows[1:],tail) for i in range(spaces+1) for tail in [rest[i:]]*bool(rows[0])+[rest[i+1:]]*rest[i:].startswith('\n'))
+
 @unittest.skipUnless(CLAUDE,'Set HGS_CLAUDE_TEST_BIN to test the installed native Claude against a local fake API')
 class NativeClaudeQuestions(unittest.TestCase):
  script=fixtures.InputTransport.script
@@ -192,9 +202,31 @@ sys.exit(result.returncode)
   self.assertEqual(result.returncode,0,result.stderr)
   self.tmux('paste-buffer','-p','-r','-d','-b','fixture-draft','-t',self.pane)
   time.sleep(.15)
-  self.tmux('send-keys','-t',self.pane,'-N',str(len(value)+1),'Left')
-  if cursor!='start':self.tmux('send-keys','-t',self.pane,'-N',str(len(value)//2 if cursor=='middle' else len(value)+1),'Right')
-  time.sleep(.15)
+  # The paste leaves the caret at the end. Move it only leftwards and exactly as
+  # far as needed: a frame Claude draws while still applying these keys never
+  # shows the caret at the requested place, as a caret passing through would.
+  position=0 if cursor=='start' else len(value)//2 if cursor=='middle' else len(value)
+  if position<len(value):self.tmux('send-keys','-t',self.pane,'-N',str(len(value)-position),'Left')
+  # Claude applies the paste and queued caret keys after tmux returns. A loaded
+  # host can still be moving the caret when hgs starts, which hgs rightly
+  # reports as a changed terminal: begin once Claude shows the whole draft
+  # with its caret at the requested place.
+  self.wait_for(lambda:(rows:=self.draft_rows()) and shows_prefix(rows[0],value.rstrip(' ')) and shows_prefix(rows[1],value[:position]))
+ def draft_rows(self):
+  # The focused Other editor's rows, and its rows up to Claude's inverse caret.
+  plain=lambda row:re.sub(r'\x1b\[[0-9;:]*m','',row)
+  rows=self.tmux('capture-pane','-p','-e','-t',self.pane).splitlines()
+  start=next((i for i,row in enumerate(rows) if re.match(r'❯ \d+\.',plain(row))),None)
+  if start is None:return None
+  # Text follows "❯ N. " and any checkbox; tmux trims the space ending a blank row.
+  number,box=re.match(r'(❯ \d+\.) ?(\[[ ✔]\])?',plain(rows[start])).groups()
+  column=len(number)+1+(len(box)+1 if box else 0)
+  shown,before=[],None
+  for row in rows[start:]:
+   if plain(row).startswith('─') or plain(row).strip() in ('Next','Submit','❯ Next','❯ Submit'):break
+   if before is None and '\x1b[7m' in row:before=shown+[plain(row.split('\x1b[7m')[0])[column:]]
+   shown.append(plain(row)[column:].rstrip(' '))
+  return None if before is None else (shown,before)
  def assert_native_answer(self,payload):
   expected={}
   for item,answer in zip(self.items,payload['answers']):

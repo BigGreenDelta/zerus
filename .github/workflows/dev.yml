@@ -2,6 +2,11 @@ name: Dev candidates
 
 on:
   workflow_call:
+    inputs:
+      macos:
+        description: Include the signed and installation-verified macOS candidate
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,11 +28,17 @@ jobs:
         with:
           name: arch-x86_64-${{ github.sha }}
           path: artifacts/dev-package
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.macos
+        with:
+          name: macos-signed-${{ github.sha }}
+          path: artifacts/dev-macos
       - name: Seal the exact verified package and source
         env:
           DEV_RUN_ID: ${{ github.run_id }}
           DEV_RUN_NUMBER: ${{ github.run_number }}
           DEV_COMMIT: ${{ github.sha }}
+          MACOS: ${{ inputs.macos }}
         run: |
           python3 - <<'PY'
           import datetime, os, pathlib, shutil, subprocess
@@ -42,11 +53,12 @@ jobs:
           shutil.copyfile('artifacts/dev-package/desktop-build-info.json', root / 'desktop-build-info.json')
           subprocess.run(['git', 'archive', '--format=tar.gz', '--prefix=zerus/',
                           '--output=' + str(root / 'zerus-source.tar.gz'), os.environ['DEV_COMMIT']], check=True)
+          macos = ['--macos', 'artifacts/dev-macos'] if os.environ['MACOS'] == 'true' else []
           subprocess.run(['python3', 'scripts/prepare-dev-update.py', '--input', str(root),
                           '--output', 'artifacts/dev-desktop', '--platform', 'desktop',
                           '--run-id', os.environ['DEV_RUN_ID'], '--run-number', os.environ['DEV_RUN_NUMBER'],
                           '--source-commit', os.environ['DEV_COMMIT'],
-                          '--published-at', datetime.datetime.now(datetime.timezone.utc).isoformat()], check=True)
+                          '--published-at', datetime.datetime.now(datetime.timezone.utc).isoformat(), *macos], check=True)
           PY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

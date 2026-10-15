@@ -280,7 +280,14 @@ def build_feed(release,info,files,sums,package_versions,commit):
             artifacts.append({'kind':kind,'name':name,'url':ORIGIN+'/downloads/'+tag+'/'+name,'sha256':sums[name],'size':files[name].stat().st_size,'os':'any' if kind=='source' else 'linux','arch':arch})
         require(any(row['kind']=='arch-package' for row in artifacts),'Desktop release lacks actual checked package')
     feed={'schemaVersion':1,'product':'zerus','platform':platform,'channel':channel,'versionName':version,'releaseId':release['id'],'publishedAt':release['published_at'],'releaseUrl':release['html_url'],'sourceCommit':commit,'artifacts':artifacts}
-    if platform=='desktop':feed['packages']=package_versions
+    if platform=='desktop':
+        feed['packages']=package_versions
+        if info.get('macos') is not None:
+            from macos_release import catalog_macos, macos_assets
+            assets=release_assets(release)
+            seals={name:{'size':assets[name]['size'],'sha256':sums[name]} for name in macos_assets(info['macos'])}
+            feed['macos']=catalog_macos(info['macos'],version,channel,
+                                        f'https://github.com/{REPOSITORY}/releases/download/{tag}/',seals)
     else:feed['versionCode']=info['version_code']
     if dirty:
         snapshot=info.get('source_snapshot');require(isinstance(snapshot,dict),'Development snapshot lacks source archive')
@@ -391,7 +398,11 @@ def check_previous(path,feed):
     old=json.loads(path.read_text())
     require(old['platform']==feed['platform'] and old['channel']==feed['channel'],'Existing feed scope mismatch')
     if old['releaseId']==feed['releaseId']:
-        require(old==feed,'Immutable release metadata changed')
+        # Older catalogs omitted the sealed Mac downloads. Permit only that
+        # additive projection after validate_and_fetch verifies the same release.
+        additive = 'macos' not in old and 'macos' in feed and feed['platform']=='desktop'
+        require(old==({k:v for k,v in feed.items() if k!='macos'} if additive else feed),
+                'Immutable release metadata changed')
     else:
         require(timestamp(feed['publishedAt'])>=timestamp(old['publishedAt']),'Refusing feed publication rollback')
         if feed['platform']=='android':require(feed['versionCode']>old['versionCode'],'Refusing APK downgrade/same-code replacement')

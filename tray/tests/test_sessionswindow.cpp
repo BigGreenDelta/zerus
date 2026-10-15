@@ -9454,6 +9454,9 @@ void TestSessionsWindow::cheatSheetOpensKeyboardSettings()
     QCOMPARE(sections->currentItem()->text(), QString("Keyboard"));
 }
 
+// Push tests wait for deliveries through the fake CLI, which is slow on Windows runners.
+constexpr int PushTimeout = 20000;
+
 void TestSessionsWindow::pushSendsNowWhenTheMessageIsQueued()
 {
     PushFixture fixture; QVERIFY(fixture.install(script()));
@@ -9464,10 +9467,10 @@ void TestSessionsWindow::pushSendsNowWhenTheMessageIsQueued()
     QVERIFY(pushes(composer)); QVERIFY(!pushes(window.findChild<MessageComposer *>("subagentComposer")));
     QSignalSpy delivered(client, &HgsClient::messageSent), queued(client, &HgsClient::queueSendFinished);
     pushMessage(window, "Run the release checks before tagging v2"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // The agent queued it; its terminal wraps the text.
     fixture.queue("q-push", "❯ Run the release checks\n  before tagging v2"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-push"}); QTRY_COMPARE(queued.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-push"}, PushTimeout); QTRY_COMPARE(queued.size(), 1);
     // The push is spent: it never resends text or the queue.
     inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList{"q-push"}); QCOMPARE(delivered.size(), 1);
@@ -9475,7 +9478,7 @@ void TestSessionsWindow::pushSendsNowWhenTheMessageIsQueued()
     QCOMPARE(composer->editor()->toPlainText(), QString());
     fixture.queue("q-later", "❯ later"); inspectPush(window, fixture);
     pushMessage(window, {});
-    QTRY_COMPARE(fixture.sentNow(), (QStringList{"q-push", "q-later"})); QCOMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), (QStringList{"q-push", "q-later"}), PushTimeout); QCOMPARE(delivered.size(), 1);
 }
 
 void TestSessionsWindow::pushIgnoresQueuesWithoutTheMessage()
@@ -9485,12 +9488,12 @@ void TestSessionsWindow::pushIgnoresQueuesWithoutTheMessage()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "Summarize the failing tests in one table"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     fixture.queue("q-other", "❯ Rename the release branch"); inspectPush(window, fixture);
     fixture.queue("q-blocked", "❯ Summarize the failing tests in one table", false); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     fixture.queue("q-match", "❯ Rename the release branch\n❯ Summarize the   failing tests in one table"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushIgnoresTheMessageInsideAnotherWord()
@@ -9500,13 +9503,13 @@ void TestSessionsWindow::pushIgnoresTheMessageInsideAnotherWord()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "test suite on CI"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // Only longer words hold the message: "latest" ends with "test", "CI-only" begins with "CI".
     fixture.queue("q-latest", "❯ Rerun the latest suite on CI"); inspectPush(window, fixture);
     fixture.queue("q-longer", "❯ test suite on CI-only runners"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     fixture.queue("q-match", "❯ Rerun the latest suite on CI\n❯ test suite on CI"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushDropsAfterSessionIdentityChange_data()
@@ -9524,7 +9527,7 @@ void TestSessionsWindow::pushDropsAfterSessionIdentityChange()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "Check the deployment logs again"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     fixture.details[field] = value; fixture.queue("q-changed", "❯ Check the deployment logs again"); inspectPush(window, fixture);
     QTRY_COMPARE(notice(window), QString("The message was not pushed: the session changed")); QVERIFY(noticeIsError(window));
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
@@ -9564,11 +9567,11 @@ void TestSessionsWindow::pushFollowsTheRunThatTakesTheMessage()
     fixture.details = QJsonObject{{"tracked", true}, {"run_id", "run-new"}, {"runtime_state", "live"}, {"process_state", "running"},
         {"activity", "idle"}, {"phase", "idle"}, {"first_message_can_send", true}, {"events", QJsonArray{}}, {"cursor", 0}};
     inspectPush(window, fixture);
-    QTRY_COMPARE(delivered.size(), 1); QCOMPARE(delivered[0][3].toJsonObject()["run_id"].toString(), QString("run-new"));
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout); QCOMPARE(delivered[0][3].toJsonObject()["run_id"].toString(), QString("run-new"));
     // The message began the run's first conversation, which the push adopts.
     fixture.details["conversation_id"] = "conversation-new"; fixture.details["activity"] = "busy"; fixture.details["phase"] = "working";
     fixture.queue("q-fresh", "❯ Start over and outline the plan"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-fresh"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-fresh"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushStaysWithItsSession()
@@ -9579,7 +9582,7 @@ void TestSessionsWindow::pushStaysWithItsSession()
     auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
     QSignalSpy delivered(client, &HgsClient::messageSent);
     pushMessage(window, "Draft the release notes for v2"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // Its session is no longer inspected once another one is selected: the push ends at once.
     fixture.queue("q-other-session", "❯ Draft the release notes for v2"); QVERIFY(fixture.save());
     window.showSession({}, "kimi/docs/research");
@@ -9597,7 +9600,7 @@ void TestSessionsWindow::pushTimesOut()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "Wait for the agent to finish the build"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     fixture.queue("q-other", "❯ Something else"); inspectPush(window, fixture);
     // A snapshot that arrives after the deadline never sends the queue, even one holding the message.
     window.setPushTimeoutForTests(0);
@@ -9633,7 +9636,7 @@ void TestSessionsWindow::pushOfAttachmentsAloneSendsWithoutPush()
     setComposerText(composer, {}); QVERIFY(composer->addAttachment("notes.txt", "text/plain", "release notes"));
     QCOMPARE(composer->editor()->toPlainText().trimmed(), QString("[File #1]"));
     pressPush(window); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     QTRY_COMPARE(notice(window), QString("Sent without push: a message without text cannot be found in the agent's queue"));
     QVERIFY(!noticeIsError(window));
     fixture.queue("q-file", "❯ [File #1] (Read the attached file at \"/fixture/notes.txt\")"); inspectPush(window, fixture);
@@ -9806,15 +9809,15 @@ void TestSessionsWindow::pushReplacesAnEarlierPush()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "First message to push"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     pushMessage(window, "Second message to push"); if (QTest::currentTestFailed()) return;
     QCOMPARE(notice(window), QString("The earlier push was replaced by a new one")); QVERIFY(!noticeIsError(window));
-    QTRY_COMPARE(delivered.size(), 2);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 2, PushTimeout);
     // Only the new push sends: a queue with the earlier message alone stays.
     fixture.queue("q-first", "❯ First message to push"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     fixture.queue("q-both", "❯ First message to push\n❯ Second message to push"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-both"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-both"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushWaitsForARunningSendNow()
@@ -9828,10 +9831,10 @@ void TestSessionsWindow::pushWaitsForARunningSendNow()
     // The gated send-now request can outlast the ordinary deadline on a loaded machine.
     window.setPushTimeoutForTests(60000);
     pushMessage(window, "Push this after the earlier queue"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // A send-now request for the earlier queue is still running when the agent queues the message.
     composer->editor()->setFocus(); QTRY_VERIFY(composer->editor()->hasFocus());
-    pressCommand(&window, "queue.sendNow"); QTRY_COMPARE(fixture.sentNow(), QStringList{"q-old"});
+    pressCommand(&window, "queue.sendNow"); QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-old"}, PushTimeout);
     fixture.queue("q-push", "❯ Earlier queued text\n❯ Push this after the earlier queue"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList{"q-old"});
     QVERIFY2(queued.isEmpty(), "The earlier send-now request must still be running");
@@ -9840,7 +9843,7 @@ void TestSessionsWindow::pushWaitsForARunningSendNow()
     QVERIFY(fixture.release());
     QTRY_COMPARE_WITH_TIMEOUT(queued.size(), 1, 15000);
     inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), (QStringList{"q-old", "q-push"}));
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), (QStringList{"q-old", "q-push"}), PushTimeout);
 }
 
 void TestSessionsWindow::pushIgnoresTheCodexQueueHeader()
@@ -9850,7 +9853,7 @@ void TestSessionsWindow::pushIgnoresTheCodexQueueHeader()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "interrupt"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // Codex's queue header says "interrupt"; only a queued item that begins with the message holds it.
     const QString header("• Messages to be submitted after next tool call (press esc to interrupt and send immediately)");
     fixture.queue("q-header", header + "\n  ↳ Check the build first"); inspectPush(window, fixture);
@@ -9859,7 +9862,7 @@ void TestSessionsWindow::pushIgnoresTheCodexQueueHeader()
     fixture.queue("q-follow-up", "• Queued follow-up inputs\n  ↳ Check the build first\n    interrupt"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     fixture.queue("q-match", header + "\n  ↳ Check the build first\n  ↳ interrupt"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment_data()
@@ -9886,7 +9889,7 @@ void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment()
     composer->editor()->moveCursor(QTextCursor::End); composer->editor()->insertPlainText("Check this");
     QCOMPARE(composer->editor()->toPlainText(), reference + " Check this");
     pressPush(window); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // The CLI pastes each reference followed by the file's location (src/state/attachments.rs).
     const QString pasted = reference + " (" + instruction + ' ' + path + ") Check this";
     // Only an item that begins with the message holds it: not a header row, not
@@ -9899,5 +9902,5 @@ void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment()
     // The agent's terminal wraps the location onto the next row.
     fixture.queue("q-match", "❯ Rename the release branch\n❯ " + reference + " (" + instruction + "\n  " + path + ") Check this");
     inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
 }

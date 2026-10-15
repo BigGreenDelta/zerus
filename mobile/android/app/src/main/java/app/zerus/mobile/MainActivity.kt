@@ -542,15 +542,32 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
     DisposableEffect(model) { onDispose { model.archive.pause() } }
     LaunchedEffect(model.sessionFilter,model.sessionQuery,model.selectedMachines,model.archiveSupportedMachines.map { MachineKey(it.connectionId,it.id) }) { model.configureArchive() }
-    val scoped = SessionFilters.scoped(model.sessions, model.machines, model.selectedMachines, model.sessionQuery, project?.key)
-    val drafts = SessionFilters.draftedSessions(model.sessions, model.drafts)
-    val counts = SessionFilters.counts(scoped, model.machines, drafts)
-    val machineCounts = SessionFilters.machineCounts(model.sessions, model.machines, model.sessionFilter, drafts, project?.key)
-    val visible = scoped.filter { SessionFilters.matches(it, model.sessionFilter, SessionFilters.online(it, model.machines), it.target.key in drafts) }
-    val dated = if(model.sessionFilter==SessionFilter.Archive) visible.filter { val at=it.raw.optDouble("archived_at",0.0); at>=model.archive.range.from && at<model.archive.range.until } else visible
-    val groups = SessionFilters.grouped(dated, model.projects)
-    val readAllTargets = scoped.map { it.target }.filter(model::listReadAllCandidate)
-    val canReadAll = model.sessionFilter!=SessionFilter.Archive && !model.demo && readAllTargets.any(model::canReadAll)
+    val sessions = model.sessions
+    val machines = model.machines
+    val projects = model.projects
+    val drafts = model.drafts
+    val selectedMachines = model.selectedMachines
+    val query = model.sessionQuery
+    val filter = model.sessionFilter
+    val archiveRange = model.archive.range
+    val projectionGeneration = remember(sessions, machines, projects, drafts, selectedMachines, query, project?.key, filter, archiveRange) { Any() }
+    val preparedProjection by produceState<Pair<Any, SessionListPresentation>?>(null, projectionGeneration) {
+        val prepared = withContext(Dispatchers.Default) {
+            SessionListPresentation.prepare(sessions, machines, projects, selectedMachines, query, project?.key, filter, drafts, archiveRange)
+        }
+        value = projectionGeneration to prepared
+    }
+    // Do not mount a restored LazyListState against an empty placeholder catalog:
+    // LazyColumn would clamp the saved position before the first projection arrives.
+    val (generation, projection) = preparedProjection ?: run {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Preparing sessions…", color = Muted) }
+        return
+    }
+    val counts = projection.counts
+    val machineCounts = projection.machineCounts
+    val groups = projection.groups
+    val readAllTargets = projection.readAllTargets
+    val canReadAll = filter != SessionFilter.Archive && !model.demo && generation === projectionGeneration && readAllTargets.any(model::canReadAll)
     val context = LocalContext.current
     var sessionActions by remember { mutableStateOf<Session?>(null) }
     val listState = rememberLazyListState(model.sessionListIndex, model.sessionListOffset)
@@ -573,6 +590,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }, enabled = canReadAll, modifier = Modifier.semantics {
                     contentDescription = if (canReadAll) "Read all conversations in the current project, machine and search scope on this phone"
                         else if (model.demo) "Read all unavailable in preview"
+                        else if (generation !== projectionGeneration) "Read all unavailable while the session scope is updating"
                         else if (readAllTargets.none(model::readAllPending)) "Read all unavailable. No unread replies or review reminders are shown in the current scope"
                         else "Read all unavailable. The current scope needs verified history or loaded replies on this phone"
                 }) { Text("Read all") }
@@ -601,8 +619,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 Text(if (model.selectedMachines.isEmpty()) model.machines.size.toString() else model.selectedMachines.size.toString(), style = MaterialTheme.typography.labelMedium)
             }
         } }
-        if(model.sessionFilter==SessionFilter.Archive) item { ArchiveFiltersUi(model.archive,model.archiveMachines.associate { MachineKey(it.connectionId,it.id) to it.name },model.archiveMachines.filter { it !in model.archiveSupportedMachines }.map { it.name },dated.size) }
-        item { Text("${model.sessionFilter.caption} (${dated.size})" + if (model.selectedMachines.isEmpty()) "" else " on selected machines", color = Muted, style = MaterialTheme.typography.bodyMedium) }
+        if(model.sessionFilter==SessionFilter.Archive) item { ArchiveFiltersUi(model.archive,model.archiveMachines.associate { MachineKey(it.connectionId,it.id) to it.name },model.archiveMachines.filter { it !in model.archiveSupportedMachines }.map { it.name },projection.visibleCount) }
+        item { Text("${model.sessionFilter.caption} (${projection.visibleCount})" + if (model.selectedMachines.isEmpty()) "" else " on selected machines", color = Muted, style = MaterialTheme.typography.bodyMedium) }
         if (model.demo) item { Text("Preview data. Pair a workspace to interact with real sessions.", color = Amber, style = MaterialTheme.typography.bodySmall) }
         groups.forEach { group ->
             val accent = runCatching { Color(android.graphics.Color.parseColor(group.color)) }.getOrDefault(Mint)
@@ -652,7 +670,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             }
         }
-        if (dated.isEmpty() && !(model.sessionFilter==SessionFilter.Archive && model.archive.loading)) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else if(model.sessionFilter==SessionFilter.Archive && model.archive.hasMore) "No loaded sessions match. Load more or narrow the date range." else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
+        if (projection.visibleCount == 0 && !(model.sessionFilter==SessionFilter.Archive && model.archive.loading)) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else if(model.sessionFilter==SessionFilter.Archive && model.archive.hasMore) "No loaded sessions match. Load more or narrow the date range." else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
         if(model.sessionFilter==SessionFilter.Archive && model.archive.hasMore) item { OutlinedButton(onClick={model.archive.loadMore()},enabled=!model.archive.loading && model.archive.range.valid,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(if(model.archive.loading) "Loading…" else if(model.archive.errors.isEmpty()) "Load more archived sessions" else "Retry archive loading") } }
     }
     sessionActions?.let { SessionActionsSheet(model, it) { sessionActions = null } }
@@ -722,8 +740,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         if (historyGate.owns(operation.id)) historyProgress = historyGate.visible()
     }
     val loadStatus = ConversationLoadPresentation.status(events.isNotEmpty() || questions.isNotEmpty(),
-        model.detailBusy, model.detailProgress, model.olderLoading, historyProgress, model.demo)
-    val conversationLoading = !model.demo && (model.detailBusy || model.olderLoading)
+        model.detailBusy, model.detailProgress, model.olderLoading, historyProgress, model.demo, resolved = raw != null)
+    val conversationLoading = loadStatus?.initial == true
     val context = LocalContext.current
     val keys = buildList {
         add("history:earlier")
@@ -942,9 +960,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     } else if(model.hasOlder) TextButton(onClick = { model.loadOlder(target) },enabled = !model.olderLoading && historyReason.isBlank()) { Text("Load earlier messages") }
                     else if(model.historyEpoch.isNotBlank() && !model.historyIndexing) Text(if(model.historyComplete) "Beginning of conversation" else "No earlier page reported; history may be incomplete.",color = Muted,style = MaterialTheme.typography.labelSmall)
                     if(model.historyIndexing) Text("History is still indexing. Unread totals may be unavailable.",color = Muted,style = MaterialTheme.typography.labelSmall)
-                    if(historyReason.isNotBlank()) Text(historyReason,color = Muted,style = MaterialTheme.typography.labelSmall)
+                    if(historyReason.isNotBlank() && events.isNotEmpty()) Text(historyReason,color = Muted,style = MaterialTheme.typography.labelSmall)
                 } }
-                item(key = "history:status") { if (loadStatus?.initial != true) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                item(key = "history:status") { if (loadStatus?.initial != true && events.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (raw == null && !model.demo) Tag("Checking…", Muted) else SessionDetailBadge(session,raw)
                     Tag(if (model.demo) "Preview" else if (model.activityVerified) "Connected" else if (raw != null) "Last known" else "Checking…",
                         if (online) Mint else Amber)
@@ -972,7 +990,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     }
                 }
                 if (events.isEmpty() && !conversationLoading) item(key = "history:empty") {
-                    Text("No recent messages are available. Refresh to load activity.", color = Muted)
+                    Text(if (raw != null || model.demo) "No messages yet." else
+                        "No recent messages are available. Refresh to load activity.", color = Muted)
                 }
                 item(key = "history:newer") {
                     if(model.hasNewer) Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.Center) {

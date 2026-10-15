@@ -362,6 +362,15 @@ impl Journal {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// [`Self::pending`] with each row's operation, which decides the state
+    /// of a substitute upload (divergence g).
+    pub fn pending_rows(&self) -> Result<Vec<(String, String, String)>> {
+        let mut statement = self.db.prepare(&format!(
+            "SELECT request_id,operation,response FROM requests WHERE delivered=0 AND response IS NOT NULL LIMIT {PENDING_BATCH}"))?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn delivered(&self, request_id: &str, now: f64) -> Result<()> {
         self.db.execute(
             "UPDATE requests SET delivered=1,delivered_at=?,updated_at=? WHERE request_id=?",

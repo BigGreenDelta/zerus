@@ -56,8 +56,11 @@ requires them again. The job then removes its signing inputs and uploads the
 sealed APK only after the complete Linux/Arch/macOS/Windows/Android CI gate of
 the same run succeeds. If the gate fails, the
 job fails without uploading anything, and **Re-run failed jobs** rebuilds the
-candidate. `ci.yml` invokes `dev.yml` only after the gate and that Android job
-succeed. Dev assembly reuses the checked Arch package and includes exact
+candidate. Trusted main CI also calls `macos-cask.yml` with `channel: dev` after
+the gate when `MACOS_CASKS_ENABLED` is enabled, building, signing, notarizing and
+installing the exact Mac candidate on disposable hosted runners. `ci.yml` invokes
+`dev.yml` only after the gate, Android and enabled Mac jobs succeed.
+Dev assembly reuses the checked Arch package and includes exact
 `git archive` source bytes. No Dev artifact of a run exists before its gate succeeds.
 The final main-only release-environment job advances `refs/tags/dev` to that
 commit using a fast-forward update. A late older build cannot move the tag back;
@@ -86,6 +89,14 @@ identity rather than treating an unchanged semantic version as proof of freshnes
 a local build of unknown provenance can be told a dev build is available without
 claiming that it is older. Android still checks package, signer, SDK, advertised
 APK identity, byte size/hash and a strictly newer `versionCode` before installation.
+
+Mac Dev candidates additionally carry signed ZIP/DMG bytes and an optional
+top-level `macos` object with signing provenance and sealed `downloads`. Existing
+source/Arch artifact kinds stay unchanged so deployed clients accept the catalog.
+`publish-dev.yml` updates `zerus@dev` only after independently checking the public
+catalog and both file hashes against that CI candidate. Mac clients compare their
+full packaged version and offer Homebrew commands or a DMG download; installation
+and restart stay explicit. See [Mac distribution](macos-distribution.md).
 
 The same signing configuration builds stable and dev APKs; no dev-specific
 application ID or generated replacement signer is used. `mobile/android/VERSION_CODE`
@@ -193,10 +204,9 @@ client upgrade is required: older Android clients retain their legacy v1 dev
 feed and cannot parse schema 2. Continue that legacy feed during the rollout;
 never repoint it to incompatible schema 2 data.
 
-The initial desktop dev candidate contains an Arch x86_64 package and source.
-macOS clients can discover source updates, but an installable signed macOS dev
-bundle is still dependent on the macOS distribution/signing work. This workflow
-does not claim that Linux binaries are macOS installers. Dev has no Windows build:
+Desktop Dev contains an Arch x86_64 package and source, plus signed Apple Silicon
+ZIP/DMG assets when Mac candidates are enabled. The optional Mac metadata keeps
+legacy desktop catalog parsing compatible. Dev has no Windows build:
 the Windows job gates Dev like every other suite, but its portable zip stays a
 GitHub asset of stable and nightly releases, and schema 2 has no artifact kind
 for it. A portable Windows build on the Dev channel says so, never reports a dev

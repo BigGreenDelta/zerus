@@ -1,0 +1,27 @@
+package app.zerus.mobile
+
+import org.json.JSONObject
+
+/** Prepared on a worker before publishing one computer inventory to the UI. */
+data class SessionCatalog(val machines: List<Machine>, val accounts: List<AccountCatalog>,
+    val projects: ProjectCatalog, val operations: Map<MachineKey, Set<String>>, val features: Map<MachineKey, Set<String>>)
+
+object SessionCatalogParser {
+    fun parse(connection: Connection, computers: List<JSONObject>): SessionCatalog {
+        val operations = mutableMapOf<MachineKey, Set<String>>()
+        val features = mutableMapOf<MachineKey, Set<String>>()
+        val machines = computers.map { raw ->
+            val key = MachineKey(connection.id, raw.getString("id"))
+            val capabilities = raw.optJSONObject("snapshot")?.optJSONObject("mobile_capabilities")
+            fun values(name: String) = capabilities?.optJSONArray(name)?.let { array ->
+                (0 until array.length()).map { array.optString(it) }.toSet()
+            }.orEmpty()
+            operations[key] = if (capabilities?.optInt("protocol_version") == 1) values("operations") else emptySet()
+            features[key] = values("features")
+            MachineCatalog.parse(connection.id, raw)
+        }
+        val sessions = computers.flatMap { NativeParser.sessions(connection, it) }
+        return SessionCatalog(machines, computers.map { AccountSnapshots.parse(connection.id, it) },
+            ProjectParser.parse(connection, computers, sessions), operations, features)
+    }
+}

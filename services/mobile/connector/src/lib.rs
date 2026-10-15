@@ -6,26 +6,40 @@
 #[cfg(not(unix))]
 compile_error!("the mobile connector supports only Unix gateways (Linux and macOS)");
 
+pub mod accounts;
+pub mod capabilities;
 pub mod check;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod execute;
 pub mod fsguard;
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
+pub mod http;
+pub mod inspection;
 pub mod journal;
+pub mod native;
+pub mod projects;
 pub mod pyjson;
+pub mod pyvalue;
 pub mod request;
+pub mod runtime;
 pub mod url;
+pub mod validate;
 
 pub use error::ConnectorError;
 
 use std::path::Path;
+use std::rc::Rc;
+use std::time::Duration;
 
 /// The fixed startup failure line; the reason stays out of the log because it
 /// can name private paths. `--check` reports the reason instead.
 pub const STARTUP_FAILURE: &str =
     "Connector could not start; verify private configuration and journal availability";
+/// The journal failed while running, which also stops the Python connector.
+pub const JOURNAL_FAILURE: &str = "Connector stopped: the connector journal is unavailable";
 
 /// A started connector: its configuration and the journal it holds.
 pub struct Started {
@@ -63,4 +77,140 @@ pub fn now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |elapsed| elapsed.as_secs_f64())
+}
+
+/// The default native timeout: Python's 45 s. A build with the non-default
+/// `test-hooks` feature reads `ZERUS_CONNECTOR_TEST_NATIVE_TIMEOUT`; other
+/// builds do not contain the variable's name at all.
+pub fn native_timeout() -> f64 {
+    #[cfg(feature = "test-hooks")]
+    if let Some(seconds) = hooks::number("NATIVE_TIMEOUT") {
+        return seconds;
+    }
+    native::DEFAULT_TIMEOUT
+}
+
+/// The factor that divides the connector's own retry spacing: 1, or
+/// `ZERUS_CONNECTOR_TEST_CLOCK_SCALE` with the `test-hooks` feature.
+pub fn clock_scale() -> f64 {
+    #[cfg(feature = "test-hooks")]
+    if let Some(scale) = hooks::number("CLOCK_SCALE") {
+        return scale;
+    }
+    1.0
+}
+
+/// Runs a started connector until a stop signal and returns its exit
+/// status: 0 after a graceful stop, 1 when the journal failed. A second
+/// signal exits at once (divergence h).
+pub fn run(started: Started) -> u8 {
+    let Started {
+        config, journal, ..
+    } = started;
+    let roots = if config.transport.secure {
+        let roots = http::system_roots();
+        if roots.is_none() {
+            runtime::log(
+                "WARNING",
+                "No trusted TLS root certificates were found; relay connections will fail",
+            );
+        }
+        roots
+    } else {
+        None
+    };
+    let Ok(tokio) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        runtime::log("ERROR", STARTUP_FAILURE);
+        return 1;
+    };
+    let settings = runtime::Settings {
+        interval: config.poll_interval,
+        binding: config.binding.clone(),
+        default_timeout: native_timeout(),
+        clock_scale: clock_scale(),
+    };
+    let local = tokio::task::LocalSet::new();
+    let code = local.block_on(&tokio, async move {
+        let relay = http::Relay::new(&config.transport, &config.token, roots);
+        let native = native::Process::new(config.hgs_path.clone(), settings.default_timeout);
+        let connector = Rc::new(runtime::Connector::new(
+            native,
+            journal,
+            settings,
+            Box::new(now),
+        ));
+        match serve(&connector, &relay).await {
+            Ok(()) => 0,
+            Err(_) => {
+                runtime::log("ERROR", JOURNAL_FAILURE);
+                1
+            }
+        }
+    });
+    // Usage refreshes still running are dropped, which kills their children.
+    {
+        let _context = tokio.enter();
+        drop(local);
+    }
+    // A resolver thread may be waiting on DNS; never wait on it.
+    tokio.shutdown_timeout(Duration::from_millis(200));
+    code
+}
+
+/// The heartbeat and request loops until a stop signal; the heartbeat ends
+/// at once, the request in progress first finishes.
+async fn serve(
+    connector: &Rc<runtime::Connector<native::Process>>,
+    relay: &http::Relay,
+) -> Result<(), execute::Fatal> {
+    use futures_util::future::{self, Either};
+    let heartbeat = runtime::until_stopped(&connector.stopping, connector.heartbeats(relay));
+    let requests = async {
+        let result = connector.requests(relay).await;
+        // A journal failure ends the heartbeat too.
+        connector.stopping.set();
+        result
+    };
+    let work = future::join(heartbeat, requests);
+    let signals = signals(&connector.stopping);
+    match future::select(std::pin::pin!(work), std::pin::pin!(signals)).await {
+        Either::Left(((_, requests), _)) => requests,
+        Either::Right(((), _)) => Ok(()),
+    }
+}
+
+/// SIGTERM or SIGINT stops claiming; a second signal exits at once without
+/// touching any child, leaving a running request for restart recovery.
+async fn signals(stopping: &runtime::Event) {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (Ok(mut terminate), Ok(mut interrupt)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        return std::future::pending().await;
+    };
+    let mut received = 0;
+    loop {
+        let number = {
+            let term = std::pin::pin!(terminate.recv());
+            let int = std::pin::pin!(interrupt.recv());
+            match futures_util::future::select(term, int).await {
+                futures_util::future::Either::Left(_) => 15,
+                futures_util::future::Either::Right(_) => 2,
+            }
+        };
+        received += 1;
+        if received > 1 {
+            runtime::log(
+                "WARNING",
+                "Connector stopped at once; restart recovers a request in progress",
+            );
+            std::process::exit(128 + number);
+        }
+        runtime::log("INFO", "Connector stopping after the request in progress");
+        stopping.set();
+    }
 }

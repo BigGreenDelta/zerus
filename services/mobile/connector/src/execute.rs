@@ -1,0 +1,721 @@
+//! `Connector.execute` and `_execute_claimed` (`connector.py:829-1235`) for
+//! the operations this build implements: claim with the no-replay
+//! fingerprint, route checks, validation, capability gates, the native calls
+//! and their identity checks, then one journaled receipt. Operations of later
+//! slices are refused as unsupported after the claim, so they never run.
+//!
+//! Before journaling, a new receipt is made acceptable to the relay
+//! (divergence b): an error is cut to 4,096 code points, a non-string error
+//! becomes a fixed text, and a receipt whose canonical form with its
+//! request_id exceeds 1 MiB becomes a fixed failure without its result.
+use crate::capabilities::Flags;
+use crate::inspection::bound_inspection;
+use crate::journal::{is_mutation, JournalError, RESTART_ERROR};
+use crate::native::{Call, Native, NativeError};
+use crate::projects::{is_archived, launch_projects};
+use crate::pyvalue::{bounded, canonical_uuid, int_literal, is_str, py_eq, py_len, PyError};
+use crate::request::{self, receipt};
+use crate::runtime::Connector;
+use crate::validate::{self, Validated};
+use serde_json::{json, Map, Value};
+use zerus_relay::{json, protocol};
+
+/// Python's catch-all receipt text for an unexpected exception.
+pub const GENERIC: &str = "connector could not record native outcome";
+pub const TOO_LARGE: &str = "native result exceeds relay size limit";
+/// A native error that was not text, as the relay accepts only text.
+pub const ERROR_NOT_TEXT: &str = "native command reported an error that was not text";
+/// `MAX_RESULT`: Python's plain-JSON bound of a receipt.
+pub const MAX_RESULT: usize = 1024 * 1024;
+/// The relay's bound of a canonical receipt with its request_id.
+pub const MAX_RECEIPT: usize = 1024 * 1024;
+pub const MAX_ERROR: usize = 4096;
+
+/// Why an operation produced no result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// Python's ConnectorError: its text reaches the receipt.
+    Connector(String),
+    /// Any other exception in Python: the generic text.
+    Generic,
+    /// The connector stopped before the call (divergence h).
+    Stopped,
+}
+
+impl Failure {
+    pub fn text(text: &str) -> Failure {
+        Failure::Connector(text.into())
+    }
+    fn message(&self) -> &str {
+        match self {
+            Failure::Connector(text) => text,
+            Failure::Generic => GENERIC,
+            Failure::Stopped => RESTART_ERROR,
+        }
+    }
+}
+
+impl From<NativeError> for Failure {
+    fn from(error: NativeError) -> Self {
+        match error {
+            NativeError::Failed(text) => Failure::text(text),
+            NativeError::Unicode => Failure::Generic,
+            NativeError::Stopping => Failure::Stopped,
+        }
+    }
+}
+
+/// `except ValueError as error: raise ConnectorError(str(error))`; any other
+/// exception is the generic text.
+fn py(error: PyError) -> Failure {
+    match error {
+        PyError::Value(text) => Failure::Connector(text),
+        PyError::Type => Failure::Generic,
+    }
+}
+
+/// A fatal journal failure stops the connector, as an uncaught sqlite3
+/// error stops Python's.
+#[derive(Debug)]
+pub struct Fatal(pub JournalError);
+
+/// The outcome of one delivered request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Outcome {
+    /// Refused before any journal row ("Rejected relay request: ...").
+    Rejected(String),
+    /// A stored receipt queued again for upload, or a request in progress.
+    Replayed,
+    /// A new receipt was journaled.
+    Finished(Value),
+}
+
+/// The receipt the journal stores for `response`, made acceptable to the
+/// relay. `mutation` decides the state of a substitute.
+pub fn sanitize(mut response: Value, request_id: &str, mutation: bool) -> Value {
+    match response.get("error") {
+        Some(Value::Null) | None => {}
+        Some(Value::String(text)) if py_len(text) > MAX_ERROR => {
+            let cut: String = text.chars().take(MAX_ERROR).collect();
+            response["error"] = json!(cut);
+        }
+        Some(Value::String(_)) => {}
+        Some(_) => response["error"] = json!(ERROR_NOT_TEXT),
+    }
+    if protocol::result(&response, request_id).is_err() {
+        let state = if mutation { "uncertain" } else { "failed" };
+        return receipt(state, Value::Null, Some(TOO_LARGE));
+    }
+    response
+}
+
+fn reject(text: &str) -> Outcome {
+    Outcome::Rejected(text.into())
+}
+
+/// `fleet.canonical_uuid(value)`.
+fn uuid_value(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_str).is_some_and(canonical_uuid)
+}
+
+/// `Fleet.resolve`: this build has no one-hop gateway, so a valid route is
+/// refused as unavailable.
+fn resolve(route: &Value) -> Result<(), Failure> {
+    let valid = route.as_object().is_some_and(|route| {
+        let mut keys: Vec<&str> = route.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys == ["computer_id", "machine_id", "route_id", "schema"]
+            && int_literal(&route["schema"]).as_deref() == Some("1")
+            && uuid_value(route.get("computer_id"))
+            && uuid_value(route.get("machine_id"))
+            && (route["route_id"].is_null() || uuid_value(route.get("route_id")))
+    });
+    if !valid {
+        return Err(Failure::text("invalid immutable gateway route"));
+    }
+    Err(Failure::text("guarded native routing is unavailable"))
+}
+
+impl<N: Native + 'static> Connector<N> {
+    /// `Connector.execute(request)`.
+    pub async fn execute(&self, request: Value) -> Result<Outcome, Fatal> {
+        let Value::Object(request) = request else {
+            return Ok(reject("invalid request"));
+        };
+        let request_id = match validate::checked_uuid(request.get("request_id")) {
+            Ok(request_id) => request_id,
+            Err(text) => return Ok(Outcome::Rejected(text)),
+        };
+        let journal_operation = request
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or("invalid")
+            .to_owned();
+        let request = Value::Object(request);
+        let Ok(hash) = request::request_hash(&request) else {
+            return Ok(reject("invalid native request JSON"));
+        };
+        let now = self.wall();
+        match self
+            .journal
+            .claim(&request_id, &journal_operation, Some(&hash), now)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                self.journal.replay(&request_id).map_err(Fatal)?;
+                return Ok(Outcome::Replayed);
+            }
+            Err(JournalError::Refused(error)) => return Ok(Outcome::Rejected(error.0)),
+            Err(error) => return Err(Fatal(error)),
+        }
+        let request = match request {
+            Value::Object(request) => request,
+            _ => unreachable!(),
+        };
+        let routed =
+            if journal_operation == "directory_create" && request.contains_key("gateway_route") {
+                let route = &request["gateway_route"];
+                let matches = route.as_object().is_some_and(|route| {
+                    request.get("computer_id").is_none_or(|computer| {
+                        py_eq(route.get("computer_id").unwrap_or(&Value::Null), computer)
+                    })
+                });
+                if matches {
+                    resolve(route)
+                } else {
+                    Err(Failure::text(
+                        "directory creation computer does not match its immutable route",
+                    ))
+                }
+            } else if let Some(route) = request.get("gateway_route") {
+                resolve(route)
+            } else {
+                Ok(())
+            };
+        if let Err(failure) = routed {
+            let response = receipt("failed", Value::Null, Some(failure.message()));
+            self.finish(&request_id, &response)?;
+            return Ok(Outcome::Finished(response));
+        }
+        let response = self.execute_claimed(&request, &request_id).await;
+        let response = sanitize(response, &request_id, is_mutation(&journal_operation));
+        self.finish(&request_id, &response)?;
+        Ok(Outcome::Finished(response))
+    }
+
+    fn finish(&self, request_id: &str, response: &Value) -> Result<(), Fatal> {
+        self.journal
+            .finish(request_id, response, self.wall())
+            .map_err(Fatal)
+    }
+
+    /// `_execute_claimed`: the receipt of a claimed request.
+    async fn execute_claimed(&self, request: &Map<String, Value>, request_id: &str) -> Value {
+        // No implemented operation is a mutation; later slices set this
+        // once their native write starts.
+        let mutation_started = false;
+        let outcome = async {
+            let validated = validate::validate(request, request_id, &self.context())
+                .map_err(Failure::Connector)?;
+            self.gate(&validated.operation, self.flags.get())?;
+            self.run(&validated, request_id).await
+        }
+        .await;
+        let failed = |failure: Failure| {
+            let state = if mutation_started {
+                "uncertain"
+            } else {
+                "failed"
+            };
+            receipt(state, Value::Null, Some(failure.message()))
+        };
+        match outcome {
+            Ok(result) => {
+                let response = json!({"state": "completed", "result": result, "error": null});
+                match json::python_default_len(&response, true) {
+                    Ok(size) if size <= MAX_RESULT => response,
+                    Ok(_) => failed(Failure::text(TOO_LARGE)),
+                    // A number beyond the double range: Python stores
+                    // "Infinity", which no relay accepts.
+                    Err(_) => failed(Failure::Generic),
+                }
+            }
+            Err(failure) => failed(failure),
+        }
+    }
+
+    /// The capability checks of `_execute_claimed`, in Python's order.
+    fn gate(&self, operation: &str, flags: Flags) -> Result<(), Failure> {
+        if operation == "history" && !flags.history {
+            return Err(Failure::text("native public history ABI is unavailable"));
+        }
+        if matches!(operation, "catalog" | "dirs" | "worktrees") && !flags.launch {
+            return Err(Failure::text("native exact launch-ID ABI is unavailable"));
+        }
+        if operation == "worktrees" && !flags.worktree {
+            return Err(Failure::text("native mobile worktree ABI is unavailable"));
+        }
+        if operation == "mark_read" && !flags.read {
+            return Err(Failure::text("native shared read ABI is unavailable"));
+        }
+        Ok(())
+    }
+
+    async fn call(&self, call: Call) -> Result<Value, Failure> {
+        Ok(self.native(call).await?.json())
+    }
+
+    async fn run(&self, validated: &Validated, request_id: &str) -> Result<Value, Failure> {
+        let session = validated.session.as_str();
+        let payload = validated.payload.as_ref();
+        match validated.operation.as_str() {
+            "inspect" => self.inspect(session, payload).await,
+            "process_output" => {
+                self.process_output(session, payload.expect("validated"), request_id)
+                    .await
+            }
+            "mark_read" => {
+                let payload = payload.expect("validated");
+                let result = self
+                    .call(
+                        Call::new(["read", session, "--json"])
+                            .payload(payload.clone())
+                            .failure_json(),
+                    )
+                    .await?;
+                if !mark_read_result(&result, payload) {
+                    return Err(Failure::text("native read acknowledgement did not match"));
+                }
+                Ok(result)
+            }
+            "history" => {
+                self.history(session, payload.expect("validated"), request_id)
+                    .await
+            }
+            "catalog" => self.catalog(request_id).await,
+            "dirs" => {
+                let path = payload
+                    .and_then(|payload| payload["path"].as_str())
+                    .unwrap_or_default();
+                let result = self.call(Call::new(["dirs", path]).timeout(5.0)).await?;
+                let valid = result.as_object().is_some_and(|result| {
+                    result.get("path").is_some_and(Value::is_string)
+                        && result.get("directories").is_some_and(Value::is_array)
+                });
+                if !valid {
+                    return Err(Failure::text("native directory catalog is invalid"));
+                }
+                let mut kept = Map::new();
+                for key in ["path", "parent", "home", "directories", "truncated"] {
+                    if let Some(value) = result.get(key) {
+                        kept.insert(key.into(), value.clone());
+                    }
+                }
+                kept.insert("request_id".into(), json!(request_id));
+                Ok(Value::Object(kept))
+            }
+            "worktrees" => {
+                let path = payload
+                    .and_then(|payload| payload["path"].as_str())
+                    .unwrap_or_default();
+                let raw = self
+                    .call(
+                        Call::new(["worktrees", "--path", path, "--refresh", "--json"])
+                            .timeout(5.0),
+                    )
+                    .await?;
+                // A catalog Python cannot read raises ValueError outside any
+                // handler: the generic receipt.
+                let mut result = worktree_catalog(&raw, path).map_err(|_| Failure::Generic)?;
+                result.insert("request_id".into(), json!(request_id));
+                Ok(Value::Object(result))
+            }
+            _ => Err(Failure::text(validate::UNSUPPORTED)),
+        }
+    }
+
+    async fn inspect(&self, session: &str, payload: Option<&Value>) -> Result<Value, Failure> {
+        let field = |key: &str| payload.and_then(|payload| payload.get(key));
+        let archive = field("archive_id").and_then(Value::as_str);
+        let mut argv = vec!["inspect".to_owned(), session.to_owned()];
+        if let Some(archive) = archive {
+            argv.extend(["--archive".into(), archive.into()]);
+        }
+        let agent = field("agent_id").and_then(Value::as_str);
+        if let Some(agent) = agent {
+            // Parent membership and immutable identity are checked before the
+            // native child inspector enforces its roster.
+            let parent = self.call(Call::new(argv.clone())).await?;
+            let belongs = parent.as_object().is_some_and(|parent| {
+                is_str(parent.get("name"), session)
+                    && same(parent.get("run_id"), field("expected_run_id"))
+                    && same(
+                        parent.get("conversation_id"),
+                        field("expected_conversation_id"),
+                    )
+                    && same(
+                        Some(parent.get("archive_id").unwrap_or(&json!(""))),
+                        Some(field("archive_id").unwrap_or(&json!(""))),
+                    )
+                    && parent
+                        .get("subagents")
+                        .and_then(Value::as_object)
+                        .is_some_and(|subagents| subagents.contains_key(agent))
+            });
+            if !belongs {
+                return Err(Failure::text(
+                    "subagent does not belong to the exact selected parent",
+                ));
+            }
+            argv.extend(["--agent".into(), agent.into(), "--skip-processes".into()]);
+        }
+        if let Some(after) = field("after") {
+            argv.extend(["--after".into(), int_literal(after).unwrap_or_default()]);
+        }
+        let result = self.call(Call::new(argv)).await?;
+        let object = result.as_object();
+        if let Some(archive) = archive {
+            let matches = object.is_some_and(|result| {
+                is_str(result.get("archive_id"), archive) && is_str(result.get("name"), session)
+            });
+            if !matches {
+                return Err(Failure::text(
+                    "native archive inspection identity did not match",
+                ));
+            }
+        } else {
+            let ordinary = object.is_some_and(|result| {
+                !is_archived(result)
+                    && result
+                        .get("name")
+                        .is_none_or(|name| name.as_str() == Some(session))
+            });
+            if !ordinary {
+                return Err(Failure::text(
+                    "native ordinary inspection returned a different or archived target",
+                ));
+            }
+        }
+        let object = object.expect("checked above");
+        if let Some(expected) = field("expected_run_id") {
+            let conversation = if agent.is_some() {
+                object.get("parent_conversation_id")
+            } else {
+                object.get("conversation_id")
+            };
+            if !same(object.get("run_id"), Some(expected))
+                || !same(conversation, field("expected_conversation_id"))
+            {
+                return Err(Failure::text(
+                    "native inspection run/conversation identity did not match",
+                ));
+            }
+        }
+        if let Some(agent) = agent {
+            let expected = format!(
+                "{}/{agent}",
+                field("expected_conversation_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            );
+            if !is_str(object.get("agent_id"), agent)
+                || !is_str(object.get("conversation_id"), &expected)
+            {
+                return Err(Failure::text(
+                    "native subagent inspection identity did not match",
+                ));
+            }
+        }
+        let result = match result {
+            Value::Object(result) => result,
+            _ => unreachable!(),
+        };
+        // The device envelope of GET adds request_id: leave room for it
+        // below the ordinary one-MiB response bound.
+        let bound = move || bound_inspection(result, MAX_RESULT - 1024);
+        let bounded = tokio::task::spawn_blocking(bound)
+            .await
+            .unwrap_or(Err(PyError::Type))
+            .map_err(py)?;
+        Ok(Value::Object(bounded))
+    }
+
+    async fn process_output(
+        &self,
+        session: &str,
+        payload: &Value,
+        request_id: &str,
+    ) -> Result<Value, Failure> {
+        let text = |key: &str| payload[key].as_str().unwrap_or_default().to_owned();
+        let process = text("process_id");
+        let mut argv = vec![
+            "processes".to_owned(),
+            session.into(),
+            "--output".into(),
+            process.clone(),
+            "--run".into(),
+            text("expected_run_id"),
+            "--conversation".into(),
+            text("expected_conversation_id"),
+        ];
+        for (field, option) in [("generation", "--generation"), ("archive_id", "--archive")] {
+            if payload.get(field).is_some() {
+                argv.extend([option.to_owned(), text(field)]);
+            }
+        }
+        let result = self.call(Call::new(argv)).await?;
+        let matches = result.as_object().is_some_and(|result| {
+            is_str(result.get("id"), &process)
+                && same(result.get("run_id"), payload.get("expected_run_id"))
+                && same(
+                    result.get("conversation_id"),
+                    payload.get("expected_conversation_id"),
+                )
+        });
+        if !matches {
+            return Err(Failure::text(
+                "native process acknowledgement identity did not match",
+            ));
+        }
+        let mut result = match result {
+            Value::Object(result) => result,
+            _ => unreachable!(),
+        };
+        result.insert("request_id".into(), json!(request_id));
+        result.insert("name".into(), json!(session));
+        result.insert("process_id".into(), json!(process));
+        if let Some(archive) = payload.get("archive_id") {
+            result.insert("archive_id".into(), archive.clone());
+        }
+        Ok(Value::Object(result))
+    }
+
+    /// History head indexing makes bounded native progress locally: up to 31
+    /// more reads within 2 s, while the head changes.
+    async fn history(
+        &self,
+        session: &str,
+        payload: &Value,
+        request_id: &str,
+    ) -> Result<Value, Failure> {
+        let until = self.clock() + 2.0;
+        let argv = ["history", session, "--json"];
+        let mut result = self
+            .call(Call::new(argv).payload(payload.clone()).timeout(2.0))
+            .await?;
+        let selected = ["before", "after", "around", "around_incoming_seq"]
+            .iter()
+            .any(|key| payload.get(*key).is_some());
+        if !selected {
+            for _ in 0..31 {
+                if !result
+                    .as_object()
+                    .is_some_and(|result| result.get("indexing") == Some(&json!(true)))
+                {
+                    break;
+                }
+                let remaining = until - self.clock();
+                if remaining <= 0.0 {
+                    break;
+                }
+                let previous = progress(&result);
+                let following = match self
+                    .call(Call::new(argv).payload(payload.clone()).timeout(remaining))
+                    .await
+                {
+                    Ok(following) => following,
+                    Err(Failure::Stopped) => return Err(Failure::Stopped),
+                    Err(_) => break,
+                };
+                let following_progress = following.is_object().then(|| progress(&following));
+                result = following;
+                if following_progress == Some(previous) {
+                    break;
+                }
+            }
+        }
+        let field = |key: &str| payload.get(key);
+        let child = field("agent_id").and_then(Value::as_str);
+        let expected_conversation = field("expected_conversation_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let valid = result.as_object().is_some_and(|result| {
+            let or_empty = |value: Option<&Value>| value.cloned().unwrap_or(json!(""));
+            is_str(result.get("request_id"), request_id)
+                && is_str(result.get("name"), session)
+                && same(result.get("run_id"), field("expected_run_id"))
+                && py_eq(
+                    &or_empty(result.get("archive_id")),
+                    &or_empty(field("archive_id")),
+                )
+                && py_eq(
+                    &or_empty(result.get("agent_id")),
+                    &or_empty(field("agent_id")),
+                )
+                && is_str(
+                    if child.is_some() {
+                        result.get("parent_conversation_id")
+                    } else {
+                        result.get("conversation_id")
+                    },
+                    expected_conversation,
+                )
+                && child.is_none_or(|child| {
+                    is_str(
+                        result.get("conversation_id"),
+                        &format!("{expected_conversation}/{child}"),
+                    )
+                })
+                && result.get("events").is_some_and(Value::is_array)
+                && result.get("history_epoch").is_some_and(Value::is_string)
+                && result.get("head").is_some_and(Value::is_object)
+        });
+        if !valid {
+            return Err(Failure::text(
+                "native public history identity or envelope did not match",
+            ));
+        }
+        Ok(result)
+    }
+
+    async fn catalog(&self, request_id: &str) -> Result<Value, Failure> {
+        let raw = self.call(Call::new(["account", "ls"]).timeout(5.0)).await?;
+        let mut result = crate::accounts::launch_catalog(&raw).map_err(py)?;
+        let flags = self.flags.get();
+        result["project_launch_supported"] = json!(false);
+        result["worktree_supported"] = json!(flags.worktree);
+        result["directory_create_supported"] = json!(flags.directory_create);
+        if flags.project_launch {
+            if let Ok(raw) = self.call(Call::new(["swarm", "get"]).timeout(3.0)).await {
+                // A TypeError from a malformed catalog is outside Python's
+                // `except (ConnectorError, ValueError)`.
+                match launch_projects(&raw) {
+                    Ok(Value::Object(projects)) => {
+                        for (key, value) in projects {
+                            result[key.as_str()] = value;
+                        }
+                    }
+                    Ok(_) | Err(PyError::Value(_)) => {}
+                    Err(PyError::Type) => return Err(Failure::Generic),
+                }
+            }
+        }
+        result["request_id"] = json!(request_id);
+        Ok(result)
+    }
+}
+
+/// `x != payload[key]` with a string on the payload side.
+fn same(value: Option<&Value>, expected: Option<&Value>) -> bool {
+    match (value, expected) {
+        (Some(value), Some(expected)) => py_eq(value, expected),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// `json.dumps([source_status, head, events], sort_keys=True)`: equal texts
+/// mean the head made no progress.
+fn progress(result: &Value) -> Option<String> {
+    let key = json!([
+        result.get("source_status").cloned().unwrap_or(Value::Null),
+        result.get("head").cloned().unwrap_or(Value::Null),
+        result.get("events").cloned().unwrap_or(Value::Null),
+    ]);
+    json::canonical(&key).ok()
+}
+
+/// `context.mark_read_result(result, payload)`.
+pub fn mark_read_result(result: &Value, payload: &Value) -> bool {
+    if py_eq(result, &json!({"ok": false, "error": "not_found"})) {
+        return true;
+    }
+    let Some(result) = result
+        .as_object()
+        .filter(|result| result.get("ok") == Some(&json!(true)))
+    else {
+        return false;
+    };
+    let applied = result
+        .get("applied")
+        .and_then(Value::as_object)
+        .is_some_and(|applied| {
+            applied.len() == 2
+                && ["reply_id", "attention_signature"]
+                    .iter()
+                    .all(|key| applied.get(*key).is_some_and(Value::is_boolean))
+        });
+    let read = match result.get("read") {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(read)) => {
+            same(read.get("conversation_id"), payload.get("conversation_id"))
+        }
+        Some(_) => false,
+    };
+    applied && read
+}
+
+fn absolute(value: Option<&Value>) -> Result<String, PyError> {
+    let value = bounded(value, 4096, false)?;
+    if !value.starts_with('/') {
+        return Err(PyError::value("worktree path must be absolute"));
+    }
+    Ok(value)
+}
+
+/// `worktrees.catalog(raw, requested)`.
+pub fn worktree_catalog(raw: &Value, requested: &str) -> Result<Map<String, Value>, PyError> {
+    let rows = match raw.get("worktrees") {
+        Some(Value::Array(rows)) if raw.is_object() && rows.len() <= 512 => rows,
+        _ => return Err(PyError::value("invalid native worktree catalog")),
+    };
+    let state = bounded(raw.get("state"), 32, false)?;
+    let mut result = Map::new();
+    result.insert("state".into(), json!(state));
+    result.insert("path".into(), json!(absolute(raw.get("path"))?));
+    result.insert("requested_path".into(), json!(requested));
+    result.insert(
+        "stale".into(),
+        json!(raw.get("stale") == Some(&json!(true))),
+    );
+    result.insert(
+        "partial".into(),
+        json!(raw.get("partial") == Some(&json!(true))),
+    );
+    for key in ["common_dir", "selected_root"] {
+        if raw.get(key).is_some_and(|value| !value.is_null()) {
+            result.insert(key.into(), json!(absolute(raw.get(key))?));
+        }
+    }
+    let identity = result
+        .get("common_dir")
+        .is_some_and(|value| value.as_str().is_some_and(|text| !text.is_empty()));
+    if state == "ok" && !identity {
+        return Err(PyError::value("worktree repository identity is missing"));
+    }
+    let mut worktrees = Vec::new();
+    for row in rows {
+        let kind = row.get("kind").and_then(Value::as_str);
+        let Some(kind) = kind.filter(|kind| ["main", "linked", "bare"].contains(kind)) else {
+            return Err(PyError::value("invalid native worktree entry"));
+        };
+        let mut item = Map::new();
+        item.insert("path".into(), json!(absolute(row.get("path"))?));
+        item.insert("kind".into(), json!(kind));
+        item.insert(
+            "available".into(),
+            json!(row.get("available") == Some(&json!(true))),
+        );
+        for key in ["branch", "head"] {
+            if row.get(key).is_some_and(crate::pyvalue::truthy) {
+                item.insert(key.into(), json!(bounded(row.get(key), 256, false)?));
+            }
+        }
+        for key in ["detached", "locked", "prunable"] {
+            item.insert(key.into(), json!(row.get(key) == Some(&json!(true))));
+        }
+        worktrees.push(Value::Object(item));
+    }
+    result.insert("worktrees".into(), Value::Array(worktrees));
+    Ok(result)
+}

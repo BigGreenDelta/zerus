@@ -135,7 +135,8 @@ if pathlib.Path(sys.argv[0]).name == "python3" and os.environ["ZERUS_CASK_TEST_R
             directory = Path(temporary)
             metadata = directory / "macos-info.json"
             for channel, release, cask in (("stable", "0.42.2", "zerus"),
-                    ("nightly", "0.42.2.r812.gabcdef0.n41", "zerus@nightly")):
+                    ("nightly", "0.42.2.r812.gabcdef0.n41", "zerus@nightly"),
+                    ("dev", "0.42.3-dev.50", "zerus@dev")):
                 info = {"asset": f"zerus-{release}-macos-arm64.zip", "qt_version": "6.11.2",
                         "team_id": "ABCDE12345", "minimum_system_version": "14.0",
                         "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef",
@@ -183,6 +184,17 @@ assert subprocess.check_output(["tmux", "-V"], text=True).strip() == "tmux fixtu
         with mock.patch.object(check.shutil, "which", return_value=None):
             self.assertEqual(check.run_selftest(Path("/nonexistent/Zerus.app")),
                              ["bundle self-tests require tmux (brew install tmux)"])
+
+    def test_bundled_gui_identity_must_match_dev_sequence_and_clean_source(self):
+        info = {'version':'0.42.2','versionName':'0.42.3-dev.50','devBuildNumber':50,
+                'sourceCommit':'a'*40,'sourceDirty':False}
+        self.assertEqual(check.build_identity_findings(info,'0.42.2','0.42.3-dev.50','a'*40),[])
+        for key, value in [('versionName','0.42.2'),('devBuildNumber',0),('sourceCommit','b'*40),('sourceDirty',True)]:
+            with self.subTest(key=key):
+                self.assertTrue(check.build_identity_findings({**info,key:value},'0.42.2','0.42.3-dev.50','a'*40))
+        stable={**info,'versionName':'0.42.2','devBuildNumber':0}
+        self.assertEqual(check.build_identity_findings(stable,'0.42.2','0.42.2','a'*40),[])
+        self.assertEqual(check.build_identity_findings(stable,'0.42.2','0.42.2.r812.gabcdef0.n41','a'*40),[])
 
     def test_load_commands_are_parsed(self):
         self.assertEqual(check.load_commands(OTOOL), [

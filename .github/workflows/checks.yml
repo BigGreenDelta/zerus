@@ -244,6 +244,11 @@ jobs:
           cargo +1.85.0 clippy --locked --all-targets --features test-hooks -- -D warnings
           cargo +1.85.0 build --locked --features test-hooks
           cargo +1.85.0 build --locked
+          # The black-box test seams exist only with the test-hooks feature.
+          if grep -q ZERUS_CONNECTOR_TEST_ target/debug/zerus-mobile-connector; then
+            echo "A build without test-hooks reads ZERUS_CONNECTOR_TEST_ variables" >&2
+            exit 1
+          fi
           # No server, database, TLS-library or proxy-aware HTTP stack in the lock.
           if grep -E '^name = "(axum|sqlx|reqwest|openssl-sys|native-tls)"$' Cargo.lock; then
             echo "The connector lock holds a forbidden crate" >&2
@@ -277,10 +282,12 @@ jobs:
             ~/.cargo/git
             services/mobile/connector/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
-      # The Python run covers every module; the Rust run only those in ported.json.
+      # The Python run covers every module; the Rust run only those in ported.json,
+      # against a build with the test-hooks seams (cargo test rebuilt it without).
       - name: Black-box suites against the Python and Rust connectors
         run: |
           "$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_bb_*.py' -v
+          (cd services/mobile/connector && cargo +1.85.0 build --locked --features test-hooks)
           ZERUS_CONNECTOR_COMMAND="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/zerus-mobile-connector" \
             "$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_bb_*.py' -v
 
