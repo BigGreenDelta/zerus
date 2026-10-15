@@ -500,7 +500,7 @@ class RelayResourceTests(unittest.IsolatedAsyncioTestCase):
                 del raw
                 # The executor thread drops its work item just after resolving
                 # the future, possibly after this coroutine resumes. Cyclic GC
-                # stays disabled, so only a reference cycle outlasts the wait.
+                # stays disabled, so a body kept by a cycle outlasts the wait.
                 deadline = time.monotonic() + 2
                 while reference() is not None and time.monotonic() < deadline:
                     await asyncio.sleep(0.001)

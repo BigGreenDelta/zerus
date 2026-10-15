@@ -10,6 +10,7 @@ import importlib
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from urllib.parse import urlsplit
 import uuid
@@ -716,7 +717,11 @@ class PostgresResourceTests(unittest.IsolatedAsyncioTestCase):
                 except RuntimeError:
                     pass
                 del payload
-                await asyncio.sleep(0)
+                # The executor thread may still hold its work item when this
+                # coroutine resumes; a retained payload outlasts the wait.
+                deadline = time.monotonic() + 2
+                while reference() is not None and time.monotonic() < deadline:
+                    await asyncio.sleep(0.001)
                 self.assertIsNone(reference())
         finally:
             if enabled:
