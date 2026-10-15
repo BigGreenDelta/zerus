@@ -59,6 +59,19 @@ class CacheHint(unittest.TestCase):
         p=fixtures.InputTransport.payload(self)
         e=fixtures.InputTransport.send(self,p,success=False)
         self.assertIn('context choice',e);self.assertEqual(self.received(),b'')
+    def test_context_actions_wait_for_the_choice_as_dispatch_does(self):
+        # The saved record stays idle; the terminal chooser alone keeps both
+        # actions unavailable, with the reason, as dispatch refuses them.
+        info=self.inspect();self.assertEqual((info['activity'],info['phase']),('busy','input'))
+        for action in ('clear_context','compact_context'):
+            self.assertFalse(info[action+'_supported'],action)
+            self.assertEqual(info[action+'_reason'],"Wait until the agent's question is answered",action)
+        for command in ('clear-context','compact-context'):
+            request=dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id)
+            r=subprocess.run([str(fixtures.HGS),command,self.name,'--json'],env=self.env,input=json.dumps(request),
+                             text=True,capture_output=True,timeout=12)
+            self.assertNotEqual(r.returncode,0,command);self.assertIn('context choice',r.stderr,command)
+        self.assertEqual(self.received(),b'')
     def test_all_native_options_and_stable_identity_during_navigation(self):
         for choice in range(4):
             with self.subTest(choice=choice):

@@ -934,7 +934,8 @@ session list shows, so Kimi profile groups still working after the main turn end
 keep them unavailable and are named by profile, such as `2 “code” subagents`.
 Applying settings and forking a running session wait for the same Ready, and a
 profile hook entry that Kimi's native subagent catalog has replaced holds back
-none of them.
+none of them. A chooser recognized only on the terminal, such as Kimi's context
+choice after an idle period, keeps both actions unavailable until it is answered.
 The desktop shows the reason as the tooltip of the disabled **Clear context**,
 **Clear session** and **Compact and continue** actions, and as a line in the
 cold-cache confirmation.

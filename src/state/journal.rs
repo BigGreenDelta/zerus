@@ -655,7 +655,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     }
     // Each unavailable action names its reason; an older host omits it.
     let context_reason = if archive_id.is_some() { Some("Restore the archived session first".to_owned()) }
-        else { clear_context::unavailable(&record,panes.is_some()) };
+        else { clear_context::unavailable_shown(&record,panes.is_some(),&output) };
     output["compact_context_supported"] = json!(context_reason.is_none());
     output["compact_context_reason"] = json!(context_reason.clone().unwrap_or_default());
     output["compact_context_request"] = record["compact_context_request"].clone();
