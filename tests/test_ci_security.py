@@ -511,8 +511,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                           '          ZERUS_REQUIRE_RELAY_E2E: "1"\n', step)
         for contract in ("", " --test contracts postgres_cross_worker -- --ignored"):
             self.assertIn(f"\n          cargo +1.85.0 test --locked{contract}\n", postgres[0])
-        self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -v\n',
-                      postgres[1])
+        self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests'
+                      " -p 'test_[!b]*.py' -v\n", postgres[1])
 
     def test_connector_job_runs_the_black_box_suites_against_both_connectors(self):
         connector = job((ROOT / ".github/workflows/checks.yml").read_text(), "connector")
