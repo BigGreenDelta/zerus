@@ -484,10 +484,16 @@ class WorkflowSecurityTests(unittest.TestCase):
                          [("", " -v"), ("env -u ZERUS_RELAY_BINARY ", " -p 'test_mobile_speech*.py' -v")])
         for variable in ("ZERUS_RELAY_BINARY", "ZERUS_DIRECTORY_TEST_HGS"):
             self.assertIn(f"\n          export {variable}=", relay)
-        # PostgreSQL modules skip without a DSN, so the job names its own database.
-        self.assertIn("\n          POSTGRES_DB: zerus_test_relay\n", relay)
-        self.assertIn("\n          ZERUS_RELAY_TEST_DSN: postgresql://postgres@127.0.0.1:"
-                      "${{ job.services.postgres.ports['5432'] }}/zerus_test_relay\n", relay)
+
+    def test_relay_job_runs_rust_contracts_on_postgresql(self):
+        relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
+        # These contracts are ignored or fall back to SQLite without the service URL.
+        postgres = [step for step in steps(relay) if "ZERUS_RELAY_TEST_DATABASE_URL" in step]
+        self.assertEqual(len(postgres), 1)
+        self.assertIn("\n          ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:"
+                      "${{ job.services.postgres.ports['5432'] }}/postgres\n", postgres[0])
+        for contract in ("--test contracts postgres_cross_worker -- --ignored", "--test administration"):
+            self.assertIn(f"\n          cargo +1.85.0 test --locked {contract}\n", postgres[0])
 
     def test_relay_job_checks_the_protocol_library_alone(self):
         relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")

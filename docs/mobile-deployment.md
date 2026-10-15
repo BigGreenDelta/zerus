@@ -33,7 +33,8 @@ See [Android build details](../mobile/android/README.md) for optional FCM setup.
 The [relay README](../services/mobile/README.md) documents Rust and Docker
 installation, administrator commands, limits and push configuration. The default SQLite profile supports one relay process for local/private setups.
 Production multiple-worker deployments use the documented
-[PostgreSQL profile and offline migration](../services/mobile/README.md#postgresql-production-profile).
+[PostgreSQL profile](../services/mobile/README.md#postgresql-production-profile);
+existing SQLite relays move as described in [SQLite installations](#sqlite-installations).
 A minimal SQLite Docker deployment is:
 
 ```sh
@@ -378,14 +379,34 @@ Run the Python tests in an environment with the relay dependencies installed.
 Android unit tests and lint are separate from these tests. No command in this
 runbook dispatches hosted CI.
 
-For SQLite, back up relay data through its online backup API or with the relay
-stopped. PostgreSQL needs a reviewed PostgreSQL backup/restore procedure.
-SQLite-to-PostgreSQL cutover is an offline owner-approved operation: keep the
-old relay writers stopped, preserve outstanding claims and identities, import
-into an empty target with `migrate-sqlite --source-offline`, and verify before
+Back up PostgreSQL with a reviewed backup/restore procedure that includes the
+permanent mutation ledger. Never restore old command claims to the queued state.
+A claimed request after a relay or connector crash remains uncertain until
+reviewed. Keep API access logs off, preserve the connector journal, and revoke
+exposed credentials individually.
+
+### SQLite installations
+
+The relay runs on PostgreSQL. The SQLite backend remains only for
+single-process local setups until it is removed. Back up a SQLite relay through
+its online backup API or with the relay stopped.
+
+The `migrate-sqlite` command was removed after
+[v0.42.2](https://github.com/ufna/zerus/releases/tag/v0.42.2), the last stable
+release that contains it. To move a SQLite relay to PostgreSQL, install that
+tag's `services/mobile` Python package, which pins asyncpg, in a private virtual
+environment:
+
+```sh
+python3 -m venv /private/zerus-migrate
+/private/zerus-migrate/bin/pip install \
+  'git+https://github.com/ufna/zerus@v0.42.2#subdirectory=services/mobile'
+```
+
+Then follow that release's
+[offline SQLite migration](https://github.com/ufna/zerus/blob/v0.42.2/services/mobile/README.md#offline-sqlite-migration)
+procedure. The cutover is an offline owner-approved operation: keep the old
+relay writers stopped, preserve outstanding claims and identities, import into
+an empty target with `migrate-sqlite --source-offline`, and verify before
 starting new admission. After new PostgreSQL writes, an old SQLite snapshot is
-not a safe rollback because it loses new mutation receipts. Follow the
-[full migration procedure](../services/mobile/README.md#offline-sqlite-migration).
-Never restore old command claims to the queued state. A claimed request after a
-relay or connector crash remains uncertain until reviewed. Keep API access logs
-off, preserve the connector journal, and revoke exposed credentials individually.
+not a safe rollback because it loses new mutation receipts.

@@ -1,4 +1,4 @@
-"""Bounded one-hop registry shared by SQLite and PostgreSQL transactions."""
+"""Bounded one-hop registry for the SQLite reference store."""
 from dataclasses import dataclass
 import json
 import time
@@ -23,11 +23,10 @@ class Query:
     sql: str
     args: tuple = ()
     result: str = 'one'
-    lock: bool = False
 
 
-def query(sql, *args, result='one', lock=False):
-    return (yield Query(sql, args, result, lock))
+def query(sql, *args, result='one'):
+    return (yield Query(sql, args, result))
 
 
 def drive_sync(connection, generator):
@@ -45,32 +44,7 @@ def drive_sync(connection, generator):
                  (dict(r) if (r := cursor.fetchone()) is not None else None) if q.result == 'one' else None)
 
 
-async def drive_async(connection, generator):
-    value = None
-    while True:
-        try:
-            q = generator.send(value)
-        except StopIteration as complete:
-            return complete.value
-        sql = q.sql.replace('BYTES(', 'octet_length(').replace(' AS_BYTES)', ')')
-        parts = sql.split('?')
-        sql = ''.join(part + (f'${i+1}' if i < len(parts)-1 else '') for i,part in enumerate(parts))
-        if q.lock:
-            sql += ' FOR UPDATE'
-        if q.result == 'all':
-            value = [dict(r) for r in await connection.fetch(sql, *q.args)]
-        elif q.result == 'one':
-            row = await connection.fetchrow(sql, *q.args)
-            value = dict(row) if row is not None else None
-        else:
-            await connection.execute(sql, *q.args)
-            value = None
-
-
 class Registry:
-    def __init__(self, postgres=False, shard=None):
-        self.postgres, self.shard = postgres, shard
-
     def create(self, workspace, name, computer_id=None, exposed=False):
         count = yield from query('SELECT count(*) AS n FROM computers WHERE workspace_id=?', workspace)
         if count['n'] >= MAX_COMPUTERS:
@@ -113,21 +87,17 @@ class Registry:
         return computer
 
     def invalidate(self, predicate, args, error='gateway route withdrawn before delivery'):
-        rows = yield from query('SELECT id,workspace_id,state,result_bytes,reserved_bytes FROM requests WHERE ('+predicate+") AND state IN ('queued','claimed')", *args, result='all', lock=True)
+        rows = yield from query('SELECT id,workspace_id,state,result_bytes,reserved_bytes FROM requests WHERE ('+predicate+") AND state IN ('queued','claimed')", *args, result='all')
         now = time.time()
         for row in rows:
             state = 'failed' if row['state'] == 'queued' else 'uncertain'
             message = error if state == 'failed' else 'gateway route withdrawn after claim'
             size = len(message.encode())
             yield from query('UPDATE requests SET state=?,error=?,result_bytes=?,reserved_bytes=0,updated=? WHERE id=?', state, message, size, now, row['id'], result='none')
-            if self.postgres:
-                delta = size-row['result_bytes']-row['reserved_bytes']
-                yield from query('UPDATE workspace_usage SET active=active-1,payload_bytes=payload_bytes+? WHERE workspace_id=?', delta, row['workspace_id'], result='none')
-                yield from query('UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=?', delta, self.shard(row['workspace_id']), result='none')
         return len(rows)
 
     def gateway(self, credential, machine, peers, guarded):
-        node = yield from query('SELECT * FROM nodes WHERE id=? AND workspace_id=? AND revoked=0', credential['id'], credential['workspace_id'], lock=True)
+        node = yield from query('SELECT * FROM nodes WHERE id=? AND workspace_id=? AND revoked=0', credential['id'], credential['workspace_id'])
         if node is None:
             raise RouteError(401, 'credential revoked')
         if machine is not None and node['machine_id'] not in (None, machine):
@@ -151,7 +121,7 @@ class Registry:
         yield from query('UPDATE computer_routes SET computer_id=?,machine_id=?,guarded=?,active=?,online=? WHERE gateway_id=? AND local=1', computer, machine, int(guarded and not root_revoked),int(not root_revoked),int(not root_revoked), node['id'], result='none')
         if not guarded:
             yield from self.invalidate('node_id=? AND target_machine_id IS NOT NULL', (node['id'],))
-        existing = yield from query('SELECT route_id,machine_id,online FROM computer_routes WHERE gateway_id=? AND local=0', node['id'], result='all', lock=True)
+        existing = yield from query('SELECT route_id,machine_id,online FROM computer_routes WHERE gateway_id=? AND local=0', node['id'], result='all')
         by_id = {p['route_id']:p for p in peers}
         for old in existing:
             new = by_id.get(old['route_id'])
