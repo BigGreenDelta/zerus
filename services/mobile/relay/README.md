@@ -146,7 +146,11 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   requests uncertain. It never reroutes a claimed request. A peer the gateway
   manifest marks offline stays listed on its computer with `online: false` and
   no snapshot; it is never selected, claimed or updated by a peer heartbeat, and
-  needs a fresh peer heartbeat after it is marked online again.
+  needs a fresh peer heartbeat after it is marked online again. Its
+  `last_seen_at` keeps the last accepted peer heartbeat (null if this native
+  UUID was never observed on the route) for display only: availability counts a
+  peer route's time only while it stores a snapshot accepted since it was last
+  marked online, and gateway heartbeats never refresh it.
 - `store/snapshots.rs` separates liveness and event-free snapshot changes from
   shared payload accounting. Event publication and wake jobs have transactional
   caps. Lock order is global event accounting, payload shard when needed,
@@ -267,6 +271,14 @@ workers together: an older worker would wake phones for every event, reject the
 `presence` field and serve `alert` rows without `alert_kind`. The offline
 SQLite-to-PostgreSQL migration does not carry candidates or `alert_kind`;
 phones ignore such migrated alert rows.
+
+Offline peer routes keep `computer_routes.last_seen` instead of clearing it,
+with no schema change or API field change. Replace all PostgreSQL workers
+together: an older worker clears the time on its own offline transitions and,
+for up to 45 seconds after the last peer heartbeat, could treat a peer that the
+gateway marks online again as fresh before its next peer heartbeat. The Python
+reference relay keeps the time with the same freshness rule, so a Rust-to-Python
+rollback stays safe.
 
 Attachment reads add only the `attachment_history` partial index (schema version
 1; the Python reference creates it too). Its first `CREATE INDEX` scans the

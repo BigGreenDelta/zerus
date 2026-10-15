@@ -103,6 +103,30 @@ class SQLitePeerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(remote['available'])
         self.assertEqual((await self.submit(self.command()))[0],409)
 
+    async def test_offline_peer_keeps_last_seen_without_becoming_fresh(self):
+        async def listed(machine):
+            return next((row for row in await self.call('computers',self.workspace) if row['machine_id']==machine),None)
+        seen=(await listed(self.remote))['last_seen_at']
+        self.assertIsNotNone(seen)
+        offline=[{**self.peers[0],'online':False}]
+        await self.manifest(offline);await self.manifest(offline,snapshot('changed'))
+        row=await listed(self.remote)
+        self.assertFalse(row['available']);self.assertIsNone(row['snapshot'])
+        self.assertEqual(row['last_seen_at'],seen)
+        # Marked online again, the retained time is not freshness evidence.
+        await self.manifest()
+        row=await listed(self.remote)
+        self.assertFalse(row['available']);self.assertEqual(row['last_seen_at'],seen)
+        self.assertEqual((await self.submit(self.command()))[0],409)
+        await self.call('peer_heartbeat',self.node,self.route,self.remote,snapshot())
+        row=await listed(self.remote)
+        self.assertTrue(row['available']);self.assertGreaterEqual(row['last_seen_at'],seen)
+        # A changed verified identity on the same route starts without history.
+        replacement=identity()
+        await self.manifest([{**offline[0],'machine_id':replacement}])
+        self.assertIsNone(await listed(self.remote))
+        self.assertIsNone((await listed(replacement))['last_seen_at'])
+
     async def test_stale_frozen_route_cannot_reroute_to_fresh_direct_node(self):
         body=self.command();await self.submit(body)
         direct=await self.call('node',self.workspace,'Direct remote')

@@ -955,6 +955,75 @@ async fn offline_peer_route_stays_listed_but_unavailable() {
     );
     f.close().await;
 }
+/// An offline peer route reports its last accepted peer heartbeat as
+/// `last_seen_at`. The retained time is display-only: gateway heartbeats never
+/// refresh it, it never makes a reconnected route usable, and a changed native
+/// identity on the same route never inherits it. `reader` lists the catalog,
+/// which may be another worker sharing the database.
+async fn offline_peer_route_keeps_last_seen(f: &Fixture, reader: &Store) {
+    let root = Uuid::new_v4().to_string();
+    let machine = Uuid::new_v4().to_string();
+    let route = Uuid::new_v4().to_string();
+    let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":protocol::OPERATIONS,"features":["gateway_one_hop"]}});
+    let changed =
+        json!({"sessions":[],"sequence":2,"mobile_capabilities":snapshot["mobile_capabilities"]});
+    let peers = |machine: &str, online: bool| json!([{"route_id":route,"machine_id":machine,"name":"Peer","online":online}]);
+    let listed = |machine: String| async move {
+        reader.computers(&f.phone).await.unwrap()["computers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["machine_id"] == machine.as_str())
+            .cloned()
+    };
+    // A remembered identity that this relay never observed has no time.
+    gateway_beat(f, &root, &peers(&machine, false), &snapshot).await;
+    let never = listed(machine.clone()).await.unwrap();
+    assert_eq!(never["online"], false);
+    assert!(never["last_seen_at"].is_null());
+    gateway_beat(f, &root, &peers(&machine, true), &snapshot).await;
+    peer_beat(f, &route, &machine, &snapshot, &Value::Null).await;
+    let online = listed(machine.clone()).await.unwrap();
+    assert_eq!(online["online"], true);
+    let seen = online["last_seen_at"].as_f64().unwrap();
+    gateway_beat(f, &root, &peers(&machine, false), &snapshot).await;
+    // Fresh gateway liveness is not evidence about the peer.
+    gateway_beat(f, &root, &peers(&machine, false), &changed).await;
+    let offline = listed(machine.clone()).await.unwrap();
+    assert_eq!(offline["id"], online["id"]);
+    assert_eq!(offline["online"], false);
+    assert!(offline["snapshot"].is_null());
+    assert_eq!(offline["via"]["gateway_id"], f.node.id);
+    assert_eq!(offline["last_seen_at"].as_f64(), Some(seen));
+    // Marked online again, the route still needs a fresh peer heartbeat even
+    // though the retained time is within the freshness window.
+    gateway_beat(f, &root, &peers(&machine, true), &changed).await;
+    let marked = listed(machine.clone()).await.unwrap();
+    assert_eq!(marked["online"], false);
+    assert_eq!(marked["last_seen_at"].as_f64(), Some(seen));
+    let mut b = f.command("send");
+    b["computer_id"] = marked["id"].clone();
+    assert_eq!(f.submit(&b).await.unwrap_err().0.as_u16(), 409);
+    assert!(f.store.claim(&f.node, true).await.unwrap().is_none());
+    peer_beat(f, &route, &machine, &snapshot, &Value::Null).await;
+    let restored = listed(machine.clone()).await.unwrap();
+    assert_eq!(restored["online"], true);
+    assert!(restored["last_seen_at"].as_f64().unwrap() >= seen);
+    // A changed verified identity replaces the route without its history.
+    let replacement = Uuid::new_v4().to_string();
+    gateway_beat(f, &root, &peers(&replacement, false), &changed).await;
+    assert!(listed(machine).await.is_none());
+    let replaced = listed(replacement).await.unwrap();
+    assert_eq!(replaced["online"], false);
+    assert!(replaced["last_seen_at"].is_null());
+    f.check_accounting().await;
+}
+#[tokio::test]
+async fn offline_peer_route_reports_last_peer_heartbeat() {
+    let f = Fixture::new().await;
+    offline_peer_route_keeps_last_seen(&f, &f.store).await;
+    f.close().await;
+}
 #[tokio::test]
 async fn heartbeats_store_presence_outside_the_snapshot() {
     let empty = json!({"sessions":[]});
@@ -2037,6 +2106,42 @@ async fn postgres_cross_worker_contract() {
     f.check_accounting().await;
     second.db.close().await;
     f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly in CI"]
+async fn postgres_cross_worker_offline_peer_last_seen() {
+    use sqlx::Connection;
+    let base =
+        std::env::var("ZERUS_RELAY_TEST_DATABASE_URL").expect("isolated PostgreSQL required");
+    let mut admin = sqlx::PgConnection::connect(&base).await.unwrap();
+    let name = format!("relay_test_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut url = url::Url::parse(&base).unwrap();
+    url.set_path(&name);
+    let cfg = Config {
+        database_url: Some(url.to_string()),
+        background: false,
+        ..Config::default()
+    };
+    let f = Fixture::config(cfg.clone()).await;
+    let second = Store::new(
+        Db::open(std::path::Path::new("unused"), Arc::new(cfg))
+            .await
+            .unwrap(),
+    );
+    // The gateway writes through one worker; the phone lists through another.
+    offline_peer_route_keeps_last_seen(&f, &second).await;
+    second.db.close().await;
+    f.close().await;
+    sqlx::query(&format!("DROP DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    admin.close().await.unwrap();
 }
 
 #[tokio::test]

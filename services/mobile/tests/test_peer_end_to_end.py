@@ -3,6 +3,7 @@ import asyncio
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 import uuid
 
@@ -150,6 +151,9 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(offline['via']['gateway_id'], gateway['node_id'])
                     self.assertIsNone(offline['snapshot'])
                     self.assertNotIn('private-peer-alias', json.dumps(catalog))
+                    # The relay keeps the last accepted peer heartbeat for "Offline, last seen".
+                    self.assertLessEqual(online['last_seen_at'], offline['last_seen_at'])
+                    self.assertLessEqual(offline['last_seen_at'], time.time())
                     calls = (root / 'calls.jsonl').read_text().count('"mobile-peer"')
                     identity = str(uuid.uuid4())
                     body = {'request_id': identity, 'computer_id': offline['id'], 'operation': 'send',
@@ -166,6 +170,7 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                     (root / 'inventory.json').write_text(json.dumps(inventory))
                     _, restored = await wait_for(lambda row: row and row['online'] and row['snapshot'])
                     self.assertEqual(restored['id'], online['id'])
+                    self.assertLess(offline['last_seen_at'], restored['last_seen_at'])
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
