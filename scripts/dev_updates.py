@@ -183,8 +183,9 @@ def unpack(raw, destination):
                         require(copied <= item.file_size, 'Archive member exceeds seal')
                         output.write(block)
                     require(copied == item.file_size, 'Truncated artifact member')
-    except (zipfile.BadZipFile, zlib.error, EOFError):
-        # Truncated or corrupt compressed data fails like any other unsafe archive.
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError):
+        # Truncated or corrupt compressed data, or zipfile's NotImplementedError
+        # for a newer format version or flag, fails like any other unsafe archive.
         raise ValueError('Invalid artifact archive') from None
 
 

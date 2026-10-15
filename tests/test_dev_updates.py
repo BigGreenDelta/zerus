@@ -549,8 +549,15 @@ class EntryPointFailureTests(unittest.TestCase):
         self.assertFalse(self.root.exists())
     def test_corrupt_or_truncated_actions_archive_reports_the_fixed_line(self):
         valid = actions_archive(self.client.path)
+        def central(offset, change):
+            # Rewrite one 16-bit field of the first central directory entry.
+            start = valid.index(b'PK\x01\x02') + offset
+            return valid[:start] + struct.pack('<H', change(struct.unpack('<H', valid[start:start+2])[0])) + valid[start+2:]
         for kind, data in (('invalid deflate', actions_archive(self.client.path, lambda raw: b'\xff' * len(raw))),
-                           ('truncated', valid[:len(valid)//2])):
+                           ('truncated', valid[:len(valid)//2]),
+                           # zipfile raises NotImplementedError for these, on opening and on reading.
+                           ('newer format version', central(6, lambda version: 64)),
+                           ('strong encryption flag', central(8, lambda flags: flags | 0x40))):
             with self.subTest(kind=kind):
                 shutil.rmtree(self.root, ignore_errors=True)
                 # The GitHub digest matches these bytes; only reading the archive fails.
