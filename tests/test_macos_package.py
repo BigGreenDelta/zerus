@@ -212,7 +212,7 @@ assert subprocess.check_output(["tmux", "-V"], text=True).strip() == "tmux fixtu
             self.assertEqual(module.MINIMUM_SYSTEM, floor, module.__name__)
         names = {"13.0": ":ventura", "14.0": ":sonoma", "15.0": ":sequoia"}
         for template in sorted((ROOT / "packaging/homebrew").glob("*.rb.in")):
-            self.assertIn(f'depends_on macos: ">= {names[floor]}"', template.read_text(encoding="utf-8"),
+            self.assertIn(f'depends_on macos: {names[floor]}', template.read_text(encoding="utf-8"),
                           template.name)
 
 
