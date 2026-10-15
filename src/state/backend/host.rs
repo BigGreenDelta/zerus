@@ -24,6 +24,7 @@
 //! | `stage`, `paste`, `discard` | one `paste`: staged text stays in this process |
 //! | `notify` | `notify` |
 //! | `server_running` | `host_status` |
+//! | `completes_launch_reports` | none: the host completes a launch's report as its session ends |
 //!
 //! **No host (D3).** Only `start` starts a host. Without one there are no live
 //! sessions, as tmux has none without a server; any other failure (a busy or
@@ -642,6 +643,12 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
         self.connector
             .var("HGS_HOST_PANE")
             .ok_or_else(|| "missing HGS_HOST_PANE in tracked agent launch".into())
+    }
+    /// The pseudoconsole's output reaches the host until the console closes
+    /// after the supervisor has exited; the host then completes the report
+    /// (`host::registry`).
+    fn completes_launch_reports(&self) -> bool {
+        true
     }
 
     fn listing(&self) -> Result<Listing> {
@@ -1436,6 +1443,8 @@ mod tests {
         let inside = HostBackend::new(inside);
         assert!(inside.inside());
         assert_eq!(inside.own_pane().unwrap(), "%1");
+        // Its supervisor's launch report waits for the host's drained lines.
+        assert!(inside.completes_launch_reports());
         assert_eq!(inside.enclosing_session(), "claude/p/a");
         assert_eq!(
             calls(&inside),

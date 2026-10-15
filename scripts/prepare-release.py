@@ -6,12 +6,14 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
 
 from macos_release import add_macos
 from release_common import binary_dependencies
+import windows_portable
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,6 +27,8 @@ def main():
     parser.add_argument("--package", type=Path, required=True, help="verified Arch CI package")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--windows-zip", type=Path,
+                        help="tested Windows portable zip from the same CI run (copied unchanged)")
     parser.add_argument("--macos", type=Path, help="signed and notarized macOS artifact from the macos-signing job")
     args = parser.parse_args()
     version = (ROOT / "VERSION").read_text().strip()
@@ -34,6 +38,13 @@ def main():
         parser.error("commit the reviewed checkout before preparing an exact-source candidate")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     epoch = int(subprocess.check_output(["git", "show", "-s", "--format=%ct", "HEAD"], cwd=ROOT, text=True))
+    if args.windows_zip:
+        # Reads only the zip directory, build-info.json and the pinned ConPTY pair
+        # (checked in memory); never extracts or runs it.
+        try:
+            windows_portable.require_build(args.windows_zip, revision, version)
+        except ValueError as error:
+            parser.error(str(error))
     args.output.mkdir(parents=True, exist_ok=True)
     if any(args.output.iterdir()):
         parser.error("use an empty candidate output directory; never overwrite an existing candidate")
@@ -79,11 +90,16 @@ def main():
     (args.output / "SHA256SUMS").write_text("".join(f"{digest(path)}  {path.name}\n" for path in (source, binary)))
     info = {"version": version, "source_commit": revision, "architecture": "x86_64", "distribution": "Arch Linux",
             "publication": "candidate", "binary_dependencies": libraries, "native_agents_bundled": False}
+    if args.windows_zip:
+        # The tested CI bytes under their stable name: renamed, never rebuilt.
+        info["windows_portable"] = windows_portable.asset_name(version)
+        shutil.copyfile(args.windows_zip, args.output / info["windows_portable"])
     if args.macos:
         add_macos(args.output, args.macos, version, info)
     (args.output / "release-info.json").write_text(json.dumps(info, indent=2) + "\n")
     print("Created source and Arch binary archives, SHA256SUMS and release AUR recipes"
-          + (" plus the notarized macOS bundle and its cask" if args.macos else "") + ". Nothing was published.")
+          + (" plus the tested Windows zip" if args.windows_zip else "")
+          + (" and the notarized macOS bundle with its cask" if args.macos else "") + ". Nothing was published.")
 
 
 if __name__ == "__main__":

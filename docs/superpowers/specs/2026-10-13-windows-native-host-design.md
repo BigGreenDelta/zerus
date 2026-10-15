@@ -46,9 +46,9 @@ the protocol, configuration and identity code.
 ### D2. Explicit enablement, a stable CLI and staged host images
 
 Local sessions on Windows are off until the user enables them, from the GUI
-("Enable local sessions (preview)" on the Machines page for this computer, D16) or
-with `hgs session-host install`. This keeps home-directory writes explicit, as for
-`zerus-setup` on Linux and macOS. Enabling:
+("Enable local sessions" on the Machines page for this computer, D16; labelled a
+preview until 2026-10-14) or with `hgs session-host install`. This keeps
+home-directory writes explicit, as for `zerus-setup` on Linux and macOS. Enabling:
 
 1. **Stages the stable CLI** `%USERPROFILE%\.local\bin\hgs.exe`, the Windows form of
    the Unix `~/.local/bin/hgs` contract. Hooks, session recipes, supervisors and the
@@ -694,12 +694,13 @@ The M3 variable `HGS_HOST_RECOVERY_WORKER` is gone.
 Apart from the status text, these rules change only a Windows GUI and its local
 machine: Linux and macOS GUIs, and every peer, behave as today.
 
-- Machines page: "Enable local sessions (preview)" for this computer when it runs
+- Machines page: "Enable local sessions" for this computer when it runs
   Windows, is a control console and its CLI reports `local_host`, running
   `hgs.exe session-host install`; the page shows the host's state, PID, ConPTY,
   integrity, Windows session and error. M6 has no disable action
   (`hgs session-host uninstall` remains). Launches on this computer warn when that
-  host runs in another Windows session (D5).
+  host runs in another Windows session (D5). M6 labelled the button and its
+  confirmation a preview; the owner removed that label on 2026-10-14 (Milestones).
 - Once enabled, the GUI runs the stable CLI from its next start and refreshes it when
   its bundled build is newer (D2).
 - Path model per machine (`tray/src/MachinePlatform.h`): the local machine is Windows
@@ -834,9 +835,12 @@ one.
   keeps its margin; the ConPTY pair in the zip and its checker; installation,
   reference, CI and CONTRIBUTING updates.
 
-Local sessions on Windows are labelled a preview in the GUI and documentation until
-the real-agent Windows suites pass in CI. A skipped native suite is not
-compatibility evidence.
+Local sessions on Windows were labelled a preview in the GUI and documentation
+until the real-agent Windows suites passed in CI. A skipped native suite is not
+compatibility evidence. Those suites run in the `windows-host` job that the CI gate
+requires, and the owner removed the preview label on 2026-10-14: the Machines page
+offers "Enable local sessions", and the documentation no longer calls local sessions
+on Windows a preview.
 
 ## Risks
 

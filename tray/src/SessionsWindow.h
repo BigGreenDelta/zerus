@@ -273,6 +273,7 @@ private:
     FleetState m_fleet;
     QList<Entry> m_entries;
     QJsonObject m_pendingLaunches;
+    QSet<QString> m_endedLaunches;
     QHash<QString, Entry> m_terminating;
     QSet<QString> m_terminationFinished;
     QString m_terminationCommand;

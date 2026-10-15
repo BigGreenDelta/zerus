@@ -467,7 +467,7 @@ void TestMachinesPage::windowsConsoleEnablesLocalSessions()
     MachinesPage page(FakeCli::program(m_script)); start(page);
     page.setFleet(windowsComputer(false, sessionHost("not-installed")));
     auto *enable = widget<QPushButton>(page, "enableLocalSessions"); auto *notice = widget<QLabel>(page, "machineNotice");
-    QVERIFY(enable->isVisible()); QVERIFY(enable->isEnabled()); QVERIFY(enable->text().contains("(preview)"));
+    QVERIFY(enable->isVisible()); QVERIFY(enable->isEnabled()); QCOMPARE(enable->text(), QString("Enable local sessions"));
     QSignalSpy changed(&page, &MachinesPage::machinesChanged);
     const auto installs = [&] {
         int count = 0; for (const auto &call : calls()) count += call.toArray().at(0) == "session-host";
@@ -480,7 +480,7 @@ void TestMachinesPage::windowsConsoleEnablesLocalSessions()
             auto *box = page.findChild<QMessageBox *>("enableLocalSessionsConfirm"); if (!box || !box->isVisible()) return;
             respond.stop(); shown = true;
             QCOMPARE(box->defaultButton(), qobject_cast<QPushButton *>(box->button(QMessageBox::Cancel)));
-            QVERIFY(box->text().contains("hgs session-host uninstall"));
+            QVERIFY(box->text().contains("hgs session-host uninstall")); QVERIFY(!box->text().contains("preview", Qt::CaseInsensitive));
             if (!proceed) { QTest::keyClick(box, Qt::Key_Escape); return; }
             for (auto *button : box->buttons()) if (box->buttonRole(button) == QMessageBox::AcceptRole) button->click();
         });
