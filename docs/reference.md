@@ -932,6 +932,9 @@ what keeps it from Ready: the main agent's turn and tools, and each working suba
 with its current tool, up to three, then a count. The actions follow the status the
 session list shows, so Kimi profile groups still working after the main turn ended
 keep them unavailable and are named by profile, such as `2 “code” subagents`.
+Applying settings and forking a running session wait for the same Ready, and a
+profile hook entry that Kimi's native subagent catalog has replaced holds back
+none of them.
 The desktop shows the reason as the tooltip of the disabled **Clear context**,
 **Clear session** and **Compact and continue** actions, and as a line in the
 cold-cache confirmation.

@@ -199,7 +199,7 @@ pub(super) fn unavailable(record: &Value, live: bool) -> Option<String> {
     if !string(record,"expected_id").is_empty() { return Some("The agent has not confirmed the resumed conversation yet".into()); }
     // Kimi profile groups can outlast the main turn's Stop, which records the
     // session idle; like the listing, wait for them and other remaining work.
-    if record["activity"]=="idle" && record["phase"]=="idle" && !telemetry::work_remains(record) { return None; }
+    if telemetry::settled(record) { return None; }
     Some(match string(record,"phase") {
         "compacting" => "Wait for compaction to finish".into(),
         "input" => "Wait until the agent's question is answered".into(),
@@ -539,6 +539,14 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         for state in ["finished","unknown"] {
             children["subagents"]["worker"]["state"]=json!(state);
             check(&children,true,None);
+        }
+    }
+    #[test] fn context_actions_agree_with_dispatch_on_the_ready_state_the_listing_reports() {
+        // Inspect offers clear and compaction exactly when dispatch accepts
+        // the session (input::checked_ready), whatever a replaced hook says.
+        assert_eq!(unavailable(&telemetry::stale_hook_child(),true),None);
+        for (case,record) in telemetry::remaining_work() {
+            assert!(unavailable(&record,true).is_some_and(|reason| reason.starts_with("Wait ")),"{case}");
         }
     }
     #[test] fn clear_hooks_require_a_changed_conversation_and_keep_the_observed_time() {

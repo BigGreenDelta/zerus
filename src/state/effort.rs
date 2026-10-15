@@ -765,16 +765,10 @@ fn settings_reason(record: &Value, models: &[ModelOption]) -> &'static str {
     ""
 }
 
+/// Settings apply now while the session is Ready as the listing reports it, or
+/// while a new session waits at its first prompt; otherwise they wait for Ready.
 fn ready(record: &Value) -> bool {
-    ((string(record, "activity") == "idle" && string(record, "phase") == "idle")
-        || input::first_message_candidate(record))
-        && telemetry::grouped_active(record) == 0
-        && record["active_tools"]
-            .as_object()
-            .is_none_or(|v| v.is_empty())
-        && !record["subagents"]
-            .as_object()
-            .is_some_and(|v| v.values().any(|c| string(c, "state") == "working"))
+    telemetry::settled(record) || input::first_message_ready(record)
 }
 
 /// Claude's PostModelSwitch: the exact model the session runs from now on,
@@ -2227,6 +2221,13 @@ pub(super) fn resume_argv(record: &Value, mut args: Vec<String>) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settings_apply_now_when_the_listing_reports_ready() {
+        assert!(ready(&telemetry::stale_hook_child()));
+        for (case, record) in telemetry::remaining_work() {
+            assert!(!ready(&record), "{case}");
+        }
+    }
     #[test]
     fn provider_settings_ignore_text_and_thinking_content() {
         assert_eq!(
