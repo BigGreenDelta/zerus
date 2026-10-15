@@ -984,7 +984,11 @@ not proof that the agent's task or process has ended.
 Claude child tracking reconciles hooks with exact native history, including
 workflow children. A final assistant `end_turn`, a successful `toolEndsTurn`
 result bound to its exact owned tool call, or a final **Request interrupted by
-user** row can settle a turn even when `SubagentStop` is missing. Matching
+user** row can settle a turn even when `SubagentStop` is missing. Its **for tool
+use** variant settles only when it follows the owned error results of the
+stopped calls; an unbound marker changes nothing. A tool-use interruption that an
+earlier hgs version recorded as new child work settles from the same native row
+unless a newer hook arrived. Matching
 workflow `started`/`result` attempts independently confirm the same reply.
 Later native child activity can recover a missing start; newer hooks take
 precedence. Silence and a completed parent never prove child completion.
