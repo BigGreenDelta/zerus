@@ -3044,12 +3044,16 @@ void TestSessionsWindow::scheduledSettingsApplyOncePerReady_data()
 {
     // What the attempt at the next Ready returns. There is none when the run or
     // its conversation changes first.
+    // Without listedChooser only inspect of the selected session shows the
+    // chooser, as when it closed again between two fleet listings.
     QTest::addColumn<bool>("keepSelected"); QTest::addColumn<QString>("retry"); QTest::addColumn<QString>("changed");
-    QTest::newRow("background-applied") << false << QString("applied") << QString();
-    QTest::newRow("background-failed") << false << QString("Native model picker unavailable") << QString();
-    QTest::newRow("background-new-run") << false << QString() << QString("run");
-    QTest::newRow("background-new-conversation") << false << QString() << QString("conversation");
-    QTest::newRow("selected-applied") << true << QString("applied") << QString();
+    QTest::addColumn<bool>("listedChooser");
+    QTest::newRow("background-applied") << false << QString("applied") << QString() << true;
+    QTest::newRow("background-failed") << false << QString("Native model picker unavailable") << QString() << true;
+    QTest::newRow("background-new-run") << false << QString() << QString("run") << true;
+    QTest::newRow("background-new-conversation") << false << QString() << QString("conversation") << true;
+    QTest::newRow("selected-applied") << true << QString("applied") << QString() << true;
+    QTest::newRow("selected-inspected-chooser") << true << QString("applied") << QString() << false;
 }
 
 void TestSessionsWindow::scheduledSettingsApplyOncePerReady()
@@ -3057,7 +3061,7 @@ void TestSessionsWindow::scheduledSettingsApplyOncePerReady()
     // A chooser can appear between the idle listing and the dispatch of a
     // pending change; dispatch then schedules it again. The change stays
     // pending for one attempt per Ready transition, never a polling loop.
-    QFETCH(bool, keepSelected); QFETCH(QString, retry); QFETCH(QString, changed);
+    QFETCH(bool, keepSelected); QFETCH(QString, retry); QFETCH(QString, changed); QFETCH(bool, listedChooser);
     QTemporaryDir directory; QVERIFY(directory.isValid());
     const QString program = directory.filePath("hgs"), snapshot = directory.filePath("snapshot.json"), capture = directory.filePath("calls.jsonl");
     QJsonObject details{{"tracked", true}, {"run_id", "run-original"}, {"conversation_id", "conversation-one"},
@@ -3144,8 +3148,10 @@ elif args[0]=='settings':
     QCOMPARE(changes[1][2].toJsonObject().value("status").toString(), QString("scheduled"));
     // No second attempt while the session stays Ready or shows the chooser.
     list("idle", "idle"); list("idle", "idle"); QCOMPARE(settledCalls(), 2);
-    list("busy", "input"); QCOMPARE(settledCalls(), 2);
-    list("busy", "input"); QCOMPARE(settledCalls(), 2);
+    if (listedChooser) {
+        list("busy", "input"); QCOMPARE(settledCalls(), 2);
+        list("busy", "input"); QCOMPARE(settledCalls(), 2);
+    }
     if (!changed.isEmpty()) {
         // A new run or conversation never receives the earlier one's change.
         if (changed == "run") box.sessions[0].runId = "run-two";
