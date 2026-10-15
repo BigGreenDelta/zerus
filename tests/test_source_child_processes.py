@@ -148,6 +148,10 @@ class ProcessObjectTest(unittest.TestCase):
                                                     "cannot follow (tray/src/ChildProcess.h)."),
             ("using Child = QProcess;\n" + function("auto *child = new Child(this);", "child->start();"),
              f"{NAME}:6: " + UNCONFIGURED.format("child")),
+            (function("QProcess first, second;", "ChildProcess::inheritStdioOnly(first);", "second.start(m_tool, {});"),
+             f"{NAME}:5: declare each QProcess on its own so that this check can follow it (tray/src/ChildProcess.h)."),
+            ("class Tool\n{\n    QProcess m_first{this}, m_second;\n    Tool() { ChildProcess::inheritStdioOnly(m_first); }\n};\n",
+             f"{NAME}:3: declare each QProcess on its own so that this check can follow it (tray/src/ChildProcess.h)."),
         ):
             with self.subTest(text=text):
                 self.assertEqual(findings(text), [expected])

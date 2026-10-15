@@ -178,6 +178,10 @@ def child_process_findings(files):
             if len(spans) > 1 or spans[0] not in {"", "nullptr"} and not spans[0].startswith("&"):
                 found.append((match.start(), "startDetached() with a program is the static QProcess::startDetached(), which "
                                              "bypasses ChildProcess::inheritStdioOnly(); use ChildProcess::startDetached()"))
+        for match in re.finditer(rf"(?<![\w:<.])(?<!->)(?:{kind})\s+[A-Za-z_]\w*\s*", code):
+            after = closing(code, match.end()) if code[match.end():match.end() + 1] in ("(", "{", "[") else match.end()
+            if re.compile(r"\s*,").match(code, after):
+                found.append((match.start(), "declare each QProcess on its own so that this check can follow it"))
         made = creations(code, kind)
         for index, (start, end, names) in enumerate(made):
             if not names:
