@@ -956,9 +956,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession();
     });
     connect(&m_client, &HgsClient::nativeSessionLaunched, this, [this](const QString &id, bool ok, const QString &error) {
+        // A listing can report the launch ended before its command returns; its
+        // notice stays and nothing waits to open a session that never appears.
+        const bool ended = m_endedLaunches.remove(id);
         if (ok) {
-            m_nativeLaunchToOpen=id;
-            showNotice(tr("Session started. Loading activity…"));
+            if (!ended) { m_nativeLaunchToOpen=id; showNotice(tr("Session started. Loading activity…")); }
         } else {
             newSessionLaunchFailed(id, error);
         }
@@ -2294,7 +2296,7 @@ void SessionsWindow::placeLaunchedSessions()
         const auto end = !consumed && box && box->ok ? box->endedLaunches.value(it.key()) : QJsonObject();
         if (!end.isEmpty() && std::none_of(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
                 return entry.host == host && entry.session.launchId == it.key(); })) {
-            consumed = true;
+            consumed = true; m_endedLaunches.insert(it.key());
             if (m_nativeLaunchToOpen == it.key()) m_nativeLaunchToOpen.clear();
             // A hidden launch status stays hidden.
             if (launch.value("show_pending").toBool()) {

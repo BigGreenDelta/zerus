@@ -364,6 +364,8 @@ private slots:
     void newSessionGroupFollowsLaunchIdentity();
     void launchPlaceholderReportsASessionThatEndedUnlisted_data();
     void launchPlaceholderReportsASessionThatEndedUnlisted();
+    void endedLaunchOutranksALaterStartedCallback_data();
+    void endedLaunchOutranksALaterStartedCallback();
     void folderBrowserIgnoresStaleResponses();
     void projectOrderAndDefaultBadge();
     void projectsEmbeddedAndRemote();
@@ -7608,6 +7610,60 @@ void TestSessionsWindow::launchPlaceholderReportsASessionThatEndedUnlisted()
         notice->clear(); window.setFleet(state);
         QVERIFY(notice->text().isEmpty()); QVERIFY(!placeholder());
     }
+}
+
+void TestSessionsWindow::endedLaunchOutranksALaterStartedCallback_data()
+{
+    QTest::addColumn<QString>("order");
+    QTest::newRow("ended-then-started") << QString("ended");
+    QTest::newRow("started-then-ended") << QString("started");
+    QTest::newRow("listed-then-started") << QString("listed");
+}
+
+void TestSessionsWindow::endedLaunchOutranksALaterStartedCallback()
+{
+    QFETCH(QString, order);
+    // A detached launch waits for both its command's result and its first listing.
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSettings().setValue("workspace/pendingLaunches", QJsonDocument(QJsonObject{{token, QJsonObject{{"host", QString()},
+        {"cmd", "claude"}, {"tag", "racing"}, {"group", "ungrouped"}, {"target", "/remote/infra"}, {"add_folder", false},
+        {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}}}}).toJson(QJsonDocument::Compact));
+    auto state = fleet();
+    SessionsWindow window(program()); window.setFleet(state); window.show();
+    auto *client = window.findChild<HgsClient *>(); auto *notice = window.findChild<QLabel *>("notice");
+    auto *list = window.findChild<SessionList *>("sessionList");
+    QVERIFY(client); QVERIFY(notice); QVERIFY(list);
+    SessionInfo created; created.name = "claude/infra/racing"; created.cmd = "claude"; created.project = "infra";
+    created.tag = "racing"; created.state = "running"; created.launchId = token;
+    const auto deliver = [&](bool ended, bool listed) {
+        auto box = state.local();
+        if (ended) box.endedLaunches.insert(token, QJsonObject{{"launch_id", token}, {"name", created.name},
+            {"code", 3}, {"output", "cannot start: example failure"}});
+        if (listed) box.sessions.append(created);
+        state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    };
+    const auto opened = [&] {
+        const auto *current = list->currentItem();
+        return current && current->data(SessionRoles::Identity).toString() == "arch\n" + created.name;
+    };
+    if (order == "started") {
+        client->nativeSessionLaunched(token, true, {});
+        QCOMPARE(notice->text(), QString("Session started. Loading activity…"));
+    }
+    deliver(order != "listed", order == "listed");
+    QVERIFY(!QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token));
+    if (order != "started") client->nativeSessionLaunched(token, true, {});
+    if (order == "listed") {
+        // A placed launch still opens its session after a late success callback.
+        QCOMPARE(notice->text(), QString("Session started. Loading activity…"));
+        deliver(false, false); QVERIFY(opened());
+        return;
+    }
+    // The ended report wins whichever arrives first.
+    QCOMPARE(notice->text(), QString("Session racing ended before it appeared (exit code 3).\ncannot start: example failure"));
+    QVERIFY(notice->isVisible()); QVERIFY(notice->property("error").toBool());
+    // Nothing waits to open the ended launch: a later session with its ID is not selected.
+    deliver(false, true); QVERIFY(!opened());
 }
 
 void TestSessionsWindow::folderBrowserIgnoresStaleResponses()

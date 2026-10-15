@@ -6,7 +6,8 @@ Zerus runs on Linux and macOS. Arch Linux x86_64 users can install the complete
 CLI and desktop bundle from AUR; Apple Silicon Macs can use the Homebrew cask.
 Other installations build from source. The CLI keeps the name `hgs`; the desktop
 executable is `hgs-tray`. Windows has a portable [control console](#windows) for
-remote Linux and macOS machines.
+remote Linux and macOS machines; it can also run agents on the Windows computer
+itself.
 
 ## Requirements
 
@@ -186,30 +187,38 @@ backup.
 
 <a id="windows"></a>
 
-## Windows control console
+## Windows
 
-Nightly releases include a portable Windows x86_64 zip with the desktop app
-(`hgs-tray.exe`) and the CLI (`hgs.exe`). They manage agent sessions on your Linux
-and macOS machines through the Windows OpenSSH client. Agents do not run on the
-Windows computer itself: this is the first phase of the
-[Windows plan](superpowers/specs/2026-10-10-windows-support-design.md).
+Stable releases after 0.42.2 and nightly releases include a portable Windows
+x86_64 zip with the desktop app (`hgs-tray.exe`) and the CLI (`hgs.exe`). It starts
+as a control console: it manages agent sessions on your Linux and macOS machines
+through the Windows OpenSSH client. You can also
+[enable local sessions](#local-sessions-on-windows), and agents then run on the
+Windows computer itself, in a session host of your user account on ConPTY, without
+WSL ([Windows plan](superpowers/specs/2026-10-10-windows-support-design.md),
+[session host](superpowers/specs/2026-10-13-windows-native-host-design.md)).
 
 Requirements:
 
-- Windows 10 version 1903 or later, or Windows 11, on x86_64.
-- The OpenSSH client. `ssh -V` in PowerShell shows whether it is installed;
-  otherwise add **OpenSSH Client** in Settings → Optional features.
-- At least one Linux or macOS machine with `hgs` installed at `~/.local/bin/hgs`
-  (see [local installation](#local-installation)) and key-based SSH access from
-  Windows. Status polls run SSH in batch mode, so the key must work without a
-  passphrase prompt, for example through the Windows `ssh-agent` service (disabled
-  by default; enabling it needs an administrator). Host aliases from
+- Windows 10 version 1903 or later, or Windows 11, on x86_64. Local sessions are
+  tested on Windows 11 and on the Windows Server 2025 CI runners.
+- For remote machines, the OpenSSH client. `ssh -V` in PowerShell shows whether it
+  is installed; otherwise add **OpenSSH Client** in Settings → Optional features.
+- For remote machines, at least one Linux or macOS machine with `hgs` installed at
+  `~/.local/bin/hgs` (see [local installation](#local-installation)) and key-based
+  SSH access from Windows. Status polls run SSH in batch mode, so the key must work
+  without a passphrase prompt, for example through the Windows `ssh-agent` service
+  (disabled by default; enabling it needs an administrator). Host aliases from
   `%USERPROFILE%\.ssh\config` work as usual.
+- For local sessions, the agents you want to run, installed on the Windows
+  computer ([below](#local-sessions-on-windows)).
 
 Install and start:
 
-1. From a [nightly release](https://github.com/ufna/zerus/releases?q=nightly-&expanded=true),
-   download `zerus-<version>-windows-x86_64.zip` and `SHA256SUMS`.
+1. From the [latest stable release](https://github.com/ufna/zerus/releases/latest)
+   or a [nightly release](https://github.com/ufna/zerus/releases?q=nightly-&expanded=true),
+   download `zerus-<version>-windows-x86_64.zip` and `SHA256SUMS`. Each release
+   carries the zip its own CI run tested; stable 0.42.2 and earlier have none.
 2. Check the zip in PowerShell. Both commands must show the same hash
    (`Get-FileHash` prints it in upper case):
 
@@ -225,11 +234,12 @@ Install and start:
    The Zerus window opens. Closing it keeps Zerus running in the notification
    area, where Windows 11 first hides a new icon behind the **^** arrow; run
    `hgs-tray.exe` again to bring the window back.
-4. Add your machines in **Machines**. Accept a new host key once with
-   **Open SSH terminal**, then use **Test connection**. **Install / update HGS…**
-   builds `hgs` on the remote machine from a Zerus source checkout on this computer;
-   the remote machine needs the [CLI requirements](#requirements). A checkout whose
-   `install.sh` or `hgs_state.py` has CRLF line endings is refused.
+4. To manage remote machines, add them in **Machines**. Accept a new host key once
+   with **Open SSH terminal**, then use **Test connection**.
+   **Install / update HGS…** builds `hgs` on the remote machine from a Zerus source
+   checkout on this computer; the remote machine needs the
+   [CLI requirements](#requirements). A checkout whose `install.sh` or
+   `hgs_state.py` has CRLF line endings is refused.
 
 In PowerShell, run the CLI from the folder with `.\hgs.exe` and quote a machine
 argument, because `@` is special there: `.\hgs.exe '@build-01' ls`. Commands
@@ -247,31 +257,94 @@ settings are in `%APPDATA%\hgdev\hgs-tray.ini`, and drafts in the
 `hgs-tray.ini.drafts` folder next to it. The computer's name in the fleet is
 `HGS_SELF` when set, otherwise its lowercase `COMPUTERNAME`.
 
-Limitations of the control console:
+### Local sessions on Windows
 
-- No local sessions, local agent accounts or hooks: `hgs.exe` exits with code 2 for
-  local session commands. Commands for another machine (`hgs.exe '@build-01' …`)
-  work as on Linux.
-- No DeepSeek Native UI from Windows: it needs SSH connection sharing, which
-  Windows OpenSSH lacks, so a DeepSeek session cannot be opened externally
-  either. Its Activity still works; DeepSeek sessions have no Terminal tab on any
-  platform.
+Local sessions stay off until you enable them. Open **Machines**, select this
+computer (*This computer: control console*) and choose **Enable local sessions**,
+or run `.\hgs.exe session-host install` in the extracted folder. Either way, `hgs`
+stages these files in your profile (under `HOME` instead when it is set):
+
+- `%USERPROFILE%\.local\bin\hgs.exe`, the stable CLI that sessions, agent hooks and
+  the recovery worker run, so they never depend on the extracted folder;
+- `%USERPROFILE%\.local\share\hgs\host\<hash>\` with `hgs.exe` and the zip's ConPTY
+  pair (`conpty.dll`, `OpenConsole.exe`), the image the session host starts from;
+- the marker `%USERPROFILE%\.config\hgs\local-sessions`, which alone decides that
+  local sessions are on (`HGS_CONFIG_DIR` moves it with the configuration).
+
+Zerus then lists this computer's sessions, offers it in New session and Accounts,
+and runs the stable CLI from its next start. When Zerus starts from another zip of
+the same or a newer version, it first stages that zip's `hgs.exe` again (a small
+*Starting Zerus…* note may show meanwhile); running sessions stay in the host that
+runs them, and the next host starts from the new image. **Machines** shows the
+session host's state for this computer, and `hgs.exe session-host status` reports
+the marker, the staged files and the host.
+
+The session host starts with the first launch, resume or fork and exits a few
+seconds after its last session has ended; listings never start it. Sessions keep
+running when Zerus closes or updates and when the terminal or SSH connection that
+started them ends. They end when you sign out of Windows or restart it; tracked
+sessions stay saved and can be resumed, as after a reboot on Linux.
+
+Install the agents on the Windows computer yourself. Zerus looks them up on `PATH`
+(with `PATHEXT`), adds `%USERPROFILE%\.local\bin` and npm's `%APPDATA%\npm`, and
+runs the script of an npm command shim with Node.js directly; other batch files are
+refused.
+
+- **Claude Code** and **Codex** run tracked, with Zerus hooks in their
+  configuration. Every automatic CI run tests their
+  [reviewed](ci-and-aur.md#native-agent-compatibility-and-upstream-review) Windows
+  builds through the session host, and both were also checked on a Windows 11 PC.
+  Claude Code before 2.1.296 needs Git for Windows for its hooks: without Git Bash
+  Zerus refuses to track it, and `HGS_TRACKING=0` runs it untracked.
+- **Kimi Code** runs tracked as well. It was checked on a Windows 11 PC and has no
+  Windows CI suite yet.
+- **Run PowerShell** in New session (`hgs sh`) opens an untracked PowerShell 7
+  (`pwsh`), or Windows PowerShell when PowerShell 7 is missing.
+- DeepSeek and OpenCode are not offered for this computer.
+
+Start Zerus and `hgs.exe` without elevation: a session host started from an
+elevated terminal refuses every client that is not elevated, Zerus included, with
+*the session host on this computer runs elevated*. A host started over SSH runs in
+another Windows session, where agents cannot open windows on your desktop, such as
+a browser sign-in; Zerus asks before it starts or resumes a session there
+(**Launch anyway**).
+
+To disable local sessions again, end the sessions on this computer and run
+`hgs.exe session-host uninstall`, which refuses while one runs. It removes the
+marker, so the computer is a control console again; the staged CLI and host images
+stay in place. **Machines** has no button for this. `hgs.exe session-host stop`
+stops an idle session host without disabling anything.
+
+### Windows limitations
+
+- Until local sessions are enabled, the computer has no local sessions, agent
+  accounts or hooks, and `hgs.exe` exits with code 2 for local session commands.
+  Commands for another machine (`hgs.exe '@build-01' …`) work as on Linux.
+- No DeepSeek or OpenCode sessions on the Windows computer, and no DeepSeek Native
+  UI from Windows: it needs SSH connection sharing, which Windows OpenSSH lacks, so
+  a DeepSeek session cannot be opened externally either. Its Activity still works;
+  DeepSeek sessions have no Terminal tab on any platform.
+- Voice messages cannot be sent to sessions on the Windows computer.
 - No mobile gateway: pair your phone with a Linux or macOS machine. Settings →
   Mobile connection is hidden, and activity on the Windows computer does not
   delay phone alerts.
-- Other machines cannot connect to the Windows computer as a peer.
-- No installer, code signing, autostart or self-update, and only nightly
-  releases carry the zip. **Settings → Updates** reports nightlies with a newer
-  product version; Stable and Dev have no Windows build, so on those channels it
-  says so and reports no update. To update, quit Zerus from the tray menu and
-  replace the folder with the new one; configuration and state stay in your
-  profile. To start Zerus at sign-in, put a shortcut to `hgs-tray.exe` in the
-  Startup folder (`shell:startup`) and add a space and `--background` at the end
-  of its **Target** field, so Zerus starts in the notification area without
-  opening its window.
+- Other machines cannot connect to the Windows computer as a peer: its local
+  sessions appear only in Zerus on that computer, and its folders in Projects are
+  not shared with other machines.
+- No installer, code signing, autostart or self-update. **Settings → Updates**
+  starts on the Nightly channel; choose Stable to hear only about stable
+  releases. It reports a release with a newer product version than the running
+  zip, with a link to its release page. Stable 0.42.2 and earlier have no
+  Windows build, so they are never reported; Dev has none either, so on that
+  channel it says so and reports no update. To update, quit Zerus from the
+  tray menu and replace the folder with the new one; configuration and state
+  stay in your profile. To start Zerus at sign-in, put a shortcut to
+  `hgs-tray.exe` in the Startup folder (`shell:startup`) and add a space and
+  `--background` at the end of its **Target** field, so Zerus starts in the
+  notification area without opening its window.
 - Without SSH connection sharing, every poll of every machine is a full SSH
   handshake: about 150 ms per machine on a LAN. The app lists this computer at
-  most once every 15 seconds.
+  most once every 15 seconds, or every 5 seconds with local sessions enabled.
 
 [Windows details in the reference](reference.md#windows) |
 [Building on Windows](../CONTRIBUTING.md#windows)
