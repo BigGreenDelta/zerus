@@ -5,11 +5,14 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 spec = importlib.util.spec_from_file_location("install_qt_macos", ROOT / "scripts/install-qt-macos.py")
 qt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(qt)
@@ -28,6 +31,9 @@ class PinnedQt(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.pin = json.loads((ROOT / "packaging/macos/qt.json").read_text())
+        retry = mock.patch.object(qt.qt_archives, "RETRY_DELAY", 0)
+        retry.start()
+        self.addCleanup(retry.stop)
 
     def test_repository_pin_is_valid_and_complete(self):
         qt.validate_pin(self.pin)
@@ -95,17 +101,19 @@ class PinnedQt(unittest.TestCase):
         bundle = self.root / "bundle.tar"
         with tarfile.open(bundle, "w") as archive:
             archive.add(payload / "bin", arcname="bin")
-        entry = self.source("pkg/qtbase.tar", bundle.read_bytes())
-        pin = {"qt_version": "6.11.2", "repository": qt.REPOSITORY, "packages": [], "archives": [entry]}
+        entry = self.source("desktop/qt.test.clang_64/6.11.2-0-1qtbase-MacOS.tar", bundle.read_bytes())
+        pin = {"qt_version": "6.11.2", "repository": qt.REPOSITORY, "archives": [entry],
+               "packages": [{"directory": "desktop", "name": "qt.test.clang_64", "archives": ["qtbase"]}]}
         output = self.root / "qt"
-        qt.install(pin, output, base=(self.root / "repository").as_uri(), check_version=False)
+        with mock.patch("sys.stdout"):
+            qt.install(pin, output, base=(self.root / "repository").as_uri(), check_version=False)
         self.assertEqual((output / "bin/marker").read_text(), "qt\n")
         self.assertEqual(json.loads((output / "zerus-qt.json").read_text())["qt_version"], "6.11.2")
         with self.assertRaises(ValueError):
             qt.install(pin, output, base=(self.root / "repository").as_uri(), check_version=False)
         tampered = self.root / "tampered"
         broken = dict(pin, archives=[dict(entry, sha256="0" * 64)])
-        with self.assertRaises(ValueError):
+        with mock.patch("sys.stderr"), self.assertRaises(ValueError):
             qt.install(broken, tampered, base=(self.root / "repository").as_uri(), check_version=False)
         self.assertFalse((tampered / "bin").exists())
 

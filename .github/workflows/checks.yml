@@ -672,30 +672,23 @@ jobs:
             python -m unittest -v test_windows_host test_windows_host_conpty test_windows_host_survival \
             test_windows_lifecycle test_windows_hooks test_backend_contract </dev/null
       # Only trusted main checks save it; PR, manual and candidate runs restore
-      # it. The key covers the Qt release, modules and installer lock.
+      # it. The key covers the Qt pin and the installer.
       - name: Restore Qt 6.10.3 for MSVC
         id: qt-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/Qt
-          key: windows-qt-6.10.3-win64_msvc2022_64-qtmultimedia-${{ hashFiles('scripts/ci/aqt-requirements.txt') }}
-      # aqtinstall 3.3.0 cannot resolve the split repository layout of Qt 6.11+
-      # for Windows yet. It and its dependencies come only from the hash-locked
-      # wheels, in an environment of their own that later steps never use.
-      # scripts/ci/aqt-settings.ini makes it extract one archive at a time:
-      # parallel workers raced py7zr's path check on Windows.
-      - name: Install Qt 6.10.3 with the hash-locked aqtinstall
+          key: windows-qt-6.10.3-win64_msvc2022_64-${{ hashFiles('packaging/windows/qt.json', 'scripts/install-qt-windows.py', 'scripts/qt_archives.py') }}
+      # The official archives pinned in packaging/windows/qt.json, each checked
+      # against its size and SHA-256 and listed before any is extracted, with the
+      # runner image's 7-Zip. No Python package is installed for it.
+      - name: Install the pinned Qt 6.10.3 for MSVC
         if: steps.qt-cache.outputs.cache-hit != 'true'
-        run: |
-          python -m venv "$RUNNER_TEMP/aqt"
-          aqt_python=$(cygpath -u "$RUNNER_TEMP/aqt/Scripts/python.exe")
-          "$aqt_python" -m pip install --no-input --disable-pip-version-check --require-hashes --only-binary :all: \
-            -r scripts/ci/aqt-requirements.txt </dev/null
-          "$aqt_python" -m aqt -c scripts/ci/aqt-settings.ini install-qt windows desktop 6.10.3 win64_msvc2022_64 \
-            -m qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null
-          rm -rf "$(cygpath -u "$RUNNER_TEMP/aqt")"
+        run: python scripts/install-qt-windows.py --output "$RUNNER_TEMP/Qt" </dev/null
+      # A restored installation must also be the pinned one.
       - name: Use Qt 6.10.3
         run: |
+          python scripts/install-qt-windows.py --check "$RUNNER_TEMP/Qt" </dev/null
           qt=$(cygpath -w "$RUNNER_TEMP/Qt/6.10.3/msvc2022_64")
           test -f "$(cygpath -u "$qt")/bin/windeployqt.exe"
           echo "QT_ROOT_DIR=$qt" >> "$GITHUB_ENV"

@@ -1,5 +1,4 @@
 """Exercise the checked-in workflow trust predicate and final success gate."""
-import configparser
 import datetime
 import importlib.util
 import io
@@ -281,27 +280,29 @@ class WorkflowSecurityTests(unittest.TestCase):
         # Line endings are fixed before checking out the exact tested commit.
         self.assertLess(windows.index("core.autocrlf false"), windows.index("actions/checkout@"))
         self.assertIn("ref: ${{ needs.source.outputs.commit }}\n          persist-credentials: false", windows)
-        # One exact interpreter; Qt's installer runs only from hash-locked wheels
-        # in its own environment, and its cache key covers that lock.
+        # One exact interpreter, and no Python package installed: Qt comes from
+        # the verified archives of its pin, and its cache key covers the pin and
+        # the installer.
         self.assertIn("uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0\n"
                       "        with:\n          python-version: '3.13.15'\n", windows)
         self.assertNotIn("install-qt-action", windows)
-        self.assertEqual(windows.count("pip install"), 1)
-        self.assertIn('"$aqt_python" -m pip install --no-input --disable-pip-version-check --require-hashes '
-                      '--only-binary :all: \\\n            -r scripts/ci/aqt-requirements.txt </dev/null', windows)
-        self.assertIn('python -m venv "$RUNNER_TEMP/aqt"', windows)
-        self.assertIn('"$aqt_python" -m aqt -c scripts/ci/aqt-settings.ini install-qt windows desktop 6.10.3 '
-                      'win64_msvc2022_64 \\\n'
-                      '            -m qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null', windows)
-        # One worker: parallel archives raced py7zr's Windows path check.
-        settings = configparser.ConfigParser()
-        settings.read_string((ROOT / "scripts/ci/aqt-settings.ini").read_text())
-        self.assertEqual({name: dict(settings[name]) for name in settings.sections()}, {"aqt": {"concurrency": "1"}})
+        self.assertNotIn("pip install", windows)
+        self.assertNotRegex(windows, r"\baqt\b")
+        qt = json.loads((ROOT / "packaging/windows/qt.json").read_text())
+        version, prefix = qt["qt_version"], qt["prefix"]
+        self.assertEqual(windows.count("scripts/install-qt-windows.py --output"), 1)
+        self.assertIn("        if: steps.qt-cache.outputs.cache-hit != 'true'\n"
+                      '        run: python scripts/install-qt-windows.py --output "$RUNNER_TEMP/Qt" </dev/null\n', windows)
+        # A restored cache is checked against the pin too, before the build uses it.
+        use = next(step for step in self.checks_steps("windows-desktop") if f"- name: Use Qt {version}\n" in step)
+        self.assertIn('python scripts/install-qt-windows.py --check "$RUNNER_TEMP/Qt" </dev/null\n', use)
+        self.assertIn(f'qt=$(cygpath -w "$RUNNER_TEMP/Qt/{prefix}")', use)
         # Qt WebEngine is an optional Linux plugin; the Windows bundle never ships it.
         self.assertNotIn("qtwebengine", windows)
-        self.assertIn("if: steps.qt-cache.outputs.cache-hit != 'true'", windows)
-        self.assertIn("key: windows-qt-6.10.3-win64_msvc2022_64-qtmultimedia-"
-                      "${{ hashFiles('scripts/ci/aqt-requirements.txt') }}", windows)
+        self.assertNotIn("qtwebengine", json.dumps(qt))
+        self.assertIn(f"key: windows-qt-{version}-win64_msvc2022_64-${{{{ hashFiles('packaging/windows/qt.json', "
+                      "'scripts/install-qt-windows.py', 'scripts/qt_archives.py') }}", windows)
+        self.assertIn(f"key: windows-ccache-v1-${{{{ runner.arch }}}}-qt{version}-", windows)
         # A new stable Rust release must not fail an unchanged commit.
         self.assertIn("cargo +1.85.0 clippy --locked --all-targets -- -D warnings", windows)
         self.assertNotRegex(windows, r"(?m)^\s*cargo clippy")
@@ -378,22 +379,6 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(rendered.rsplit("-", 1)[0], "android-gradle-v1-2026-10")
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         self.assertEqual(checks.count("android-gradle-v1-"), 2)
-
-    def test_qt_installer_dependencies_are_exact_hashed_wheels(self):
-        lock = (ROOT / "scripts/ci/aqt-requirements.txt").read_text()
-        lines = [line for line in lock.splitlines() if not line.lstrip().startswith("#")]
-        requirements = lines[0::2]
-        hashes = lines[1::2]
-        self.assertEqual(len(requirements), len(hashes))
-        pins = {}
-        for requirement, digest in zip(requirements, hashes):
-            # No options (index URLs, editable or local paths), only name==version and one hash.
-            self.assertRegex(requirement, r"^[a-z0-9][a-z0-9.-]*==[0-9][A-Za-z0-9.]* \\$")
-            self.assertRegex(digest, r"^    --hash=sha256:[0-9a-f]{64}$")
-            name, version = requirement[:-2].split("==")
-            self.assertNotIn(name, pins)
-            pins[name] = version
-        self.assertEqual((pins.get("aqtinstall"), pins.get("py7zr")), ("3.3.0", "1.1.3"))
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
@@ -968,7 +953,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         exec(compile(inline_python(job(self.ci, "cache-trim")), "workflow-cache-trim", "exec"), namespace)
         def entry(number, key, created, ref="refs/heads/main"):
             return {"id": number, "key": key, "ref": ref, "created_at": created, "size_in_bytes": 1}
-        qt = "windows-qt-6.10.3-win64_msvc2022_64-qtmultimedia-"
+        qt = "windows-qt-6.10.3-win64_msvc2022_64-"
         caches = [
             entry(1, "arch-ccache-v1-100", "2026-10-12T10:00:00.123456Z"),
             entry(2, "arch-ccache-v1-101", "2026-10-12T11:00:00Z"),
