@@ -36,6 +36,15 @@ job durations live in ignored `artifacts/test-results/`. Set
 `ZERUS_BUILD_JOBS` to limit desktop build parallelism. Run
 `cargo +1.85.0 test --locked` for the minimum supported Rust.
 
+`check-source.py` keeps the desktop's Unix children from inheriting its descriptors
+([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects
+`QProcess::startDetached()` and `QProcess::execute()`, and every `QProcess` must go to
+`ChildProcess::inheritStdioOnly()`, directly or through a function that passes its
+parameter there, in the function that creates it (for a member, a constructor of its
+class) and before it starts.
+`CHILD_PROCESS_EXEMPT` in the script names the files that may start children
+otherwise, each with its reason.
+
 A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare a
 [tmux census](docs/ci-and-aur.md#unix-tmux-census) of the branch with one of main.
 `scripts/ci/check-windows-target.sh` type-checks the Windows target from Linux or
