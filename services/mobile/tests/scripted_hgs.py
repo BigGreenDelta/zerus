@@ -5,9 +5,11 @@ It never runs hgs, tmux or an agent. Every call re-reads `script.json` from the
 directory named by ZERUS_SCRIPTED_HGS_DIR, answers with the first matching rule
 and appends `start` and `end` events to `calls.jsonl` there.
 
-A rule matches with `argv` (exact) or `prefix` (leading arguments); `times`
-limits how many calls it answers under its `id` (its index without one). It
-may set:
+A rule matches with `argv` (exact) or `prefix` (leading arguments), and with
+`stdin_fields` also only when stdin is a JSON object whose listed fields have
+exactly these JSON values (a peer envelope's `via`, `target_machine_id` and
+inner `argv`, say); `times` limits how many calls it answers under its `id`
+(its index without one). It may set:
 
 - `stdout` (a JSON value) or `stdout_text`, `stderr` (text) and `exit` (status);
 - `delay` (seconds to work before answering);
@@ -16,7 +18,9 @@ may set:
   connector that never saw the native outcome.
 
 Strings in `stdout` that are exactly `{{stdin}}`, `{{stdin.FIELD}}` or
-`{{argv.N}}` become the parsed stdin, one of its fields or one argument.
+`{{argv.N}}` become the parsed stdin, one of its fields or one argument; a
+dotted FIELD such as `payload.request_id` or `argv.4` descends into objects
+and arrays.
 An unmatched call exits 2.
 """
 import fcntl
@@ -53,6 +57,17 @@ def open_descriptors():
     return found
 
 
+def field(value, path):
+    for part in path.split("."):
+        if isinstance(value, dict):
+            value = value.get(part)
+        elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+            value = value[int(part)]
+        else:
+            return None
+    return value
+
+
 def substitute(value, argv, stdin):
     if isinstance(value, dict):
         return {key: substitute(item, argv, stdin) for key, item in value.items()}
@@ -63,18 +78,29 @@ def substitute(value, argv, stdin):
         if name == "stdin":
             return stdin
         if name.startswith("stdin."):
-            return stdin.get(name[6:]) if isinstance(stdin, dict) else None
+            return field(stdin, name[6:])
         if name.startswith("argv."):
             index = int(name[5:])
             return argv[index] if index < len(argv) else None
     return value
 
 
-def matches(rule, argv):
+def same(left, right):
+    # JSON equality, so that `true` never matches 1.
+    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+
+
+def matches(rule, argv, stdin):
     if "argv" in rule:
-        return argv == rule["argv"]
-    prefix = rule.get("prefix", [])
-    return argv[:len(prefix)] == prefix
+        found = argv == rule["argv"]
+    else:
+        prefix = rule.get("prefix", [])
+        found = argv[:len(prefix)] == prefix
+    expected = rule.get("stdin_fields")
+    if found and expected is not None:
+        found = isinstance(stdin, dict) and all(key in stdin and same(stdin[key], value)
+                                                for key, value in expected.items())
+    return found
 
 
 def main():
@@ -103,7 +129,7 @@ def main():
         chosen = rule = None
         for index, candidate in enumerate(rules):
             key = candidate.get("id", index)
-            if matches(candidate, argv) and ("times" not in candidate or previous.get(key, 0) < candidate["times"]):
+            if matches(candidate, argv, stdin) and ("times" not in candidate or previous.get(key, 0) < candidate["times"]):
                 chosen, rule = key, candidate
                 break
         append(log, {"event": "start", "pid": os.getpid(), "ppid": os.getppid(), "argv": argv,

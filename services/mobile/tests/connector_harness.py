@@ -283,7 +283,9 @@ class FakeRelay:
     parameters, an unknown endpoint) is answered as the relay or nginx would and
     also recorded in `violations`, which BlackBoxCase fails on. Requests are
     queued as phones submit them and handed out one per long poll in the
-    relay's batch envelope; results follow the relay's claim rules.
+    relay's batch envelope; results follow the relay's claim rules. As the
+    relay does, it answers 404 to a peer heartbeat whose route is not in the
+    last heartbeat manifest it accepted.
     """
 
     def __init__(self, token: str | None = None):
@@ -296,6 +298,7 @@ class FakeRelay:
         self.pending: collections.deque[str] = collections.deque()
         self.result_posts: list[tuple[str, object, int]] = []
         self.deliveries: list[tuple[str, int]] = []  # (request_id, index in exchanges)
+        self.manifest: dict[str, dict] = {}  # route_id -> peer row of the last accepted heartbeat
         self.active_polls = 0
         self.max_polls = 2  # max_polls_per_credential
         self.url = ""
@@ -363,6 +366,12 @@ class FakeRelay:
     def heartbeats(self) -> list[Exchange]:
         return [exchange for exchange in self.exchanges if exchange.method == "POST"
                 and exchange.path == "/v1/node/heartbeat" and exchange.status == 200]
+
+    def peer_heartbeats(self, route_id: str | None = None) -> list[Exchange]:
+        """Accepted peer heartbeats, for one route or all of them."""
+        return [exchange for exchange in self.exchanges if exchange.method == "POST" and exchange.status == 200
+                and re.fullmatch(r"/v1/node/peers/[^/]+/heartbeat", exchange.path)
+                and (route_id is None or exchange.path == f"/v1/node/peers/{route_id}/heartbeat")]
 
     def delivered_since(self, request_id: str, mark: int) -> int | None:
         """Index in `exchanges` of the poll that handed this identity out in
@@ -437,11 +446,15 @@ class FakeRelay:
             problem = heartbeat_problem(exchange.body)
             if problem:
                 return self.refuse(exchange, 400, "invalid request", problem)
+            # A heartbeat without a machine_id withdraws every route (relay store/snapshots.rs).
+            self.manifest = {row["route_id"]: row for row in exchange.body.get("peers", [])}
             return 200, {"ok": True}
         if exchange.method == "POST" and len(parts) == 5 and parts[:3] == ["v1", "node", "peers"] and parts[4] == "heartbeat":
             problem = peer_heartbeat_problem(parts[3], exchange.body)
             if problem:
                 return self.refuse(exchange, 400, "invalid request", problem)
+            if parts[3] not in self.manifest:
+                return 404, {"error": "not found"}
             return 200, {"ok": True}
         if exchange.method == "POST" and len(parts) == 5 and parts[:3] == ["v1", "node", "requests"] and parts[4] == "result":
             return self.result(exchange, parts[3])
