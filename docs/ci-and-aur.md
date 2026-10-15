@@ -1088,16 +1088,12 @@ Package upgrades do not perform a restart. Review the old unit's kill policy bef
 restarting an existing installation; never use a broad process kill or restart all
 native clients.
 
-`KillMode=process` does not protect panes of a tmux server that runs inside the
-unit: tmux built with systemd support makes each pane part of the unit holding its
-server, and an explicit `systemctl --user stop` of that unit ends them; a restart
-keeps them. `hgs` therefore starts a new tmux
-server from any user unit in a transient scope of its own (see
-[Terminal, SSH and clipboard](reference.md#terminal-ssh-and-clipboard)). A server
-that an earlier release started inside `hgs-tray`, the mobile connector or a worker
-stays there until it exits: `systemctl --user status UNIT` then lists a `tmux`
-process in the unit's control group. Meanwhile give that unit `KillMode=process`
-and restart it rather than stop it.
+`hgs` starts a new tmux server from any user unit in a transient scope of its own
+(see [Terminal, SSH and clipboard](reference.md#terminal-ssh-and-clipboard)), so
+the panes of that server are not part of `hgs-tray`, the mobile connector or a
+worker. A server that an earlier release started inside one of those units stays
+there until it exits, and so does one started where systemd could not make the
+scope: until then, restart that unit rather than stop it.
 
 The swarm worker is the exception: it holds no agents. A current `hgs-swarm`
 exits when an upgrade replaces its executable and `Restart=always` starts the new

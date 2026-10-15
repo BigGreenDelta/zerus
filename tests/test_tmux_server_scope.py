@@ -7,8 +7,8 @@ whatever its KillMode. Each test runs one command in a uniquely named transient
 service (the launcher, standing in for the desktop GUI, the mobile connector or a
 recovery worker) with a clean environment and a private tmux socket, then stops
 only that unit. The suite needs a reachable user service manager and is skipped
-elsewhere (macOS, CI runners, SSH logins without one). It never addresses another
-tmux server or unit and never reloads the manager.
+where none is, as on macOS, in a container or in an SSH login without one. It
+never addresses another tmux server or unit and never reloads the manager.
 """
 import os
 from pathlib import Path
@@ -38,8 +38,11 @@ def unavailable():
         return 'tmux, systemd-run and systemctl are required'
     if not Path(RUNTIME, 'systemd/private').exists():
         return 'no user service manager'
-    state = subprocess.run([SYSTEMCTL, '--user', 'is-system-running'], capture_output=True, text=True,
-                           timeout=15).stdout.strip()
+    try:
+        state = subprocess.run([SYSTEMCTL, '--user', 'is-system-running'], capture_output=True, text=True,
+                               timeout=15).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        state = ''
     if state not in ('running', 'degraded'):
         return f'user service manager is {state or "unreachable"}'
     return None

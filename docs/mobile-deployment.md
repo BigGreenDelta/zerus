@@ -173,10 +173,13 @@ Save it as `~/.config/systemd/user/zerus-mobile-connector.service`, then run
 `systemctl --user enable --now zerus-mobile-connector.service`. Start it from
 the user service manager so it does not inherit a running agent's environment.
 
-Agents launched from the phone run in tmux, and a launch that finds no tmux
-server running starts one inside this service. `KillMode=process` limits systemd
-to the connector process itself when the service stops, restarts or exits; the
-default `control-group` mode also kills that tmux server and every agent in it.
+Agents launched from the phone run in tmux. A launch that finds no tmux server
+running starts one in a transient scope of its own (see
+[Terminal, SSH and clipboard](reference.md#terminal-ssh-and-clipboard)); a server
+that an earlier `hgs` started, or one started where systemd could not make that
+scope, runs inside this service. `KillMode=process` limits systemd to the
+connector process itself when the service stops, restarts or exits; the default
+`control-group` mode also kills a tmux server inside it and every agent in it.
 Restart the connector with `systemctl --user restart zerus-mobile-connector.service`;
 native agents keep running. Do not stop it while agents run; see
 [Protect running agents](#protect-running-agents).

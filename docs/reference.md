@@ -1822,9 +1822,10 @@ that starts the server through `systemd-run --user --scope`, in a transient
 exits. Stopping or restarting the unit that launched the first session then leaves
 the agents running; stopping that scope itself ends the server and its agents. A
 running server is never moved, restarted or replaced: one started earlier, by an
-older `hgs` or by tmux itself, stays in its unit until it exits. Outside a user
-unit (an SSH login, macOS), without a reachable user manager or `systemd-run`, or
-when systemd cannot create the scope, `hgs` starts tmux as before.
+older `hgs` or by a plain `tmux` command, stays in its unit until it exits.
+Outside a user unit (an SSH login, macOS), without a reachable user manager or
+`systemd-run`, or when systemd cannot create the scope, `hgs` starts tmux as
+before.
 
 The optional `tmux.conf` binds Ctrl-V to `hgs paste` for the remote image clipboard
 bridge. At attach, `HGS_CLIENT` records the viewing host; an SSH hop forwards it
