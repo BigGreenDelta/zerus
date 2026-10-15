@@ -164,6 +164,31 @@ that event stay, and older versions still warn about those. An unreadable versio
 a launcher keeps the entry, as does a wrapper script that starts another Claude Code
 without itself changing: delete the entry from its `settings.json` by hand there.
 `PreModelSwitch` is never registered.
+
+Claude Code reports its context window only to a status line command. For a tracked
+Unix start of the `claude` CLI that reports 2.1.296 or later (the version read as
+for `PostModelSwitch`), `hgs` adds `--settings` with its own `statusLine`,
+`hgs __state statusline`, to the agent's command line; no settings file changes and
+the saved launch arguments stay as typed. The command keeps the run's latest
+`session_id`, `model.id` and `context_window.context_window_size` from Claude's
+input in `context-telemetry/` of the state folder, one file per run; a new run
+removes those not updated for 30 days. It then runs the status line Claude would otherwise use:
+the `statusLine` of the user settings file (`CLAUDE_CONFIG_DIR` or `~/.claude`),
+then the session folder's `.claude/settings.json` and `.claude/settings.local.json`,
+each later file's fields over the earlier ones. It runs that command with
+`/bin/sh -c`, Claude's input, environment and folder, prints its output and exits
+with its status, so Claude shows the user's status line as before and a change to
+it applies at once. Its `padding`, `refreshInterval` and `hideVimModeIndicator` are
+copied at launch. Without a user status line nothing is printed; Claude 2.1.296
+then keeps one empty row below the prompt. Claude keeps its own status line, and
+the session reports no window, on Windows, through a project launcher, with an older
+or unreadable version, when the launch passes `--settings` or `--setting-sources`,
+when managed settings exist (`/etc/claude-code` or
+`/Library/Application Support/ClaudeCode`, or `CLAUDE_CODE_MANAGED_SETTINGS_PATH`),
+when a settings file cannot be read or its status line is not a command, and when
+local settings of an enclosing repository's root set one, which Claude chooses by
+ownership checks.
+
 Tracked Codex needs `--no-daemon`; the integration has been verified with 0.160.0,
 while 0.155.1 lacks that required flag.
 
@@ -991,6 +1016,14 @@ Switching dialogs, changing filters or closing the workspace keeps accepted send
 pending on their original sessions. They continue in the background, verify the
 same run/conversation and compaction request, and never submit a second copy.
 Context metrics use native telemetry, without guessing a capacity from a model name.
+Claude's window comes from its status line (see
+[Tracking and durable state](#tracking-and-durable-state)): `session_usage.context`
+gains `limit`, `limit_source` `native_statusline`, `limit_model` and
+`limit_observed_at` only while the latest report belongs to the session's run and
+conversation and names the model that the inspection reports. After a model change
+the window stays hidden until Claude reports the new model; after a clear Claude
+2.1.296 reports at its next update, usually the next reply, and a resumed run
+reports when it starts. Compaction changes the used context, not the window.
 Claude's recorded compaction boundary replaces the earlier context size with its
 reported summary size. It invalidates the earlier prompt cache estimate; a new
 warm countdown requires fresh native usage with a reported TTL.

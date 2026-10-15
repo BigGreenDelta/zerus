@@ -7,6 +7,7 @@ mod claude_trust;
 mod claude_permission;
 mod claude_resume;
 mod claude_question;
+mod claude_statusline;
 mod claude_subagents;
 mod attachments;
 pub(crate) mod voice;
@@ -628,6 +629,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "hook" {
         return hooks::hook();
+    }
+    if command == "statusline" {
+        return claude_statusline::run();
     }
     if command == "voice" { return voice::dispatch(args); }
     if command == "attachment" {
