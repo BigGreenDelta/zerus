@@ -204,6 +204,40 @@ fn run_mode_refuses_unsafe_state_without_repair() {
     held.close();
 }
 
+/// Python checks only the state directory and its files for symlinks, so a
+/// linked parent such as a dotfile-managed `~/.local` keeps working.
+#[test]
+fn state_below_a_symlinked_parent_opens_as_in_python() {
+    let scratch = scratch("linked-parent");
+    std::fs::create_dir(scratch.path("real")).unwrap();
+    std::os::unix::fs::symlink("real", scratch.path("link")).unwrap();
+    let state = scratch.path("link/state");
+    let config =
+        json!({"server_url": RELAY, "node_token": TOKEN, "state_dir": state.display().to_string()});
+    let path = write_config(&scratch, &config.to_string(), 0o600);
+    let (code, _, stderr) = connector(&scratch, &["--config".into(), path.clone()]);
+    assert!(!stderr.contains(STARTUP_FAILURE), "{stderr}");
+    assert_ne!(code, Some(2));
+    let binding = zerus_relay::json::digest(format!("{RELAY}\0{TOKEN}"));
+    let stored: String = read_only(&scratch.path("real/state").join(JOURNAL))
+        .query_row(
+            "SELECT value FROM metadata WHERE key='relay_binding'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, binding);
+    let (code, report) = check(&scratch, &path);
+    assert_eq!(code, 0, "{report}");
+    let journal = &report["state"]["journal"];
+    assert_eq!(
+        (journal["status"].as_str(), journal["binding"].as_str()),
+        (Some("readable"), Some("matches")),
+        "{report}"
+    );
+    Journal::open(&state, &binding, EPOCH).unwrap().close();
+}
+
 fn check(scratch: &Scratch, config: &str) -> (i32, Value) {
     let (code, stdout, stderr) = connector(
         scratch,

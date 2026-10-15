@@ -1,8 +1,9 @@
 //! Reads `connector.json` with exactly the acceptance of Python's `json.loads`
-//! (the C scanner): `NaN`, `Infinity` and `-Infinity` literals, lone surrogate
-//! escapes, repeated keys (the last wins) and unbounded integers up to 4,300
-//! digits. A strict parser would refuse files that the Python connector
-//! starts with, for example a `NaN` under a key nobody reads.
+//! (the C scanner) up to 1,000 levels of nesting: `NaN`, `Infinity` and
+//! `-Infinity` literals, lone surrogate escapes, repeated keys (the last wins)
+//! and unbounded integers up to 4,300 digits. A strict parser would refuse
+//! files that the Python connector starts with, for example a `NaN` under a
+//! key nobody reads.
 //!
 //! Untrusted protocol JSON never goes through this reader; it uses the relay
 //! codec (`crate::request`).
@@ -13,7 +14,9 @@ pub struct DecodeError;
 
 /// Python's default `sys.int_info.default_max_str_digits`.
 const MAX_INT_DIGITS: usize = 4300;
-/// Python fails with RecursionError near its default limit of 1,000 frames.
+/// Deeper nesting is refused. Python's own limit depends on its version
+/// (3.14 reads 10,000 levels); no configuration comes near either, and this
+/// recursive reader stays far from the stack limit.
 const MAX_DEPTH: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq)]

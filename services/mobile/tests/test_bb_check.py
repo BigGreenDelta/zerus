@@ -1,5 +1,6 @@
 """Black-box --check: the Rust connector's read-only report, next to a running
-Python connector on the same journal. --check exists only in the Rust
+Python connector on the same journal, and the startup refusals of reviewed
+divergences that Python does not make. --check exists only in the Rust
 connector, so this module runs only in Rust mode."""
 import asyncio
 import hashlib
@@ -114,6 +115,7 @@ class CheckTests(BlackBoxCase):
                 ("boolean poll interval", self.config(poll_interval=True), 0o600, "k"),
                 ("falsy state_dir", self.config(state_dir=[]), 0o600, "k"),
                 ("another user's home", self.config(state_dir="~nosuchuser-blackbox/state"), 0o600, "f"),
+                ("non-ASCII relay host", self.config(server_url="https://r\u00e9lay.example.invalid"), 0o600, "i"),
                 ("group-writable configuration", self.config(), 0o660, "e")):
             with self.subTest(name):
                 report = await self.check(config, code=1, mode=mode)
@@ -121,6 +123,19 @@ class CheckTests(BlackBoxCase):
                 self.assertIn(divergence, {finding["divergence"] for finding in report["configuration"]["findings"]
                                            if finding["level"] == "refusal"})
                 self.assertFalse(self.state_dir.exists())
+        self.assertEqual(self.relay.exchanges, [])
+        self.assertEqual(self.hgs.events(), [])
+
+    async def test_divergent_starts_are_refused_before_any_state_or_network(self):
+        # i: Python would IDNA-encode a non-ASCII relay host and keep retrying it.
+        process = await self.launch(self.config(server_url="https://r\u00e9lay.example.invalid"), ready=False)
+        self.assertEqual(await process.wait_exit(10), 1, process.output())
+        self.assertIn(STARTUP_FAILURE, process.output())
+        # j: argparse takes --conf for --config; only the exact spelling works here.
+        process = self.spawn(["--conf", str(self.write_config(self.config())), "--allow-insecure-localhost"])
+        self.assertEqual(await process.wait_exit(10), 2, process.output())
+        self.assertNotIn(STARTUP_FAILURE, process.output())
+        self.assertFalse(self.state_dir.exists())
         self.assertEqual(self.relay.exchanges, [])
         self.assertEqual(self.hgs.events(), [])
 

@@ -231,9 +231,9 @@ struct Contents {
 }
 
 fn read_journal(path: &Path) -> rusqlite::Result<Contents> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_NOFOLLOW
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    // As in the journal: a symlinked parent directory is fine, and the file
+    // itself passed the lstat checks.
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let db = Connection::open_with_flags(path, flags)?;
     db.busy_timeout(Duration::from_secs(5))?;
     let tx = db.unchecked_transaction()?;

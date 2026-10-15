@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub const DEFAULT_STATE: &str = ".local/state/hgs/mobile-connector";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// Python's `self.server_url`: the transport URL as text.
     pub server_url: String,
@@ -25,6 +25,22 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// `sha256(identity_url + "\0" + node_token)` in hex.
     pub binding: String,
+}
+
+/// The node token is never logged, so it never reaches `{:?}` either.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("server_url", &self.server_url)
+            .field("identity_url", &self.identity_url)
+            .field("transport", &self.transport)
+            .field("token", &"<redacted>")
+            .field("hgs_path", &self.hgs_path)
+            .field("poll_interval", &self.poll_interval)
+            .field("state_dir", &self.state_dir)
+            .field("binding", &self.binding)
+            .finish()
+    }
 }
 
 /// HOME and the working directory, passed explicitly so tests need no
@@ -297,6 +313,18 @@ mod tests {
             state_dir(Some(&pyjson::parse("\"rel\"").unwrap()), &homeless).unwrap(),
             PathBuf::from("/work/rel")
         );
+    }
+
+    #[test]
+    fn debug_output_never_shows_the_token() {
+        let config = pyjson::parse(
+            "{\"server_url\": \"https://relay.example.test\", \"node_token\": \"fixture-node-token\"}",
+        )
+        .unwrap();
+        let config = validate(&config, false, &environment()).unwrap();
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("fixture-node-token"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
     }
 
     #[test]

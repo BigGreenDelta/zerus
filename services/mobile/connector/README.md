@@ -93,8 +93,8 @@ runtime. None survives a rollback to Python.
 |---|---|---|---|
 | e | No checks on `connector.json`. | Refused unless owned by the effective uid and not group- or world-writable, because `hgs_path` is executed; a group- or world-readable file only logs a warning. | `binary::check_reports_reviewed_divergences_as_refusals`, `binary::main_outcomes_match_the_python_connector` (`main-world-writable-config`), `test_bb_check` |
 | f | `state_dir` goes through `expanduser`, so `~user` works. | `~`, `~/...`, absolute and working-directory-relative paths work; `~user` is refused. | `config_vectors` (`state-tilde-user`), `binary` (`main-unknown-home-user`), `test_bb_check` |
-| i | A non-ASCII transport host is IDNA-encoded. | Refused at startup. | `config_vectors::relay_urls_and_bindings_match_the_python_connector`, `binary::check_reports_reviewed_divergences_as_refusals` |
-| j | argparse accepts prefixes such as `--conf` and `--allow`. | Only the exact spellings; anything else exits 2. | `cli` unit tests, `binary` (`main-prefix-abbreviation`) |
+| i | A non-ASCII transport host is IDNA-encoded. | Refused at startup. | `config_vectors::relay_urls_and_bindings_match_the_python_connector`, `binary::check_reports_reviewed_divergences_as_refusals`, `test_bb_check` |
+| j | argparse accepts prefixes such as `--conf` and `--allow`. | Only the exact spellings; anything else exits 2. | `cli` unit tests, `binary` (`main-prefix-abbreviation`), `test_bb_check` |
 | k | `poll_interval: true` passes the number check; a falsy non-string `state_dir` (`false`, `0`, `[]`, `{}`) means the default. | A boolean `poll_interval` and a non-string, non-null `state_dir` are refused; `null` and `""` still mean the default. | `config_vectors` (`poll-true`, `state-zero`, `state-false`), `test_bb_check` |
 
 ## Compatibility notes
@@ -102,16 +102,19 @@ runtime. None survives a rollback to Python.
 - `connector.json` is read with the acceptance of Python's `json.loads`:
   `NaN` and `Infinity`, lone surrogate escapes and repeated keys (the last
   wins) are accepted, integers of more than 4,300 digits refused, so a file the
-  Python connector starts with never stops this one. A known key whose string
-  holds a lone surrogate is refused as invalid: no Rust string, UTF-8 URL or
-  path can carry one, and Python fails on such values at its first use.
+  Python connector starts with never stops this one. Only nesting deeper than
+  1,000 levels, which Python 3.14 still reads, is refused. A known key whose
+  string holds a lone surrogate is refused as invalid: no Rust string, UTF-8
+  URL or path can carry one, and Python fails on such values at its first use.
 - Relay URLs follow Python's `urllib.parse.urlsplit` and `checked_url`
   exactly; the vectors pin both. A non-ASCII host is refused (i), so Python's
   NFKC check of such hosts has no counterpart.
 - The journal is the Python connector's file, opened in place: the same file
-  checks, DDL text, legacy upgrade, restart recovery, pragmas (`synchronous`
-  FULL, `secure_delete` ON, a 5 s busy timeout, foreign keys off), rollback
-  journal mode, retention and caps, `user_version` 0 and no other objects.
+  checks (the state directory and its files are never symlinks, while a
+  symlinked parent such as a linked `~/.local` is fine), DDL text, legacy
+  upgrade, restart recovery, pragmas (`synchronous` FULL, `secure_delete` ON,
+  a 5 s busy timeout, foreign keys off), rollback journal mode, retention and
+  caps, `user_version` 0 and no other objects.
   Receipts are stored with Python's key order and spelling for `state`,
   `result` and `error`; nested native results are sorted, which keeps their
   length.

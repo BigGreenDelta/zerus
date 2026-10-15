@@ -150,9 +150,10 @@ impl Journal {
                 false,
             )?);
         }
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        // No SQLITE_OPEN_NOFOLLOW: it refuses a symlink anywhere in the path,
+        // such as a linked ~/.local, which Python accepts. The file itself was
+        // just opened without following a symlink, as Python checks it.
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let db = Connection::open_with_flags(&path, flags)?;
         // Python's sqlite3 waits 5 s by default; the bundled build enables
         // foreign keys, which Python's connection does not.

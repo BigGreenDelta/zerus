@@ -118,6 +118,7 @@ save them.
 | Family | Job | Key after the prefix | Saved when | Bound |
 | --- | --- | --- | --- | --- |
 | `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
+| `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.85.0 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
 | `arch-cargo-v1-` | Arch package | Month, `Cargo.lock` hash | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `windows-qt-6.10.3-` | Windows | Hash of the Qt pin and installer | Exact key missed; desktop build passed | The pinned Qt archives, no WebEngine |
