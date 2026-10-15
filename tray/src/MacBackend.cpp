@@ -1,7 +1,7 @@
 #include "MacBackend.h"
+#include "ChildProcess.h"
 
 #include <QDir>
-#include <QProcess>
 
 namespace {
 
@@ -58,9 +58,9 @@ bool MacBackend::open(const QString &command, QString *error)
     // завершения osascript значило бы блокировать GUI-поток трея на клике. Скрипт при
     // этом собирается из ровно одной подстановки, которая экранируется (см.
     // appleScriptEscape), -- синтаксически сломать его входными данными нельзя.
-    if (!QProcess::startDetached(QStringLiteral("osascript"),
-                                 {QStringLiteral("-e"), terminalAppScript(command)},
-                                 QDir::homePath())) {
+    if (!ChildProcess::startDetached(QStringLiteral("osascript"),
+                                     {QStringLiteral("-e"), terminalAppScript(command)},
+                                     QDir::homePath())) {
         *error = QStringLiteral("cannot start osascript");
         return false;
     }
