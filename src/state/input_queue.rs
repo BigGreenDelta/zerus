@@ -9,10 +9,22 @@ struct Queue { text: String, keys: Vec<&'static str>, hint: String }
 fn parse(agent: &str, screen: &str) -> Option<Queue> {
     let rows: Vec<_> = screen.lines().collect();
     if agent == "codex" {
-        let start = rows.iter().rposition(|r|r.contains("Messages to be submitted after next tool call")
-            || r.trim() == "• Queued follow-up inputs" || r.contains("Messages to be submitted at end of turn"))?;
-        // Include preceding pending-steer sections when multiple queue types coexist.
-        let start = rows[..=start].iter().rposition(|r|r.contains("Messages to be submitted after next tool call")).unwrap_or(start);
+        // Panel headers begin their row; transcript text quoting them (diffs, source,
+        // tool output) must never select a queue or its Escape action.
+        let header = |r: &str, h: &str| r.trim_start().starts_with(h);
+        const STEER: &str = "• Messages to be submitted after next tool call";
+        let start = rows.iter().rposition(|r|header(r,STEER)
+            || r.trim() == "• Queued follow-up inputs" || header(r,"• Messages to be submitted at end of turn"))?;
+        // Include a pending-steer section only when it directly precedes this one in the
+        // same panel (its indented items and blank separators), never an earlier one.
+        let mut first = start;
+        if !header(rows[start],STEER) {
+            for i in (0..start).rev() {
+                if header(rows[i],STEER) { first = i; break; }
+                if !(rows[i].trim().is_empty() || rows[i].starts_with(' ')) { break; }
+            }
+        }
+        let start = first;
         let end = rows[start+1..].iter().position(|r|r.trim_start().starts_with('›') || r.trim_start().starts_with('╭')).map(|i|start+1+i).unwrap_or(rows.len());
         let block = rows[start..end].join("\n");
         if !block.contains('↳') { return None; }
@@ -134,5 +146,21 @@ mod tests {
         let mixed="• Working (2s • esc to interrupt)\n\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ Steer three\n\n• Queued follow-up inputs\n  ↳ Queued follow-up one\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n";
         let q=parse("codex",mixed).unwrap();
         assert_eq!(q.keys,vec!["Escape"]);assert!(q.text.contains("Steer three")&&q.text.contains("Queued follow-up one"));
+    }
+    #[test]
+    fn codex_queue_headers_in_transcript_never_offer_escape() {
+        // Transcript output (here a displayed diff of a queue fixture) can quote a pending
+        // steer header, its Escape hint and an item marker on one row. Only the panel
+        // itself may decide the action; generic Escape would interrupt the turn.
+        let quoted="• Edited src/state/input_queue.rs (+1 -0)\n    113 +        let codex=\"• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\\n  ↳ hello\\n\\n› \\n\";\n\n";
+        let ordinary=format!("{quoted}• Working (3s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ Queued follow-up one\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n");
+        let q=parse("codex",&ordinary).unwrap();
+        assert!(q.keys.is_empty());assert_eq!(q.hint,"Use Terminal to edit or submit these queued follow-ups");
+        assert!(q.text.starts_with("• Queued follow-up inputs")&&!q.text.contains("113 +"));
+        assert!(parse("codex",&format!("{quoted}• Working (3s • esc to interrupt)\n\n\n› Ask Codex to do anything\n")).is_none());
+        // A real steer panel below the same transcript still offers its displayed Escape.
+        let steer=format!("{quoted}• Working (3s • esc to interrupt)\n\n• Messages to be submitted after next tool call\n  (press esc to interrupt and send immediately)\n  ↳ Steer three\n\n• Queued follow-up inputs\n  ↳ Queued follow-up one\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n");
+        let q=parse("codex",&steer).unwrap();
+        assert_eq!(q.keys,vec!["Escape"]);assert!(q.text.starts_with("• Messages to be submitted after next tool call")&&q.text.contains("Queued follow-up one"));
     }
 }
