@@ -179,16 +179,20 @@ public:
         set(SessionRoles::Draft, draft);
         set(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(session) ? session.backgroundStarted : session.phase == "compacting" ? session.compactionStarted : session.turnStarted);
         set(SessionRoles::Scheduled, scheduled(session, online));
+        set(SessionRoles::OptionalQuestions, optionalQuestionCount(session, online));
         set(SessionRoles::Children, childCount(session, false, online, includeCompleted));
         // Overview cards navigate to a session; the roster opens in its list.
         set(SessionRoles::HasChildren, false);
         const QStringList description{displayTitle(session), alias, session.cmd, status(session, online),
             projectContext(session), item->data(SessionRoles::Detail).toString(), session.model, session.effort,
             childCount(session, true, online, includeCompleted)};
-        const auto git = GitStatusBadge::tooltip(session.gitStatus);
+        QStringList detailLines;
+        if (const auto git = GitStatusBadge::tooltip(session.gitStatus); !git.isEmpty()) detailLines << git;
+        if (const int optional = optionalQuestionCount(session, online); optional > 0) detailLines << optionalQuestionsLabel(optional);
+        const auto details = detailLines.join('\n');
         const auto name = description.join(" / ");
         if (accessibleName() != name) setAccessibleName(name);
-        if (accessibleDescription() != git) setAccessibleDescription(git);
+        if (accessibleDescription() != details) setAccessibleDescription(details);
         // Background polls repeat most cards unchanged; repaint only changed ones.
         if (changed) QWidget::update();
     }
@@ -196,10 +200,17 @@ public:
 protected:
     bool event(QEvent *event) override
     {
-        // The card already shows its fields; like Sessions cards, only the Git badges explain themselves.
+        // The card already shows its fields; like Sessions cards, only the Git and
+        // optional-question badges explain themselves.
         if (event->type() == QEvent::ToolTip) {
             const auto *help = static_cast<QHelpEvent *>(event);
             const auto index = m_model.index(0, 0);
+            const auto question = SessionDelegate::optionalQuestionRect(rect(), index, font(), false);
+            if (question.contains(help->pos())) {
+                QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(
+                    OptionalQuestionBadge::tooltip(index.data(SessionRoles::OptionalQuestions).toInt())), this, question);
+                return true;
+            }
             const auto badge = SessionDelegate::gitStatusRect(rect(), index, font(), false);
             const auto text = badge.contains(help->pos()) ? GitStatusBadge::tooltip(index.data(SessionRoles::GitStatus).toJsonObject()) : QString();
             if (text.isEmpty()) QToolTip::hideText();

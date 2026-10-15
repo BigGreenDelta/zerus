@@ -97,6 +97,11 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             for (int a = 0; a < 360; a += 45) { p.save(); p.translate(12, 12); p.rotate(a); p.drawLine(0, 7, 0, 9); p.restore(); }
         } else if (name == "context-warning") {
             p.drawEllipse(QRectF(3, 3, 18, 18)); p.drawLine(12, 7, 12, 12); p.drawPoint(QPointF(12, 16));
+        } else if (name == "question") {
+            // An optional question: the circle of context-warning with git-unknown's mark.
+            p.drawEllipse(QRectF(3, 3, 18, 18));
+            QPainterPath question; question.moveTo(10, 10); question.cubicTo(10, 7, 15, 7, 15, 10);
+            question.cubicTo(15, 12, 12, 11, 12, 14); p.drawPath(question); p.drawPoint(QPointF(12, 17));
         } else if (name == "attention") {
             QPainterPath path; path.moveTo(6, 10); path.cubicTo(6, 3, 18, 3, 18, 10); path.lineTo(18, 15); path.lineTo(20, 18); path.lineTo(4, 18); path.lineTo(6, 15); path.closeSubpath();
             p.drawPath(path); p.drawArc(QRectF(10, 18, 4, 4), 180*16, 180*16);
