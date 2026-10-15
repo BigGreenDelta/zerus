@@ -3032,6 +3032,28 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     if (statusChanged || previousRoster != childRoster(*entry)) rebuild();
 }
 
+namespace {
+// Why the host reports a native context action ("clear", "compact")
+// unavailable. Older hosts omit the reason: the action keeps its usual text.
+QString contextActionReason(const QJsonObject &details, const QString &action)
+{
+    if (details.value(action + "_context_supported").toBool()) return {};
+    return details.value(action + "_context_reason").toString().simplified();
+}
+QString contextReasonSentence(const QString &reason)
+{
+    return reason.isEmpty() || QStringLiteral(".!?…").contains(reason.back()) ? reason : reason + '.';
+}
+// A disabled context action shows that reason instead of its usual tooltip.
+template<typename Control> void explainContextAction(Control *control, const QString &reason)
+{
+    if (!control->property("usualToolTip").isValid()) control->setProperty("usualToolTip", control->toolTip());
+    // Reported names stay literal, as in the cold-cache line.
+    control->setToolTip(reason.isEmpty() ? control->property("usualToolTip").toString()
+        : Qt::convertFromPlainText(contextReasonSentence(reason), Qt::WhiteSpaceNormal));
+}
+}
+
 void SessionsWindow::renderDetails()
 {
     updateSessionLoading();
@@ -3061,6 +3083,9 @@ void SessionsWindow::renderDetails()
     const auto cacheWarning=entry?CacheStatus::warning(m_details):QString();m_cacheWarning->setText(cacheWarning);m_cacheWarning->setVisible(!cacheWarning.isEmpty());
     m_cacheDetail->setText(CacheStatus::details(m_details,recorded));m_cacheClear->setVisible(!cacheWarning.isEmpty());
     m_cacheClear->setEnabled(entry && entry->online && !m_clearRequest && m_details.value("clear_context_supported").toBool());
+    // An offline host's last inspection no longer explains the action.
+    const bool reported=entry && entry->online;
+    explainContextAction(m_cacheClear,reported?contextActionReason(m_details,"clear"):QString());
     const bool mainContext=m_subagentId.isEmpty();
     m_detailsClear->setVisible(mainContext);m_detailsContext->setVisible(mainContext);
     const bool canClear=mainContext && entry && entry->online && entry->session.state!="archived"
@@ -3068,6 +3093,9 @@ void SessionsWindow::renderDetails()
         && !m_details.value("run_id").toString().isEmpty() && !m_details.value("conversation_id").toString().isEmpty()
         && (m_details.value("clear_context_supported").toBool() || m_details.value("clear_context_dismiss").toBool());
     m_detailsClear->setEnabled(canClear);
+    // A Claude chooser still allows Dismiss and clear.
+    const auto clearReason=reported && !m_details.value("clear_context_dismiss").toBool()?contextActionReason(m_details,"clear"):QString();
+    explainContextAction(m_detailsClear,clearReason);explainContextAction(m_clearAction,clearReason);
     m_detailsClear->setText(m_clearRequest?tr("Clearing…"):tr("Clear session"));
     // A live agent clears natively; a stopped one starts fresh instead.
     const bool stopped=entry && (entry->session.state=="paused" || entry->session.state=="stopped");
@@ -3895,6 +3923,19 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
         compact->setToolTip(tr("Run native /compact, then send this draft only after successful completion."));
         auto *clear=dialog.addButton(tr("Clear context"),QMessageBox::ActionRole);
         clear->setEnabled(m_details.value("clear_context_supported").toBool() && !m_clearRequest);
+        // Name what the host reports blocking each unavailable action, such as
+        // a subagent or tool that is still working.
+        const auto compactReason=contextActionReason(m_details,"compact"),clearReason=contextActionReason(m_details,"clear");
+        explainContextAction(compact,compactReason);explainContextAction(clear,clearReason);
+        QStringList unavailable;
+        if(!compactReason.isEmpty() && compactReason==clearReason)
+            unavailable<<tr("Compact and continue and Clear context are unavailable. %1").arg(contextReasonSentence(compactReason));
+        else {
+            if(!compactReason.isEmpty())unavailable<<tr("Compact and continue is unavailable. %1").arg(contextReasonSentence(compactReason));
+            if(!clearReason.isEmpty())unavailable<<tr("Clear context is unavailable. %1").arg(contextReasonSentence(clearReason));
+        }
+        // Reported names stay literal: the format also applies to this line.
+        if(!unavailable.isEmpty()){dialog.setInformativeText(unavailable.join('\n'));dialog.setTextFormat(Qt::PlainText);}
         auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);dialog.exec();
         if(dialog.clickedButton()!=proceed && dialog.clickedButton()!=clear && dialog.clickedButton()!=compact)return;
         entry=selected();

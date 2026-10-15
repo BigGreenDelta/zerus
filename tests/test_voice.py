@@ -345,6 +345,168 @@ class VoiceWorker(unittest.TestCase):
         self.assertEqual(json.loads(body)["speech"]["profile_revision"], payload["speech"]["profile_revision"])
         self.assertEqual(audio[44:], base64.b64decode(payload["audio"]["data_base64"]))
 
+    def children(self):
+        """This process's voice hgs children, exited ones included."""
+        found = set()
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text()
+            except OSError:
+                continue
+            comm, fields = stat[stat.index("(") + 1:stat.rindex(")")], stat[stat.rindex(")") + 2:].split()
+            if comm == self.hgs.name[:15] and int(fields[1]) == os.getpid():
+                found.add(int(entry.name))
+        return found
+
+    def submitted(self):
+        """Submits a voice message and returns how many workers the submit
+        started. A worker started detached exits at once when it is not needed,
+        so this process adopts it as a subreaper and counts it even after it
+        exited."""
+        import ctypes
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+        before = self.children()
+        self.assertEqual(prctl(36, 1, 0, 0, 0), 0, "PR_SET_CHILD_SUBREAPER")
+        try:
+            self.accepted = self.voice(self.payload())
+            spawned = self.children() - before
+        finally:
+            prctl(36, 0, 0, 0, 0)
+            for pid in self.children() - before:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                os.waitpid(pid, 0)
+        self.assertEqual(self.accepted["state"], "queued")
+        return len(spawned)
+
+    def held(self, name):
+        path = self.state / "voice" / name
+        if not path.exists():
+            return False
+        with path.open("rb") as stream:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+        return False
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "counts the started workers through /proc")
+    def test_submit_starts_no_worker_while_a_worker_runs_or_the_service_worker_waits(self):
+        # The fixture's worker holds the lock: a submit needs no detached one,
+        # and that worker delivers the message.
+        self.assertEqual(self.submitted(), 0, "a running worker needs no detached one")
+        self.settle(self.accepted["id"], {"submitted"})
+        self.stop_worker()
+        self.wait_for(lambda: not self.held("worker.lock"))
+        # Without a worker a submit starts one, so the counts here are observed.
+        self.assertEqual(self.submitted(), 1)
+        self.wait_for(lambda: not self.held("worker.lock"))
+        service = (self.state / "voice/service.lock").open("a")
+        self.addCleanup(service.close)
+        fcntl.flock(service, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertEqual(self.submitted(), 0, "the waiting service worker needs no detached one")
+        self.assertFalse(self.held("worker.lock"))
+
+
+@unittest.skipIf(sys.platform == "win32", "voice messages are not supported on Windows")
+@unittest.skipUnless(HGS.exists(), "Build hgs for isolated voice worker contracts")
+class VoiceWorkerOwnership(unittest.TestCase):
+    """launchd and systemd start the service's worker again 10 s after it exits,
+    so it waits for a worker a client started, and that worker gives way to it.
+    These workers are not the service's; the service's own waiting is pinned by
+    the state::service_worker unit tests."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="hgs-voice-worker-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "state"
+        # The worker refuses voice storage that other users can reach.
+        (self.state / "voice").mkdir(parents=True)
+        (self.state / "voice").chmod(0o700)
+        tools = self.root / "bin"
+        tools.mkdir()
+        # No test here reaches a tmux server; never fall through to the user's.
+        (tools / "tmux").write_text("#!/bin/sh\nexit 1\n")
+        (tools / "tmux").chmod(0o755)
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith(("HGS_", "CLAUDE_", "TMUX"))}
+        self.env.update(HOME=str(self.root), HGS_CONFIG_DIR=str(self.root / "config"),
+                        HGS_STATE_DIR=str(self.state), HGS_PEERS="",
+                        PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.started = []
+        self.addCleanup(self.stop)
+
+    def stop(self):
+        for worker in self.started:
+            if worker.poll() is None:
+                worker.terminate()
+                worker.wait(timeout=10)
+
+    def hold(self, name):
+        handle = open(self.state / "voice" / name, "a")
+        self.addCleanup(handle.close)
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+
+    held = VoiceWorker.held
+
+    def worker(self):
+        worker = subprocess.Popen([str(HGS), "voice", "worker"], env=self.env, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        self.started.append(worker)
+        return worker
+
+    def finished(self, worker):
+        try:
+            _, errors = worker.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            self.fail("the worker kept running")
+        self.assertEqual(worker.returncode, 0, errors)
+
+    def wait_for(self, check, seconds=15):
+        until = time.monotonic() + seconds
+        while not check():
+            if time.monotonic() > until:
+                self.fail("condition not reached")
+            time.sleep(.05)
+
+    def test_worker_exits_while_another_worker_holds_the_lock(self):
+        self.hold("worker.lock")
+        self.finished(self.worker())
+        self.assertFalse(self.held("service.lock"))
+
+    def test_worker_leaves_the_lock_to_a_waiting_service_worker(self):
+        self.hold("service.lock")
+        self.finished(self.worker())
+        self.assertFalse(self.held("worker.lock"))
+
+    def test_worker_refuses_a_linked_lock(self):
+        elsewhere = self.root / "elsewhere.lock"
+        elsewhere.touch()
+        (self.state / "voice/worker.lock").symlink_to(elsewhere)
+        worker = self.worker()
+        try:
+            _, errors = worker.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            self.fail("the worker kept running")
+        self.assertNotEqual(worker.returncode, 0)
+        self.assertIn("hgs:", errors)
+        with elsewhere.open("rb") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_worker_gives_way_once_the_service_worker_waits(self):
+        worker = self.worker()
+        self.wait_for(lambda: self.held("worker.lock"))
+        time.sleep(2.5)
+        self.assertIsNone(worker.poll(), "a worker without a waiting service keeps running")
+        self.hold("service.lock")
+        self.finished(worker)
+        self.assertFalse(self.held("worker.lock"))
+
 
 if __name__ == "__main__":
     unittest.main()
