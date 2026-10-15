@@ -5,6 +5,7 @@ import base64
 import datetime
 import difflib
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -137,6 +140,37 @@ def discover_upstream(manifest):
     return rows
 
 
+DOWNLOAD_ATTEMPTS = 3
+
+
+def download(url, archive):
+    """Fetch a bounded package into archive and return its SHA-512 digest.
+
+    A dropped connection or a server error is retried; the caller still
+    verifies every byte against the pin, so a retry cannot change the package.
+    """
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        digest = hashlib.sha512()
+        size = 0
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response, archive.open('wb') as output:
+                while chunk := response.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_PACKAGE_BYTES:
+                        raise ValueError('Native package exceeds its size limit')
+                    digest.update(chunk)
+                    output.write(chunk)
+            return digest.digest()
+        except urllib.error.HTTPError as error:
+            if error.code < 500 or attempt == DOWNLOAD_ATTEMPTS:
+                raise
+        except (OSError, http.client.HTTPException):
+            if attempt == DOWNLOAD_ATTEMPTS:
+                raise
+        print('Retrying the package download after a dropped connection', flush=True)
+        time.sleep(5 * attempt)
+
+
 def install_native(agent, package, destination):
     """Verify published bytes, then extract exactly one regular native executable."""
     spec = AGENTS[agent]
@@ -151,19 +185,10 @@ def install_native(agent, package, destination):
     expected = base64.b64decode(encoded, validate=True)
     if len(expected) != 64:
         raise ValueError('Invalid package integrity digest')
-    digest = hashlib.sha512()
     destination.mkdir(parents=True, exist_ok=True)
     archive = destination / 'native.tgz'
-    size = 0
     try:
-        with urllib.request.urlopen(url, timeout=60) as response, archive.open('wb') as output:
-            while chunk := response.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_PACKAGE_BYTES:
-                    raise ValueError('Native package exceeds its size limit')
-                digest.update(chunk)
-                output.write(chunk)
-        if digest.digest() != expected:
+        if download(url, archive) != expected:
             raise ValueError('Native package integrity mismatch')
         with tarfile.open(archive, 'r:gz') as tar:
             member = tar.getmember(name)
