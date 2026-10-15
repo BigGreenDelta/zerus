@@ -121,10 +121,10 @@ terminal-safe class. Everything else goes to the agent, bound or not.
   every ⌥ chord go to the agent.
 
 So in Terminal the defaults that work are sections (Ctrl+1…5, Ctrl+,), session
-switching via Ctrl+PgUp/PgDn, Ctrl+Tab, Ctrl+`, zoom reset (Ctrl+0) and
-Ctrl+Shift+Enter; on macOS all ⌘ defaults plus ⌃Tab and ⌃`. Ctrl+` and Ctrl+Tab
-are the keyboard way out of Terminal. Claude's own Ctrl+X Ctrl+S keeps working in
-Terminal because Ctrl+letters always reach the agent.
+switching via Ctrl+PgUp/PgDn, Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+`, zoom reset
+(Ctrl+0) and Ctrl+Shift+Enter; on macOS all ⌘ defaults plus ⌃Tab, ⌃⇧Tab and ⌃`.
+Ctrl+` and Ctrl+Tab are the keyboard way out of Terminal. Claude's own Ctrl+X
+Ctrl+S keeps working in Terminal because Ctrl+letters always reach the agent.
 
 ## Text-field rule
 

@@ -153,7 +153,7 @@ void TestShortcuts::terminalKeepsAgentKeys()
         QVERIFY2(!safe(chord), chord);
     QVERIFY(Shortcuts::terminalSafe(QKeyCombination(Qt::ControlModifier | Qt::ShiftModifier, Qt::Key_Backtab), Platform::Linux));
     // macOS: every Command chord but copy and paste; Control only for tabs.
-    for (const auto &chord : {"Ctrl+K", "Ctrl+1", "Ctrl+Alt+Down", "Ctrl+Shift+Return", "Meta+Tab", "Meta+Shift+Tab", "Meta+`"})
+    for (const auto &chord : {"Ctrl+K", "Ctrl+1", "Ctrl+Alt+Down", "Ctrl+Shift+Return", "Meta+Tab", "Meta+Shift+Tab", "Meta+`", "Meta+Shift+`"})
         QVERIFY2(safe(chord, Platform::MacOS), chord);
     for (const auto &chord : {"Ctrl+C", "Ctrl+V", "Meta+X", "Meta+S", "Meta+R", "Alt+Up", "Esc", "F1"})
         QVERIFY2(!safe(chord, Platform::MacOS), chord);

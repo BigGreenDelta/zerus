@@ -561,7 +561,8 @@ Windows, a key reaches Zerus only when a command uses it and it is Ctrl or
 Ctrl+Shift with a digit, Tab, PgUp, PgDn, ` or comma, or Ctrl+Shift+Enter.
 Ctrl+letters (Ctrl+C, Ctrl+R, the agent's own Ctrl+X Ctrl+S), Alt chords,
 Escape, Enter and function keys go to the agent. On macOS every Command chord
-except ⌘C and ⌘V reaches Zerus, and of the Control chords only ⌃Tab and ⌃`.
+except ⌘C and ⌘V reaches Zerus, and of the Control chords only ⌃Tab, ⌃⇧Tab, ⌃`
+and ⌃⇧`.
 
 **Text fields keep their editing keys.** In the message field and search, a
 command's key wins over the field except for copy, cut, paste, undo, redo,

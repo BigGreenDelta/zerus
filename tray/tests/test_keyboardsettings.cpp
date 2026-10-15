@@ -331,7 +331,7 @@ void TestKeyboardSettings::terminalRuleFollowsThePlatform()
     QCOMPARE(Shortcuts::terminalRule(Platform::Windows), other);
     for (const char *part : {"Ctrl or Ctrl+Shift with a digit", "Tab", "Page Up", "Page Down", "backtick", "comma", "Ctrl+Shift+Enter"})
         QVERIFY2(other.contains(QLatin1String(part)), part);
-    for (const char *part : {"⌘", "except ⌘C and ⌘V", "⌃Tab", "⌃⇧Tab", "⌃`", "Every other ⌃ chord and every ⌥ chord goes to the agent"})
+    for (const char *part : {"⌘", "except ⌘C and ⌘V", "⌃Tab", "⌃⇧Tab", "⌃`", "⌃⇧`", "Every other ⌃ chord and every ⌥ chord goes to the agent"})
         QVERIFY2(mac.contains(QString::fromUtf8(part)), part);
     QVERIFY(!mac.contains("Page Up"));
     const auto native = [](Qt::KeyboardModifiers modifiers, Qt::Key key) {

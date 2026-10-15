@@ -201,7 +201,7 @@ QString text(const QKeySequence &sequence) { return sequence.toString(QKeySequen
 QString terminalRule(Platform platform)
 {
     if (platform == Platform::MacOS)
-        return QCoreApplication::translate("Shortcuts", "In Terminal, a command's chord reaches Zerus only when it uses ⌘ (except ⌘C and ⌘V) or is ⌃Tab, ⌃⇧Tab or ⌃`. Every other ⌃ chord and every ⌥ chord goes to the agent, bound or not.");
+        return QCoreApplication::translate("Shortcuts", "In Terminal, a command's chord reaches Zerus only when it uses ⌘ (except ⌘C and ⌘V) or is ⌃Tab, ⌃⇧Tab, ⌃` or ⌃⇧`. Every other ⌃ chord and every ⌥ chord goes to the agent, bound or not.");
     return QCoreApplication::translate("Shortcuts", "In Terminal, a command's chord reaches Zerus only when it is Ctrl or Ctrl+Shift with a digit, Tab, Page Up, Page Down, backtick or comma, or Ctrl+Shift+Enter. Everything else goes to the agent, bound or not.");
 }
 }
