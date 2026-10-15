@@ -88,6 +88,7 @@ pub const SPEECH_CONFIG: &[&str] = &[
 /// What the native CLI offers, from its help text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
+    pub archive: bool,
     pub lifecycle: bool,
     pub terminal: bool,
     pub recovery: bool,
@@ -112,6 +113,7 @@ impl Flags {
     pub fn from_help(help: &str) -> Flags {
         let has = |marker: &str| help.contains(marker);
         Flags {
+            archive: has("archives --json"),
             lifecycle: help
                 .lines()
                 .any(|line| line.contains("session-action <session> --json")),
@@ -143,6 +145,7 @@ impl Flags {
             }
         };
         remove(self.worktree, WORKTREES);
+        remove(self.archive, &["archive_list"]);
         remove(self.directory_create, &["directory_create"]);
         remove(self.lifecycle, LIFECYCLE);
         remove(self.terminal, TERMINAL);

@@ -365,6 +365,28 @@ def capability_map(runs: dict) -> dict:
             "markers": markers}
 
 
+async def legacy_snapshot_vector(root: Path) -> bytes:
+    """Current Python's full legacy-native heartbeat, separate from paging."""
+    help_answer = help_text(skip=("archive_list",))
+    with fixed_clock():
+        node = make_connector(root)
+    try:
+        node.accounts.wall, node.accounts.clock = (lambda: EPOCH), (lambda: MONOTONIC)
+        node._native = snapshot_native(help_answer)
+        node.fleet.local_id = MACHINE
+        with fixed_clock():
+            snapshot = await node.snapshot()
+        return document({"kind": "snapshot", "id": "heartbeat-legacy", "native": {
+            "ls --json --local": LISTING, "swarm get": SWARM, "account ls": ACCOUNTS,
+            "inspect " + SESSION: inspection(), "--help": help_answer},
+            "peers_discovered": True, "expect": {
+                "heartbeat": {**node.fleet.heartbeat(snapshot), "presence": node.presence},
+                "calls": sorted(node._native.calls, key=compact)}})
+    finally:
+        await node.accounts.close()
+        node.journal.close()
+
+
 def operation_tables(runs: dict) -> bytes:
     sets = {
         "OPERATIONS": context.OPERATIONS, "READ_OPERATIONS": context.READ_OPERATIONS,
@@ -2404,6 +2426,7 @@ def _render(oracle: dict | None, relay: dict) -> dict[str, bytes]:
     files = {}
     with scratch() as root:
         runs = asyncio.run(snapshot_runs(root / "snapshots"))
+        files["heartbeat-legacy.json"] = asyncio.run(legacy_snapshot_vector(root / "legacy-snapshot"))
         executions = asyncio.run(execute_runs(root / "executions"))
         files["identities.json"] = identity_vectors(root / "identities")
         files["sizes.jsonl"] = size_vectors(root)

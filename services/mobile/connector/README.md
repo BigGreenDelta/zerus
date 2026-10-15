@@ -17,6 +17,12 @@ required") and never advertised, until its slice implements it
 (`src/capabilities.rs`, `IMPLEMENTED`). Nothing packages or starts this binary
 yet; gateways keep running the Python connector.
 
+Archive paging is also deferred: `archive_list` is refused and never
+advertised, even when the CLI offers it. Heartbeats retain the legacy listing
+and report `mobile_archive.available=false`. The full legacy heartbeat is
+compared with current Python's captured legacy-native contract in
+`heartbeat-legacy.json`; the paged Python oracle remains separate.
+
 ## Build and test
 
 ```sh

@@ -236,6 +236,12 @@ impl<N: Native + 'static> Connector<N> {
             Some(Value::Array(sessions)) => sessions,
             _ => return Err(INVALID_SNAPSHOT.into()),
         };
+        // Archive paging belongs to a later slice. Preserve the legacy listing
+        // and explicitly report that this connector has no bounded preview.
+        snapshot.insert(
+            "mobile_archive".into(),
+            json!({"schema": 1, "available": false, "loaded": 0, "total": null, "partial": false}),
+        );
         // Native SSH aliases and the peer-of-peer inventory stay local.
         snapshot.remove("peers");
         // Ended launches carry the last screen lines of failed starts for the

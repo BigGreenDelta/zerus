@@ -66,6 +66,7 @@ strict JSON reader can load it. JSONL files hold one record per line.
 | `receipts.json` | Fixed receipt texts exactly as stored and uploaded. |
 | `validation/*.jsonl` | Submissions with the connector's decision and receipt error, the frozen relay-oracle decision and the Rust relay's decision, with the source test where a case comes from a `validate_request` call site. |
 | `projections.jsonl` | Pure projection functions, the heartbeat snapshot, and `Connector.execute` runs with their native argv, stdin payloads, options and stored receipts. |
+| `heartbeat-legacy.json` | Full current-Python heartbeat and native calls with the archive paging marker absent; retains archived rows and project memberships for the Rust connector's legacy listing contract. |
 | `sizes.jsonl` | Python's byte measures and the limits that flip on one byte. |
 | `operations.json` | Operation sets, SQL predicates, constants and the help-marker to capability map. |
 | `errors.json` | AST catalogue of literal error texts, log formats, and library messages that reach receipts. |

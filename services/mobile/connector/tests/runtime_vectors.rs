@@ -20,6 +20,13 @@ use zerus_mobile_connector::runtime::{Connector, Settings};
 use zerus_mobile_connector::{accounts, inspection, projects, validate};
 
 const BINDING: &str = "fixture-binding";
+const ARCHIVE_CASES: [&str; 5] = [
+    "archive_list/extra",
+    "archive_list/invalid-range",
+    "archive_list/nonempty-session",
+    "archive_list/too-large",
+    "valid/archive_list",
+];
 
 /// Native answers by argv, recording every call with Python's option names.
 #[derive(Default)]
@@ -180,6 +187,7 @@ fn parse(text: &str) -> Value {
 fn validation_matches_the_python_connector_for_implemented_operations() {
     let mut checked = 0;
     let mut refused = 0;
+    let mut archive_refusals = Vec::new();
     for family in ["control", "conversation", "envelope", "launch", "speech"] {
         let rows = records(&format!("validation/{family}.jsonl"));
         let base = rows.iter().find(|row| row["kind"] == "context").unwrap()["context"].clone();
@@ -220,6 +228,9 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             let result = validate::validate(&request, &request_id, &context);
             if !capabilities::implemented(operation) {
                 assert_eq!(result, Err(validate::UNSUPPORTED.into()), "{id}");
+                if operation == "archive_list" {
+                    archive_refusals.push(id.to_owned());
+                }
                 refused += 1;
                 continue;
             }
@@ -250,7 +261,9 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (54, 186));
+    assert_eq!((checked, refused), (54, 191));
+    archive_refusals.sort();
+    assert_eq!(archive_refusals, ARCHIVE_CASES);
 }
 
 /// Python's `capable(node)`: every flag, the vectors' sessions and archive.
@@ -372,11 +385,42 @@ async fn later_operations_are_refused_without_native_calls() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn archive_pages_are_refused_without_native_calls() {
+    let mut checked = Vec::new();
+    for case in records("validation/envelope.jsonl") {
+        if case["submission"]["operation"] != "archive_list" {
+            continue;
+        }
+        let harness = harness(case["id"].as_str().unwrap());
+        capable(&harness.connector);
+        let mut request = case["submission"].as_object().unwrap().clone();
+        request.remove("computer_id");
+        let outcome = harness
+            .connector
+            .execute(Value::Object(request))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Finished(
+                json!({"state": "failed", "result": null, "error": "unsupported operation"})
+            ),
+            "{}",
+            case["id"]
+        );
+        assert!(harness.connector.native.calls.borrow().is_empty());
+        checked.push(case["id"].as_str().unwrap().to_owned());
+    }
+    checked.sort();
+    assert_eq!(checked, ARCHIVE_CASES);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn the_heartbeat_snapshot_matches_the_python_connector() {
-    let vector = projections()
-        .into_iter()
-        .find(|row| row["kind"] == "snapshot")
-        .unwrap();
+    // C2 has no archive paging implementation. Compare every legacy snapshot
+    // field and native call against current Python with the legacy native ABI.
+    // The separate paged oracle remains intact for the later archive slice.
+    let vector = document("heartbeat-legacy.json");
     let harness = harness("snapshot");
     let connector = &harness.connector;
     for (command, answer) in vector["native"].as_object().unwrap() {
