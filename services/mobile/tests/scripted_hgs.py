@@ -5,11 +5,16 @@ It never runs hgs, tmux or an agent. Every call re-reads `script.json` from the
 directory named by ZERUS_SCRIPTED_HGS_DIR, answers with the first matching rule
 and appends `start` and `end` events to `calls.jsonl` there.
 
-A rule matches with `argv` (exact) or `prefix` (leading arguments); `times`
-limits how many calls it answers under its `id` (its index without one). It
-may set:
+A rule matches with `argv` (exact) or `prefix` (leading arguments), and with
+`stdin_has` only when stdin is a JSON object holding those fields and values;
+`times` limits how many calls it answers under its `id` (its index without
+one). It may set:
 
 - `stdout` (a JSON value) or `stdout_text`, `stderr` (text) and `exit` (status);
+- `stdout_path`: write that file's bytes verbatim, for answers too large to
+  keep in the script;
+- `exec`: run that program (a real hgs) with the same arguments, stdin and
+  environment, and answer with its stdout, stderr and exit status;
 - `delay` (seconds to work before answering);
 - `kill_parent`: after writing stdout, SIGKILL the parent before exiting, but
   only when the parent's pid is the one in `connector.pid`. This leaves a
@@ -24,6 +29,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import time
 
@@ -70,7 +76,11 @@ def substitute(value, argv, stdin):
     return value
 
 
-def matches(rule, argv):
+def matches(rule, argv, stdin):
+    fields = rule.get("stdin_has", {})
+    if fields and not (isinstance(stdin, dict) and all(key in stdin and stdin[key] == value
+                                                       for key, value in fields.items())):
+        return False
     if "argv" in rule:
         return argv == rule["argv"]
     prefix = rule.get("prefix", [])
@@ -103,7 +113,7 @@ def main():
         chosen = rule = None
         for index, candidate in enumerate(rules):
             key = candidate.get("id", index)
-            if matches(candidate, argv) and ("times" not in candidate or previous.get(key, 0) < candidate["times"]):
+            if matches(candidate, argv, stdin) and ("times" not in candidate or previous.get(key, 0) < candidate["times"]):
                 chosen, rule = key, candidate
                 break
         append(log, {"event": "start", "pid": os.getpid(), "ppid": os.getppid(), "argv": argv,
@@ -117,19 +127,25 @@ def main():
         return 2
     if rule.get("delay"):
         time.sleep(float(rule["delay"]))
-    if "stdout" in rule:
-        output = json.dumps(substitute(rule["stdout"], argv, stdin)) + "\n"
-    else:
-        output = rule.get("stdout_text", "")
+    errors = rule.get("stderr", "").encode()
     code = int(rule.get("exit", 0))
+    if "exec" in rule:
+        native = subprocess.run([rule["exec"], *argv], input=raw, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, errors, code = native.stdout, native.stderr, native.returncode
+    elif "stdout" in rule:
+        output = (json.dumps(substitute(rule["stdout"], argv, stdin)) + "\n").encode()
+    elif "stdout_path" in rule:
+        output = Path(rule["stdout_path"]).read_bytes()
+    else:
+        output = rule.get("stdout_text", "").encode()
     # Recorded before writing: a connector that has already gone cannot read
     # it, and the event still proves this call finished on its own.
     record(log, {"event": "end", "pid": os.getpid(), "argv": argv, "exit": code, "at": time.time()})
     try:
-        if rule.get("stderr"):
-            sys.stderr.write(rule["stderr"])
+        if errors:
+            sys.stderr.buffer.write(errors)
             sys.stderr.flush()
-        sys.stdout.write(output)
+        sys.stdout.buffer.write(output)
         sys.stdout.flush()
     except (BrokenPipeError, OSError):
         pass
