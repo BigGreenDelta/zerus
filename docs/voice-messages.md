@@ -74,6 +74,16 @@ The speech machine may be another configured computer, resolved and verified by
 its stable machine UUID from the conversation computer. Client SSH aliases are
 never interpreted as server-side routes.
 
+An installed per-user service runs `hgs voice worker`: `hgs-voice.service` on
+Linux, `com.hgdev.hgs-voice` on macOS. On Linux a submission starts that
+service; otherwise it starts a detached worker, unless a worker already runs or
+the service's worker waits to take over. The service's own worker (the process
+launchd or systemd reports for the job or unit; only when systemd cannot
+answer does the unit's control group decide) never exits because another
+worker holds the worker lock, which would make the service manager start it
+again every 10 seconds: it waits for the lock, and a detached worker hands over
+to it between rounds.
+
 The workflow states are `queued`, `transcribing`, `ready`, `waiting_agent`,
 `delivering`, `submitted`, `failed`, `cancelled` and `uncertain`. The same message
 UUID survives every transition. Only recognized text is delivered to the native

@@ -935,6 +935,13 @@ the current settings without retrying the stale request or showing a failure.
 `hgs [@host] settings SESSION --json` exposes the same scoped operation.
 
 Native clear/compact operations are capability-gated and require exact identity.
+When they are unavailable, `hgs inspect` reports why in `clear_context_reason` and
+`compact_context_reason`, empty while the action is available. A busy session names
+what keeps it from Ready: the main agent's turn and tools, and each working subagent
+with its current tool, up to three, then a count. The desktop shows the reason as
+the tooltip of the disabled **Clear context**, **Clear session** and
+**Compact and continue** actions, and as a line in the cold-cache confirmation.
+Hosts from before these fields leave the actions disabled without a reason.
 **Clear session** requires confirmation naming the session and host, preserves
 unsent drafts and rechecks identity. While Claude shows an approval, question or
 another chooser, **Clear session** asks for a separate **Dismiss and clear**
@@ -1698,10 +1705,13 @@ JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.
 On Linux, client policy refreshes start the configured user service without
 restarting an active executor. A detached worker remains the fallback when no
 installed service or usable user manager is available; refreshes start none
-while a worker runs. The service's own worker (the job launchd or the unit
-systemd runs) never exits because another worker holds the executor lock, which
-would make the service manager start it again every 10 seconds: it waits for the
-lock, and a detached worker hands over to it between rounds.
+while a worker runs. The service's own worker (the job's process as launchd
+reports it, or the unit's main process as systemd reports it, not another
+process in the unit's control group; only when systemd cannot answer does the
+control group decide) never exits because another worker holds
+the executor lock, which would make the service manager start it again every 10
+seconds: it waits for the lock, and a detached worker hands over to it between
+rounds.
 
 Open Zerus clients synchronize policy versions over HGS/SSH every 15 seconds;
 offline machines catch up later and executors keep their saved local policy.

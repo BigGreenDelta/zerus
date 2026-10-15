@@ -5,10 +5,11 @@
 //! be started again every few seconds, forever. It waits for the lock instead,
 //! holding a standby lock meanwhile, and any other worker gives way to it
 //! between rounds, so the service ends up owning the work.
-use super::{lock_file, Result};
+use super::Result;
 use crate::platform::FileLock;
 use fs2::FileExt;
 use std::{
+    fs::File,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -51,8 +52,8 @@ pub(super) fn waiting(standby: &Path) -> bool {
     crate::status::locked(standby)
 }
 
-fn take(path: &Path) -> Result<Option<FileLock>> {
-    let file = lock_file(path)?;
+fn take(open: &impl Fn(&Path) -> Result<File>, path: &Path) -> Result<Option<FileLock>> {
+    let file = open(path)?;
     Ok(file
         .try_lock_exclusive()
         .is_ok()
@@ -63,10 +64,12 @@ fn take(path: &Path) -> Result<Option<FileLock>> {
 /// the service's worker waits for the lock, or another worker holds it and
 /// this one is not the service's. The service's worker waits instead, polling
 /// every `poll`, until it holds the lock or its executable is `replaced`.
-/// `is_service` runs only when another worker holds the lock.
+/// `open` opens either lock file, so that each kind of worker keeps its own
+/// rules for them. `is_service` runs only when another worker holds the lock.
 pub(super) fn acquire(
     lock_path: &Path,
     standby_path: &Path,
+    open: impl Fn(&Path) -> Result<File>,
     is_service: impl FnOnce() -> bool,
     replaced: impl Fn() -> bool,
     poll: Duration,
@@ -76,7 +79,7 @@ pub(super) fn acquire(
     if waiting(standby_path) {
         return Ok(None);
     }
-    let lock = lock_file(lock_path)?;
+    let lock = open(lock_path)?;
     let owner = |lock, standby| Owner {
         _lock: FileLock::held(lock),
         standby,
@@ -97,7 +100,7 @@ pub(super) fn acquire(
         // A worker probing the standby lock at this instant only delays it;
         // without it the worker still waits, and is not started again.
         if standby.is_none() {
-            standby = take(standby_path).unwrap_or(None);
+            standby = take(&open, standby_path).unwrap_or(None);
         }
         if replaced() {
             return Ok(None);
@@ -124,6 +127,38 @@ fn systemd_unit(cgroup: &str) -> Option<&str> {
     })
 }
 
+/// The unit's main process ID from `systemctl show --property=MainPID`: 0 when
+/// the unit has none.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn systemd_main_pid(show: &str) -> Option<u32> {
+    show.lines()
+        .find_map(|line| line.strip_prefix("MainPID=")?.trim().parse().ok())
+}
+
+/// The main process ID that `command`, a `systemctl show`, reports, or `None`
+/// when it cannot tell within a few seconds.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn main_pid(command: &mut std::process::Command) -> Option<u32> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    match crate::platform::run_bounded(command, [1 << 16, 1 << 16], deadline, &|| false) {
+        Ok((status, out, _)) if status.success() => {
+            systemd_main_pid(&String::from_utf8_lossy(&out))
+        }
+        _ => None,
+    }
+}
+
+/// Whether process `pid` in control group `cgroup` is the worker of `unit`.
+/// systemd keeps every process a unit starts in its control group, with its
+/// environment (INVOCATION_ID too), so a worker started detached from inside
+/// the unit is there as well: only the unit's main process is its worker.
+/// `main` asks systemd for it, and only for a process in the unit's group;
+/// when systemd cannot tell, the control group decides.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn unit_worker(cgroup: &str, unit: &str, pid: u32, main: impl FnOnce() -> Option<u32>) -> bool {
+    systemd_unit(cgroup) == Some(unit) && main().is_none_or(|main| main == pid)
+}
+
 /// The job's own process ID from `launchctl print`, one level inside its
 /// braces, as the desktop's single-instance check reads it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -148,11 +183,21 @@ fn launchd_pid(description: &str) -> Option<u32> {
     pid
 }
 
-/// systemd keeps a unit's processes in its control group.
+/// systemd reports the unit's main process; a worker started detached from
+/// inside the unit shares its control group.
 #[cfg(target_os = "linux")]
 fn current(service: &Service) -> bool {
-    std::fs::read_to_string("/proc/self/cgroup")
-        .is_ok_and(|cgroup| systemd_unit(&cgroup) == Some(service.unit))
+    let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") else {
+        return false;
+    };
+    unit_worker(&cgroup, service.unit, std::process::id(), || {
+        main_pid(std::process::Command::new("systemctl").args([
+            "--user",
+            "show",
+            "--property=MainPID",
+            service.unit,
+        ]))
+    })
 }
 /// launchd reports the job's process; a worker a client started detached has
 /// the same parent and may have inherited the job's environment.
@@ -180,7 +225,8 @@ fn current(_: &Service) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::File, time::Instant};
+    use crate::state::lock_file;
+    use std::time::Instant;
 
     #[test]
     fn systemd_unit_is_the_leaf_of_the_systemd_hierarchy() {
@@ -203,6 +249,68 @@ mod tests {
         assert_eq!(systemd_unit("4:cpu,cpuacct:/hgs-recovery.service\n"), None);
         assert_eq!(systemd_unit("0::/\n"), None);
         assert_eq!(systemd_unit(""), None);
+    }
+
+    #[test]
+    fn systemd_main_pid_reads_the_property() {
+        assert_eq!(systemd_main_pid("MainPID=4242\n"), Some(4242));
+        assert_eq!(
+            systemd_main_pid("Id=hgs-voice.service\nMainPID=7\n"),
+            Some(7)
+        );
+        // The unit has no main process: the answer is still known.
+        assert_eq!(systemd_main_pid("MainPID=0\n"), Some(0));
+        assert_eq!(systemd_main_pid("MainPID=\n"), None);
+        assert_eq!(systemd_main_pid("MainPID=x\n"), None);
+        assert_eq!(systemd_main_pid("ExecMainPID=7\n"), None);
+        assert_eq!(systemd_main_pid(""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn main_pid_is_unknown_unless_the_command_reports_it() {
+        use std::process::Command;
+        let sh = |script: &str| {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            command
+        };
+        assert_eq!(main_pid(&mut sh("printf 'MainPID=42\\n'")), Some(42));
+        assert_eq!(main_pid(&mut sh("printf 'MainPID=42\\n'; exit 1")), None);
+        assert_eq!(main_pid(&mut sh("echo unrelated")), None);
+        assert_eq!(main_pid(&mut Command::new("/nonexistent/systemctl")), None);
+    }
+
+    #[test]
+    fn only_the_units_main_process_is_its_worker() {
+        let manager = format!("/user.slice/user-1000.slice/user{}1000.service", '@');
+        let unit = format!("0::{manager}/app.slice/hgs-voice.service\n");
+        let unit = unit.as_str();
+        // The service's worker: its own process is the unit's main one.
+        assert!(unit_worker(unit, "hgs-voice.service", 4242, || Some(4242)));
+        // A worker that a process inside the unit started detached shares its
+        // control group, not its main process.
+        assert!(!unit_worker(unit, "hgs-voice.service", 4343, || Some(4242)));
+        // Left in the group after the main process exited.
+        assert!(!unit_worker(unit, "hgs-voice.service", 4343, || Some(0)));
+        // systemd cannot tell: the control group decides.
+        assert!(unit_worker(unit, "hgs-voice.service", 4343, || None));
+        // Another unit, or a login session: systemd is not asked.
+        let not_asked = || -> Option<u32> { panic!("not asked") };
+        assert!(!unit_worker(unit, "hgs-recovery.service", 4242, not_asked));
+        let ssh = "0::/user.slice/user-1000.slice/session-4.scope\n";
+        assert!(!unit_worker(ssh, "hgs-voice.service", 4242, not_asked));
+        assert!(!unit_worker("", "hgs-voice.service", 4242, not_asked));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_test_process_is_no_service_worker() {
+        let service = Service {
+            unit: "hgs-service-worker-test.service",
+            label: "com.example.hgs-service-worker-test",
+        };
+        assert!(!service.is_current());
     }
 
     #[test]
@@ -270,9 +378,16 @@ mod tests {
     #[test]
     fn free_lock_is_taken_without_asking_the_service_manager() {
         let f = fixture();
-        let owner = acquire(&f.lock, &f.standby, || panic!("not asked"), || false, POLL)
-            .unwrap()
-            .expect("free lock");
+        let owner = acquire(
+            &f.lock,
+            &f.standby,
+            lock_file,
+            || panic!("not asked"),
+            || false,
+            POLL,
+        )
+        .unwrap()
+        .expect("free lock");
         assert!(crate::status::locked(&f.lock));
         assert!(!owner.yields());
         // The service's worker starts waiting: this worker gives way between rounds.
@@ -292,6 +407,7 @@ mod tests {
         let owner = acquire(
             &f.lock,
             &f.standby,
+            lock_file,
             || {
                 asked = true;
                 false
@@ -309,7 +425,15 @@ mod tests {
     fn other_worker_leaves_the_free_lock_to_a_waiting_service_worker() {
         let f = fixture();
         let _service = hold(&f.standby);
-        let owner = acquire(&f.lock, &f.standby, || panic!("not asked"), || false, POLL).unwrap();
+        let owner = acquire(
+            &f.lock,
+            &f.standby,
+            lock_file,
+            || panic!("not asked"),
+            || false,
+            POLL,
+        )
+        .unwrap();
         assert!(owner.is_none());
         assert!(!crate::status::locked(&f.lock));
     }
@@ -319,7 +443,9 @@ mod tests {
         let f = fixture();
         let executor = hold(&f.lock);
         let (lock, standby) = (f.lock.clone(), f.standby.clone());
-        let waiter = std::thread::spawn(move || acquire(&lock, &standby, || true, || false, POLL));
+        let waiter = std::thread::spawn(move || {
+            acquire(&lock, &standby, lock_file, || true, || false, POLL)
+        });
         // While it waits it announces itself, and other workers give way to it.
         eventually(|| waiting(&f.standby));
         std::thread::sleep(POLL * 5);
@@ -348,6 +474,7 @@ mod tests {
                 acquire(
                     &f.lock,
                     &f.standby,
+                    lock_file,
                     || true,
                     || replaced.load(std::sync::atomic::Ordering::SeqCst),
                     POLL,
@@ -360,5 +487,40 @@ mod tests {
         // The service manager starts the new version, which waits in turn.
         assert!(!waiting(&f.standby));
         assert!(crate::status::locked(&f.lock));
+    }
+
+    #[test]
+    fn the_callers_opener_opens_both_lock_files() {
+        let f = fixture();
+        let executor = hold(&f.lock);
+        let opened = std::sync::Mutex::new(Vec::new());
+        let open = |path: &Path| {
+            opened.lock().unwrap().push(path.to_path_buf());
+            lock_file(path)
+        };
+        let owner = std::thread::scope(|scope| {
+            let waiter =
+                scope.spawn(|| acquire(&f.lock, &f.standby, open, || true, || false, POLL));
+            eventually(|| waiting(&f.standby));
+            drop(executor);
+            waiter.join().unwrap().unwrap()
+        });
+        assert!(owner.is_some());
+        assert_eq!(
+            opened.lock().unwrap()[..2],
+            [f.lock.clone(), f.standby.clone()]
+        );
+        drop(owner);
+        // A lock file the opener refuses ends the attempt with its error.
+        let refused = acquire(
+            &f.lock,
+            &f.standby,
+            |_| Err("refused".into()),
+            || panic!("not asked"),
+            || false,
+            POLL,
+        );
+        assert_eq!(refused.err().as_deref(), Some("refused"));
+        assert!(!crate::status::locked(&f.lock));
     }
 }

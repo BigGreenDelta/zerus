@@ -1197,6 +1197,10 @@ class ActivitySummary(Harness):
         busy = json.loads(self.hgs("inspect", name))
         self.assertFalse(busy["clear_context_supported"])
         self.assertFalse(busy["compact_context_supported"])
+        # Both actions name the child that keeps the session from Ready.
+        waiting = "Wait until the agent reports Ready. Still working: subagent \u201cworkflow-subagent\u201d"
+        self.assertEqual(busy["clear_context_reason"], waiting)
+        self.assertEqual(busy["compact_context_reason"], waiting)
         record = self.binding(name)
         session = record["conversation_id"]
         account = self.root / ".claude"
@@ -1242,6 +1246,7 @@ class ActivitySummary(Harness):
         self.assertEqual(idle["reply_id"], before["reply_id"])
         self.assertTrue(idle["clear_context_supported"])
         self.assertTrue(idle["compact_context_supported"])
+        self.assertEqual((idle["clear_context_reason"], idle["compact_context_reason"]), ("", ""))
 
     def test_native_child_completion_and_resume_reconcile_missing_hooks(self):
         name = self.start()
