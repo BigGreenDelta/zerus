@@ -24,6 +24,25 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 rustix = { version = "1", features = ["fs", "process"] }
 # request_hash needs exact number spelling; the codec sorts keys itself.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+# One current_thread runtime: requests run in claim order, as in Python.
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "process", "signal", "sync", "io-util"] }
+# Function forms of select and join, so tokio needs no proc-macro crates.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+# HTTP/1.1 only, no proxy support and no redirect following (reqwest, the url
+# crate and IDNA stay out; README divergence i).
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+# rustls with ring and the system roots (SSL_CERT_FILE and SSL_CERT_DIR on
+# Linux, the Keychain on macOS); no aws-lc-rs, no OpenSSL.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
+rustls-native-certs = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["macros", "test-util"] }
 
 [profile.release]
 strip = true

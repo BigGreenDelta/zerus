@@ -2,12 +2,8 @@
 //! `--check [--json]` for a read-only report. Log lines follow Python's
 //! `%(levelname)s: %(message)s` on stderr.
 use std::process::ExitCode;
+use zerus_mobile_connector::runtime::log;
 use zerus_mobile_connector::{check, cli, config, start, STARTUP_FAILURE};
-
-/// The relay runtime comes with the next connector slice; until then a valid
-/// start stops here, after the journal checks, without contacting the relay.
-const NOT_IMPLEMENTED: &str =
-    "Connector runtime is not available in this build; keep using the Python connector";
 
 fn main() -> ExitCode {
     let command = match cli::parse(std::env::args_os().skip(1)) {
@@ -43,15 +39,13 @@ fn main() -> ExitCode {
                     .map_err(|_| ())
                 });
             let Ok(started) = started else {
-                eprintln!("ERROR: {STARTUP_FAILURE}");
+                log("ERROR", STARTUP_FAILURE);
                 return ExitCode::from(1);
             };
             for warning in &started.warnings {
-                eprintln!("WARNING: {warning}");
+                log("WARNING", warning);
             }
-            started.journal.close();
-            eprintln!("ERROR: {NOT_IMPLEMENTED}");
-            return ExitCode::from(1);
+            return ExitCode::from(zerus_mobile_connector::run(started));
         }
     }
     ExitCode::SUCCESS
