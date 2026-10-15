@@ -27,8 +27,9 @@ cargo +1.85.0 test --locked --no-default-features --test codec
 ```
 
 The image and the infra packager copy only `Cargo.toml`, `Cargo.lock`, `.cargo`
-and `src/**/*.rs|*.sql`, so the crate has no build script, declared test target
-or include from outside `src/` (`tests/test_source_relay_inputs.py`).
+and `src/**/*.rs|*.sql`, so the crate has no build script, declared test target,
+path dependency or include from outside `src/`
+([the source check](../../../tests/test_source_relay_inputs.py)).
 
 The PostgreSQL contract is explicit, never silently treated as passed by a local
 SQLite run. Point `ZERUS_RELAY_TEST_DATABASE_URL` at a **disposable** PostgreSQL

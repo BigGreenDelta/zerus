@@ -2,8 +2,9 @@
 
 services/mobile/Dockerfile and the infra relay packager copy only the manifest,
 Cargo.lock, .cargo and src/**/*.rs|*.sql, and the packager skips any path with a
-`tests` component. A build script, a declared test target or an include from
-outside src/ would then fail only in the image or on the relay host.
+`tests` component. A build script, a declared test target, a path dependency or
+an include from outside src/ would then fail only in the image or on the relay
+host.
 """
 import re
 import tomllib
@@ -29,9 +30,18 @@ class RelayInputsTest(unittest.TestCase):
         targets = [manifest.get("lib", {}), *manifest.get("bin", [])]
         for target in targets:
             self.assertTrue(target.get("path", "src/").startswith("src/"), target)
-        for table in ("dependencies", "dev-dependencies", "build-dependencies"):
-            for name, spec in manifest.get(table, {}).items():
+        # Platform-specific tables, [patch] and [replace] can name a path too.
+        kinds = ("dependencies", "dev-dependencies", "build-dependencies")
+        tables = [manifest.get(kind, {}) for kind in kinds]
+        tables += [platform.get(kind, {}) for platform in manifest.get("target", {}).values() for kind in kinds]
+        tables += [*manifest.get("patch", {}).values(), manifest.get("replace", {})]
+        for table in tables:
+            for name, spec in table.items():
                 self.assertNotIn("path", spec if isinstance(spec, dict) else {}, name)
+        for name in ("config", "config.toml"):
+            if (RELAY / ".cargo" / name).exists():
+                settings = tomllib.loads((RELAY / ".cargo" / name).read_text())
+                self.assertFalse({"paths", "patch"} & set(settings), name)
 
     def test_sources_include_only_packaged_files(self):
         for path in SOURCES.rglob("*"):
