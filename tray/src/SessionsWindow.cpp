@@ -4004,7 +4004,9 @@ void SessionsWindow::deliverMessage(const QString &key, const QString &host, con
                 }
                 const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId);
                 m_pendingMessages.insert(request, {key, runId, conversationId});
-                if (m_push && m_push->key == key && !m_push->request && m_push->text == text) m_push->request = request;
+                if (m_push && m_push->key == key && !m_push->request && m_push->text == text) {
+                    m_push->request = request; m_push->run = runId; m_push->conversation = conversationId;
+                }
                 auto &messages = m_localMessages[key];
                 for(int i=messages.size();i-- >0;) {
                     const auto previous=messages[i].toObject();

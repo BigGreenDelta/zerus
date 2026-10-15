@@ -98,8 +98,8 @@ signals:
     void settingsTerminalRequested(const QString &sessionKey);
     void settingsRequested(const QString &sessionKey, const QString &model, const QString &effort);
     void sendRequested(const QString &sessionKey, const QString &text, const QList<MessageAttachment> &attachments);
-    // Right before sendRequested of a message sent with push.
-    void pushRequested(const QString &sessionKey);
+    // Right before sendRequested of a message sent with push, with its text.
+    void pushRequested(const QString &sessionKey, const QString &text);
     // Push with an empty field and no attachments: send the existing queue now.
     void sendNowRequested(const QString &sessionKey);
     // hasDraft(sessionKey) changed.

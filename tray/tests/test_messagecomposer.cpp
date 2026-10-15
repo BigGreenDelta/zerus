@@ -981,13 +981,13 @@ void TestMessageComposer::pushWithTextEmitsPushThenSend()
 {
     RoutedWindow window("arch/push"); auto *composer = window.composer; composer->setPushEnabled(true);
     QStringList order;
-    connect(composer, &MessageComposer::pushRequested, composer, [&](const QString &key) { order << "push:" + key; });
+    connect(composer, &MessageComposer::pushRequested, composer, [&](const QString &key, const QString &text) { order << "push:" + key + ":" + text; });
     connect(composer, &MessageComposer::sendRequested, composer, [&](const QString &key, const QString &text) { order << "send:" + key + ":" + text; });
     connect(composer, &MessageComposer::sendNowRequested, composer, [&](const QString &key) { order << "now:" + key; });
     window.widget.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window.widget));
     auto *editor = composer->editor(); editor->setPlainText("Push this message"); editor->setFocus(); QTRY_VERIFY(editor->hasFocus());
     pressCommand(window.widget, "message.push");
-    QCOMPARE(order, (QStringList{"push:arch/push", "send:arch/push:Push this message"}));
+    QCOMPARE(order, (QStringList{"push:arch/push:Push this message", "send:arch/push:Push this message"}));
     QCOMPARE(editor->toPlainText(), QString("Push this message"));
     // A send that cannot start leaves no push behind for the next ordinary send.
     order.clear(); composer->setAvailability(false, "Agent needs approval; use the terminal.");

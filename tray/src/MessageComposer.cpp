@@ -624,7 +624,7 @@ void MessageComposer::send()
     if (m_suggestions.contains(m_key)) {
         m_dismissedSuggestions.insert(m_key, m_suggestions.take(m_key).at); updatePlaceholder();
     }
-    if (std::exchange(m_pushing, false)) emit pushRequested(m_key);
+    if (std::exchange(m_pushing, false)) emit pushRequested(m_key, draft.text);
     emit sendRequested(m_key, draft.text, draft.attachments);
 }
 

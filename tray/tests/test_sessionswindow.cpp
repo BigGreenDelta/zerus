@@ -417,9 +417,15 @@ private slots:
     void cheatSheetOpensKeyboardSettings();
     void pushSendsNowWhenTheMessageIsQueued();
     void pushIgnoresQueuesWithoutTheMessage();
-    void pushDropsAfterRunChange();
+    void pushIgnoresTheMessageInsideAnotherWord();
+    void pushDropsAfterSessionIdentityChange_data();
+    void pushDropsAfterSessionIdentityChange();
+    void pushFollowsTheRunThatTakesTheMessage();
     void pushStaysWithItsSession();
     void pushTimesOut();
+    void pushOutlastedBySlowSend();
+    void pushOfAttachmentsAloneSendsWithoutPush();
+    void pushDropsWhenSendFails_data();
     void pushDropsWhenSendFails();
     void preview();
     void controlConsolePreview();
@@ -8522,20 +8528,24 @@ bool focusedIn(const QWidget *area)
 }
 
 // A copy of the base fixture for Send and push now: inspect answers from
-// <script>.details, send confirms each message (or refuses it), and send-now
-// records each queue id in <script>.send-now.
+// <script>.details, send answers each message as the mode says, resume starts
+// nothing, and send-now records each queue id in <script>.send-now.
 struct PushFixture {
+    enum class Send { Confirm, Slow, Refuse, Uncertain };
     QTemporaryDir dir; QString script = dir.filePath("hgs");
     QJsonObject details{{"tracked", true}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"}, {"runtime_state", "live"},
         {"process_state", "running"}, {"activity", "busy"}, {"phase", "working"}, {"events", QJsonArray{}}, {"cursor", 0}};
-    bool install(const QString &base, bool refuse = false)
+    bool install(const QString &base, Send mode = Send::Confirm)
     {
         QFile original(base); if (!original.open(QIODevice::ReadOnly)) return false;
-        const QByteArray send = refuse ? " print('refused by the fixture',file=sys.stderr);sys.exit(1)\n"
-            : " print(json.dumps({'status':'submitted','request_id':payload['request_id'],'name':a[1],'run_id':payload['expected_run_id'],"
-              "'conversation_id':payload['expected_conversation_id']}))\n";
+        const QByteArray confirm = " print(json.dumps({'status':'submitted','request_id':payload['request_id'],'name':a[1],'run_id':payload['expected_run_id'],"
+            "'conversation_id':payload['expected_conversation_id'],'first_message':not payload['expected_conversation_id']}))\n";
+        const QByteArray send = mode == Send::Refuse ? " print('refused by the fixture',file=sys.stderr);sys.exit(1)\n"
+            : mode == Send::Uncertain ? " print('delivery uncertain: the fixture lost the reply',file=sys.stderr);sys.exit(1)\n"
+            : mode == Send::Slow ? " __import__('time').sleep(3)\n" + confirm : confirm;
         return FakeCli::install(script, original.readAll().replace("if False:pass\n", "if False:pass\n"
             "elif c=='inspect':print(open(__file__+'.details').read())\n"
+            "elif c=='resume':pass\n"
             "elif c=='send':\n payload=json.loads(sys.stdin.read())\n" + send +
             "elif c=='send-now':\n payload=json.loads(sys.stdin.read())\n"
             " open(__file__+'.send-now','a').write(payload['queue_id']+'\\n')\n"
@@ -8570,13 +8580,20 @@ void inspectPush(SessionsWindow &window, const PushFixture &fixture)
     settleSelectedInspection(window.findChild<MessageComposer *>("messageComposer"), window.findChild<HgsClient *>(), {}, "codex/hgs/dashboard", fixture.details);
 }
 
+// Presses Send and push now in the message field.
+void pressPush(SessionsWindow &window)
+{
+    auto *editor = window.findChild<MessageComposer *>("messageComposer")->editor();
+    editor->setFocus(); QTRY_VERIFY(editor->hasFocus());
+    const auto push = ShortcutRegistry::instance().keys("message.push").value(0); QCOMPARE(push.count(), 2);
+    for (int i = 0; i < push.count(); ++i) pressChord(&window, push[i].key(), push[i].keyboardModifiers());
+}
+
 // Types text into the message field and presses Send and push now.
 void pushMessage(SessionsWindow &window, const QString &text)
 {
-    auto *composer = window.findChild<MessageComposer *>("messageComposer");
-    setComposerText(composer, text); composer->editor()->setFocus(); QTRY_VERIFY(composer->editor()->hasFocus());
-    const auto push = ShortcutRegistry::instance().keys("message.push").value(0); QCOMPARE(push.count(), 2);
-    for (int i = 0; i < push.count(); ++i) pressChord(&window, push[i].key(), push[i].keyboardModifiers());
+    setComposerText(window.findChild<MessageComposer *>("messageComposer"), text);
+    pressPush(window);
 }
 
 bool pushes(const MessageComposer *composer)
@@ -8586,6 +8603,7 @@ bool pushes(const MessageComposer *composer)
 }
 
 QString notice(SessionsWindow &window) { return window.findChild<QLabel *>("notice")->text(); }
+bool noticeIsError(SessionsWindow &window) { return window.findChild<QLabel *>("notice")->property("error").toBool(); }
 }
 
 void TestSessionsWindow::shortcutsSwitchSections()
@@ -8999,17 +9017,82 @@ void TestSessionsWindow::pushIgnoresQueuesWithoutTheMessage()
     QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
 }
 
-void TestSessionsWindow::pushDropsAfterRunChange()
+void TestSessionsWindow::pushIgnoresTheMessageInsideAnotherWord()
 {
+    PushFixture fixture; QVERIFY(fixture.install(script()));
+    SessionsWindow window(FakeCli::program(fixture.script)); openPushSession(window, fleet(), fixture);
+    if (QTest::currentTestFailed()) return;
+    QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
+    pushMessage(window, "test suite on CI"); if (QTest::currentTestFailed()) return;
+    QTRY_COMPARE(delivered.size(), 1);
+    // Only longer words hold the message: "latest" ends with "test", "CI-only" begins with "CI".
+    fixture.queue("q-latest", "❯ Rerun the latest suite on CI"); inspectPush(window, fixture);
+    fixture.queue("q-longer", "❯ test suite on CI-only runners"); inspectPush(window, fixture);
+    QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
+    fixture.queue("q-match", "❯ Rerun the latest suite on CI\n❯ test suite on CI"); inspectPush(window, fixture);
+    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+}
+
+void TestSessionsWindow::pushDropsAfterSessionIdentityChange_data()
+{
+    QTest::addColumn<QString>("field"); QTest::addColumn<QString>("value");
+    QTest::newRow("run") << QStringLiteral("run_id") << QStringLiteral("run-two");
+    QTest::newRow("conversation") << QStringLiteral("conversation_id") << QStringLiteral("conversation-two");
+}
+
+void TestSessionsWindow::pushDropsAfterSessionIdentityChange()
+{
+    QFETCH(QString, field); QFETCH(QString, value);
     PushFixture fixture; QVERIFY(fixture.install(script()));
     SessionsWindow window(FakeCli::program(fixture.script)); openPushSession(window, fleet(), fixture);
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "Check the deployment logs again"); if (QTest::currentTestFailed()) return;
     QTRY_COMPARE(delivered.size(), 1);
-    fixture.details["run_id"] = "run-two"; fixture.queue("q-new-run", "❯ Check the deployment logs again"); inspectPush(window, fixture);
-    QTRY_COMPARE(notice(window), QString("The message was not pushed: the session changed"));
+    fixture.details[field] = value; fixture.queue("q-changed", "❯ Check the deployment logs again"); inspectPush(window, fixture);
+    QTRY_COMPARE(notice(window), QString("The message was not pushed: the session changed")); QVERIFY(noticeIsError(window));
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
+}
+
+void TestSessionsWindow::pushFollowsTheRunThatTakesTheMessage()
+{
+    PushFixture fixture;
+    fixture.details = QJsonObject{{"tracked", true}, {"run_id", "run-old"}, {"conversation_id", "conversation-old"},
+        {"runtime_state", "saved"}, {"process_state", "exited"}, {"events", QJsonArray{}}, {"cursor", 0}};
+    QVERIFY(fixture.install(script()));
+    auto state = fleet(); auto box = state.local();
+    const auto setSession = [&](const QString &value, const QString &run, const QString &conversation) {
+        for (auto &session : box.sessions) if (session.name == "codex/hgs/dashboard") {
+            session.state = value; session.runId = run; session.conversationId = conversation; session.currentTool.clear();
+            session.processState = value == "running" ? "running" : "exited"; session.activity = "idle"; session.phase = "idle";
+        }
+        state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    };
+    setSession("stopped", "run-old", "conversation-old");
+    SessionsWindow window(FakeCli::program(fixture.script)); openPushSession(window, state, fixture);
+    if (QTest::currentTestFailed()) return;
+    auto *client = window.findChild<HgsClient *>();
+    QSignalSpy delivered(client, &HgsClient::messageSent), writes(client, &HgsClient::writeDone);
+    // The stopped session starts fresh before it takes the message: the push waits for that run.
+    QTimer answer; answer.setInterval(10);
+    connect(&answer, &QTimer::timeout, &window, [&] {
+        auto *dialog = window.findChild<QMessageBox *>("startToSendConfirm");
+        if (!dialog || !dialog->isVisible()) return;
+        answer.stop(); dialog->findChild<QPushButton *>("startFreshAndSend")->click();
+    });
+    answer.start();
+    pushMessage(window, "Start over and outline the plan"); if (QTest::currentTestFailed()) return;
+    QVERIFY(!answer.isActive());
+    QTRY_COMPARE(writes.size(), 1);
+    setSession("running", "run-new", {}); window.setFleet(state);
+    fixture.details = QJsonObject{{"tracked", true}, {"run_id", "run-new"}, {"runtime_state", "live"}, {"process_state", "running"},
+        {"activity", "idle"}, {"phase", "idle"}, {"first_message_can_send", true}, {"events", QJsonArray{}}, {"cursor", 0}};
+    inspectPush(window, fixture);
+    QTRY_COMPARE(delivered.size(), 1); QCOMPARE(delivered[0][3].toJsonObject()["run_id"].toString(), QString("run-new"));
+    // The message began the run's first conversation, which the push adopts.
+    fixture.details["conversation_id"] = "conversation-new"; fixture.details["activity"] = "busy"; fixture.details["phase"] = "working";
+    fixture.queue("q-fresh", "❯ Start over and outline the plan"); inspectPush(window, fixture);
+    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-fresh"});
 }
 
 void TestSessionsWindow::pushStaysWithItsSession()
@@ -9028,8 +9111,8 @@ void TestSessionsWindow::pushStaysWithItsSession()
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     // Its own session is no longer inspected, so the push ends at its deadline.
     window.setPushTimeoutForTests(0);
-    QTRY_COMPARE(notice(window), QString("The message was sent without push: it did not appear in the agent's queue"));
-    QCOMPARE(fixture.sentNow(), QStringList());
+    QTRY_COMPARE(notice(window), QString("The message was sent without push: the agent did not offer to send it now within 20 seconds"));
+    QVERIFY(!noticeIsError(window)); QCOMPARE(fixture.sentNow(), QStringList());
 }
 
 void TestSessionsWindow::pushTimesOut()
@@ -9041,24 +9124,66 @@ void TestSessionsWindow::pushTimesOut()
     pushMessage(window, "Wait for the agent to finish the build"); if (QTest::currentTestFailed()) return;
     QTRY_COMPARE(delivered.size(), 1);
     fixture.queue("q-other", "❯ Something else"); inspectPush(window, fixture);
-    // The agent may already have taken the message: without a snapshot holding it, the push ends.
+    // A snapshot that arrives after the deadline never sends the queue, even one holding the message.
     window.setPushTimeoutForTests(0);
-    QTRY_COMPARE(notice(window), QString("The message was sent without push: it did not appear in the agent's queue"));
     fixture.queue("q-late", "❯ Wait for the agent to finish the build"); inspectPush(window, fixture);
+    QTRY_COMPARE(notice(window), QString("The message was sent without push: the agent did not offer to send it now within 20 seconds"));
+    QVERIFY(!noticeIsError(window));
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
+}
+
+void TestSessionsWindow::pushOutlastedBySlowSend()
+{
+    PushFixture fixture; QVERIFY(fixture.install(script(), PushFixture::Send::Slow));
+    SessionsWindow window(FakeCli::program(fixture.script)); openPushSession(window, fleet(), fixture);
+    if (QTest::currentTestFailed()) return;
+    QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
+    pushMessage(window, "Rebuild the documentation site"); if (QTest::currentTestFailed()) return;
+    // The push gives up while the send is still on its way; the message itself still goes out.
+    window.setPushTimeoutForTests(0);
+    QTRY_COMPARE(notice(window), QString("The message will be sent without push: it was not delivered within 20 seconds"));
+    QVERIFY(!noticeIsError(window)); QCOMPARE(delivered.size(), 0);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, 15000);
+    fixture.queue("q-slow", "❯ Rebuild the documentation site"); inspectPush(window, fixture);
+    QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
+}
+
+void TestSessionsWindow::pushOfAttachmentsAloneSendsWithoutPush()
+{
+    PushFixture fixture; QVERIFY(fixture.install(script()));
+    SessionsWindow window(FakeCli::program(fixture.script)); openPushSession(window, fleet(), fixture);
+    if (QTest::currentTestFailed()) return;
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
+    setComposerText(composer, {}); QVERIFY(composer->addAttachment("notes.txt", "text/plain", "release notes"));
+    QCOMPARE(composer->editor()->toPlainText().trimmed(), QString("[File #1]"));
+    pressPush(window); if (QTest::currentTestFailed()) return;
+    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE(notice(window), QString("Sent without push: a message without text cannot be found in the agent's queue"));
+    QVERIFY(!noticeIsError(window));
+    fixture.queue("q-file", "❯ [File #1] (Read the attached file at \"/fixture/notes.txt\")"); inspectPush(window, fixture);
+    QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
+}
+
+void TestSessionsWindow::pushDropsWhenSendFails_data()
+{
+    QTest::addColumn<bool>("uncertain"); QTest::addColumn<QString>("expected");
+    QTest::newRow("refused") << false << QStringLiteral("The message was not pushed: sending did not complete");
+    QTest::newRow("uncertain") << true << QStringLiteral("The message was not pushed: delivery is not confirmed");
 }
 
 void TestSessionsWindow::pushDropsWhenSendFails()
 {
-    PushFixture fixture; QVERIFY(fixture.install(script(), true));
+    QFETCH(bool, uncertain); QFETCH(QString, expected);
+    PushFixture fixture; QVERIFY(fixture.install(script(), uncertain ? PushFixture::Send::Uncertain : PushFixture::Send::Refuse));
     SessionsWindow window(FakeCli::program(fixture.script)); openPushSession(window, fleet(), fixture);
     if (QTest::currentTestFailed()) return;
     auto *composer = window.findChild<MessageComposer *>("messageComposer");
     QSignalSpy failed(window.findChild<HgsClient *>(), &HgsClient::messageFailed);
-    pushMessage(window, "This message is refused"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(failed.size(), 1); QVERIFY(!failed[0][4].toBool());
-    QTRY_COMPARE(notice(window), QString("The message was not pushed: sending did not complete"));
-    fixture.queue("q-old", "❯ This message is refused"); inspectPush(window, fixture);
+    pushMessage(window, "This message is not delivered"); if (QTest::currentTestFailed()) return;
+    QTRY_COMPARE(failed.size(), 1); QCOMPARE(failed[0][4].toBool(), uncertain);
+    QTRY_COMPARE(notice(window), expected); QVERIFY(noticeIsError(window));
+    fixture.queue("q-old", "❯ This message is not delivered"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
-    QTRY_COMPARE(composer->editor()->toPlainText(), QString("This message is refused"));
+    QTRY_COMPARE(composer->editor()->toPlainText(), QString("This message is not delivered"));
 }

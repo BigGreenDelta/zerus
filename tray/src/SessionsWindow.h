@@ -303,11 +303,12 @@ private:
     ShortcutRouter *m_shortcutRouter = nullptr;
     // Send and push now (message.push): after its send is confirmed, the first
     // snapshot of this session's native queue that holds the message is sent now.
+    // Run and conversation are those its send request expects.
     struct PendingPush { QString key, run, conversation, text; quint64 request = 0; bool confirmed = false; QDeadlineTimer deadline; };
     std::optional<PendingPush> m_push;
     QTimer m_pushTimer;
     int m_pushTimeout = 20000;
-    void armPush(const QString &key);
+    void armPush(const QString &key, const QString &text);
     void pushSendFinished(quint64 request, bool ok, bool uncertain);
     void pushInspected(const QString &key, const QJsonObject &details);
     void checkPush();

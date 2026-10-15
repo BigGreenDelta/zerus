@@ -19,6 +19,7 @@
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QStackedWidget>
 #include <QTabWidget>
@@ -89,15 +90,39 @@ private:
     QHash<QString, QAction *> m_actions;
 };
 
-// A native queue holds a message when it shows the message start: its first 24
-// non-space characters, with whitespace normalized on both sides, since the
-// agent's terminal wraps and indents queued text.
+// What a native queue shows of a message as typed: the first 24 non-space
+// characters of its first text between attachment references, whitespace
+// normalized, since the CLI puts each file's location after its reference and
+// the agent's terminal wraps and indents queued text. whole: the text ends there.
+// Empty for a message of attachments only.
+struct MessageStart { QString text; bool whole = false; };
+MessageStart messageStart(const QString &message)
+{
+    static const QRegularExpression reference(QStringLiteral(R"(\[(?:Image|File) #\d+\])"));
+    for (const auto &part : message.split(reference)) {
+        const QString text = part.simplified();
+        if (text.isEmpty()) continue;
+        qsizetype end = 0;
+        for (int count = 0; end < text.size() && count < 24; ++end) if (!text[end].isSpace()) ++count;
+        return {text.left(end), end == text.size()};
+    }
+    return {};
+}
+
+// A queue holds a message when its start begins a line or word of the queue text
+// ("test" inside "latest" does not), and a whole short text also ends one there.
 bool queueHolds(const QString &queue, const QString &message)
 {
-    const QString text = message.simplified();
-    qsizetype end = 0;
-    for (int count = 0; end < text.size() && count < 24; ++end) if (!text[end].isSpace()) ++count;
-    return end > 0 && queue.simplified().contains(text.left(end));
+    const auto start = messageStart(message);
+    if (start.text.isEmpty()) return false;
+    const QString shown = queue.simplified();
+    // Queue rows begin with the agent's own markers, such as Claude's ❯ and Codex's ↳.
+    const auto boundary = [&shown](qsizetype at) {
+        return at < 0 || at >= shown.size() || shown[at].isSpace() || QStringView(u"❯↳›•>").contains(shown[at]);
+    };
+    for (qsizetype at = shown.indexOf(start.text); at >= 0; at = shown.indexOf(start.text, at + 1))
+        if (boundary(at - 1) && (!start.whole || boundary(at + start.text.size()))) return true;
+    return false;
 }
 }
 
@@ -200,12 +225,12 @@ bool SessionsWindow::sendQueuedNow(const QString &queueId)
     return true;
 }
 
-// The message field emits pushRequested right before it sends the message;
-// deliverMessage records the request that carries it.
-void SessionsWindow::armPush(const QString &key)
+// The message field emits pushRequested with the text right before it sends it;
+// deliverMessage records the request that carries it, with its run and conversation.
+void SessionsWindow::armPush(const QString &key, const QString &text)
 {
     if (key != m_selectedKey) return;
-    m_push = PendingPush{key, m_details["run_id"].toString(), m_details["conversation_id"].toString(), m_composer->editor()->toPlainText()};
+    m_push = PendingPush{key, {}, {}, text};
     m_push->deadline.setRemainingTime(m_pushTimeout);
     m_pushTimer.start();
 }
@@ -213,7 +238,10 @@ void SessionsWindow::armPush(const QString &key)
 void SessionsWindow::pushSendFinished(quint64 request, bool ok, bool uncertain)
 {
     if (!m_push || !request || m_push->request != request) return;
-    if (!ok || uncertain) endPush(tr("The message was not pushed: sending did not complete"), true);
+    if (uncertain) endPush(tr("The message was not pushed: delivery is not confirmed"), true);
+    else if (!ok) endPush(tr("The message was not pushed: sending did not complete"), true);
+    // Without text, nothing tells the message apart in the agent's queue.
+    else if (messageStart(m_push->text).text.isEmpty()) endPush(tr("Sent without push: a message without text cannot be found in the agent's queue"));
     else m_push->confirmed = true;
 }
 
@@ -222,31 +250,34 @@ void SessionsWindow::pushSendFinished(quint64 request, bool ok, bool uncertain)
 void SessionsWindow::pushInspected(const QString &key, const QJsonObject &details)
 {
     if (!m_push || m_push->key != key) return;
-    const QString conversation = details["conversation_id"].toString();
-    // A first message may give the run its conversation.
-    if (details["run_id"].toString() != m_push->run || (!m_push->conversation.isEmpty() && conversation != m_push->conversation)) {
-        endPush(tr("The message was not pushed: the session changed"), true); return;
+    // Until its request, starting or compacting may still change the run that
+    // takes the message. A run's first message adopts its conversation.
+    if (m_push->request) {
+        const QString conversation = details["conversation_id"].toString();
+        if (details["run_id"].toString() != m_push->run || (!m_push->conversation.isEmpty() && conversation != m_push->conversation)) {
+            endPush(tr("The message was not pushed: the session changed"), true); return;
+        }
+        m_push->conversation = conversation;
     }
-    m_push->conversation = conversation;
+    checkPush(); // A snapshot after the deadline never sends the queue.
+    if (!m_push || !m_push->confirmed) return;
     const auto queue = details["input_queue"].toObject();
-    if (m_push->confirmed && queue["can_send_now"].toBool() && queueHolds(queue["text"].toString(), m_push->text)) {
-        endPush(); sendQueuedNow(queue["id"].toString()); return;
-    }
-    checkPush();
+    if (queue["can_send_now"].toBool() && queueHolds(queue["text"].toString(), m_push->text)) { endPush(); sendQueuedNow(queue["id"].toString()); }
 }
 
 void SessionsWindow::checkPush()
 {
     if (!m_push) { m_pushTimer.stop(); return; }
-    if (m_push->deadline.hasExpired()) {
-        // The agent may already have taken the message.
-        if (m_push->confirmed) endPush(tr("The message was sent without push: it did not appear in the agent's queue"));
-        else endPush(tr("The message was not pushed: sending did not complete"), true);
-        return;
-    }
-    // The send ended before reaching the agent: refused, or a dialog was cancelled.
-    if (!m_push->request && !QApplication::activeModalWidget() && !m_composer->isSending(m_push->key) && !m_composer->isWaitingToSend(m_push->key))
-        endPush(tr("The message was not pushed: sending did not complete"), true);
+    // The send is still on its way: in transport, behind a dialog, or waiting for
+    // the session to start or compact.
+    const bool sending = m_push->request ? m_pendingMessages.contains(m_push->request)
+        : QApplication::activeModalWidget() || m_composer->isSending(m_push->key) || m_composer->isWaitingToSend(m_push->key);
+    // It ended before reaching the agent: refused, or a dialog was cancelled.
+    if (!m_push->confirmed && !sending) endPush(tr("The message was not pushed: sending did not complete"), true);
+    else if (!m_push->deadline.hasExpired()) return;
+    // Neither notice is an error: the message itself was or will be sent.
+    else if (m_push->confirmed) endPush(tr("The message was sent without push: the agent did not offer to send it now within 20 seconds"));
+    else endPush(tr("The message will be sent without push: it was not delivered within 20 seconds"));
 }
 
 void SessionsWindow::endPush(const QString &notice, bool error)
