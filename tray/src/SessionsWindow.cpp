@@ -2869,6 +2869,7 @@ void SessionsWindow::selectSession()
     if (key != m_selectedKey) {
         m_readCandidate.clear(); m_readSelectionKey.clear();
         m_selectedKey = key; m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear();
+        rememberRecentSession(key);
         m_processPollAge.invalidate();m_inspectionAge.invalidate();
         m_childrenHtml.clear(); m_activityView->setSessionKey(key); m_composer->setSessionKey(key);
         const auto *entry = selected();

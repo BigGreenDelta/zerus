@@ -43,6 +43,9 @@ class MachinesPage;
 class MachineFilter;
 class DashboardPage;
 class AccountsPage;
+class GoToDialog;
+class ShortcutsDialog;
+struct GoToItem;
 class SessionSearch;
 class IdentityBadge;
 class SwarmButton;
@@ -278,8 +281,15 @@ private:
     // Empty queueId: the selected session's current snapshot. False, with a
     // notice when nothing can be sent, unless a request is already running.
     bool sendQueuedNow(const QString &queueId = {});
+    // Go to and the cheat sheet, in SessionsWindowGoTo.cpp.
     void openGoTo();
     void openShortcutHelp();
+    QList<GoToItem> goToItems() const;
+    void activateGoTo(const GoToItem &item);
+    void rememberRecentSession(const QString &key);
+    GoToDialog *m_goTo = nullptr;
+    ShortcutsDialog *m_shortcutHelp = nullptr;
+    QStringList m_recentSessions;
     void stepSession(int direction, bool attention);
     void stepTab(int direction);
     void stepFocus(int direction);

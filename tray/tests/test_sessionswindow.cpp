@@ -30,6 +30,8 @@
 #include <QSplitter>
 #include <QScrollBar>
 #include <QListWidget>
+#include "GoToDialog.h"
+#include "ShortcutsDialog.h"
 #include <QPushButton>
 #include <QPlainTextEdit>
 #include <QSettings>
@@ -411,6 +413,8 @@ private slots:
     void reboundChordsApplyAtOnce();
     void projectListKeepsItsReorderKeys();
     void focusChordsCycleSessionAreas();
+    void goToOpensAndActivatesItems();
+    void cheatSheetOpensKeyboardSettings();
     void preview();
     void controlConsolePreview();
 private:
@@ -8813,4 +8817,73 @@ void TestSessionsWindow::focusChordsCycleSessionAreas()
     // Other pages have no such areas.
     window.findChild<QPushButton *>("brandMark")->click(); auto *focus = QApplication::focusWidget();
     pressChord(&window, Qt::Key_F6); QCOMPARE(QApplication::focusWidget(), focus);
+}
+
+void TestSessionsWindow::goToOpensAndActivatesItems()
+{
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    auto *pages = workspacePages(window); QVERIFY(pages);
+    auto *sessions = window.findChild<SessionList *>(); QVERIFY(sessions);
+    pressChord(&window, Qt::Key_K, Qt::ControlModifier);
+    auto *goTo = window.findChild<GoToDialog *>("goToDialog"); QVERIFY(goTo);
+    QTRY_VERIFY(goTo->isVisible());
+    auto *results = goTo->findChild<QListWidget *>("goToResults"); QVERIFY(results);
+    QStringList titles; QList<GoToItem> items;
+    for (int row = 0; row < results->count(); ++row) {
+        const auto item = results->item(row)->data(Qt::UserRole).value<GoToItem>();
+        items << item; titles << item.title;
+    }
+    QVERIFY(titles.contains("hgs / dashboard"));
+    QVERIFY(titles.contains("infra / review"));
+    QVERIFY(titles.contains("Next session"));
+    QVERIFY(titles.contains("Projects"));
+    QVERIFY(titles.contains("mac"));
+    // Message-field commands and Go to itself do not apply from the popup.
+    QVERIFY(!titles.contains("Send message"));
+    QVERIFY(!titles.contains("Go to…"));
+    const auto find = [&](GoToItem::Kind kind, const QString &title) {
+        for (const auto &item : items) if (item.kind == kind && item.title == title) return item;
+        return GoToItem{};
+    };
+    goTo->hide();
+    // A session on another computer opens and becomes the selection.
+    const auto review = find(GoToItem::Session, "infra / review"); QCOMPARE(review.id, QString("mac\nclaude/infra/review"));
+    emit goTo->activated(review);
+    QCOMPARE(pages->currentIndex(), 0);
+    QCOMPARE(currentSessionKey(sessions), review.id);
+    // A section and a command run like their chords.
+    emit goTo->activated(find(GoToItem::Section, "Projects"));
+    QCOMPARE(pages->currentIndex(), 1);
+    emit goTo->activated(find(GoToItem::Section, "Sessions"));
+    auto *toggle = window.findChild<QPushButton *>("toggleInspector"); QVERIFY(toggle);
+    const bool panel = toggle->isChecked();
+    emit goTo->activated(find(GoToItem::Command, "Show or hide the side panel"));
+    QCOMPARE(toggle->isChecked(), !panel);
+    // A project without sessions opens Projects.
+    GoToItem empty; empty.kind = GoToItem::Project; empty.id = "no-such-project";
+    emit goTo->activated(empty);
+    QCOMPARE(pages->currentIndex(), 1);
+    // Recently opened sessions come first with an empty query.
+    pressChord(&window, Qt::Key_2, Qt::ControlModifier);
+    pressChord(&window, Qt::Key_K, Qt::ControlModifier);
+    QTRY_VERIFY(goTo->isVisible());
+    QVERIFY(results->count() > 0);
+    QCOMPARE(results->item(0)->data(Qt::UserRole).value<GoToItem>().id, review.id);
+    goTo->hide();
+}
+
+void TestSessionsWindow::cheatSheetOpensKeyboardSettings()
+{
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&window));
+    pressChord(&window, Qt::Key_F1);
+    auto *help = window.findChild<ShortcutsDialog *>("shortcutsDialog"); QVERIFY(help);
+    QTRY_VERIFY(help->isVisible());
+    auto *customize = help->findChild<QPushButton *>("shortcutsCustomize"); QVERIFY(customize);
+    customize->click();
+    QVERIFY(!help->isVisible());
+    auto *pages = workspacePages(window); QVERIFY(pages); QCOMPARE(pages->currentIndex(), 5);
+    auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    QCOMPARE(sections->currentItem()->text(), QString("Keyboard"));
 }

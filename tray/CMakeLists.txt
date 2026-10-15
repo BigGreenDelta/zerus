@@ -150,7 +150,7 @@ add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)
 target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown)
 
-add_library(hgs-tray-views STATIC src/SessionsWindow.cpp src/SessionsWindowShortcuts.cpp src/SessionSelection.cpp src/NativeUiView.cpp
+add_library(hgs-tray-views STATIC src/SessionsWindow.cpp src/SessionsWindowShortcuts.cpp src/SessionsWindowGoTo.cpp src/SessionSelection.cpp src/NativeUiView.cpp
     src/NativeBrowserPlugin.cpp src/NativeBrowser.h)
 target_link_libraries(hgs-tray-views PUBLIC hgs-tray-ui hgs-tray-activity
     PRIVATE hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file hgs-updates)

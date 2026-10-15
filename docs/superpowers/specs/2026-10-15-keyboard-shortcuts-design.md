@@ -147,14 +147,22 @@ sequence, since it also does nothing without a selection.
 Escape and Enter keep their existing handling in the composer. `Ctrl+Enter`
 (`message.send`) is an alias for Enter.
 
+A focused combo box keeps Alt+↑, Alt+↓ and F4, which open its list: the router
+claims these keys for it, so they never switch sessions there. A widget whose
+own action uses a command's chord (the Projects list's Alt+↑/↓) keeps it while
+it has focus: the window's command drops that chord until focus leaves, since
+Qt would otherwise treat the two shortcuts as ambiguous and run neither.
+
 ## Routing
 
 A `ShortcutRouter` event filter on `qApp` implements both rules. It acts only on
 `QEvent::ShortcutOverride` whose focus widget belongs to the main window. If the
 chord is bound to a command whose scope covers the focus widget, the router decides
 with the Terminal or text-field rule. When the window should win, it ignores the
-event and stops it there, so the widget cannot claim it and Qt's shortcut map
-activates the command's `QAction`. Otherwise the event continues to the widget.
+event and stops it there and at the focus widget's ancestors, so no widget can
+claim it and Qt's shortcut map activates the command's `QAction`. Qt delivers
+each override to the window object before the focus widget; the router decides
+only at the focus widget and starts afresh for every event. Otherwise the event continues to the widget.
 Dialogs and other windows are untouched. `TerminalScreen` needs no change: it
 still accepts every override that reaches it.
 

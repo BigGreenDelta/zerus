@@ -186,10 +186,6 @@ bool SessionsWindow::sendQueuedNow(const QString &queueId)
     return true;
 }
 
-void SessionsWindow::openGoTo() { showNotice(tr("Go to is not available yet.")); }
-
-void SessionsWindow::openShortcutHelp() { showWorkspaceSettings(); }
-
 // Next and Previous move in the visible list (search results while shown) and
 // stop at its ends. Attention navigation searches the session list in list
 // order, wraps, and opens a collapsed project to select its session.
