@@ -318,19 +318,7 @@ pub(super) fn safe_to_pause(record: &Value) -> bool {
 /// `safe_to_pause` with the verification of a pending resume supplied by the
 /// caller; it is asked only when no confirmed idle conversation qualifies.
 pub(super) fn pausable(record: &Value, resumed_idle: impl FnOnce() -> bool) -> bool {
-    telemetry::grouped_active(record) == 0
-        && !record["active_tools"]
-            .as_object()
-            .map(|tools| !tools.is_empty())
-            .unwrap_or(false)
-        && !record["subagents"]
-            .as_object()
-            .map(|children| {
-                children
-                    .values()
-                    .any(|child| telemetry::child_working(record, child))
-            })
-            .unwrap_or(false)
+    !telemetry::work_remains(record)
         && ((string(record, "activity") == "idle" && string(record, "expected_id").is_empty())
             // Codex defers SessionStart after resume until the next turn; a
             // verified resume waits at its restored conversation's empty composer.
