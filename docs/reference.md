@@ -1000,7 +1000,11 @@ not proof that the agent's task or process has ended.
 Claude child tracking reconciles hooks with exact native history, including
 workflow children. A final assistant `end_turn`, a successful `toolEndsTurn`
 result bound to its exact owned tool call, or a final **Request interrupted by
-user** row can settle a turn even when `SubagentStop` is missing. Matching
+user** row can settle a turn even when `SubagentStop` is missing. Its **for tool
+use** variant settles only when it follows the owned error results of the
+stopped calls; an unbound marker changes nothing. A tool-use interruption that an
+earlier hgs version recorded as new child work settles from the same native row
+unless a newer hook arrived. Matching
 workflow `started`/`result` attempts independently confirm the same reply.
 Later native child activity can recover a missing start; newer hooks take
 precedence. Silence and a completed parent never prove child completion.
@@ -1962,7 +1966,9 @@ service's GUI and opens the workspace there. It starts its own GUI only when
 the service stops or does not answer in time. A GUI that a launch started while
 the service was stopped keeps the socket, and a later service start then exits
 without a GUI of its own.
-The desktop version appears in the rail and Settings. **Settings → About** also
+The desktop version in the rail opens **About**; its tooltip shows the complete
+installed version, including the Dev build number or local source identity.
+**Settings → About** also
 shows the configured `hgs` CLI version, read when About opens; an unavailable or
 unrecognized response remains explicit instead of using a compiled-in value.
 Closing a workspace never owns agent process lifetime. Local machine settings,

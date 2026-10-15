@@ -129,6 +129,7 @@ public:
         if(!gateway&&nav->currentRow()==5)nav->setCurrentRow(0);
     }
     void openUpdates(){nav->setCurrentRow(4);}
+    void openAbout(){nav->setCurrentRow(aboutSection);}
     void openRecovery(){nav->setCurrentRow(2);sync->refresh();}
     void setWindowLayerState(bool on,bool enabled,const QString &hint){const QSignalBlocker block(onTop);onTop->setChecked(on);onTop->setEnabled(enabled);onTopHint->setText(hint);}
     void refresh(){sync->refresh();mobileDelivery->refresh();if(nav->currentRow()==aboutSection)refreshCliVersion();if(nav->currentRow()==speechSection)speech->refresh();}
