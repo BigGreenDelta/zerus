@@ -12,7 +12,7 @@ pub(crate) fn with_launch_binding<T>(
     let _opencode=lock(Some(&root().join("opencode/bindings.lock"))).map_err(anyhow::Error::msg)?;
     let record = if opencode::exists(name) {
         let record=opencode::binding(name).map_err(anyhow::Error::msg)?;
-        let inspected=opencode::inspect(name,None).map_err(anyhow::Error::msg)?;
+        let inspected=opencode::own_state(name).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(record["paused"]!=true && inspected["state"]=="running","Native OpenCode launch is no longer live");record
     } else if dsh::exists(name) {
         let record = dsh::binding(name).map_err(anyhow::Error::msg)?;
