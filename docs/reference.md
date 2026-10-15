@@ -504,7 +504,8 @@ the docked width are local preferences.
 
 Search names, IDs, folders, branches and models immediately. From two characters,
 content search also reads public Codex, Claude and Kimi messages and saved tool
-events on each host. Machine and state filters narrow results; the all-sessions
+events on each host, and DeepSeek messages through a running native host
+([DeepSeek](#deepseek)). Machine and state filters narrow results; the all-sessions
 view includes archives. Results open the recorded message; **Back to latest
 activity** returns to the live timeline. **Limited history searched**, **Some
 history unavailable** and excerpt labels describe incomplete coverage. Internal
@@ -1190,7 +1191,8 @@ tracking evidence without changing reply/read identities or restarting agents.
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
-DeepSeek native fork remains in Native UI.
+DeepSeek uses the native fork of a supported resident host
+([DeepSeek](#deepseek)).
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
@@ -1774,12 +1776,49 @@ Closing Zerus leaves the host running; Forget retains native history. Linux user
 systemd runs the host in an independent scope so GUI service restart cannot kill
 the engine.
 
-Native fork, global DeepSeek history search, schedule management and account
-transfer are currently handled in Native UI. Native context reset awaits a
-supported Session Controller operation. Other harness versions need contract
-verification; updates never restart live hosts or agents automatically.
+**Fork session…** uses the official Session Controller fork. It copies the
+conversation through its latest completed turn into a new native session of the
+same profile and folder (including its permission preset),
+named after the fork, and binds the exact session ID the engine returns; the
+source keeps its identity and history. The engine, not Zerus, holds the new live
+agent until its host next starts: Zerus sends its messages, while its questions,
+approvals and Pause stay in Native UI until then. A fork needs a completed reply.
+If the reply is lost, forking again under the same name adopts the result from the
+same host; after a host change Zerus refuses to repeat it. A native failure after
+creation can leave an unbound session in Native UI.
+
+Content search covers bound DeepSeek sessions through the native store's
+literal, case-insensitive event scan, which works without the optional full-text
+index. Results contain the person's and the agent's text only; injected context
+and reasoning are excluded. Searching never starts, resumes or reloads a host.
+Hosts are asked at once, each scanning for at most 5 seconds; a stopped host, an
+older adapter or a host that does not answer within 7 seconds reports that
+history as unavailable.
+
+The official optional Schedule bundle (**Automation tasks** in Native UI
+Plugins; shipped profiles leave it off) is listed and managed per exact session:
+
+```sh
+hgs schedules dsh/project/work            # tasks of this session as JSON
+echo '{"request_id":"UUID","expected_run_id":"RUN","expected_conversation_id":"session-ID",
+  "expected_generation":"GENERATION","action":"update","id":"schedule-ID",
+  "expected":{...record from the list...},"title":"New name"}' | hgs schedules dsh/project/work --json
+```
+
+`action` is `delete`, `update` (the native compare-and-set; `title`, `prompt`
+and the native `change` timing object) or `history` (`limit` 1-100, optional
+`before`). Results keep native codes such as `schedule_conflict` and
+`schedule_not_found`. None of these activate the session. Without the bundle the
+command refuses and listings omit `schedules`.
+
+Account transfer stays in Native UI. Native context reset awaits a supported
+Session Controller operation. Resident adapters advertise each operation; one
+started by an older Zerus keeps fork and schedules in Native UI and its history
+unavailable to search until its next ordinary start. Other harness versions need
+contract verification; updates never restart live hosts or agents automatically.
 `python3 tests/test_dsh_native.py -v` exercises the official engine with a local
-keyless model, covering history, lifecycle, questions, settings and browser login.
+keyless model, covering history, lifecycle, questions, settings, fork, search,
+schedules and browser login.
 
 ## Automatic recovery
 
@@ -2405,7 +2444,10 @@ is `null` while the journal cannot be read. While `schedules.recurring` is
 positive, turns opened by those jobs without a prompt from the person do not
 advance `reply_id`; a prompt queued into such a turn makes its reply the person's.
 `reply_scheduled` is true when the reported reply ended a scheduled turn, which
-happens once no recurring job remains or while the count is unknown. Other
+happens once no recurring job remains or while the count is unknown. DeepSeek
+sessions report the same `schedules` object from the active tasks of the native
+Schedule catalog while that optional bundle is loaded, with the earliest stored
+target as `next_at`; delivered reminders remain ordinary replies. Other
 providers report false and omit `schedules`.
 
 ```sh

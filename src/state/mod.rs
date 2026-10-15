@@ -663,6 +663,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "search" {
         return search::dispatch(args);
     }
+    if command == "schedules" {
+        return Err("Native schedule management is available for DeepSeek sessions; other agents report schedules read-only".into());
+    }
     if command == "send-now" { return input_queue::dispatch(args); }
     if command == "send" {
         return input::dispatch(args);

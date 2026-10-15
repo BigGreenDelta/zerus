@@ -42,6 +42,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let archives = archive::records()?;
     bindings.retain(|record| !archive::equivalent(record, &archives));
     bindings.extend(archives);
+    for mut record in dsh::binding_records() {
+        record["agent"] = json!("dsh");
+        record["updated"] = record["created"].clone();
+        bindings.push(record);
+    }
     // Prefer recent sessions when the explicit scan budget is exhausted.
     bindings.sort_by(|a, b| number(b, "updated").total_cmp(&number(a, "updated")));
     println!("{}", search(&root(), bindings, query, limit)?);
@@ -282,7 +287,23 @@ fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize)
     if let Some(db) = &db {
         let _ = db.busy_timeout(std::time::Duration::from_millis(300));
     }
+    // DeepSeek history stays in its native engine: one exact query per host.
+    let native: Vec<&Value> = bindings.iter().filter(|record| record["backend"] == "dsh").collect();
+    let native = if native.is_empty() { BTreeMap::new() } else { dsh::history_search(&native, query, limit.min(20)) };
     for record in &bindings {
+        if record["backend"] == "dsh" {
+            match native.get(string(record, "name")) {
+                Some(Some((events, truncated))) => {
+                    search.truncated |= *truncated;
+                    for event in events {
+                        let role = if event["type"] == "UserPromptSubmit" { "user" } else { "assistant" };
+                        search.accept(record, event.clone(), role);
+                    }
+                }
+                _ => search.unavailable(record),
+            }
+            continue;
+        }
         if string(record, "agent") == "kimi" {
             match questions::wire_paths(record) {
                 Ok(paths) if !paths.is_empty() => {
