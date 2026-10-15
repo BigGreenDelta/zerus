@@ -255,6 +255,52 @@ class SessionSettings(test_effort.EffortTransport):
         self.assertEqual(self.inspect()['model'],'kimi-code/k4')
         self.assertEqual(self.inspect()['effort'],'max')
 
+    def test_kimi_context_choice_schedules_settings_until_it_is_answered(self):
+        # Kimi's context choice shows only on the terminal, over a Ready saved
+        # record. No key reaches it: inspect schedules the change, as dispatch
+        # does, and holds back forks and effort changes until it is answered.
+        self.record.update(agent='kimi',model='kimi-code/k3',base=['kimi']);self.write_record()
+        config=self.root/'.kimi-code/config.toml';config.parent.mkdir()
+        config.write_text('[models."kimi-code/k3"]\ndisplay_name="K3"\ncapabilities=["thinking","always_thinking"]\nsupport_efforts=["low","high","max"]\n[models."kimi-code/k4"]\ndisplay_name="K4"\ncapabilities=["thinking","always_thinking"]\nsupport_efforts=["low","high","max"]\n')
+        def redraw(expected):
+            __import__('os').kill(self.record['pid'],signal.SIGUSR1)
+            self.wait_for(lambda:expected in self.tmux('capture-pane','-p','-t',self.pane))
+        (self.root/'set-kimi').touch();redraw('K3 thinking: high');(self.root/'set-kimi').unlink()
+        rows=['─'*96,' This session has been idle for 2h and is ~217k tokens.',' ↑↓ navigate · Enter select · Esc cancel','',
+              ' Cache expired — the next message re-sends the entire history at full price.']
+        rows+=['  '+('❯' if i==0 else ' ')+' '+label for i,label in
+               enumerate(['Compact and continue','Start a new session','Continue as-is',"Don't ask me again"])]
+        rows+=['','─'*96,' Ask When Needed  K3 thinking: high /fixture',' context: 22% (217k/1M)']
+        # The status line keeps the prompt's rows, so the current effort is known.
+        (self.root/'screen').write_text('\x1b[2J\x1b[17;1H'+'\r\n'.join(rows));redraw('Cache expired')
+        reason="Wait until the agent's question is answered"
+        info=self.inspect();self.assertEqual((info['phase'],info['pending_questions'][0]['source']),('input','kimi_cache_hint'))
+        self.assertTrue(info['settings_change_supported']);self.assertEqual(info['settings_apply_when'],'ready')
+        for action in ('fork','effort_change'):
+            self.assertEqual((info[action+'_supported'],info[action+'_reason']),(False,reason),action)
+        p=self.payload('max');p['model']='kimi-code/k4'
+        result=self.settings(p)
+        self.assertEqual((result['status'],result['apply_when'],result['pending_settings_id']),('scheduled','ready',p['request_id']))
+        info=self.inspect()
+        self.assertEqual((info['model'],info['pending_model'],info['pending_effort']),('kimi-code/k3','kimi-code/k4','max'))
+        # An apply of the pending change stays scheduled, and `hgs effort`
+        # refuses the chooser; neither sends a key.
+        retry=self.payload('max');retry.update(model='kimi-code/k4',expected_pending_id=p['request_id'])
+        result=self.settings(retry)
+        self.assertEqual((result['status'],result['apply_when'],result['pending_settings_id']),('scheduled','ready',p['request_id']))
+        self.assertIn('context choice',self.change(self.payload('low'),success=False))
+        self.assertEqual(self.received(),b'')
+        # Answered: Kimi's prompt returns, and the pending change applies.
+        (self.root/'set-kimi').touch();redraw('K3 thinking: high')
+        info=self.inspect();self.assertEqual(info['settings_apply_when'],'now')
+        for action in ('fork','effort_change'):
+            self.assertEqual((info[action+'_supported'],info[action+'_reason']),(True,''),action)
+        apply=self.payload('max');apply.update(model='kimi-code/k4',expected_pending_id=p['request_id'])
+        self.assertEqual(self.settings(apply)['status'],'applied')
+        self.assertEqual(self.received(),b'/model\r\x1b[B\x1b[C\x1bs')
+        info=self.inspect()
+        self.assertEqual((info['model'],info['effort'],info['pending_model']),('kimi-code/k4','max',''))
+
     def test_kimi_model_before_first_message(self):
         self.fresh()
         self.test_kimi_model_and_effort_never_write_defaults()

@@ -917,8 +917,9 @@ later turn or `/model` receipt; the switch itself adds no Activity entry.
 A stopped Claude session resumes with a choice made in Zerus through `--model` and
 `--effort`; otherwise it starts with the account's settings.
 
-Busy-session choices remain **Pending** until the agent is ready, including after
-navigation away. A message sent before application uses the current model.
+Busy-session choices, and choices made while the terminal shows a chooser, remain
+**Pending** until the agent is ready, including after navigation away. A message
+sent before application uses the current model.
 **Save for resume** stores a stopped session's choice without starting it. A stale
 queued setting cannot replace a newer choice from another device.
 If a message or another client already consumed or replaced it, Zerus refreshes
@@ -937,7 +938,8 @@ profile hook entry that Kimi's native subagent catalog has replaced holds back
 none of them. A chooser recognized only on the terminal, such as Kimi's context
 choice after an idle period, keeps both actions, forks and effort changes
 unavailable until it is answered; `fork_reason` and `effort_change_reason` give the
-same reason.
+same reason. A model settings change made meanwhile is saved as **Pending**
+(`settings_apply_when` is `ready`), and no key reaches the chooser.
 The desktop shows the reason as the tooltip of the disabled **Clear context**,
 **Clear session** and **Compact and continue** actions, and as a line in the
 cold-cache confirmation.
