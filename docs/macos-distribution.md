@@ -364,7 +364,9 @@ to `ufna/homebrew-zerus`. Anonymous downloads of the public DMG and ZIP match
 their Actions artifact bytes, `SHA256SUMS` and GitHub digests; the public cask
 matches the reviewed template, version and ZIP digest. `brew fetch --cask
 ufna/zerus/zerus@nightly` also downloaded and verified the public package without
-installing over the developer's app.
+installing over the developer's app. The desktop/nightly mirror synchronized
+successfully and serves the same release and source commit; macOS downloads
+remain on GitHub.
 
 Still requiring interactive or subsequent release qualification:
 
