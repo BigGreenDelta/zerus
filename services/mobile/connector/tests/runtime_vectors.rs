@@ -250,7 +250,7 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (52, 185));
+    assert_eq!((checked, refused), (54, 186));
 }
 
 /// Python's `capable(node)`: every flag, the vectors' sessions and archive.
