@@ -9,7 +9,7 @@ import uuid
 
 from zerus_mobile.connector import MUTATIONS, Connector
 from zerus_mobile.context import OPERATIONS, READ_OPERATIONS, READ_SQL, mark_read_result, validate_mark_read
-from zerus_mobile.server import validate_request
+from relay_oracle import validate_request
 
 NAME = "codex/example/mobile"
 SIGNATURE = "a" * 64

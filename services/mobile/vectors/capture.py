@@ -8,7 +8,9 @@
 The capture runs offline and is deterministic: a fixed clock, synthetic tokens,
 reserved example domains, a scratch state directory, no network connection and
 no native process. The relay-oracle column of validation/*.jsonl is frozen data;
-only --refresh-oracle reads zerus_mobile.server. README.md describes each file.
+only --refresh-oracle recomputes it, with the reference relay's validation as
+services/mobile/tests/relay_oracle.py keeps it. The Rust relay's column is
+copied; its tests/vectors.rs recomputes it. README.md describes each file.
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 if __name__ == "__main__":
-    sys.path.insert(0, str(HERE.parent))
+    sys.path[:0] = [str(HERE.parent), str(HERE.parent / "tests")]
 
 from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet, file_reads,  # noqa: E402
                           history, launch, managed_relay, projects, speech, speech_config, terminal,
@@ -1181,6 +1183,9 @@ def validation_cases() -> list[dict]:
     case("session/dash", "inspect", session="-help")
     case("session/at", "inspect", session="codex/example@host")
     case("session/control", "inspect", session="codex/example\tsession")
+    # The Rust relay refuses DEL in every text field; the reference relay's text() did not.
+    case("session/delete", "inspect", session="codex/example\x7fsession")
+    case("computer-id/delete", "inspect", top={"computer_id": COMPUTER[:35] + "\x7f"})
     case("session/too-long", "inspect", session="c" * 513)
     case("session/not-string", "inspect", session=7)
     case("session/archive-at-top-level", "inspect", top={"archive_id": ARCHIVE})
@@ -1192,6 +1197,7 @@ def validation_cases() -> list[dict]:
     case("payload/request-id-mismatch", "send", change=put(request_id=ident("other")))
     case("payload/run-missing", "send", change=drop("expected_run_id"))
     case("payload/run-empty", "send", change=put(expected_run_id=""))
+    case("payload/run-delete", "send", change=put(expected_run_id="fixture\x7frun"))
     case("payload/archived-non-inspection", "pause", change=put(archive_id=ARCHIVE),
          source="test_mobile_actions.LifecycleTransportTests.test_old_cli_and_invalid_payload_never_invoke_mutator")
     # inspect
@@ -1424,29 +1430,10 @@ def connector_decision(case: dict) -> dict:
 
 
 def live_oracle(submission: dict) -> dict:
-    """The decision of the Python reference relay's submission validation."""
-    from aiohttp import web
-    from zerus_mobile import ingress, server
-    required = ("request_id", "computer_id", "operation", "session", "payload")
-    if not isinstance(submission, dict) or set(submission) - set(required) or not set(required) <= set(submission):
-        return {"decision": "reject", "status": 400, "raised": "HTTPBadRequest", "stage": "fields"}
-    try:
-        server.validate_request(submission)
-        operation = submission["operation"]
-        if operation == "send":
-            attachments.validate_send(submission["payload"])
-        elif operation in {"speech_submit", "voice_submit"}:
-            if ingress.encoded_size(submission, 6 * 1024 * 1024) > 6 * 1024 * 1024:
-                return {"decision": "reject", "status": 413, "raised": "HTTPRequestEntityTooLarge", "stage": "size"}
-        elif ingress.encoded_size(submission, 1024 * 1024) > 1024 * 1024:
-            return {"decision": "reject", "status": 413, "raised": "HTTPRequestEntityTooLarge", "stage": "size"}
-    except web.HTTPException as error:
-        return {"decision": "reject", "status": error.status, "raised": type(error).__name__, "stage": "validate"}
-    except ValueError as error:
-        return {"decision": "reject", "status": 400, "raised": "ValueError", "message": str(error), "stage": "validate"}
-    except (TypeError, KeyError, RecursionError) as error:  # Interpreter wording differs between Python versions.
-        return {"decision": "reject", "status": 400, "raised": type(error).__name__, "stage": "validate"}
-    return {"decision": "accept"}
+    """The decision of the Python reference relay's submission validation,
+    through its test-only copy in services/mobile/tests/relay_oracle.py."""
+    import relay_oracle
+    return relay_oracle.decision(submission)
 
 
 VALIDATION_FAMILIES = {
@@ -1465,17 +1452,27 @@ def validation_file(case_id: str) -> str:
     return "validation/%s.jsonl" % family
 
 
-def frozen_oracle(directory: Path) -> dict:
-    """The committed relay-oracle column: case id -> (submission text, decision)."""
-    oracle = {}
+def frozen_column(directory: Path, column: str) -> dict:
+    """One committed decision column: case id -> (submission text, decision)."""
+    decisions = {}
     for path in sorted(directory.glob("validation/*.jsonl")):
         for row in map(json.loads, path.read_text().splitlines()):
-            if row.get("kind") == "case" and "oracle" in row:
-                oracle[row["id"]] = (compact(row["submission"]), row["oracle"])
-    return oracle
+            if row.get("kind") == "case" and column in row:
+                decisions[row["id"]] = (compact(row["submission"]), row[column])
+    return decisions
 
 
-def validation_vectors(oracle: dict | None) -> tuple[dict[str, bytes], set[str]]:
+def frozen_oracle(directory: Path) -> dict:
+    """The committed relay-oracle column."""
+    return frozen_column(directory, "oracle")
+
+
+def frozen_relay(directory: Path) -> dict:
+    """The committed column of the Rust relay, which relay/tests/vectors.rs computes."""
+    return frozen_column(directory, "relay")
+
+
+def validation_vectors(oracle: dict | None, relay: dict) -> tuple[dict[str, bytes], set[str]]:
     header = {"kind": "context", "name": "default", "context": DEFAULT_CONTEXT,
               "note": "snapshot_age is seconds since the last local snapshot; the connector input is the submission without computer_id"}
     files: dict[str, list] = {}
@@ -1492,11 +1489,15 @@ def validation_vectors(oracle: dict | None) -> tuple[dict[str, bytes], set[str]]
             case["oracle"] = oracle[case["id"]][1]
         else:
             missing.append(case["id"])
+        # A new or changed submission has no relay decision until
+        # ZERUS_BLESS=1 cargo test --test vectors computes it.
+        if relay.get(case["id"], (None,))[0] == compact(case["submission"]):
+            case["relay"] = relay[case["id"]][1]
         files.setdefault(validation_file(case["id"]), [header]).append(case)
     if missing:
         raise CaptureError("validation cases without a frozen relay-oracle decision for their submission: "
                            + ", ".join(missing)
-                           + "\nRun capture.py --refresh-oracle while zerus_mobile.server exists, or remove them.")
+                           + "\nRun capture.py --refresh-oracle, or remove them.")
     return {name: jsonl(rows) for name, rows in files.items()}, observed
 
 
@@ -2375,17 +2376,17 @@ def size_vectors(root: Path) -> bytes:
 
 # ---------------------------------------------------------------------------
 
-def render(oracle: dict | None) -> dict[str, bytes]:
+def render(oracle: dict | None, relay: dict) -> dict[str, bytes]:
     """Every vector file, keyed by its path below services/mobile/vectors."""
     # Parent directories that Journal creates take the process umask.
     previous = os.umask(0o022)
     try:
-        return _render(oracle)
+        return _render(oracle, relay)
     finally:
         os.umask(previous)
 
 
-def _render(oracle: dict | None) -> dict[str, bytes]:
+def _render(oracle: dict | None, relay: dict) -> dict[str, bytes]:
     files = {}
     with scratch() as root:
         runs = asyncio.run(snapshot_runs(root / "snapshots"))
@@ -2393,7 +2394,7 @@ def _render(oracle: dict | None) -> dict[str, bytes]:
         files["identities.json"] = identity_vectors(root / "identities")
         files["sizes.jsonl"] = size_vectors(root)
     files["operations.json"] = operation_tables(runs)
-    validation, observed = validation_vectors(oracle)
+    validation, observed = validation_vectors(oracle, relay)
     files.update(validation)
     files["errors.json"] = error_catalogue(observed)
     files.update(hash_vectors())
@@ -2427,11 +2428,11 @@ def differences(files: dict[str, bytes], directory: Path = HERE) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="recompute and compare without writing")
-    parser.add_argument("--refresh-oracle", action="store_true", help="recompute the relay-oracle column from zerus_mobile.server")
+    parser.add_argument("--refresh-oracle", action="store_true", help="recompute the relay-oracle column from tests/relay_oracle.py")
     args = parser.parse_args()
     oracle = None if args.refresh_oracle else frozen_oracle(HERE)
     try:
-        files = render(oracle)
+        files = render(oracle, frozen_relay(HERE))
     except CaptureError as error:
         print(error, file=sys.stderr)
         return 1

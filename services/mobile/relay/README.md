@@ -22,9 +22,18 @@ API v1 codec (`json`), envelope validation (`protocol`) and `error`, with none
 of the HTTP, database or TLS crates, for the outbound connector:
 
 ```sh
-cargo +1.85.0 clippy --locked --no-default-features --lib --test codec -- -D warnings
-cargo +1.85.0 test --locked --no-default-features --test codec
+cargo +1.85.0 clippy --locked --no-default-features --lib --test codec --test vectors -- -D warnings
+cargo +1.85.0 test --locked --no-default-features --test codec --test vectors
 ```
+
+`tests/vectors.rs` checks the library against the golden vectors in
+[`../vectors`](../vectors/README.md), read at run time: `request_hash` through
+the codec at a claim batch's limits, the operation tables, and the `relay`
+column of `validation/*.jsonl`, which `protocol::request` decides. It names every
+case where that column differs from the frozen decision of the Python reference
+relay. After a reviewed change to the validation or to a vector submission,
+`ZERUS_BLESS=1 cargo +1.85.0 test --locked --test vectors` rewrites only that
+column; then run `capture.py --check`.
 
 The image and the infra packager copy only `Cargo.toml`, `Cargo.lock`, `.cargo`
 and `src/**/*.rs|*.sql`, so the crate has no build script, declared test target,
