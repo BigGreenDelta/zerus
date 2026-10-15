@@ -126,7 +126,10 @@ fn capture_command(
             }
         });
     }
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    // Speech discovery queries computers from parallel workers. A sibling's
+    // child started in between would inherit these pipes and keep its request
+    // from ending (`spawn_in_turn`).
+    let mut child = crate::platform::spawn_in_turn(&mut command).map_err(|e| e.to_string())?;
     let mut stdin = child.stdin.take().ok_or("Missing child input")?;
     let mut stdout = child.stdout.take().ok_or("Missing child output")?;
     let mut stderr = child.stderr.take().ok_or("Missing child errors")?;
@@ -452,6 +455,53 @@ mod tests {
         stalled.args(["-c", "sleep 30 & wait"]);
         assert!(capture_command(stalled, b"{}", Duration::from_millis(100)).is_err());
         assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_query_never_inherits_pipes_another_worker_is_still_creating() {
+        // This thread stands in for another discovery worker that holds the
+        // spawn turn between creating its pipes and marking them close-on-exec,
+        // as Rust does on macOS. High numbers keep its pipe apart from the
+        // descriptors the listing opens.
+        let turn = crate::platform::spawn_turn();
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let creating: Vec<i32> = fds
+            .iter()
+            .map(|fd| unsafe {
+                let high = libc::fcntl(*fd, libc::F_DUPFD, 64);
+                libc::close(*fd);
+                high
+            })
+            .collect();
+        assert!(creating.iter().all(|fd| *fd >= 64), "{creating:?}");
+        let listing = std::thread::spawn(|| {
+            // The listing inherits exactly what the query's shell was given.
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "printf '[%s]' \"$(ls /dev/fd | paste -sd, -)\""]);
+            capture_command(command, b"{}", Duration::from_secs(30))
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        for fd in &creating {
+            assert_eq!(
+                unsafe { libc::fcntl(*fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0
+            );
+        }
+        drop(turn);
+        let output = listing.join().unwrap().unwrap();
+        let open: Vec<i64> = output
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_i64)
+            .collect();
+        assert!(open.contains(&0), "{open:?}");
+        for fd in creating {
+            assert!(!open.contains(&fd.into()), "query inherited {fd}: {open:?}");
+            unsafe { libc::close(fd) };
+        }
     }
 
     #[test]

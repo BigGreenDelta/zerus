@@ -16,7 +16,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Mutex,
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -32,11 +32,6 @@ const REMEMBERED: &str = "swarm/mobile-peers.json";
 const REMEMBERED_LOCK: &str = "swarm/mobile-peers.lock";
 const REMEMBERED_BYTES: u64 = 64 * 1024;
 static TRANSPORT_STOP: AtomicBool = AtomicBool::new(false);
-/// On macOS, Rust creates a child's pipes before marking them close-on-exec.
-/// A child another discovery worker spawns in between inherits those ends, so
-/// that peer's transport waits for EOF until the unrelated one ends. Spawns
-/// therefore take turns.
-static SPAWN: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -605,10 +600,9 @@ fn capture_control(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = {
-        let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-        command.spawn().context("mobile helper unavailable")?
-    };
+    // Discovery workers spawn side by side: a transport started in between
+    // would inherit this one's pipes and hold its input open (`spawn_in_turn`).
+    let mut child = platform::spawn_in_turn(&mut command).context("mobile helper unavailable")?;
     let result = (|| {
         let mut stdin = child.stdin.take();
         let mut stdout = child.stdout.take();
@@ -1515,7 +1509,7 @@ mod tests {
         // spawn turn between creating its pipes and marking them close-on-exec,
         // as Rust does on macOS. High numbers keep its pipe apart from the
         // descriptor the listing opens.
-        let turn = SPAWN.lock().unwrap();
+        let turn = platform::spawn_turn();
         let mut fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let creating: Vec<i32> = fds
