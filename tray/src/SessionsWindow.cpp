@@ -2959,7 +2959,7 @@ void SessionsWindow::renderAccountUsage()
 {
     const auto *entry=selected();const bool visible=m_pages->currentIndex()==0 && entry && entry->session.tracked && entry->session.archiveId.isEmpty() && m_subagentId.isEmpty();
     // Hide only when it should go: hiding and showing again would close an open popover on every refresh.
-    m_usageStrip->setVisible(visible);if(!visible){m_usageLimit->setActive(false);m_usageRefresh->setRefreshing(false);return;}
+    m_usageStrip->setVisible(visible);if(!visible){m_recovery->setUsageNotice({});m_usageLimit->setActive(false);m_usageRefresh->setRefreshing(false);return;}
     m_accountUsageData=m_usageStore->data(AccountUsageRef::bound(entry->host,entry->session));m_accountUsage->setData(m_accountUsageData);
     QString notice;
     const auto failure=m_details.value("provider_error").toObject();

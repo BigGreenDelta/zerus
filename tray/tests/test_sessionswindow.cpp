@@ -237,6 +237,7 @@ private slots:
     void usageIndicatorSettingUpdatesFooter();
     void usageLimitBecomesToolbarChip();
     void earlyQuotaResetExplainsPendingNativeChoiceAndKeepsDraft();
+    void openingChildClearsHiddenAccountUsageRecoveryNotice();
     void dashboardAndMultiMachineNavigation();
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void projectFilterCombinesScopesCountsAndNavigation();
@@ -1695,6 +1696,37 @@ void TestSessionsWindow::earlyQuotaResetExplainsPendingNativeChoiceAndKeepsDraft
     for(const auto *option:options)QVERIFY(!option->isChecked());
     QVERIFY(!composer->findChild<QPushButton *>("sendMessage")->isEnabled());
     QCOMPARE(composer->editor()->toPlainText(),QString("Continue after my reset"));
+}
+
+void TestSessionsWindow::openingChildClearsHiddenAccountUsageRecoveryNotice()
+{
+    const auto now=QDateTime::currentSecsSinceEpoch();
+    auto state=fleet();auto box=state.local();auto &session=box.sessions[0];
+    session.cmd="claude";session.runId="run-one";session.conversationId="conversation-one";session.accountId="native-claude";state.setLocal(box,0);
+    const QJsonObject children{{"review",QJsonObject{{"name","Review"},{"state","working"}}}};
+    const QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},
+        {"runtime_state","live"},{"process_state","running"},{"last_event_at",double(now-60)},{"provider_status_at",double(now-60)},
+        {"phase","error"},{"activity","attention"},{"subagents",children},
+        {"provider_error",QJsonObject{{"error_kind","quota"},{"at",double(now-60)},{"detail","Weekly limit reached"}}},
+        {"events",QJsonArray{}},{"cursor",0}};
+    const QJsonObject child{{"parent_conversation_id","conversation-one"},{"conversation_id","child-conversation"},
+        {"run_id","run-one"},{"events",QJsonArray{}}};
+    SessionsWindow window(programInspecting("quota-child-switch",details,child));window.setFleet(state);window.show();window.showSession({},session.name);
+    auto *usage=window.findChild<AccountUsageStore *>()->findChild<HgsClient *>();
+    usage->accountsReady(1,{},QJsonObject{{"id","native-claude"},{"status","ok"},{"checked_at",double(now)},
+        {"windows",QJsonArray{QJsonObject{{"window_minutes",300},{"used_percent",0},{"resets_at",double(now+3600)}},
+            QJsonObject{{"window_minutes",10080},{"used_percent",0},{"resets_at",double(now+86400)}}}}});
+    auto *help=window.findChild<QLabel *>("providerErrorHelp");
+    QTRY_VERIFY(help->text().contains("Latest account usage is below the limit"));
+    auto *stack=window.findChild<QStackedWidget *>("activityStack");
+    window.findChild<QTextBrowser *>("subagents")->anchorClicked(QUrl("hgs-agent:review"));
+    QCOMPARE(stack->currentIndex(),1);
+    QVERIFY(window.findChild<ToolbarChip *>("usageLimitChip")->isHidden());
+    QVERIFY2(!help->text().contains("Latest account usage is below the limit"),qPrintable(help->text()));
+    QVERIFY(help->text().contains("will not retry automatically"));
+    // Returning projects the same fresh parent-account evidence again.
+    window.findChild<QPushButton *>("subagentBack")->click();QCOMPARE(stack->currentIndex(),0);
+    QTRY_VERIFY(help->text().contains("Latest account usage is below the limit"));
 }
 
 void TestSessionsWindow::accountUsageRejectsOtherSessionReplies()
