@@ -11,8 +11,10 @@ class SwarmController;
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QTimer>
+#include <QDeadlineTimer>
 #include <QElapsedTimer>
 #include <QWidget>
+#include <optional>
 #include "FleetState.h"
 #include "HgsClient.h"
 #include "SessionOrganization.h"
@@ -43,11 +45,15 @@ class MachinesPage;
 class MachineFilter;
 class DashboardPage;
 class AccountsPage;
+class GoToDialog;
+class ShortcutsDialog;
+struct GoToItem;
 class SessionSearch;
 class IdentityBadge;
 class SwarmButton;
 class QToolBar;
 class BusyIndicator;
+class ShortcutRouter;
 
 // A view over hgs snapshots and its durable event journal. Closing this window
 // never owns or terminates an agent. All operations still go through the CLI.
@@ -69,11 +75,13 @@ public:
     void setPollingHosts(const QSet<QString> &hosts);
     static QString status(const SessionInfo &session, bool reachable = true);
     // Tests only, so suites need not wait out fixed delays: information notices
-    // (5 s), compaction polls (2.5 s), and the details poll tick (500 ms) with
-    // its Activity interval (2.5 s). The application keeps the defaults.
+    // (5 s), compaction polls (2.5 s), the details poll tick (500 ms) with its
+    // Activity interval (2.5 s), and the wait of Send and push now (20 s, which
+    // also restarts an armed push's wait). The application keeps the defaults.
     void setNoticeDurationForTests(int ms) { m_noticeMs = ms; }
     void setCompactPollIntervalForTests(int ms) { m_compactTimer.setInterval(ms); }
     void setDetailsPollForTests(int tickMs, int activityMs) { m_timer.setInterval(tickMs); m_activityPollMs = activityMs; }
+    void setPushTimeoutForTests(int ms) { m_pushTimeout = ms; if (m_push) m_push->deadline.setRemainingTime(ms); }
 
 signals:
     void replyViewed(const QString &host, const QString &name, const QString &conversation, const QString &reply);
@@ -267,6 +275,46 @@ private:
     void renderQuestion(const Entry &entry, int navigation = 0);
     void setInspectorVisible(bool visible);
     void updateInspectorMinimum();
+    // Keyboard commands of the Window scope (Shortcuts.h), implemented in
+    // SessionsWindowShortcuts.cpp. Every command's action stays enabled; a
+    // command with nothing to do does nothing or shows a notice.
+    void setupShortcuts();
+    void applyShortcuts();
+    void runShortcut(const QString &id);
+    QAction *shortcutAction(const QString &id) const;
+    // Empty queueId: the selected session's current snapshot. False, with a
+    // notice when nothing can be sent, unless a request is already running.
+    bool sendQueuedNow(const QString &queueId = {});
+    // Go to and the cheat sheet, in SessionsWindowGoTo.cpp.
+    void openGoTo();
+    void openShortcutHelp();
+    QList<GoToItem> goToItems() const;
+    void activateGoTo(const GoToItem &item);
+    void rememberRecentSession(const QString &key);
+    GoToDialog *m_goTo = nullptr;
+    ShortcutsDialog *m_shortcutHelp = nullptr;
+    QStringList m_recentSessions;
+    void stepSession(int direction, bool attention);
+    void stepTab(int direction);
+    void stepFocus(int direction);
+    void stepContentScale(int direction);
+    QWidget *viewFocusTarget() const;
+    QHash<QString, QAction *> m_shortcutActions;
+    ShortcutRouter *m_shortcutRouter = nullptr;
+    // Send and push now (message.push): after its send is confirmed, the first
+    // snapshot of this session's native queue that holds the message is sent now.
+    // Run and conversation are those its send request expects.
+    struct PendingPush { QString key, run, conversation, text; quint64 request = 0; bool confirmed = false; QDeadlineTimer deadline; };
+    std::optional<PendingPush> m_push;
+    QTimer m_pushTimer;
+    int m_pushTimeout = 20000;
+    void armPush(const QString &key, const QString &text);
+    void pushSendFinished(quint64 request, bool ok, bool uncertain);
+    void pushInspected(const QString &key, const QJsonObject &details);
+    // Before another session (or none) becomes the selected one.
+    void pushSelectionChanged(const QString &key);
+    void checkPush();
+    void endPush(const QString &notice = {}, bool error = false);
 
     IdentityBadge *m_providerBadge, *m_machineBadge;
     HgsClient m_client;

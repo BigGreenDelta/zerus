@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QString>
+#include <QStringList>
 
 class QKeyEvent;
 class QWidget;
@@ -37,6 +38,8 @@ bool protectedInTextField(QKeyCombination key, Platform platform);
 // Cut and Copy do nothing without a selection, so they may start a sequence.
 bool selectionKey(QKeyCombination key);
 QString text(const QKeySequence &sequence);
+// The Terminal rule in one sentence for Settings and the cheat sheet.
+QString terminalRule(Platform platform);
 }
 
 // Current chords: defaults overridden by QSettings group "shortcuts" (one list
@@ -59,6 +62,8 @@ public:
     // The command (other than id) already using the sequence, or one of them
     // that would make it ambiguous as a prefix. Empty when free.
     QString conflict(const QString &id, const QKeySequence &sequence) const;
+    // Every such command, in command order.
+    QStringList conflicts(const QString &id, const QKeySequence &sequence) const;
 signals:
     void changed();
 private:
@@ -66,7 +71,8 @@ private:
 };
 
 // Lets bound commands win over Terminal and text fields of one window, under
-// the Terminal and text-field rules. Install on qApp.
+// the Terminal and text-field rules. A focused combo box keeps Alt+Up, Alt+Down
+// and F4, which open its list. Install on qApp.
 class ShortcutRouter : public QObject {
 public:
     explicit ShortcutRouter(QWidget *window, Shortcuts::Platform platform = Shortcuts::currentPlatform(), QObject *parent = nullptr);

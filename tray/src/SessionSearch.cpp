@@ -99,6 +99,13 @@ SessionSearch::SessionSearch(const QString &hgs, QWidget *parent) : QWidget(pare
     setTheme(false);
 }
 
+QString SessionSearch::sessionKey(const QListWidgetItem *item)
+{
+    if (!item) return {};
+    const QString archive = item->data(Archive).toString();
+    return item->data(Host).toString() + '\n' + item->data(Name).toString() + (archive.isEmpty() ? QString() : '\n' + archive);
+}
+
 void SessionSearch::activateResult(QListWidgetItem *item)
 {
     if (!item) return;

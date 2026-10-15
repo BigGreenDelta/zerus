@@ -138,7 +138,8 @@ add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp s
     src/MachineFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
-    src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp
+    src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
+    src/KeyboardSettings.cpp src/ShortcutsDialog.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
     # only on macOS; makeTrayIcon() in TrayAgent.cpp explains why not on Linux.
     src/QuietTrayIcon.cpp)
@@ -149,7 +150,7 @@ add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)
 target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown)
 
-add_library(hgs-tray-views STATIC src/SessionsWindow.cpp src/SessionSelection.cpp src/NativeUiView.cpp
+add_library(hgs-tray-views STATIC src/SessionsWindow.cpp src/SessionsWindowShortcuts.cpp src/SessionsWindowGoTo.cpp src/SessionSelection.cpp src/NativeUiView.cpp
     src/NativeBrowserPlugin.cpp src/NativeBrowser.h)
 target_link_libraries(hgs-tray-views PUBLIC hgs-tray-ui hgs-tray-activity
     PRIVATE hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file hgs-updates)
