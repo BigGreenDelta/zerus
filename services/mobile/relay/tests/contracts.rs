@@ -3027,26 +3027,86 @@ async fn postgres_cross_worker_computer_file_read_is_scoped_gated_and_short_live
     f.close().await;
 }
 
-async fn archive_page_contract(f:&Fixture,second:Option<&Store>){
-    let worker=second.unwrap_or(&f.store);
-    assert!(protocol::READS.contains(&"archive_list"));assert!(!protocol::READ_SQL.contains("archive_list"));
-    let id=Uuid::new_v4().to_string();
-    let command=json!({"request_id":id,"computer_id":f.node.id,"operation":"archive_list","session":"","payload":{"from":100,"until":200,"limit":50,"cursor":"","query":"Русский"}});
-    protocol::request(&command).unwrap();assert_eq!(f.submit(&command).await.unwrap_err().0.as_u16(),409);
+async fn archive_page_contract(f: &Fixture, second: Option<&Store>) {
+    let worker = second.unwrap_or(&f.store);
+    assert!(protocol::READS.contains(&"archive_list"));
+    assert!(!protocol::READ_SQL.contains("archive_list"));
+    let id = Uuid::new_v4().to_string();
+    let command = json!({"request_id":id,"computer_id":f.node.id,"operation":"archive_list","session":"","payload":{"from":100,"until":200,"limit":50,"cursor":"","query":"Русский"}});
+    protocol::request(&command).unwrap();
+    assert_eq!(f.submit(&command).await.unwrap_err().0.as_u16(), 409);
     f.beat(&json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["archive_list"],"features":[]}})).await;
-    for (field,value) in [("limit",json!(51)),("limit",json!(true)),("from",json!(200)),("until",json!(253402300801_u64)),("cursor",json!("#")),("query",json!("bad\nquery")),("offset",json!(5000))]{let mut bad=command.clone();bad["payload"][field]=value;assert!(protocol::request(&bad).is_err(),"accepted {field}");}
-    let mut bad=command.clone();bad["session"]=json!("codex/example/tag");assert!(protocol::request(&bad).is_err());
-    f.submit(&command).await.unwrap();let claimed=worker.claim(&f.node,false).await.unwrap().unwrap().decode().unwrap();assert_eq!(claimed["requests"][0]["operation"],"archive_list");
-    let result=json!({"state":"completed","result":{"version":1,"sessions":[],"next_cursor":"","total":0,"from":100,"until":200,"query":"Русский"},"error":null});
-    worker.result(&f.node,&id,&result,Some(&canonical(&result["result"]).unwrap())).await.unwrap();
-    assert_eq!(f.store.receipt(&f.phone,&id).await.unwrap()["result"]["total"],0);f.check_accounting().await;
-    f.store.db.exec("UPDATE requests SET updated=? WHERE id=?",args![now()-3601.,&id]).await.unwrap();worker.maintain(false).await.unwrap();assert_eq!(f.count("requests WHERE operation='archive_list'").await,0);f.check_accounting().await;
+    for (field, value) in [
+        ("limit", json!(51)),
+        ("limit", json!(true)),
+        ("from", json!(200)),
+        ("until", json!(253402300801_u64)),
+        ("cursor", json!("#")),
+        ("query", json!("bad\nquery")),
+        ("offset", json!(5000)),
+    ] {
+        let mut bad = command.clone();
+        bad["payload"][field] = value;
+        assert!(protocol::request(&bad).is_err(), "accepted {field}");
+    }
+    let mut bad = command.clone();
+    bad["session"] = json!("codex/example/tag");
+    assert!(protocol::request(&bad).is_err());
+    f.submit(&command).await.unwrap();
+    let claimed = worker
+        .claim(&f.node, false)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode()
+        .unwrap();
+    assert_eq!(claimed["requests"][0]["operation"], "archive_list");
+    let result = json!({"state":"completed","result":{"version":1,"sessions":[],"next_cursor":"","total":0,"from":100,"until":200,"query":"Русский"},"error":null});
+    worker
+        .result(
+            &f.node,
+            &id,
+            &result,
+            Some(&canonical(&result["result"]).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.receipt(&f.phone, &id).await.unwrap()["result"]["total"],
+        0
+    );
+    f.check_accounting().await;
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET updated=? WHERE id=?",
+            args![now() - 3601., &id],
+        )
+        .await
+        .unwrap();
+    worker.maintain(false).await.unwrap();
+    assert_eq!(f.count("requests WHERE operation='archive_list'").await, 0);
+    f.check_accounting().await;
 }
 #[tokio::test]
-async fn archive_pages_are_gated_bounded_reads(){let f=Fixture::new().await;archive_page_contract(&f,None).await;f.close().await;}
+async fn archive_pages_are_gated_bounded_reads() {
+    let f = Fixture::new().await;
+    archive_page_contract(&f, None).await;
+    f.close().await;
+}
 #[tokio::test]
-#[ignore="requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly"]
-async fn postgres_cross_worker_archive_pages_are_gated_bounded_reads(){
-    let f=Fixture::provision(Backend::postgres(Config{background:false,..Config::default()}).await).await;
-    let second=f.backend.store().await;archive_page_contract(&f,Some(&second)).await;second.db.close().await;f.close().await;
+#[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly"]
+async fn postgres_cross_worker_archive_pages_are_gated_bounded_reads() {
+    let f = Fixture::provision(
+        Backend::postgres(Config {
+            background: false,
+            ..Config::default()
+        })
+        .await,
+    )
+    .await;
+    let second = f.backend.store().await;
+    archive_page_contract(&f, Some(&second)).await;
+    second.db.close().await;
+    f.close().await;
 }

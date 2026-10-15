@@ -295,16 +295,41 @@ pub fn request(v: &Value) -> Result<()> {
     text(
         &v["session"],
         1024,
-        op=="archive_list" || LAUNCH.contains(&op) || COMPUTER.contains(&op) || SPEECH.contains(&op),
+        op == "archive_list"
+            || LAUNCH.contains(&op)
+            || COMPUTER.contains(&op)
+            || SPEECH.contains(&op),
     )?;
-    if op=="archive_list" {
-        if v["session"]!="" { return Err(Error::BAD); }
-        fields(p,&[],&["from","until","limit","cursor","query"])?;
-        let number=|key:&str,default:u64|->Result<u64>{match p.get(key){None=>Ok(default),Some(v)=>v.as_u64().ok_or(Error::BAD)}};
-        let start=number("from",0)?;let end=number("until",253402300800)?;let limit=number("limit",50)?;
-        if start>=end || end>253402300800 || !(1..=50).contains(&limit) {return Err(Error::BAD);}
-        if let Some(c)=p.get("cursor"){if !text(c,1024,true)?.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)){return Err(Error::BAD);}}
-        if let Some(q)=p.get("query"){if text(q,256,true)?.chars().any(char::is_control){return Err(Error::BAD);}}
+    if op == "archive_list" {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        fields(p, &[], &["from", "until", "limit", "cursor", "query"])?;
+        let number = |key: &str, default: u64| -> Result<u64> {
+            match p.get(key) {
+                None => Ok(default),
+                Some(v) => v.as_u64().ok_or(Error::BAD),
+            }
+        };
+        let start = number("from", 0)?;
+        let end = number("until", 253402300800)?;
+        let limit = number("limit", 50)?;
+        if start >= end || end > 253402300800 || !(1..=50).contains(&limit) {
+            return Err(Error::BAD);
+        }
+        if let Some(c) = p.get("cursor") {
+            if !text(c, 1024, true)?
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+            {
+                return Err(Error::BAD);
+            }
+        }
+        if let Some(q) = p.get("query") {
+            if text(q, 256, true)?.chars().any(char::is_control) {
+                return Err(Error::BAD);
+            }
+        }
     } else if LAUNCH.contains(&op) {
         if v["session"] != "" {
             return Err(Error::BAD);

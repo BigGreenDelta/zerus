@@ -254,7 +254,10 @@ impl Journal {
             &format!("DELETE FROM requests WHERE operation='attachment_read' AND {delivered}"),
             [short],
         )?;
-        tx.execute(&format!("DELETE FROM requests WHERE operation='archive_list' AND {delivered}"),[now-3600.0])?;
+        tx.execute(
+            &format!("DELETE FROM requests WHERE operation='archive_list' AND {delivered}"),
+            [now - 3600.0],
+        )?;
         tx.execute(&format!("DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND {delivered}"),
                    [now - READ_SECONDS])?;
         let expired: Vec<(String, String)> = tx
