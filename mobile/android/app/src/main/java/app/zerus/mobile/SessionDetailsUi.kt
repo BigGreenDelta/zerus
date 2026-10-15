@@ -387,6 +387,7 @@ import org.json.JSONObject
     } },confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } })
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun NativeSettingsDialog(model: ZerusViewModel, session: Session, onDismiss: () -> Unit) {
     val target = session.target
     val snapshot = remember(target) { SessionDetailsPresentation.settings(model.activity) }
@@ -405,21 +406,15 @@ import org.json.JSONObject
             else -> ""
         }
     }
-    ZerusAlertDialog(onDismissRequest = onDismiss,title = { Text("Model and effort") },text = { Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Settings apply to ${target.session}.",style = MaterialTheme.typography.bodySmall)
-        if(snapshot.pendingId.isNotBlank()) Text("Pending: ${snapshot.pendingModel} / ${snapshot.pendingEffort.ifBlank { "Default" }}",style = MaterialTheme.typography.bodySmall)
-        NativeSettingsChoices(snapshot.models,selectedModel,efforts,selectedEffort,
+    ModalBottomSheet(onDismissRequest = onDismiss,sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        NativeSettingsSheetContent(snapshot,target.session,selectedModel,selectedEffort,reason,
             onModelChange = { id ->
                 selectedModel = id
                 if(selectedEffort !in snapshot.models.first { it.id == id }.efforts) selectedEffort = ""
-            },onEffortChange = { selectedEffort = it })
-        Text(when(snapshot.applyWhen) { "ready" -> "Apply when the agent is ready."; "resume" -> "Save for the next resume."; "now" -> "Apply now."; else -> "The machine determines when these settings apply." },style = MaterialTheme.typography.bodySmall)
-        if(snapshot.supported && snapshot.notice.isNotBlank()) Text(snapshot.notice,style = MaterialTheme.typography.bodySmall)
-        if(reason.isNotBlank()) Text(reason,style = MaterialTheme.typography.bodySmall)
-    } },confirmButton = { TextButton(onClick = { model.updateSettings(target,selectedModel,selectedEffort,if(applyingPending) snapshot.pendingId else ""); onDismiss() },enabled = reason.isBlank()) {
-        Text(when(snapshot.applyWhen) { "ready" -> "Apply when ready"; "resume" -> "Save for resume"; else -> if(applyingPending) "Apply pending" else "Apply" })
-    } },dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+            },onEffortChange = { selectedEffort = it },
+            onApply = { model.updateSettings(target,selectedModel,selectedEffort,if(applyingPending) snapshot.pendingId else "");onDismiss() },
+            onDismiss = onDismiss)
+    }
 }
 
 internal fun actionLabel(operation: String,target: Target? = null) = when(operation) {

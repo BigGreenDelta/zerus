@@ -276,12 +276,20 @@ one durable authorized apply attempt when native readiness is observed, includin
 when another session is open. Uncertain actions expose their original receipt;
 they are never retried automatically.
 
-Model and effort shows the selected model in a compact dropdown, so a long
-native model catalog cannot hide the Effort controls. Supported effort levels
-wrap into single-choice buttons with 48 dp touch targets; the selected level
-is highlighted and repeated beside the Effort heading. Default retains the
-native default choice. Changing these selections only edits the form; Apply
-keeps the existing exact-session, pending-request and readiness checks.
+Model and effort opens a sheet with a scrolling native model list and a pinned
+Effort row showing the current level. That row opens a separate effort page;
+Back returns to models and preserves the staged selections. Selected rows have
+a checkmark and accessible radio state, with at least 48 dp touch targets.
+Default retains the native default choice. Selection and navigation only edit
+the form; Apply keeps the exact-session, pending-request and readiness checks.
+
+Model labels and order come from the shared `hgs` catalog, without Android
+sorting or invented recommendation/cost badges. Codex uses its native cached
+catalog's `display_name` (falling back to the ID), and Claude uses the account
+catalog's `name`. Both retain catalog array order. Kimi retains configuration
+order, and DeepSeek retains native group/model order. OpenCode currently uses
+provider/model ID order in the backend. Desktop consumes the same catalog,
+deduplicates model IDs and prepends the current model when absent.
 
 Terminal uses a separate saved input buffer and a fresh exact native binding.
 Snapshots poll adaptively while visible; input sends literal text or fixed keys,
