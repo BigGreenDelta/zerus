@@ -152,6 +152,8 @@ class SessionSettings(test_effort.EffortTransport):
         message=dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id,text='continue')
         result=subprocess.run([str(test_input.HGS),'send',self.name,'--json'],env=self.env,input=json.dumps(message),text=True,capture_output=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)
+        # The fixture agent records its input after hgs returns.
+        self.wait_for(lambda:self.received().endswith(b'\r'))
         self.assertEqual(self.received(),b'\x1b[200~continue\x1b[201~\r')
         self.assertEqual(self.inspect()['pending_effort'],'low')
 
