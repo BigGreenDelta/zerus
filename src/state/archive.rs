@@ -118,36 +118,48 @@ pub(super) fn reconcile() -> Result<()> {
         return Ok(());
     }
     let _guard = lock(None)?;
-    let snapshot = live()?;
+    reconcile_locked(&live()?).map(drop)
+}
+
+/// `reconcile` for a caller that holds the state lock and read `snapshot`
+/// under it. Returns the archives and the bindings as it leaves them.
+pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<Value>)> {
     let archived = records()?;
-    for record in super::storage::records()? {
-        if snapshot.contains_key(string(&record, "name"))
-            || process_alive(&record)
+    let bindings = super::storage::records()?;
+    let mut saved = false;
+    for record in &bindings {
+        if snapshot.contains_key(string(record, "name"))
+            || process_alive(record)
             || record.get("pausing").is_some()
             || record["paused"].as_bool().unwrap_or(false)
-            || !string(&record, "expected_id").is_empty()
+            || !string(record, "expected_id").is_empty()
         {
             continue;
         }
-        if equivalent(&record, &archived) {
-            save(&record)?;
+        if equivalent(record, &archived) {
+            save(record)?;
+            saved = true;
             continue;
         }
-        let explicit_claude = string(&record, "agent") == "claude"
+        let explicit_claude = string(record, "agent") == "claude"
             && record.get("supervisor").is_none()
             && record["termination_signal"].is_null()
-            && string(&record, "error").is_empty()
-            && known_exit(&record);
-        let confirmed_supervisor = string(&record, "completion_source") == "supervisor"
-            && string(&record, "completion_reason") == "clean_exit"
+            && string(record, "error").is_empty()
+            && known_exit(record);
+        let confirmed_supervisor = string(record, "completion_source") == "supervisor"
+            && string(record, "completion_reason") == "clean_exit"
             && record["exit_code"] == 0
             && record["termination_signal"].is_null()
-            && known_exit(&record);
+            && known_exit(record);
         if explicit_claude || confirmed_supervisor {
-            save(&record)?;
+            save(record)?;
+            saved = true;
         }
     }
-    Ok(())
+    if saved {
+        return Ok((records()?, super::storage::records()?));
+    }
+    Ok((archived, bindings))
 }
 
 pub(super) fn manual(name: &str, dry: bool) -> Result<i32> { manual_scoped(name,dry,None) }
