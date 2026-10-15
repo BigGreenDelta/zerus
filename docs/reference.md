@@ -155,10 +155,15 @@ Claude Code's `PostModelSwitch` is registered only once `claude --version` repor
 2.1.296 or later: older versions stop every start at a settings warning for a hook
 event they do not know. Until then each launch reads the version again; a version
 that cannot be read gets no such event. A launch through a project `run_claude.sh`
-never reads it, because a launcher runs only under supervision. The entry is never
-removed: an older Claude Code run later with the same configuration directory shows
-that warning at each start until the `PostModelSwitch` entry is deleted from its
-`settings.json`. `PreModelSwitch` is never registered.
+never reads it, because a launcher runs only under supervision. Once registered,
+the version is read again only when the `claude` executable changes; a version older
+than 2.1.296 then has hgs remove its own `PostModelSwitch` entries before a tracked
+start, dropping the event only when nothing else is left in it; started outside hgs
+or with `HGS_TRACKING=0` first, it still warns until then. The user's own hooks for
+that event stay, and older versions still warn about those. An unreadable version or
+a launcher keeps the entry, as does a wrapper script that starts another Claude Code
+without itself changing: delete the entry from its `settings.json` by hand there.
+`PreModelSwitch` is never registered.
 Tracked Codex needs `--no-daemon`; the integration has been verified with 0.160.0,
 while 0.155.1 lacks that required flag.
 

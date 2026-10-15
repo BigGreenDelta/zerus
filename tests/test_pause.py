@@ -35,6 +35,8 @@ if sys.argv[1:] == ['--help']:
     sys.exit(0)
 if sys.argv[1:] == ['--version']:
     # hgs reads Claude Code's version before it registers PostModelSwitch.
+    with open(home / 'version-reads', 'a') as f:
+        f.write(agent + '\n')
     version = home / 'claude-version'
     print(version.read_text().strip() if version.exists() else '2.1.296 (Claude Code)')
     sys.exit(0)
@@ -54,6 +56,11 @@ else:
     var, folder, filename = ("CLAUDE_CONFIG_DIR", ".claude", "settings.json") if agent == "claude" else ("CODEX_HOME", ".codex", "hooks.json")
     path = pathlib.Path(os.environ.get(var) or home / folder) / filename
     hooks = json.loads(path.read_text())["hooks"]
+    version = home / 'claude-version'
+    if agent == "claude" and "PostModelSwitch" in hooks and version.exists() and \
+            tuple(map(int, version.read_text().split()[0].split('.'))) < (2, 1, 296):
+        # Older Claude Code stops its start at a Settings Warning for the unknown event.
+        (home / 'settings-warning').touch()
 def event(kind, **fields):
     path = home / "history" / (sid + ".jsonl")
     path.parent.mkdir(exist_ok=True)
@@ -681,6 +688,55 @@ class Lifecycle(Harness):
         self.send_event(name, "PostModelSwitch", **dict(switch, from_model="claude-fable-5-1",
                                                         to_model="claude-sonnet-5-5", requested_model=None, source="auto"))
         self.assertEqual(json.loads(self.hgs("inspect", name))["model"], "claude-sonnet-5-5")
+
+    @unittest.skipIf(LEGACY_STATE, "Claude's PostModelSwitch requires the native CLI")
+    def test_older_claude_loses_only_hgs_model_switch_entry(self):
+        settings = self.root / ".claude/settings.json"
+        reads = self.root / "version-reads"
+        name = self.start()
+        data = json.loads(settings.read_text())
+        entry = data["hooks"]["Stop"]
+        self.assertEqual(data["hooks"]["PostModelSwitch"], entry)
+        others = lambda hooks: {event: groups for event, groups in hooks.items() if event != "PostModelSwitch"}
+        # The user's own hook for the event, beside hgs's.
+        user = {"matcher": "opus", "hooks": [{"type": "command", "command": "true"}]}
+        data["hooks"]["PostModelSwitch"].append(user)
+        settings.write_text(json.dumps(data))
+        asked = len(reads.read_text().splitlines())
+        # The same Claude Code is not asked for its version at each start.
+        self.hgs("pause", name)
+        self.resume(name)
+        self.assertEqual(len(reads.read_text().splitlines()), asked)
+        self.assertEqual(json.loads(settings.read_text())["hooks"]["PostModelSwitch"], entry + [user])
+        # An older one installed in its place is, and hgs's entry goes before it starts.
+        self.hgs("pause", name)
+        self.script("claude", AGENT + "# Claude Code 2.1.295\n")
+        (self.root / "claude-version").write_text("2.1.295 (Claude Code)\n")
+        self.resume(name)
+        hooks = json.loads(settings.read_text())["hooks"]
+        self.assertEqual(hooks["PostModelSwitch"], [user])
+        self.assertEqual(others(hooks), others(data["hooks"]))
+        self.assertEqual(len(reads.read_text().splitlines()), asked + 1)
+        # A current version again gets the entry back, beside the user's.
+        self.hgs("pause", name)
+        self.script("claude", AGENT)
+        (self.root / "claude-version").unlink()
+        self.resume(name)
+        data = json.loads(settings.read_text())
+        self.assertEqual(data["hooks"]["PostModelSwitch"], [user] + entry)
+        # Without the user's hook, an older version loses the event itself
+        # and starts without a settings warning.
+        data["hooks"]["PostModelSwitch"] = entry
+        settings.write_text(json.dumps(data))
+        self.hgs("pause", name)
+        (self.root / "settings-warning").unlink(missing_ok=True)
+        self.script("claude", AGENT + "# Claude Code 2.0.9\n")
+        (self.root / "claude-version").write_text("2.0.9 (Claude Code)\n")
+        self.resume(name)
+        hooks = json.loads(settings.read_text())["hooks"]
+        self.assertNotIn("PostModelSwitch", hooks)
+        self.assertEqual(others(hooks), others(data["hooks"]))
+        self.assertFalse((self.root / "settings-warning").exists())
 
     def test_failed_resume_keeps_binding_and_no_fresh_fallback(self):
         name = self.start()

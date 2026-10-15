@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 use std::fs;
 
 const COMMON: &[&str] = &[
@@ -46,7 +47,8 @@ const CLAUDE_MODEL_SWITCH: Version = (2, 1, 296);
 /// every start at a settings warning while `settings.json` names a hook event
 /// it does not know, so these are added only for a version read from the
 /// agent's native CLI, never for a project launcher or a version that cannot
-/// be read. `PreModelSwitch` stays
+/// be read, and hgs's entry goes again before an older version starts
+/// (`prune_json`). `PreModelSwitch` stays
 /// unregistered: its allow would also skip Claude's cache-miss confirmation
 /// for the user.
 fn versioned_events(agent: &str) -> &'static [(&'static str, Version)] {
@@ -385,6 +387,59 @@ fn merge_json(
     )))
 }
 
+/// The JSON hook configuration text `original` of `agent` without hgs's
+/// entries for a `versioned_events` event that the agent's version lacks, or
+/// `None` when nothing goes: then its bytes are kept. Only where hgs has such
+/// an entry is `version` asked, and only a version read as older removes it:
+/// one that cannot be read keeps a working entry. The user's hooks stay, a
+/// matcher group goes only when hgs's entries were all it held, and the event
+/// key only when nothing is left in it. Text that `merge_json` cannot read
+/// stays for it to report.
+fn prune_json(
+    original: &str,
+    agent: &str,
+    windows: bool,
+    version: &mut dyn FnMut() -> Option<Version>,
+) -> Option<String> {
+    let mut document: Value = serde_json::from_str(original).ok()?;
+    let hooks = document.get_mut("hooks")?.as_object_mut()?;
+    let owned = |hook: &Value| Entry::owned(hook, windows).is_some();
+    let mut changed = false;
+    for &(event, oldest) in versioned_events(agent) {
+        let Some(groups) = hooks.get_mut(event).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let installed = groups
+            .iter()
+            .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+            .flatten()
+            .any(owned);
+        // A version that cannot be read may well have the event: its entry stays.
+        if !installed || version().is_none_or(|v| v >= oldest) {
+            continue;
+        }
+        groups.retain_mut(|group| {
+            let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let before = entries.len();
+            entries.retain(|hook| !owned(hook));
+            entries.len() == before || !entries.is_empty()
+        });
+        if groups.is_empty() {
+            hooks.remove(event);
+        }
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    Some(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&document).ok()?
+    ))
+}
+
 /// Install hgs's tracking hooks into the configuration of `agent`, whose
 /// executable is `program` (spec D12 on Windows).
 pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
@@ -418,20 +473,30 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
         program,
         agent: if agent == "claude" { "Claude Code" } else { agent },
         version: std::cell::OnceCell::new(),
+        seen: root().join("hook-versions").join(format!(
+            "{:x}.json",
+            Sha256::digest(path.to_string_lossy().as_bytes())
+        )),
     };
     let merged = if agent == "kimi" {
         merge_kimi(&original, &path, cfg!(windows), &mut || {
             fresh_command(&executable)
         })?
     } else {
+        // An older version run with this configuration later would stop at
+        // hgs's entry for an event it lacks: the entry goes before it starts.
+        let pruned = prune_json(&original, agent, cfg!(windows), &mut || {
+            installed.registered_version(agent)
+        });
         merge_json(
-            &original,
+            pruned.as_deref().unwrap_or(&original),
             &path,
             agent,
             cfg!(windows),
             &mut || fresh_entry(agent, &executable, &installed),
             &mut || installed.native_version(agent),
         )?
+        .or(pruned)
     };
     let Some(content) = merged else {
         return Ok(());
@@ -451,11 +516,13 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
 
 /// The agent whose hooks an installation writes: its executable `program`, its
 /// name for messages, and the version `program --version` reports, read at
-/// most once and only when a hook depends on it.
+/// most once and only when a hook depends on it. `seen` keeps the version last
+/// read for this configuration with the executable it was read from.
 struct Installed<'a> {
     program: &'a str,
     agent: &'a str,
     version: std::cell::OnceCell<Result<Version>>,
+    seen: PathBuf,
 }
 
 impl Installed<'_> {
@@ -469,7 +536,33 @@ impl Installed<'_> {
     /// as `run_claude.sh`: a launcher runs only under supervision, since it may
     /// prompt or unlock secrets, so its version stays unknown.
     fn native_version(&self, cli: &str) -> Option<Version> {
-        (self.program == cli).then(|| self.version().ok()).flatten()
+        if self.program != cli {
+            return None;
+        }
+        let identity = version::executable_identity(self.program);
+        let version = self.version().ok()?;
+        if let Some(identity) = identity {
+            version::remember(&self.seen, &identity, version);
+        }
+        Some(version)
+    }
+
+    /// `native_version` for an event whose entry is already there: the version
+    /// last read while the executable stays the same file, so a current agent
+    /// is not asked at every start, else read again. A launcher, an
+    /// executable that cannot be found and a version that cannot be read stay
+    /// unknown.
+    fn registered_version(&self, cli: &str) -> Option<Version> {
+        if self.program != cli {
+            return None;
+        }
+        let identity = version::executable_identity(self.program)?;
+        if let Some(version) = version::recalled(&self.seen, &identity) {
+            return Some(version);
+        }
+        let version = self.version().ok()?;
+        version::remember(&self.seen, &identity, version);
+        Some(version)
     }
 }
 
@@ -504,10 +597,14 @@ fn fresh_entry(agent: &str, executable: &str, installed: &Installed) -> Result<E
 
 /// Agent versions, `MAJOR.MINOR.PATCH`, and reading the installed one.
 mod version {
-    use super::Result;
+    use super::{atomic, Result};
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+    use std::fs;
     use std::io::{Read, Seek, SeekFrom};
+    use std::path::{Path, PathBuf};
     use std::process::Stdio;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     pub(super) type Version = (u64, u64, u64);
 
@@ -575,6 +672,66 @@ mod version {
             .and_then(|_| output.take(64 * 1024).read_to_string(&mut text))
             .map_err(|e| fail(e.to_string()))?;
         version_in(&text).ok_or_else(|| fail(format!("no version in {:?}", text.trim())))
+    }
+
+    /// What `program` starts, as a few file system calls tell it: each file it
+    /// runs (on Windows also the script of an npm shim) by its real path, size
+    /// and times, and on Unix by its inode too. Installing another version
+    /// changes it; a wrapper script that starts another program does not.
+    /// `None` when `program` cannot be found.
+    pub(super) fn executable_identity(program: &str) -> Option<String> {
+        let command = crate::platform::agent_command(&[program.to_owned()]).ok()?;
+        let started = crate::platform::which(command.get_program().to_str()?)?;
+        let nanos = |time: std::io::Result<SystemTime>| {
+            time.ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_nanos())
+        };
+        let mut identity = String::new();
+        for file in std::iter::once(started).chain(command.get_args().map(PathBuf::from)) {
+            let file = fs::canonicalize(file).ok()?;
+            let meta = fs::metadata(&file).ok()?;
+            #[cfg(unix)]
+            let changed = {
+                use std::os::unix::fs::MetadataExt;
+                format!(
+                    "{}:{}:{}.{}",
+                    meta.dev(),
+                    meta.ino(),
+                    meta.ctime(),
+                    meta.ctime_nsec()
+                )
+            };
+            #[cfg(windows)]
+            let changed = nanos(meta.created());
+            identity.push_str(&format!(
+                "{}\0{}\0{}\0{changed}\n",
+                file.display(),
+                meta.len(),
+                nanos(meta.modified())
+            ));
+        }
+        Some(format!("{:x}", Sha256::digest(identity.as_bytes())))
+    }
+
+    /// The version that `remember` kept in `seen` for the executable `identity`.
+    pub(super) fn recalled(seen: &Path, identity: &str) -> Option<Version> {
+        let record: Value = serde_json::from_slice(&fs::read(seen).ok()?).ok()?;
+        if record["executable"] != identity {
+            return None;
+        }
+        version_in(record["version"].as_str()?)
+    }
+
+    /// Keep in `seen` that the executable `identity` reported `version`. A
+    /// record that cannot be written only means the version is read again.
+    pub(super) fn remember(seen: &Path, identity: &str, version: Version) {
+        if recalled(seen, identity) != Some(version) {
+            let (major, minor, patch) = version;
+            let record =
+                json!({"executable": identity, "version": format!("{major}.{minor}.{patch}")});
+            let _ = atomic(seen, &record.to_string());
+        }
     }
 }
 
@@ -1540,12 +1697,197 @@ mod tests {
             program: &program,
             agent: "Claude Code",
             version: std::cell::OnceCell::new(),
+            seen: folder.path().join("seen.json"),
         };
         // A launcher may prompt or unlock secrets: its version stays unknown.
         assert_eq!(installed.native_version("claude"), None);
+        assert_eq!(installed.registered_version("claude"), None);
         assert!(!marker.exists());
         // The same script read as the agent itself answers.
         assert_eq!(installed.native_version(&program), Some(CLAUDE_MODEL_SWITCH));
         assert!(marker.exists());
+    }
+
+    /// A pruning for an agent that reports `version`, which says how often it was asked.
+    fn versioned_prune(
+        original: &str,
+        agent: &str,
+        windows: bool,
+        version: Option<Version>,
+    ) -> (Option<String>, usize) {
+        let mut asked = 0;
+        let pruned = prune_json(original, agent, windows, &mut || {
+            asked += 1;
+            version
+        });
+        (pruned, asked)
+    }
+
+    #[test]
+    fn claude_model_switch_entry_goes_only_for_an_older_version() {
+        let unix = Entry::shell(UNIX.into());
+        let older = json_merge(r#"{"model": "opus"}"#, "claude", false, unix.clone()).unwrap();
+        let (registered, _) = versioned_merge(
+            &older,
+            "claude",
+            false,
+            unix.clone(),
+            Some(CLAUDE_MODEL_SWITCH),
+        );
+        let registered = registered.unwrap();
+        // A version that has the event keeps the entry and every byte, and so
+        // does one that cannot be read: it may well be current.
+        for version in [None, Some(CLAUDE_MODEL_SWITCH), Some((2, 2, 0))] {
+            assert_eq!(
+                versioned_prune(&registered, "claude", false, version),
+                (None, 1),
+                "{version:?}"
+            );
+        }
+        // An older version gets back what it had before the entry, and keeps it.
+        for version in [(2, 1, 295), (2, 0, 9)] {
+            let (pruned, asked) = versioned_prune(&registered, "claude", false, Some(version));
+            assert_eq!((pruned.as_deref(), asked), (Some(older.as_str()), 1));
+            assert_eq!(
+                versioned_merge(&older, "claude", false, unix.clone(), Some(version)),
+                (None, 1)
+            );
+            assert_eq!(
+                versioned_prune(&older, "claude", false, Some(version)),
+                (None, 0)
+            );
+        }
+        // Only hgs's entries go, as hgs knows them (a legacy one too): the
+        // user's hooks stay, and so does a group of theirs beside hgs's.
+        let user = json!({"type": "command", "command": "notify-send switched"});
+        let entry = hook_entries(&registered, "PostModelSwitch")[0].clone();
+        let legacy = json!({"type": "command", "command": "python3 /old/hgs_state.py hook"});
+        let mut document: Value = serde_json::from_str(&registered).unwrap();
+        document["hooks"]["PostModelSwitch"] = json!([
+            {"matcher": "opus", "hooks": [user]},
+            {"hooks": [entry]},
+            {"matcher": "haiku", "hooks": [entry, user, legacy]},
+            {"matcher": "sonnet", "hooks": []},
+            {"matcher": "fable"},
+        ]);
+        let (pruned, _) =
+            versioned_prune(&document.to_string(), "claude", false, Some((2, 1, 295)));
+        let mut pruned: Value = serde_json::from_str(&pruned.unwrap()).unwrap();
+        assert_eq!(
+            pruned["hooks"]["PostModelSwitch"],
+            json!([
+                {"matcher": "opus", "hooks": [user]},
+                {"matcher": "haiku", "hooks": [user]},
+                {"matcher": "sonnet", "hooks": []},
+                {"matcher": "fable"},
+            ])
+        );
+        for document in [&mut document, &mut pruned] {
+            document["hooks"]
+                .as_object_mut()
+                .unwrap()
+                .remove("PostModelSwitch");
+        }
+        assert_eq!(pruned, document);
+        // Without an hgs entry there, nothing asks for the version.
+        let mut theirs: Value = serde_json::from_str(&older).unwrap();
+        theirs["hooks"]["PostModelSwitch"] = json!([{"hooks": [user]}]);
+        assert_eq!(
+            versioned_prune(&theirs.to_string(), "claude", false, Some((2, 1, 295))),
+            (None, 0)
+        );
+        // Only Claude has versioned events, and what merge_json reports stays for it.
+        assert_eq!(
+            versioned_prune(&registered, "codex", false, Some((2, 1, 295))),
+            (None, 0)
+        );
+        for original in [
+            "",
+            "{",
+            "[]",
+            r#"{"hooks": []}"#,
+            r#"{"hooks": {"PostModelSwitch": {}}}"#,
+        ] {
+            assert_eq!(
+                versioned_prune(original, "claude", false, Some((2, 1, 295))),
+                (None, 0),
+                "{original:?}"
+            );
+        }
+        // Windows knows its exec form as hgs's too.
+        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
+        let (settings, _) =
+            versioned_merge("", "claude", true, exec.clone(), Some(CLAUDE_MODEL_SWITCH));
+        let settings = settings.unwrap();
+        let (pruned, _) = versioned_prune(&settings, "claude", true, Some((2, 1, 295)));
+        let pruned = pruned.unwrap();
+        let hooks: Value = serde_json::from_str(&pruned).unwrap();
+        assert!(hooks["hooks"].get("PostModelSwitch").is_none());
+        for event in events("claude") {
+            assert_eq!(hook_entries(&pruned, event), hook_entries(&settings, event));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_version_is_read_again_only_for_another_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let reads = folder.path().join("reads");
+        let answer = folder.path().join("answer");
+        let claude = folder.path().join("claude");
+        // A new file in its place, as an installer writes it.
+        let install = |rest: &str| {
+            let new = folder.path().join("claude.new");
+            let script = format!(
+                "#!/bin/sh\necho >> '{}'\ncat '{}'\n{rest}",
+                reads.display(),
+                answer.display()
+            );
+            fs::write(&new, script).unwrap();
+            fs::set_permissions(&new, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::rename(&new, &claude).unwrap();
+        };
+        let asked = || fs::read_to_string(&reads).map_or(0, |text| text.lines().count());
+        let program = claude.to_string_lossy().into_owned();
+        let seen = folder.path().join("state/hook-versions/settings.json");
+        let launch = || Installed {
+            program: &program,
+            agent: "Claude Code",
+            version: std::cell::OnceCell::new(),
+            seen: seen.clone(),
+        };
+        install("");
+        fs::write(&answer, "2.1.296 (Claude Code)\n").unwrap();
+        // The launch that registers the entry keeps the version it read.
+        assert_eq!(launch().native_version(&program), Some(CLAUDE_MODEL_SWITCH));
+        assert_eq!(asked(), 1);
+        // Later launches of the same file are not asked, whatever it would answer.
+        fs::write(&answer, "2.1.295 (Claude Code)\n").unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                launch().registered_version(&program),
+                Some(CLAUDE_MODEL_SWITCH)
+            );
+        }
+        assert_eq!(asked(), 1);
+        // Another version installed in its place is, once.
+        install("# 2.1.295\n");
+        let installed = launch();
+        assert_eq!(installed.registered_version(&program), Some((2, 1, 295)));
+        assert_eq!(installed.native_version(&program), Some((2, 1, 295)));
+        assert_eq!(launch().registered_version(&program), Some((2, 1, 295)));
+        assert_eq!(asked(), 2);
+        // A version that cannot be read stays unknown and is asked again.
+        install("exit 3\n");
+        for _ in 0..2 {
+            assert_eq!(launch().registered_version(&program), None);
+        }
+        assert_eq!(asked(), 4);
+        // A launcher, and an executable that is gone, are never run.
+        assert_eq!(launch().registered_version("claude"), None);
+        fs::remove_file(&claude).unwrap();
+        assert_eq!(launch().registered_version(&program), None);
+        assert_eq!(asked(), 4);
     }
 }
