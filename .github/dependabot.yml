@@ -14,7 +14,7 @@ updates:
         applies-to: security-updates
         patterns: ["*"]
   - package-ecosystem: cargo
-    directories: ["/", "/services/mobile/relay"]
+    directories: ["/", "/services/mobile/relay", "/services/mobile/connector"]
     schedule:
       interval: monthly
     open-pull-requests-limit: 1

@@ -29,7 +29,7 @@ from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
 from . import speech, speech_config, voice
-from . import attachment_reads
+from . import attachment_reads, file_reads
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import ATTACHMENT_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
@@ -179,6 +179,7 @@ class Journal:
                                 (state, json.dumps(response), now, request_id))
         self.db.execute("CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'")
+        self.db.execute("CREATE INDEX IF NOT EXISTS file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS attachment_delivered_reads ON requests(delivered_at) WHERE operation='attachment_read' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS journal_operation ON requests(operation)")
         self.db.execute("CREATE INDEX IF NOT EXISTS delivered_reads ON requests(delivered_at) WHERE operation='inspect' AND delivered=1 AND state!='running'")
@@ -193,6 +194,7 @@ class Journal:
             self.db.execute(f"DELETE FROM requests WHERE operation IN {speech.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {voice.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             # Delivered attachment chunks are never kept beyond the same short window.
+            self.db.execute("DELETE FROM requests WHERE operation='file_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute("DELETE FROM requests WHERE operation='attachment_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 3600,))
             rows = self.db.execute(f"SELECT request_id,state FROM requests WHERE operation NOT IN {READ_CLASS_SQL} AND delivered=1 AND state!='running' AND delivered_at<? AND response IS NOT NULL AND response_expired=0", (now - 7 * 86400,)).fetchall()
@@ -307,10 +309,12 @@ class Connector:
         self.read_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
+        self.file_read_supported = False
         self.speech_supported = False
         self.speech_config_supported = False
         self.voice_supported = False
         self.attachment_reads = attachment_reads.AttachmentReads()
+        self.file_reads = attachment_reads.AttachmentReads()
         self.capabilities_next_poll = 0.0
         self.presence = None  # Latest listing desktop_presence; sent beside, never inside, the snapshot.
         self.accounts = AccountCache(lambda *args, **kwargs: self.native(*args, **kwargs),
@@ -483,7 +487,7 @@ class Connector:
         await asyncio.gather(self.enrich_attention(snapshot), self.enrich_projects(snapshot))
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
+        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -506,6 +510,7 @@ class Connector:
         self.read_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
+        self.file_read_supported = False
         self.speech_supported = False
         self.speech_config_supported = False
         self.voice_supported = False
@@ -525,6 +530,7 @@ class Connector:
             self.read_supported = isinstance(help_text, str) and "read <session> --json" in help_text
             self.preference_supported = isinstance(help_text,str) and "swarm preference set mobile_delivery" in help_text
             self.attachment_read_supported = isinstance(help_text, str) and attachment_reads.HELP_MARKER in help_text
+            self.file_read_supported = isinstance(help_text, str) and file_reads.HELP_MARKER in help_text
             self.speech_supported = isinstance(help_text, str) and speech.HELP_MARKER in help_text
             self.voice_supported = isinstance(help_text, str) and voice.HELP_MARKER in help_text
             self.speech_config_supported = isinstance(help_text, str) and speech_config.HELP_MARKER in help_text
@@ -664,7 +670,7 @@ class Connector:
                 raise ConnectorError("session must match an exact nonarchived snapshot entry")
             return operation, session, payload or None
         payload = request.get("payload")
-        archived_output = operation in {"process_output", "history", "restore", "forget", "rename", "fork", "attachment_read"} and isinstance(payload, dict) and "archive_id" in payload
+        archived_output = operation in {"process_output", "history", "restore", "forget", "rename", "fork", "attachment_read", "file_read"} and isinstance(payload, dict) and "archive_id" in payload
         if isinstance(payload, dict) and "archive_id" in payload and not archived_output:
             raise ConnectorError("archived targets support inspection only")
         if archived_output:
@@ -685,6 +691,9 @@ class Connector:
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation == "history":
             try: validate_history(payload,request["request_id"])
+            except ValueError as error: raise ConnectorError(str(error)) from None
+        if operation == "file_read":
+            try: file_reads.validate(payload, request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation == "attachment_read":
             try: validate_read(payload,request["request_id"])
@@ -782,6 +791,26 @@ class Connector:
         except attachment_reads.AttachmentReadError as error:
             raise ConnectorError(str(error)) from None
 
+    async def read_computer_file(self, session: str, payload: dict, request_id: str) -> dict:
+        # The first range always captures the current file. Following ranges
+        # use only that immutable digest, never a silently replaced path.
+        expected = payload.get("sha256", "")
+        entry = self.file_reads.get(file_reads.key(session, payload, expected)) if expected else None
+        try:
+            if entry is None:
+                try:
+                    raw = await self.native(["file-read", session, "--json"], file_reads.native_payload(payload),
+                                            max_output_bytes=attachment_reads.NATIVE_OUTPUT_BYTES)
+                except ConnectorError as error:
+                    if str(error) != "native command failed":
+                        raise
+                    raise ConnectorError("The file could not be read. Check that it still exists, is readable and is at most 10 MiB, then open it again.") from None
+                entry = await asyncio.to_thread(file_reads.decode, raw, session, payload)
+                self.file_reads.put(file_reads.key(session, payload, entry["sha256"]), entry)
+            return await asyncio.to_thread(file_reads.chunk, entry, session, payload, request_id)
+        except attachment_reads.AttachmentReadError as error:
+            raise ConnectorError(str(error)) from None
+
     async def child_send_preflight(self, session, payload):
         if not session.startswith("dsh/"):
             raise ConnectorError("this native provider has no child-send ABI")
@@ -875,6 +904,8 @@ class Connector:
                 raise ConnectorError("native mobile worktree ABI is unavailable")
             if operation == "mark_read" and not self.read_supported:
                 raise ConnectorError("native shared read ABI is unavailable")
+            if operation == "file_read" and not self.file_read_supported:
+                raise ConnectorError("native computer file read ABI is unavailable")
             if operation == "attachment_read" and not self.attachment_read_supported:
                 raise ConnectorError("native attachment read ABI is unavailable")
             if operation == "directory_create":
@@ -1143,6 +1174,8 @@ class Connector:
                 result = await self.native(["swarm", "preference", "set", "mobile_delivery", payload["value"], "--json"], timeout=10)
                 if not isinstance(result, dict) or result.get("ok") is not True or result.get("mobile_delivery") != payload["value"]:
                     raise ConnectorError("native delivery setting acknowledgement did not match")
+            elif operation == "file_read":
+                result = await self.read_computer_file(session, payload, request_id)
             elif operation == "attachment_read":
                 result = await self.read_attachment(session, payload, request_id)
             elif operation == "mark_read":

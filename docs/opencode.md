@@ -100,7 +100,7 @@ saved binding. Voice recognition delivers its transcript through the same guarde
 text-message path; original audio remains in Zerus history.
 
 The initial API-host path has no tmux Terminal or embedded Native UI. Attachments,
-child-session controls, archive/fork, context reset and compaction are not yet
+messages to child sessions, archive/fork, context reset and compaction are not yet
 supported. Clients keep those controls unavailable with a reason. Configure
 native permissions and provider credentials on the host; additional managed
 OpenCode accounts are outside this initial native-account contract. Accounts can
@@ -122,12 +122,37 @@ The native server listens only on authenticated loopback. Its endpoint metadata
 and access secret are private host state, not relay data or public catalog fields.
 Closing or updating Zerus does not dispose that native host.
 
+## Child sessions
+
+The reviewed version's native API runtime has no `task` tool, so a conversation
+driven only through Zerus does not create subagents. OpenCode's classic runtime,
+used by the OpenCode TUI and `opencode run` on the same computer and data
+directory, can continue that conversation and start children. Each child is a
+native session whose recorded parent is the Zerus conversation.
+
+Zerus lists exactly those children under the session and opens each one
+read-only with its own recent history (the latest 200 native messages). A child's
+turn is finished when its own newest message records how it ended: completed or
+interrupted children show **Ready**, failed ones **Error**. The API host does
+not run classic turns, so it cannot confirm current work: an unfinished turn,
+which another OpenCode process may still be running or a crashed one abandoned,
+stays **Unknown**. Counters therefore show no confirmed active child and keep
+the `+` uncertainty marker, for example `0+/2`. A child never takes its parent's
+state, and the parent's state never comes from its children. At most 64 recent
+children are checked each time; older ones stay listed as unknown.
+
+Sending to a child, answering its questions or permissions, and changing its
+model remain in the OpenCode client that runs it. Turns that the classic runtime
+runs on the parent conversation itself are not part of the native API history
+that Zerus reads for the parent.
+
 ## Qualification
 
 The ordinary CLI suite covers parsing and projections. The native adapter suite
 runs against the actual reviewed OpenCode binary with private synthetic state
-and a keyless local model fixture; it does not contact paid model APIs. Run the
-suite explicitly with the prerequisites installed:
+and a keyless local model fixture; it does not contact paid model APIs. Its child
+test starts a classic `opencode run` process on the same private data directory
+to create a real child. Run the suite explicitly with the prerequisites installed:
 
 ```sh
 cargo build --locked

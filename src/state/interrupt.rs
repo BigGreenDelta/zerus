@@ -24,7 +24,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
     let guard=lock(None)?;
     let name=&args[0];let open_native=opencode::exists(name);let native=dsh::exists(name) || open_native;
-    let record=if open_native {opencode::inspect(name,None)?} else if native {dsh::inspect(name,None)?} else {read(name)?};
+    let record=if open_native {opencode::own_state(name)?} else if native {dsh::inspect(name,None)?} else {read(name)?};
     if request.expected_run_id.is_empty() || record["run_id"]!=request.expected_run_id
         || record["conversation_id"]!=request.expected_conversation_id
         || record["turn_started"].as_f64().unwrap_or(0.0)!=request.expected_turn_started {

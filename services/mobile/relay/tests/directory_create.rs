@@ -1,15 +1,10 @@
 //! Additive computer-scoped mutations retain exact route and permanent identity.
 use serde_json::{json, Value};
-use std::sync::Arc;
 use uuid::Uuid;
-use zerus_relay::{
-    args,
-    config::Config,
-    db::{s, Db},
-    json::canonical,
-    protocol,
-    store::{Credential, Role, Store, Submission},
-};
+use zerus_relay::{args, db::s, json::canonical, protocol};
+
+mod common;
+use common::Fixture;
 
 fn command(computer: &str) -> Value {
     let id = Uuid::new_v4().to_string();
@@ -62,79 +57,28 @@ fn strict_directory_wire_agrees_with_connector_and_is_never_a_read() {
     assert!(protocol::request(&boundary).is_err());
 }
 
-struct Fixture {
-    _root: tempfile::TempDir,
-    store: Store,
-    node: Credential,
-    phone: Credential,
-}
-
-impl Fixture {
-    async fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let db = Db::open(
-            &root.path().join("relay.sqlite3"),
-            Arc::new(Config {
-                background: false,
-                ..Config::default()
-            }),
+/// A heartbeat advertising exactly these operations.
+async fn beat(fixture: &Fixture, operations: &[&str]) {
+    let snapshot =
+        json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":operations}});
+    fixture
+        .store
+        .heartbeat(
+            &fixture.node,
+            &json!({"snapshot":snapshot}),
+            &canonical(&snapshot).unwrap(),
         )
         .await
         .unwrap();
-        let store = Store::new(db);
-        let credentials = store
-            .provision("Example workspace", "Example computer")
-            .await
-            .unwrap();
-        let pair = store
-            .pair(s(&credentials, "pair_code"), "Example phone")
-            .await
-            .unwrap();
-        let node = store
-            .authenticate(s(&credentials, "node_token"), Role::Node)
-            .await
-            .unwrap();
-        let phone = store
-            .authenticate(s(&pair, "device_token"), Role::Device)
-            .await
-            .unwrap();
-        Self {
-            _root: root,
-            store,
-            node,
-            phone,
-        }
-    }
-
-    async fn beat(&self, operations: &[&str]) {
-        let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":operations}});
-        self.store
-            .heartbeat(
-                &self.node,
-                &json!({"snapshot":snapshot}),
-                &canonical(&snapshot).unwrap(),
-            )
-            .await
-            .unwrap();
-    }
-
-    async fn submit(&self, body: &Value) -> zerus_relay::error::Result<Value> {
-        self.store
-            .submit(&self.phone, &Submission::new(body.clone())?)
-            .await
-            .map(|(_, value)| value)
-    }
 }
 
 #[tokio::test]
 async fn admission_capability_duplicate_claim_receipt_and_retention_preserve_mutation() {
     let fixture = Fixture::new().await;
     let body = command(&fixture.node.id);
-    fixture.beat(&["dirs", "launch"]).await;
+    beat(&fixture, &["dirs", "launch"]).await;
     assert_eq!(fixture.submit(&body).await.unwrap_err().0.as_u16(), 409);
-    fixture.beat(&["dirs", "directory_create"]).await;
+    beat(&fixture, &["dirs", "directory_create"]).await;
     assert_eq!(fixture.submit(&body).await.unwrap()["state"], "queued");
     assert_eq!(fixture.submit(&body).await.unwrap()["state"], "queued");
     let usage = fixture
@@ -224,7 +168,7 @@ async fn admission_capability_duplicate_claim_receipt_and_retention_preserve_mut
     let mut changed = body.clone();
     changed["payload"]["path"] = json!("/workspace/other");
     assert_eq!(fixture.submit(&changed).await.unwrap_err().0.as_u16(), 409);
-    fixture.store.db.close().await;
+    fixture.close().await;
 }
 
 #[tokio::test]
@@ -295,5 +239,5 @@ async fn direct_peer_directory_request_is_bound_to_enrolled_gateway_and_exact_ma
         .unwrap()
         .is_none());
     assert_eq!(fixture.submit(&body).await.unwrap()["state"], "uncertain");
-    fixture.store.db.close().await;
+    fixture.close().await;
 }

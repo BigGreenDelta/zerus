@@ -112,6 +112,17 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.assertEqual(result["result_target"]["conversation_id"], "session-synthetic")
         self.assertFalse(self.binding.exists())
 
+    def test_context_reset_keeps_the_explicit_fallback_without_native_effects(self):
+        # The reviewed native release has no context reset; a clear must never reach the host.
+        state = sorted(path.relative_to(self.root) for path in (self.root / "state").rglob("*"))
+        request = {"request_id": str(uuid.uuid4()), "expected_run_id": "run", "expected_conversation_id": "session-synthetic"}
+        result = subprocess.run([str(HGS), "clear-context", self.name, "--json"], env=self.env, input=json.dumps(request), capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("This DeepSeek harness does not expose a native context reset. Use its native UI.", result.stderr)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(json.loads(self.binding.read_text()), self.record)
+        self.assertEqual(sorted(path.relative_to(self.root) for path in (self.root / "state").rglob("*")), state)
+
 
 if __name__ == "__main__":
     unittest.main()

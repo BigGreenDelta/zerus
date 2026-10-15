@@ -138,8 +138,12 @@ own observation time: fresh Arch heartbeats cannot keep stale Mac data online.
 A withdrawn or explicitly offline route becomes unavailable immediately. An
 offline route stays listed beneath its gateway with `online: false` and no
 snapshot, so its computer ID, phone label and color remain stable, but it cannot
-be selected, claimed or receive a peer snapshot. After reconnection it needs a
-fresh peer observation before it becomes usable. Existing
+be selected, claimed or receive a peer snapshot. Its `last_seen_at` keeps the
+time of the last accepted peer heartbeat, or null if the relay never observed
+that native UUID on the route, so phones can show when it was last seen. Gateway
+heartbeats never refresh that time, and a changed native UUID starts a new route
+without it. After reconnection the route needs a fresh peer observation before
+it becomes usable, however recent the retained time is. Existing
 body, response and workspace resource limits continue to apply; peer count does
 not multiply the permitted size of an individual request or computer response.
 Peer snapshot storage is capped at 1 MiB of canonical JSON, as is the connector's
@@ -510,9 +514,10 @@ Ordinary agent messages and non-approval question disclosures render Markdown
 with the desktop's CommonMark and GFM feature set: headings, emphasis, lists,
 quotes, links, tables, strikethrough, static task markers and code blocks.
 Android uses CommonMark Java 0.30.0 with native Compose presentation, not a WebView.
-Only explicitly tapped absolute HTTP(S) links open a browser; local file
-references remain visible text. Raw HTML is literal, and images display their
-descriptions without downloading resources. Native answers, approval commands,
+Only explicitly tapped absolute HTTP(S) links open a browser. In an agent
+conversation, file links open the source computer's file dialog described below.
+Raw HTML is literal, and images display their descriptions without downloading
+resources. Native answers, approval commands,
 receipts, raw events and delivery identities remain unchanged. Parsing runs away
 from the UI thread with two workers and an exact-content cache capped at 128
 entries and 4 MiB. The source, nesting, node and table-cell limits are 256 KiB,
@@ -754,6 +759,49 @@ no app can open the type. Rows show progress and errors; a failed read is never
 retried automatically. Without the operation on the relay and the computer, the
 row says "Update Zerus on this computer to open attachments."
 
+### Computer file links
+
+Agent Markdown file links open a dialog showing the original computer and path,
+with Copy path, Open and Save actions. Absolute POSIX paths, local `file:///`
+URLs and relative or `~/` paths are supported; relative paths resolve on that
+conversation's computer. Line fragments remain visible. No file bytes are read
+while rendering, opening the disclosure or copying its path. Open downloads an
+immutable copy and grants another Android app read access through FileProvider;
+Save downloads it, then opens Android's document picker. Its consumed launch ID
+and result remain bound to that copy through navigation and configuration
+changes. A stale result cannot export a newly selected file. Disconnecting a
+gateway cancels pending reads and unconfirmed exports, drains an already
+accepted save, then clears private copies. Process death never replays a save.
+
+The additive `file_read` operation requires support on the relay, connector and
+selected computer. Its payload is `{request_id, expected_run_id,
+expected_conversation_id, path, offset, length, sha256?, archive_id?, agent_id?}`.
+The first range starts at zero; later ranges require the first result's SHA-256.
+Files must be regular, nonempty and at most 10 MiB; chunks are at most 512 KiB.
+Native `hgs file-read <session> --json` receives the identity/path fields, checks
+the original binding before and after the bounded read, and returns a complete
+snapshot. It never stages an attachment, sends agent input or writes the source
+file. A child relative path needs its own verified folder; absolute paths still
+require membership in the exact parent conversation. The normal authorized
+single-hop machine route is retained.
+
+The connector reads a fresh snapshot for an initial range without a digest,
+verifies its digest, and keeps that version in a separate bounded 30 MiB, 120-second memory
+cache for following ranges. Missing cached data may be reread only if the
+original digest still matches. Results add `{name, run_id, conversation_id,
+requested_path, path, file_name, mime, bytes, sha256, offset, length,
+data_base64}` and echo optional archive/child identities. Android checks every
+identity and the final digest before publishing a private copy in
+`cacheDir/computer-file-view/` (24 hours, 100 MiB, verified on reuse). A later
+explicit Open or Save still obtains the current native digest first.
+
+Relay byte results use their own `file_history` index and expire five seconds
+after their receipt is read, or 60 seconds after completion. Delivered connector
+journal results expire after 120 seconds. The existing indexed `READ_SQL`
+predicate stays unchanged. Errors require an explicit retry; missing capability
+explains which gateway/computer needs updating. Sent attachments continue using
+the separate receipt-based `attachment_read` contract.
+
 ### Voice input
 
 The provider manager targets an explicitly selected authorized processing
@@ -830,7 +878,7 @@ are `inspect`, `send`, `answer` and `interrupt`. Additive operations include
 and `process_stop`, native lifecycle actions, `terminal_snapshot`,
 `terminal_input`, `history`, `catalog`, `dirs`, `directory_create`, `launch`, `worktrees`,
 `worktree_create`, `recovery_action`, `mark_read`, `set_mobile_delivery` and
-`attachment_read`.
+`attachment_read` and `file_read`.
 
 `attachment_read` is a read of one byte range of a file in the exact
 conversation's own delivery receipt. Its payload is `{request_id,
@@ -888,7 +936,9 @@ locally for up to two seconds and 32 native reads, avoiding a network roundtrip
 per index chunk. Cursored reads execute once. A partial resident adapter is
 reported as partial rather than a completed conversation.
 
-`last_seen_at` and event `created_at` use Unix epoch seconds.
+`last_seen_at` and event `created_at` use Unix epoch seconds. `last_seen_at`
+is the selected route's last accepted heartbeat (the gateway's own heartbeat for
+a direct route), retained while the computer is offline; null means none.
 
 ## Notifications
 

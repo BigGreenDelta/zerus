@@ -279,7 +279,7 @@ impl Store {
         } else {
             r
         };
-        if ["terminal_snapshot", "attachment_read"].contains(&s(&row, "operation"))
+        if ["terminal_snapshot", "attachment_read", "file_read"].contains(&s(&row, "operation"))
             && ["completed", "failed", "uncertain"].contains(&s(&row, "state"))
         {
             t.exec(

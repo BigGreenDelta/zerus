@@ -110,11 +110,25 @@ The ordinary `kwinwindowlayer` test runs on a private D-Bus session with a fake
 compositor and never controls the user's desktop.
 
 For the Rust mobile relay, run `cargo +1.85.0 test --locked` inside
-`services/mobile/relay`, then the explicit PostgreSQL and connector contracts
-in [its README](services/mobile/relay/README.md). The Docker image uses that Rust
-binary. For the connector and reference compatibility fixtures, install
-`services/mobile` in a Python 3.11+
-virtual environment and run `python -m unittest discover -s services/mobile/tests -v`.
+`services/mobile/relay`. The Docker image uses that Rust binary. For the Rust
+mobile connector, run `cargo +1.85.0 test --locked` inside
+`services/mobile/connector`; [its README](services/mobile/connector/README.md)
+names the variables its Python and `hgs` handoff tests need and how the
+black-box suites run against its binary. For the Python connector and reference
+compatibility fixtures, install `services/mobile` and
+`services/mobile/tests/requirements.txt` in a Python 3.11+ virtual environment
+and run `python -m unittest discover -s services/mobile/tests -v`.
+The relay storage contracts and the connector HTTP suites need PostgreSQL:
+without `ZERUS_RELAY_TEST_DATABASE_URL` the contracts use SQLite and the HTTP
+suites skip instead of running the Rust relay. Start a disposable server with
+one line:
+
+```sh
+docker run --rm -d --name zerus-relay-test-postgres -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17.11-alpine -c max_connections=300
+```
+
+Then follow [the relay's PostgreSQL tests](services/mobile/relay/README.md#postgresql-tests)
+for the variables and commands; each test creates and drops its own database.
 These tests use synthetic subprocesses and isolated databases, without live native
 agents. For Android, run `./gradlew testDebugUnitTest lintDebug assembleDebug` from
 `mobile/android` with JDK 17 or 21 and Android SDK 36. Every CI run, PRs included,

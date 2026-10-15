@@ -133,7 +133,7 @@ fn record(name: &str, r: &Request) -> Result<Value> {
     }
     if let Some(id) = &r.agent_id {
         if !value["subagents"].get(id).is_some_and(Value::is_object)
-            && string(&value, "agent") != "dsh"
+            && !["dsh", "opencode"].contains(&string(&value, "agent"))
         {
             return Err("Child is not in this exact parent conversation".into());
         }
@@ -1387,9 +1387,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         .map_err(|e| e.to_string())?;
     let (provider_complete, mut status) = if string(&parent,"agent")=="opencode" {
         let detail=opencode::inspect(name,request.agent_id.as_deref())?;
-        if detail["run_id"]!=parent["run_id"] || detail["conversation_id"]!=parent["conversation_id"] {return Err("OpenCode history identity changed".into());}
+        // A child view carries its exact parent separately from its own ID.
+        if detail["run_id"]!=parent["run_id"] || detail.get("parent_conversation_id").unwrap_or(&detail["conversation_id"])!=&parent["conversation_id"]
+            || detail.get("agent_id").map(|id| Some(id.as_str().unwrap_or_default())!=request.agent_id.as_deref()).unwrap_or(request.agent_id.is_some()) {return Err("OpenCode history identity changed".into());}
         for row in detail["events"].as_array().into_iter().flatten() { add(&db,&key(&parent,&request),row.clone(),"journal")?; }
-        (detail["history_truncated"]==false,json!({"provider":"complete"}))
+        let done=detail["history_truncated"]==false;
+        (done,json!({"provider":if done{"complete"}else{"partial_native_window"}}))
     } else if string(&parent, "agent") == "dsh" {
         let detail = dsh::inspect(name, request.agent_id.as_deref())?;
         if detail["run_id"] != parent["run_id"]

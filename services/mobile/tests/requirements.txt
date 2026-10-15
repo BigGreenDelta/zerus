@@ -1,0 +1,3 @@
+# Test-only: the relay fixtures create and drop a PostgreSQL database per test.
+# It never belongs to the zerus-mobile package; CI installs it beside the package.
+asyncpg==0.31.0

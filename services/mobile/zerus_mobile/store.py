@@ -112,6 +112,7 @@ class Store:
         """)
         self.db.execute("DROP INDEX IF EXISTS read_history_v2")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_history_v2 ON requests(updated) WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain')")
+        self.db.execute("CREATE INDEX IF NOT EXISTS file_history ON requests(updated,id) WHERE operation='file_read' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS attachment_history ON requests(updated,id) WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_expiry ON requests(expires_at) WHERE state='queued' AND expires_at IS NOT NULL")
         self.db.execute("CREATE INDEX IF NOT EXISTS request_workspace ON requests(workspace_id,operation,state)")
@@ -228,6 +229,7 @@ class Store:
             self.db.execute(f"UPDATE requests SET state='failed',error='terminal input expired before delivery',result_bytes=length('terminal input expired before delivery'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='queued' AND expires_at<=? ORDER BY expires_at LIMIT {batch_size})", (now,now))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
             # Attachment bytes are carried, never kept beyond a short read window.
+            self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='file_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated LIMIT {batch_size})", (now - ATTACHMENT_RESULT_TTL, now - ATTACHMENT_READ_GRACE))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated LIMIT {batch_size})", (now - ATTACHMENT_RESULT_TTL, now - ATTACHMENT_READ_GRACE))
             self.db.execute(f"UPDATE requests SET state='failed',error='request expired before delivery',result_bytes=length('request expired before delivery'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='queued' AND created<=? ORDER BY created LIMIT {batch_size})", (now, now - queue_ttl))
             if restart:
@@ -537,7 +539,7 @@ class Store:
             elif row["state"] == "claimed" and row["claimed"] <= now-claim_ttl:
                 self.db.execute("UPDATE requests SET state='uncertain',error='node result timeout after claim',result_bytes=length('node result timeout after claim'),reserved_bytes=0,updated=? WHERE id=?", (now,value))
             row = self.db.execute("SELECT id,operation,state,result,error FROM requests WHERE id=?", (value,)).fetchone()
-            if row["operation"] in ("terminal_snapshot", "attachment_read") and row["state"] not in ("queued","claimed"):
+            if row["operation"] in ("terminal_snapshot", "attachment_read", "file_read") and row["state"] not in ("queued","claimed"):
                 self.db.execute("UPDATE requests SET result_read=? WHERE id=?", (now,value))
             return self.envelope(row)
 

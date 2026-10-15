@@ -1,27 +1,19 @@
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Duration};
-use tempfile::TempDir;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zerus_relay::{
     args,
     config::Config,
-    db::{i, now, s, Db},
-    error::Result,
+    db::{i, now, s},
     http::{serve, App},
     json::{canonical, digest},
     protocol,
-    store::{Credential, Role, Store},
+    store::{Role, Store},
 };
 
-struct Fixture {
-    _dir: TempDir,
-    store: Store,
-    node: Credential,
-    phone: Credential,
-    credentials: Value,
-    paired: Value,
-}
+mod common;
+use common::{Backend, Fixture};
 
 #[test]
 fn opencode_launch_model_is_native_account_scoped_and_bounded() {
@@ -484,134 +476,6 @@ async fn speech_status_retention_keeps_owner_receipt_and_exact_accounting() {
     f.check_accounting().await;
     f.close().await;
 }
-impl Fixture {
-    async fn new() -> Self {
-        Self::config(Config {
-            background: false,
-            ..Config::default()
-        })
-        .await
-    }
-    async fn config(cfg: Config) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let db = Db::open(&dir.path().join("relay.sqlite3"), Arc::new(cfg))
-            .await
-            .unwrap();
-        let store = Store::new(db);
-        let c = store
-            .provision("Example workspace", "Example computer")
-            .await
-            .unwrap();
-        let p = store.pair(s(&c, "pair_code"), "Phone").await.unwrap();
-        let node = store
-            .authenticate(s(&c, "node_token"), Role::Node)
-            .await
-            .unwrap();
-        let phone = store
-            .authenticate(s(&p, "device_token"), Role::Device)
-            .await
-            .unwrap();
-        Self {
-            _dir: dir,
-            store,
-            node,
-            phone,
-            credentials: c,
-            paired: p,
-        }
-    }
-    fn command(&self, op: &str) -> Value {
-        let id = Uuid::new_v4().to_string();
-        json!({"request_id":id,"computer_id":self.node.id,"operation":op,"session":"codex/example/tag","payload":if op=="inspect"{json!({})}else{json!({"request_id":id,"expected_run_id":"run","expected_conversation_id":"conversation","text":"hello"})}})
-    }
-    async fn submit(&self, b: &Value) -> Result<Value> {
-        self.store
-            .submit(
-                &self.phone,
-                &zerus_relay::store::Submission::new(b.clone())?,
-            )
-            .await
-            .map(|(_, b)| b)
-    }
-    async fn check_accounting(&self) {
-        let mut t = self.store.db.begin().await.unwrap();
-        let row=t.one("SELECT CAST(COALESCE(sum(body_bytes+result_bytes+reserved_bytes),0) AS BIGINT) AS bytes FROM requests WHERE workspace_id=?",args![&self.phone.workspace]).await.unwrap().unwrap();
-        let usage = t
-            .one(
-                "SELECT * FROM workspace_usage WHERE workspace_id=?",
-                args![&self.phone.workspace],
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row["bytes"], usage["payload_bytes"]);
-        let active=t.one("SELECT count(*) AS n FROM requests WHERE workspace_id=? AND state IN ('queued','claimed')",args![&self.phone.workspace]).await.unwrap().unwrap();
-        assert_eq!(active["n"], usage["active"]);
-        t.commit().await.unwrap();
-    }
-    /// A heartbeat from a connector that never sends presence.
-    async fn beat(&self, snapshot: &Value) {
-        self.store
-            .heartbeat(
-                &self.node,
-                &json!({ "snapshot": snapshot }),
-                &canonical(snapshot).unwrap(),
-            )
-            .await
-            .unwrap();
-    }
-    async fn beat_with(&self, snapshot: &Value, presence: &Value) {
-        self.store
-            .heartbeat(
-                &self.node,
-                &json!({"snapshot":snapshot,"presence":presence}),
-                &canonical(snapshot).unwrap(),
-            )
-            .await
-            .unwrap();
-    }
-    async fn node_row(&self, columns: &str) -> Value {
-        self.store
-            .db
-            .one(
-                &format!("SELECT {columns} FROM nodes WHERE id=?"),
-                args![&self.node.id],
-            )
-            .await
-            .unwrap()
-            .unwrap()
-    }
-    /// Counts the rows of a FROM clause, for example `alert_candidates WHERE session='s0'`.
-    async fn count(&self, from: &str) -> i64 {
-        i(
-            &self
-                .store
-                .db
-                .one(&format!("SELECT count(*) AS n FROM {from}"), &[])
-                .await
-                .unwrap()
-                .unwrap(),
-            "n",
-        )
-    }
-    async fn alert_count(&self) -> i64 {
-        self.count("events WHERE kind='alert'").await
-    }
-    async fn events_of(&self, kind: &str) -> Vec<Value> {
-        self.store.events(&self.phone, 0).await.unwrap()["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| e["kind"] == kind)
-            .cloned()
-            .collect()
-    }
-    async fn close(self) {
-        self.store.db.close().await;
-    }
-}
 fn presence(idle: f64, locked: Option<f64>) -> Value {
     json!({"idle_seconds":idle,"locked":locked.is_some(),"locked_seconds":locked})
 }
@@ -780,14 +644,21 @@ async fn expired_claims_and_revocation_are_terminal() {
     f.check_accounting().await;
     f.close().await;
 }
+/// The sole SQLite owner retires its claims on restart and keeps them uncertain.
+/// A PostgreSQL worker never retires another worker's claim before its deadline.
 #[tokio::test]
-async fn sqlite_restart_keeps_claim_uncertain() {
+async fn restart_retires_claims_only_on_sqlite() {
     let f = Fixture::new().await;
     let b = f.command("send");
     f.submit(&b).await.unwrap();
     f.store.claim(&f.node, false).await.unwrap();
     f.store.maintain(true).await.unwrap();
-    assert_eq!(f.submit(&b).await.unwrap()["state"], "uncertain");
+    let state = if f.backend.is_postgres() {
+        "claimed"
+    } else {
+        "uncertain"
+    };
+    assert_eq!(f.submit(&b).await.unwrap()["state"], state);
     f.check_accounting().await;
     f.close().await;
 }
@@ -804,9 +675,29 @@ async fn startup_defers_alert_pass_failure_but_not_record_maintenance() {
         .await
         .unwrap();
     assert!(f.store.maintain(false).await.is_err());
+    // An expired claim, which record maintenance retires on either backend.
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET claimed=? WHERE id=?",
+            args![now() - 91.0, &b["request_id"]],
+        )
+        .await
+        .unwrap();
     f.store.maintain_at_startup(true).await.unwrap();
-    // The record stages before it still ran: the SQLite restart retired the claim.
-    assert_eq!(f.submit(&b).await.unwrap()["state"], "uncertain");
+    // The record stages before it still ran. The stored row shows it, since a
+    // receipt would also expire the claim itself.
+    let row = f
+        .store
+        .db
+        .one(
+            "SELECT state FROM requests WHERE id=?",
+            args![&b["request_id"]],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row["state"], "uncertain");
     f.check_accounting().await;
     // Record maintenance failures stay fatal at startup.
     f.store
@@ -979,6 +870,8 @@ async fn one_hop_routes_freeze_and_withdraw() {
         .find(|r| r["machine_id"] == machine)
         .unwrap();
     assert_eq!(peer["via"]["gateway_id"], f.node.id);
+    // A peer's appearance never creates another queue credential.
+    assert_eq!(f.count("nodes").await, 1);
     let mut b = f.command("send");
     b["computer_id"] = peer["id"].clone();
     f.submit(&b).await.unwrap();
@@ -1060,6 +953,75 @@ async fn offline_peer_route_stays_listed_but_unavailable() {
         (restored["id"].clone(), restored["online"].clone()),
         (online["id"].clone(), json!(true))
     );
+    f.close().await;
+}
+/// An offline peer route reports its last accepted peer heartbeat as
+/// `last_seen_at`. The retained time is display-only: gateway heartbeats never
+/// refresh it, it never makes a reconnected route usable, and a changed native
+/// identity on the same route never inherits it. `reader` lists the catalog,
+/// which may be another worker sharing the database.
+async fn offline_peer_route_keeps_last_seen(f: &Fixture, reader: &Store) {
+    let root = Uuid::new_v4().to_string();
+    let machine = Uuid::new_v4().to_string();
+    let route = Uuid::new_v4().to_string();
+    let snapshot = json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":protocol::OPERATIONS,"features":["gateway_one_hop"]}});
+    let changed =
+        json!({"sessions":[],"sequence":2,"mobile_capabilities":snapshot["mobile_capabilities"]});
+    let peers = |machine: &str, online: bool| json!([{"route_id":route,"machine_id":machine,"name":"Peer","online":online}]);
+    let listed = |machine: String| async move {
+        reader.computers(&f.phone).await.unwrap()["computers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["machine_id"] == machine.as_str())
+            .cloned()
+    };
+    // A remembered identity that this relay never observed has no time.
+    gateway_beat(f, &root, &peers(&machine, false), &snapshot).await;
+    let never = listed(machine.clone()).await.unwrap();
+    assert_eq!(never["online"], false);
+    assert!(never["last_seen_at"].is_null());
+    gateway_beat(f, &root, &peers(&machine, true), &snapshot).await;
+    peer_beat(f, &route, &machine, &snapshot, &Value::Null).await;
+    let online = listed(machine.clone()).await.unwrap();
+    assert_eq!(online["online"], true);
+    let seen = online["last_seen_at"].as_f64().unwrap();
+    gateway_beat(f, &root, &peers(&machine, false), &snapshot).await;
+    // Fresh gateway liveness is not evidence about the peer.
+    gateway_beat(f, &root, &peers(&machine, false), &changed).await;
+    let offline = listed(machine.clone()).await.unwrap();
+    assert_eq!(offline["id"], online["id"]);
+    assert_eq!(offline["online"], false);
+    assert!(offline["snapshot"].is_null());
+    assert_eq!(offline["via"]["gateway_id"], f.node.id);
+    assert_eq!(offline["last_seen_at"].as_f64(), Some(seen));
+    // Marked online again, the route still needs a fresh peer heartbeat even
+    // though the retained time is within the freshness window.
+    gateway_beat(f, &root, &peers(&machine, true), &changed).await;
+    let marked = listed(machine.clone()).await.unwrap();
+    assert_eq!(marked["online"], false);
+    assert_eq!(marked["last_seen_at"].as_f64(), Some(seen));
+    let mut b = f.command("send");
+    b["computer_id"] = marked["id"].clone();
+    assert_eq!(f.submit(&b).await.unwrap_err().0.as_u16(), 409);
+    assert!(f.store.claim(&f.node, true).await.unwrap().is_none());
+    peer_beat(f, &route, &machine, &snapshot, &Value::Null).await;
+    let restored = listed(machine.clone()).await.unwrap();
+    assert_eq!(restored["online"], true);
+    assert!(restored["last_seen_at"].as_f64().unwrap() >= seen);
+    // A changed verified identity replaces the route without its history.
+    let replacement = Uuid::new_v4().to_string();
+    gateway_beat(f, &root, &peers(&replacement, false), &changed).await;
+    assert!(listed(machine).await.is_none());
+    let replaced = listed(replacement).await.unwrap();
+    assert_eq!(replaced["online"], false);
+    assert!(replaced["last_seen_at"].is_null());
+    f.check_accounting().await;
+}
+#[tokio::test]
+async fn offline_peer_route_reports_last_peer_heartbeat() {
+    let f = Fixture::new().await;
+    offline_peer_route_keeps_last_seen(&f, &f.store).await;
     f.close().await;
 }
 #[tokio::test]
@@ -1884,28 +1846,15 @@ async fn http_end_to_end_and_disconnect_cleanup() {
 #[tokio::test]
 #[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly in CI"]
 async fn postgres_cross_worker_speech() {
-    use sqlx::Connection;
-    let base =
-        std::env::var("ZERUS_RELAY_TEST_DATABASE_URL").expect("isolated PostgreSQL required");
-    let mut admin = sqlx::PgConnection::connect(&base).await.unwrap();
-    let name = format!("relay_test_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {name}"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    let mut url = url::Url::parse(&base).unwrap();
-    url.set_path(&name);
-    let cfg = Config {
-        database_url: Some(url.to_string()),
-        background: false,
-        ..Config::default()
-    };
-    let f = Fixture::config(cfg.clone()).await;
-    let second = Store::new(
-        Db::open(std::path::Path::new("unused"), Arc::new(cfg))
-            .await
-            .unwrap(),
-    );
+    let f = Fixture::provision(
+        Backend::postgres(Config {
+            background: false,
+            ..Config::default()
+        })
+        .await,
+    )
+    .await;
+    let second = f.backend.store().await;
     f.beat(&json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":protocol::SPEECH}})).await;
     let upload = speech_command(&f.node.id, "speech_submit", None);
     f.submit(&upload).await.unwrap();
@@ -2001,38 +1950,20 @@ async fn postgres_cross_worker_speech() {
     f.check_accounting().await;
     second.db.close().await;
     f.close().await;
-    sqlx::query(&format!("DROP DATABASE {name}"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    admin.close().await.unwrap();
 }
 
 #[tokio::test]
 #[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly in CI"]
 async fn postgres_cross_worker_contract() {
-    use sqlx::Connection;
-    let base =
-        std::env::var("ZERUS_RELAY_TEST_DATABASE_URL").expect("isolated PostgreSQL required");
-    let mut admin = sqlx::PgConnection::connect(&base).await.unwrap();
-    let name = format!("relay_test_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {name}"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    let mut url = url::Url::parse(&base).unwrap();
-    url.set_path(&name);
-    let cfg = Config {
-        database_url: Some(url.to_string()),
-        background: false,
-        ..Config::default()
-    };
-    let f = Fixture::config(cfg.clone()).await;
-    let second = Store::new(
-        Db::open(std::path::Path::new("unused"), Arc::new(cfg.clone()))
-            .await
-            .unwrap(),
-    );
+    let f = Fixture::provision(
+        Backend::postgres(Config {
+            background: false,
+            ..Config::default()
+        })
+        .await,
+    )
+    .await;
+    let second = f.backend.store().await;
     let b = f.command("send");
     let mut wake = second.db.wake.subscribe();
     f.submit(&b).await.unwrap();
@@ -2156,9 +2087,11 @@ async fn postgres_cross_worker_contract() {
     // Simulate losing only this fixture database's LISTEN sockets. Durable
     // commands must remain visible while listeners reconnect and wake waiters.
     let mut wake = second.db.wake.subscribe();
+    let mut admin = f.backend.server().await;
     let terminated: Vec<bool> = sqlx::query_scalar(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND query LIKE 'LISTEN%'",
-    ).bind(&name).fetch_all(&mut admin).await.unwrap();
+    ).bind(f.backend.database()).fetch_all(&mut admin).await.unwrap();
+    sqlx::Connection::close(admin).await.unwrap();
     assert_eq!(terminated.len(), 2);
     assert!(terminated.iter().all(|v| *v));
     tokio::time::timeout(Duration::from_secs(3), wake.recv())
@@ -2173,38 +2106,38 @@ async fn postgres_cross_worker_contract() {
     f.check_accounting().await;
     second.db.close().await;
     f.close().await;
-    sqlx::query(&format!("DROP DATABASE {name}"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    admin.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly in CI"]
+async fn postgres_cross_worker_offline_peer_last_seen() {
+    let f = Fixture::provision(
+        Backend::postgres(Config {
+            background: false,
+            ..Config::default()
+        })
+        .await,
+    )
+    .await;
+    let second = f.backend.store().await;
+    // The gateway writes through one worker; the phone lists through another.
+    offline_peer_route_keeps_last_seen(&f, &second).await;
+    second.db.close().await;
+    f.close().await;
 }
 
 #[tokio::test]
 #[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly in CI"]
 async fn postgres_cross_worker_single_alert() {
-    use sqlx::Connection;
-    let base =
-        std::env::var("ZERUS_RELAY_TEST_DATABASE_URL").expect("isolated PostgreSQL required");
-    let mut admin = sqlx::PgConnection::connect(&base).await.unwrap();
-    let name = format!("relay_test_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {name}"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    let mut url = url::Url::parse(&base).unwrap();
-    url.set_path(&name);
-    let cfg = Config {
-        database_url: Some(url.to_string()),
-        background: false,
-        ..Config::default()
-    };
-    let f = Fixture::config(cfg.clone()).await;
-    let second = Store::new(
-        Db::open(std::path::Path::new("unused"), Arc::new(cfg))
-            .await
-            .unwrap(),
-    );
+    let f = Fixture::provision(
+        Backend::postgres(Config {
+            background: false,
+            ..Config::default()
+        })
+        .await,
+    )
+    .await;
+    let second = f.backend.store().await;
     f.store
         .register_push(&f.phone, "fcm", "synthetic-token")
         .await
@@ -2292,11 +2225,6 @@ async fn postgres_cross_worker_single_alert() {
     );
     second.db.close().await;
     f.close().await;
-    sqlx::query(&format!("DROP DATABASE {name}"))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    admin.close().await.unwrap();
 }
 
 #[test]
@@ -3012,5 +2940,89 @@ async fn mobile_delivery_is_computer_scoped_and_capability_gated() {
             Err(e) if e.0.as_u16() == 400
         ));
     }
+    f.close().await;
+}
+
+async fn computer_file_read_contract(f: &Fixture, second: Option<&Store>) {
+    let worker = second.unwrap_or(&f.store);
+    assert!(protocol::READS.contains(&"file_read"));
+    assert!(!protocol::READ_SQL.contains("file_read"));
+    let id = Uuid::new_v4().to_string();
+    let command = json!({"request_id":id,"computer_id":f.node.id,"operation":"file_read","session":"codex/example/tag",
+        "payload":{"request_id":id,"expected_run_id":"run","expected_conversation_id":"conversation",
+            "path":"/workspace/example/Сводная итог.xlsx","offset":0,"length":524288}});
+    protocol::request(&command).unwrap();
+    assert_eq!(f.submit(&command).await.unwrap_err().0.as_u16(), 409);
+    f.beat(&json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["file_read"],"features":[]}})).await;
+    for (field, value) in [
+        ("path", json!("")),
+        ("path", json!("/bad\nfile")),
+        ("path", json!("界".repeat(2731))),
+        ("offset", json!(1)),
+        ("offset", json!(true)),
+        ("length", json!(0)),
+        ("length", json!(524289)),
+        ("sha256", json!("a")),
+        ("archive_id", json!("00000000-0000-0000-0000-000000000000")),
+        ("agent_id", json!("../child")),
+    ] {
+        let mut bad = command.clone();
+        bad["payload"][field] = value;
+        assert!(protocol::request(&bad).is_err(), "accepted {field}");
+    }
+    let mut later = command.clone();
+    later["payload"]["offset"] = json!(3);
+    later["payload"]["sha256"] = json!("a".repeat(64));
+    protocol::request(&later).unwrap();
+    f.submit(&command).await.unwrap();
+    worker.claim(&f.node, false).await.unwrap().unwrap();
+    let result = json!({"state":"completed","result":{"file_name":"Сводная итог.xlsx","data_base64":"AABQ"},"error":null});
+    worker
+        .result(
+            &f.node,
+            &id,
+            &result,
+            Some(&canonical(&result["result"]).unwrap()),
+        )
+        .await
+        .unwrap();
+    f.store.receipt(&f.phone, &id).await.unwrap();
+    f.check_accounting().await;
+    worker.maintain(false).await.unwrap();
+    assert_eq!(f.count("requests WHERE operation='file_read'").await, 1);
+    f.store
+        .db
+        .exec(
+            "UPDATE requests SET result_read=? WHERE id=?",
+            args![now() - 6., &id],
+        )
+        .await
+        .unwrap();
+    worker.maintain(false).await.unwrap();
+    assert_eq!(f.count("requests WHERE operation='file_read'").await, 0);
+    f.check_accounting().await;
+}
+
+#[tokio::test]
+async fn computer_file_read_is_scoped_gated_and_short_lived() {
+    let f = Fixture::new().await;
+    computer_file_read_contract(&f, None).await;
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly"]
+async fn postgres_cross_worker_computer_file_read_is_scoped_gated_and_short_lived() {
+    let f = Fixture::provision(
+        Backend::postgres(Config {
+            background: false,
+            ..Config::default()
+        })
+        .await,
+    )
+    .await;
+    let second = f.backend.store().await;
+    computer_file_read_contract(&f, Some(&second)).await;
+    second.db.close().await;
     f.close().await;
 }

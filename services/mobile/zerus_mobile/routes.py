@@ -147,7 +147,8 @@ class Registry:
         for peer,target in authorized:
             yield from query('INSERT INTO computer_routes(gateway_id,route_id,computer_id,machine_id,local,active,online,guarded,name) VALUES(?,?,?,?,0,1,?,?,?) ON CONFLICT(gateway_id,route_id) DO UPDATE SET online=excluded.online,guarded=excluded.guarded,name=excluded.name', node['id'], peer['route_id'], target, peer['machine_id'], int(peer['online']), int(guarded), peer['name'], result='none')
             if not peer['online']:
-                yield from query('UPDATE computer_routes SET snapshot=NULL,snapshot_hash=NULL,last_seen=NULL WHERE gateway_id=? AND route_id=?', node['id'], peer['route_id'], result='none')
+                # Keep last_seen for display; clearing the snapshot withdraws freshness evidence.
+                yield from query('UPDATE computer_routes SET snapshot=NULL,snapshot_hash=NULL WHERE gateway_id=? AND route_id=?', node['id'], peer['route_id'], result='none')
         return computer
 
     @staticmethod
@@ -159,13 +160,16 @@ class Registry:
         return bool(row['online'] and row['guarded'] and row['gateway_seen'] is not None and row['last_seen'] is not None and now-row['gateway_seen']<45 and now-row['last_seen']<45)
 
     def candidates(self, workspace, computer=None, payload=True):
+        # last_seen is freshness evidence: a peer route's time counts only while it
+        # stores a snapshot accepted since the gateway last marked it online.
+        # last_seen_at is the display time, which an offline peer route retains.
         where = 'c.workspace_id=? AND c.revoked=0 AND n.revoked=0 AND r.active=1'
         args = (workspace,)
         if computer is not None:
             where += ' AND c.id=?';args += (computer,)
         snapshot = "CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END"
         fields = (snapshot+' AS snapshot') if payload else ('COALESCE(BYTES('+snapshot+' AS_BYTES),0) AS snapshot_bytes')
-        rows = yield from query('SELECT c.id,c.name,c.exposed,c.revoked,r.gateway_id,r.route_id,r.machine_id,r.local,r.active,r.online,r.guarded,CASE WHEN r.local=1 THEN n.last_seen ELSE r.last_seen END AS last_seen,n.last_seen AS gateway_seen,n.revoked AS gateway_revoked,n.name AS gateway_name,'+fields+' FROM computers c JOIN computer_routes r ON r.computer_id=c.id JOIN nodes n ON n.id=r.gateway_id WHERE '+where, *args, result='all')
+        rows = yield from query('SELECT c.id,c.name,c.exposed,c.revoked,r.gateway_id,r.route_id,r.machine_id,r.local,r.active,r.online,r.guarded,CASE WHEN r.local=1 THEN n.last_seen WHEN r.snapshot_hash IS NOT NULL THEN r.last_seen END AS last_seen,CASE WHEN r.local=1 THEN n.last_seen ELSE r.last_seen END AS last_seen_at,n.last_seen AS gateway_seen,n.revoked AS gateway_revoked,n.name AS gateway_name,'+fields+' FROM computers c JOIN computer_routes r ON r.computer_id=c.id JOIN nodes n ON n.id=r.gateway_id WHERE '+where, *args, result='all')
         return rows
 
     def resolve(self, workspace, alias):
