@@ -247,6 +247,13 @@ def build_feed(release,info,files,sums,package_versions,commit):
             cask={'stable':'zerus','nightly':'zerus@nightly'}.get(channel)
             require(cask is not None and info.get('schema')==2 and info.get('homebrew_casks')==[cask] and isinstance(macos,dict) and macos.get('asset')==f'zerus-{version}-macos-arm64.zip','Unexpected macOS release metadata')
             expected.add(macos['asset'])
+            if 'dmg' in macos:
+                dmg=macos['dmg']
+                require(isinstance(dmg,dict) and set(dmg)=={'asset','notarization_id'} and
+                        dmg['asset']==f'zerus-{version}-macos-arm64.dmg' and isinstance(dmg['notarization_id'],str) and
+                        re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',dmg['notarization_id']),
+                        'Unexpected macOS disk image metadata')
+                expected.add(dmg['asset'])
         require(set(sums)==expected,'Unexpected desktop asset family')
     artifacts=[]
     declared=info.get('artifacts') if platform=='android' else None
@@ -325,13 +332,16 @@ def validate_and_fetch(client,release,directory,expected_platform,expected_chann
     portable=info.get('windows_portable') if expected_platform=='desktop' and expected_channel in {'stable','nightly'} else None
     macos=info.get('macos') if expected_platform=='desktop' else None
     cask=macos.get('asset') if isinstance(macos,dict) else None
+    dmg=macos.get('dmg') if isinstance(macos,dict) else None
+    image=dmg.get('asset') if isinstance(dmg,dict) else None
     for name,digest in sums.items():
         if name in files:continue
         if (isinstance(portable,str) and name==portable and name.endswith('-windows-x86_64.zip')) or \
-                (isinstance(cask,str) and name==cask and name.endswith('-macos-arm64.zip')):
+                (isinstance(cask,str) and name==cask and name.endswith('-macos-arm64.zip')) or \
+                (isinstance(image,str) and name==image and name.endswith('-macos-arm64.dmg')):
             # Not mirrored (the mirror never deletes and has a fixed disk budget)
             # and not a feed artifact; build_feed checks its sealed name. Homebrew
-            # downloads the macOS zip from GitHub.
+            # downloads the macOS zip from GitHub; direct installs use the DMG.
             declared=assets[name].get('digest')
             require(declared is None or declared=='sha256:'+digest,'GitHub asset digest mismatch')
             continue

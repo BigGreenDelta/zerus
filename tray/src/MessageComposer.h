@@ -8,6 +8,7 @@
 #include <QWidget>
 #include <functional>
 
+class QAction;
 class QLabel;
 class QComboBox;
 class QPlainTextEdit;
@@ -87,6 +88,9 @@ public:
     bool insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved);
     // Opens a stored copy of an attachment; tests replace the desktop handler.
     std::function<bool(const QUrl &)> openUrl;
+    // Send and push now (message.push) in this field; off by default. Only the
+    // main message field pushes: a subagent message bypasses the session's queue.
+    void setPushEnabled(bool enabled);
 
 signals:
     void sessionRefreshRequested(const QString &sessionKey);
@@ -94,6 +98,10 @@ signals:
     void settingsTerminalRequested(const QString &sessionKey);
     void settingsRequested(const QString &sessionKey, const QString &model, const QString &effort);
     void sendRequested(const QString &sessionKey, const QString &text, const QList<MessageAttachment> &attachments);
+    // Right before sendRequested of a message sent with push, with its text.
+    void pushRequested(const QString &sessionKey, const QString &text);
+    // Push with an empty field and no attachments: send the existing queue now.
+    void sendNowRequested(const QString &sessionKey);
     // hasDraft(sessionKey) changed.
     void draftChanged(const QString &sessionKey);
     void controlsChanged();
@@ -106,6 +114,8 @@ private:
     using Draft = ComposerDraft;
     bool saveDraft(const QString &key);
     void send();
+    void push();
+    void applyShortcuts();
     void restoreDraft();
     void notifyDraft(const QString &key);
     void updatePlaceholder();
@@ -168,4 +178,7 @@ private:
     QHash<int, QPixmap> m_previews;   // decoded once per list; a null pixmap marks a non-image
     QHBoxLayout *m_actions;
     bool m_narrow = false;
+    // Composer-scope commands (Shortcuts.h) on the field.
+    QAction *m_sendAction, *m_pushAction;
+    bool m_pushEnabled = false, m_pushing = false;
 };

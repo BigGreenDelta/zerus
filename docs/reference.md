@@ -501,10 +501,99 @@ clears selection. Context menus and shortcuts preserve the target identity.
 **Clear archive…** requires confirmation, preserves offline records and excludes
 new records created after the confirmation snapshot; native history remains.
 
-Common shortcuts: Ctrl/Command-F searches, Ctrl/Command-R refreshes, Enter opens the
-selected live session and Escape closes the current transient UI; it never closes
-the workspace.
-An archive needs explicit **Restore**; Enter does not start it.
+Enter opens the selected live session and Escape closes the current transient UI;
+it never closes the workspace. An archive needs explicit **Restore**; Enter does
+not start it. The other keyboard commands are listed below.
+
+<a id="keyboard"></a>
+
+### Keyboard
+
+**Mod** is Ctrl on Linux and Windows and Command (⌘) on macOS. **Control** is the
+physical Control key everywhere; macOS keeps Command-Tab and Command-` for its
+application and window switchers.
+
+| Command | Linux / Windows | macOS |
+|---|---|---|
+| Overview, Sessions, Projects, Machines, Accounts | Ctrl+1 … Ctrl+5 | ⌘1 … ⌘5 |
+| Settings | Ctrl+, | ⌘, |
+| Go to… (sessions, projects, accounts, machines, commands) | Ctrl+K | ⌘K |
+| Keyboard shortcuts | F1, Ctrl+/ | F1, ⌘/ |
+| Next / previous session | Alt+↓ / Alt+↑, Ctrl+PgDn / Ctrl+PgUp | ⌥↓ / ⌥↑, ⌘⌥↓ / ⌘⌥↑ |
+| Next / previous session that needs attention | Alt+Shift+↓ / ↑ | ⌥⇧↓ / ↑ |
+| New session | Ctrl+N | ⌘N |
+| Rename session | F2 | F2 |
+| Search sessions | Ctrl+F | ⌘F |
+| Refresh | Ctrl+R, F5 | ⌘R, F5 |
+| Next / previous tab (Activity, Terminal, Processes, Native UI) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
+| Switch between Activity and Terminal | Ctrl+` | ⌃` |
+| Show or hide the side panel | Ctrl+I | ⌘I |
+| Next / previous area (list, conversation, message field, side panel) | F6 / Shift+F6 | F6 / ⇧F6 |
+| Send message (also Enter) | Ctrl+Enter | ⌘↩ |
+| Send queued messages now | Ctrl+Shift+Enter | ⌘⇧↩ |
+| Send and push now | Ctrl+X, Ctrl+S | ⌃X, ⌃S |
+| Increase, decrease, reset content scale | Ctrl+= / Ctrl+- / Ctrl+0 | ⌘= / ⌘- / ⌘0 |
+
+Session navigation moves through the visible list, or the search results while
+they are shown, and skips project headers and subagents; it does not wrap.
+Attention navigation moves among the sessions of the same list that match the
+**Needs attention** filter, wraps around and opens a collapsed project. Tab
+cycling skips hidden tabs. From Terminal, Ctrl+` returns to Activity with the
+cursor in the message field.
+
+**Send queued messages now** runs the agent's own send-now action for the queue
+shown in Activity, exactly like its **Send now** button; it never sends the text
+being typed. **Send and push now** sends the typed message and, once the agent
+shows it in its queue, sends that queue now. With an empty message field it is
+the same as Send queued messages now. If the message does not appear in the
+queue within 20 seconds, for example because the agent took it directly or a
+dialog such as the cold cache warning is still open, or the session's run or
+conversation changes, the push is dropped with a notice; the message is never
+resent. Selecting another session drops the push at once, and a new push
+replaces one that is still waiting. A message with attachments but no text is
+sent without a push, because the queue cannot be matched without text. Without
+a selection, Ctrl+X starts this sequence; with a selection it still cuts. As in
+every Qt key sequence, a key other than Ctrl+S after Ctrl+X cancels the
+sequence and is not typed.
+
+**Terminal keeps the agent's keys.** While Terminal has focus on Linux and
+Windows, a key reaches Zerus only when a command uses it and it is Ctrl or
+Ctrl+Shift with a digit, Tab, PgUp, PgDn, ` or comma, or Ctrl+Shift+Enter.
+Ctrl+letters (Ctrl+C, Ctrl+R, the agent's own Ctrl+X Ctrl+S), Alt chords,
+Escape, Enter and function keys go to the agent. On macOS every Command chord
+except ⌘C and ⌘V reaches Zerus, and of the Control chords only ⌃Tab, ⌃⇧Tab, ⌃`
+and ⌃⇧`.
+
+**Text fields keep their editing keys.** In the message field and search, a
+command's key wins over the field except for copy, cut, paste, undo, redo,
+select all, word and line movement and deletion (Ctrl, Command or Alt with
+arrows, Home, End, Backspace or Delete), and keys without Ctrl, Command or Alt.
+Function keys are not editing keys: F1, F2, F5 and F6 reach Zerus without a
+modifier. So Alt+↑/↓ switches sessions even while typing, and on Linux Ctrl+K
+opens Go to instead of deleting to the end of the line. A focused drop-down
+list keeps Alt+↑/↓ and F4 to open it, and the Projects dialog's list keeps
+Alt+↑/↓ to reorder projects.
+
+**Go to** (Ctrl+K) searches sessions (not archived), projects, accounts,
+machines, sections and commands by name; start the query with `>` to list only
+sections and commands. With an empty query, sessions opened recently come
+first, then the others in the order of the session list. Enter opens the
+result; Escape or the Go to chord again closes the popup. A session opens
+under the current filter when it is visible there; otherwise the filter
+changes to All sessions. A project selects its first session, or opens
+Projects with that project selected when it has none.
+
+**Settings → Keyboard** changes any command's chords (up to two per command,
+each a key or a two-key sequence), marks the chords that also work in
+Terminal, and resets one command or all of them. Keys used for typing,
+navigation, text editing, context menus and Terminal copy/paste cannot be
+assigned. A chord already used by another command can be reassigned after
+confirmation. Changes apply at once and are stored on this device.
+**Keyboard shortcuts** (F1) lists the current chords and these fixed keys:
+Enter and Shift+Enter in the message field, Escape, Tab and Shift+Tab, Tab to take
+a suggestion, list navigation keys, Menu and Shift+F10, Ctrl/Command-click,
+Space and Escape during voice capture, Ctrl+Shift+C/V (⌘C/⌘V on macOS) and
+Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the Projects dialog's list.
 
 <a id="activity"></a>
 
@@ -927,8 +1016,11 @@ A stopped Claude session resumes with a choice made in Zerus through `--model` a
 `--effort`; otherwise it starts with the account's settings.
 
 Busy-session choices, and choices made while the terminal shows a chooser, remain
-**Pending** until the agent is ready, including after navigation away. A message
-sent before application uses the current model.
+**Pending** until the agent is ready, including after navigation away. If a
+chooser appears while the desktop applies a choice, the choice stays **Pending**
+and the desktop tries once each time the session becomes ready again. A failed
+or refused application, a new run and a new conversation end these attempts. A
+message sent before application uses the current model.
 **Save for resume** stores a stopped session's choice without starting it. A stale
 queued setting cannot replace a newer choice from another device.
 If a message or another client already consumed or replaced it, Zerus refreshes
@@ -1824,6 +1916,21 @@ hgs: the tmux server died; terminal restored, sessions on this box are gone
 A client failure while tmux remains alive does not trigger terminal reset sequences
 that could corrupt the normal screen. Saved conversation bindings can still be
 restored after server loss, but tmux is not a reboot-persistence mechanism.
+
+On Linux, tmux built with systemd support puts each pane in a `tmux-spawn-*.scope`
+that is `PartOf=` the unit holding the tmux server, so stopping that unit ends every
+pane, whatever its `KillMode=`. When `hgs` runs in a user service manager unit (the
+desktop GUI, the mobile connector, the recovery and swarm workers, a desktop
+terminal) and no server answers on the selected socket, it runs the `new-session`
+that starts the server through `systemd-run --user --scope`, in a transient
+`hgs-tmux-<uuid>.scope` that holds only tmux and is collected when the server
+exits. Stopping or restarting the unit that launched the first session then leaves
+the agents running; stopping that scope itself ends the server and its agents. A
+running server is never moved, restarted or replaced: one started earlier, by an
+older `hgs` or by a plain `tmux` command, stays in its unit until it exits.
+Outside a user unit (an SSH login, macOS), without a reachable user manager or
+`systemd-run`, or when systemd cannot create the scope, `hgs` starts tmux as
+before.
 
 The optional `tmux.conf` binds Ctrl-V to `hgs paste` for the remote image clipboard
 bridge. At attach, `HGS_CLIENT` records the viewing host; an SSH hop forwards it

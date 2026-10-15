@@ -57,7 +57,7 @@ jobs:
               output.write(f'release={release}\n')
           print(f'Building the {channel} macOS bundle {release}.')
           PY
-      - run: brew install cmake ninja
+      - run: brew install cmake ninja tmux
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: Install the pinned official Qt
         run: python3 scripts/install-qt-macos.py --output "$RUNNER_TEMP/qt"
@@ -81,7 +81,8 @@ jobs:
     name: macOS signing and notarization
     needs: bundle
     runs-on: macos-15
-    timeout-minutes: 150
+    # Separate accepted submissions for the app and its final, signed disk image.
+    timeout-minutes: 270
     environment: macos-signing
     steps:
       - name: Require upstream main
@@ -150,6 +151,7 @@ jobs:
         with:
           name: macos-signed-${{ github.sha }}
           path: artifacts/macos-signed
+      - run: brew install tmux
       - name: Install the candidate cask from a local tap
         env:
           CHANNEL: ${{ inputs.channel }}

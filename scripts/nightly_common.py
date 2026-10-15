@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import tarfile
 
-from macos_release import require_template_cask, validate_macos_info
+from macos_release import macos_assets, require_template_cask, validate_macos_info
 from release_common import (LEGACY_BINARY_LIBRARIES, OPTIONAL_WEBENGINE, binary_library_names, metadata,
                             retains_description_update, require, sha256)
 import windows_portable
@@ -78,7 +78,7 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
         require(windows == windows_asset(version), "Invalid Windows nightly asset.")
         expected_files.add(windows)
     if macos:
-        expected_files.add(macos["asset"])
+        expected_files.update(macos_assets(macos))
     sums = {}
     for line in (directory / "SHA256SUMS").read_text().splitlines():
         match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.+-]+)", line)

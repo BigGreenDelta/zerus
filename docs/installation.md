@@ -102,6 +102,26 @@ packaged services; local definitions can shadow the system package. Package
 installation and upgrades do not restart native agents, tmux or the GUI.
 [Service setup and migration](ci-and-aur.md#package-contents-and-compatibility).
 
+## macOS (DMG)
+
+For Apple Silicon Macs running macOS 14 or later, download
+`zerus-VERSION-macos-arm64.dmg` from the selected [GitHub release](https://github.com/ufna/zerus/releases).
+Open the image, drag **Zerus** into **Applications**, then eject the image and
+open Zerus from Applications. The application and disk image are signed and
+notarized by Apple. Older releases may not contain a macOS download.
+
+To use the bundled CLI and SSH session bridge, run the per-user setup once,
+without sudo:
+
+```sh
+/Applications/Zerus.app/Contents/Resources/bin/zerus-setup
+```
+
+Local tmux sessions require `tmux` (`brew install tmux`). Agent providers are
+installed separately. The Homebrew cask below installs tmux and links the CLI
+automatically. For a manual upgrade, replace the application with the new DMG's
+copy and use **Restart to finish update** in Zerus; native agents keep running.
+
 ## macOS (Homebrew)
 
 Apple Silicon Macs running macOS 14 or later can install the signed and notarized
