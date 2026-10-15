@@ -1821,6 +1821,21 @@ A client failure while tmux remains alive does not trigger terminal reset sequen
 that could corrupt the normal screen. Saved conversation bindings can still be
 restored after server loss, but tmux is not a reboot-persistence mechanism.
 
+On Linux, tmux built with systemd support puts each pane in a `tmux-spawn-*.scope`
+that is `PartOf=` the unit holding the tmux server, so stopping that unit ends every
+pane, whatever its `KillMode=`. When `hgs` runs in a user service manager unit (the
+desktop GUI, the mobile connector, the recovery and swarm workers, a desktop
+terminal) and no server answers on the selected socket, it runs the `new-session`
+that starts the server through `systemd-run --user --scope`, in a transient
+`hgs-tmux-<uuid>.scope` that holds only tmux and is collected when the server
+exits. Stopping or restarting the unit that launched the first session then leaves
+the agents running; stopping that scope itself ends the server and its agents. A
+running server is never moved, restarted or replaced: one started earlier, by an
+older `hgs` or by a plain `tmux` command, stays in its unit until it exits.
+Outside a user unit (an SSH login, macOS), without a reachable user manager or
+`systemd-run`, or when systemd cannot create the scope, `hgs` starts tmux as
+before.
+
 The optional `tmux.conf` binds Ctrl-V to `hgs paste` for the remote image clipboard
 bridge. At attach, `HGS_CLIENT` records the viewing host; an SSH hop forwards it
 through `--client`. The session host fetches PNG from the client's `hgs clip`, puts
