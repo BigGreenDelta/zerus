@@ -142,6 +142,17 @@ class RustRelay(Relay):
             reservation.bind(('127.0.0.1', 0))
             port = reservation.getsockname()[1]
         self.log = (self.root / 'relay.log').open('wb')
+        await self._serve(port)
+
+    async def restart(self):
+        """Stop the server, then serve the same database at the same URL again.
+
+        Clients must reconnect: their pooled connections went with the process.
+        """
+        await self._stop()
+        await self._serve(urlsplit(self.url).port)
+
+    async def _serve(self, port):
         self.process = await asyncio.create_subprocess_exec(
             str(self.binary), '--config', str(self.config), 'serve', '--port', str(port),
             stdout=asyncio.subprocess.DEVNULL, stderr=self.log, env=self.environment)
@@ -189,15 +200,18 @@ class RustRelay(Relay):
         """Revoke a device, node or computer through the command line."""
         await self.cli('revoke-' + kind, '--id', identity)
 
+    async def _stop(self):
+        if self.process is not None and self.process.returncode is None:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), 45)
+            except asyncio.TimeoutError:
+                self.process.kill()
+                await self.process.wait()
+
     async def cleanup(self):
         try:
-            if self.process is not None and self.process.returncode is None:
-                self.process.terminate()
-                try:
-                    await asyncio.wait_for(self.process.wait(), 45)
-                except asyncio.TimeoutError:
-                    self.process.kill()
-                    await self.process.wait()
+            await self._stop()
         finally:
             try:
                 if self.created:
