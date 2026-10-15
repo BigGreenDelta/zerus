@@ -296,10 +296,13 @@ running when Zerus closes or updates and when the terminal or SSH connection tha
 started them ends. They end when you sign out of Windows or restart it; tracked
 sessions stay saved and can be resumed, as after a reboot on Linux.
 
-Install the agents on the Windows computer yourself. Zerus looks them up on `PATH`
-(with `PATHEXT`), adds `%USERPROFILE%\.local\bin` and npm's `%APPDATA%\npm`, and
-runs the script of an npm command shim with Node.js directly; other batch files are
-refused.
+Install the agents from **Accounts** with **Install agent…**, or yourself. On
+Windows, Codex installs with npm (`npm.cmd`, so Node.js must be installed), and
+Claude Code and Kimi Code with their vendors' PowerShell installers (`install.ps1`),
+which verify the binaries they download. Zerus looks the agents up on `PATH` (with
+`PATHEXT`), adds `%USERPROFILE%\.local\bin`, npm's `%APPDATA%\npm` and Kimi Code's
+`%USERPROFILE%\.kimi-code\bin`, and runs the script of an npm command shim with
+Node.js directly; other batch files are refused.
 
 - **Claude Code** and **Codex** run tracked, with Zerus hooks in their
   configuration. Every automatic CI run tests their
