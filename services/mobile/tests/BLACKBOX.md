@@ -78,7 +78,9 @@ scripted `hgs` processes it started; no tmux server or agent is involved.
   batch. As the relay does, it answers a peer heartbeat with 404 when its
   route is not in the last heartbeat manifest it accepted (a heartbeat
   without gateway fields withdraws every route) and with 409 when that route
-  is offline or names another machine. `rule()` programs status answers,
+  is offline or names another machine, or when that heartbeat's snapshot did
+  not offer `gateway_one_hop`, which leaves its routes unguarded.
+  `rule()` programs status answers,
   optionally limited by count or a predicate on the parsed body. All traffic
   is kept in `exchanges`.
 - **`scripted_hgs.py`**: the `hgs` on the connector's PATH. It answers from

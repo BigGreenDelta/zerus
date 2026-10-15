@@ -175,6 +175,7 @@ class HarnessTests(BlackBoxCase):
         typed = {"Content-Type": "application/json"}
         gateway, peer, other, route, offline = (str(uuid.uuid4()) for _ in range(5))
         snapshot = {"sessions": []}
+        guarded = {"sessions": [], "mobile_capabilities": {"protocol_version": 1, "features": ["gateway_one_hop"]}}
         rows = [{"route_id": route, "machine_id": peer, "name": "Peer", "online": True},
                 {"route_id": offline, "machine_id": other, "name": "Offline peer", "online": False}]
 
@@ -182,17 +183,29 @@ class HarnessTests(BlackBoxCase):
             body = canonical({"machine_id": machine_id, "snapshot": snapshot})
             return (await self.call("POST", f"/v1/node/peers/{route_id}/heartbeat", body, typed))[0]
 
+        async def gateway_beat(gateway_snapshot):
+            extended = canonical({"snapshot": gateway_snapshot, "machine_id": gateway, "peers": rows})
+            self.assertEqual((await self.call("POST", "/v1/node/heartbeat", extended, typed))[0], 200)
+
         self.assertEqual(await beat(route, peer), 404)
-        extended = canonical({"snapshot": snapshot, "machine_id": gateway, "peers": rows})
-        self.assertEqual((await self.call("POST", "/v1/node/heartbeat", extended, typed))[0], 200)
+        await gateway_beat(guarded)
         statuses = [await beat(route, peer), await beat(route, other), await beat(offline, other)]
         self.assertEqual(statuses, [200, 409, 409])
+        # A gateway snapshot without gateway_one_hop (or with another protocol
+        # version) leaves even an online route unguarded.
+        for unguarded in (snapshot, {**guarded, "mobile_capabilities": {"protocol_version": True,
+                                                                         "features": ["gateway_one_hop"]}}):
+            with self.subTest(unguarded=unguarded):
+                await gateway_beat(unguarded)
+                self.assertEqual(await beat(route, peer), 409)
+        await gateway_beat(guarded)
+        self.assertEqual(await beat(route, peer), 200)
         # A heartbeat without the gateway fields withdraws every route.
         plain = canonical({"snapshot": snapshot})
         self.assertEqual((await self.call("POST", "/v1/node/heartbeat", plain, typed))[0], 200)
         self.assertEqual(await beat(route, peer), 404)
         self.assertEqual([exchange.path for exchange in self.relay.peer_heartbeats()],
-                         [f"/v1/node/peers/{route}/heartbeat"])
+                         [f"/v1/node/peers/{route}/heartbeat"] * 2)
         self.assertEqual(self.relay.violations, [])
 
     async def test_queue_counts_and_refuses_like_the_relay(self):

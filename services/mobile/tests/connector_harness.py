@@ -308,7 +308,8 @@ class FakeRelay:
     relay's batch envelope; results follow the relay's claim rules. As the
     relay does, it answers a peer heartbeat with 404 when its route is not in
     the last heartbeat manifest it accepted, and with 409 when that route is
-    offline or names another machine.
+    offline or names another machine, or when that heartbeat's snapshot did
+    not offer `gateway_one_hop` (the relay keeps such routes unguarded).
     """
 
     def __init__(self, token: str | None = None):
@@ -322,6 +323,7 @@ class FakeRelay:
         self.result_posts: list[tuple[str, object, int]] = []
         self.deliveries: list[tuple[str, int]] = []  # (request_id, index in exchanges)
         self.manifest: dict[str, dict] = {}  # route_id -> peer row of the last accepted heartbeat
+        self.guarded = False  # whether that heartbeat's snapshot offered gateway_one_hop
         self.active_polls = 0
         self.max_polls = 2  # max_polls_per_credential
         self.url = ""
@@ -481,8 +483,11 @@ class FakeRelay:
             problem = heartbeat_problem(exchange.body)
             if problem:
                 return self.refuse(exchange, 400, "invalid request", problem)
-            # A heartbeat without a machine_id withdraws every route (relay store/snapshots.rs).
+            # A heartbeat without a machine_id withdraws every route, and one
+            # whose snapshot lacks gateway_one_hop leaves its routes unguarded
+            # (relay store/snapshots.rs and registry.rs).
             self.manifest = {row["route_id"]: row for row in exchange.body.get("peers", [])}
+            self.guarded = supports(exchange.body["snapshot"], "gateway_one_hop")
             return 200, {"ok": True}
         if exchange.method == "POST" and len(parts) == 5 and parts[:3] == ["v1", "node", "peers"] and parts[4] == "heartbeat":
             problem = peer_heartbeat_problem(parts[3], exchange.body)
@@ -491,7 +496,7 @@ class FakeRelay:
             route = self.manifest.get(parts[3])
             if route is None:
                 return 404, {"error": "not found"}
-            if not route["online"] or route["machine_id"] != exchange.body["machine_id"]:
+            if not (route["online"] and self.guarded) or route["machine_id"] != exchange.body["machine_id"]:
                 return 409, {"error": "request identity or route conflicts"}
             return 200, {"ok": True}
         if exchange.method == "POST" and len(parts) == 5 and parts[:3] == ["v1", "node", "requests"] and parts[4] == "result":
@@ -588,6 +593,14 @@ def snapshot_problem(snapshot) -> str | None:
         if not isinstance(row, dict) or ("name" in row and not text_field(row["name"], 1024)):
             return "invalid snapshot session"
     return None
+
+
+def supports(snapshot, feature: str) -> bool:
+    """The relay's `protocol::supports` for a snapshot's features."""
+    capabilities = snapshot.get("mobile_capabilities") if isinstance(snapshot, dict) else None
+    return (isinstance(capabilities, dict) and type(capabilities.get("protocol_version")) is int
+            and capabilities["protocol_version"] == 1
+            and isinstance(capabilities.get("features"), list) and feature in capabilities["features"])
 
 
 def presence_problem(body) -> str | None:
