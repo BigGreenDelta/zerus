@@ -1,8 +1,10 @@
 #include "GraphPage.h"
+#include "GraphViewStateStore.h"
 #include "SessionCardDelegate.h"
 #include "WorkspacePageHeader.h"
 #include "WorkspaceStyle.h"
 #include <QFrame>
+#include <QHideEvent>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
@@ -67,7 +69,7 @@ class GraphSummary : public QWidget {
     SessionDelegate delegate;
 };
 
-GraphPage::GraphPage(QWidget *parent) : QWidget(parent) {
+GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(parent) {
     setObjectName("graphPage");
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(20, 16, 20, 12);
@@ -176,6 +178,7 @@ GraphPage::GraphPage(QWidget *parent) : QWidget(parent) {
     root->addWidget(m_splitter, 1);
     auto *footer = new QHBoxLayout;
     m_freshness = plain(tr("Waiting for graph data"));
+    m_freshnessSummary = m_freshness->text();
     m_freshness->setObjectName("graphFreshness");
     m_freshness->setMinimumHeight(24);
     m_freshness->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
@@ -183,11 +186,7 @@ GraphPage::GraphPage(QWidget *parent) : QWidget(parent) {
     for (const auto &action : QList<QPair<QString, std::function<void()>>>{
              {tr("−"), [this] { m_canvas->zoomBy(1 / 1.2); }},
              {tr("+"), [this] { m_canvas->zoomBy(1.2); }},
-             {tr("Fit"), [this] { m_canvas->fitGraph(); }},
-             {tr("Reset layout"), [this] {
-                  m_canvas->resetLayout();
-                  m_canvas->fitGraph();
-              }}}) {
+             {tr("Fit"), [this] { m_canvas->fitGraph(); }}}) {
         auto *button = new QPushButton(action.first);
         button->setAccessibleName(action.first == "−"   ? tr("Zoom out")
                                   : action.first == "+" ? tr("Zoom in")
@@ -195,15 +194,37 @@ GraphPage::GraphPage(QWidget *parent) : QWidget(parent) {
         footer->addWidget(button);
         connect(button, &QPushButton::clicked, this, action.second);
     }
+    m_arrange = new QPushButton(tr("Arrange visible"));
+    m_arrange->setObjectName("graphArrange");
+    m_arrange->setToolTip(tr("Rearrange only the visible nodes. Your layout is saved on this "
+                             "device; refresh never rearranges it. You can undo this action."));
+    footer->addWidget(m_arrange);
+    m_undo = new QPushButton(tr("Undo arrange"));
+    m_undo->setObjectName("graphUndoArrange");
+    m_undo->setToolTip(tr("Restore positions and camera from before the last arrangement"));
+    m_undo->hide();
+    footer->addWidget(m_undo);
+    connect(m_arrange, &QPushButton::clicked, this, &GraphPage::arrangeVisible);
+    connect(m_undo, &QPushButton::clicked, this, &GraphPage::undoArrange);
+    connect(m_canvas, &GraphCanvas::positionsChanged, this, [this] {
+        if (!m_arranging && !m_restoring) {
+            m_beforeArrange = {};
+            m_undo->hide();
+        }
+    });
+    connect(m_canvas, &GraphCanvas::viewStateChanged, this, &GraphPage::saveView);
     root->addLayout(footer);
     auto *searchDelay = new QTimer(this);
     searchDelay->setSingleShot(true);
     searchDelay->setInterval(150);
     connect(m_search, &QLineEdit::textChanged, searchDelay, qOverload<>(&QTimer::start));
+    connect(m_search, &QLineEdit::textChanged, this, &GraphPage::saveView);
     connect(searchDelay, &QTimer::timeout, this, &GraphPage::render);
     connect(m_refresh, &QPushButton::clicked, this, &GraphPage::refreshRequested);
-    connect(m_listToggle, &QPushButton::toggled, this,
-            [this](bool list) { m_views->setCurrentIndex(list ? 1 : 0); });
+    connect(m_listToggle, &QPushButton::toggled, this, [this](bool list) {
+        m_views->setCurrentIndex(list ? 1 : 0);
+        saveView();
+    });
     connect(m_canvas, &GraphCanvas::nodeSelected, this, &GraphPage::inspectNode);
     connect(m_canvas, &GraphCanvas::relationSelected, this, &GraphPage::inspectRelation);
     connect(m_list, &QListView::activated, this, [this](const QModelIndex &index) {
@@ -213,6 +234,7 @@ GraphPage::GraphPage(QWidget *parent) : QWidget(parent) {
         if (!m_rendering) {
             m_selectedNode.clear();
             m_selectedRelation.clear();
+            m_inspectorWanted = false;
             m_inspector->hide();
         }
     });
@@ -221,10 +243,15 @@ GraphPage::GraphPage(QWidget *parent) : QWidget(parent) {
                 if (!m_rendering && current.isValid())
                     inspectNode(current.data(SessionRoles::Key).toString());
             });
-    connect(close, &QPushButton::clicked, m_inspector, &QWidget::hide);
+    connect(close, &QPushButton::clicked, this, [this] {
+        m_inspectorWanted = false;
+        m_inspector->hide();
+        saveView();
+    });
     connect(m_focus, &QPushButton::clicked, this, [this] {
         m_neighborhood = m_selectedNode;
         render();
+        saveView();
     });
     connect(m_connections, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
         if (!item->data(Qt::UserRole).toString().isEmpty())
@@ -254,6 +281,67 @@ GraphPage::GraphPage(QWidget *parent) : QWidget(parent) {
     connect(m_filterMenu, &QMenu::aboutToShow, this, &GraphPage::rebuildFilters);
     setTheme(true);
     render();
+    if (!viewStateKey.isEmpty()) {
+        m_viewStore = new GraphViewStateStore(viewStateKey, this);
+        connect(m_viewStore, &GraphViewStateStore::loaded, this,
+                [this](const QJsonObject &state, const QString &error) {
+                    m_viewError = error;
+                    // A late settings read cannot override an interaction that
+                    // already happened in this window.
+                    if (!m_viewTouched && !state.isEmpty() && !restoreViewState(state))
+                        m_viewError = tr("Saved layout could not be loaded");
+                    m_viewLoaded = true;
+                    if (m_haveProjection && m_viewError.isEmpty())
+                        m_viewStore->save(viewState());
+                    updateFreshness();
+                });
+        connect(m_viewStore, &GraphViewStateStore::saved, this, [this](const QString &error) {
+            m_viewError = error;
+            updateFreshness();
+        });
+    }
+}
+GraphPage::~GraphPage() {
+    if (m_viewStore) {
+        if (m_viewTouched)
+            m_viewStore->save(viewState());
+        m_viewStore->flush();
+    }
+}
+void GraphPage::saveView() {
+    if (m_restoring || m_rendering || m_arranging)
+        return;
+    m_viewTouched = true;
+    if (m_viewStore)
+        m_viewStore->save(viewState());
+}
+void GraphPage::arrangeVisible() {
+    if (!m_canvas->nodeCount())
+        return;
+    m_beforeArrange = m_canvas->viewState();
+    m_arranging = true;
+    m_canvas->resetLayout();
+    m_canvas->fitGraph();
+    m_arranging = false;
+    m_undo->show();
+    saveView();
+}
+void GraphPage::undoArrange() {
+    if (m_beforeArrange.isEmpty())
+        return;
+    auto previous = m_beforeArrange;
+    previous["selected"] = m_canvas->viewState()["selected"];
+    m_canvas->restoreViewState(previous);
+    m_beforeArrange = {};
+    m_undo->hide();
+    saveView();
+}
+void GraphPage::hideEvent(QHideEvent *event) {
+    QWidget::hideEvent(event);
+    if (m_viewStore && m_viewTouched) {
+        m_viewStore->save(viewState());
+        m_viewStore->flush();
+    }
 }
 
 bool GraphPage::setProjection(const QList<Node> &nodes, const QList<Relation> &relations) {
@@ -261,7 +349,7 @@ bool GraphPage::setProjection(const QList<Node> &nodes, const QList<Relation> &r
         return false;
     QSet<QString> ids, edges;
     for (const auto &node : nodes) {
-        if (node.card.id.isEmpty() || ids.contains(node.card.id))
+        if (node.card.id.isEmpty() || node.card.id.size() > 512 || ids.contains(node.card.id))
             return false;
         ids.insert(node.card.id);
     }
@@ -273,7 +361,12 @@ bool GraphPage::setProjection(const QList<Node> &nodes, const QList<Relation> &r
     }
     m_nodes = nodes;
     m_relations = relations;
+    m_haveProjection = true;
     render();
+    // Remember new automatically placed nodes too, after the old saved layout
+    // has been applied. Ordinary identical refreshes are coalesced by the store.
+    if (m_viewStore && m_viewLoaded && m_viewError.isEmpty())
+        m_viewStore->save(viewState());
     return true;
 }
 void GraphPage::render() {
@@ -328,6 +421,7 @@ void GraphPage::render() {
     m_canvas->setGroupLabels(groups);
     m_canvas->setGraph(nodes, edges);
     m_rendering = false;
+    m_arrange->setEnabled(!nodes.isEmpty());
     m_count->setText(
         tr("%1 of %2 sessions and agents · %3 connections%4")
             .arg(nodes.size())
@@ -339,7 +433,7 @@ void GraphPage::render() {
                            : tr("Filters (%1)")
                                  .arg(int(!m_project.isEmpty()) + int(m_attentionOnly) +
                                       int(!m_neighborhood.isEmpty())));
-    if (!m_inspector->isHidden())
+    if (m_inspectorWanted)
         inspectSelection();
 }
 void GraphPage::inspectNode(const QString &id) {
@@ -347,6 +441,7 @@ void GraphPage::inspectNode(const QString &id) {
         return;
     m_selectedNode = id;
     m_selectedRelation.clear();
+    m_inspectorWanted = true;
     {
         const QSignalBlocker block(m_canvas);
         if (m_canvas->selectedNode() != id)
@@ -361,13 +456,16 @@ void GraphPage::inspectNode(const QString &id) {
         }
     }
     inspectSelection();
+    saveView();
 }
 void GraphPage::inspectRelation(const QString &id) {
     if (m_rendering)
         return;
     m_selectedRelation = id;
     m_selectedNode.clear();
+    m_inspectorWanted = true;
     inspectSelection();
+    saveView();
 }
 void GraphPage::inspectSelection() {
     const auto selectedNode =
@@ -474,10 +572,21 @@ void GraphPage::focusProject(const QString &id) {
     m_project = id;
     m_neighborhood.clear();
     render();
+    saveView();
 }
 void GraphPage::setFreshness(const QString &summary, const QString &details) {
+    m_freshnessSummary = summary;
+    m_freshnessDetails = details;
+    updateFreshness();
+}
+void GraphPage::updateFreshness() {
+    const QString summary = m_viewError.isEmpty()
+                                ? m_freshnessSummary
+                                : m_viewError + tr(" · changes kept in this window");
     m_freshness->setText(summary);
-    m_freshness->setToolTip(details);
+    m_freshness->setToolTip(
+        m_freshnessDetails + "\n" +
+        tr("Positions, zoom and camera are saved on this device. Refresh keeps your layout."));
     m_freshness->setAccessibleName(summary);
 }
 void GraphPage::rebuildFilters() {
@@ -489,6 +598,7 @@ void GraphPage::rebuildFilters() {
         m_attentionOnly = false;
         m_search->clear();
         render();
+        saveView();
     });
     auto *attention = m_filterMenu->addAction(tr("Needs attention"));
     attention->setCheckable(true);
@@ -496,6 +606,7 @@ void GraphPage::rebuildFilters() {
     connect(attention, &QAction::toggled, this, [this](bool enabled) {
         m_attentionOnly = enabled;
         render();
+        saveView();
     });
     auto *projects = m_filterMenu->addMenu(tr("Project"));
     QMap<QString, QString> groups;
@@ -514,6 +625,7 @@ void GraphPage::rebuildFilters() {
         connect(exit, &QAction::triggered, this, [this] {
             m_neighborhood.clear();
             render();
+            saveView();
         });
     }
 }
@@ -576,17 +688,29 @@ QJsonObject GraphPage::viewState() const {
             {"query", m_search->text()},
             {"attention", m_attentionOnly},
             {"neighborhood", m_neighborhood},
+            {"selectedNode", m_selectedNode},
+            {"selectedRelation", m_selectedRelation},
+            {"inspector", m_inspectorWanted},
             {"list", m_listToggle->isChecked()}};
 }
 bool GraphPage::restoreViewState(const QJsonObject &state) {
+    m_restoring = true;
     if (state["schema"] != 1 || !state["canvas"].isObject() ||
-        !m_canvas->restoreViewState(state["canvas"].toObject()))
+        !m_canvas->restoreViewState(state["canvas"].toObject())) {
+        m_restoring = false;
         return false;
+    }
     m_project = state["project"].toString().left(160);
     m_neighborhood = state["neighborhood"].toString().left(512);
     m_search->setText(state["query"].toString().left(512));
     m_attentionOnly = state["attention"].toBool();
+    m_selectedNode = state["selectedNode"].toString().left(512);
+    m_selectedRelation = state["selectedRelation"].toString().left(512);
+    m_inspectorWanted = state["inspector"].toBool();
     m_listToggle->setChecked(state["list"].toBool());
     render();
+    if (!m_inspectorWanted)
+        m_inspector->hide();
+    m_restoring = false;
     return true;
 }

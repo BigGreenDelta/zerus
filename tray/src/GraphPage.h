@@ -11,6 +11,7 @@ class QSplitter;
 class QStackedWidget;
 class QMenu;
 class GraphSummary;
+class GraphViewStateStore;
 
 // Inspection only. The owner must revalidate an exact target before navigating;
 // this page never reads/answers a conversation or starts a native operation.
@@ -30,7 +31,10 @@ class GraphPage : public QWidget {
         GraphCanvas::Relation line;
         QString evidence;
     };
-    explicit GraphPage(QWidget *parent = nullptr);
+    // An empty key disables local persistence for isolated preview/fixtures.
+    explicit GraphPage(QWidget *parent = nullptr,
+                       const QString &viewStateKey = QStringLiteral("workspace/graphView"));
+    ~GraphPage() override;
     bool setProjection(const QList<Node> &nodes, const QList<Relation> &relations);
     void setTheme(bool dark);
     void setFreshness(const QString &summary, const QString &details = {});
@@ -46,6 +50,7 @@ class GraphPage : public QWidget {
 
   protected:
     void resizeEvent(QResizeEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
 
   private:
     void render();
@@ -54,12 +59,23 @@ class GraphPage : public QWidget {
     void inspectSelection();
     void arrangeInspector();
     void rebuildFilters();
+    void saveView();
+    void arrangeVisible();
+    void undoArrange();
+    void updateFreshness();
     QList<Node> m_nodes;
     QList<Relation> m_relations;
     GraphCanvas *m_canvas;
     QLineEdit *m_search;
     QLabel *m_count, *m_freshness, *m_title, *m_details;
     QPushButton *m_refresh, *m_filters, *m_listToggle, *m_open, *m_focus;
+    QPushButton *m_arrange, *m_undo;
+    GraphViewStateStore *m_viewStore = nullptr;
+    QJsonObject m_beforeArrange;
+    QString m_freshnessSummary, m_freshnessDetails, m_viewError;
+    bool m_restoring = false, m_arranging = false, m_viewTouched = false;
+    bool m_inspectorWanted = false;
+    bool m_viewLoaded = false, m_haveProjection = false;
     QWidget *m_inspector;
     GraphSummary *m_summary;
     QListView *m_list;

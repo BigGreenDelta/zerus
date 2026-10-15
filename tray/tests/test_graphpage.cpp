@@ -1,11 +1,16 @@
 #include "GraphPage.h"
+#include "GraphViewStateStore.h"
 #include "SessionCardDelegate.h"
+#include <QGraphicsItem>
+#include <QGraphicsScene>
 #include <QJsonArray>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
 #include <QListWidget>
+#include <QProcess>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -46,10 +51,11 @@ class TestGraphPage : public QObject {
         QCoreApplication::setOrganizationName("ZerusGraphFixture");
         QCoreApplication::setApplicationName("GraphPage");
         QSettings::setDefaultFormat(QSettings::IniFormat);
-        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                           qEnvironmentVariable("ZERUS_GRAPH_SETTINGS_ROOT", settings.path()));
     }
     void inspectDoesNotNavigateAndOpenCarriesExactIdentity() {
-        GraphPage page;
+        GraphPage page(nullptr, {});
         page.resize(1400, 900);
         page.show();
         QVERIFY(QTest::qWaitForWindowExposed(&page));
@@ -72,7 +78,7 @@ class TestGraphPage : public QObject {
         QCOMPARE(open.size(), 1);
     }
     void selectedCardCanReopenItsClosedInspectorWithoutNavigation() {
-        GraphPage page;
+        GraphPage page(nullptr, {});
         page.resize(1400, 900);
         page.show();
         QVERIFY(QTest::qWaitForWindowExposed(&page));
@@ -90,7 +96,7 @@ class TestGraphPage : public QObject {
         QCOMPARE(open.size(), 0);
     }
     void projectScopeKeepsOutsideNeighborsAndPinsSurviveFiltering() {
-        GraphPage page;
+        GraphPage page(nullptr, {});
         QVERIFY(page.setProjection(nodes(), relations()));
         auto state = page.canvas()->viewState();
         state["positions"] = QJsonObject{{"other", QJsonArray{980, 400}}};
@@ -103,7 +109,7 @@ class TestGraphPage : public QObject {
         QCOMPARE(page.canvas()->nodePosition("other"), QPointF(980, 400));
     }
     void listSelectionAndCanvasUseSameModelAndNoReadAction() {
-        GraphPage page;
+        GraphPage page(nullptr, {});
         page.resize(1400, 900);
         page.show();
         QVERIFY(QTest::qWaitForWindowExposed(&page));
@@ -119,7 +125,7 @@ class TestGraphPage : public QObject {
         QCOMPARE(page.findChild<QListWidget *>("graphBindings")->count(), 1);
     }
     void repeatedProjectionPreservesChosenExactBinding() {
-        GraphPage page;
+        GraphPage page(nullptr, {});
         page.resize(1400, 900);
         page.show();
         QVERIFY(QTest::qWaitForWindowExposed(&page));
@@ -145,7 +151,7 @@ class TestGraphPage : public QObject {
         QCOMPARE(open[0][2].toString(), QString("resumed-run"));
     }
     void unchangedRefreshKeepsEvidenceSelection() {
-        GraphPage page;
+        GraphPage page(nullptr, {});
         page.resize(1400, 900);
         page.show();
         QVERIFY(QTest::qWaitForWindowExposed(&page));
@@ -157,7 +163,7 @@ class TestGraphPage : public QObject {
         QCOMPARE(connections->currentRow(), 0);
     }
     void searchMatchesMachineAndBranch() {
-        GraphPage page;
+        GraphPage page(nullptr, {});
         QVERIFY(page.setProjection(nodes(), relations()));
         auto *search = page.findChild<QLineEdit *>("graphSearch");
         search->setText("fixture-mac");
@@ -165,8 +171,177 @@ class TestGraphPage : public QObject {
         search->setText("feature/graph");
         QTRY_COMPARE(page.canvas()->nodeCount(), 3);
     }
+    void arrangeIsExplicitUndoableAndRefreshDoesNotMovePins() {
+        GraphPage page(nullptr, {});
+        page.resize(1400, 900);
+        page.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&page));
+        QVERIFY(page.setProjection(nodes(), relations()));
+        auto original = page.canvas()->viewState();
+        original["positions"] = QJsonObject{{"review", QJsonArray{500, 600}},
+                                            {"release", QJsonArray{-500, 400}},
+                                            {"other", QJsonArray{980, 400}}};
+        original["scale"] = .75;
+        original["center"] = QJsonArray{100, 200};
+        QVERIFY(page.canvas()->restoreViewState(original));
+        QSignalSpy open(&page, &GraphPage::openRequested);
+        QTest::mouseClick(page.findChild<QPushButton *>("graphArrange"), Qt::LeftButton);
+        QVERIFY(page.canvas()->nodePosition("review") != QPointF(500, 600));
+        const auto arranged = page.canvas()->viewState().value("positions");
+        QVERIFY(page.setProjection(nodes(), relations()));
+        QCOMPARE(page.canvas()->viewState().value("positions"), arranged);
+        auto *undo = page.findChild<QPushButton *>("graphUndoArrange");
+        QVERIFY(undo->isVisible());
+        QTest::mouseClick(undo, Qt::LeftButton);
+        QCOMPARE(page.canvas()->viewState().value("positions"), original["positions"]);
+        QCOMPARE(page.canvas()->viewState().value("scale"), original["scale"]);
+        QCOMPARE(page.canvas()->viewState().value("center"), original["center"]);
+        QVERIFY(undo->isHidden());
+        QCOMPARE(open.size(), 0);
+    }
+    void positionsCameraFiltersAndInspectionSurviveReopen() {
+        const QString key = "fixtures/reopen";
+        QSettings().remove(key);
+        QJsonObject saved;
+        {
+            GraphPage page(nullptr, key);
+            QSignalSpy loaded(page.findChild<GraphViewStateStore *>(),
+                              &GraphViewStateStore::loaded);
+            QTRY_COMPARE(loaded.size(), 1);
+            page.resize(1400, 900);
+            page.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&page));
+            QVERIFY(page.setProjection(nodes(), relations()));
+            page.focusNode("review");
+            auto state = page.canvas()->viewState();
+            state["positions"] = QJsonObject{{"review", QJsonArray{500, 600}},
+                                             {"release", QJsonArray{-500, 400}},
+                                             {"other", QJsonArray{980, 400}}};
+            QVERIFY(page.canvas()->restoreViewState(state));
+            page.canvas()->zoomBy(.8);
+            page.canvas()->horizontalScrollBar()->setValue(
+                page.canvas()->horizontalScrollBar()->value() + 40);
+            page.focusProject("Zerus");
+            saved = page.viewState();
+            page.hide(); // Navigation flushes the coalesced write, even before its timer.
+        }
+        // Reopen immediately, without waiting for the pending background write.
+        GraphPage reopened(nullptr, key);
+        QSignalSpy open(&reopened, &GraphPage::openRequested);
+        QSignalSpy loaded(reopened.findChild<GraphViewStateStore *>(),
+                          &GraphViewStateStore::loaded);
+        reopened.resize(1000, 700);
+        reopened.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&reopened));
+        QTRY_COMPARE(loaded.size(), 1);
+        // Host data arrives after local view state and at a different window size.
+        QVERIFY(reopened.setProjection(nodes(), relations()));
+        QCOMPARE(reopened.viewState().value("project"), saved["project"]);
+        QCOMPARE(reopened.canvas()->viewState().value("positions"),
+                 saved["canvas"].toObject()["positions"]);
+        QCOMPARE(reopened.canvas()->viewState().value("scale"),
+                 saved["canvas"].toObject()["scale"]);
+        QCOMPARE(reopened.canvas()->viewState().value("center"),
+                 saved["canvas"].toObject()["center"]);
+        QCOMPARE(reopened.canvas()->selectedNode(), QString("review"));
+        QVERIFY(reopened.findChild<QWidget *>("graphInspector")->isVisible());
+        QCOMPARE(open.size(), 0);
+        const auto bytes = QSettings().value(key).toByteArray();
+        QCOMPARE(QJsonDocument::fromJson(bytes).object(), saved);
+    }
+    void layoutSurvivesProcessExitBeforeSaveTimer() {
+        const QString key = "fixtures/process-restart";
+        if (qEnvironmentVariable("ZERUS_GRAPH_PROCESS_FIXTURE") == "write") {
+            GraphPage page(nullptr, key);
+            QSignalSpy loaded(page.findChild<GraphViewStateStore *>(),
+                              &GraphViewStateStore::loaded);
+            QTRY_COMPARE(loaded.size(), 1);
+            QVERIFY(page.setProjection(nodes(), relations()));
+            auto state = page.canvas()->viewState();
+            state["positions"] = QJsonObject{{"review", QJsonArray{765, -432}}};
+            QVERIFY(page.canvas()->restoreViewState(state));
+            page.canvas()->zoomBy(.75);
+            return; // Destruction and application exit flush the pending change.
+        }
+        QProcess child;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert("ZERUS_GRAPH_PROCESS_FIXTURE", "write");
+        environment.insert("ZERUS_GRAPH_SETTINGS_ROOT", settings.path());
+        child.setProcessEnvironment(environment);
+        child.start(QCoreApplication::applicationFilePath(), {QTest::currentTestFunction()});
+        QVERIFY(child.waitForStarted(5000));
+        QVERIFY(child.waitForFinished(15000));
+        QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+        QVERIFY2(child.exitCode() == 0, child.readAllStandardOutput().constData());
+        QSettings().sync();
+        GraphPage reopened(nullptr, key);
+        QSignalSpy loaded(reopened.findChild<GraphViewStateStore *>(),
+                          &GraphViewStateStore::loaded);
+        QTRY_COMPARE(loaded.size(), 1);
+        QVERIFY(reopened.setProjection(nodes(), relations()));
+        QCOMPARE(reopened.canvas()->nodePosition("review"), QPointF(765, -432));
+        QCOMPARE(reopened.canvas()->viewState().value("scale"), QJsonValue(.75));
+    }
+    void undoWithNewArrivalDoesNotOverlapRestoredPins() {
+        GraphPage page(nullptr, {});
+        QVERIFY(page.setProjection({node("a", "Project")}, {}));
+        auto old = page.canvas()->viewState();
+        // This is the slot the new child will prefer after arrangement.
+        old["positions"] = QJsonObject{{"a", QJsonArray{0, 152}}};
+        QVERIFY(page.canvas()->restoreViewState(old));
+        page.findChild<QPushButton *>("graphArrange")->click();
+        QVERIFY(page.setProjection({node("a", "Project"), node("new", "Project")}, {}));
+        QCOMPARE(page.canvas()->nodePosition("new"), QPointF(0, 152));
+        page.findChild<QPushButton *>("graphUndoArrange")->click();
+        QCOMPARE(page.canvas()->nodePosition("a"), QPointF(0, 152));
+        QVERIFY(!page.canvas()->nodeRect("a").intersects(page.canvas()->nodeRect("new")));
+        QCOMPARE(page.canvas()->nodeCount(), 2);
+    }
+    void corruptSavedStateIsVisibleAndDoesNotReplaceCurrentGraph_data() {
+        QTest::addColumn<QByteArray>("bytes");
+        QTest::newRow("syntax") << QByteArray("{broken");
+        QTest::newRow("invalid-layout")
+            << QByteArray("{\"schema\":1,\"canvas\":{\"schema\":1,\"scale\":0}}");
+        QTest::newRow("oversized") << QByteArray(1024 * 1024 + 1, 'x');
+    }
+    void corruptSavedStateIsVisibleAndDoesNotReplaceCurrentGraph() {
+        QFETCH(QByteArray, bytes);
+        const QString key = "fixtures/corrupt";
+        QSettings().setValue(key, bytes);
+        GraphPage page(nullptr, key);
+        QSignalSpy loaded(page.findChild<GraphViewStateStore *>(), &GraphViewStateStore::loaded);
+        QVERIFY(page.setProjection(nodes(), relations()));
+        const auto before = page.canvas()->viewState().value("positions");
+        QTRY_COMPARE(loaded.size(), 1);
+        QCOMPARE(page.canvas()->viewState().value("positions"), before);
+        QVERIFY(page.findChild<QLabel *>("graphFreshness")->text().contains("could not be loaded"));
+        QCOMPARE(QSettings().value(key).toByteArray(), bytes);
+        QSignalSpy saved(page.findChild<GraphViewStateStore *>(), &GraphViewStateStore::saved);
+        page.canvas()->zoomBy(.8);
+        QTRY_COMPARE(saved.size(), 1);
+        QVERIFY(saved[0][0].toString().isEmpty());
+        QVERIFY(!page.findChild<QLabel *>("graphFreshness")->text().contains("could not"));
+        QVERIFY(QJsonDocument::fromJson(QSettings().value(key).toByteArray()).isObject());
+    }
+    void lateSavedViewDoesNotOverrideNewInteraction() {
+        const QString key = "fixtures/late";
+        GraphPage fixture(nullptr, {});
+        QVERIFY(fixture.setProjection(nodes(), relations()));
+        auto saved = fixture.viewState();
+        auto canvas = saved["canvas"].toObject();
+        canvas["positions"] = QJsonObject{{"review", QJsonArray{8000, 6000}}};
+        saved["canvas"] = canvas;
+        QSettings().setValue(key, QJsonDocument(saved).toJson(QJsonDocument::Compact));
+        GraphPage page(nullptr, key);
+        QSignalSpy loaded(page.findChild<GraphViewStateStore *>(), &GraphViewStateStore::loaded);
+        QVERIFY(page.setProjection(nodes(), relations()));
+        page.canvas()->zoomBy(.8); // Before the queued settings callback.
+        const auto newest = page.canvas()->viewState();
+        QTRY_COMPARE(loaded.size(), 1);
+        QCOMPARE(page.canvas()->viewState(), newest);
+    }
     void narrowInspectorOverlaysWithoutSqueezingCanvasAndRaster() {
-        GraphPage page;
+        GraphPage page(nullptr, {});
         page.resize(880, 720);
         page.show();
         QVERIFY(QTest::qWaitForWindowExposed(&page));

@@ -141,7 +141,30 @@ Start with deterministic placement within groups. A child's default position is
 near its parent; interproject bundles use clear routes between group boundaries.
 Do not run an endless force simulation. New nodes occupy free space near relevant
 neighbors; existing positions and the user's camera stay still. Dragging pins a
-position locally. Reset layout is explicit and reversible through Back.
+position locally.
+
+Owner follow-up, 2026-10-15: manual movement must be predictable and survive
+reopening. Use these complementary controls:
+
+- **Drag a card:** keep its new position. The project's region grows, shrinks
+  and moves around its currently visible members during the drag, with padding.
+  Crossing another region never changes project membership. No force simulation
+  or refresh moves an existing card; new nodes find unoccupied space, reserving
+  the saved positions of temporarily hidden nodes too.
+- **Fit:** change only the camera and zoom to show the visible scope.
+- **Arrange visible:** explicitly arrange the current filtered nodes; hidden
+  positions stay reserved. **Undo arrange** restores the previous positions and
+  camera during this visit, including if new nodes arrived meanwhile. A later
+  manual drag starts a new layout decision and retires that one-step undo.
+
+Save positions by stable node ID, camera, zoom, filters and inspection locally
+on this device. The native page coalesces saves on a dedicated settings worker,
+flushes on navigation/close and restores before or after asynchronous graph data.
+A late settings read cannot replace a newer local interaction. Malformed or
+unwritable settings show a concise notice and leave the current graph usable.
+The view state is bounded to 2000 cached node positions and 1 MiB; it is separate
+from the host metadata cache and is not synchronized between computers. The
+default keeps manual placement stable; arrangement is explicit.
 
 Communication cycles are normal. The session graph is a directed multigraph,
 not a DAG. The two directions of a conversation have separate counts/evidence
@@ -417,6 +440,11 @@ painter. Project regions, cross-project filter context, search, exact-target
 Open Activity signals, retained positions and a narrow overlay inspector have
 synthetic native coverage. Selection keeps Draft/unread badges and does not
 navigate or acknowledge messages.
+
+Native layout persistence now includes actual process-exit/reopen coverage,
+live project bounds, collision-aware insertion and undoable visible arrangement.
+The synthetic public preview demonstrates the same movement, local-save, Fit and
+Arrange/Undo behavior in the browser. It does not share layout with the app.
 
 A separate controller now schedules one bounded configured-host read at a time,
 assembles pages off the UI thread, retains last-good metadata and writes a private

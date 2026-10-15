@@ -3,6 +3,7 @@
 #include <QGraphicsItem>
 #include <QGraphicsScene>
 #include <QJsonArray>
+#include <QMouseEvent>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -114,8 +115,8 @@ class TestGraphCanvas : public QObject {
         QCOMPARE(view.nodePosition("one"), QPointF(125, 270));
         QCOMPARE(view.nodePosition("two"), QPointF(700, 290));
         QCOMPARE(view.selectedNode(), QString("two"));
-        QCOMPARE(view.viewState()["scale"], saved["scale"]);
-        QCOMPARE(view.viewState()["center"], saved["center"]);
+        QCOMPARE(view.viewState().value("scale"), saved["scale"]);
+        QCOMPARE(view.viewState().value("center"), saved["center"]);
     }
     void duplicateAndMissingIdentitiesDoNotReplaceLastGood() {
         GraphCanvas view;
@@ -152,6 +153,119 @@ class TestGraphCanvas : public QObject {
                               {{"parent-child", "parent", "child", "parent", "Native child"}}));
         QCOMPARE(view.nodeRect("parent").height(), 104.0);
         QCOMPARE(view.nodeRect("child").height(), 64.0);
+    }
+    void dragResizesProjectWithoutChangingMembershipOrCamera() {
+        GraphCanvas view;
+        view.resize(1100, 800);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto second = node("b");
+        second.group = "another-project";
+        QVERIFY(view.setGraph({node("a"), node("c"), second}, {}));
+        view.fitGraph();
+        const auto before = view.groupRect("project");
+        const auto other = view.groupRect("another-project");
+        const auto camera = view.viewState().value("center");
+        const QPoint start = view.mapFromScene(view.nodeRect("a").center());
+        const QPoint end = start + QPoint(90, 95);
+        QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, start);
+        QMouseEvent move(QEvent::MouseMove, end, view.viewport()->mapToGlobal(end), Qt::NoButton,
+                         Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(), &move);
+        // The cloud already follows while the button is still held.
+        QVERIFY(view.groupRect("project") != before);
+        QVERIFY(view.groupRect("project").height() > before.height());
+        QVERIFY(view.groupRect("project").contains(view.nodeRect("a")));
+        QCOMPARE(view.groupRect("another-project"), other);
+        QCOMPARE(view.viewState().value("center"), camera);
+        QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, end);
+        const auto moved = view.nodePosition("a");
+        QVERIFY(view.setGraph({second, node("c"), node("a", "Background")}, {}));
+        QCOMPARE(view.nodePosition("a"), moved);
+        QVERIFY(view.groupRect("project").contains(view.nodeRect("c")));
+        const QPoint backStart = view.mapFromScene(view.nodeRect("a").center());
+        QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, backStart);
+        const QPoint backEnd = backStart - QPoint(90, 95);
+        QMouseEvent back(QEvent::MouseMove, backEnd, view.viewport()->mapToGlobal(backEnd),
+                         Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(), &back);
+        QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, backEnd);
+        QVERIFY(qAbs(view.groupRect("project").height() - before.height()) < 2);
+    }
+    void newCardsAvoidManualAndHiddenPositions() {
+        GraphCanvas view;
+        QVERIFY(view.setGraph({node("a"), node("hidden")}, {}));
+        auto state = view.viewState();
+        state["positions"] =
+            QJsonObject{{"a", QJsonArray{404, 0}}, {"hidden", QJsonArray{404, 152}}};
+        QVERIFY(view.restoreViewState(state));
+        QVERIFY(view.setGraph({node("a"), node("new")}, {}));
+        QCOMPARE(view.nodePosition("a"), QPointF(404, 0));
+        QVERIFY(!view.nodeRect("new").intersects(QRectF(404, 152, 340, 104)));
+        QVERIFY(!view.nodeRect("new").intersects(view.nodeRect("a")));
+        const auto added = view.nodePosition("new");
+        QVERIFY(view.setGraph({node("new"), node("hidden"), node("a")}, {}));
+        QCOMPARE(view.nodePosition("hidden"), QPointF(404, 152));
+        QCOMPARE(view.nodePosition("new"), added);
+        const auto camera = view.viewState().value("center");
+        QVERIFY(view.setGraph({}, {}));
+        QCOMPARE(view.viewState().value("center"), camera);
+        QVERIFY(view.setGraph({node("a"), node("new"), node("hidden")}, {}));
+        QCOMPARE(view.nodePosition("a"), QPointF(404, 0));
+        QCOMPARE(view.nodePosition("new"), added);
+    }
+    void restoreBeforeDataAndResizeRetainsCameraAndSelection() {
+        GraphCanvas view;
+        const QJsonObject saved{{"schema", 1},
+                                {"positions", QJsonObject{{"a", QJsonArray{1800, -800}}}},
+                                {"scale", .8},
+                                {"center", QJsonArray{2000, -1000}},
+                                {"selected", "a"}};
+        QVERIFY(view.restoreViewState(saved));
+        view.resize(1200, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        QVERIFY(view.setGraph({node("a")}, {}));
+        QCOMPARE(view.nodePosition("a"), QPointF(1800, -800));
+        QCOMPARE(view.selectedNode(), QString("a"));
+        QCOMPARE(view.viewState().value("center"), saved["center"]);
+        QCOMPARE(view.viewState().value("scale"), saved["scale"]);
+        QVERIFY(QLineF(view.mapToScene(view.viewport()->rect().center()), QPointF(2000, -1000))
+                    .length() < 3);
+        view.resize(650, 500);
+        QCoreApplication::processEvents();
+        QCOMPARE(view.viewState().value("center"), saved["center"]);
+        QVERIFY(QLineF(view.mapToScene(view.viewport()->rect().center()), QPointF(2000, -1000))
+                    .length() < 3);
+    }
+    void arrangeVisibleKeepsHiddenPinsAndFitOnlyChangesCamera() {
+        GraphCanvas view;
+        QVERIFY(view.setGraph({node("a"), node("hidden")}, {}));
+        auto state = view.viewState();
+        state["positions"] = QJsonObject{{"a", QJsonArray{800, 500}}, {"hidden", QJsonArray{0, 0}}};
+        QVERIFY(view.restoreViewState(state));
+        QVERIFY(view.setGraph({node("a")}, {}));
+        view.resetLayout();
+        QVERIFY(!view.nodeRect("a").intersects(QRectF(0, 0, 340, 104)));
+        const auto arranged = view.nodePosition("a");
+        view.fitGraph();
+        QCOMPARE(view.nodePosition("a"), arranged);
+        QVERIFY(view.setGraph({node("a"), node("hidden")}, {}));
+        QCOMPARE(view.nodePosition("hidden"), QPointF());
+        QCOMPARE(view.nodePosition("a"), arranged);
+    }
+    void maximumAdmittedLayoutCanBeRestored() {
+        GraphCanvas view;
+        QList<GraphCanvas::Node> nodes;
+        for (int i = 0; i < 2000; ++i) {
+            auto value = node(QString::number(i));
+            value.group = QString::number(i);
+            nodes.append(value);
+        }
+        QVERIFY(view.setGraph(nodes, {}));
+        const auto state = view.viewState();
+        QCOMPARE(state["positions"].toObject().size(), 2000);
+        QVERIFY(view.restoreViewState(state));
     }
     void largeGraphUsesPaintItemsAndOptionalRaster() {
         GraphCanvas view;

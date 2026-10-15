@@ -44,13 +44,13 @@
 <div class="empty" id="empty" hidden><strong>No sessions match these filters</strong><p class="muted">Clear a filter to return to the full graph.</p><button id="emptyReset">Show all sessions</button></div>
 <div class="listing" id="listing" aria-label="Sessions in this graph" hidden></div>
 <div class="legend"><span><i class="sample"></i>Message</span><span><i class="sample parent"></i>Child</span><span><i class="sample reference"></i>Reference</span></div>
-<div class="zoom"><button id="zoomOut" aria-label="Zoom out">−</button><output id="zoomLevel">100%</output><button id="zoomIn" aria-label="Zoom in">+</button><button id="fit">Fit</button><button id="resetLayout" title="Reset local node positions">Reset layout</button></div>
+<div class="zoom"><button id="zoomOut" aria-label="Zoom out">−</button><output id="zoomLevel">100%</output><button id="zoomIn" aria-label="Zoom in">+</button><button id="fit">Fit</button><button id="resetLayout" title="Arrange visible nodes; hidden positions stay saved">Arrange</button><button id="undoLayout" title="Restore the previous positions and camera" hidden>Undo</button></div>
 <div class="coverage" id="coverage" hidden><h3>Connection coverage</h3><p><span class="status-dot"></span><strong>Workstation</strong> · updated just now<br><span class="muted">Native children and recorded messages</span></p><p><span class="status-dot"></span><strong>MacBook</strong> · updated 12 seconds ago<br><span class="muted">Native children and recorded messages</span></p><p><span style="color:var(--amber)">◌</span> <strong>Build host</strong> · last seen 18 minutes ago<br><span class="muted">Retained snapshot · current state unavailable</span></p><p class="muted">Connections before tracking began can be missing. Names alone do not establish a sender.</p><button id="closeCoverage">Close</button></div>
 <div class="toast" id="toast" role="status" hidden></div>
 </div>
 <aside class="inspector" id="inspector" aria-label="Selection details"><div class="inspector-head"><strong id="inspectorKind">Connection</strong><span class="spacer"></span><button id="closeInspector" class="quiet" aria-label="Close details">×</button></div><div class="inspector-body" id="inspectorBody"></div><div class="inspector-footer">Selecting here keeps unread messages unchanged.</div></aside>
 </div>
-<footer class="statusbar"><span id="freshness"><span class="status-dot"></span>Cached graph · updated 12 seconds ago</span><span class="spacer"></span><span class="extra">Drag cards to arrange · drag background to pan</span><span id="scopeHint">One computer offline · last known data retained</span></footer>
+<footer class="statusbar"><span id="freshness"><span class="status-dot"></span>Cached graph · updated 12 seconds ago</span><span class="spacer"></span><span class="extra">Layout saved locally · drag cards or background</span><span id="scopeHint">One computer offline · last known data retained</span></footer>
 </section>
 </main>
 <script>
@@ -81,7 +81,15 @@ const edges=[
 ];
 const positions=Object.fromEntries(nodes.map(n=>[n.id,{x:n.x,y:n.y}]));
 const byId=id=>nodes.find(n=>n.id===id), projectName=id=>groups.find(g=>g.id===id)?.title||id;
-let selected={type:'edge',id:'e4'}, focus=null, view='graph', visible=new Set(), camera={x:0,y:0,w:1100,h:760}, drag=null, toastTimer;
+let selected={type:'edge',id:'e4'}, focus=null, view='graph', visible=new Set(), camera={x:0,y:0,w:1100,h:760}, drag=null, toastTimer, undoLayout=null, saveTimer;
+const layoutKey='zerus.graph.preview.layout.v1';
+function saveLayout(){clearTimeout(saveTimer);try{localStorage.setItem(layoutKey,JSON.stringify({schema:1,positions,camera}));}catch{toast('Layout could not be saved in this browser. Changes remain in this tab.');}}
+function saveSoon(){clearTimeout(saveTimer);saveTimer=setTimeout(saveLayout,180);}
+function loadLayout(){try{const raw=localStorage.getItem(layoutKey);if(!raw)return;if(raw.length>1048576)throw Error();const state=JSON.parse(raw), c=state.camera;if(state.schema!==1||!state.positions||Array.isArray(state.positions)||typeof state.positions!=='object'||!c||![c.x,c.y,c.w,c.h].every(Number.isFinite)||Math.abs(c.x)>1e6||Math.abs(c.y)>1e6||c.w<420||c.w>50000||c.h<=0||c.h>50000)throw Error();const loaded={};for(const n of nodes){const p=state.positions[n.id];if(p===undefined)continue;if(!p||![p.x,p.y].every(Number.isFinite)||Math.abs(p.x)>1e5||Math.abs(p.y)>1e5)throw Error();loaded[n.id]={x:p.x,y:p.y};}Object.assign(positions,loaded);camera={x:c.x,y:c.y,w:c.w,h:c.h};}catch{toast('Saved preview layout could not be loaded. You can arrange it again.');}}
+function groupBounds(members){const left=Math.min(...members.map(n=>positions[n.id].x))-25,top=Math.min(...members.map(n=>positions[n.id].y))-60;return {x:left,y:top,w:Math.max(...members.map(n=>positions[n.id].x+260))+25-left,h:Math.max(...members.map(n=>positions[n.id].y+94))+24-top};}
+function fitVisible(){const members=nodes.filter(n=>visible.has(n.id));if(!members.length)return;const b=groupBounds(members),w=Math.max(420,Math.min(50000,Math.max(b.w,b.h*1100/760)*1.08)),h=w*760/1100;camera={x:b.x+b.w/2-w/2,y:b.y+b.h/2-h/2,w,h};applyCamera();saveLayout();}
+function arrangeVisible(){undoLayout={positions:structuredClone(positions),camera:{...camera}};const occupied=nodes.filter(n=>!visible.has(n.id)).map(n=>positions[n.id]);for(const n of nodes.filter(n=>visible.has(n.id))){const p={x:n.x,y:n.y};while(occupied.some(o=>p.x<o.x+276&&p.x+276>o.x&&p.y<o.y+110&&p.y+110>o.y))p.y+=140;positions[n.id]=p;occupied.push(p);}$('undoLayout').hidden=false;render();fitVisible();toast('Visible nodes arranged. Undo restores your previous layout.');}
+
 function el(tag,attrs={},text){const e=document.createElementNS(NS,tag);Object.entries(attrs).forEach(([k,v])=>e.setAttribute(k,v));if(text!==undefined)e.textContent=text;return e;}
 function plain(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
 function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4200);}
@@ -131,7 +139,7 @@ function pathFor(e){
 }
 function render(){
  const base=computeVisible();$('nodes').replaceChildren();$('edges').replaceChildren();$('groups').replaceChildren();
- for(const g of groups){const members=nodes.filter(n=>n.project===g.id&&visible.has(n.id));if(!members.length)continue;$('groups').append(el('rect',{x:g.x,y:g.y,width:g.w,height:g.h,rx:16,class:`group ${g.id}`}));$('groups').append(el('text',{x:g.x+18,y:g.y+27,class:`group-label ${g.id}`},g.title));$('groups').append(el('text',{x:g.x+18,y:g.y+44,class:'group-meta'},`${members.filter(n=>!n.child).length} ${members.filter(n=>!n.child).length===1?'session':'sessions'}${members.some(n=>n.child)?` · ${members.filter(n=>n.child).length} native agents`:''}`));}
+ for(const g of groups){const members=nodes.filter(n=>n.project===g.id&&visible.has(n.id));if(!members.length)continue;const b=groupBounds(members);$('groups').append(el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:16,class:`group ${g.id}`,'data-group':g.id}));$('groups').append(el('text',{x:b.x+18,y:b.y+27,class:`group-label ${g.id}`},g.title));$('groups').append(el('text',{x:b.x+18,y:b.y+44,class:'group-meta'},`${members.filter(n=>!n.child).length} ${members.filter(n=>!n.child).length===1?'session':'sessions'}${members.some(n=>n.child)?` · ${members.filter(n=>n.child).length} native agents`:''}`));}
  for(const e of edges){if(!visible.has(e.from)||!visible.has(e.to)||(e.type==='reference'&&!$('references').checked))continue;const chosen=selected?.type==='edge'&&selected.id===e.id,d=pathFor(e);$('edges').append(el('path',{d,class:`edge ${e.type} ${chosen?'selected':''}`,'marker-end':e.type==='parent'?'':`url(#${chosen?'selectedArrow':'arrow'})`}));const hit=el('path',{d,class:'edge-hit','data-edge-id':e.id,tabindex:0,role:'button','aria-label':`${byId(e.from).name} to ${byId(e.to).name}, ${relationName(e)}, ${e.count||''}`});hit.onclick=()=>choose('edge',e.id);hit.onkeydown=k=>{if(k.key==='Enter'||k.key===' '){k.preventDefault();choose('edge',e.id);}};$('edges').append(hit);if(positions[e.from].x===byId(e.from).x&&positions[e.from].y===byId(e.from).y&&positions[e.to].x===byId(e.to).x&&positions[e.to].y===byId(e.to).y)$('edges').append(el('text',{x:e.labelX,y:e.labelY,class:`edge-label ${chosen?'selected':''}`},e.label));}
  for(const n of nodes){
   if(!visible.has(n.id))continue;
@@ -164,25 +172,26 @@ function renderInspector(){
 }
 function renderList(){const list=$('listing');list.replaceChildren();for(const n of nodes){if(!visible.has(n.id))continue;const b=action('',()=>choose('node',n.id),'listrow');b.append(plain('strong','',n.name),plain('span','',projectName(n.project)),htmlBadge('state',n.status,n.state),identityRow(n,false));list.append(b);}}
 function applyCamera(){$('graph').setAttribute('viewBox',`${camera.x} ${camera.y} ${camera.w} ${camera.h}`);$('zoomLevel').value=`${Math.round(1100/camera.w*100)}%`;}
-function zoom(factor){const nw=Math.min(2200,Math.max(420,camera.w*factor)),nh=nw*760/1100;camera.x+=(camera.w-nw)/2;camera.y+=(camera.h-nh)/2;camera.w=nw;camera.h=nh;applyCamera();}
+function zoom(factor){const nw=Math.min(2200,Math.max(420,camera.w*factor)),nh=nw*760/1100;camera.x+=(camera.w-nw)/2;camera.y+=(camera.h-nh)/2;camera.w=nw;camera.h=nh;applyCamera();saveLayout();}
 function resetFilters(){$('project').value='all';$('state').value='all';$('external').checked=true;$('references').checked=false;$('search').value='';focus=null;render();}
 function setView(next){view=next;$('listing').hidden=view!=='list';$('graph').hidden=view==='list';$('graphView').setAttribute('aria-pressed',view==='graph');$('listView').setAttribute('aria-pressed',view==='list');}
 $('filtersToggle').onclick=()=>{$('filters').hidden=!$('filters').hidden;$('filtersToggle').setAttribute('aria-expanded',!$('filters').hidden)};
 ['project','state','external','references'].forEach(id=>$(id).onchange=()=>{render();renderInspector();});$('search').oninput=render;
 $('clearFilters').onclick=resetFilters;$('emptyReset').onclick=resetFilters;$('graphView').onclick=()=>setView('graph');$('listView').onclick=()=>setView('list');$('unfocus').onclick=()=>{focus=null;render()};$('closeInspector').onclick=()=>{$('inspector').hidden=true};
 $('coverageToggle').onclick=()=>{$('coverage').hidden=!$('coverage').hidden;$('coverageToggle').setAttribute('aria-expanded',!$('coverage').hidden)};$('closeCoverage').onclick=()=>{$('coverage').hidden=true;$('coverageToggle').setAttribute('aria-expanded',false)};
-$('zoomIn').onclick=()=>zoom(.8);$('zoomOut').onclick=()=>zoom(1.25);$('fit').onclick=()=>{camera={x:0,y:0,w:1100,h:760};applyCamera()};$('resetLayout').onclick=()=>{nodes.forEach(n=>positions[n.id]={x:n.x,y:n.y});camera={x:0,y:0,w:1100,h:760};render();toast('Preview layout reset. Session and project membership are unchanged.');};
+$('zoomIn').onclick=()=>zoom(.8);$('zoomOut').onclick=()=>zoom(1.25);$('fit').onclick=fitVisible;$('resetLayout').onclick=arrangeVisible;$('undoLayout').onclick=()=>{if(!undoLayout)return;Object.assign(positions,undoLayout.positions);camera={...undoLayout.camera};undoLayout=null;$('undoLayout').hidden=true;render();saveLayout();};
 $('refresh').onclick=()=>{$('refresh').disabled=true;$('freshness').replaceChildren(plain('span','spinner'),document.createTextNode('Refreshing connections · keeping cached graph'));setTimeout(()=>{$('refresh').disabled=false;$('freshness').replaceChildren(plain('span','status-dot'),document.createTextNode('Updated just now · positions preserved'));toast('Synthetic refresh complete. Nodes, selection and inspector stay in place.');},850)};
 document.querySelectorAll('[data-demo]').forEach(b=>b.onclick=()=>toast(`${b.dataset.demo} is available in the app. This preview demonstrates Graph only.`));
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(!$('coverage').hidden)$('closeCoverage').click();else if(focus){focus=null;render();}else $('inspector').hidden=true;}});
 function svgPoint(e){const p=$('graph').createSVGPoint();p.x=e.clientX;p.y=e.clientY;return p.matrixTransform($('graph').getScreenCTM().inverse());}
 $('graph').addEventListener('pointerdown',e=>{if(e.button!==0||e.target.closest('.edge-hit'))return;const card=e.target.closest('.node'),p=svgPoint(e);drag={id:card?.dataset.id,start:p,initial:card?{...positions[card.dataset.id]}:{...camera},moved:false,screenX:e.clientX,screenY:e.clientY};$('graph').setPointerCapture(e.pointerId);});
-$('graph').addEventListener('pointermove',e=>{if(!drag)return;if(Math.hypot(e.clientX-drag.screenX,e.clientY-drag.screenY)<5&&!drag.moved)return;drag.moved=true;const p=svgPoint(e),dx=p.x-drag.start.x,dy=p.y-drag.start.y;if(drag.id){positions[drag.id]={x:drag.initial.x+dx,y:drag.initial.y+dy};render();}else{camera.x-=dx;camera.y-=dy;applyCamera();}});
-$('graph').addEventListener('pointerup',e=>{const current=drag;if(!current)return;$('graph').releasePointerCapture(e.pointerId);if(!current.moved&&current.id)choose('node',current.id);setTimeout(()=>{drag=null},0)});
-$('graph').addEventListener('pointercancel',()=>{drag=null});
+$('graph').addEventListener('pointermove',e=>{if(!drag)return;if(Math.hypot(e.clientX-drag.screenX,e.clientY-drag.screenY)<5&&!drag.moved)return;drag.moved=true;const p=svgPoint(e),dx=p.x-drag.start.x,dy=p.y-drag.start.y;if(drag.id){undoLayout=null;$('undoLayout').hidden=true;positions[drag.id]={x:Math.max(-1e5,Math.min(1e5,drag.initial.x+dx)),y:Math.max(-1e5,Math.min(1e5,drag.initial.y+dy))};render();}else{camera.x=Math.max(-1e6,Math.min(1e6,camera.x-dx));camera.y=Math.max(-1e6,Math.min(1e6,camera.y-dy));applyCamera();}saveSoon();});
+$('graph').addEventListener('pointerup',e=>{const current=drag;if(!current)return;$('graph').releasePointerCapture(e.pointerId);if(!current.moved&&current.id)choose('node',current.id);if(current.moved)saveLayout();setTimeout(()=>{drag=null},0)});
+$('graph').addEventListener('pointercancel',()=>{if(drag?.moved)saveLayout();drag=null});
+window.addEventListener('pagehide',saveLayout);
 $('graph').addEventListener('wheel',e=>{if(e.ctrlKey||e.metaKey){e.preventDefault();zoom(e.deltaY>0?1.08:.92)}},{passive:false});
 document.querySelectorAll('.coverage p strong').forEach(label=>label.replaceWith(htmlBadge('machine',label.textContent)));
-render();renderInspector();if(window.innerWidth<1100)$('inspector').hidden=true;
+loadLayout();render();renderInspector();if(window.innerWidth<1100)$('inspector').hidden=true;
 </script>
 </body>
 </html>

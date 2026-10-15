@@ -37,6 +37,7 @@ class GraphCanvas : public QGraphicsView {
     QStandardItemModel *nodeModel() { return &m_model; }
     QPointF nodePosition(const QString &id) const;
     QRectF nodeRect(const QString &id) const;
+    QRectF groupRect(const QString &id) const;
     QString selectedNode() const;
     int nodeCount() const { return m_nodes.size(); }
     int relationCount() const { return m_relations.size(); }
@@ -45,23 +46,32 @@ class GraphCanvas : public QGraphicsView {
     void relationSelected(const QString &id);
     void selectionCleared();
     void positionsChanged();
+    void viewStateChanged();
 
   protected:
     void wheelEvent(QWheelEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
   private:
     friend class GraphNodeItem;
     void moved(const QString &id);
     void updateBounds();
+    QPointF freePosition(const QString &group) const;
+    void rememberCamera();
+    void trimPositions();
     QStandardItemModel m_model;
     SessionDelegate *m_delegate;
     QHash<QString, GraphNodeItem *> m_nodes;
     QHash<QString, GraphRelationItem *> m_relations;
     QHash<QString, QList<GraphRelationItem *>> m_incident;
     QHash<QString, QPointF> m_positions;
+    QHash<QString, QString> m_positionGroups;
     QMap<QString, QString> m_groupLabels;
     QHash<QString, GraphGroupItem *> m_groups;
     QStringList m_order;
+    QPointF m_center;
+    QString m_selection;
+    bool m_haveCamera = false;
     bool m_dark = true, m_applying = false;
 };
