@@ -4,7 +4,7 @@ import unittest
 
 from aiohttp import ClientSession
 
-from relay_fixture import DATABASE_URL, start_relay
+from relay_fixture import DATABASE_URL, UNFINISHED, start_relay
 
 
 class RelayFixtureTests(unittest.IsolatedAsyncioTestCase):
@@ -40,9 +40,12 @@ class RelayFixtureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(relay.config.stat().st_mode & 0o777, 0o600)
         self.assertEqual(await databases(), 1)
+        # Until cleanup, the exit hook would drop it after an interruption.
+        self.assertIn(relay, UNFINISHED)
         await relay.cleanup()
         self.assertIsNotNone(relay.process.returncode)
         self.assertEqual(await databases(), 0)
+        self.assertNotIn(relay, UNFINISHED)
 
 
 if __name__ == '__main__':

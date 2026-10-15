@@ -23,6 +23,8 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             fixture = Path(__file__).with_name("fixture_hgs.py")
             fixture.chmod(0o755)
             relay = await start_relay(workspace="Integration", computer="Fixture computer")
+            # Also when a step before the try below fails.
+            self.addAsyncCleanup(relay.cleanup)
             url, node, invitation = relay.url, relay.node, relay.invitation
             connector = Connector({"server_url": url, "node_token": node["node_token"],
                 "hgs_path": str(fixture), "state_dir": str(root / "journal"), "poll_interval": 1},

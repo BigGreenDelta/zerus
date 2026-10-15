@@ -10,6 +10,8 @@ until that reference is deleted. No fixture touches a native agent, deployed
 database, host configuration or non-fixture service, or prints the URL.
 """
 import asyncio
+import atexit
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -23,6 +25,10 @@ from aiohttp import ClientSession
 
 DATABASE_URL = 'ZERUS_RELAY_TEST_DATABASE_URL'
 REQUIRED = 'ZERUS_REQUIRE_RELAY_E2E'
+# Rust relays whose database still exists. Ctrl+C makes unittest skip cleanups,
+# so the exit hook below stops and drops these; a killed interpreter leaves its
+# databases to the disposable server.
+UNFINISHED = set()
 
 
 def unavailable(reason):
@@ -59,6 +65,23 @@ async def admin(server, statement):
         await connection.execute(statement)
     finally:
         await connection.close()
+
+
+def drop(database):
+    # FORCE also closes connections a killed relay left behind.
+    return f'DROP DATABASE IF EXISTS {database} WITH (FORCE)'
+
+
+@atexit.register
+def drop_unfinished():
+    """Stop the Rust relays of an interrupted run and drop their databases."""
+    for relay in list(UNFINISHED):
+        if relay.process is not None:
+            # Popen never signals a child that has already been reaped.
+            with contextlib.suppress(Exception):
+                relay.process.kill()
+        with contextlib.suppress(Exception):
+            asyncio.run(admin(relay.server, drop(relay.database)))
 
 
 class Relay:
@@ -106,6 +129,7 @@ class RustRelay(Relay):
     async def _start(self, workspace, computer, settings):
         await admin(self.server, f'CREATE DATABASE {self.database}')
         self.created = True
+        UNFINISHED.add(self)
         url = urlsplit(self.server)._replace(path='/' + self.database).geturl()
         descriptor = os.open(self.config, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, 'w') as handle:
@@ -177,9 +201,9 @@ class RustRelay(Relay):
         finally:
             try:
                 if self.created:
-                    # FORCE also closes connections a killed relay left behind.
-                    await admin(self.server, f'DROP DATABASE IF EXISTS {self.database} WITH (FORCE)')
+                    await admin(self.server, drop(self.database))
                     self.created = False
+                    UNFINISHED.discard(self)
             finally:
                 if self.log is not None:
                     self.log.close()

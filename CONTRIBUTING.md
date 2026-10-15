@@ -115,8 +115,9 @@ connector and reference compatibility fixtures, install `services/mobile` and
 `services/mobile/tests/requirements.txt` in a Python 3.11+ virtual environment
 and run `python -m unittest discover -s services/mobile/tests -v`.
 The relay storage contracts and the connector HTTP suites need PostgreSQL:
-without `ZERUS_RELAY_TEST_DATABASE_URL` the contracts use SQLite and the suites
-that run the Rust relay skip. Start a disposable server with one line:
+without `ZERUS_RELAY_TEST_DATABASE_URL` the contracts use SQLite and the HTTP
+suites skip instead of running the Rust relay. Start a disposable server with
+one line:
 
 ```sh
 docker run --rm -d --name zerus-relay-test-postgres -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17.11-alpine -c max_connections=300

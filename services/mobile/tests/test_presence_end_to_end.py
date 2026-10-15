@@ -27,6 +27,8 @@ class PresenceEndToEndTests(unittest.IsolatedAsyncioTestCase):
             fixture.chmod(0o755)
             # Presence alerts are evaluated only by the Rust relay.
             relay = await start_relay(rust_only=True, workspace="Integration", computer="Fixture computer")
+            # Also when a step before the try below fails.
+            self.addAsyncCleanup(relay.cleanup)
             url, node, invitation = relay.url, relay.node, relay.invitation
 
             def presence(idle, locked=None):

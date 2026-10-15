@@ -113,6 +113,9 @@ class SpeechHttpServiceTests(unittest.IsolatedAsyncioTestCase):
     """Real relay HTTP, connector subprocess and speech socket in private fixtures."""
 
     async def asyncSetUp(self):
+        # First, so a skipped relay leaves no speech server running.
+        self.relay = await start_relay(workspace="Speech fixture", computer="Speech computer")
+        self.addAsyncCleanup(self.relay.cleanup)
         self.temp = tempfile.TemporaryDirectory(prefix="zerus-speech-http-")
         self.root = Path(self.temp.name)
         config = self.root / "speech.json"
@@ -122,8 +125,6 @@ class SpeechHttpServiceTests(unittest.IsolatedAsyncioTestCase):
         self.speech = SpeechServer(speech_config(config), test_mode=True)
         self.thread = threading.Thread(target=self.speech.serve_forever, daemon=True)
         self.thread.start()
-        self.relay = await start_relay(workspace="Speech fixture", computer="Speech computer")
-        self.addAsyncCleanup(self.relay.cleanup)
         url, self.node = self.relay.url, self.relay.node
         self.phone = await self.relay.pair("Speech phone", self.relay.invitation["pair_code"])
         self.client = ClientSession(base_url=url)

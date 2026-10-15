@@ -37,12 +37,13 @@ The storage contracts (`tests/contracts.rs`, `tests/directory_create.rs` and
 `tests/administration.rs`) and the connector HTTP suites run on PostgreSQL. Point
 `ZERUS_RELAY_TEST_DATABASE_URL` at a **disposable** server whose role may create
 databases: each test creates its own `relay_test_<uuid>` database and drops it
-afterwards, also when it fails, and credentials are not logged. Without the
-variable the Rust contracts fall back to a private SQLite file and the Rust relay
-suites skip; a local SQLite run never stands in for PostgreSQL. CI sets
-`ZERUS_REQUIRE_RELAY_E2E=1`, which turns that fallback and those skips into
-failures. A one-line server on a random loopback port, whose data leaves with
-the container:
+afterwards, also when it fails, and credentials are not logged. The Python
+fixtures also drop theirs after Ctrl+C; a killed or interrupted `cargo test` can
+leave some behind. Without the variable the Rust contracts fall back to a
+private SQLite file and the connector HTTP suites skip; a local SQLite run never
+stands in for PostgreSQL. CI sets `ZERUS_REQUIRE_RELAY_E2E=1`, which turns that
+fallback and those skips into failures. A one-line server on a random loopback
+port, whose data, leftovers included, leaves with the container:
 
 ```sh
 docker run --rm -d --name zerus-relay-test-postgres -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17.11-alpine -c max_connections=300

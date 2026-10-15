@@ -28,6 +28,8 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                                     'name': 'Peer', 'online': True, 'error': None}]}
             (root / 'inventory.json').write_text(json.dumps(inventory))
             relay = await start_relay(computer='Gateway')
+            # Also when pairing or a step before the try below fails.
+            self.addAsyncCleanup(relay.cleanup)
             url, gateway = relay.url, relay.node
             phone = await relay.pair('Example phone', relay.invitation['pair_code'])
             connector = Connector({'server_url': url, 'node_token': gateway['node_token'],
@@ -114,6 +116,8 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                                     'online': True, 'error': None, 'identity': 'verified'}]}
             (root / 'inventory.json').write_text(json.dumps(inventory))
             relay = await start_relay(computer='Gateway')
+            # Also when pairing or a step before the try below fails.
+            self.addAsyncCleanup(relay.cleanup)
             url, gateway = relay.url, relay.node
             phone = await relay.pair('Example phone', relay.invitation['pair_code'])
             connector = Connector({'server_url': url, 'node_token': gateway['node_token'],
