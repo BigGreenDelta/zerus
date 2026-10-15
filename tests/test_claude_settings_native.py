@@ -92,6 +92,14 @@ class NativeClaudeSettings(unittest.TestCase):
         self.name = 'claude/settings-test'
         self.run_id = str(uuid.uuid4())
         self.addCleanup(lambda: fixtures.InputTransport.tearDown(self))
+        if 'hook' in self._testMethodName:
+            # The entry hgs registers for Claude Code 2.1.296, run as this run's hook.
+            hook = dict(HGS_SESSION=self.name, HGS_RUN_ID=self.run_id, HGS_STATE_DIR=str(self.state),
+                        HGS_CONFIG_DIR=str(self.root / 'config'), PATH=self.env['PATH'])
+            command = ('env ' + ' '.join(shlex.quote(key + '=' + value) for key, value in hook.items()) + ' '
+                       + shlex.quote(str(fixtures.HGS)) + ' __state hook')
+            self.settings_file.write_text(json.dumps(dict(hooks=dict(PostModelSwitch=[
+                dict(hooks=[dict(type='command', command=command, timeout=5)])]))))
         launch = ['--resume', self.conversation_id] if resumed else ['--session-id', self.conversation_id]
         self.tmux('new-session', '-d', '-s', self.name, '-x', '120', '-y', '36', '-c', str(work),
                   'env', '-i', 'HOME=' + str(self.root), 'PATH=' + os.environ['PATH'],
@@ -167,6 +175,28 @@ class NativeClaudeSettings(unittest.TestCase):
         self.assertEqual(self.change('claude-sonnet-5-5', 'low')['status'], 'applied')
         self.assertIn('○ low · /effort', self.screen())
         self.assertEqual(self.inspect()['effort'], 'low')
+        self.assertEqual(self.settings_file.read_bytes(), before)
+
+    def test_terminal_model_change_reaches_hgs_through_its_hook(self):
+        before = self.settings_file.read_bytes()
+        # The person changes the model in Terminal, for this session only.
+        self.tmux('send-keys', '-t', self.pane, '-l', '/model')
+        time.sleep(.3)
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.wait_for(lambda: 's to use this session only' in self.screen())
+        for _ in range(8):
+            row = next((line for line in self.screen().splitlines() if re.match(r'\s*❯ \d\.', line)), '')
+            if 'Fable' in row:
+                break
+            self.tmux('send-keys', '-t', self.pane, 'Down')
+            time.sleep(.2)
+        self.assertIn('Fable', row, self.screen())
+        self.tmux('send-keys', '-t', self.pane, 's')
+        # Claude's PostModelSwitch names the exact ID, not the picker's display name.
+        record = lambda: json.loads(self.record_path.read_text())
+        self.wait_for(lambda: record()['model'] == 'claude-fable-5-1')
+        self.assertEqual(record()['model_source_path'], str(self.transcript))
+        self.assertEqual(self.inspect()['model'], 'claude-fable-5-1')
         self.assertEqual(self.settings_file.read_bytes(), before)
 
     def test_resumed_conversation_confirms_claudes_cache_notice(self):

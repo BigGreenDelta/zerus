@@ -151,6 +151,19 @@ Kimi `config.toml`, preserving other hooks and making a `.pre-hgs` backup before
 first edit. It respects `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME`.
 Handlers do nothing outside an `hgs` run. `HGS_TRACKING=0` disables registration for
 new launches. Native hook trust still requires an explicit user choice in Codex.
+Claude Code's `PostModelSwitch` is registered only once `claude --version` reports
+2.1.296 or later: older versions stop every start at a settings warning for a hook
+event they do not know. Until then each launch reads the version again; a version
+that cannot be read gets no such event. A launch through a project `run_claude.sh`
+never reads it, because a launcher runs only under supervision. Once registered,
+the version is read again only when the `claude` executable changes; a version older
+than 2.1.296 then has hgs remove its own `PostModelSwitch` entries before a tracked
+start, dropping the event only when nothing else is left in it; started outside hgs
+or with `HGS_TRACKING=0` first, it still warns until then. The user's own hooks for
+that event stay, and older versions still warn about those. An unreadable version or
+a launcher keeps the entry, as does a wrapper script that starts another Claude Code
+without itself changing: delete the entry from its `settings.json` by hand there.
+`PreModelSwitch` is never registered.
 Tracked Codex needs `--no-daemon`; the integration has been verified with 0.160.0,
 while 0.155.1 lacks that required flag.
 
@@ -629,15 +642,30 @@ path (`C:\work\a.cpp:12`, `C:/work/a.cpp` or `file:///C:/work/a.cpp`); a share
 (`\\server\share\…`) never opens. The file dialog shows and copies a path on this
 Windows computer with backslashes (`C:\work\a.cpp`); remote machines keep their
 `/` separators. Local references can open the file or its parent folder; remote
-references identify the host and offer **Download…** and
-**Download and open…**, with a local Save dialog, plus an SSH terminal. Downloads
-use that machine's configured SSH profile and SFTP, stream directly to disk and
-replace the chosen destination only after a successful transfer. Errors remain
+references identify the host and offer **Download…**, **Download and open** and
+an SSH terminal. **Download…** asks where to save. **Download and open** saves
+automatically in the local Downloads folder under `Zerus Files`, then opens that
+copy. Each request downloads a fresh copy; existing names are preserved with
+numbered suffixes such as `report (1).pdf`, including simultaneous downloads.
+Downloads use that machine's configured SSH profile and SFTP, stream directly to
+disk and publish the destination only after a successful transfer. Errors remain
 in the dialog; a saved copy can be opened with **Open local copy**. Offline or
 unresolved relative references explain why downloading is unavailable. The
 download continues if its dialog is closed, with a completion or error notice;
 an explicitly requested open still happens after successful saving. The
 120-second transfer deadline leaves an existing destination unchanged on failure.
+
+**Settings → Files** controls the local downloaded-copy cache. **Never clear** is
+the default. An optional size limit removes the oldest completed copies created
+by **Download and open**, without touching manual downloads, unrelated files or
+copies whose contents were edited. An internal index tracks ownership; files
+that have been moved or whose contents changed are no longer cleanup candidates.
+Transfers in progress and newly completed copies are protected for one minute so the default
+application can consume them. Usage may briefly exceed the limit, including a
+single oversized file; periodic cleanup runs while Zerus is open and on its next
+start. Enabling or reducing a limit requires confirmation. Cleanup and inventory
+run outside the UI thread.
+
 `hgs @host download --path REMOTE_PATH --output LOCAL_FILE` provides the same
 transfer from the CLI, including empty files and paths starting with `~/`.
 Display alone downloads or launches
@@ -794,10 +822,22 @@ For Codex hooks, **Review hooks** opens the native browser in Terminal;
 Review input with an uncertain result is never retried automatically.
 Codex's **Update available** picker shows both versions and the exact update
 command. **Update now** switches to Terminal while Codex runs that command; Codex
-then exits and the session needs an explicit resume. **Skip** and **Skip until
-next version** continue startup, and Codex records the dismissal itself. Only
-reviewed npm, Bun, Vite+, pnpm, Homebrew and standalone Unix commands are
-recognized; other or clipped commands stay in Terminal.
+then exits and the session needs an explicit resume. Codex leaves the picker and
+input mode at once and prints `Updating Codex via` with the command before running
+it. That announcement for the exact command, or Codex exiting, confirms the choice
+within 15 seconds, however long the installer takes. Zerus does not wait for the
+installer: the `hgs answer` receipt's `codex_update` is `installing` while Codex
+runs it, or `exited`. Without either confirmation, delivery stays uncertain and
+Enter is never sent again. **Skip** and **Skip until next version** continue
+startup, and Codex records the dismissal itself. Only reviewed npm, Bun, Vite+,
+pnpm, Homebrew and standalone Unix commands are recognized; other or clipped
+commands stay in Terminal.
+
+After **Update now**, the desktop shows a notice for that state: Codex is still
+installing its update, or it has exited and the session needs a resume. An
+older host's receipt has no `codex_update`; the desktop then only switches to
+Terminal.
+
 After a resume, Codex asks **Resume paused goal?** when the conversation's goal
 is paused, stalled or limited by usage. Activity shows the goal from Codex's goal
 database once the centered dialog over the transcript shows the same goal and
@@ -854,6 +894,10 @@ warns that the next message re-reads the full history and uses more tokens: the
 selector states this before **Apply**, and Zerus then accepts only that built-in
 notice. A confirmation requested by a `PreModelSwitch` hook is declined and
 reported, as is a picker without the session-only choice; use Terminal for those.
+With Claude Code 2.1.296 or later, its `PostModelSwitch` hook names the exact model
+of every switch at once: `/model` in Terminal, a change from Zerus, an automatic
+switch or a resume. The selector shows that model until the transcript records a
+later turn or `/model` receipt; the switch itself adds no Activity entry.
 A stopped Claude session resumes with a choice made in Zerus through `--model` and
 `--effort`; otherwise it starts with the account's settings.
 
@@ -1046,7 +1090,9 @@ project placement. A session that ends before it appears and leaves no record,
 such as an agent that cannot start after the launch reported it started, also
 removes the placeholder: a notice shows its exit code and last lines, as its
 computer reports them in `ended_launches` ([JSON and external
-clients](#json-and-external-clients)); a hidden launch status ends silently.
+clients](#json-and-external-clients)), and stays when the launch command
+reports afterwards; a hidden launch status ends silently but still shows a
+later launch error.
 Existing names and unrelated sessions are never repurposed.
 **Open terminal window** is off by default and remembered separately from the tray
 open mode; DeepSeek uses its embedded native interface.

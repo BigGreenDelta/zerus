@@ -1,5 +1,6 @@
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "DownloadCache.h"
 #include "SessionFileDrop.h"
 #include "SessionCardDelegate.h"
 #include "SessionPanelDock.h"
@@ -601,6 +602,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             {"conversation_id",message.value("conversation_id")},{"submitted_at",message.value("created_at")},{"attachments",QJsonArray{message.value("audio")}}});
         if(key==m_selectedKey){reconcileMessages();renderDetails();m_activityView->jumpToLatest();inspect();}
     });
+    connect(&m_client, &HgsClient::downloadCacheWarning, this, [this](const QString &error) { showNotice(error, true); });
     auto openFileReference = [this](const QString &href) {
         const auto *entry = selected(); if (!entry) return;
         const auto target = SessionFileReference::parse(href); if (!target.valid()) return;
@@ -630,7 +632,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         auto *hint = new QLabel(local ? (path.isEmpty() ? tr("The session folder is unknown. Copy the path to locate this file.")
             : tr("Open with your default application, or copy the path."))
-            : tr("Download a copy from %1 to this computer, then open it with your default application.").arg(machine));
+            : tr("Download… lets you choose where to save. Download and open saves a copy in Downloads/Zerus Files and opens it with your default application."));
         hint->setObjectName("sessionFileHint");
         hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
         hint->setTextFormat(Qt::PlainText); hint->setWordWrap(true); layout->addWidget(hint);
@@ -656,7 +658,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             progress->setAccessibleName(tr("Downloading file from %1").arg(machine));
             progress->setRange(0, 0); progress->setTextVisible(false); progress->hide(); layout->insertWidget(layout->count() - 1, progress);
             auto *download = buttons->addButton(tr("Download…"), QDialogButtonBox::ActionRole); download->setObjectName("downloadSessionFile");
-            auto *open = buttons->addButton(tr("Download and open…"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
+            auto *open = buttons->addButton(tr("Download and open"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
+            open->setToolTip(tr("Save automatically to %1 and open the local copy.").arg(QDir::toNativeSeparators(DownloadCache::directory())));
             auto *savedOpen = buttons->addButton(tr("Open local copy"), QDialogButtonBox::ActionRole); savedOpen->setObjectName("openDownloadedSessionFile"); savedOpen->hide();
             const QString remotePath = path.isEmpty() && target.path.startsWith("~/") ? target.path : path;
             const bool downloadable = online && !remotePath.isEmpty();
@@ -665,15 +668,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             else if (remotePath.isEmpty()) hint->setText(tr("The session folder is unknown. Copy the path or use the SSH terminal to locate the file."));
             auto startDownload = [&, download, open, savedOpen, progress, remotePath](bool opening) {
                 if (pending) return;
-                const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-                QFileDialog save(&dialog, tr("Save local copy"), QDir(downloads.isEmpty() ? QDir::homePath() : downloads).filePath(QFileInfo(remotePath).fileName()));
-                save.setObjectName("sessionFileSaveDialog"); save.setAcceptMode(QFileDialog::AcceptSave); save.setFileMode(QFileDialog::AnyFile);
-                if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
-                const auto destination = save.selectedFiles().first();
+                QString destination = DownloadCache::directory();
+                if (!opening) {
+                    const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+                    QFileDialog save(&dialog, tr("Save local copy"), QDir(downloads.isEmpty() ? QDir::homePath() : downloads).filePath(QFileInfo(remotePath).fileName()));
+                    save.setObjectName("sessionFileSaveDialog"); save.setAcceptMode(QFileDialog::AcceptSave); save.setFileMode(QFileDialog::AnyFile);
+                    if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
+                    destination = save.selectedFiles().first();
+                }
                 download->setEnabled(false); open->setEnabled(false); savedOpen->hide();
                 progress->show(); hint->setText(tr("Downloading from %1 to %2…\nThe download continues if you close this dialog.").arg(machine, destination));
                 openAfterDownload = opening;
-                pending = m_client.downloadFile(host, remotePath, destination);
+                pending = opening ? m_client.downloadFileToCache(host, remotePath) : m_client.downloadFile(host, remotePath, destination);
                 auto *completion = new QObject(this);
                 const QPointer<QDialog> shownDialog(&dialog);
                 const auto request = pending;
@@ -958,15 +964,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::nativeSessionLaunched, this, [this](const QString &id, bool ok, const QString &error) {
         // A listing can report the launch ended before its command returns; its
         // notice stays and nothing waits to open a session that never appears.
-        const bool ended = m_endedLaunches.remove(id);
         if (ok) {
-            if (!ended) { m_nativeLaunchToOpen=id; showNotice(tr("Session started. Loading activity…")); }
+            if (!takeEndedLaunch(id)) { m_nativeLaunchToOpen=id; showNotice(tr("Session started. Loading activity…")); }
         } else {
             newSessionLaunchFailed(id, error);
         }
         emit refreshRequested();
     });
-    connect(&m_client, &HgsClient::questionAnswered, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &receipt) {
+    connect(&m_client, &HgsClient::questionAnswered, this, [this](quint64 request, const QString &, const QString &name, const QJsonObject &receipt) {
         const auto pending = m_pendingAnswers.value(request);
         // Hook review and Codex's native installer continue in Terminal.
         const bool openTerminal = !pending.key.isEmpty() && pending.key == m_selectedKey
@@ -974,8 +979,22 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             && pending.questionHash == receipt.value("question_hash").toString()
             && m_details.value("run_id") == receipt.value("run_id")
             && receipt.value("open_terminal").toBool();
+        // After Update now, the receipt says whether Codex still runs its
+        // installer or has exited; older hosts omit it.
+        QString updateNotice;
+        if (!pending.key.isEmpty() && pending.questionId.startsWith("codex-update:")
+            && pending.questionHash == receipt.value("question_hash").toString()) {
+            const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == pending.key; });
+            const QString target = entry == m_entries.cend() ? name : tr("%1 (%2)").arg(entry->session.name, entry->machine);
+            const QString phase = receipt.value("codex_update").toString();
+            if (phase == "installing")
+                updateNotice = tr("Codex in %1 is installing its update in Terminal. Resume the session after Codex exits.").arg(target);
+            else if (phase == "exited")
+                updateNotice = tr("Codex in %1 exited after its update. Check the result in Terminal, then resume the session.").arg(target);
+        }
         finishQuestion(request, true);
         if (openTerminal) { m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession(); }
+        if (!updateNotice.isEmpty()) showNotice(updateNotice);
     });
     connect(&m_client, &HgsClient::questionAnswerFailed, this, [this](quint64 request, const QString &, const QString &, const QString &error, bool uncertain) {
         finishQuestion(request, false, error, uncertain);
@@ -1556,7 +1575,7 @@ void SessionsWindow::applyTheme()
         QListWidget#settingsSections::item { padding:11px 10px;margin-bottom:5px;border-radius:6px; }
         QListWidget#settingsSections::item:selected { background:%10;color:%5; }
         QListWidget#settingsSections::item:hover { background:%7; }
-        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QDialog#speechProfileEditor QScrollArea, QWidget#speechEditorContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
+        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QWidget#downloadCacheSettings, QDialog#speechProfileEditor QScrollArea, QWidget#speechEditorContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
         QDialog#speechProfileEditor QScrollBar:vertical { background:%1; width:10px; margin:0; border:0; }
         QDialog#speechProfileEditor QScrollBar:horizontal { background:%1; height:10px; margin:0; border:0; }
         QDialog#speechProfileEditor QScrollBar::handle:vertical { background:%4; border-radius:4px; min-height:24px; }
@@ -1605,7 +1624,8 @@ void SessionsWindow::applyTheme()
         QTableWidget#swarmConflictChoices::item { padding:8px 10px; }
         QTreeWidget#worktreeCatalog::item, QTreeWidget#processList::item { padding:6px 4px; }
         QTableWidget#projectFolders::item { padding:0 10px; }
-        QSpinBox { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
+        QSpinBox, QDoubleSpinBox#downloadCacheSize { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
+        QDoubleSpinBox#downloadCacheSize:disabled { color:%6; background:%1; }
         QListWidget#machineProfiles, QListWidget#accountProfiles, QListWidget#speechProfiles, QListWidget#launchAccount { background:%3; color:%2; border:1px solid %4; border-radius:8px; }
         QListWidget#machineProfiles::item, QListWidget#speechProfiles::item { padding:14px 10px; border-bottom:1px solid %4; }
         QListWidget#accountProfiles::item { padding:6px 10px; border-bottom:1px solid %4; }
@@ -2242,9 +2262,21 @@ void SessionsWindow::savePendingLaunches()
     QSettings settings; settings.setValue("workspace/pendingLaunches", QJsonDocument(m_pendingLaunches).toJson(QJsonDocument::Compact)); settings.sync();
 }
 
+bool SessionsWindow::takeEndedLaunch(const QString &launchId, QJsonObject *launch)
+{
+    const auto it = std::find_if(m_endedLaunches.begin(), m_endedLaunches.end(), [&](const auto &ended) { return ended.first == launchId; });
+    if (it == m_endedLaunches.end()) return false;
+    if (launch) *launch = it->second;
+    m_endedLaunches.erase(it); return true;
+}
+
 void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QString &error)
 {
-    const QString name = m_pendingLaunches.value(launchId).toObject().value("tag").toString();
+    // A listing that reported the launch ended already showed its reason and last
+    // lines. A hidden launch status showed nothing, so its failure still names it.
+    QJsonObject ended;
+    if (takeEndedLaunch(launchId, &ended) && ended.value("show_pending").toBool()) return;
+    const QString name = (ended.isEmpty() ? m_pendingLaunches.value(launchId).toObject() : ended).value("tag").toString();
     m_pendingLaunches.remove(launchId); savePendingLaunches();
     rebuild();
     showNotice(error.isEmpty() ? tr("Could not start session %1. Check the terminal.").arg(name)
@@ -2254,7 +2286,7 @@ void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QStri
 void SessionsWindow::placeLaunchedSessions()
 {
     bool changed = false;
-    QString ended;
+    QString ended, endedLaunch;
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     for (auto it = m_pendingLaunches.begin(); it != m_pendingLaunches.end();) {
         const auto launch = it.value().toObject();
@@ -2282,10 +2314,18 @@ void SessionsWindow::placeLaunchedSessions()
         const auto end = !consumed && box && box->ok ? box->endedLaunches.value(it.key()) : QJsonObject();
         if (!end.isEmpty() && std::none_of(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
                 return entry.host == host && entry.session.launchId == it.key(); })) {
-            consumed = true; m_endedLaunches.insert(it.key());
+            consumed = true; m_endedLaunches.append({it.key(), launch});
+            // Terminal launches and launches restored after a restart never
+            // report a result, so only the newest ended launches are kept.
+            constexpr qsizetype EndedLaunchLimit = 16;
+            if (m_endedLaunches.size() > EndedLaunchLimit) m_endedLaunches.removeFirst();
             if (m_nativeLaunchToOpen == it.key()) m_nativeLaunchToOpen.clear();
             // A hidden launch status stays hidden.
             if (launch.value("show_pending").toBool()) {
+                // Only the last ended notice shows. A launch whose notice it
+                // replaces showed nothing, so its later failure still names it.
+                for (auto &[id, shown] : m_endedLaunches) if (id == endedLaunch) shown["show_pending"] = false;
+                endedLaunch = it.key();
                 const QString name = launch.value("tag").toString(); const auto code = end.value("code");
                 ended = code.isDouble() ? tr("Session %1 ended before it appeared (exit code %2).").arg(name).arg(code.toInteger())
                     : tr("Session %1 ended before it appeared.").arg(name);

@@ -2,6 +2,7 @@
 #include <QDesktopServices>
 #include <QTemporaryDir>
 #include "ExternalFile.h"
+#include "DownloadCache.h"
 
 namespace {
 QString write(const QTemporaryDir &dir, const QString &name, const QByteArray &bytes)
@@ -101,6 +102,20 @@ private slots:
         m_revealResult = false;
         QCOMPARE(ExternalFile::open(program, ExternalFile::Origin::ThisComputer), ExternalFile::Outcome::RevealFailed);
         QVERIFY(ExternalFile::revealFailedNotice(program).contains(QDir::toNativeSeparators(program)));
+    }
+
+    void markedCacheCopiesStillExpire()
+    {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        auto prepared = DownloadCache::prepare(dir.path()); QVERIFY(prepared.pending);
+        QFile file(prepared.pending->path); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("cache copy"); file.close();
+        const auto result = DownloadCache::publish(prepared.pending, "remote.txt", 1000); QVERIFY(result.error.isEmpty());
+        QCOMPARE(ExternalFile::open(result.path, ExternalFile::Origin::OtherMachine), ExternalFile::Outcome::Opened);
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+        QVERIFY(!marker(result.path).isEmpty());
+#endif
+        const auto usage = DownloadCache::trim(dir.path(), 1, DownloadCache::OpeningGraceMs + 1001);
+        QVERIFY2(usage.error.isEmpty(), qPrintable(usage.error)); QCOMPARE(usage.files, 0); QVERIFY(!QFileInfo::exists(result.path));
     }
 
     void marksFilesFromOtherMachines()

@@ -15,7 +15,7 @@ OBJECTIVE = ('Finish the example export: verify the staging copy, compare row co
 
 # A 100-cell pane: Codex centers the 72-cell dialog over the transcript, which
 # stays visible in the 14 cells on each side.
-FAKE = r'''
+FAKE = fixtures.SIGNAL_SAFE_READ + r'''
 import os,pathlib,signal,sqlite3,sys,termios,textwrap,tty
 root=pathlib.Path(os.environ['INPUT_FIXTURE']);fd=sys.stdin.fileno();original=termios.tcgetattr(fd);tty.setraw(fd)
 os.write(1,b'\x1b[?2004h');selected=0;open_dialog=True;buf=b''
@@ -37,7 +37,7 @@ def render(*args):
 signal.signal(signal.SIGUSR1,render);render();(root/'agent-pid').write_text(str(os.getpid()))
 try:
  while True:
-  value=os.read(fd,65536)
+  value=read_input(fd)
   if not value:break
   with (root/'received').open('ab') as f:f.write(value)
   buf+=value

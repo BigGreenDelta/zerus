@@ -3,8 +3,11 @@
 import datetime
 import json
 import os
+import pathlib
+import shutil
 import signal
 import subprocess
+import sys
 import time
 import unittest
 import uuid
@@ -13,7 +16,7 @@ import test_clear_context_native
 import test_input as fixtures
 from test_questions import Questions
 
-FAKE = r'''
+FAKE = fixtures.SIGNAL_SAFE_READ + r'''
 import os,pathlib,select,signal,sys,termios,time,tty
 root=pathlib.Path(os.environ['INPUT_FIXTURE']);fd=sys.stdin.fileno();original=termios.tcgetattr(fd);tty.setraw(fd)
 os.write(1,b'\x1b[?2004h');selected=0;buf=b''
@@ -30,10 +33,17 @@ def render(*args):
  for i in (1,2):lines += [('› ' if selected==i else '  ')+str(i+1)+'. '+labels[i]]
  lines += ['','  enter continue · esc skip']
  os.write(1,b'\x1b[2J\x1b[H'+'\r\n'.join(lines).encode())
+def drain(seconds):
+ # Keep recording input, so a resent key stays visible to the test. A release
+ # file ends the wait early.
+ end=time.monotonic()+seconds
+ while (left:=end-time.monotonic())>0 and not (root/'release').exists():
+  if select.select([fd],[],[],min(left,.05))[0]:
+   with (root/'received').open('ab') as f:f.write(os.read(fd,65536))
 signal.signal(signal.SIGUSR1,render);render();(root/'agent-pid').write_text(str(os.getpid()))
 try:
  while True:
-  value=os.read(fd,65536)
+  value=read_input(fd)
   if not value:break
   with (root/'received').open('ab') as f:f.write(value)
   buf+=value
@@ -44,15 +54,18 @@ try:
     buf=buf[1:];(root/'submitted').write_text(labels[selected])
     if (root/'hold-dialog').exists():continue
     if selected==0:
-     os.write(1,('\x1b[2J\x1b[H\r\nUpdating Codex via `'+command+'`...\r\n').encode())
+     # Like Codex: leave raw mode and clear the picker at once, then announce
+     # the command after the given teardown seconds.
+     if (root/'teardown').exists():
+      termios.tcsetattr(fd,termios.TCSANOW,original);os.write(1,b'\x1b[2J\x1b[H')
+      if (root/'exit-before-announcement').exists():sys.exit(1)
+      drain(float((root/'teardown').read_text()))
+     announced=(root/'announce').read_text() if (root/'announce').exists() else command
+     os.write(1,('\x1b[2J\x1b[H\r\nUpdating Codex via `'+announced+'`...\r\n').encode())
      if (root/'exit-after-update').exists():sys.exit(0)
      # Like Codex: leave the TUI, run the installer for the given seconds, then exit.
-     # Keep recording input meanwhile, so a resent key stays visible to the test.
      if (root/'installer').exists():
-      termios.tcsetattr(fd,termios.TCSANOW,original);end=time.monotonic()+float((root/'installer').read_text())
-      while (left:=end-time.monotonic())>0:
-       if select.select([fd],[],[],left)[0]:
-        with (root/'received').open('ab') as f:f.write(os.read(fd,65536))
+      termios.tcsetattr(fd,termios.TCSANOW,original);drain(float((root/'installer').read_text()))
       sys.exit(0)
     else:
      # Codex keeps announcing the newer version in its main view after a skip.
@@ -60,6 +73,22 @@ try:
    elif buf[0]==27 and len(buf)<3:break
    else:buf=buf[1:]
 finally:termios.tcsetattr(fd,termios.TCSANOW,original)
+'''
+
+
+# Stands in for `npm install -g @openai/codex` until the test releases it or
+# Codex is gone, and records any input that reaches the installer.
+FAKE_NPM = r'''#!{python}
+import os,pathlib,select,sys,time
+root=pathlib.Path(os.environ['INPUT_FIXTURE']);(root/'npm-args').write_text(' '.join(sys.argv[1:]))
+print('fake npm: installing',flush=True);end=time.monotonic()+30;parent=os.getppid()
+while not (root/'release').exists() and os.getppid()==parent and time.monotonic()<end:
+ if select.select([0],[],[],.05)[0]:
+  try:value=os.read(0,65536)
+  except OSError:break
+  if not value:break
+  with (root/'npm-received').open('ab') as f:f.write(value)
+print('fake npm: done',flush=True)
 '''
 
 
@@ -150,11 +179,85 @@ class CodexUpdate(unittest.TestCase):
         self.assertTrue(receipt['open_terminal'])
         self.assertEqual(self.received(), b'\r')
 
-    def test_update_now_installer_outliving_acknowledgement_is_never_retried(self):
-        (self.root / 'installer').write_text('5')
+    def alive(self):
+        try:
+            os.kill(self.record['pid'], 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def finish_installer(self):
+        (self.root / 'release').touch()
+        deadline = time.monotonic() + 10
+        while self.alive() and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertFalse(self.alive(), 'the fake installer did not finish')
+
+    def test_update_now_installer_outliving_acknowledgement_is_answered_and_never_retried(self):
+        # Codex's announcement delivers the choice; nothing waits for the installer.
+        (self.root / 'installer').write_text('60')
         request = self.payload('update_now')
+        receipt = self.answer(request)
+        self.assertEqual((receipt['status'], receipt['open_terminal'], receipt['codex_update']),
+                         ('answered', True, 'installing'))
+        self.assertTrue(self.alive())
+        self.assertEqual(self.received(), b'\r')
+        self.assertEqual(self.answer(request), receipt)
+        self.finish_installer()
+        self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_waits_for_a_slow_teardown_after_raw_mode_ends(self):
+        # Codex leaves raw mode and clears the picker before it announces the
+        # command; a slow teardown outlives the usual 2 s acknowledgement.
+        (self.root / 'teardown').write_text('3')
+        (self.root / 'installer').write_text('60')
+        started = time.monotonic()
+        receipt = self.answer(self.payload('update_now'))
+        self.assertGreaterEqual(time.monotonic() - started, 3)
+        self.assertEqual((receipt['status'], receipt['open_terminal'], receipt['codex_update']),
+                         ('answered', True, 'installing'))
+        self.finish_installer()
+        self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_exit_before_the_announcement_is_answered(self):
+        (self.root / 'teardown').write_text('0')
+        (self.root / 'exit-before-announcement').touch()
+        receipt = self.answer(self.payload('update_now'))
+        self.assertEqual((receipt['status'], receipt['open_terminal'], receipt['codex_update']),
+                         ('answered', True, 'exited'))
+        self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_announcing_another_command_in_input_mode_is_uncertain(self):
+        # Still in input mode, the wait ends at the usual 2 s.
+        (self.root / 'announce').write_text('brew upgrade --cask codex')
+        request = self.payload('update_now')
+        started = time.monotonic()
+        self.assertIn('delivery uncertain', self.answer(request, success=False))
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(self.received(), b'\r')
         self.assertIn('delivery uncertain', self.answer(request, success=False))
         self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_without_the_exact_announcement_is_uncertain_and_never_retried(self):
+        # Out of input mode, the wait for the exact announcement or an exit is bounded.
+        for name, value in [('teardown', '0'), ('announce', 'brew upgrade --cask codex'), ('installer', '60')]:
+            (self.root / name).write_text(value)
+        request = self.payload('update_now')
+        started = time.monotonic()
+        self.assertIn('delivery uncertain', self.answer(request, success=False, timeout=30))
+        self.assertGreaterEqual(time.monotonic() - started, 15)
+        self.assertTrue(self.alive())
+        self.assertEqual(self.received(), b'\r')
+        self.assertIn('delivery uncertain', self.answer(request, success=False))
+        self.finish_installer()
+        self.assertEqual(self.received(), b'\r')
+
+    def test_update_now_with_the_picker_still_open_is_uncertain_without_the_longer_wait(self):
+        (self.root / 'hold-dialog').touch()
+        request = self.payload('update_now')
+        started = time.monotonic()
+        self.assertIn('delivery uncertain', self.answer(request, success=False))
+        self.assertLess(time.monotonic() - started, 10)
         self.assertIn('delivery uncertain', self.answer(request, success=False))
         self.assertEqual(self.received(), b'\r')
 
@@ -183,7 +286,7 @@ class CodexUpdate(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('HGS_CODEX_TEST_BIN'), 'Set HGS_CODEX_TEST_BIN for the isolated native Codex update test')
 class NativeCodexUpdate(unittest.TestCase):
-    """The real picker from a cached newer version; only skip choices are answered."""
+    """The real picker from a cached newer version; Update now runs only a fake npm."""
     script = fixtures.InputTransport.script
     tmux = fixtures.InputTransport.tmux
     write_record = fixtures.InputTransport.write_record
@@ -219,8 +322,10 @@ class NativeCodexUpdate(unittest.TestCase):
         self.version_file.write_text(json.dumps(dict(latest_version='999.0.0', last_checked_at=checked, dismissed_version=None)))
         width, height = os.environ.get('HGS_CODEX_TEST_SIZE', '110x35').split('x')
         # The npm install context selects a stable command without a package manager.
+        # A private npm prefix keeps even a misplaced real npm out of global packages.
         self.tmux('new-session', '-d', '-s', self.name, '-x', width, '-y', height,
-                  'env', 'CODEX_HOME=' + str(self.native_home), 'CODEX_MANAGED_BY_NPM=1', binary, '--no-daemon',
+                  'env', 'CODEX_HOME=' + str(self.native_home), 'CODEX_MANAGED_BY_NPM=1',
+                  'NPM_CONFIG_PREFIX=' + str(self.root / 'npm-prefix'), binary, '--no-daemon',
                   '-c', 'tui.animations=false', '-C', str(self.root))
         self.pane = self.tmux('display-message', '-p', '-t', '=' + self.name + ':', '#{pane_id}').strip()
         self.tmux('set-option', '-t', '=' + self.name + ':', '@hgs_run', self.run_id)
@@ -252,6 +357,37 @@ class NativeCodexUpdate(unittest.TestCase):
         self.card = self.inspect()['pending_questions'][0]
         self.assertEqual(self.answer(self.payload('skip_version'))['status'], 'answered')
         self.wait_for(lambda: json.loads(self.version_file.read_text()).get('dismissed_version') == '999.0.0')
+
+    def test_native_update_now_hands_off_to_the_installer(self):
+        # A fake npm first on Codex's own PATH stands in for the installer.
+        self.script('npm', FAKE_NPM.replace('{python}', sys.executable))
+        environ = pathlib.Path('/proc', str(self.record['pid']), 'environ')
+        if not environ.exists():
+            # Never select Update now unless Codex's own PATH is verified.
+            self.skipTest("Codex's own PATH needs /proc to verify")
+        paths = [self.env['PATH'], dict(item.split('=', 1) for item in environ.read_text().split('\0') if '=' in item)['PATH']]
+        for path in paths:
+            self.assertEqual(shutil.which('npm', path=path), str(self.bin / 'npm'))
+        self.assertEqual(self.card['questions'][0]['options'][0]['label'], 'Update now (runs `npm install -g @openai/codex`)')
+        # Codex leaves raw mode at once; its announcement delivers the choice
+        # while the installer still runs.
+        receipt = self.answer(self.payload('update_now'))
+        self.assertEqual((receipt['status'], receipt['open_terminal'], receipt['codex_update']),
+                         ('answered', True, 'installing'))
+        self.wait_for(lambda: (self.root / 'npm-args').exists())
+        self.assertEqual((self.root / 'npm-args').read_text(), 'install -g @openai/codex')
+        # Narrow panes wrap the announcement, possibly inside a word.
+        self.assertIn('UpdatingCodexvia`npminstall-g@openai/codex`...',
+                      ''.join(self.tmux('capture-pane', '-p', '-t', self.pane).split()))
+        (self.root / 'release').touch()
+
+        def exited():
+            stat = subprocess.run(['ps', '-p', str(self.record['pid']), '-o', 'stat='],
+                                  capture_output=True, text=True).stdout.strip()
+            return not stat or stat.startswith(('Z', 'X'))
+        self.wait_for(exited)
+        self.assertFalse((self.root / 'npm-received').exists())
+        self.assertFalse((self.root / 'npm-prefix').exists())
 
 
 if __name__ == '__main__':

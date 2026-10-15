@@ -1,4 +1,5 @@
 #include "UpdateController.h"
+#include "ChildProcess.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -284,13 +285,18 @@ void UpdateController::refreshBundleState(){
     if(replaced!=m_restartRequired){m_restartRequired=replaced;emit changed();}
 #endif
 }
-void UpdateController::restartIntoInstalledBundle(){
-#ifdef Q_OS_MACOS
-    QDir bundle=QFileInfo(m_executable).absoluteDir();if(!bundle.cdUp()||!bundle.cdUp()||!bundle.dirName().endsWith(".app"))return;
+bool UpdateController::startRestartHelper(const QString &bundle,qint64 pid,const QString &shell){
     // The new instance must start after this one exits, or it would hand its request to
     // this process through the single-instance socket and exit.
     const QString script=QStringLiteral("while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open -a \"$2\" --args --sessions");
-    if(QProcess::startDetached(QStringLiteral("/bin/sh"),{QStringLiteral("-c"),script,QStringLiteral("zerus-restart"),QString::number(QCoreApplication::applicationPid()),bundle.absolutePath()}))QCoreApplication::quit();
+    // Detached, it outlives this process; it waits that long, so it must not hold a
+    // request's pipe that ProcessRunner is still creating (ChildProcess.h).
+    return ChildProcess::startDetached(shell,{QStringLiteral("-c"),script,QStringLiteral("zerus-restart"),QString::number(pid),bundle});
+}
+void UpdateController::restartIntoInstalledBundle(){
+#ifdef Q_OS_MACOS
+    QDir bundle=QFileInfo(m_executable).absoluteDir();if(!bundle.cdUp()||!bundle.cdUp()||!bundle.dirName().endsWith(".app"))return;
+    if(startRestartHelper(bundle.absolutePath(),QCoreApplication::applicationPid()))QCoreApplication::quit();
 #endif
 }
 
@@ -334,7 +340,8 @@ void UpdateController::run(const QString &program,const QStringList &arguments,s
     connect(process,&QProcess::finished,this,[finish,deadline](int code,QProcess::ExitStatus status){deadline->stop();finish(code==0&&status==QProcess::NormalExit);});
     connect(process,&QProcess::errorOccurred,this,[finish](QProcess::ProcessError error){if(error==QProcess::FailedToStart)finish(false);});
     connect(deadline,&QTimer::timeout,this,[process,failed]{*failed=true;process->kill();});
-    process->setProgram(program);process->setArguments(arguments);process->start();deadline->start(g_testCommandTimeoutMs>0?g_testCommandTimeoutMs:5000);
+    // Like every child of the GUI, pacman and vercmp inherit only stdio (ChildProcess.h).
+    process->setProgram(program);process->setArguments(arguments);ChildProcess::inheritStdioOnly(*process);process->start();deadline->start(g_testCommandTimeoutMs>0?g_testCommandTimeoutMs:5000);
 }
 void UpdateController::setCommandTimeoutForTests(int ms){g_testCommandTimeoutMs=ms;}
 void UpdateController::sourceInstallation(const QString &executable){

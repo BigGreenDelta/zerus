@@ -2,7 +2,7 @@
 import json, subprocess, time, unittest, uuid
 import test_input
 
-AGENT = r'''
+AGENT = test_input.SIGNAL_SAFE_READ + r'''
 import os, pathlib, sys, termios, tty, json, uuid, signal
 root=pathlib.Path(os.environ['INPUT_FIXTURE']); fd=sys.stdin.fileno(); old=termios.tcgetattr(fd);tty.setraw(fd)
 text='';agent='codex'
@@ -19,7 +19,7 @@ def show(*args):
 signal.signal(signal.SIGUSR1,show);os.write(1,b'\x1b[?2004h');show();(root/'agent-pid').write_text(str(os.getpid()))
 try:
  while True:
-  value=os.read(fd,65536)
+  value=read_input(fd)
   with (root/'received').open('ab') as f:f.write(value)
   if (root/'freeze').exists():continue
   for c in value:

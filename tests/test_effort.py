@@ -9,7 +9,7 @@ import unittest
 
 import test_input
 
-AGENT = r'''
+AGENT = test_input.SIGNAL_SAFE_READ + r'''
 import json, os, pathlib, signal, sys, termios, tty
 root = pathlib.Path(os.environ['INPUT_FIXTURE'])
 fd = sys.stdin.fileno(); original = termios.tcgetattr(fd); tty.setraw(fd)
@@ -35,7 +35,7 @@ os.write(1,b'\x1b[?2004h'); show(); (root/'agent-pid').write_text(str(os.getpid(
 pending=b''
 try:
  while True:
-    value=os.read(fd,65536)
+    value=read_input(fd)
     if not value: break
     with (root/'received').open('ab') as f: f.write(value)
     if (root/'freeze').exists(): continue

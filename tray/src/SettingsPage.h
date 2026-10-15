@@ -6,6 +6,7 @@
 #include "UpdatesWidget.h"
 #include "RelaySettings.h"
 #include "MobileDeliverySettings.h"
+#include "DownloadCacheSettings.h"
 #include "speech/SpeechSettings.h"
 #include <QComboBox>
 #include <QCoreApplication>
@@ -29,7 +30,7 @@ public:
     explicit SettingsPage(const QString &executable,QWidget *parent=nullptr):QWidget(parent){
         setObjectName("settingsPage");auto *outer=new QVBoxLayout(this);outer->setContentsMargins(24,20,24,20);outer->setSpacing(20);
         auto *title=new QLabel(tr("Settings"));title->setObjectName("heading");outer->addWidget(title);
-        auto *body=new QHBoxLayout;body->setSpacing(24);nav=new QListWidget;nav->setObjectName("settingsSections");nav->setFixedWidth(180);nav->addItems({tr("Appearance"),tr("Sessions"),tr("Automatic recovery"),tr("Processes"),tr("Updates"),tr("Mobile connection"),tr("Voice input"),tr("About")});body->addWidget(nav);
+        auto *body=new QHBoxLayout;body->setSpacing(24);nav=new QListWidget;nav->setObjectName("settingsSections");nav->setFixedWidth(180);nav->addItems({tr("Appearance"),tr("Sessions"),tr("Automatic recovery"),tr("Processes"),tr("Updates"),tr("Mobile connection"),tr("Files"),tr("Voice input"),tr("About")});body->addWidget(nav);
         pages=new QStackedWidget;pages->setMinimumWidth(0);body->addWidget(pages,1);outer->addLayout(body,1);
         auto makePage=[&](const QString &heading){auto *content=new QWidget;content->setMaximumWidth(850);auto *layout=new QVBoxLayout(content);layout->setContentsMargins(0,0,12,0);layout->setSpacing(18);auto *h=new QLabel(heading);h->setObjectName("heading");layout->addWidget(h);addPage(content);return layout;};
         auto *appearance=makePage(tr("Appearance"));auto *theme=new QComboBox;theme->setObjectName("workspaceTheme");theme->addItem(tr("Follow system appearance"),"system");theme->addItem(tr("Dark"),"dark");theme->addItem(tr("Light"),"light");theme->setCurrentIndex(qMax(0,theme->findData(QSettings().value("workspace/theme","system"))));appearance->addWidget(new QLabel(tr("Theme")));appearance->addWidget(theme);
@@ -102,6 +103,7 @@ public:
         // This computer's connector configuration, then the timing every computer and the phone share.
         auto *mobile=new QWidget;mobile->setMaximumWidth(850);auto *mobileLayout=new QVBoxLayout(mobile);mobileLayout->setContentsMargins(0,0,0,0);mobileLayout->setSpacing(28);
         mobileLayout->addWidget(new RelaySettings::Panel);mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
+        files=new DownloadCacheSettings;addPage(files);
         speechSection=pages->count();speech=new SpeechSettings(executable);speech->setMaximumWidth(850);addPage(speech);
         aboutSection=pages->count();
         auto *about=makePage(tr("About"));auto *installedVersion=new QLabel(tr("Zerus %1").arg(UpdateController::installedVersion()));installedVersion->setObjectName("aboutZerusVersion");installedVersion->setTextInteractionFlags(Qt::TextSelectableByMouse);about->addWidget(installedVersion);
@@ -115,7 +117,7 @@ public:
         connect(repository,&QPushButton::clicked,this,[]{QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/ufna/zerus")));});
         about->addWidget(repository,0,Qt::AlignLeft);about->addStretch();
         connect(nav,&QListWidget::currentRowChanged,pages,&QStackedWidget::setCurrentIndex);nav->setCurrentRow(0);
-        connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();});
+        connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();if(row==6)files->refresh();});
     }
     void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);}
     // A control-only computer keeps no recovery policy of its own.
@@ -142,6 +144,7 @@ private:
     void refreshCliVersion(){cliVersion->setText(tr("hgs CLI: checking…"));versionClient->requestVersion();}
     HgsClient *versionClient;QLabel *cliVersion;MobileDeliverySettings *mobileDelivery;
     SpeechSettings *speech;
+    DownloadCacheSettings *files;
     int speechSection=-1,aboutSection=-1;
     // An icon button restoring a slider's default, shown only after a change.
     // It keeps its space while hidden, so the rows below do not move. Focus

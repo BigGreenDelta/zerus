@@ -13,7 +13,7 @@ import test_input as fixtures
 
 HGS = fixtures.HGS
 
-FAKE_QUESTION = r'''
+FAKE_QUESTION = fixtures.SIGNAL_SAFE_READ + r'''
 import json, os, pathlib, signal, sys, termios, time, tty
 root=pathlib.Path(os.environ['INPUT_FIXTURE'])
 fd=sys.stdin.fileno(); original=termios.tcgetattr(fd); tty.setraw(fd)
@@ -77,7 +77,7 @@ def handle(value):
     render()
 try:
     while True:
-        value=os.read(fd,65536)
+        value=read_input(fd)
         if not value: break
         with (root/'received').open('ab') as file: file.write(value)
         buffer+=value

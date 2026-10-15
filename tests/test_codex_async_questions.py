@@ -8,7 +8,7 @@ import unittest
 import uuid
 import test_input as fixtures
 
-FAKE = r'''
+FAKE = fixtures.SIGNAL_SAFE_READ + r'''
 import json,os,pathlib,signal,sys,termios,tty
 root=pathlib.Path(os.environ['INPUT_FIXTURE']);fd=0;original=termios.tcgetattr(fd);tty.setraw(fd)
 config=None;draft='';buffer=b''
@@ -47,7 +47,7 @@ def handle(value):
 signal.signal(signal.SIGUSR1,render);render();(root/'agent-pid').write_text(str(os.getpid()))
 try:
  while True:
-  value=os.read(fd,65536)
+  value=read_input(fd)
   if not value:break
   with (root/'received').open('ab') as f:f.write(value)
   buffer+=value

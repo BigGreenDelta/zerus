@@ -36,10 +36,25 @@ job durations live in ignored `artifacts/test-results/`. Set
 `ZERUS_BUILD_JOBS` to limit desktop build parallelism. Run
 `cargo +1.85.0 test --locked` for the minimum supported Rust.
 
+`check-source.py` keeps the desktop's Unix children from inheriting its descriptors
+([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects
+`QProcess::startDetached()` and `QProcess::execute()`, and every `QProcess` must go to
+`ChildProcess::inheritStdioOnly()`, directly or through a function that passes its
+parameter there, in the function that creates it (for a member, a constructor of its
+class) and before it starts.
+`CHILD_PROCESS_EXEMPT` in the script names the files that may start children
+otherwise, each with its reason.
+
 A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare a
 [tmux census](docs/ci-and-aur.md#unix-tmux-census) of the branch with one of main.
 `scripts/ci/check-windows-target.sh` type-checks the Windows target from Linux or
 macOS.
+
+On macOS the Rust standard library marks a child's pipes close-on-exec only after
+creating them, so a child that another thread starts in between inherits them and
+holds that exchange's input or output open until it exits. Where threads of one
+`hgs` process can spawn at the same time (mobile peer discovery, speech computer
+discovery), every such spawn goes through `platform::spawn_in_turn`.
 
 The CLI script also builds `examples/fake_agent.rs`, a native stand-in agent for
 terminal tests that need a real process rather than a script, such as those that
