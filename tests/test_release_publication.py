@@ -16,7 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import macos_release
 from homebrew_tap_fixture import make_tap_remote, remote_file
+from windows_portable_fixture import pinned_pair, portable_zip
+import conpty_pair
 import release_common as common
+import windows_portable
 
 
 def load(name, filename):
@@ -28,6 +31,7 @@ def load(name, filename):
 
 fetch = load("fetch_candidate", "fetch-release-candidate.py")
 publish = load("publish_candidate", "publish-release.py")
+prepare = load("prepare_candidate", "prepare-release.py")
 VERSION = "0.37.0"
 COMMIT = "a" * 40
 
@@ -37,15 +41,23 @@ class PublicationTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="zerus-release-contract-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
+        # The synthetic zips' ConPTY pair passes as the pinned build.
+        pin = patch.object(conpty_pair, "PIN", pinned_pair())
+        pin.start()
+        self.addCleanup(pin.stop)
         self.info = {"schema": 1, "version": VERSION, "source_commit": COMMIT,
                      "architecture": "x86_64", "distribution": "Arch Linux",
                      "publication": "candidate", "native_agents_bundled": False,
                      "aur_packages": list(common.PACKAGES),
                      "binary_dependencies": {name: "1.2.3" for name in common.BINARY_LIBRARIES}}
 
-    def candidate(self, macos=False):
-        directory = self.directory / "candidate"
+    def candidate(self, macos=False, windows=False, name="candidate", **zip_options):
+        directory = self.directory / name
         directory.mkdir()
+        self.info.pop("windows_portable", None)
+        if windows:
+            self.info["windows_portable"] = windows_portable.asset_name(VERSION)
+            portable_zip(directory / self.info["windows_portable"], **{"version": VERSION, **zip_options})
         if macos:
             archive = directory / macos_release.macos_asset(VERSION)
             archive.write_bytes(b"notarized application")
@@ -205,15 +217,111 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid checksum"):
             common.validate_candidate(directory, VERSION)
 
-    def test_stable_candidate_has_no_windows_zip_even_when_sealed(self):
-        # finish_candidate seals nightly zips; a stable release keeps its Arch-only family.
-        directory = self.candidate()
-        self.assertEqual(len(common.validate_candidate(directory, VERSION)[1]), 6)
-        (directory / f"zerus-{VERSION}-windows-x86_64.zip").write_bytes(b"portable")
+    def test_stable_candidate_seals_the_tested_windows_zip(self):
+        directory = self.candidate(windows=True)
+        info, hashes = common.validate_candidate(directory, VERSION, COMMIT)
+        name = info["windows_portable"]
+        self.assertEqual(name, f"zerus-{VERSION}-windows-x86_64.zip")
+        self.assertEqual(len(hashes), 7)
+        self.assertEqual(hashes[name], common.sha256(directory / name))
+        self.assertIn(f"{hashes[name]}  {name}\n", (directory / "SHA256SUMS").read_text())
+        (directory / name).write_bytes((directory / name).read_bytes() + b"changed")
+        with self.assertRaisesRegex(ValueError, "Checksum mismatch"):
+            common.validate_candidate(directory, VERSION)
+
+    def test_candidates_sealed_before_the_windows_zip_still_validate(self):
+        # 0.42.2 and earlier were sealed without a zip; retrying them must keep working.
+        info, hashes = common.validate_candidate(self.candidate(), VERSION, COMMIT)
+        self.assertNotIn("windows_portable", info)
+        self.assertEqual(len(hashes), 6)
+        self.assertFalse(any(name.endswith(".zip") for name in hashes))
+
+    def test_later_stable_candidates_must_carry_the_windows_zip(self):
+        # Portable Windows apps announce every stable release after this one as a
+        # Windows update, so publication never lets one through without the zip.
+        self.assertEqual(common.LAST_STABLE_WITHOUT_WINDOWS, "0.42.2")
+        self.assertIn(f'lastStableWithoutWindows="{common.LAST_STABLE_WITHOUT_WINDOWS}"',
+                      (ROOT / "tray/src/UpdateController.cpp").read_text())
+        without = self.candidate()
+        with_zip = self.candidate(windows=True, name="with-zip")
+        with patch.object(common, "LAST_STABLE_WITHOUT_WINDOWS", "0.36.9"):
+            with self.assertRaisesRegex(ValueError, "after 0.36.9 must carry the tested Windows zip"):
+                common.validate_candidate(without, VERSION, COMMIT)
+            self.assertIn("windows_portable", common.validate_candidate(with_zip, VERSION, COMMIT)[0])
+        with patch.object(common, "LAST_STABLE_WITHOUT_WINDOWS", VERSION):
+            self.assertNotIn("windows_portable", common.validate_candidate(without, VERSION, COMMIT)[0])
+
+    def test_windows_zip_and_manifest_must_agree(self):
+        directory = self.candidate(windows=True)
+        info = json.loads((directory / "release-info.json").read_text())
+        # A zip the manifest does not name is never published unnoticed.
+        (directory / "release-info.json").write_text(json.dumps({key: value for key, value in info.items()
+                                                                 if key != "windows_portable"}))
         common.finish_candidate(directory)
-        self.assertIn(f"zerus-{VERSION}-windows-x86_64.zip", (directory / "SHA256SUMS").read_text())
         with self.assertRaisesRegex(ValueError, "Unexpected/missing release assets"):
             common.validate_candidate(directory, VERSION)
+        # A named zip that is missing, or named for another version or platform, fails too.
+        (directory / "release-info.json").write_text(json.dumps(info))
+        zip_path = directory / info["windows_portable"]
+        zip_bytes = zip_path.read_bytes()
+        zip_path.unlink()
+        common.finish_candidate(directory)
+        with self.assertRaisesRegex(ValueError, "Unexpected/missing release assets"):
+            common.validate_candidate(directory, VERSION)
+        zip_path.write_bytes(zip_bytes)
+        for name in ("zerus-windows-x86_64.zip", "zerus-0.36.2-windows-x86_64.zip", f"zerus-{VERSION}-windows-arm64.zip"):
+            with self.subTest(name=name):
+                (directory / "release-info.json").write_text(json.dumps({**info, "windows_portable": name}))
+                common.finish_candidate(directory)
+                with self.assertRaisesRegex(ValueError, "Invalid Windows stable asset"):
+                    common.validate_candidate(directory, VERSION)
+
+    def test_windows_zip_from_another_build_or_unsafe_is_rejected(self):
+        for index, (options, message) in enumerate([
+                ({"commit": "b" * 40}, "another commit/version"),
+                ({"version": "0.36.2"}, "another commit/version"),
+                ({"entries": [(f"{windows_portable.TOP}/../outside", "x")]}, "Unsafe Windows portable entry"),
+                ({"entries": [("other/hgs.exe", "x")]}, "Unsafe Windows portable entry")]):
+            directory = self.candidate(windows=True, name=f"candidate-{index}", **options)
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, message):
+                common.validate_candidate(directory, VERSION)
+
+    def prepare(self, portable, output):
+        """Run prepare-release.py with the Git checkout and the verified pacman package replaced by fixtures."""
+        product = (ROOT / "VERSION").read_text().strip()
+        buildinfo = "".join(f"installed = {name}-1.2.3-1-x86_64\n" for name in common.BINARY_LIBRARIES)
+        def check_output(command, **kwargs):
+            if command[0] == "tar":
+                return "usr/share/doc/zerus/build-info.json\n.BUILDINFO\n"
+            return {"status": "", "rev-parse": COMMIT + "\n", "show": "1760000000\n",
+                    "archive": b"exact source archive"}[command[1]]
+        def run(command, **kwargs):
+            root = Path(command[command.index("-C") + 1])
+            (root / "usr/share/doc/zerus").mkdir(parents=True)
+            (root / "usr/share/doc/zerus/build-info.json").write_text(
+                json.dumps({"source_commit": COMMIT, "version": product}))
+            (root / ".BUILDINFO").write_text(buildinfo)
+        arguments = ["prepare-release.py", "--version", product, "--package", "arch.pkg.tar.zst",
+                     "--windows-zip", str(portable), "--output", str(output)]
+        with patch.object(prepare.subprocess, "check_output", side_effect=check_output), \
+                patch.object(prepare.subprocess, "run", side_effect=run), patch.object(sys, "argv", arguments):
+            prepare.main()
+
+    def test_prepare_copies_the_tested_windows_zip_unchanged_under_its_stable_name(self):
+        product = (ROOT / "VERSION").read_text().strip()
+        portable = portable_zip(self.directory / "zerus-windows-x86_64.zip", version=product)
+        output = self.directory / "dist"
+        self.prepare(portable, output)
+        info = json.loads((output / "release-info.json").read_text())
+        self.assertEqual(info["windows_portable"], f"zerus-{product}-windows-x86_64.zip")
+        self.assertEqual((output / info["windows_portable"]).read_bytes(), portable.read_bytes())
+        self.assertEqual(info["source_commit"], COMMIT)
+        # The zip of another commit or version, or an unsafe one, leaves no candidate.
+        for name, options in (("commit", {"commit": "b" * 40, "version": product}), ("version", {"version": "0.0.1"}),
+                              ("layout", {"version": product, "entries": [("outside", "x")]})):
+            with self.subTest(mismatch=name), self.assertRaises(SystemExit), patch("sys.stderr", io.StringIO()):
+                self.prepare(portable_zip(self.directory / f"{name}.zip", **options), self.directory / name)
+            self.assertFalse((self.directory / name).exists())
 
     def test_wrong_package_architecture_fails(self):
         directory = self.candidate()
@@ -448,6 +556,47 @@ class PublicationTests(unittest.TestCase):
             commands.clear()
             publish.publish_github(directory, info, sums)
             self.assertEqual(commands, [])
+
+    def test_stable_notes_describe_the_windows_zip_and_retry_changes_nothing(self):
+        for windows in (True, False):
+            with self.subTest(windows=windows):
+                directory = self.candidate(windows=windows, name=f"notes-{windows}")
+                info, sums = common.validate_candidate(directory, VERSION)
+                hashes = {**sums, "SHA256SUMS": common.sha256(directory / "SHA256SUMS")}
+                release = {"draft": True, "tag_name": "v" + VERSION, "target_commitish": COMMIT, "assets": []}
+                state = {"created": False}
+                commands = []
+                def lookup(_):
+                    return copy.deepcopy(release) if state["created"] else None
+                def gh(*args):
+                    commands.append(args)
+                    if args[1] == "create":
+                        state["created"] = True
+                        commands.append(Path(args[args.index("--notes-file") + 1]).read_text())
+                    elif args[1] == "upload":
+                        name = Path(args[3]).name
+                        release["assets"].append({"name": name, "digest": "sha256:" + hashes[name],
+                                                  "size": (directory / name).stat().st_size})
+                    elif args[1] == "edit":
+                        release["draft"] = False
+                class Download(io.BytesIO):
+                    def geturl(self): return "https://release-assets.githubusercontent.com/verified"
+                with patch.object(publish, "release_for_tag", side_effect=lookup), \
+                        patch.object(publish, "verify_tag", return_value=True), \
+                        patch.object(publish, "gh", side_effect=gh), \
+                        patch.object(publish.urllib.request, "urlopen",
+                                     side_effect=lambda url, **kw: Download((directory / url.rsplit("/", 1)[1]).read_bytes())):
+                    publish.publish_github(directory, info, sums)
+                    notes = commands[1]
+                    self.assertNotIn("--prerelease", commands[0])
+                    self.assertEqual(f"`zerus-{VERSION}-windows-x86_64.zip`" in notes, windows)
+                    self.assertEqual("hgs-tray.exe" in notes, windows)
+                    uploaded = {Path(args[3]).name for args in commands if isinstance(args, tuple) and args[1] == "upload"}
+                    self.assertEqual(uploaded, set(hashes))
+                    self.assertIn(("release", "edit", "v" + VERSION, "--repo", common.REPOSITORY, "--draft=false", "--latest"), commands)
+                    commands.clear()
+                    publish.publish_github(directory, info, sums)
+                    self.assertEqual(commands, [])
 
     def test_new_draft_visibility_delay_retries_reads_without_recreating(self):
         directory = self.candidate()

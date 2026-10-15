@@ -417,8 +417,8 @@ class DevUpdateTests(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()), [])
 
     def test_desktop_dev_ignores_and_refuses_the_windows_portable_zip(self):
-        # The same CI run retains windows-x86_64-<commit> for nightlies; Dev
-        # selects only its own sealed artifact.
+        # The same CI run retains windows-x86_64-<commit>, as stable and nightly
+        # runs do; Dev selects only its own sealed artifact.
         rows = {'total_count': 3, 'artifacts': [
             {'id': 7, 'name': f'windows-x86_64-{COMMIT}'}, {'id': 8, 'name': f'arch-x86_64-{COMMIT}'},
             {'id': 9, 'name': 'zerus-dev-desktop-a1', 'expired': True}]}

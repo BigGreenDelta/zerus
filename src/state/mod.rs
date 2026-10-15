@@ -69,6 +69,7 @@ mod workspace;
 mod git_status;
 mod worktrees;
 mod worktree_cleanup;
+mod worktree_inspection;
 
 /// Current bounded native Git evidence for exact project/worktree placement.
 pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {

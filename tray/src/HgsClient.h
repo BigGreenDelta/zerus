@@ -179,9 +179,10 @@ public:
     // stay cached for five minutes for the Clean up reminder; removal repeats every
     // check there, never forces and is never retried automatically.
     quint64 reviewWorktrees(const QString &host, const QString &path, const QString &worktree = {});
+    quint64 inspectWorktree(const QString &host, const QString &path, const QString &commonDir, const QString &file = {}, int offset = 0);
     QJsonObject worktreeReview(const QString &host, const QString &commonDir) const;
     quint64 removeWorktree(const QString &host, const QString &path, const QString &commonDir,
-                           const QString &fingerprint, bool deleteBranch);
+                           const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {});
     quint64 requestDirectories(const QString &host, const QString &path, bool hidden = false);
     quint64 createDirectory(const QString &host, const QString &path);
     bool requestInspection(const QString &host, const QString &name, qint64 after = 0, const QString &archiveId = {}, bool includeProcesses = true);
@@ -299,6 +300,7 @@ signals:
     void worktreeCreated(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void worktreeReviewReady(quint64 request, const QString &host, const QString &path, const QJsonObject &data);
     void worktreeReviewFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
+    void worktreeInspectionFinished(quint64 request, const QString &host, const QString &path, const QString &file, const QJsonObject &data, const QString &error);
     void worktreeRemoved(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void directoriesReady(quint64 request, const QString &host, const QJsonObject &data);
     void directoryCreated(quint64 request, const QString &host, const QJsonObject &data);

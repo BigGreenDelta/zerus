@@ -200,7 +200,9 @@ Windows stubs.
 
 **Local session commands** (`a`, `kill`, `send`, `inspect`, a launch without
 `@host`, and the rest) exit with code 2 and the message "Local sessions are not
-supported on Windows yet; choose a remote machine."
+supported on Windows yet; choose a remote machine." Phase 2 keeps the exit code
+where local sessions are not enabled and replaces the message with one that says
+how to enable them ([reference](../../reference.md#windows)).
 
 **Platform layer.** Split `src/platform.rs` into `platform/{mod,unix,windows}.rs`:
 

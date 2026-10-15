@@ -71,7 +71,7 @@ automatically on pushes to main and PRs targeting main. Manual runs default to f
 coverage; explicit suite inputs can narrow a manual/reusable run. Validate workflow
 edits locally before pushing. Daily nightlies publish a verified binary to GitHub and
 AUR, and the Windows portable zip to GitHub, only after every check passes; stable
-releases remain manually published.
+releases, which carry the zip their own candidate run tested, remain manually published.
 See [CI and Arch publication](docs/ci-and-aur.md) for triggers and publication
 requirements.
 
@@ -119,8 +119,9 @@ common accidental machine paths and keys; it is not a complete secret scanner.
 
 ## Windows
 
-Windows builds the [control console](docs/installation.md#windows): `hgs.exe`
-without the local session host and `hgs-tray.exe` for remote machines. You need:
+Windows builds the [portable zip](docs/installation.md#windows): `hgs.exe`, whose
+session host runs local sessions once they are enabled, and `hgs-tray.exe`.
+You need:
 
 - Visual Studio 2022 with the x64 C++ tools and a Windows SDK; its own CMake
   (3.22 or later is needed for the Windows tests) and Ninja are used;

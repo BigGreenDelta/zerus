@@ -371,8 +371,7 @@ The report and each class's log land in `artifacts/test-results/agent-compatibil
 UTF-8 mode keeps the suites' non-ASCII prompts from failing on a Windows code page;
 the runner also sets `PYTHONUTF8` for the suites. CI runs the same command in the
 `windows-host` job, outside the step's job like the host suites
-([CI](ci-and-aur.md#windows-real-agents-through-the-session-host)). Local sessions on
-Windows remain a preview until these suites pass there.
+([CI](ci-and-aur.md#windows-real-agents-through-the-session-host)).
 
 The input key cases also depend on the keyboard layout. Codex reads a control key
 through the console as its character plus the Ctrl state, and crossterm resolves that
