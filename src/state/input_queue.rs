@@ -117,4 +117,22 @@ mod tests {
         assert_ne!(snapshot(&record,&q)["id"],snapshot(&record,&parse("claude",&c.replace("first","changed")).unwrap())["id"]);
         let mut other=record.clone();other["run_id"]=json!("new");assert_ne!(snapshot(&record,&q)["id"],snapshot(&other,&q)["id"]);
     }
+    #[test]
+    fn codex_ordinary_follow_ups_stay_read_only() {
+        // Panels captured from the pinned Codex 0.160.1 and 0.162.0 (110x35). Ordinary
+        // (Tab) follow-ups offer only "edit last queued message", which pops the last one
+        // into the composer over any draft. Escape interrupts and leaves them all there
+        // as one unsent draft, so neither may stand in for a native "send now".
+        let ordinary="• Working (1s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ Queued follow-up one\n  ↳ Queued follow-up two\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n";
+        let q=parse("codex",ordinary).unwrap();
+        assert!(q.keys.is_empty());assert!(q.text.contains("Queued follow-up one")&&q.text.contains("Queued follow-up two"));
+        assert_eq!(q.hint,"Use Terminal to edit or submit these queued follow-ups");
+        let record=json!({"phase":"working"});
+        assert_eq!(snapshot(&record,&q)["can_send_now"],false);
+        // Steers listed above them keep the displayed Escape: 0.160.1 then submits the
+        // steer at once and the ordinary follow-up after that turn, in order.
+        let mixed="• Working (2s • esc to interrupt)\n\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ Steer three\n\n• Queued follow-up inputs\n  ↳ Queued follow-up one\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n";
+        let q=parse("codex",mixed).unwrap();
+        assert_eq!(q.keys,vec!["Escape"]);assert!(q.text.contains("Steer three")&&q.text.contains("Queued follow-up one"));
+    }
 }
