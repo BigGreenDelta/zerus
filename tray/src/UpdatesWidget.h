@@ -149,6 +149,7 @@ public:
         instructions->setObjectName("muted");
         detailsLayout->addWidget(instructions);
         auto *source = new QPushButton(tr("Installation instructions"));
+        source->setObjectName("updatesInstructions");
         compact(source);
         detailsLayout->addWidget(source, 0, Qt::AlignLeft);
         details->hide();
@@ -159,8 +160,8 @@ public:
             details->setVisible(expanded);
             detailsToggle->setText(expanded ? tr("Hide installation details") : tr("Show installation details"));
         });
-        connect(source, &QPushButton::clicked, this, [] {
-            QDesktopServices::openUrl(QUrl("https://github.com/ufna/zerus#installation"));
+        connect(source, &QPushButton::clicked, this, [controller] {
+            QDesktopServices::openUrl(UpdateController::installationInstructionsUrl(controller->installation()));
         });
         connect(automatic, &QCheckBox::toggled, controller, &UpdateController::setAutomaticChecks);
         connect(channel, &QComboBox::currentIndexChanged, this, [controller, channel] {
