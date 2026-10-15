@@ -250,8 +250,9 @@ Offline peer routes keep `computer_routes.last_seen` instead of clearing it,
 with no schema change or API field change. Replace all PostgreSQL workers
 together: an older worker clears the time on its own offline transitions and,
 for up to 45 seconds after the last peer heartbeat, could treat a peer that the
-gateway marks online again as fresh before its next peer heartbeat. The retiring
-Python reference relay still clears the time.
+gateway marks online again as fresh before its next peer heartbeat. The Python
+reference relay keeps the time with the same freshness rule, so a Rust-to-Python
+rollback stays safe.
 
 Attachment reads add only the `attachment_history` partial index (schema version
 1; the Python reference creates it too). Its first `CREATE INDEX` scans the
