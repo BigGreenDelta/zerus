@@ -536,21 +536,25 @@ application and window switchers.
 
 Session navigation moves through the visible list, or the search results while
 they are shown, and skips project headers and subagents; it does not wrap.
-Attention navigation follows the **Needs attention** filter, wraps around and
-opens a collapsed project. Tab cycling skips hidden tabs. From Terminal,
-Ctrl+` returns to Activity with the cursor in the message field.
+Attention navigation moves among the sessions of the same list that match the
+**Needs attention** filter, wraps around and opens a collapsed project. Tab
+cycling skips hidden tabs. From Terminal, Ctrl+` returns to Activity with the
+cursor in the message field.
 
 **Send queued messages now** runs the agent's own send-now action for the queue
 shown in Activity, exactly like its **Send now** button; it never sends the text
 being typed. **Send and push now** sends the typed message and, once the agent
 shows it in its queue, sends that queue now. With an empty message field it is
 the same as Send queued messages now. If the message does not appear in the
-queue within 20 seconds, for example because the agent took it directly, or the
-session's run or conversation changes, the push is dropped with a notice; the
-message is never resent. A message with attachments but no text is sent without
-a push, because the queue cannot be matched without text. Without a selection, Ctrl+X starts this sequence; with
-a selection it still cuts. As in every Qt key sequence, a key other than Ctrl+S
-after Ctrl+X cancels the sequence and is not typed.
+queue within 20 seconds, for example because the agent took it directly or a
+dialog such as the cold cache warning is still open, or the session's run or
+conversation changes, the push is dropped with a notice; the message is never
+resent. Selecting another session drops the push at once, and a new push
+replaces one that is still waiting. A message with attachments but no text is
+sent without a push, because the queue cannot be matched without text. Without
+a selection, Ctrl+X starts this sequence; with a selection it still cuts. As in
+every Qt key sequence, a key other than Ctrl+S after Ctrl+X cancels the
+sequence and is not typed.
 
 **Terminal keeps the agent's keys.** While Terminal has focus on Linux and
 Windows, a key reaches Zerus only when a command uses it and it is Ctrl or
@@ -563,16 +567,20 @@ except ⌘C and ⌘V reaches Zerus, and of the Control chords only ⌃Tab and �
 command's key wins over the field except for copy, cut, paste, undo, redo,
 select all, word and line movement and deletion (Ctrl, Command or Alt with
 arrows, Home, End, Backspace or Delete), and keys without Ctrl, Command or Alt.
-So Alt+↑/↓ switches sessions even while typing, and on Linux Ctrl+K opens Go to
-instead of deleting to the end of the line. A focused drop-down list keeps Alt+↑/↓ and
-F4 to open it, and the Projects dialog's list keeps Alt+↑/↓ to reorder projects.
+Function keys are not editing keys: F1, F2, F5 and F6 reach Zerus without a
+modifier. So Alt+↑/↓ switches sessions even while typing, and on Linux Ctrl+K
+opens Go to instead of deleting to the end of the line. A focused drop-down
+list keeps Alt+↑/↓ and F4 to open it, and the Projects dialog's list keeps
+Alt+↑/↓ to reorder projects.
 
 **Go to** (Ctrl+K) searches sessions (not archived), projects, accounts,
 machines, sections and commands by name; start the query with `>` to list only
-commands. Enter opens the result, Escape closes the popup. A session opens
+sections and commands. With an empty query, sessions opened recently come
+first, then the others in the order of the session list. Enter opens the
+result; Escape or the Go to chord again closes the popup. A session opens
 under the current filter when it is visible there; otherwise the filter
 changes to All sessions. A project selects its first session, or opens
-Projects when it has none.
+Projects with that project selected when it has none.
 
 **Settings → Keyboard** changes any command's chords (up to two per command,
 each a key or a two-key sequence), marks the chords that also work in
@@ -583,8 +591,8 @@ confirmation. Changes apply at once and are stored on this device.
 **Keyboard shortcuts** (F1) lists the current chords and these fixed keys:
 Enter and Shift+Enter in the message field, Escape, Tab and Shift+Tab, Tab to take
 a suggestion, list navigation keys, Menu and Shift+F10, Ctrl/Command-click,
-Space and Escape during voice capture, Ctrl+Shift+C/V and Shift+PgUp/PgDn in
-Terminal, and Alt+↑/↓ in the Projects dialog's list.
+Space and Escape during voice capture, Ctrl+Shift+C/V (⌘C/⌘V on macOS) and
+Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the Projects dialog's list.
 
 <a id="activity"></a>
 

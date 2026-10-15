@@ -186,13 +186,15 @@ never hands its chord back to a text field.
   relative to the current selection. The draft and selection rules of ordinary
   selection apply.
 - **`session.nextAttention` / `session.previousAttention`** move to the next or
-  previous session for which the Needs attention filter predicate holds, in list
-  order, within the current filter. They wrap around and reveal a collapsed
-  project. With none, a notice says "No sessions need attention".
+  previous session for which the Needs attention filter predicate holds, in the
+  order of the visible list (the search results while they are shown, where the
+  current session's other result rows are skipped), within the current filter.
+  They wrap around and, in the session list, reveal a collapsed project. With
+  none, a notice says "No sessions need attention".
 - **`go.anywhere`** opens the Go to popup (below).
 - **`session.new`** does what the rail's **+** does.
-- **`session.rename`** starts renaming the selected session when renaming applies,
-  otherwise does nothing.
+- **`session.rename`** starts renaming the selected session while the Sessions
+  page is shown and renaming applies, otherwise does nothing.
 - **`session.search`** and **`view.refresh`** keep today's behavior.
 - **`tab.next` / `tab.previous`** cycle the visible and enabled tabs of the
   session view and wrap. With no session selected they do nothing.
@@ -211,13 +213,24 @@ never hands its chord back to a text field.
   like `queue.sendNow`. Otherwise it sends the message through the ordinary send
   path and then arms a push for that session key, run and conversation. When the
   send is confirmed, the next inspection whose queue snapshot has
-  `can_send_now` and contains the message start (the first 24 non-space characters,
-  whitespace-normalized) triggers the Send now path for that snapshot. The push is
-  dropped with a notice if the session, run or conversation changes, the send
-  fails or is uncertain, or 20 seconds pass without such a snapshot (the agent may
-  already have taken the message). A push never resends text. A message with
-  attachments but no text is sent without a push, since the queue cannot be
-  matched without text.
+  `can_send_now` and an item that begins with the message start (the first 24
+  non-space characters, whitespace-normalized) triggers the Send now path for
+  that snapshot. An item is a row that begins with the agent's marker (❯, ↳ or
+  ›) with the indented rows that continue it; header rows such as Codex's
+  "• Messages to be submitted after next tool call …" never hold a message.
+  While another send-now request runs, a matching snapshot leaves the push
+  armed for a later one. The push is dropped with a notice if the session, run
+  or conversation changes, the send fails or is uncertain, or 20 seconds pass
+  without such a snapshot (the agent may already have taken the message).
+  Selecting another session drops it at once with a notice naming that session
+  ("The message to *title* was not pushed: another session was selected"). At
+  the deadline the notice says the message will be sent without push only while
+  its request is in flight or the message field sends it by itself after a
+  start or compaction; while a dialog such as the cold cache warning still holds
+  it, the notice says it was not pushed because it was not sent within 20
+  seconds. A new push replaces a pending one with a notice. A push never resends
+  text. A message with attachments but no text is sent without a push, since
+  the queue cannot be matched without text.
 - **Zoom** changes `workspace/contentScale` in 10% steps within its bounds, applies
   it like the Settings slider, keeps the slider in sync and shows the new value
   in a notice.
@@ -232,14 +245,16 @@ Mod+K opens a popup at the top of the main window: a search field and a list.
 Items are sessions (live and saved, not archived; title, project, machine and
 status), projects, accounts (label, provider, machine), machines, the sections and
 every command (with its chord). With an empty query the list shows recent
-sessions of this run first, then sessions in list order. Matching is a
+sessions of this run first, then the other sessions in the order of the session
+list, and after them those the list does not show. Matching is a
 case-insensitive subsequence match ranked by prefix, word-start and contiguous
-matches. A leading `>` limits the list to commands. ↑/↓ move, Enter activates,
-Escape or Mod+K closes.
+matches. A leading `>` limits the list to sections and commands. ↑/↓ move,
+Enter activates, Escape or the current `go.anywhere` chord closes.
 
 Activation: a session opens like a notification does (`showSession`), but keeps
 the current filter when the session is visible under it. A project reveals its
-group and selects its first session; a project without sessions opens Projects.
+group and selects its first session; a project without sessions opens Projects
+with that project selected.
 An account opens Accounts on it (`showAccount`). A machine opens Machines on it
 (`selectMachine`). A section shows it. A command runs.
 
@@ -254,9 +269,11 @@ each and marks chords that also work in Terminal. Editing uses
 `QKeySequenceEdit` with at most two keys per chord. Validation:
 
 - Fixed and protected editing keys cannot be assigned; the dialog says why.
-- A chord already used by a command with an overlapping scope (Window overlaps
-  both scopes) asks "Already used by *title*. Reassign?". Reassigning removes it
-  from the other command.
+- A chord that conflicts with chords of other commands with an overlapping
+  scope (Window overlaps both scopes), being equal to one or a prefix either
+  way, asks once "Already used by *titles*. Reassign?". Reassigning removes the
+  conflicting chords from all of them, and the edited command's other slot
+  drops a conflicting chord too.
 - **Reset** restores one command's defaults; **Reset all** asks first.
 
 Overrides live in `QSettings` group `shortcuts`, key = command id, value = a list
