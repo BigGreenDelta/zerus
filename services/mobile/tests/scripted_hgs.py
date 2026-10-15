@@ -17,6 +17,10 @@ may set:
 
 Strings in `stdout` that are exactly `{{stdin}}`, `{{stdin.FIELD}}` or
 `{{argv.N}}` become the parsed stdin, one of its fields or one argument.
+A rule's `fill` maps placeholders to `[unit, count]` parts, as the golden
+vectors do: a string in `stdout`, or the whole `stdout_text` or `stderr`,
+equal to a placeholder becomes the concatenation of its parts, so a rule can
+answer with megabytes without a large script.
 An unmatched call exits 2.
 """
 import fcntl
@@ -53,11 +57,19 @@ def open_descriptors():
     return found
 
 
-def substitute(value, argv, stdin):
+def expand(value, fill):
+    parts = fill.get(value) if isinstance(value, str) else None
+    return value if parts is None else "".join(unit * count for unit, count in parts)
+
+
+def substitute(value, argv, stdin, fill=None):
+    fill = fill or {}
     if isinstance(value, dict):
-        return {key: substitute(item, argv, stdin) for key, item in value.items()}
+        return {key: substitute(item, argv, stdin, fill) for key, item in value.items()}
     if isinstance(value, list):
-        return [substitute(item, argv, stdin) for item in value]
+        return [substitute(item, argv, stdin, fill) for item in value]
+    if isinstance(value, str) and value in fill:
+        return expand(value, fill)
     if isinstance(value, str) and value.startswith("{{") and value.endswith("}}"):
         name = value[2:-2]
         if name == "stdin":
@@ -117,17 +129,18 @@ def main():
         return 2
     if rule.get("delay"):
         time.sleep(float(rule["delay"]))
+    fill = rule.get("fill", {})
     if "stdout" in rule:
-        output = json.dumps(substitute(rule["stdout"], argv, stdin)) + "\n"
+        output = json.dumps(substitute(rule["stdout"], argv, stdin, fill)) + "\n"
     else:
-        output = rule.get("stdout_text", "")
+        output = expand(rule.get("stdout_text", ""), fill)
     code = int(rule.get("exit", 0))
     # Recorded before writing: a connector that has already gone cannot read
     # it, and the event still proves this call finished on its own.
     record(log, {"event": "end", "pid": os.getpid(), "argv": argv, "exit": code, "at": time.time()})
     try:
         if rule.get("stderr"):
-            sys.stderr.write(rule["stderr"])
+            sys.stderr.write(expand(rule["stderr"], fill))
             sys.stderr.flush()
         sys.stdout.write(output)
         sys.stdout.flush()
