@@ -1640,7 +1640,11 @@ executor lock. CLI operations are `hgs [@host] recovery get|set|sync|action`, wi
 JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.
 On Linux, client policy refreshes start the configured user service without
 restarting an active executor. A detached worker remains the fallback when no
-installed service or usable user manager is available.
+installed service or usable user manager is available; refreshes start none
+while a worker runs. The service's own worker (the job launchd or the unit
+systemd runs) never exits because another worker holds the executor lock, which
+would make the service manager start it again every 10 seconds: it waits for the
+lock, and a detached worker hands over to it between rounds.
 
 Open Zerus clients synchronize policy versions over HGS/SSH every 15 seconds;
 offline machines catch up later and executors keep their saved local policy.
