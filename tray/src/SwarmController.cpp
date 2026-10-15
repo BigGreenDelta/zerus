@@ -45,9 +45,15 @@ QJsonObject sharedOrganization(QJsonObject local, const QString &node)
 }
 }
 
+namespace {
+int pollInterval = 5000;
+}
+
+void SwarmController::setPollInterval(int milliseconds) { pollInterval = milliseconds; }
+
 SwarmController::SwarmController(HgsClient *client, QObject *parent) : QObject(parent), m_client(client)
 {
-    m_poll.setInterval(5000);
+    m_poll.setInterval(pollInterval);
     connect(&m_poll,&QTimer::timeout,this,&SwarmController::refresh);
     m_flush.setSingleShot(true);m_flush.setInterval(120);
     connect(&m_flush,&QTimer::timeout,this,[this]{if(!m_suspended && !busy() && m_ready && m_base!=m_desired)send("apply");});

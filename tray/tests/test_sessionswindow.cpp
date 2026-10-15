@@ -3249,6 +3249,8 @@ void TestSessionsWindow::scheduledSettingsApplyOncePerReady_data()
 
 void TestSessionsWindow::scheduledSettingsApplyOncePerReady()
 {
+    // Each settings change and inspection runs the fake CLI, which is slow on Windows runners.
+    constexpr int SettingsTimeout = 20000;
     // A chooser can appear between the idle listing and the dispatch of a
     // pending change; dispatch then schedules it again. The change stays
     // pending for one attempt per Ready transition, never a polling loop.
@@ -3311,7 +3313,7 @@ elif args[0]=='settings':
     auto *efforts = composer->findChild<QComboBox *>("sessionEffortChoice"); efforts->setCurrentIndex(efforts->findData("xhigh"));
     auto *apply = composer->findChild<QPushButton *>("applySessionSettings"); QVERIFY(apply->isEnabled()); apply->click();
     if (!keepSelected) window.showSession({}, "kimi/docs/research");
-    QTRY_COMPARE(changes.size(), 1); QVERIFY(changes[0][1].toBool());
+    QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 1, SettingsTimeout); QVERIFY(changes[0][1].toBool());
     QCOMPARE(changes[0][2].toJsonObject().value("status").toString(), QString("scheduled"));
     const auto list = [&](const QString &activity, const QString &phase) {
         box.sessions[0].activity = activity; box.sessions[0].phase = phase; box.sessions[0].processState = "running";
@@ -3329,13 +3331,13 @@ elif args[0]=='settings':
         const auto seen = inspections.size(); QTest::qWait(150);
         const auto inspected = [&] { return std::count_if(inspections.cbegin() + seen, inspections.cend(),
             [&](const QList<QVariant> &reply) { return reply[1].toString() == selectedName; }); };
-        if (!QTest::qWaitFor([&] { return inspected() >= 2; }, 5000)) return -1;
+        if (!QTest::qWaitFor([&] { return inspected() >= 2; }, SettingsTimeout)) return -1;
         return changes.size() == calls() ? int(changes.size()) : -1;
     };
     // The idle listing starts the automatic apply, but a chooser appeared in
     // the meantime: dispatch schedules it.
     list("idle", "idle");
-    QTRY_COMPARE(changes.size(), 2); QVERIFY(changes[1][1].toBool());
+    QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 2, SettingsTimeout); QVERIFY(changes[1][1].toBool());
     QCOMPARE(changes[1][2].toJsonObject().value("status").toString(), QString("scheduled"));
     // No second attempt while the session stays Ready or shows the chooser.
     list("idle", "idle"); list("idle", "idle"); QCOMPARE(settledCalls(), 2);
@@ -3358,7 +3360,7 @@ elif args[0]=='settings':
             QVERIFY(ready.contains("pending_settings_id")); ready["settings_apply_when"] = "now";
             QVERIFY(FakeCli::replace(snapshot, QJsonDocument(ready).toJson()));
         }
-        QTRY_COMPARE(changes.size(), 3); QCOMPARE(changes[2][1].toBool(), retry == "applied");
+        QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 3, SettingsTimeout); QCOMPARE(changes[2][1].toBool(), retry == "applied");
         auto *notice = window.findChild<QLabel *>("notice"); QVERIFY(notice);
         if (retry == "applied") QVERIFY(notice->isHidden());
         else { QVERIFY(notice->isVisible()); QVERIFY(notice->text().contains(retry)); }
