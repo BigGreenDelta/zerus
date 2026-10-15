@@ -20,8 +20,10 @@ mod tmux;
 use super::Result;
 use crate::cli::{Error, Result as CliResult};
 
-/// What an operation reports on a computer without a session terminal.
-const UNSUPPORTED: &str = "Local sessions are not supported on this computer yet";
+/// What an operation reports on a computer without a session terminal, as every
+/// other local session command there does. The tmux and host backends implement
+/// every operation, so only that computer's backend reports it.
+const UNSUPPORTED: &str = crate::platform::LOCAL_SESSIONS_UNSUPPORTED;
 /// What `hgs a --existing --run-id` reports when the session runs another run.
 pub(crate) const RUN_CHANGED: &str = "session run changed; refresh before reconnecting";
 

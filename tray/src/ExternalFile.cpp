@@ -4,9 +4,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QProcess>
 #include <QRegularExpression>
 #include <QSet>
+#include "ChildProcess.h"
 #include "LocalFile.h"
 #ifdef Q_OS_WIN
 #include <QSettings>
@@ -218,7 +218,7 @@ bool reveal(const QString &path)
     }).detach();
     return true;
 #elif defined(Q_OS_MACOS)
-    return QProcess::startDetached(QStringLiteral("/usr/bin/open"), {QStringLiteral("-R"), info.absoluteFilePath()});
+    return ChildProcess::startDetached(QStringLiteral("/usr/bin/open"), {QStringLiteral("-R"), info.absoluteFilePath()});
 #elif defined(Q_OS_LINUX)
     // The file manager selects the file; without one, open its folder.
     const auto folder = QUrl::fromLocalFile(info.absolutePath());

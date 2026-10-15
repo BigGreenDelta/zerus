@@ -459,8 +459,8 @@ class NativeHarness(unittest.TestCase):
     def test_reads_do_not_add_effects_while_a_child_scope_unloads(self):
         # Native disposal unloads a finished child's Cordis scope before the
         # child leaves the live registry; the fixture holds that window open.
-        # Nothing may read the child before it: a read of the live child
-        # installs its model selection, which later reads would reuse.
+        # Nothing reads the child before it, so no earlier read can have
+        # installed a model selection that later reads would reuse.
         for mode in ('one-shot', 'continuable'):
             with self.subTest(mode=mode):
                 parent=self.create();hold='DISPOSING_CHILD_'+uuid.uuid4().hex
@@ -501,6 +501,151 @@ class NativeHarness(unittest.TestCase):
                 self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
                 done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'][child]['state']=='finished' else None)
                 self.assertEqual(done['subagent_completed_count'],1)
+
+    def test_reads_leave_a_starting_child_on_its_inherited_model(self):
+        # Upstream installs model selection only while composing a top-level
+        # agent; a child runs the route it inherits from its parent's request.
+        # Reads during its first step, which the fixture holds, must neither
+        # install the profile default on the child nor report it.
+        parent=self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
+        chosen={'provider':'hgs-test','model':'test-b','reasoningEffort':'off'}
+        self.cli('settings',parent,self.payload(parent,model='hgs-test/test-b',effort='off'))
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        def child_row():
+            return next((r for r in self.rpc('list')['items']
+                         if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
+        try:
+            row=self.wait(child_row);child=row['sessionId']
+            self.assertTrue(row['running'])
+            self.assertEqual(row['selection'],chosen)
+            native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+            self.assertTrue(native['live']);self.assertEqual(native['selection'],chosen)
+            result=subprocess.run([str(HGS),'inspect',parent['name'],'--agent',child],env=self.env,text=True,capture_output=True,timeout=35)
+            self.assertEqual(result.returncode,0,result.stderr)
+            shown=json.loads(result.stdout)
+            self.assertEqual((shown['model_provider'],shown['model'],shown['effort']),('hgs-test','test-b','off'))
+            # The parent keeps its live session selection.
+            parent_row=next(r for r in self.rpc('list')['items'] if r['sessionId']==parent['conversation_id'])
+            self.assertEqual(parent_row['selection'],chosen)
+        finally:
+            (self.root/'holds'/hold).touch()
+        def used():
+            native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+            return native['baseline']['values'].get('modelSelection',{}).get('lastUsed')
+        self.assertEqual(self.wait(used),chosen)
+        self.assertEqual(self.cli('inspect',parent)['model'],'test-b')
+
+    def test_send_and_settings_refuse_a_child_without_changing_its_model(self):
+        # hgs messages a child only through its parent (send-child). A send or
+        # settings request that names a live child is refused before it can
+        # install or change the child's selection, which would route its first
+        # request, held by the fixture, away from the inherited model.
+        parent=self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
+        chosen={'provider':'hgs-test','model':'test-b','reasoningEffort':'off'}
+        self.cli('settings',parent,self.payload(parent,model='hgs-test/test-b',effort='off'))
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        def child_row():
+            return next((r for r in self.rpc('list')['items']
+                         if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
+        try:
+            child=self.wait(child_row)['sessionId']
+            with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+                self.rpc('send',{'sessionId':child,'requestId':str(uuid.uuid4()),'mode':'steer',
+                                 'content':[{'type':'text','text':'Direct child send'}]})
+            row=child_row()
+            self.assertTrue(row['running']);self.assertEqual(row['selection'],chosen)
+            with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+                self.rpc('settings',{'sessionId':child,'provider':'hgs-test','model':'test-a','reasoningEffort':'high'})
+            row=child_row()
+            self.assertEqual(row['selection'],chosen)
+            self.assertIsNone(row['projections']['values'].get('modelSelection',{}).get('next'))
+            native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+            self.assertTrue(native['live']);self.assertEqual(native['selection'],chosen)
+            parent_row=next(r for r in self.rpc('list')['items'] if r['sessionId']==parent['conversation_id'])
+            self.assertEqual(parent_row['selection'],chosen)
+        finally:
+            (self.root/'holds'/hold).touch()
+        def used():
+            native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+            return native['baseline']['values'].get('modelSelection',{}).get('lastUsed')
+        self.assertEqual(self.wait(used),chosen)
+        self.assertNotIn('Direct child send',json.dumps(self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})['page']))
+        # A stored child keeps the refusal it gets when settings would resume it.
+        self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
+        with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+            self.rpc('settings',{'sessionId':child,'provider':'hgs-test','model':'test-a'})
+        self.assertEqual(self.cli('inspect',parent)['model'],'test-b')
+
+    def test_compact_and_interrupt_refuse_a_child_without_changing_it(self):
+        # hgs compacts and interrupts only a top-level session. Upstream offers
+        # no commands for a child and interrupts one only through its parent's
+        # address. A compact or interrupt request that names a live child, here
+        # held in its first step, is refused before it runs a command on the
+        # child, records compaction state or touches goals or the parent's turn.
+        # The held child's goal is armed, so a disarm would show.
+        parent=self.create();hold='HOLD_CHILD_ARMED_'+uuid.uuid4().hex
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        def child_row():
+            return next((r for r in self.rpc('list')['items']
+                         if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
+        def goals():
+            return (self.rpc('inspect',{'sessionId':parent['conversation_id']})['goal'],
+                    self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})['goal'])
+        request_id=str(uuid.uuid4())
+        try:
+            child=self.wait(child_row)['sessionId']
+            running=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('interrupt_supported') else None)
+            before=self.wait(lambda: g if (g:=goals())[1] and g[1]['activation']=='armed' else None)
+            # Each request carries the parent's host generation and current turn.
+            with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+                self.rpc('compact',{'sessionId':child,'generation':running['host_generation'],'requestId':request_id})
+            with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
+                self.rpc('interrupt',{'sessionId':child,'generation':running['host_generation'],'turnStarted':running['turn_started']})
+            self.assertTrue(child_row()['running'])
+            self.assertEqual(goals(),before)
+            still=self.cli('inspect',parent)
+            self.assertTrue(still['interrupt_supported']);self.assertEqual(still['turn_started'],running['turn_started'])
+        finally:
+            (self.root/'holds'/hold).touch()
+        def replied():
+            page=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})['page']
+            return page if 'Native reply: Child result fixture '+hold in json.dumps(page['records']) else None
+        self.assertNotIn('command/run',json.dumps(self.wait(replied)))
+        self.wait(lambda:self.cli('inspect',parent)['phase']=='idle')
+        # The parent keeps both operations, and the refused request ID was not consumed.
+        compacted=subprocess.run([str(HGS),'compact-context',parent['name'],'--json'],input=json.dumps(self.payload(parent,request_id=request_id)),
+                                 env=self.env,text=True,capture_output=True,timeout=15)
+        self.assertEqual(compacted.returncode,0,compacted.stderr)
+        done=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('compact_context_request',{}).get('status') not in ['compacting','submitted',None] else None)
+        self.assertEqual(done['compact_context_request']['request_id'],request_id)
+        self.assertIn(done['compact_context_request']['status'],['unchanged','completed'])
+        self.cli('send',parent,self.payload(parent,text='INTERRUPT_WAIT_FIXTURE',attachments=[]))
+        busy=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('interrupt_supported') else None)
+        interrupted=subprocess.run([str(HGS),'interrupt',parent['name'],'--json'],input=json.dumps(self.payload(parent,expected_turn_started=busy['turn_started'])),
+                                   env=self.env,text=True,capture_output=True,timeout=15)
+        self.assertEqual(interrupted.returncode,0,interrupted.stderr)
+        self.wait(lambda:self.cli('inspect',parent)['phase']=='idle')
+
+    def test_send_reads_an_uncomposed_root_without_installing_a_selection(self):
+        # A webhook root runs its creation route without the model selection
+        # upstream installs while composing a session. The send sign-in check
+        # only reads one: an installed selection would route the request to
+        # the profile default. A model change remains a top-level setting.
+        parent=self.create();root='webhook-'+str(uuid.uuid4())
+        route={'provider':'hgs-test','model':'test-b'}
+        self.cli('send',parent,self.payload(parent,text='UNCOMPOSED_ROOT_FIXTURE '+root,attachments=[]))
+        row=self.wait(lambda: next((r for r in self.rpc('list')['items'] if r['sessionId']==root),None))
+        self.assertIsNone(row.get('parentSessionId'));self.assertEqual(row['selection'],route)
+        self.rpc('send',{'sessionId':root,'requestId':str(uuid.uuid4()),'mode':'steer',
+                         'content':[{'type':'text','text':'Uncomposed root message'}]})
+        def replied():
+            native=self.rpc('inspect',{'sessionId':root})
+            return native if 'Native reply: Uncomposed root message' in json.dumps(native['page']['records']) else None
+        used=self.wait(replied)['baseline']['values']['modelSelection']['lastUsed']
+        self.assertEqual({k:v for k,v in used.items() if k!='reasoningEffort'},route)
+        chosen={'provider':'hgs-test','model':'test-a','reasoningEffort':'off'}
+        self.assertEqual(self.rpc('settings',{'sessionId':root,**chosen})['selected'],chosen)
+        self.assertEqual(next(r for r in self.rpc('list')['items'] if r['sessionId']==root)['selection'],chosen)
 
     def test_continuable_child_send_is_addressed_and_idempotent(self):
         parent, other = self.create(), self.create()

@@ -11,11 +11,13 @@ export const inject = ['sessionController', 'agents', 'goals', 'llm', 'agentDefa
 
 export function apply(ctx, config) {
   const api = ctx.sessionController;
-  // These three extension seams are deliberately pinned to the tested release.
-  // In particular the public selectModel also changes the profile default.
+  // These extension seams are deliberately pinned to the tested release.
+  // In particular the public selectModel also changes the profile default, and
+  // only the private selection map tells whether an Agent has a selection.
   const control = api.agents;
   if (typeof control?.composeAgent !== 'function' || typeof control?.serializeImageAdmission !== 'function'
-      || typeof control?.selectForNextRequest !== 'function') throw new Error('HGS: incompatible official dsh session controller');
+      || typeof control?.selectForNextRequest !== 'function' || !(control.selections instanceof WeakMap))
+    throw new Error('HGS: incompatible official dsh session controller');
   const owned = new Map(), opening = new Map(), questions = new Map();
   const generation = randomUUID();
   const shellContext = new AsyncLocalStorage(), shellCalls = new Map(), jobCalls = new Map();
@@ -121,14 +123,29 @@ export function apply(ctx, config) {
     opening.set(sessionId, work);
     return work;
   }
-  // selectionFor installs prompt listeners on an Agent's first read, e.g. for a
-  // child. Native disposal unloads the Agent's Cordis scope before the Agent
-  // leaves the live registry, and Cordis rejects every new effect on a disposed
-  // (uid null) or unloading (state 5) fiber. Reads there use the stored selection.
+  // Upstream installs a model selection while composing a top-level Agent or
+  // changing its model. selectionFor would also install one on a read of any
+  // other Agent, such as a child: prompt listeners that take over its request
+  // route (the profile default before its first request), and an effect Cordis
+  // rejects on an unloading scope. Reads never install one; an Agent without
+  // one reports its stored selection, or before its first request its own route.
   const selectionOf = (agent, projections) => {
-    const fiber = agent.ctx.fiber;
-    if (fiber.uid !== null && fiber.state !== 5) return { ...control.selectionFor(agent).current };
-    return projections?.modelSelection?.next ?? null;
+    const installed = control.selections.get(agent);
+    if (installed) return { ...installed.current };
+    const stored = projections?.modelSelection?.next;
+    if (stored) return stored;
+    const { provider, model, reasoningEffort } = agent.options ?? {};
+    return provider && model ? { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) } : null;
+  };
+  // A child lives in its parent's Agent scope and belongs to subagent routing:
+  // upstream neither prompts nor reconfigures one directly, offers it no
+  // commands and interrupts it only through its parent's address. HGS messages
+  // it through send-child. Send, settings, compact and interrupt refuse any
+  // other than a top-level Agent before they change it.
+  const topLevel = agent => {
+    if (agent && (agent.session.header.origin === 'subagent' || !ctx.agents.roots().includes(agent)))
+      throw new Error('Use the parent to manage a subagent');
+    return agent;
   };
   const publicQuestions = sessionId => [...questions.values()].filter(q => q.sessionId === sessionId)
     .map(({ id, items, approval }) => ({ id, questions: items, approval: Boolean(approval) }));
@@ -276,7 +293,7 @@ export function apply(ctx, config) {
       }
       case 'compact': {
         if (p.generation !== generation) throw new Error('DeepSeek host changed');
-        const agent = ctx.agents.get(p.sessionId);
+        const agent = topLevel(ctx.agents.get(p.sessionId));
         if (!agent || ctx.commands.find(agent,'compact')?.definitionId !== '@deepseek-ai/dsh-command-compact') throw new Error('Native compaction is unavailable');
         if (compactReceipts.has(p.requestId) || compactionPublic(p.sessionId)?.status === 'compacting') throw new Error('Compaction was already requested');
         const abort = new AbortController();
@@ -294,9 +311,11 @@ export function apply(ctx, config) {
       }
       case 'interrupt': {
         if (p.generation !== generation) throw new Error('DeepSeek host changed');
+        topLevel(ctx.agents.get(p.sessionId));
         const fresh = await inspect({ sessionId: p.sessionId });
         const started = fresh.page.records.findLast(row => row.event?.type === 'turn/start')?.event.time / 1000;
-        const live = ctx.agents.get(p.sessionId);
+        // The registry may change while the inspection awaits.
+        const live = topLevel(ctx.agents.get(p.sessionId));
         if (!live || !(started > 0) || started !== p.turnStarted) throw new Error('DeepSeek turn changed; refresh Activity');
         ctx.goals.disarm(live);
         const compaction = compactions.get(p.sessionId);
@@ -406,6 +425,7 @@ export function apply(ctx, config) {
         return ctx.subagents.prompt(p, new AbortController().signal);
       }
       case 'send': {
+        topLevel(ctx.agents.get(p.sessionId));
         const compact = compactionPublic(p.sessionId);
         if (p.expectedCompactionId && (compact?.request_id !== p.expectedCompactionId || compact.status !== 'completed'))
           throw new Error('Compaction is not confirmed; message was not sent');
@@ -416,12 +436,16 @@ export function apply(ctx, config) {
         recovery.get(p.sessionId)?.finish(undefined);
         const agent = ctx.agents.get(p.sessionId);
         if (!agent) throw new Error('Resume this session before sending a message');
-        if (needsSignIn(control.selectionFor(agent).current, await accountStatus()))
+        // Read as list and inspect do. A top-level Agent upstream composed has an
+        // installed selection; another one, such as a webhook root, gets none here.
+        const selection = selectionOf(agent, control.selections.has(agent) ? undefined
+          : (await api.projections({ sessionId: p.sessionId }, new AbortController().signal))?.values);
+        if (needsSignIn(selection, await accountStatus()))
           throw new Error('Sign in to DeepSeek in the native UI before sending a message');
         return api.prompt(p, new AbortController().signal);
       }
       case 'settings': {
-        const agent = await resume(p.sessionId);
+        const agent = topLevel(await resume(p.sessionId));
         const catalog = await api.modelCatalog();
         const model = catalog.groups.find(g => g.id === p.provider)?.models.find(m => m.id === p.model);
         if (!model) throw new Error('This model is unavailable for the native account');

@@ -139,6 +139,17 @@ zerus-setup --autostart   # start Zerus at login
 zerus-setup --workers     # recovery and swarm background workers
 ```
 
+Through 0.42.2, `--autostart` wrote a LaunchAgent that launchd runs as a background
+daemon: whenever other programs keep every core busy, the Zerus window stops
+responding and is restarted after 30 seconds. Run `zerus-setup --autostart` again
+after upgrading to update it. It applies at your next login; to apply it now, quit
+Zerus from its menu and reload the agent:
+
+```sh
+launchctl bootout "gui/$(id -u)/com.hgdev.hgs-tray"
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.hgdev.hgs-tray.plist
+```
+
 `brew upgrade --cask zerus` (or `zerus@nightly`) replaces the application but never
 quits it, unloads its LaunchAgents or stops tmux and native agents. When the
 installed bundle is another build than the running GUI, Zerus shows **Restart to
@@ -285,10 +296,13 @@ running when Zerus closes or updates and when the terminal or SSH connection tha
 started them ends. They end when you sign out of Windows or restart it; tracked
 sessions stay saved and can be resumed, as after a reboot on Linux.
 
-Install the agents on the Windows computer yourself. Zerus looks them up on `PATH`
-(with `PATHEXT`), adds `%USERPROFILE%\.local\bin` and npm's `%APPDATA%\npm`, and
-runs the script of an npm command shim with Node.js directly; other batch files are
-refused.
+Install the agents from **Accounts** with **Install agent…**, or yourself. On
+Windows, Codex installs with npm (`npm.cmd`, so Node.js must be installed), and
+Claude Code and Kimi Code with their vendors' PowerShell installers (`install.ps1`),
+which verify the binaries they download. Zerus looks the agents up on `PATH` (with
+`PATHEXT`), adds `%USERPROFILE%\.local\bin`, npm's `%APPDATA%\npm` and Kimi Code's
+`%USERPROFILE%\.kimi-code\bin`, and runs the script of an npm command shim with
+Node.js directly; other batch files are refused.
 
 - **Claude Code** and **Codex** run tracked, with Zerus hooks in their
   configuration. Every automatic CI run tests their

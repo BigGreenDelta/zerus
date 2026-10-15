@@ -16,6 +16,7 @@ public:
     QSet<QString> selection() const { return m_selection; }
     void setSelection(const QSet<QString> &hosts);
     void setFleet(const FleetState &fleet);
+    void setSessionCounts(const QMap<QString, int> &counts, const QString &caption);
     void setTheme(bool dark);
     void refreshColors();
     // The chip row shows with a selection unless its owner has no room for it
@@ -26,9 +27,12 @@ signals:
 private:
     void rebuildChips();
     void rebuildMenu();
+    void updateMenuCounts();
     void toggle(const QString &host, bool selected);
     QString name(const QString &host) const;
     FleetState m_fleet;
+    QMap<QString, int> m_sessionCounts;
+    QString m_countCaption;
     QSet<QString> m_selection;
     QPushButton *m_button;
     QMenu *m_menu;

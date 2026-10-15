@@ -56,6 +56,24 @@ class SessionFiltersTest {
             assertEquals(example.getString("name"), expected, matches)
         }
     }
+    @Test fun machineChooserCountsKeepWorkspaceIdentityStateProjectAndZeroMachines() {
+        val a=MachineKey("a","same");val b=MachineKey("b","same");val zero=MachineKey("a","empty")
+        val hosts=machines+Machine(zero.connectionId,zero.computerId,"Empty",true)
+        val project=ProjectKey("a","swarm","project")
+        val busy=session("""{"activity":"busy","phase":"tool"}""",name="codex/project/busy").copy(projectKey=project)
+        val offline=session("""{"activity":"idle","phase":"idle"}""",connection="b").copy(projectKey=ProjectKey("b","swarm","project"))
+        val saved=session("""{"state":"paused"}""",name="codex/project/saved").copy(projectKey=project)
+        val archive=busy.copy(target=busy.target.copy(archiveId="archive"))
+        val other=busy.copy(target=busy.target.copy(session="codex/other/busy"),projectKey=null)
+        val sessions=listOf(busy,offline,saved,archive,other)
+        val drafts=setOf(busy.target.key,offline.target.key,archive.target.key)
+        assertEquals(mapOf(a to 3,b to 1,zero to 0),SessionFilters.machineCounts(sessions,hosts,SessionFilter.All,drafts))
+        assertEquals(mapOf(a to 2,b to 1,zero to 0),SessionFilters.machineCounts(sessions,hosts,SessionFilter.Active,drafts))
+        assertEquals(mapOf(a to 1,b to 0,zero to 0),SessionFilters.machineCounts(sessions,hosts,SessionFilter.Active,drafts,project))
+        assertEquals(mapOf(a to 1,b to 0,zero to 0),SessionFilters.machineCounts(sessions,hosts,SessionFilter.Saved,drafts,project))
+        assertEquals(mapOf(a to 1,b to 0,zero to 0),SessionFilters.machineCounts(sessions,hosts,SessionFilter.Archive,drafts,project))
+        assertEquals(mapOf(a to 1,b to 0,zero to 0),SessionFilters.machineCounts(sessions,hosts,SessionFilter.Active,emptySet(),project))
+    }
     @Test fun localDraftsJoinActiveOnceWithinMachineProjectAndSearchScope() {
         val project = ProjectKey("a", "swarm", "project")
         val idle = session("""{"activity":"idle"}""", name="codex/project/draft").copy(projectKey=project)

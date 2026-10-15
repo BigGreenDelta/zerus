@@ -1238,12 +1238,23 @@ background. Coverage reports checked/known worktrees and incomplete catalogs.
 After the first bounded repository review, unchecked known rows are checked
 individually, including rows beyond the native 64-row review limit. Catalogs
 remain bounded at 512 entries; this is not a scan of every folder on a computer.
-Offline snapshots remain readable but cannot be selected for removal. Expired
-checks are refreshed; changed fingerprints invalidate previous selections.
+Offline snapshots remain readable but cannot be selected for removal.
+Browsing data is retained for one hour, across closing and reopening the manager.
+The coverage line shows when catalogs were updated; **Refresh** rereads them and
+clears the selected cleanup candidates. The open manager refreshes hourly, and
+worktree creation/removal invalidates the affected computer/repository cache.
+External Git changes can be picked up with **Refresh**. Cleanup selections still
+require checks less than five minutes old: refresh before selecting expired
+candidates. Removal always repeats native safety checks; a cached browsing verdict
+never authorizes deletion. Changed fingerprints invalidate previous selections.
 
-Use **Read files and commits** (the inspector's refresh button) to view
-changed/untracked file names, tracked diffs and up to
-30 original commits absent from the base history. The base comparison is a
+Selecting a folder loads its files and commits after a short navigation debounce.
+The inspector distinguishes loading, an empty list and a failed read with retry.
+Its refresh button rereads the selected folder, including cached file previews.
+Changed/untracked file names, tracked diffs and up to
+30 original commits absent from the base history are available. Inspection and
+file previews are cached in bounded application memory for an hour, never written
+to the settings file. The base comparison is a
 two-way diff and can include later changes on the base. **Local files** previews
 ignored entries and their contents; **Sessions** opens the exact related
 conversation on its owning computer. Reads are bounded (200 changed files or
@@ -1324,6 +1335,13 @@ Multiple machine filters narrow both sessions and content search. Label color,
 Bright/Soft mode and appearance previews are local. **All machines** clears the
 restriction. A temporary connectivity error retains the last snapshot and makes
 unavailable controls explicit.
+
+The machine chooser shows each computer's session count, including zero, and an
+All machines total. Counts follow the current session state filter and folder
+scope before machine selection or text search; child rows and unconfirmed launch
+placeholders do not add sessions. An open chooser updates counts without replacing
+its checkboxes or changing the selection. Offline computers retain their last
+known session inventory; live-work filters still require current work evidence.
 
 <a id="accounts"></a>
 
@@ -1492,12 +1510,16 @@ Activity supports creation, messages/images, busy-session submission, questions,
 approvals, per-session model/effort, pause/resume, rename, goals, todos and child
 views. A new child view stays empty until the child's first step records its
 native identity; a child cancelled before that step stays listed with an empty
-view. A child that ran without a valid identity reports native corruption.
-Request receipts prevent duplicate submission. Uncertain delivery requires
-inspection. Model changes do not replace profile defaults. Stopping one session
-does not terminate neighboring agents or the shared host. Closing Zerus leaves
-the host running; Forget retains native history. Linux user systemd runs the
-host in an independent scope so GUI service restart cannot kill the engine.
+view. A child that ran without a valid identity reports native corruption. A
+child view shows the child's own model, which reading never changes. Request
+receipts prevent duplicate submission. Uncertain delivery requires inspection.
+Model changes do not replace profile defaults. A child keeps the model it
+inherits and takes messages only through its parent; the adapter refuses model
+changes, messages, compaction and interrupts addressed to the child itself.
+Stopping one session does not terminate neighboring agents or the shared host.
+Closing Zerus leaves the host running; Forget retains native history. Linux user
+systemd runs the host in an independent scope so GUI service restart cannot kill
+the engine.
 
 Native fork, global DeepSeek history search, schedule management and account
 transfer are currently handled in Native UI. Native context reset awaits a
@@ -1800,6 +1822,12 @@ and installs it under `~/Applications/hgs-tray.app` with
 for the tray. Signing precedes bundle replacement; matching code hashes avoid
 unnecessary replacement. Ad-hoc signing is not a Developer ID distribution
 signature. LaunchAgent crash recovery is independent of native agent engines.
+The LaunchAgent runs with `ProcessType` `Interactive` and the GUI thread requests
+user-interactive QoS, as for an app started from Finder. Without that key launchd
+starts a daemon and clamps all its threads below ordinary CPU load, niced load
+included: a busy machine then starves the whole window until the main-thread
+watchdog aborts it, and no QoS request from inside the process lifts the clamp.
+`launchctl print "gui/$(id -u)/com.hgdev.hgs-tray"` shows `spawn type = interactive`.
 Finder, the Dock and Spotlight start the bundle without the LaunchAgent's `--hgs`
 and with PATH `/usr/bin:/bin:/usr/sbin:/sbin`; the desktop then finds the CLI in
 the standard install directories listed under **Desktop option** below.
