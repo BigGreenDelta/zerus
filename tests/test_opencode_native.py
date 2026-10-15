@@ -42,10 +42,15 @@ class Model(http.server.BaseHTTPRequestHandler):
         if not any(m.get('role')=='tool' for m in body.get('messages',[])):
             if 'QUESTION_NATIVE' in last_user: tool = ('question', {'questions':[{'question':'Pick a color','header':'Color','options':[{'label':'Green','description':'First'},{'label':'Blue','description':'Second'}]}]})
             elif 'BASH_NATIVE' in last_user: tool = ('bash',{'command':'printf native-tool-output','description':'Print isolated fixture output'})
+            elif 'TASK_NATIVE' in last_user and any(t.get('function',{}).get('name')=='task' for t in body.get('tools',[])):
+                tool = ('task',{'description':'Native fixture child','prompt':'CHILD_NATIVE_HOLD child work','subagent_type':'general'})
+            elif 'CHILD_NATIVE_HOLD' in last_user:
+                self.server.holding.set()
+                self.server.release.wait(20)
         if tool:
             choices=[{'index':0,'delta':{'tool_calls':[{'index':0,'id':'call_fixture','type':'function','function':{'name':tool[0],'arguments':json.dumps(tool[1])}}]},'finish_reason':None}, {'index':0,'delta':{},'finish_reason':'tool_calls'}]
         else:
-            choices = [{'index': 0, 'delta': {'content': 'Native OpenCode reply'}, 'finish_reason': None},
+            choices = [{'index': 0, 'delta': {'content': 'Native child reply' if 'CHILD_NATIVE' in last_user else 'Native OpenCode reply'}, 'finish_reason': None},
                    {'index': 0, 'delta': {}, 'finish_reason': 'stop'}]
         try:
             self.send_response(200)
@@ -77,7 +82,7 @@ class OpenCodeNative(unittest.TestCase):
         cls.model.holding = threading.Event(); cls.model.release = threading.Event()
         cls.thread = threading.Thread(target=cls.model.serve_forever, daemon=True); cls.thread.start()
         native = {'model': 'fixture/local', 'small_model': 'fixture/local', 'share': 'disabled',
-                  'permission': {'*': 'ask', 'question':'allow'}, 'provider': {'fixture': {'npm': '@ai-sdk/openai-compatible',
+                  'permission': {'*': 'ask', 'question':'allow', 'task':'allow'}, 'provider': {'fixture': {'npm': '@ai-sdk/openai-compatible',
                   'name': 'Private keyless fixture', 'options': {'baseURL': f'http://127.0.0.1:{cls.model.server_port}/v1'},
                   'models': {'local': {'name': 'Native fixture', 'limit': {'context': 32768, 'output': 2048}}, 'alternate': {'name':'Alternate fixture','limit':{'context':32768,'output':2048}}}}}}
         (cls.native_config / 'opencode.json').write_text(json.dumps(native))
@@ -343,3 +348,60 @@ class OpenCodeNative(unittest.TestCase):
             self.assertNotIn('INLINE_SECRET_SENTINEL',blocked.stderr+json.dumps(account))
             self.assertFalse((self.root/'inline-state/opencode').exists())
         finally:self.env=original
+
+    def test_10_classic_children_are_exact_read_only_and_never_inherit_parent_state(self):
+        b=self.create();name=b['name']
+        empty=self.command(['inspect',name])
+        self.assertEqual((empty['subagent_source'],empty['subagents'],empty['subagent_total_count']),('opencode_native',{},0))
+        self.assertTrue(empty['subagent_counts_complete'])
+        # The reviewed native API runtime offers no task tool. Another OpenCode
+        # process sharing this data home (`opencode run`, like the TUI) creates
+        # the child with its classic runtime.
+        self.model.holding.clear();self.model.release.clear()
+        log=(self.root/'classic-run.log').open('ab')
+        run=subprocess.Popen([NATIVE,'run','--session',b['conversation_id'],'--model','fixture/local','TASK_NATIVE delegate'],env=self.env,
+                             cwd=self.workspace,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
+        try:
+            self.assertTrue(self.model.holding.wait(30),'classic child did not start')
+            running=self.wait(name,lambda v:len(v['subagents'])==1)
+            child_id,child=next(iter(running['subagents'].items()))
+            self.assertTrue(child_id.startswith('ses_'));self.assertNotEqual(child_id,b['conversation_id'])
+            # This host does not own that process: the open turn stays unknown.
+            self.assertEqual(child['state'],'unknown');self.assertEqual(running['subagent_active_count'],0)
+            self.assertEqual(running['subagent_unknown_count'],1);self.assertFalse(running['subagent_counts_complete'])
+            view=self.command(['inspect',name,'--agent',child_id,'--skip-processes'])
+            self.assertEqual((view['name'],view['agent_id'],view['parent_conversation_id'],view['conversation_id'],view['run_id']),
+                             (name,child_id,b['conversation_id'],b['conversation_id']+'/'+child_id,b['run_id']))
+            self.assertEqual(view['phase'],'unknown');self.assertFalse(view['send_supported']);self.assertTrue(view['read_only'])
+            self.assertEqual((view['allowed_actions'],view['pending_questions']),([],[]))
+            self.command(['send',name,'--json'],{**self.payload(b,text='child-refused'),'agent_id':child_id},False)
+        finally:
+            self.model.release.set()
+            try:code=run.wait(60)
+            except subprocess.TimeoutExpired:
+                os.killpg(run.pid,signal.SIGTERM);code=run.wait(10)
+            log.close()
+        self.assertEqual(code,0,(self.root/'classic-run.log').read_text())
+        done=self.wait(name,lambda v:v['subagents'].get(child_id,{}).get('state')=='finished')
+        self.assertEqual((done['subagent_active_count'],done['subagent_completed_count'],done['subagent_unknown_count']),(0,1,0))
+        self.assertTrue(done['subagent_counts_complete'])
+        self.assertEqual(done['subagents'][child_id]['tracking_evidence']['source'],'opencode_native_messages')
+        view=self.command(['inspect',name,'--agent',child_id])
+        self.assertEqual(view['phase'],'idle')
+        self.assertTrue(any(e['type']=='UserPromptSubmit' and 'CHILD_NATIVE_HOLD' in e['detail'] for e in view['events']))
+        self.assertTrue(any(e['type']=='AgentMessage' and e['detail']=='Native child reply' for e in view['events']))
+        page=self.command(['history',name,'--json'],{**self.payload(b,limit=100),'agent_id':child_id})
+        self.assertTrue(any(e.get('detail')=='Native child reply' for e in page['events']),page)
+        other=self.create()
+        for foreign in [b['conversation_id'],other['conversation_id'],'ses_'+'0'*26,'../child']:
+            self.command(['inspect',name,'--agent',foreign],success=False)
+        self.command(['history',name,'--json'],{**self.payload(b,limit=100),'agent_id':other['conversation_id']},False)
+        # A working parent never makes its finished child working.
+        self.model.holding.clear();self.model.release.clear()
+        self.command(['send',name,'--json'],self.payload(b,text='HOLD_NATIVE parent turn'))
+        self.assertTrue(self.model.holding.wait(10))
+        try:
+            working=self.wait(name,lambda v:v['phase']=='working')
+            self.assertEqual(working['subagents'][child_id]['state'],'finished');self.assertEqual(working['subagent_active_count'],0)
+        finally:self.model.release.set()
+        self.wait(name,lambda v:v['phase']!='working')
