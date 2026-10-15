@@ -45,29 +45,39 @@ class ManagedProfileMcp(unittest.TestCase):
 
     def stop(self):
         # A detached session outlives its launch command: its tracked supervisor records the
-        # agent's exit in the state folder, also after kill-server returns. Remove the fixture
-        # only after this private server's pane processes, with the same start identity, ended.
-        def alive(pids):
-            if not pids:
-                return {}
+        # agent's exit in the state folder, also after kill-server returns. The supervisor is not
+        # always the pane's own process: tmux runs the pane command with `$SHELL -c`, which bash
+        # replaces by that command, while dash (Ubuntu's /bin/sh) stays as the pane process, dies
+        # of the hangup at once and leaves its child supervisor still writing. Remove the fixture
+        # only after this private server's pane processes and all their descendants, each with
+        # the same start identity, ended.
+        def processes():
             # One keyword per -o: POSIX ps (macOS) takes the rest of an argument after '=' as its header.
-            status = subprocess.run(['ps', '-p', ','.join(pids), '-o', 'pid=', '-o', 'stat=', '-o', 'lstart='],
-                                    capture_output=True, text=True, timeout=5, env=dict(self.env, LC_ALL='C', TZ='UTC'))
-            rows = [line.split() for line in status.stdout.splitlines()]
+            listing = subprocess.run(['ps', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'stat=', '-o', 'lstart='],
+                                     capture_output=True, text=True, timeout=5, env=dict(self.env, LC_ALL='C', TZ='UTC'))
+            rows = [line.split(None, 3) for line in listing.stdout.splitlines()]
             # An unreadable listing must fail here rather than skip the wait.
-            self.assertTrue(all(len(row) > 2 and row[0] in pids for row in rows), status.stdout)
-            return {row[0]: ' '.join(row[2:]) for row in rows if not row[1].startswith(('Z', 'X'))}
+            self.assertTrue(listing.returncode == 0 and rows and all(len(row) == 4 for row in rows), listing.stdout)
+            return {pid: (parent, status, ' '.join(start.split())) for pid, parent, status, start in rows}
+
+        def alive(owned, table):
+            return {pid: start for pid, start in owned.items()
+                    if pid in table and table[pid][2] == start and not table[pid][1].startswith(('Z', 'X'))}
         panes = subprocess.run([TMUX, '-S', str(self.socket), 'list-panes', '-a', '-F', '#{pane_pid}'],
                                capture_output=True, text=True, timeout=5)
         try:
-            owned = alive([pid for pid in panes.stdout.split() if pid.isdigit()])
+            table = processes()
+            owned = {pid: table[pid][2] for pid in panes.stdout.split() if pid in table}
+            while children := {pid: row[2] for pid, row in table.items() if pid not in owned and row[0] in owned}:
+                owned.update(children)
+            owned = alive(owned, table)
         finally:
             subprocess.run([TMUX, '-S', str(self.socket), 'kill-server'], capture_output=True, timeout=5)
         deadline = time.monotonic() + 10
         while owned and time.monotonic() < deadline:
             time.sleep(0.02)
-            owned = {pid: start for pid, start in alive(list(owned)).items() if owned[pid] == start}
-        self.assertFalse(owned, 'private tmux panes survived kill-server')
+            owned = alive(owned, processes())
+        self.assertFalse(owned, 'processes of the private tmux panes survived kill-server')
         self.temp.cleanup()
 
     def script(self, name, text):
