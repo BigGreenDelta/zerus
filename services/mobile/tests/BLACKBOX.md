@@ -187,6 +187,7 @@ row names the Rust relay contract that replaces a relay case;
 | `test_result_too_large_is_failed_read_or_uncertain_write` | `test_bb_native_limits.test_a_result_fits_only_within_the_relay_limit` | covered |
 | `test_journal_refuses_config_switch_and_unsafe_files_without_chmod` | `test_bb_journal.test_other_credentials_never_take_over_a_journal`, `test_unsafe_state_directory_is_refused_without_repair`, `test_unsafe_journal_files_are_refused_without_repair` | covered |
 | `test_attention_round_robin_budget_and_exact_identity_cache` | `test_bb_computer.AttentionTests.test_two_live_codex_sessions_are_inspected_per_heartbeat` | covered |
+| `test_attention_marks_only_optional_codex_async_questions` | `test_bb_computer.AttentionTests.test_optional_codex_async_questions_carry_one_boolean` | covered |
 | `test_https_and_explicit_loopback_only_http` | `test_bb_startup.test_invalid_configuration_is_refused_before_any_state_or_network`, `test_loopback_http_requires_its_explicit_development_flag`; the full matrix: P2 `config.jsonl` | covered |
 
 The poison pill of divergence b is pinned for Python by

@@ -423,6 +423,34 @@ asyncio.run(c.execute(json.loads(sys.argv[2])))
         self.assertNotIn(("codex/4", "run-4", "conversation-4"), self.connector.attention_cache)
         self.assertLessEqual(len(self.connector.attention_cache), 1)
 
+    async def test_attention_marks_only_optional_codex_async_questions(self):
+        row = {"name": "codex/0", "cmd": "codex", "tracked": True, "runtime_state": "live",
+               "process_state": "running", "run_id": "run-0", "conversation_id": "conversation-0"}
+
+        def card(question_id, **changes):
+            return {"run_id": "run-0", "conversation_id": "conversation-0", "question_id": question_id,
+                    "question_hash": f"h-{question_id}", "questions": [{"question": "never export"}], **changes}
+
+        async def native(argv, **kwargs):
+            return {**row, "pending_questions": [
+                card("codex-async:c:0", source="codex_async", optional=True, can_skip=True),
+                card("blocking", source="hook"),
+                card("not-codex", source="hook", optional=True),
+                card("loose", source="codex_async", optional=1),
+                card("done", source="codex_async", optional=True, answer_delivery={"status": "submitted"}),
+                card("other-run", source="codex_async", optional=True, run_id="old-run")]}
+
+        self.connector.native = native
+        snapshot = {"sessions": [dict(row)]}
+        await self.connector.enrich_attention(snapshot)
+        # Exact shapes: only the optional Codex async item gains the boolean.
+        self.assertEqual(snapshot["sessions"][0]["mobile_attention"], [
+            {"question_id": "blocking", "question_hash": "h-blocking"},
+            {"question_id": "codex-async:c:0", "question_hash": "h-codex-async:c:0", "optional": True},
+            {"question_id": "loose", "question_hash": "h-loose"},
+            {"question_id": "not-codex", "question_hash": "h-not-codex"}])
+        self.assertIs(snapshot["sessions"][0]["mobile_attention"][1]["optional"], True)
+
     def test_https_and_explicit_loopback_only_http(self):
         self.assertEqual(checked_url("https://relay.example.invalid/"), "https://relay.example.invalid")
         for url in ("http://127.0.0.1", "http://localhost", "http://[::1]"):
