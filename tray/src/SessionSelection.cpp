@@ -259,6 +259,10 @@ void SessionsWindow::runNextSelectionAction()
             ++m_selectionFailed; m_selectionErrors << tr("%1 / %2: session changed or is unavailable").arg(original.machine, original.session.name); continue;
         }
         const auto entry = *found; const auto &s = entry.session;
+        if (m_selectionOperation == SelectionAction::Archive || m_selectionOperation == SelectionAction::Terminate) {
+            m_worktreeCleanup->hide();
+            m_archivedWorktree = {entry.host,s.name,s.gitWorktree ? s.gitRoot : QString(),s.gitWorktree ? s.gitCommonDir : QString()};
+        }
         showNotice(tr("%1: %2 / %3…").arg(selectionActionText(m_selectionOperation)).arg(m_selectionDone + m_selectionFailed + 1).arg(m_selectionTotal));
         switch (m_selectionOperation) {
         case SelectionAction::Pause:

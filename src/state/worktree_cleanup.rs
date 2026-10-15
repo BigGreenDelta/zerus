@@ -1,11 +1,13 @@
 //! Review and guarded removal of linked worktrees. Removal repeats every check
 //! under the repository lock used by creation, compares the fingerprint the
-//! person reviewed and runs only `git worktree remove` without force.
+//! person reviewed. Force is limited to explicitly confirmed, content-fingerprinted
+//! uncommitted files; active/locked/nested/unknown worktrees remain protected.
 use super::worktrees::{cache_file, canonical, error, git, list, GitError};
 use super::*;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const MAX_REVIEWED: usize = 64;
@@ -27,6 +29,7 @@ struct Context {
     /// Other processes' current directories, or why they cannot be read.
     processes: std::result::Result<Vec<(u32, PathBuf, String)>, String>,
     bindings: Vec<Reference>,
+    bindings_complete: bool,
     archives: Vec<Reference>,
 }
 
@@ -86,18 +89,54 @@ fn reference(record: &Value) -> Reference {
     }
 }
 
-fn deepseek_bindings() -> Vec<Reference> {
-    let files = ["dsh/bindings", "opencode/bindings"]
-        .into_iter()
-        .flat_map(|directory| fs::read_dir(root().join(directory)).into_iter().flatten());
-    files
-        .flatten()
-        .take(5000)
-        .filter(|file| file.path().extension().is_some_and(|e| e == "json"))
-        .filter_map(|file| serde_json::from_slice::<Value>(&fs::read(file.path()).ok()?).ok())
-        .filter(|record| ["dsh", "opencode"].contains(&string(record, "backend")))
-        .map(|record| reference(&record))
-        .collect()
+fn bindings() -> Result<Vec<Reference>> {
+    // Ordinary catalog reads tolerate broken records. Deletion cannot interpret
+    // a skipped or unreadable record as proof that no session uses the folder.
+    let mut result = Vec::new();
+    let mut count = 0;
+    for directory in ["", "bindings", "dsh/bindings", "opencode/bindings"] {
+        let folder = root().join(directory);
+        let files = match fs::read_dir(&folder) {
+            Ok(files) => files,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        for file in files {
+            let file = file.map_err(|e| e.to_string())?;
+            let path = file.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if !(directory.contains('/')
+                || stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                continue;
+            }
+            count += 1;
+            if count > 5000 {
+                return Err("Too many session bindings to check".into());
+            }
+            let value: Value = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            if value["rename_shadow"] == true {
+                continue;
+            }
+            if string(&value, "name").is_empty() {
+                return Err("Invalid saved session identity".into());
+            }
+            let value = if directory.contains('/') {
+                value
+            } else {
+                read(string(&value, "name"))?
+            };
+            result.push(reference(&value));
+        }
+    }
+    Ok(result)
 }
 
 fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
@@ -118,16 +157,14 @@ fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
             bases.push((name, origin));
         }
     }
-    let mut bindings: Vec<Reference> = storage::records()
-        .unwrap_or_default()
-        .iter()
-        .map(reference)
-        .collect();
-    bindings.extend(deepseek_bindings());
+    let records = bindings();
+    let bindings_complete = records.is_ok();
+    let bindings = records.unwrap_or_default();
     Context {
         bases,
         processes: crate::platform::current_directories(),
         bindings,
+        bindings_complete,
         archives: archive::records()
             .unwrap_or_default()
             .iter()
@@ -250,8 +287,177 @@ fn modified(path: &Path) -> f64 {
         .unwrap_or(0.)
 }
 
+/// Git status omits special files (for example FIFOs), and ignored nested
+/// repositories can be invisible there too. A bounded metadata inventory must
+/// establish that neither is silently discarded. Symlinks are not followed.
+fn inventory(root: &Path, known_nested: &[String], deadline: Instant) -> (u64, bool, Vec<Value>) {
+    let mut pending = vec![root.to_path_buf()];
+    let mut bytes = 0;
+    let mut count = 0;
+    let mut complete = true;
+    let mut blockers = Vec::new();
+    while let Some(path) = pending.pop() {
+        count += 1;
+        if count > WALK_ENTRIES || Instant::now() >= deadline {
+            complete = false;
+            break;
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(value) => value,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
+        };
+        if path.file_name().is_some_and(|name| {
+            name.to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+        }) {
+            if let Some(parent) = path.parent().filter(|parent| *parent != root) {
+                if !known_nested
+                    .iter()
+                    .any(|nested| Path::new(nested) == parent)
+                {
+                    blockers.push(reason(
+                        "nested_repository",
+                        format!(
+                            "Contains another Git repository: {}. Move it out first.",
+                            parent.display()
+                        ),
+                    ));
+                }
+            }
+            continue;
+        }
+        if metadata.is_dir() {
+            match fs::read_dir(&path) {
+                Ok(files) => {
+                    for file in files {
+                        match file {
+                            Ok(file) => pending.push(file.path()),
+                            Err(_) => complete = false,
+                        }
+                    }
+                }
+                Err(_) => complete = false,
+            }
+        } else if metadata.is_file() || metadata.file_type().is_symlink() {
+            bytes += metadata.len();
+        } else {
+            blockers.push(reason(
+                "special_files",
+                format!(
+                    "Contains a special local file: {}. Remove or move it explicitly first.",
+                    path.display()
+                ),
+            ));
+        }
+        if blockers.len() >= MAX_SAMPLES {
+            break;
+        }
+    }
+    (bytes, complete, blockers)
+}
+
 fn fingerprint(material: Value) -> String {
     format!("{:x}", Sha256::digest(material.to_string().as_bytes()))
+}
+
+/// Bound the exact data a manual discard would lose, not merely status letters
+/// or file sizes. Never follow symlinks, read special files, or bless a partial
+/// scan. The cached index's raw blob IDs also protect staged-only changes.
+fn discard_proof(tree: &Path, status: &Status, deadline: Instant) -> Option<String> {
+    let staged = git(
+        tree,
+        &[
+            "diff",
+            "--cached",
+            "--raw",
+            "--no-abbrev",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-z",
+        ],
+        deadline,
+    )
+    .ok()?;
+    let mut pending = Vec::new();
+    for entry in &status.entries {
+        if entry.starts_with("!!") {
+            continue;
+        }
+        let relative = Path::new(entry.get(3..)?);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        let mut parent = tree.to_path_buf();
+        let parts: Vec<_> = relative.components().collect();
+        for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            parent.push(part.as_os_str());
+            if fs::symlink_metadata(&parent).ok()?.file_type().is_symlink() {
+                return None;
+            }
+        }
+        pending.push(tree.join(relative));
+    }
+    let mut manifest = BTreeMap::new();
+    let mut remaining = 64 * 1024 * 1024_u64;
+    let mut entries = 0;
+    while let Some(path) = pending.pop() {
+        entries += 1;
+        if entries > WALK_ENTRIES || Instant::now() >= deadline || path.to_str().is_none() {
+            return None;
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(value) => value,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                manifest.insert(path, json!({"missing":true}));
+                continue;
+            }
+            Err(_) => return None,
+        };
+        let value = if metadata.file_type().is_symlink() {
+            json!({"link": fs::read_link(&path).ok()?})
+        } else if metadata.is_dir() {
+            for child in fs::read_dir(&path).ok()? {
+                pending.push(child.ok()?.path());
+            }
+            json!({"directory":true})
+        } else if metadata.is_file() {
+            if metadata.len() > remaining {
+                return None;
+            }
+            let mut data = Vec::new();
+            fs::File::open(&path)
+                .ok()?
+                .take(remaining + 1)
+                .read_to_end(&mut data)
+                .ok()?;
+            if data.len() as u64 > remaining {
+                return None;
+            }
+            remaining -= data.len() as u64;
+            let after = fs::symlink_metadata(&path).ok()?;
+            if metadata.len() != after.len()
+                || metadata.modified().ok() != after.modified().ok()
+                || !after.is_file()
+            {
+                return None;
+            }
+            json!({"content":format!("{:x}", Sha256::digest(&data))})
+        } else {
+            return None;
+        };
+        manifest.insert(path, value);
+    }
+    (Instant::now() < deadline).then(|| {
+        fingerprint(json!({"files":manifest,"index":format!("{:x}",Sha256::digest(staged))}))
+    })
 }
 
 fn finish(mut row: Value, reasons: Vec<Value>, notes: Vec<Value>) -> Value {
@@ -300,6 +506,12 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     }
     let mut reasons = Vec::new();
     let mut notes = Vec::new();
+    if !context.bindings_complete {
+        reasons.push(reason(
+            "sessions_unavailable",
+            "Saved sessions could not be checked. Review again before removal.",
+        ));
+    }
     if tree["locked"] == true {
         let why = string(tree, "locked_reason");
         reasons.push(reason(
@@ -604,7 +816,15 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
             ));
         }
     }
-    let (bytes, complete, _) = measure(&path, &mut 0, (Instant::now() + WALK_TIME).min(total));
+    let (bytes, complete, blockers) =
+        inventory(&path, &nested, (Instant::now() + WALK_TIME).min(total));
+    reasons.extend(blockers);
+    if !complete {
+        reasons.push(reason(
+            "local_inventory_unavailable",
+            "Local files could not be fully checked. Review again before removal.",
+        ));
+    }
     row["disk_bytes"] = json!(bytes);
     row["disk_complete"] = json!(complete);
 
@@ -647,10 +867,28 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     if now() - activity < RECENT {
         notes.push(reason("recent", "Used in the last 24 hours."));
     }
+    if status.changes > 0 || status.untracked > 0 {
+        // Lossy Git names cannot authorize deleting a different filesystem name.
+        if !status.entries.iter().any(|s| s.contains('\u{fffd}')) {
+            row["discard_fingerprint"] = json!(discard_proof(
+                &path,
+                &status,
+                (Instant::now() + WALK_TIME).min(total)
+            ));
+        }
+        row["discardable"] = json!(
+            row["discard_fingerprint"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+                && reasons
+                    .iter()
+                    .all(|r| matches!(string(r, "code"), "changes" | "untracked"))
+        );
+    }
     row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,
         "locked":row["locked"],"prunable":row["prunable"],"available":true,
         "status":status.entries,"nested":row["nested"],"sessions":row["sessions"],
-        "ignored":row["ignored_fingerprint"]})));
+        "ignored":row["ignored_fingerprint"],"discard":row["discard_fingerprint"]})));
     finish(row, reasons, notes)
 }
 
@@ -758,16 +996,19 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut delete_branch = false;
+    let mut automatic = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => {}
             "--delete-branch" => delete_branch = true,
+            "--automatic" => automatic = true,
             "--dry-run" => return Err("worktree removal does not support --dry-run".into()),
             key @ ("--path"
             | "--common-dir"
             | "--fingerprint"
             | "--ignored-fingerprint"
+            | "--discard-fingerprint"
             | "--request-id") => {
                 i += 1;
                 let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
@@ -832,7 +1073,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     )
     .open(cache.with_extension("lock"))
     .map_err(|e| e.to_string())?;
-    let waited = Instant::now() + Duration::from_secs(10);
+    let waited = Instant::now() + Duration::from_secs(if automatic { 1 } else { 10 });
     while guard.try_lock_exclusive().is_err() {
         if Instant::now() >= waited {
             return Err(
@@ -842,11 +1083,17 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         std::thread::sleep(Duration::from_millis(10));
     }
     let lock = crate::platform::FileLock::held(guard);
+    // One lock order: repository, then session writer. No lifecycle caller holds
+    // the writer lock while entering cleanup. A new binding cannot race removal.
+    let _state_lock = storage::writer_until(
+        Instant::now() + Duration::from_secs(if automatic { 1 } else { 10 }),
+    )?
+    .ok_or("Session state is busy. Review cleanup after the current operation finishes.")?;
 
     let data = review(
         &common,
         Some(target),
-        Instant::now() + Duration::from_secs(20),
+        Instant::now() + Duration::from_secs(if automatic { 5 } else { 20 }),
     );
     if data["state"] != "ok" {
         return Err(format!(
@@ -863,7 +1110,16 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     if row["kind"] != "linked" {
         return Err("Only linked worktrees can be removed; the main checkout stays.".into());
     }
-    if row["verdict"] == "blocked" {
+    let discard = options.get("--discard-fingerprint").copied();
+    if discard.is_some()
+        && (row["discardable"] != true || discard != row["discard_fingerprint"].as_str())
+    {
+        return Err(
+            "Discard confirmation is stale or this worktree is still protected. Review it again."
+                .into(),
+        );
+    }
+    if row["verdict"] == "blocked" && discard.is_none() {
         let reasons: Vec<_> = row["reasons"]
             .as_array()
             .into_iter()
@@ -876,7 +1132,30 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             reasons.join(" ")
         ));
     }
-    if string(&row, "fingerprint") != expected {
+    if automatic {
+        if delete_branch
+            || options.contains_key("--discard-fingerprint")
+            || options.contains_key("--ignored-fingerprint")
+        {
+            return Err("Automatic cleanup cannot discard local data or delete branches".into());
+        }
+        if super::worktree_lifecycle::owned(&common, &path).is_none() {
+            return Err("Not a verified Zerus-created worktree; review it manually".into());
+        }
+        if row["changes"].as_u64().unwrap_or(1) != 0
+            || row["untracked"].as_u64().unwrap_or(1) != 0
+            || row["ignored_count"].as_u64().unwrap_or(1) != 0
+        {
+            return Err("Uncommitted changes or local files remain; review them manually".into());
+        }
+        if !matches!(
+            string(&row["integration"], "kind"),
+            "ancestor" | "same_tree" | "equivalent_patches"
+        ) {
+            return Err("Work is not proven integrated; its folder and branch were kept".into());
+        }
+    }
+    if !automatic && string(&row, "fingerprint") != expected {
         return Err("Worktree changed since the review. Review it again.".into());
     }
     if row["ignored_count"].as_u64().unwrap_or(0) > 0
@@ -885,14 +1164,23 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         return Err("Review the local files outside Git and explicitly confirm their deletion before removing this worktree.".into());
     }
     let missing = row["verdict"] == "missing";
+    if automatic {
+        super::worktree_lifecycle::prepare_removal(&common, &row)?;
+    }
+    let spelling = path.to_string_lossy();
+    let mut command = vec!["worktree", "remove"];
+    if discard.is_some() {
+        command.push("--force");
+    }
+    command.extend(["--", &spelling]);
     git(
         &common,
-        &["worktree", "remove", "--", &path.to_string_lossy()],
-        Instant::now() + Duration::from_secs(300),
+        &command,
+        Instant::now() + Duration::from_secs(if automatic { 3 } else { 300 }),
     )
     .map_err(|e| {
         format!(
-            "{}\nNothing was forced. Review the worktree again before retrying.",
+            "Removal could not be confirmed: {}\nReview the worktree again before retrying.",
             e.detail
         )
     })?;

@@ -76,7 +76,7 @@ pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<(
     let archived = !string(record, "archive_id").is_empty();
     let changing = record.get("pausing").is_some() || record["resume_pending"] == true;
     let confirmed = !string(record, "conversation_id").is_empty();
-    let recipe = record["base"].is_array() && Path::new(string(record, "launch_dir")).is_dir();
+    let recipe = record["base"].is_array() && (Path::new(string(record, "launch_dir")).is_dir() || super::worktree_lifecycle::restorable(record));
     let restore_pending = !string(record, "restore_archive_id").is_empty();
     let decisions = [
         (

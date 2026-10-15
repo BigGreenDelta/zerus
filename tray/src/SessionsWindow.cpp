@@ -1,5 +1,6 @@
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "WorktreeBatchCleanupDialog.h"
 #include "DownloadCache.h"
 #include "SessionFileDrop.h"
 #include "SessionCardDelegate.h"
@@ -1415,7 +1416,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(&m_client, &HgsClient::writeDone, this, [this](const QString &operation, bool ok, const QString &detail) {
         if (finishSelectionAction(operation, ok, detail)) return;
-        if (m_archivedWorktree.size() == 4 && operation == QStringLiteral("archive %1").arg(m_archivedWorktree[1])) {
+        if (m_archivedWorktree.size() == 4 && (operation == QStringLiteral("archive %1").arg(m_archivedWorktree[1]) || operation == QStringLiteral("terminate %1").arg(m_archivedWorktree[1]))) {
             if (ok) offerWorktreeCleanup(); else m_archivedWorktree.clear();
         }
         if (!ok && (operation == QStringLiteral("resume %1").arg(m_startSend.name) || operation == QStringLiteral("fresh %1").arg(m_startSend.name)))
@@ -1452,6 +1453,20 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         showNotice(ok ? (renamed ? tr("Session renamed. Refreshing…") : tr("Session updated. Refreshing…")) : detail, !ok);
         emit refreshRequested(); rebuild(); inspect();
+    });
+    connect(&m_client, &HgsClient::worktreeCleanupFinished, this, [this](const QString &host, const QString &operation, const QJsonObject &result) {
+        if (m_archivedWorktree.size() != 4 || m_archivedWorktree[0] != host || (!m_archivedWorktree[2].isEmpty() && m_archivedWorktree[2] != result["path"].toString())
+            || (!m_archivedWorktree[3].isEmpty() && m_archivedWorktree[3] != result["common_dir"].toString())
+            || (operation != "archive " + m_archivedWorktree[1] && operation != "terminate " + m_archivedWorktree[1])) return;
+        m_archivedWorktree[2] = result["path"].toString(); m_archivedWorktree[3] = result["common_dir"].toString();
+        if (result["status"] == "removed") {
+            m_worktreeCleanup->hide(); m_archivedWorktree.clear();
+            showNotice(tr("Worktree removed automatically. The branch and archived conversation are kept.")); updateWorktrees();
+        } else {
+            m_worktreeCleanup->setText(result["status"] == "unconfirmed" ? tr("Check worktree cleanup…") : tr("Review remaining worktree…"));
+            m_worktreeCleanup->setToolTip(result["reason"].toString()); m_worktreeCleanup->show();
+            showNotice(tr("Worktree kept for review: %1").arg(result["reason"].toString()));
+        }
     });
     connect(&m_client, &HgsClient::gitStatusChanged, this, [this](const QString &host, const QString &path) {
         // Update only the Git role. Asynchronous repository reads must not run
@@ -2036,6 +2051,21 @@ void SessionsWindow::showWorkspaceSettings()
 }
 
 void SessionsWindow::setFleet(const FleetState &fleet) {
+    // A native clean exit may remove its managed checkout without a GUI write.
+    // Expire only repositories whose exact live run has newly reached Archive.
+    QSet<QString> expired;
+    const auto completed = [&](const BoxState &before, const BoxState &after, const QString &host) {
+        for (const auto &old : before.sessions) {
+            if (old.state == "archived" || !old.gitWorktree || old.gitCommonDir.isEmpty() || old.runId.isEmpty()) continue;
+            for (const auto &current : after.sessions) if (current.state == "archived" && current.runId == old.runId && current.conversationId == old.conversationId) {
+                const auto key=host+'\n'+old.gitCommonDir;
+                if (!expired.contains(key)) { expired.insert(key); m_client.invalidateWorktreeCache(host,old.gitCommonDir); }
+                break;
+            }
+        }
+    };
+    completed(m_fleet.local(),fleet.local(),{});
+    for (const auto &host : fleet.peerNames()) if (const auto *before=m_fleet.peer(host)) completed(*before,*fleet.peer(host),host);
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setLocalSessions(fleet.local().localSessions); m_settingsPage->setPeers(fleet.peerNames());
     m_settingsPage->setMobileGateway(fleet.local().localSessions&&MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Posix);
@@ -4511,22 +4541,23 @@ void SessionsWindow::archiveSession()
     if (!e || !e->online || m_pending || !m_renameKey.isEmpty() || (e->session.state != "paused" && e->session.state != "stopped")) return;
     const QString host = e->host, name = e->session.name;
     ++m_worktreeCleanupRevision; m_worktreeCleanup->hide();
-    m_archivedWorktree = e->session.gitWorktree && !e->session.gitRoot.isEmpty()
-        ? QStringList{host, name, e->session.gitRoot, e->session.gitCommonDir} : QStringList{};
+    const bool inspected = m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
+    m_archivedWorktree = {host,name,inspected ? m_details.value("git_root").toString() : e->session.gitWorktree ? e->session.gitRoot : QString(),
+        inspected ? m_details.value("git_common_dir").toString() : e->session.gitWorktree ? e->session.gitCommonDir : QString()};
     m_pending = true; m_restoreKey.clear(); m_client.archiveSession(host, name);
     showNotice(tr("Moving session to archive…")); renderDetails();
 }
 
 void SessionsWindow::offerWorktreeCleanup()
 {
+    if (m_archivedWorktree.size() != 4 || m_archivedWorktree[2].isEmpty()) return;
     const auto host = m_archivedWorktree[0], name = m_archivedWorktree[1], root = m_archivedWorktree[2];
     // Another running, paused or saved session keeps the checkout in use.
     for (const auto &entry : m_entries)
-        if (entry.host == host && entry.session.name != name && entry.session.state != "archived" && entry.session.gitRoot == root) { m_archivedWorktree.clear(); return; }
+        if (entry.host == host && entry.session.name != name && entry.session.state != "archived" && entry.session.gitRoot == root) return;
     m_worktreeCleanup->setToolTip(tr("Review %1 for removal. Nothing is removed without your confirmation.").arg(root));
     m_worktreeCleanup->show();
-    const int revision = ++m_worktreeCleanupRevision;
-    QTimer::singleShot(60000, m_worktreeCleanup, [this, revision] { if (revision == m_worktreeCleanupRevision) { m_worktreeCleanup->hide(); m_archivedWorktree.clear(); } });
+    m_worktreeCleanup->setText(tr("Review remaining worktree…")); ++m_worktreeCleanupRevision;
 }
 
 void SessionsWindow::cleanUpArchivedWorktree()
@@ -4534,7 +4565,8 @@ void SessionsWindow::cleanUpArchivedWorktree()
     if (m_archivedWorktree.size() != 4) return;
     const auto offer = m_archivedWorktree; m_archivedWorktree.clear(); ++m_worktreeCleanupRevision; m_worktreeCleanup->hide();
     // The common directory still answers after the worktree folder is gone.
-    WorktreeCleanupDialog dialog(&m_client, offer[0], offer[0].isEmpty() ? m_fleet.local().host : offer[0], offer[3].isEmpty() ? offer[2] : offer[3], offer[2], this);
+    WorktreeBatchCleanupDialog dialog(&m_client, {QJsonObject{{"host",offer[0]}, {"machine",offer[0].isEmpty() ? m_fleet.local().host : offer[0]},
+        {"common_dir",offer[3].isEmpty() ? offer[2] : offer[3]}, {"row",QJsonObject{{"path",offer[2]}, {"kind","linked"}}}}}, this);
     dialog.exec();
     if (dialog.changed()) { emit refreshRequested(); updateWorktrees(); }
 }
@@ -4656,6 +4688,10 @@ void SessionsWindow::terminateSession()
     }
     m_pending = true; m_restoreKey.clear();
     if(live){
+        ++m_worktreeCleanupRevision; m_worktreeCleanup->hide();
+        const bool inspected=m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
+        m_archivedWorktree = keepArchive ? QStringList{host,name,inspected ? m_details.value("git_root").toString() : original.session.gitWorktree ? original.session.gitRoot : QString(),
+            inspected ? m_details.value("git_common_dir").toString() : original.session.gitWorktree ? original.session.gitCommonDir : QString()} : QStringList{};
         m_terminationFinished.remove(original.key);m_terminating.insert(original.key,original);m_terminationCommand=original.key;
         showNotice(tr("Terminating %1…").arg(name));rebuild();
     }

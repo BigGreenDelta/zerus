@@ -51,7 +51,9 @@ class NativeClaudeQuestions(unittest.TestCase):
   self.items=ITEMS[:1] if self._testMethodName.startswith('test_single_') else WRAPPED_ITEMS if wrapped else ITEMS
   (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
   permission_mode=getattr(self,'native_permission_mode','default' if self.approval_fixture or self.message_fixture else 'bypassPermissions')
-  (self.root/'.claude/settings.json').write_text(json.dumps({'permissions':{'defaultMode':permission_mode}}))
+  settings={'permissions':{'defaultMode':permission_mode}}
+  if hasattr(self,'native_settings'):settings.update(self.native_settings(work))
+  (self.root/'.claude/settings.json').write_text(json.dumps(settings))
   fixture=self;self.native_requests=[]
   class Server(BaseHTTPRequestHandler):
    def log_message(self,*args):pass
@@ -61,7 +63,9 @@ class NativeClaudeQuestions(unittest.TestCase):
     asks=not fixture.message_fixture and any(t.get('name')==fixture.tool_name for t in body.get('tools',[]))
     answered=any(isinstance(m.get('content'),list) and any(b.get('type')=='tool_result' for b in m['content']) for m in body.get('messages',[]))
     blocks=[dict(type='tool_use',id='toolu_native_fixture',name=fixture.tool_name,input=fixture.tool_input or dict(questions=fixture.items))] if asks and not answered else [dict(type='text',text='Fixture complete.')]
-    message=dict(id='msg_fixture',type='message',role='assistant',model=body.get('model','claude-sonnet-4-6'),content=blocks,stop_reason='tool_use' if asks and not answered else 'end_turn',stop_sequence=None,usage=dict(input_tokens=100,output_tokens=30))
+    if hasattr(fixture,'native_response_blocks'):blocks=fixture.native_response_blocks(body)
+    asks=any(block['type']=='tool_use' for block in blocks)
+    message=dict(id='msg_fixture',type='message',role='assistant',model=body.get('model','claude-sonnet-4-6'),content=blocks,stop_reason='tool_use' if asks else 'end_turn',stop_sequence=None,usage=dict(input_tokens=100,output_tokens=30))
     self.send_response(200)
     if body.get('stream'):
      self.send_header('Content-Type','text/event-stream');self.end_headers()

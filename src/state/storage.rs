@@ -54,7 +54,8 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
 }
 
 /// An exclusive lock on an auxiliary file, or None when another process still
-/// holds it at `deadline`. Never use it for the default state lock.
+/// holds it at `deadline`. Use writer_until for the default state lock so that
+/// its recovery protocol runs as well.
 pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Option<Guard>> {
     private_dir(path.parent().ok_or("invalid lock path")?)?;
     let file = lock_file(path)?;
@@ -66,6 +67,16 @@ pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Op
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
     }
+}
+
+/// The normal writer-lock recovery, with a bounded admission wait for optional
+/// lifecycle cleanup. Never turn a busy writer into an unbounded archive exit.
+pub(super) fn writer_until(deadline: std::time::Instant) -> Result<Option<Guard>> {
+    private_dir(&root())?;
+    let Some(guard) = lock_until(&root().join(".lock"), deadline)? else { return Ok(None); };
+    rename::recover_locked()?;
+    rename::sync_legacy_locked()?;
+    Ok(Some(guard))
 }
 
 /// An owner-only lock file, never written. Windows locks a byte range only
@@ -200,14 +211,24 @@ pub(super) type Snapshot = BTreeMap<String, Vec<Pane>>;
 
 /// Each live session's panes as (pane, dead, run marker). No server means none.
 pub(super) fn live() -> Result<Snapshot> {
+    live_sessions().map(|(snapshot, _)| snapshot)
+}
+
+/// `live`, and from the same answer each live session's name by its immutable
+/// session ID (`$N`), which a rename keeps.
+pub(super) fn live_sessions() -> Result<(Snapshot, BTreeMap<String, String>)> {
     let mut result: Snapshot = BTreeMap::new();
+    let mut names = BTreeMap::new();
     for row in backend::current().panes()? {
+        if !row.session_id.is_empty() {
+            names.insert(row.session_id, row.session.clone());
+        }
         result
             .entry(row.session)
             .or_default()
             .push((row.pane, row.dead, row.run_marker));
     }
-    Ok(result)
+    Ok((result, names))
 }
 
 pub(super) fn matches(record: &Value, panes: Option<&Vec<Pane>>) -> bool {
