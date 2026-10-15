@@ -142,7 +142,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val machine=JSONObject().put("id",key.computerId).put("name",machines.find{it.id==key.computerId&&it.connectionId==key.connectionId}?.name.orEmpty()).put("snapshot",result)
         val rows=NativeParser.sessions(connection,machine)
         check(rows.size==result.getJSONArray("sessions").length() && rows.all { SessionFilters.archived(it) && archive.range.let { r -> it.raw.optDouble("archived_at",-1.0)>=r.from && it.raw.optDouble("archived_at",-1.0)<r.until } }){"Invalid archived session identity"}
-        return ArchivePage(ProjectParser.parse(connection,listOf(machine),rows).sessions,result.getString("next_cursor"),result.getInt("total"))
+        val window=result.has("position") || result.has("previous_cursor")
+        if(window)check(result.opt("previous_cursor") is String && result.opt("position") is Number && result.getDouble("position")==result.getInt("position").toDouble()){"Invalid archive window"}
+        return ArchivePage(ProjectParser.parse(connection,listOf(machine),rows).sessions,result.getString("next_cursor"),result.getInt("total"),result.optString("previous_cursor",""),if(window)result.getInt("position")else null)
     }
     fun chooseSessionFilter(value: SessionFilter) { sessionFilter = value; resetSessionScroll() }
     fun changeSessionQuery(value: String) { sessionQuery = value; resetSessionScroll() }

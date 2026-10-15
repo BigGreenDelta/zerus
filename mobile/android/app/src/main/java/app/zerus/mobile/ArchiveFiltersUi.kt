@@ -27,9 +27,11 @@ import java.time.LocalDate
             OutlinedButton(modifier=Modifier.heightIn(min=48.dp),onClick={pick(archive.last){archive.dates(ArchivePeriod.Custom,through=it)}}){Text("Through ${archive.last}")}
         }
         if(!archive.range.valid) Text("Choose an end date on or after the start date.",color=MaterialTheme.colorScheme.error)
-        else Text(if(archive.loading) "Loading archive…" else if(!archive.totalsKnown && !archive.hasMore) "$visibleCount previously loaded sessions shown" else "${archive.rows.size} of ${archive.total} loaded",style=MaterialTheme.typography.bodySmall)
+        else Text(if(archive.loading) "Loading archive…" else if(!archive.totalsKnown && !archive.hasMore) "$visibleCount previously loaded sessions shown" else "${archive.rows.size} shown of ${archive.total} · up to 50 per computer",style=MaterialTheme.typography.bodySmall)
+        archive.windows.forEach { (machine,window) -> if(window.position!=null && window.count>0) Text("${machineNames[machine] ?: "Computer"}: ${window.position+1}–${window.position+window.count} of ${window.total}",style=MaterialTheme.typography.bodySmall) }
         archive.errors.forEach { (machine,error) -> Text("${machineNames[machine] ?: "Computer"}: $error",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall) }
         if(unsupported.isNotEmpty()) Text("Archive paging needs online computers with an updated relay, connector and CLI. Unavailable: ${unsupported.joinToString()}.",style=MaterialTheme.typography.bodySmall)
         TextButton(modifier=Modifier.heightIn(min=48.dp),onClick={archive.refresh()},enabled=!archive.loading && archive.range.valid){Text("Refresh archive")}
+        if(archive.hasNewer) OutlinedButton(modifier=Modifier.heightIn(min=48.dp),onClick={archive.loadNewer()},enabled=!archive.loading && archive.range.valid){Text("Newer archived sessions")}
     }
 }

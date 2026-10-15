@@ -39,7 +39,7 @@ class ArchiveConnector(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.node.archive_allowed(*target))
     async def test_bad_native_pages_never_grant_archive_admission(self):
         self.node.fleet.resolve=AsyncMock(return_value=(self.node,None))
-        for edit in ({'version':2},{'total':0},{'from':5},{'next_cursor':'#'},{'sessions':[]}):
+        for edit in ({'version':2},{'total':0},{'from':5},{'next_cursor':'#'},{'sessions':[]}, {'previous_cursor':'#','position':0},{'previous_cursor':'','position':True},{'previous_cursor':'','position':1},{'position':0}):
             page={**self.page(),**edit}
             if edit=={'sessions':[]}:page['next_cursor']='loop'
             with patch.object(self.node,'native',AsyncMock(return_value=page)):
@@ -109,6 +109,9 @@ class NativeArchivePaging(OperationCase,BlackBoxCase):
         result=await self.submit(inspect,process);self.assertEqual(result['state'],'completed',result)
         self.assertEqual(result['result']['archive_id'],row['archive_id']);self.assertEqual(result['result']['run_id'],row['run_id'])
         self.assertEqual(len(self.since(mark,'archives')),2,'Inspect must not load the entire archive again')
+        back=await self.submit(request(second['result']['previous_cursor']),process)
+        self.assertEqual(back['state'],'completed',back);self.assertEqual(back['result']['position'],0)
+        self.assertEqual([r['archive_id'] for r in back['result']['sessions']],[r['archive_id'] for r in page['sessions']])
         process.stop()
         process=await self.launch()
         mark=self.mark()

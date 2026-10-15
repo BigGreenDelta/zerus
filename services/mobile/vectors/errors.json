@@ -50,6 +50,7 @@
   {"count":1,"exception":"ValueError","function":"page","message":"invalid archive identity or date","module":"archives"},
   {"count":1,"exception":"ValueError","function":"page","message":"invalid archive row","module":"archives"},
   {"count":1,"exception":"ValueError","function":"page","message":"invalid native archive page","module":"archives"},
+  {"count":1,"exception":"ValueError","function":"page","message":"invalid native archive window","module":"archives"},
   {"count":1,"exception":"ValueError","function":"validate","message":"invalid archive cursor","module":"archives"},
   {"count":1,"exception":"ValueError","function":"validate","message":"invalid archive date range or page size","module":"archives"},
   {"count":1,"exception":"ValueError","function":"validate","message":"invalid archive query fields","module":"archives"},

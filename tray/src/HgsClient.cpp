@@ -1,4 +1,5 @@
 #include "HgsClient.h"
+#include <QtMath>
 #include "DownloadCache.h"
 #include "ChildProcess.h"
 #include "ProcessRunner.h"
@@ -379,6 +380,10 @@ quint64 HgsClient::requestArchivePage(const QString &host,const QJsonObject &que
         const auto rows=data["sessions"].toArray();
         if(!doc.isObject()||data["version"].toInt()!=1||!data["sessions"].isArray()||rows.size()>50||!data["next_cursor"].isString()||data["next_cursor"].toString().size()>1024||!data["total"].isDouble()||data["total"].toDouble()<rows.size()
             ||data["from"]!=query["from"]||data["until"]!=query["until"]||data["query"]!=query["query"]||rows.isEmpty()&&!data["next_cursor"].toString().isEmpty()||!query["cursor"].toString().isEmpty()&&query["cursor"]==data["next_cursor"])error=tr("Invalid archive page. Update the computer CLI and refresh.");
+        if(data.contains("previous_cursor")||data.contains("position")) {
+            const auto previous=data["previous_cursor"];const auto position=data["position"].toDouble(-1);
+            if(!previous.isString()||previous.toString().size()>1024||!data["position"].isDouble()||position<0||position!=qFloor(position)||position+rows.size()>data["total"].toDouble())error=tr("Invalid archive window. Refresh the archive.");
+        }
         for(const auto &value:rows){const auto row=value.toObject();const auto id=row["archive_id"].toString();if(row["state"]!="archived"||row["name"].toString().isEmpty()||QUuid(id).toString(QUuid::WithoutBraces)!=id||!row["archived_at"].isDouble()||row["archived_at"].toDouble()<query["from"].toDouble()||row["archived_at"].toDouble()>=query["until"].toDouble())error=tr("Invalid archived session identity. Refresh the archive.");}
         finish(data,error);
     },[finish](const QString &,const QString &error){finish({},error);},QJsonDocument(query).toJson(QJsonDocument::Compact));

@@ -28,6 +28,12 @@ def page(value, payload):
             or value.get('from')!=payload.get('from',0) or value.get('until')!=payload.get('until',MAX_DATE)
             or value.get('query')!=payload.get('query','') or not value['sessions'] and value['next_cursor']):
         raise ValueError('invalid native archive page')
+    if 'previous_cursor' in value or 'position' in value:
+        previous=value.get('previous_cursor');position=value.get('position')
+        if (not isinstance(previous,str) or len(previous)>1024 or not re.fullmatch(r'[A-Za-z0-9_-]*',previous)
+                or type(position) is not int or not 0<=position<=value['total']
+                or position+len(value['sessions'])>value['total']):
+            raise ValueError('invalid native archive window')
     seen=set(); previous=None
     for row in value['sessions']:
         if not isinstance(row,dict) or row.get('state')!='archived': raise ValueError('invalid archive row')

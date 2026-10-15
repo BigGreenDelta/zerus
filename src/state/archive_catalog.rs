@@ -41,6 +41,8 @@ struct Cursor {
     query: String,
     at: f64,
     id: String,
+    #[serde(default)]
+    newer: bool,
 }
 
 pub(crate) fn validate(value: &Value) -> Result<Query> {
@@ -297,20 +299,33 @@ pub(crate) fn page(value: &Value) -> Result<Value> {
         params![q.from, q.until, needle],
         |r| r.get(0),
     ))?;
-    let mut stmt=sql(db.prepare("SELECT id,name,at FROM archive_rows WHERE at>=? AND at<? AND instr(search,?)>0 AND (at<? OR (at=? AND id<?)) ORDER BY at DESC,id DESC LIMIT ?"))?;
-    let rows = sql(stmt.query_map(
-        params![q.from, q.until, needle, at, at, id, q.limit + 1],
-        |r| {
+    let newer = cursor.as_ref().is_some_and(|c| c.newer);
+    let mut stmt=sql(db.prepare(if newer {
+        "SELECT id,name,at FROM archive_rows WHERE at>=? AND at<? AND instr(search,?)>0 AND (at>? OR (at=? AND id>?)) ORDER BY at ASC,id ASC LIMIT ?"
+    } else {
+        "SELECT id,name,at FROM archive_rows WHERE at>=? AND at<? AND instr(search,?)>0 AND (at<? OR (at=? AND id<?)) ORDER BY at DESC,id DESC LIMIT ?"
+    }))?;
+    let rows = sql(
+        stmt.query_map(params![q.from, q.until, needle, at, at, id, q.limit], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, f64>(2)?,
             ))
-        },
-    ))?;
-    let rows = rows
+        }),
+    )?;
+    let mut rows = rows
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
+    if newer {
+        rows.reverse();
+    }
+    let position: u64 = if let Some((first_id, _, first_at)) = rows.first() {
+        sql(db.query_row("SELECT count(*) FROM archive_rows WHERE at>=? AND at<? AND instr(search,?)>0 AND (at>? OR (at=? AND id>?))",
+            params![q.from,q.until,needle,first_at,first_at,first_id],|r|r.get(0)))?
+    } else {
+        total
+    };
     let records = rows
         .iter()
         .take(q.limit as usize)
@@ -341,24 +356,39 @@ pub(crate) fn page(value: &Value) -> Result<Value> {
         bytes += size;
         sessions.push(row);
     }
-    let next = if sessions.len() == rows.len() || sessions.is_empty() {
-        String::new()
-    } else {
-        let (id, _, at) = &rows[sessions.len() - 1];
-        URL_SAFE_NO_PAD.encode(
+    let encode = |at: f64, id: &str, newer: bool| -> Result<String> {
+        Ok(URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&Cursor {
                 version: 1,
-                catalog,
+                catalog: catalog.clone(),
                 from: q.from,
                 until: q.until,
                 query: query_hash(&q.query),
-                at: *at,
-                id: id.clone(),
+                at,
+                id: id.to_owned(),
+                newer,
             })
             .map_err(|e| e.to_string())?,
-        )
+        ))
+    };
+    let next = if !sessions.is_empty() && position + (sessions.len() as u64) < total {
+        let (id, _, at) = &rows[sessions.len() - 1];
+        encode(*at, id, false)?
+    } else {
+        String::new()
+    };
+    let previous = if position > 0 {
+        if let Some((id, _, at)) = rows.first() {
+            encode(*at, id, true)?
+        } else if let Some(c) = cursor {
+            encode(c.at, &c.id, true)?
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
     };
     Ok(
-        json!({"version":1,"sessions":sessions,"next_cursor":next,"total":total,"from":q.from,"until":q.until,"query":q.query}),
+        json!({"version":1,"sessions":sessions,"next_cursor":next,"previous_cursor":previous,"position":position,"total":total,"from":q.from,"until":q.until,"query":q.query}),
     )
 }

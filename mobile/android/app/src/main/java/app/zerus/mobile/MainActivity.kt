@@ -603,7 +603,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 val selected = model.sessionFilter == filter
                 val count = if(filter==SessionFilter.Archive && !model.demo && model.archiveSupportedMachines.isNotEmpty()) {
                     if(!model.archive.totalsKnown && counts.getValue(filter)==0) "…"
-                    else counts.getValue(filter).toString() + if(!model.archive.totalsKnown || model.archive.hasMore) "+" else ""
+                    else counts.getValue(filter).toString() + if(model.archive.partial) "+" else ""
                 } else counts.getValue(filter).toString()
                 val accent = if (filter == SessionFilter.Attention && counts.getValue(filter) > 0) Amber else if (selected) Mint else Muted
                 OutlinedButton(onClick = { model.chooseSessionFilter(filter) }, modifier = Modifier.height(48.dp).widthIn(min = 56.dp).semantics {
@@ -670,8 +670,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             }
         }
-        if (projection.visibleCount == 0 && !(model.sessionFilter==SessionFilter.Archive && model.archive.loading)) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else if(model.sessionFilter==SessionFilter.Archive && model.archive.hasMore) "No loaded sessions match. Load more or narrow the date range." else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
-        if(model.sessionFilter==SessionFilter.Archive && model.archive.hasMore) item { OutlinedButton(onClick={model.archive.loadMore()},enabled=!model.archive.loading && model.archive.range.valid,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(if(model.archive.loading) "Loading…" else if(model.archive.errors.isEmpty()) "Load more archived sessions" else "Retry archive loading") } }
+        if (projection.visibleCount == 0 && !(model.sessionFilter==SessionFilter.Archive && model.archive.loading)) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else if(model.sessionFilter==SessionFilter.Archive && model.archive.partial) "No sessions in this page match. Browse older/newer sessions or narrow the date range." else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
+        if(model.sessionFilter==SessionFilter.Archive && model.archive.hasMore) item { OutlinedButton(onClick={model.archive.loadMore()},enabled=!model.archive.loading && model.archive.range.valid,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(if(model.archive.loading) "Loading…" else "Older archived sessions") } }
     }
     sessionActions?.let { SessionActionsSheet(model, it) { sessionActions = null } }
     if (machineDialog) ZerusAlertDialog(onDismissRequest = { machineDialog = false }, title = { Text("Filter machines") },

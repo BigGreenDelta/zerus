@@ -89,5 +89,24 @@ class ArchivePages(unittest.TestCase):
         if hasattr(os,'mkfifo'):
             os.mkfifo(self.archives/(row['archive_id']+'.json'))
             self.assertNotEqual(lookup(value).returncode,0)
+    def test_bidirectional_keysets_reach_all_rows_with_only_current_window_anchors(self):
+        for i in range(257):self.record(i,100+i//4)
+        expected=sorted([(100+i//4,str(uuid.UUID(int=i+1))) for i in range(257)],reverse=True)
+        page=self.run_query();position=0
+        while True:
+            self.assertEqual(page['position'],position)
+            self.assertEqual([(r['archived_at'],r['archive_id']) for r in page['sessions']],expected[position:position+50])
+            self.assertLessEqual(len(page['sessions']),50)
+            self.assertEqual(bool(page['previous_cursor']),position>0)
+            if not page['next_cursor']:break
+            page=self.run_query({'cursor':page['next_cursor']});position+=50
+        self.assertEqual(position,250)
+        while page['previous_cursor']:
+            page=self.run_query({'cursor':page['previous_cursor']});position=max(0,position-50)
+            self.assertEqual(page['position'],position)
+            self.assertEqual([(r['archived_at'],r['archive_id']) for r in page['sessions']],expected[position:position+50])
+        self.assertEqual(position,0)
+        next_page=self.run_query({'cursor':page['next_cursor']})
+        for change in ({'query':'changed'},{'from':1},{'until':200}):self.run_query(dict(cursor=next_page['previous_cursor'],**change),True)
 
 if __name__=='__main__':unittest.main()

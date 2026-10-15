@@ -415,6 +415,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_machineFilter, &MachineFilter::selectionChanged, this, [this](const QSet<QString> &hosts) { m_hostFilters = hosts; rebuild(); });
     m_archiveBrowser=new ArchiveBrowser(m_client,this);listLayout->addWidget(m_archiveBrowser);
     connect(m_archiveBrowser,&ArchiveBrowser::changed,this,[this]{if(m_filter=="archived")rebuild();});
+    connect(m_archiveBrowser,&ArchiveBrowser::windowChanged,this,[this]{if(m_filter=="archived")m_sessions->scrollToTop();});
     m_folderFilterClear=new QPushButton;m_folderFilterClear->setObjectName("clearFolderFilter");m_folderFilterClear->hide();m_folderFilterClear->setAutoDefault(false);
     connect(m_folderFilterClear,&QPushButton::clicked,this,[this]{m_folderFilterPath.clear();rebuild();});listLayout->addWidget(m_folderFilterClear);
     // Holds the height of filter rows the strip hides, so the list does not move.

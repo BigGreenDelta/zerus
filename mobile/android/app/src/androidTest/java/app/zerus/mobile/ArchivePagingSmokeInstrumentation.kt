@@ -33,7 +33,7 @@ class ArchivePagingSmokeInstrumentation:Instrumentation(){
     override fun onCreate(arguments:Bundle?){variant=arguments?.getString("variant")?:"normal";super.onCreate(arguments);start()}
     override fun onStart(){val result=Bundle();try{
         check(Build.VERSION.SDK_INT>=33&&BuildConfig.DEBUG&&Build.HARDWARE in setOf("ranchu","goldfish"));check(PrivateStore(targetContext).connections().isEmpty())
-        smoke();result.putString("stream","Archive paging passed ($variant): lazy <=50 rows, physical Load more, date/cursor reset and custom date geometry.\n");finish(Activity.RESULT_OK,result)
+        smoke();result.putString("stream","Archive paging passed ($variant): bounded <=50 retained rows, physical older/newer beyond cap, date/cursor reset and custom date geometry.\n");finish(Activity.RESULT_OK,result)
     }catch(e:Throwable){dump();shot("failure");result.putString("stream","Archive paging failed ($variant): ${e.stackTraceToString()}\n");finish(Activity.RESULT_CANCELED,result)}}
     private fun <T> main(action:()->T):T{val r=AtomicReference<Result<T>>();runOnMainSync{r.set(runCatching(action))};return r.get().getOrThrow()}
     private fun await(label:String,condition:()->Boolean){val until=SystemClock.elapsedRealtime()+15000;while(!condition()){check(SystemClock.elapsedRealtime()<until){"Timed out: $label"};SystemClock.sleep(40)}}
@@ -56,9 +56,9 @@ class ArchivePagingSmokeInstrumentation:Instrumentation(){
         val key=MachineKey("fixture-workspace","11111111-1111-4111-8111-111111111111");val calls=AtomicInteger();val last=AtomicReference<JSONObject>()
         val client=OkHttpClient.Builder().addInterceptor{chain->val request=chain.request();check(request.url.host=="relay.example.test"&&request.method=="POST"&&request.url.encodedPath=="/v1/requests")
             val body=JSONObject(okio.Buffer().also{request.body?.writeTo(it)}.readUtf8());check(body.string("operation")=="archive_list"&&body.string("session").isEmpty()&&body.string("computer_id")==key.computerId)
-            val q=body.getJSONObject("payload");check(q.getInt("limit")==50);last.set(q);calls.incrementAndGet();val older=q.string("cursor").isNotBlank();val rows=JSONArray()
-            for(i in (if(older)50 else 0) until (if(older)51 else 50))rows.put(JSONObject().put("name","codex/example/archived-$i").put("cmd","codex").put("state","archived").put("run_id","run-$i").put("conversation_id","conversation-$i").put("archive_id","10000000-0000-4000-8000-${(i+1).toString().padStart(12,'0')}").put("archived_at",q.getLong("from")+100))
-            val result=JSONObject().put("version",1).put("request_id",body.string("request_id")).put("sessions",rows).put("next_cursor",if(older)"" else "next").put("total",2043).put("from",q.getLong("from")).put("until",q.getLong("until")).put("query",q.string("query"))
+            val q=body.getJSONObject("payload");check(q.getInt("limit")==50);last.set(q);calls.incrementAndGet();val start=q.string("cursor").removePrefix("page_").toIntOrNull()?:0;val rows=JSONArray()
+            for(i in start until start+50)rows.put(JSONObject().put("name","codex/example/archived-$i").put("cmd","codex").put("state","archived").put("run_id","run-$i").put("conversation_id","conversation-$i").put("archive_id","10000000-0000-4000-8000-${(i+1).toString().padStart(12,'0')}").put("archived_at",q.getLong("from")+2043-i))
+            val result=JSONObject().put("version",1).put("request_id",body.string("request_id")).put("sessions",rows).put("next_cursor","page_${start+50}").put("previous_cursor",if(start>0)"page_${start-50}"else"").put("position",start).put("total",2043).put("from",q.getLong("from")).put("until",q.getLong("until")).put("query",q.string("query"))
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("Fixture").body(JSONObject().put("request_id",body.string("request_id")).put("state","completed").put("result",result).toString().toResponseBody("application/json".toMediaType())).build()
         }.build()
         val activity=startActivitySync(Intent(targetContext,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
@@ -75,15 +75,22 @@ class ArchivePagingSmokeInstrumentation:Instrumentation(){
         }
         SystemClock.sleep(300);check(calls.get()==0){"Eager archive fetch"};main{model.chooseSessionFilter(SessionFilter.Archive)}
         await("first page"){main{!model.archive.loading&&model.archive.rows.size==50}};check(calls.get()==1);shot("first")
-        physical("Load more archived sessions");await("second page"){main{!model.archive.loading&&model.archive.rows.size==51}};check(calls.get()==2&&last.get().string("cursor")=="next")
-        main{model.archive.dates(ArchivePeriod.Today)};await("date reset"){calls.get()==3&&main{!model.archive.loading&&model.archive.rows.size==50}};check(last.get().string("cursor").isBlank()&&last.get().getLong("from")>0);shot("today")
-        main{model.archive.dates(ArchivePeriod.Custom)};await("custom range"){calls.get()==4&&main{!model.archive.loading}}
+        for(start in listOf(50,100)){
+            physical("Older archived sessions");await("older window $start"){main{!model.archive.loading&&model.archive.rows.size==50&&model.archive.rows.first().target.run=="run-$start"}}
+            check(last.get().string("cursor")=="page_$start");check(main{model.sessions.count{SessionFilters.archived(it)}==50})
+        };check(calls.get()==3);shot("older")
+        for(start in listOf(50,0)){
+            physical("Newer archived sessions");await("newer window $start"){main{!model.archive.loading&&model.archive.rows.size==50&&model.archive.rows.first().target.run=="run-$start"}}
+            check(last.get().string("cursor")=="page_$start")
+        };check(calls.get()==5&&!main{model.archive.hasNewer});shot("newer")
+        main{model.archive.dates(ArchivePeriod.Today)};await("date reset"){calls.get()==6&&main{!model.archive.loading&&model.archive.rows.size==50}};check(last.get().string("cursor").isBlank()&&last.get().getLong("from")>0);shot("today")
+        main{model.archive.dates(ArchivePeriod.Custom)};await("custom range"){calls.get()==7&&main{!model.archive.loading}}
         val original=main{model.archive.first};val dateLabel="From $original";physical(dateLabel);shot("calendar")
-        var cancel=node("CANCEL");while(!cancel.isClickable&&cancel.parent!=null)cancel=cancel.parent;check(cancel.performAction(AccessibilityNodeInfo.ACTION_CLICK));check(calls.get()==4)
+        var cancel=node("CANCEL");while(!cancel.isClickable&&cancel.parent!=null)cancel=cancel.parent;check(cancel.performAction(AccessibilityNodeInfo.ACTION_CLICK));check(calls.get()==7)
         await("calendar dismissed"){uiAutomation.clearCache();find(uiAutomation.rootInActiveWindow,dateLabel)!=null}
         physical(dateLabel);val chosen=original.withDayOfMonth(if(original.dayOfMonth<28)original.dayOfMonth+1 else original.dayOfMonth-1)
         var day=node(chosen.dayOfMonth.toString());while(!day.isClickable&&day.parent!=null)day=day.parent;check(day.performAction(AccessibilityNodeInfo.ACTION_CLICK))
         var okay=node("OK");while(!okay.isClickable&&okay.parent!=null)okay=okay.parent;check(okay.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-        await("applied native date"){calls.get()==5&&main{model.archive.first==chosen&&!model.archive.loading}};check(last.get().string("cursor").isBlank());shot("custom");main{activity.finish()}
+        await("applied native date"){calls.get()==8&&main{model.archive.first==chosen&&!model.archive.loading}};check(last.get().string("cursor").isBlank());shot("custom");main{activity.finish()}
     }
 }

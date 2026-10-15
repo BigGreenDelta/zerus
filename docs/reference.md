@@ -255,11 +255,13 @@ Archive, independently of its creation or last message. Choose All dates, Today,
 7/30 calendar days, or an inclusive From/Through range. Days use the viewing
 device's local time zone, including daylight-saving changes. Pages request the
 most recently archived instances first; the desktop retains saved row order within
-each project. **Refresh** starts a fresh view; **Load more**
-requests the next page, at most 50 rows per selected online computer. Loaded/total
-status distinguishes an empty archive from a partly loaded one. The Archive
-badge counts loaded rows in the current project/machine scope, with `+` when
-more remain; the date panel reports the whole queried computer/date total. An unavailable
+each project. **Refresh** starts a fresh view. **Older sessions** and **Newer
+sessions** replace the current page, retaining at most 50 rows per selected online
+computer. Only two cursor anchors per computer are kept, without a growing page
+or cursor history; every matching record remains reachable in either direction.
+The date panel reports each computer's current row range and matching total.
+The Archive badge counts rows in the current project/machine scope, with `+` when
+the current window does not contain the whole archive. An unavailable
 computer keeps its own error and retry state; changing dates, search or machines
 discards responses belonging to the previous view.
 
@@ -281,8 +283,10 @@ printf '%s' '{"from":0,"until":253402300800,"limit":50,"cursor":"","query":""}' 
 `limit` is 1–50. All fields are optional. `query` is literal case-insensitive
 archive metadata search (names, IDs, provider, folder and title), at most 256
 characters; this is distinct from the desktop's global public-message search.
-The result contains `version:1`, `sessions`, `total`, `next_cursor` and the echoed
-range/query. Pass the opaque cursor with the same range/query to continue.
+The result contains `version:1`, `sessions`, `total`, `next_cursor`, the additive
+`previous_cursor` and zero-based `position`, and the echoed range/query. Pass either
+opaque cursor with the same range/query to move older or newer. Both directions
+use date/ID keysets; no offset scan or retained client cursor stack is required.
 Ordering uses `(archived_at, archive_id)` descending, avoiding offset duplicates
 when an earlier page changes. Newer completions appear after Refresh. Deleted or
 restored instances disappear; all actions still recheck exact native identity.

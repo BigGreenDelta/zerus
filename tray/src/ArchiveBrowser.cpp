@@ -21,20 +21,22 @@ ArchiveBrowser::ArchiveBrowser(HgsClient &client,QWidget *parent):QWidget(parent
     m_from->setObjectName("archiveFrom");m_from->setAccessibleName(tr("Archived from, inclusive"));m_until->setObjectName("archiveUntil");m_until->setAccessibleName(tr("Archived through, inclusive"));range->hide();layout->addWidget(range);
     m_status=new QLabel;m_status->setObjectName("archiveStatus");m_status->setWordWrap(true);layout->addWidget(m_status);
     m_more=new QPushButton(tr("Load more"));m_more->setObjectName("archiveMore");layout->addWidget(m_more);
+    m_newer=new QPushButton(tr("Newer sessions"));m_newer->setObjectName("archiveNewer");layout->addWidget(m_newer);
     connect(m_period,qOverload<int>(&QComboBox::currentIndexChanged),this,[this,range](int i){range->setVisible(i==4);refresh();});
     connect(m_from,&QDateEdit::dateChanged,this,[this]{if(m_period->currentIndex()==4)refresh();});
     connect(m_until,&QDateEdit::dateChanged,this,[this]{if(m_period->currentIndex()==4)refresh();});
     connect(m_refresh,&QPushButton::clicked,this,&ArchiveBrowser::refresh);
     connect(m_more,&QPushButton::clicked,this,&ArchiveBrowser::loadMore);
+    connect(m_newer,&QPushButton::clicked,this,[this]{navigate(true);});
     connect(&m_client,&HgsClient::archivePageReady,this,[this](quint64 id,const QString &host,const QJsonObject &data,const QString &error){
         auto i=m_pages.find(host);if(i==m_pages.end()||i->request!=id)return;
         i->request=0;i->error=error;
         if(error.isEmpty()){
-            i->loaded=true;i->cursor=data["next_cursor"].toString();i->total=data["total"].toInt();
             const auto rows=HgsClient::parseSessions(data["sessions"].toArray());
-            for(const auto &row:rows){bool duplicate=false;for(const auto &old:i->rows)if(old.archiveId==row.archiveId){duplicate=true;break;}if(!duplicate)i->rows.append(row);}
+            if(rows.isEmpty()&&!i->rows.isEmpty())i->error=tr("Archive changed. Refresh to start a new view.");
+            else {i->loaded=true;i->cursor=data["next_cursor"].toString();i->previous=data["previous_cursor"].toString();i->total=data["total"].toInt();i->position=data.contains("position")?data["position"].toInt():-1;i->rows=rows;}
         }
-        updateStatus();emit changed();
+        const bool accepted=i->error.isEmpty();updateStatus();emit changed();if(accepted)emit windowChanged();
     });
     m_debounce=new QTimer(this);m_debounce->setSingleShot(true);m_debounce->setInterval(300);connect(m_debounce,&QTimer::timeout,this,&ArchiveBrowser::refresh);
     hide();
@@ -59,21 +61,24 @@ void ArchiveBrowser::configure(const QMap<QString,QString>&hosts,bool active){
 }
 void ArchiveBrowser::setQuery(const QString &query){const auto text=query.trimmed();if(text==m_query)return;m_query=text;m_client.cancelArchivePages();m_pages.clear();m_debounce->start();updateStatus();}
 void ArchiveBrowser::refresh(){m_debounce->stop();m_client.cancelArchivePages();m_pages.clear();if(m_active)loadMore();updateStatus();emit changed();}
-void ArchiveBrowser::loadMore(){
+void ArchiveBrowser::loadMore(){navigate(false);}
+void ArchiveBrowser::navigate(bool newer){
+    if(!m_active)return;
     if(query({})["from"].toDouble()>=query({})["until"].toDouble()){updateStatus();return;}
-    for(auto h=m_hosts.begin();h!=m_hosts.end();++h){auto &p=m_pages[h.key()];if(p.request||(p.loaded&&p.cursor.isEmpty()&&p.error.isEmpty()))continue;p.error.clear();p.request=m_client.requestArchivePage(h.key(),query(p.cursor));}
+    for(auto h=m_hosts.begin();h!=m_hosts.end();++h){auto &p=m_pages[h.key()];const auto cursor=newer?p.previous:p.cursor;if(p.request||(newer&&cursor.isEmpty())||(!newer&&p.loaded&&cursor.isEmpty()))continue;p.error.clear();p.newer=newer;p.request=m_client.requestArchivePage(h.key(),query(cursor));}
     updateStatus();
 }
 void ArchiveBrowser::updateStatus(){
-    int loaded=0,total=0;bool busy=false,more=false;QStringList errors;
-    for(auto i=m_pages.begin();i!=m_pages.end();++i){loaded+=i->rows.size();total+=i->total;busy|=i->request!=0;more|=!i->loaded||!i->cursor.isEmpty()||!i->error.isEmpty();if(!i->error.isEmpty())errors.append(m_hosts.value(i.key())+": "+i->error);}
+    bool busy=false,more=false,newer=false;QStringList errors,windows;
+    for(auto i=m_pages.begin();i!=m_pages.end();++i){busy|=i->request!=0;more|=!i->loaded||!i->cursor.isEmpty();newer|=!i->previous.isEmpty();if(!i->error.isEmpty())errors.append(m_hosts.value(i.key())+": "+i->error);
+        if(i->loaded)windows.append(m_hosts.value(i.key())+": "+(i->position>=0&&!i->rows.isEmpty()?tr("%1–%2 of %3").arg(i->position+1).arg(i->position+i->rows.size()).arg(i->total):tr("%1 shown of %2").arg(i->rows.size()).arg(i->total)));}
     const bool valid=query({})["from"].toDouble()<query({})["until"].toDouble();
-    m_status->setText(!valid?tr("Choose an end date on or after the start date."):!errors.isEmpty()?errors.join('\n').left(240):busy?tr("Loading archive…"):m_hosts.isEmpty()?tr("Archived date · loaded sessions"):tr("%1 of %2 loaded · archived date").arg(loaded).arg(total));
+    m_status->setText(!valid?tr("Choose an end date on or after the start date."):!errors.isEmpty()?errors.join('\n').left(240):busy?tr("Loading archive…"):m_hosts.isEmpty()?tr("Archived date · loaded sessions"):windows.join('\n'));
     m_status->setToolTip(errors.join('\n'));
-    m_more->setVisible(!m_hosts.isEmpty()&&(more||busy));m_more->setEnabled(valid&&!busy);m_more->setText(errors.isEmpty()?tr("Load more"):tr("Retry"));m_refresh->setEnabled(!busy);
+    m_more->setVisible(!m_hosts.isEmpty()&&(more||busy));m_more->setEnabled(valid&&!busy);m_more->setText(tr("Older sessions"));m_newer->setVisible(newer);m_newer->setEnabled(valid&&!busy);m_refresh->setEnabled(!busy);
 }
 QList<SessionInfo> ArchiveBrowser::sessions(const QString&host)const{return m_pages.value(host).rows;}
 int ArchiveBrowser::total()const{int n=0;for(const auto&p:m_pages)n+=p.total;return n;}
 
 bool ArchiveBrowser::totalsKnown()const{if(m_hosts.isEmpty())return false;for(auto h=m_hosts.begin();h!=m_hosts.end();++h)if(!m_pages.value(h.key()).loaded)return false;return true;}
-bool ArchiveBrowser::hasMore()const{for(auto h=m_hosts.begin();h!=m_hosts.end();++h){const auto p=m_pages.value(h.key());if(!p.loaded||!p.cursor.isEmpty()||!p.error.isEmpty())return true;}return false;}
+bool ArchiveBrowser::hasMore()const{for(auto h=m_hosts.begin();h!=m_hosts.end();++h){const auto p=m_pages.value(h.key());if(!p.loaded||!p.cursor.isEmpty()||!p.previous.isEmpty()||p.rows.size()<p.total||!p.error.isEmpty())return true;}return false;}

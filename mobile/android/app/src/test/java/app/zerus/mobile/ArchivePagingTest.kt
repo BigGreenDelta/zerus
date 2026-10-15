@@ -44,7 +44,27 @@ class ArchivePagingTest {
         var calls=0
         val pager=ArchivePaging(this){_,q -> calls++;when(calls){1->ArchivePage(listOf(row(1)),"older",2);2->throw IllegalStateException("offline");else->{assertEquals("older",q.getString("cursor"));ArchivePage(listOf(row(2)),"",2)}}}
         pager.configure(setOf(key),"",true);yield();pager.loadMore();yield();assertEquals(1,pager.rows.size);assertTrue(pager.errors.isNotEmpty())
-        pager.loadMore();yield();assertEquals(2,pager.rows.size);assertTrue(pager.errors.isEmpty())
+        pager.loadMore();yield();assertEquals(1,pager.rows.size);assertEquals("r2",pager.rows.single().target.run);assertTrue(pager.errors.isEmpty())
         pager.configure(emptySet(),"",true);assertTrue(pager.rows.isEmpty())
+    }
+    @Test fun boundedWindowsReachAllRecordsAndReturnWithoutGrowingCursorHistory()=runBlocking {
+        val total=257;var calls=0
+        val pager=ArchivePaging(this){_,q ->
+            calls++;val start=q.getString("cursor").removePrefix("page_").toIntOrNull()?:0
+            ArchivePage((start until minOf(start+50,total)).map(::row),if(start+50<total)"page_${start+50}"else"",total,if(start>0)"page_${maxOf(0,start-50)}"else"",start)
+        }
+        pager.configure(setOf(key),"needle",true);yield()
+        val seen=mutableSetOf<String>()
+        for(start in 0 until total step 50){
+            assertEquals(start,pager.windows.getValue(key).position);assertTrue(pager.rows.size<=50)
+            seen+=pager.rows.map{it.target.key};assertEquals(start>0,pager.hasNewer)
+            if(pager.hasMore){pager.loadMore();yield()}
+        }
+        assertEquals(total,seen.size);assertTrue(pager.partial);assertEquals(6,calls)
+        for(start in listOf(200,150,100,50,0)){
+            pager.loadNewer();yield();assertEquals(start,pager.windows.getValue(key).position)
+            assertEquals("r$start",pager.rows.first().target.run);assertEquals(50,pager.rows.size)
+        }
+        assertFalse(pager.hasNewer);assertEquals(11,calls)
     }
 }
