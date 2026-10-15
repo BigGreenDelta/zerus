@@ -59,6 +59,13 @@ class Adapter extends LlmAdapter {
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'child-call',name:'subagent',arguments:args}};
       yield {type:'finish',reason:{kind:'tool-calls'}};return;
     }
+    if (text.includes('UNCOMPOSED_ROOT_FIXTURE') && last?.role !== 'tool') {
+      const args=JSON.stringify({sessionId:text.match(/webhook-[0-9a-f-]{36}/)?.[0]??''});
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'tool-call-delta',index:0,id:'root-call',name:'hgs_test_root',argumentsDelta:args};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'root-call',name:'hgs_test_root',arguments:args}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};return;
+    }
     if (text.includes('QUESTION') && last?.role !== 'tool') {
       const args=JSON.stringify({ questions:[{id:'choice',question:'Which option?',options:[{label:'First'},{label:'Second'}]}] });
       yield {type:'block-start',index:0,blockType:'tool-call'};
@@ -79,7 +86,7 @@ class Adapter extends LlmAdapter {
     yield {type:'finish',reason:{kind:'stop'}};
   }
 }
-export const inject=['llm','goals','tools','approval','jobs'];
+export const inject=['llm','goals','tools','approval','jobs','agents'];
 export function apply(ctx,config) {
   ctx.llm.registerAdapter(['hgs-test'],new Adapter());
   // Hold a marked child's first step, before it records its subagent
@@ -155,6 +162,16 @@ export function apply(ctx,config) {
   ctx.tools.register(defineTool({name:'hgs_test_job_read',description:'Verify the model output cursor',parameters:{},
     output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},
     async execute(_args,exec){const owner=exec.agent.session.id;const job=ctx.jobs.list(owner).find(j=>j.owner===owner&&j.kind==='bash');return ctx.jobs.read(job.id,owner).chunks.map(c=>c.text).join('');}
+  }));
+  // A top-level agent on its own route, as a webhook creates one: no parent,
+  // and no model selection, which upstream installs only while composing one.
+  ctx.tools.register(defineTool({name:'hgs_test_root',description:'Create an uncomposed top-level agent',
+    parameters:{sessionId:{type:'string',required:true}},
+    output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},
+    async execute(args,exec){
+      await ctx.agents.create({sessionId:args.sessionId,agentOptions:{provider:'hgs-test',model:'test-b'},meta:{cwd:exec.agent.session.header.cwd}});
+      return args.sessionId;
+    }
   }));
   ctx.tools.register(defineTool({name:'hgs_test_approval',description:'Keyless approval fixture',parameters:{},
     output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},
