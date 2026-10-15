@@ -15,6 +15,31 @@
 #include <QDateTime>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#ifdef Q_OS_UNIX
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+#include "ChildProcess.h"
+
+namespace {
+#ifdef Q_OS_UNIX
+// A request's pipe ProcessRunner's macOS worker is still creating: pipe() made it
+// and close-on-exec follows only afterwards. High numbers keep its ends apart from
+// the descriptor a listing of /dev/fd opens.
+struct CreatingPipe {
+    int ends[2]={-1,-1};
+    CreatingPipe(){int made[2];if(::pipe(made)!=0)return;for(int i=0;i<2;++i){ends[i]=::fcntl(made[i],F_DUPFD,64);::close(made[i]);}}
+    ~CreatingPipe(){for(int fd:ends)if(fd>=0)::close(fd);}
+    bool valid() const{return ends[0]>=64&&ends[1]>=64;}
+};
+// The descriptors in a child's `ls /dev/fd`.
+QList<int> descriptors(const QString &path){
+    QFile file(path);QList<int> open;if(!file.open(QIODevice::ReadOnly))return open;
+    for(const auto &name:file.readAll().simplified().split(' '))if(!name.isEmpty())open<<name.toInt();
+    return open;
+}
+#endif
+}
 
 class FixtureReply : public QNetworkReply {
     QByteArray bytes; qint64 position=0;
@@ -323,6 +348,28 @@ private slots:
         plist("0.38.0.r815.g1234567.n42");controller.refreshBundleState();QVERIFY(controller.restartRequired());QVERIFY(changed.count()>0);
 #endif
     }
+    void restartHelperIsDetachedWithOnlyStdio(){
+#ifndef Q_OS_UNIX
+        QSKIP("The restart helper reopens a macOS bundle");
+#else
+        if(!ChildProcess::inheritsStdioOnly)QSKIP("This Qt cannot close inherited descriptors");
+        // In place of /bin/sh, record what the helper gets instead of reopening a bundle.
+        QTemporaryDir dir;QVERIFY(dir.isValid());const QString shell=dir.path()+"/sh",bundle=dir.path()+"/Zerus.app";
+        tool(shell,"#!/bin/sh\nout=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$out/arguments\"\necho \"$PPID\" > \"$out/parent\"\nls /dev/fd > \"$out/fds.part\" && mv \"$out/fds.part\" \"$out/fds\"\n");
+        // The GUI may be quitting while ProcessRunner creates a request's pipe; the helper
+        // then waits for it to exit and must not keep that request's input open meanwhile.
+        const CreatingPipe creating;QVERIFY(creating.valid());const qint64 pid=QCoreApplication::applicationPid();
+        QVERIFY(UpdateController::startRestartHelper(bundle,pid,shell));
+        QTRY_VERIFY(QFileInfo::exists(dir.path()+"/fds"));
+        QFile arguments(dir.path()+"/arguments");QVERIFY(arguments.open(QIODevice::ReadOnly));
+        QCOMPARE(QString::fromUtf8(arguments.readAll()).split('\n',Qt::SkipEmptyParts),QStringList({"-c","while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open -a \"$2\" --args --sessions","zerus-restart",QString::number(pid),bundle}));
+        // Detached: not a child of this process, so it outlives it.
+        QFile parent(dir.path()+"/parent");QVERIFY(parent.open(QIODevice::ReadOnly));const qint64 parentPid=parent.readAll().trimmed().toLongLong();
+        QVERIFY(parentPid>0);QVERIFY(parentPid!=pid);
+        const auto open=descriptors(dir.path()+"/fds");const auto shown=QDebug::toString(open).toLatin1();
+        QVERIFY2(open.contains(1),shown.constData());for(int fd:creating.ends)QVERIFY2(!open.contains(fd),shown.constData());
+#endif
+    }
     void canonicalOwnershipAsync(){
 #ifdef Q_OS_LINUX
         QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);qputenv("ZERUS_TEST_LOG",(dir.path()+"/args.json").toUtf8());
@@ -338,6 +385,21 @@ private slots:
     void unknownOwnerNeverOffersReplacement(){
 #ifdef Q_OS_LINUX
         QTemporaryDir dir;auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport sys\nprint('custom-owner' if sys.argv[1]=='-Qqo' else 'custom-owner 2.1-1')\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();UpdateController controller(nullptr,executable.fileName());QTRY_VERIFY_WITH_TIMEOUT(!controller.installation().version.isEmpty(),2000);QCOMPARE(controller.installation().package,QString("custom-owner"));QVERIFY(UpdateController::updateCommand(controller.installation()).isEmpty());qputenv("PATH",oldPath);
+#endif
+    }
+    void packageProbesInheritOnlyStdio(){
+#ifdef Q_OS_LINUX
+        if(!ChildProcess::inheritsStdioOnly)QSKIP("This Qt cannot close inherited descriptors");
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);const auto restorePath=qScopeGuard([oldPath]{qputenv("PATH",oldPath);});
+        tool(dir.path()+"/pacman","#!/bin/sh\nif [ \"$1\" = -Qqo ]; then ls /dev/fd > \"$0.fds.part\" && mv \"$0.fds.part\" \"$0.fds\"; echo zerus-ade-bin; else echo 'zerus-ade-bin 0.36.2-1'; fi\n");
+        QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
+        // A probe started while a request's pipe is being created must not keep that
+        // request's input open, like every other child of the GUI (ChildProcess.h).
+        const CreatingPipe creating;QVERIFY(creating.valid());
+        UpdateController controller(nullptr,executable.fileName());QTRY_VERIFY_WITH_TIMEOUT(!controller.installation().version.isEmpty(),5000);
+        const auto open=descriptors(dir.path()+"/pacman.fds");const auto shown=QDebug::toString(open).toLatin1();
+        QVERIFY2(open.contains(0)&&open.contains(1)&&open.contains(2),shown.constData());for(int fd:creating.ends)QVERIFY2(!open.contains(fd),shown.constData());
 #endif
     }
     void verifiedCatalogSurvivesRestartAndRejectsCorruption(){

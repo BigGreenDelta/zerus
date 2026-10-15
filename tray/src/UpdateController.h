@@ -59,6 +59,9 @@ public:
     // True when the application bundle on disk now holds another release than the one this
     // process started from, for example after `brew upgrade --cask zerus`.
     static bool bundleReplaced(const QString &executable,const QString &startedRelease);
+    // Starts the detached helper that opens `bundle` with --sessions once process `pid` has
+    // exited, with only stdio inherited. Tests pass another `shell` to see what it receives.
+    static bool startRestartHelper(const QString &bundle,qint64 pid,const QString &shell=QStringLiteral("/bin/sh"));
     // Tests only: the deadline of package-manager commands (5 s; 0 restores it), so
     // suites need not wait it out. The application keeps the default.
     static void setCommandTimeoutForTests(int ms);
