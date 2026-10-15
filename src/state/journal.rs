@@ -668,7 +668,12 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     output["input_queue"] = if archive_id.is_none() { input_queue::inspection(&record, panes.is_some()).unwrap_or(Value::Null) } else { Value::Null };
     output["session_usage"] = if clear_context::awaiting_start(&record) {
         json!({"status":"unavailable","source":record["agent"],"scope":"conversation"})
-    } else { usage::read(&record) };
+    } else {
+        let mut usage = usage::read(&record);
+        // Only for the model this inspection reports: a switch makes it stale.
+        claude_statusline::apply(&record, string(&output, "model"), &mut usage);
+        usage
+    };
     output["session_clear"] = clear_context::event(&record).unwrap_or(Value::Null);
     output["clear_context_request"] = record["clear_context_request"].clone();
     if include_processes {

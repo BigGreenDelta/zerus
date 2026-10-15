@@ -17,6 +17,8 @@ import subprocess
 import sys
 import tempfile
 
+from macos_stapler import run_stapler
+
 ROOT = Path(__file__).resolve().parents[1]
 APP_ENTITLEMENTS = ROOT / "packaging/macos/Zerus.entitlements"
 MINIMUM_SYSTEM = "14.0"
@@ -137,8 +139,14 @@ def notarize_upload(upload, key_file, key_id, issuer):
 
 
 def staple(path):
-    subprocess.run(["xcrun", "stapler", "staple", str(path)], check=True)
-    subprocess.run(["xcrun", "stapler", "validate", str(path)], check=True)
+    # Apple can accept a submission while its CloudKit ticket endpoint drops
+    # the connection. Both ticket operations use the same bounded policy;
+    # permanent errors and exhausted retries remain fatal.
+    for action in ("staple", "validate"):
+        result = run_stapler(action, path)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        result.check_returncode()
 
 
 def notarize(app, key_file, key_id, issuer):

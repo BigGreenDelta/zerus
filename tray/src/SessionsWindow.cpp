@@ -50,6 +50,7 @@
 #include "SwarmButton.h"
 #include "MachinesPage.h"
 #include "MachineFilter.h"
+#include "ProjectFilter.h"
 #include "MachineAppearance.h"
 #include "MachinePlatform.h"
 #include "LocalLaunchWarning.h"
@@ -314,7 +315,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_attentionBadge->setAlignment(Qt::AlignCenter); m_attentionBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_attentionBadge->setGeometry(24, 3, 17, 16); m_attentionBadge->hide();
     connect(m_sessionsNav, &QPushButton::clicked, this, [this] {
-        if (m_pages->currentIndex() == 0) { m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_search->clear(); }
+        if (m_pages->currentIndex() == 0) { m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); }
         showSessionList();
     });
     connect(m_projectsNav, &QPushButton::clicked, this, [this]() { showProjects(selectedHostTarget()); });
@@ -404,7 +405,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         });
     }
     m_machineFilter = new MachineFilter;
-    filterRow->addWidget(m_machineFilter->button()); listLayout->addLayout(filterRow); listLayout->addWidget(m_machineFilter);
+    m_projectFilter = new ProjectFilter;
+    filterRow->addWidget(m_machineFilter->button()); filterRow->addWidget(m_projectFilter->button());
+    listLayout->addLayout(filterRow); listLayout->addWidget(m_machineFilter); listLayout->addWidget(m_projectFilter);
+    connect(m_projectFilter, &ProjectFilter::selectionChanged, this, [this](const QSet<QString> &projects) { m_projectFilters = projects; rebuild(); });
     connect(m_machineFilter, &MachineFilter::selectionChanged, this, [this](const QSet<QString> &hosts) { m_hostFilters = hosts; rebuild(); });
     m_folderFilterClear=new QPushButton;m_folderFilterClear->setObjectName("clearFolderFilter");m_folderFilterClear->hide();m_folderFilterClear->setAutoDefault(false);
     connect(m_folderFilterClear,&QPushButton::clicked,this,[this]{m_folderFilterPath.clear();rebuild();});listLayout->addWidget(m_folderFilterClear);
@@ -1063,6 +1067,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     };
     connect(m_composer, &MessageComposer::draftChanged, this, draftChanged);
     connect(m_subagentComposer, &MessageComposer::draftChanged, this, draftChanged);
+    for (auto *composer : {m_composer, m_subagentComposer}) {
+        composer->canOpenDraftSession = [this](const QString &key) { return draftOwner(key) != nullptr; };
+        connect(composer, &MessageComposer::draftSessionRequested, this, &SessionsWindow::openDraftSession);
+    }
     connect(m_activityView, &ActivityView::messageActionRequested, this, &SessionsWindow::messageAction);
     connect(m_composer, &MessageComposer::settingsTerminalRequested, this, [this](const QString &key) {
         if (key != m_selectedKey || !selected()) return;
@@ -1264,7 +1272,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_machinesPage, &MachinesPage::machinesChanged, this, &SessionsWindow::refreshRequested);
     connect(m_machinesPage, &MachinesPage::sshTerminalRequested, this, &SessionsWindow::machineSshRequested);
     connect(m_machinesPage, &MachinesPage::viewSessionsRequested, this, [this](const QString &host) {
-        m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters = {host.isEmpty() ? QStringLiteral("@local") : host}; m_search->clear(); showSessionList();
+        m_filter = "all"; m_folderFilterPath.clear(); m_projectFilters.clear(); m_hostFilters = {host.isEmpty() ? QStringLiteral("@local") : host}; m_search->clear(); showSessionList();
     });
     m_dashboard = new DashboardPage; m_pages->addWidget(m_dashboard);
     connect(m_dashboard,&DashboardPage::refreshRequested,this,[this]{emit refreshRequested();updateDashboardAccounts(true,true);});
@@ -1273,7 +1281,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_dashboard,&DashboardPage::sessionRequested,this,&SessionsWindow::showAttentionSession);
     connect(m_dashboard,&DashboardPage::machinesRequested,this,[this](const QString &host) { m_pages->setCurrentIndex(2); m_machinesPage->selectMachine(host); });
     connect(m_dashboard,&DashboardPage::filterRequested,this,[this](const QString &host,const QString &filter) {
-        m_filter=filter; m_folderFilterPath.clear(); m_hostFilters = host == "@all" ? QSet<QString>() : QSet<QString>{host.isEmpty()?QStringLiteral("@local"):host}; m_search->clear(); showSessionList();
+        m_filter=filter; m_folderFilterPath.clear(); m_projectFilters.clear(); m_hostFilters = host == "@all" ? QSet<QString>() : QSet<QString>{host.isEmpty()?QStringLiteral("@local"):host}; m_search->clear(); showSessionList();
     });
     m_accountsPage = new AccountsPage(hgsPath,nullptr,m_usageStore); m_pages->addWidget(m_accountsPage);
     m_settingsPage=new SettingsPage(hgsPath);m_pages->addWidget(m_settingsPage);
@@ -1453,11 +1461,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             } else m_renameKey.clear();
         }
         if (ok && !m_forkKey.isEmpty()) {
-            m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_search->clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false);
+            m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false);
         }
         if (!ok && !m_forkKey.isEmpty()) { m_forkKey.clear(); m_forkGroup.clear(); m_forkBefore.clear(); }
         if (!m_restoreKey.isEmpty()) {
-            if (ok) { m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_search->clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false); }
+            if (ok) { m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false); }
             else m_restoreKey.clear();
         }
         showNotice(ok ? (renamed ? tr("Session renamed. Refreshing…") : tr("Session updated. Refreshing…")) : detail, !ok);
@@ -1561,6 +1569,15 @@ void SessionsWindow::applyTheme()
     const QString selected = m_dark ? "#233d35" : "#e0f0e9";
     setStyleSheet(QString(R"(
         QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
+        QDialog#savedDraftsDialog { background:%1; color:%2; }
+        QWidget#automaticApprovalSettings { background:transparent; color:%2; }
+        QPlainTextEdit#approvalJournalDetail { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:10px; selection-background-color:%10; selection-color:%2; }
+        QTableWidget#approvalJournal::item { padding:7px 10px; border-bottom:1px solid %4; }
+        QListWidget#savedDraftList { background:%1; color:%2; border:1px solid %4; border-radius:8px; padding:4px; outline:0; }
+        QListWidget#savedDraftList::item { background:%3; color:%2; border:1px solid %4; border-radius:6px; padding:10px 12px; }
+        QListWidget#savedDraftList::item:hover { background:%7; }
+        QListWidget#savedDraftList::item:selected { background:%10; color:%2; border-color:%5; }
+        QPlainTextEdit#savedDraftPreview { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:10px; selection-background-color:%10; selection-color:%2; }
         QWidget { font-size:13px; }
         QLabel { color:%2; background:transparent; }
         QWidget#sidebar { background:%3; border-right:1px solid %4; }
@@ -1618,7 +1635,7 @@ void SessionsWindow::applyTheme()
         QPushButton#sessionStripSearch { padding:0; background:%3; border:1px solid %4; }
         QWidget#sessionListPanel { background:%1; }
         QPushButton#newSession { background:%10; }
-        QPushButton#machineFilter::menu-indicator, QPushButton#batchActions::menu-indicator { image:none; width:0; }
+        QPushButton#machineFilter::menu-indicator, QPushButton#projectFilter::menu-indicator, QPushButton#batchActions::menu-indicator { image:none; width:0; }
         QPushButton#hostFilterChip { padding:3px 8px; font-size:11px; text-align:left; color:%5; background:%10; }
         QPushButton[sessionHeaderAction="true"], QPushButton[settingReset="true"] { background:transparent; border:1px solid transparent; border-radius:6px; padding:0; }
         QPushButton[sessionHeaderAction="true"]:hover, QPushButton[settingReset="true"]:hover { background:%7; }
@@ -1659,7 +1676,7 @@ void SessionsWindow::applyTheme()
         QListWidget#machineProfiles::item:selected, QListWidget#accountProfiles::item:selected, QListWidget#speechProfiles::item:selected, QListWidget#launchAccount::item:selected { background:%10; color:%2; }
         QListWidget#launchAccount::item:hover { background:%7; }
         QPlainTextEdit#machineSetupLog, QPlainTextEdit#processOutput { background:%3; color:%2; border:1px solid %4; border-radius:7px; }
-        QPushButton#machineFilter { padding:0; border-color:transparent; background:transparent; }
+        QPushButton#machineFilter, QPushButton#projectFilter { padding:0; border-color:transparent; background:transparent; }
         QCheckBox { color:%2; spacing:8px; }
         QSlider#workspaceContentScale, QSlider#workspaceActivityWidth { min-height:22px; }
         QSlider#workspaceContentScale::groove:horizontal, QSlider#workspaceActivityWidth::groove:horizontal { height:4px; background:%4; border-radius:2px; }
@@ -1716,7 +1733,7 @@ void SessionsWindow::applyTheme()
     m_cacheClear->setIcon(workspaceIcon("refresh",QColor(m_muted)));m_cacheClear->setIconSize(QSize(14,14));
     m_fileDrop->setTheme(m_dark);
     m_recovery->setStyleSheet(QStringLiteral("QFrame#recoveryPanel {background:transparent;border:0;} QLabel {border:0;background:transparent;}"));
-    m_machineFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
+    m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     m_processes->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
@@ -1775,7 +1792,7 @@ void SessionsWindow::applySessionStrip()
         if (strip && !(m_stripLayout & 2)) {
             // Measured before hiding, while these rows still have their docked height.
             int reserve = 0, rows = 0;
-            for (QWidget *row : {static_cast<QWidget *>(m_machineFilter), static_cast<QWidget *>(m_folderFilterClear)})
+            for (QWidget *row : {static_cast<QWidget *>(m_machineFilter), static_cast<QWidget *>(m_projectFilter), static_cast<QWidget *>(m_folderFilterClear)})
                 if (row->isVisible()) { reserve += row->height(); ++rows; }
             m_stripReserve = rows ? reserve + (rows - 1) * m_stripSpacer->parentWidget()->layout()->spacing() : 0;
         }
@@ -1794,13 +1811,13 @@ void SessionsWindow::applySessionStrip()
     // and a row still to go would hold the list a row lower until the next layout.
     const bool folder = !strip && !m_folderFilterPath.isEmpty(), spacer = strip && m_stripReserve > 0;
     (strip ? static_cast<QWidget *>(m_search) : m_stripSearch)->hide();
-    if (strip) m_machineFilter->setConcealed(true);
+    if (strip) { m_machineFilter->setConcealed(true); m_projectFilter->setConcealed(true); }
     if (!folder) m_folderFilterClear->hide();
     if (!spacer) m_stripSpacer->hide();
     m_stripSpacer->setFixedHeight(m_stripReserve);
     (strip ? static_cast<QWidget *>(m_stripSearch) : m_search)->show();
     if (spacer) m_stripSpacer->show();
-    if (!strip) m_machineFilter->setConcealed(false);
+    if (!strip) { m_machineFilter->setConcealed(false); m_projectFilter->setConcealed(false); }
     if (folder) m_folderFilterClear->show();
     // Narrow filters keep the active one and the most urgent beside it: sessions
     // that need attention, otherwise active ones, otherwise all of them.
@@ -1824,7 +1841,7 @@ void SessionsWindow::applySessionStrip()
         else { button->setMinimumWidth(0); button->setMaximumWidth(QWIDGETSIZE_MAX); }
         if (m_filterRow->itemAt(m_filterRow->indexOf(button))->alignment() != align) m_filterRow->setAlignment(button, align);
     }
-    m_machineFilter->button()->setVisible(!filters);
+    m_machineFilter->button()->setVisible(!filters); m_projectFilter->button()->setVisible(!filters);
     m_listStack->setCurrentIndex(!strip && m_searchResults->active() ? 1 : 0);
     m_count->setText(strip ? m_countShort : m_countFull);
     m_count->setAlignment(strip ? Qt::AlignCenter : Qt::AlignLeft | Qt::AlignVCenter);
@@ -1968,6 +1985,19 @@ void SessionsWindow::showGroupMenu(const QString &id, const QPoint &position)
     auto *menu = new QMenu(this); menu->setObjectName("sessionGroupMenu");
     connect(menu->addAction(tr("New session…")), &QAction::triggered, this,
             [this, id]() { showNewSession({}, id, selectedHostTarget()); });
+    menu->addSeparator();
+    auto *only = menu->addAction(workspaceIcon("projects", QColor(m_muted)), tr("Only this project")); only->setObjectName("filterOnlyProject");
+    connect(only, &QAction::triggered, this, [this,id] { if (m_organization.group(id)) m_projectFilter->setSelection({id}); });
+    const bool selected = m_projectFilters.contains(id);
+    auto *toggle = menu->addAction(selected ? tr("Remove from project filter") : tr("Add to project filter")); toggle->setObjectName("toggleProjectFilter");
+    connect(toggle, &QAction::triggered, this, [this,id] {
+        if (!m_organization.group(id)) return;
+        auto next = m_projectFilters; if (next.contains(id)) next.remove(id); else next.insert(id); m_projectFilter->setSelection(next);
+    });
+    if (!m_projectFilters.isEmpty()) {
+        auto *all = menu->addAction(tr("Show all projects")); all->setObjectName("clearProjectFilter");
+        connect(all, &QAction::triggered, this, [this] { m_projectFilter->setSelection({}); });
+    }
     menu->addSeparator();
     const bool collapsed = group->collapsed;
     connect(menu->addAction(collapsed ? tr("Expand project") : tr("Collapse project")), &QAction::triggered, this, [this, id, collapsed]() {
@@ -2189,7 +2219,7 @@ void SessionsWindow::showSessionList()
 
 void SessionsWindow::showSession(const QString &host, const QString &name)
 {
-    m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_search->clear(); showSessionList();
+    m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); showSessionList();
     const QString key = host + '\n' + name;
     revealSession(key);
     for (int row = 0; row < m_sessions->count(); ++row)
@@ -2281,7 +2311,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
                 {"target", target}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
             savePendingLaunches();
             m_organization.setCollapsed(group, false);
-            m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_search->clear(); showSessionList();
+            m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); showSessionList();
             for (int row = 0; row < m_sessions->count(); ++row)
                 if (m_sessions->item(row)->data(SessionRoles::LaunchId).toString() == id) m_sessions->scrollToItem(m_sessions->item(row));
             // Refresh soon after terminal creation, while the placeholder already
@@ -2510,23 +2540,12 @@ void SessionsWindow::rebuild()
         const bool reachable = box.ok && (host.isEmpty() ? m_connectionError.isEmpty() :
             QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs);
         if (reachable) ++online;
-        const bool selectedHost = m_hostFilters.isEmpty() || m_hostFilters.contains(host.isEmpty() ? "@local" : host);
-        const auto style = MachinePlatform::of(box.metrics, host.isEmpty());
         for (const auto &stored : box.sessions) {
             auto s=stored;
             const QString key = host + '\n' + s.name + (s.state == "archived" ? '\n' + s.archiveId : QString());
             if(key == m_selectedKey && m_inspectError.isEmpty())s=SessionPresentation::inspected(s,m_details);
             m_entries.append({host, host.isEmpty() ? box.host : host, key, {}, s, reachable});
             if (entryHasDraft(m_entries.last())) drafts.insert(key);
-            if (!selectedHost) continue;
-            if (!m_folderFilterPath.isEmpty() && (host != m_folderFilterHost ||
-                !MachinePlatform::same(m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd, m_folderFilterPath, style))) continue;
-            if (s.state == "archived") { ++archived; continue; }
-            ++total;
-            const bool needsAttention = entryNeedsAttention(m_entries.last());
-            if (needsAttention) ++attention;
-            if (needsAttention || SessionPresentation::active(s, reachable, drafts.contains(key))) ++active;
-            if (s.state != "running") ++saved;
         }
     };
     append({}, m_fleet.local());
@@ -2570,6 +2589,21 @@ void SessionsWindow::rebuild()
             requestedSelection = m_renameKey; m_renameKey.clear(); break;
         }
     }
+    QSet<QString> projectKeys;
+    for (const auto &entry : m_entries) {
+        if (!m_projectFilters.isEmpty() && !m_projectFilters.contains(m_organization.groupFor(entry.identity))) continue;
+        projectKeys.insert(entry.key);
+        if (!m_hostFilters.isEmpty() && !m_hostFilters.contains(entry.host.isEmpty() ? "@local" : entry.host)) continue;
+        const auto &s = entry.session;
+        if (!m_folderFilterPath.isEmpty() && (entry.host != m_folderFilterHost || !MachinePlatform::same(
+            m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd, m_folderFilterPath, MachinePlatform::of(m_fleet.local().metrics, entry.host.isEmpty())))) continue;
+        if (s.state == "archived") { ++archived; continue; }
+        ++total;
+        const bool needsAttention = entryNeedsAttention(entry);
+        if (needsAttention) ++attention;
+        if (needsAttention || SessionPresentation::active(s, entry.online, drafts.contains(entry.key))) ++active;
+        if (s.state != "running") ++saved;
+    }
     m_heading->setText(m_filter == "archived" ? tr("Archive") : tr("Sessions"));
     const int unreadCount = m_fleet.unreadReplies().size();
     m_markAllReadAction->setEnabled(unreadCount > 0);
@@ -2586,11 +2620,12 @@ void SessionsWindow::rebuild()
     }
     m_sessionsNav->setChecked(m_pages->currentIndex() == 0);
     m_machinesNav->setChecked(m_pages->currentIndex() == 2);
+    m_searchResults->setProjectScope(projectKeys, !m_projectFilters.isEmpty());
     m_searchResults->setFolderScope(m_folderFilterHost,m_folderFilterPath,m_folderFilterCheckout);
     m_searchResults->setHostsScope(m_fleet, m_filter, m_hostFilters, drafts);
     const QString query; // Text searches have their own result list and selection.
     QList<Entry> visible;
-    QMap<QString, int> machineCounts;
+    QMap<QString, int> machineCounts, projectCounts;
     for (const auto &e : m_entries) {
         const auto &s = e.session;
         if ((s.state == "archived") != (m_filter == "archived")) continue;
@@ -2602,18 +2637,25 @@ void SessionsWindow::rebuild()
         if (!(s.name + ' ' + e.machine + ' ' + s.prompt + ' ' + s.currentTool + ' ' + s.gitBranch + ' ' + s.gitWorktreeName + ' ' + s.activitySummary + ' ' + s.activityDetail).contains(query, Qt::CaseInsensitive)) continue;
         if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||!MachinePlatform::same(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd,m_folderFilterPath,MachinePlatform::of(m_fleet.local().metrics,e.host.isEmpty()))))continue;
         const QString machine = e.host.isEmpty() ? QStringLiteral("@local") : e.host;
+        const auto project = m_organization.groupFor(e.identity);
+        if (m_hostFilters.isEmpty() || m_hostFilters.contains(machine)) ++projectCounts[project];
+        if (!projectKeys.contains(e.key)) continue;
         ++machineCounts[machine];
         if (!m_hostFilters.isEmpty() && !m_hostFilters.contains(machine)) continue;
         visible.append(e);
     }
+    if (!m_folderFilterPath.isEmpty()) countCaption += tr(" / selected folder");
     { const QSignalBlocker block(m_machineFilter); m_machineFilter->setSelection(m_hostFilters); m_machineFilter->setFleet(m_fleet);
-        m_machineFilter->setSessionCounts(machineCounts, countCaption); }
+        m_machineFilter->setSessionCounts(machineCounts, countCaption + (m_projectFilters.isEmpty() ? QString() : tr(" / selected projects"))); }
+    { const QSignalBlocker block(m_projectFilter); m_projectFilter->setSelection(m_projectFilters); m_projectFilter->setProjects(m_organization.groups());
+        m_projectFilter->setSessionCounts(projectCounts, countCaption + (m_hostFilters.isEmpty() ? QString() : tr(" / selected machines"))); }
     struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch; };
     QList<Row> rows;
     const bool hasGroups = m_organization.groups().size() > 1;
-    const bool filtering = !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
+    const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
     const bool hideEmptyProjects = QSettings().value("workspace/hideEmptyProjects", true).toBool();
     for (const auto &group : m_organization.groups()) {
+        if (!m_projectFilters.isEmpty() && !m_projectFilters.contains(group.id)) continue;
         QList<int> members;
         QStringList launches;
         if (m_filter == "all"&&m_folderFilterPath.isEmpty()) for (auto it = m_pendingLaunches.begin(); it != m_pendingLaunches.end(); ++it) {
@@ -4859,13 +4901,13 @@ void SessionsWindow::updateWorktrees()
 }
 void SessionsWindow::filterFolder(const QString &host,const QString &path,bool checkout)
 {
-    m_folderFilterHost=host;m_folderFilterPath=path;m_folderFilterCheckout=checkout;
+    m_projectFilters.clear(); m_folderFilterHost=host;m_folderFilterPath=path;m_folderFilterCheckout=checkout;
     if(path.isEmpty()){m_filter="all";m_hostFilters.clear();m_search->clear();}
     showSessionList();
 }
 void SessionsWindow::openRelatedSession(const QString &host,const QString &name,const QString &archive)
 {
-    m_folderFilterPath.clear();m_filter=archive.isEmpty()?"all":"archived";m_hostFilters.clear();m_search->clear();showSessionList();
+    m_folderFilterPath.clear();m_filter=archive.isEmpty()?"all":"archived";m_hostFilters.clear(); m_projectFilters.clear();m_search->clear();showSessionList();
     const auto key=host+'\n'+name+(archive.isEmpty()?QString():'\n'+archive);revealSession(key);
     for(int i=0;i<m_sessions->count();++i)if(m_sessions->item(i)->data(KeyRole).toString()==key){m_sessions->setCurrentRow(i);m_sessions->scrollToItem(m_sessions->item(i));return;}
 }

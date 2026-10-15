@@ -128,7 +128,7 @@ class RequestTests(BlackBoxCase):
         # Divergence b: Python re-raises a 400, 413 or 422 upload refusal
         # before it polls, so one result the relay rejects blocks every claim.
         if IMPLEMENTATION != "python":
-            self.skipTest("divergence b: the Rust retirement after three spaced attempts is planned for H2")
+            self.skipTest("divergence b: test_bb_native_limits.RefusedResultTests covers the Rust retirement")
         rejected = self.request("send", text="result the relay rejects")
         rule = self.relay.rule("POST", rf"/v1/node/requests/{rejected['request_id']}/result", 400)
         process = await self.launch()

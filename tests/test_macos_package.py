@@ -1,16 +1,19 @@
 """The macOS bundle must reference only itself and the system, for Apple Silicon only."""
 import ast
 import importlib.util
+import json
 import os
 from pathlib import Path
 import plistlib
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 def load(name, filename):
@@ -23,7 +26,6 @@ def load(name, filename):
 check = load("check_macos_bundle", "check-macos-bundle.py")
 package = load("package_macos", "package-macos.py")
 sign = load("sign_macos", "sign-macos.py")
-sys.path.insert(0, str(ROOT / "scripts"))
 import macos_release  # noqa: E402
 
 OTOOL = """Zerus.app/Contents/MacOS/hgs-tray:
@@ -76,6 +78,82 @@ Load command 20
 
 
 class BundleChecks(unittest.TestCase):
+    def test_exhausted_ticket_validation_is_a_bundle_failure(self):
+        responses = [subprocess.CompletedProcess([], 0, "", ""),
+                     subprocess.CompletedProcess([], 0, "", "TeamIdentifier=ABCDE12345\nflags=0x10000(runtime)"),
+                     subprocess.CompletedProcess([], 0, "", "source=Notarized Developer ID")]
+        with mock.patch.object(check.subprocess, "run", side_effect=responses), \
+                mock.patch.object(check, "run_stapler", return_value=subprocess.CompletedProcess(
+                    [], 68, "NSURLErrorDomain Code=-1005", "")) as validate:
+            findings = check.signature_findings(Path("/fixture/Zerus.app"), "ABCDE12345")
+        validate.assert_called_once_with("validate", Path("/fixture/Zerus.app"))
+        self.assertEqual(len(findings), 1)
+        self.assertIn("notarization ticket is not stapled", findings[0])
+
+    @unittest.skipUnless(Path("/bin/bash").exists(), "requires Bash")
+    def test_unattended_cask_execution_requires_prior_installed_gatekeeper_acceptance(self):
+        script = (ROOT / "scripts/ci/macos-cask-install.sh").read_text()
+        segment = script.split("app=/Applications/Zerus.app\n", 1)[1].split('\nhome="', 1)[0]
+        with tempfile.TemporaryDirectory(prefix="zerus-cask-gate-") as temporary:
+            directory = Path(temporary)
+            log = directory / "calls.jsonl"
+            for name in ("python3", "xattr"):
+                stub = directory / name
+                stub.write_text(f"#!{sys.executable}\n" + '''import json, os, pathlib, sys
+with open(os.environ["ZERUS_CASK_TEST_LOG"], "a") as log:
+    log.write(json.dumps([pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]) + "\\n")
+if pathlib.Path(sys.argv[0]).name == "python3" and os.environ["ZERUS_CASK_TEST_REJECT"] == "1":
+    sys.exit(7)
+''')
+                stub.chmod(0o755)
+            for rejected in (False, True):
+                with self.subTest(rejected=rejected):
+                    log.write_text("")
+                    env = dict(os.environ, PATH=f"{directory}:/usr/bin:/bin",
+                               ZERUS_CASK_TEST_LOG=str(log), ZERUS_CASK_TEST_REJECT=str(int(rejected)))
+                    command = 'set -euo pipefail\napp="$1"\nversion=0.42.2\nrelease=0.42.2\nteam=ABCDE12345\n' + segment
+                    result = subprocess.run(["/bin/bash", "-c", command, "cask-gate", str(directory / "Zerus.app")],
+                                            env=env, capture_output=True, text=True)
+                    calls = [json.loads(line) for line in log.read_text().splitlines()]
+                    self.assertEqual(result.returncode, 7 if rejected else 0, result.stderr)
+                    self.assertEqual([call[0] for call in calls], ["python3"] if rejected else
+                                     ["python3", "xattr", "python3"])
+                    self.assertIn("--team-id", calls[0])
+                    self.assertNotIn("--selftest", calls[0])
+                    if not rejected:
+                        self.assertEqual(calls[1], ["xattr", "-dr", "com.apple.quarantine", str(directory / "Zerus.app")])
+                        self.assertIn("--selftest", calls[2])
+
+    @unittest.skipUnless(Path("/bin/bash").exists(), "requires Bash")
+    def test_cask_metadata_is_validated_by_the_system_bash_before_installation(self):
+        script = ROOT / "scripts/ci/macos-cask-install.sh"
+        # Execute the real pre-installation section, including its quoted
+        # Python heredoc, with Apple's Bash 3.2 on macOS and Bash on Linux.
+        preflight = script.read_text().split('\nasset="$signed/', 1)[0]
+        preflight += '\nprintf "%s\\n" "$cask" "$release" "$team"\n'
+        with tempfile.TemporaryDirectory(prefix="zerus-cask-metadata-") as temporary:
+            directory = Path(temporary)
+            metadata = directory / "macos-info.json"
+            for channel, release, cask in (("stable", "0.42.2", "zerus"),
+                    ("nightly", "0.42.2.r812.gabcdef0.n41", "zerus@nightly")):
+                info = {"asset": f"zerus-{release}-macos-arm64.zip", "qt_version": "6.11.2",
+                        "team_id": "ABCDE12345", "minimum_system_version": "14.0",
+                        "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef",
+                        "dmg": {"asset": f"zerus-{release}-macos-arm64.dmg",
+                                "notarization_id": "1123abcd-4567-89ef-0123-456789abcdef"}}
+                metadata.write_text(json.dumps(info))
+                command = ["/bin/bash", "-c", preflight, str(script), str(directory), channel]
+                with self.subTest(channel=channel):
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), [cask, release, "ABCDE12345"])
+                for invalid in ({**info, "team_id": "invalid"},
+                                {key: value for key, value in info.items() if key != "dmg"}):
+                    metadata.write_text(json.dumps(invalid))
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "", "invalid metadata must stop before installation")
+
     def test_selftest_exposes_tmux_with_an_isolated_home_and_socket_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

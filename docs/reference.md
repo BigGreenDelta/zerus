@@ -164,6 +164,33 @@ that event stay, and older versions still warn about those. An unreadable versio
 a launcher keeps the entry, as does a wrapper script that starts another Claude Code
 without itself changing: delete the entry from its `settings.json` by hand there.
 `PreModelSwitch` is never registered.
+
+Claude Code reports its context window only to a status line command. For a tracked
+Unix start of the `claude` CLI that reports 2.1.296 or later (the version read as
+for `PostModelSwitch`), `hgs` adds `--settings` with its own `statusLine`,
+`hgs __state statusline`, to the agent's command line; no settings file changes and
+the saved launch arguments stay as typed. The command keeps the run's latest
+`session_id`, `model.id` and `context_window.context_window_size` from Claude's
+input in `context-telemetry/` of the state folder, one file per run; a new run
+removes those not updated for 30 days. It then runs the status line Claude would otherwise use:
+the `statusLine` of the user settings file (`CLAUDE_CONFIG_DIR` or `~/.claude`),
+then the session folder's `.claude/settings.json` and `.claude/settings.local.json`,
+each later file's fields over the earlier ones. It runs that command with
+`/bin/sh -c`, Claude's input, environment and folder, prints its output and exits
+with its status, so Claude shows the user's status line as before and a change to
+it applies at once. Its `padding`, `refreshInterval` and `hideVimModeIndicator` are
+copied at launch. Without a user status line nothing is printed; Claude 2.1.296
+then keeps one empty row below the prompt. Claude keeps its own status line, and
+the session reports no window, on Windows, through a project launcher, with an older
+or unreadable version, when the launch passes `--settings`, `--setting-sources`,
+`--project-config-root`, `--managed-settings` or `--worktree` (`-w`), when managed
+settings exist (`/etc/claude-code` or
+`/Library/Application Support/ClaudeCode`, or `CLAUDE_CODE_MANAGED_SETTINGS_PATH`),
+when a settings file cannot be read or its status line is not a command, and when
+the session folder lies below another repository root (an enclosing repository, or
+the repository of a linked worktree such as a generated one) and the local settings
+of that root or of the folder set one: Claude reads one of the two by ownership checks.
+
 Tracked Codex needs `--no-daemon`; the integration has been verified with 0.160.0,
 while 0.155.1 lacks that required flag.
 
@@ -447,6 +474,21 @@ the option disabled with a window-menu/rules workaround. Files and terminals
 opened from Zerus may appear behind it. Missing Git metadata does not turn
 a folder into a repository.
 
+The project button beside the machine chooser focuses Sessions on one or more
+logical projects. Check projects to apply changes immediately; selected projects
+appear as removable chips. **All projects** clears this restriction. Right-click
+a project band for **Only this project**, **Add to project filter** (or **Remove
+from project filter**) and **Show all projects**. Multiple projects form a union,
+narrowed by the machine, state, folder and search filters. Selection stays local
+to the open workspace while navigating sections; an explicit session link or
+Overview scope opens its requested context. Renaming a project retains selection,
+and new projects do not join an explicit selection automatically.
+
+The project chooser shows parent-session counts for the current state, machine
+and folder scope before project selection or text search, including zero counts.
+Its open checkboxes and selection stay in place during polling. A removed selected
+project remains as **Unavailable project** until removed from the filter.
+
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
 each session once. Desktop and Android use the same filter IDs and membership
@@ -477,7 +519,8 @@ the docked width are local preferences.
 
 Search names, IDs, folders, branches and models immediately. From two characters,
 content search also reads public Codex, Claude and Kimi messages and saved tool
-events on each host. Machine and state filters narrow results; the all-sessions
+events on each host, and DeepSeek messages through a running native host
+([DeepSeek](#deepseek)). Project, machine and state filters narrow results; the all-sessions
 view includes archives. Results open the recorded message; **Back to latest
 activity** returns to the live timeline. **Limited history searched**, **Some
 history unavailable** and excerpt labels describe incomplete coverage. Internal
@@ -676,10 +719,53 @@ checkpoint or resurrect a confirmed sent message. Attachment snapshots remain
 immutable. Save failures remain visible and block sending until persistence
 succeeds.
 
+**Settings → Automatic approvals** provides a separate dangerous opt-in, off by
+default. Enabling it explicitly allows reachable sessions to run tools without
+individual review, including destructive commands and paid usage. It works
+while this Zerus process is running, including with its window hidden, and does
+not change another desktop's preference or the agents' permanent permissions.
+Resuming after an expired cache may process the full conversation again. While
+enabled, the normal peer polling interval is capped at five seconds so remote
+permission prompts need not wait for the ordinary minute-long refresh.
+Only verified, answerable one-time Claude, native OpenCode and native DeepSeek
+tool permissions qualify. Ordinary questions, startup trust, incomplete panels and
+persistent permission changes remain manual. Existing native identity and
+delivery guards still apply.
+
+The same Settings page contains this computer's private approval journal, naming
+the computer, session, time, question, selected answer and confirmed outcome.
+Each attempt is durably reserved before native input. Failed, cancelled and
+unconfirmed attempts remain visible; an unconfirmed delivery is never retried
+automatically, including after a restart. If the journal cannot be saved,
+automatic approvals pause without sending new answers. Turning the option off
+stops new approvals; requests already sent may still finish.
+
+The journal stores full questions only in the private local
+`approval-audit/journal.sqlite3` below the existing `HGS_STATE_DIR`. It is not
+part of P2P settings sync. Pages contain at most 50 summaries; exact computer and
+session filters use indexes, and Older/Newer navigation uses stable record-ID
+cursors rather than offsets or complete-table counts. Full question text loads
+only for the selected entry. Background discovery scans at most 512 sessions per
+tick, admits at most two concurrent targets and bounds its cooldown cache to
+4096 entries, independent of total session or journal counts.
+
+`hgs approval-log begin|finish|list|detail` is the local desktop journal API
+(JSON stdin). `begin` selects only a supported one-time grant and returns a
+durable request UUID; an existing reservation never permits another delivery.
+`list` supports exact `host`/`session` filters and `before` or `after` record IDs.
+`detail` reads one entry. The command itself never sends native input.
+
 **Saved drafts** below the session list lets you preview, copy or restore drafts
-from ended or missing sessions into the current session. Copying keeps the dialog
-open; restoring never sends anything and replacing an existing draft requires
-confirmation. A source draft remains available after copying it to another session.
+from ended or missing sessions into the current session. It lists the most
+recently edited drafts first; each row names the draft's session and computer
+(and whether it is a subagent message, question answer or voice message), with
+its time and first line. **Go to session** opens the session that owns the
+selected draft, or its subagent, while that session is in the session list.
+Rows have visible outlines and spacing in both desktop themes; hovering and
+selection use the workspace colors. The preview follows the same theme.
+Copying keeps the dialog open; restoring never sends anything and replacing an
+existing draft requires confirmation. A source draft remains available after
+copying it to another session.
 Confirmed sends clear the outgoing draft; failures retain it. After an interrupted
 or uncertain send, check Activity or Terminal before explicitly allowing another
 send. Saving failures are shown in the editor and retried locally; sending starts
@@ -1083,6 +1169,14 @@ Switching dialogs, changing filters or closing the workspace keeps accepted send
 pending on their original sessions. They continue in the background, verify the
 same run/conversation and compaction request, and never submit a second copy.
 Context metrics use native telemetry, without guessing a capacity from a model name.
+Claude's window comes from its status line (see
+[Tracking and durable state](#tracking-and-durable-state)): `session_usage.context`
+gains `limit`, `limit_source` `native_statusline`, `limit_model` and
+`limit_observed_at` only while the latest report belongs to the session's run and
+conversation and names the model that the inspection reports. After a model change
+the window stays hidden until Claude reports the new model; after a clear Claude
+2.1.296 reports at its next update, usually the next reply, and a resumed run
+reports when it starts. Compaction changes the used context, not the window.
 Claude's recorded compaction boundary replaces the earlier context size with its
 reported summary size. It invalidates the earlier prompt cache estimate; a new
 warm countdown requires fresh native usage with a reported TTL.
@@ -1155,7 +1249,8 @@ tracking evidence without changing reply/read identities or restarting agents.
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
-DeepSeek native fork remains in Native UI.
+DeepSeek uses the native fork of a supported resident host
+([DeepSeek](#deepseek)).
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
@@ -1554,7 +1649,7 @@ restriction. A temporary connectivity error retains the last snapshot and makes
 unavailable controls explicit.
 
 The machine chooser shows each computer's session count, including zero, and an
-All machines total. Counts follow the current session state filter and folder
+All machines total. Counts follow the current session state, project and folder
 scope before machine selection or text search; child rows and unconfirmed launch
 placeholders do not add sessions. An open chooser updates counts without replacing
 its checkboxes or changing the selection. Offline computers retain their last
@@ -1739,12 +1834,49 @@ Closing Zerus leaves the host running; Forget retains native history. Linux user
 systemd runs the host in an independent scope so GUI service restart cannot kill
 the engine.
 
-Native fork, global DeepSeek history search, schedule management and account
-transfer are currently handled in Native UI. Native context reset awaits a
-supported Session Controller operation. Other harness versions need contract
-verification; updates never restart live hosts or agents automatically.
+**Fork session…** uses the official Session Controller fork. It copies the
+conversation through its latest completed turn into a new native session of the
+same profile and folder (including its permission preset),
+named after the fork, and binds the exact session ID the engine returns; the
+source keeps its identity and history. The engine, not Zerus, holds the new live
+agent until its host next starts: Zerus sends its messages, while its questions,
+approvals and Pause stay in Native UI until then. A fork needs a completed reply.
+If the reply is lost, forking again under the same name adopts the result from the
+same host; after a host change Zerus refuses to repeat it. A native failure after
+creation can leave an unbound session in Native UI.
+
+Content search covers bound DeepSeek sessions through the native store's
+literal, case-insensitive event scan, which works without the optional full-text
+index. Results contain the person's and the agent's text only; injected context
+and reasoning are excluded. Searching never starts, resumes or reloads a host.
+Hosts are asked at once, each scanning for at most 5 seconds; a stopped host, an
+older adapter or a host that does not answer within 7 seconds reports that
+history as unavailable.
+
+The official optional Schedule bundle (**Automation tasks** in Native UI
+Plugins; shipped profiles leave it off) is listed and managed per exact session:
+
+```sh
+hgs schedules dsh/project/work            # tasks of this session as JSON
+echo '{"request_id":"UUID","expected_run_id":"RUN","expected_conversation_id":"session-ID",
+  "expected_generation":"GENERATION","action":"update","id":"schedule-ID",
+  "expected":{...record from the list...},"title":"New name"}' | hgs schedules dsh/project/work --json
+```
+
+`action` is `delete`, `update` (the native compare-and-set; `title`, `prompt`
+and the native `change` timing object) or `history` (`limit` 1-100, optional
+`before`). Results keep native codes such as `schedule_conflict` and
+`schedule_not_found`. None of these activate the session. Without the bundle the
+command refuses and listings omit `schedules`.
+
+Account transfer stays in Native UI. Native context reset awaits a supported
+Session Controller operation. Resident adapters advertise each operation; one
+started by an older Zerus keeps fork and schedules in Native UI and its history
+unavailable to search until its next ordinary start. Other harness versions need
+contract verification; updates never restart live hosts or agents automatically.
 `python3 tests/test_dsh_native.py -v` exercises the official engine with a local
-keyless model, covering history, lifecycle, questions, settings and browser login.
+keyless model, covering history, lifecycle, questions, settings, fork, search,
+schedules and browser login.
 
 ## Automatic recovery
 
@@ -2399,7 +2531,10 @@ is `null` while the journal cannot be read. While `schedules.recurring` is
 positive, turns opened by those jobs without a prompt from the person do not
 advance `reply_id`; a prompt queued into such a turn makes its reply the person's.
 `reply_scheduled` is true when the reported reply ended a scheduled turn, which
-happens once no recurring job remains or while the count is unknown. Other
+happens once no recurring job remains or while the count is unknown. DeepSeek
+sessions report the same `schedules` object from the active tasks of the native
+Schedule catalog while that optional bundle is loaded, with the earliest stored
+target as `next_at`; delivered reminders remain ordinary replies. Other
 providers report false and omit `schedules`.
 
 ```sh

@@ -121,7 +121,7 @@ fn kimi_fork(record: &Value) -> Result<String> {
     )
 }
 
-fn choose_name(
+pub(super) fn choose_name(
     source: &str,
     tag: Option<&str>,
     occupied: &std::collections::BTreeSet<String>,
@@ -184,6 +184,9 @@ pub(super) fn start_scoped(
     dry: bool,
     scope: Option<&session_action::Scope>,
 ) -> Result<String> {
+    if archive_id.is_none() && dsh::exists(name) {
+        return dsh::fork(name, tag, expected_run, expected_conversation, dry, scope);
+    }
     let _guard = lock(None)?;
     let record = if let Some(id) = archive_id {
         archive::read_archive(name, id)?

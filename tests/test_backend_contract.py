@@ -503,6 +503,20 @@ class Contract(unittest.TestCase):
     def received(self, pid):
         return b"".join(bytes.fromhex(token["hex"]) for token in self.tokens(pid))
 
+    def agent_arguments(self, agent):
+        """The agent's own arguments of a tracked Claude Code start. On Unix hgs adds its status line
+        command as flag settings for this version (`claude_statusline`), which no file keeps; the
+        Windows session host adds none."""
+        argv = list(agent["argv"])
+        if sys.platform == "win32":
+            self.assertNotIn("--settings", argv)
+            return argv
+        at = argv.index("--settings")
+        line = json.loads(argv[at + 1])["statusLine"]
+        self.assertEqual((line["type"], shlex.split(line["command"])[1:]), ("command", ["__state", "statusline"]))
+        del argv[at:at + 2]
+        return argv
+
     def wait_for(self, predicate, what, timeout=None):
         deadline = time.monotonic() + (timeout or self.backend.WAIT)
         while not (value := predicate()):
@@ -621,7 +635,7 @@ class Sessions(Contract):
         self.assertTrue(row["run_id"])
         self.assertTrue(started - 2 <= row["created"] <= time.time() + 1, row["created"])
         # The agent runs in the session folder on a terminal of its own, with nothing typed.
-        self.assertEqual((agent["argv"], agent["cwd"], agent["tty"], agent["raw"]),
+        self.assertEqual((self.agent_arguments(agent), agent["cwd"], agent["tty"], agent["raw"]),
                          ([], str(self.project), True, True))
         self.assertEqual(self.received(agent["pid"]), b"")
         # An untracked command is listed and runs the same way, without a conversation.
@@ -692,7 +706,7 @@ class Sessions(Contract):
         self.hgs("resume", name, "-d")
         resumed = self.wait_for(lambda: next((event for event in self.events(kind="start")
                                               if event["pid"] not in (pid, kept_agent["pid"])), None), "the resume")
-        self.assertEqual((resumed["argv"], resumed["session_id"], resumed["resumed"], resumed["cwd"]),
+        self.assertEqual((self.agent_arguments(resumed), resumed["session_id"], resumed["resumed"], resumed["cwd"]),
                          (["--resume", row["conversation_id"]], row["conversation_id"], True, str(self.project)))
         live = self.wait_for(lambda: (live := self.sessions()[name]).get("runtime_state") == "live"
                              and live.get("activity") == "idle" and live["run_id"] != row["run_id"] and live,

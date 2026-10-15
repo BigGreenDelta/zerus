@@ -29,6 +29,7 @@
 #include <QToolTip>
 #include <QLabel>
 #include <QListWidget>
+#include <QLocale>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMimeDatabase>
@@ -44,6 +45,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <functional>
 #include <utility>
 
@@ -317,7 +319,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         for (const auto &key : pending) saveDraft(key);
         if (!pending.isEmpty()) updateControls();
     }); retrySave->start();
-    m_draftStore.indexAsync(this, [this](const QHash<QString, QString> &index) {
+    m_draftStore.indexAsync(this, [this](const QHash<QString, ComposerDraftSummary> &index) {
         for (auto it = index.cbegin(); it != index.cend(); ++it) {
             if (!m_drafts.contains(it.key())) m_storedDrafts.insert(it.key());
             notifyDraft(it.key());
@@ -905,20 +907,51 @@ void MessageComposer::updateControls()
 
 void MessageComposer::showSavedDrafts()
 {
-    QDialog dialog(this); dialog.setObjectName("savedDraftsDialog"); dialog.setWindowTitle(tr("Saved drafts")); dialog.resize(720, 440);
-    auto *layout = new QVBoxLayout(&dialog);
+    QDialog dialog(this); dialog.setObjectName("savedDraftsDialog"); dialog.setWindowTitle(tr("Saved drafts")); dialog.resize(720, 520);
+    auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
     auto *hint = new QLabel(tr("Drafts stay on this desktop, including those from ended or unavailable sessions. Restoring never sends a message."));
     hint->setWordWrap(true); layout->addWidget(hint);
     auto *list = new QListWidget; list->setObjectName("savedDraftList"); layout->addWidget(list, 1);
-    const auto populate = [this, list](const QHash<QString, QString> &index) {
-        QSet<QString> keys;
-        for (auto it = index.cbegin(); it != index.cend(); ++it) keys.insert(it.key());
-        for (auto it = m_drafts.cbegin(); it != m_drafts.cend(); ++it)
-            if (!it.value().text.trimmed().isEmpty() || !it.value().attachments.isEmpty()) keys.insert(it.key());
-        auto sorted = keys.values(); sorted.sort(); list->clear();
-        for (const auto &key : sorted) {
-            auto *item = new QListWidgetItem(index.value(key, QString(key).replace('\n', " / ")), list);
-            item->setData(Qt::UserRole, key);
+    // Each row has two lines: the session, then the time and first line.
+    list->setSpacing(3); list->setMouseTracking(true);
+    list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    const auto populate = [this, list](const QHash<QString, ComposerDraftSummary> &index) {
+        auto summaries = index;
+        // Unsaved edits here are newer than their stored copy.
+        for (auto it = m_drafts.cbegin(); it != m_drafts.cend(); ++it) {
+            if (it.value().text.trimmed().isEmpty() && it.value().attachments.isEmpty()) continue;
+            auto &summary = summaries[it.key()];
+            summary.preview.clear(); summary.attachments = it.value().attachments.size();
+            for (const auto &line : it.value().text.split('\n')) if (!line.trimmed().isEmpty()) { summary.preview = line.simplified().left(200); break; }
+        }
+        auto keys = summaries.keys();
+        // Most recently edited first; a draft not yet saved is the newest.
+        std::sort(keys.begin(), keys.end(), [&summaries = std::as_const(summaries)](const QString &a, const QString &b) {
+            const auto left = summaries[a].modified, right = summaries[b].modified;
+            if (left.isValid() != right.isValid()) return !left.isValid();
+            return left != right ? left > right : a < b;
+        });
+        list->clear();
+        for (const auto &key : keys) {
+            const auto summary = summaries.value(key);
+            const auto owner = ComposerDraftStore::owner(key);
+            QStringList title, detail;
+            if (owner.kind == ComposerDraftOwner::Kind::Unknown) {
+                title << (summary.label.isEmpty() ? QString(key).replace('\n', " / ") : summary.label);
+            } else {
+                title << owner.session << (owner.machine.isEmpty() ? tr("this computer") : owner.machine);
+                if (owner.kind == ComposerDraftOwner::Kind::Subagent) title << tr("subagent");
+                else if (owner.kind == ComposerDraftOwner::Kind::Question) title << tr("question answer");
+                else if (owner.kind == ComposerDraftOwner::Kind::Voice) title << tr("voice message");
+                if (!owner.archive.isEmpty()) title << tr("archived");
+            }
+            if (summary.modified.isValid()) detail << QLocale().toString(summary.modified, QLocale::ShortFormat);
+            if (!summary.preview.isEmpty()) detail << summary.preview;
+            if (summary.attachments) detail << tr("%n attachment(s)", nullptr, summary.attachments);
+            const auto text = title.join(QStringLiteral(" · ")) + (detail.isEmpty() ? QString() : '\n' + detail.join(QStringLiteral(" · ")));
+            auto *item = new QListWidgetItem(text, list);
+            item->setData(Qt::UserRole, key); item->setToolTip(text);
         }
         if (list->count()) list->setCurrentRow(0);
     };
@@ -927,9 +960,12 @@ void MessageComposer::showSavedDrafts()
     auto *actions = new QHBoxLayout;
     auto *copy = new QPushButton(tr("Copy text")); copy->setObjectName("copySavedDraft");
     auto *restore = new QPushButton(tr("Restore in current session")); restore->setObjectName("restoreSavedDraft");
+    auto *open = new QPushButton(tr("Go to session")); open->setObjectName("openSavedDraftSession");
     auto *close = new QPushButton(tr("Close")); close->setDefault(true);
-    actions->addWidget(copy); actions->addWidget(restore); actions->addStretch(); actions->addWidget(close); layout->addLayout(actions);
+    actions->addWidget(copy); actions->addWidget(restore); actions->addWidget(open); actions->addStretch(); actions->addWidget(close);
+    layout->addLayout(actions);
     const auto target = m_key;
+    QString requested;
     Draft selected;
     quint64 selection = 0;
     const auto presentSelection = [&] {
@@ -949,6 +985,10 @@ void MessageComposer::showSavedDrafts()
     connect(list, &QListWidget::currentItemChanged, &dialog, [&](QListWidgetItem *item) {
         const auto generation = ++selection;
         const auto key = item ? item->data(Qt::UserRole).toString() : QString();
+        const bool reachable = item && ComposerDraftStore::owner(key).kind != ComposerDraftOwner::Kind::Unknown
+            && canOpenDraftSession && canOpenDraftSession(key);
+        open->setEnabled(reachable);
+        open->setToolTip(reachable || !item ? QString() : tr("This session is not in the session list now."));
         if (!item) selected = {};
         else if (m_preservedDrafts.contains(key)) selected = m_preservedDrafts.value(key);
         else if (m_drafts.contains(key) && !isDraftLoading(key)) selected = m_drafts.value(key);
@@ -963,6 +1003,10 @@ void MessageComposer::showSavedDrafts()
     });
 
     connect(copy, &QPushButton::clicked, &dialog, [&] { QApplication::clipboard()->setText(selected.text); });
+    connect(open, &QPushButton::clicked, &dialog, [&] {
+        if (!list->currentItem()) return;
+        requested = list->currentItem()->data(Qt::UserRole).toString(); dialog.accept();
+    });
     connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
     connect(restore, &QPushButton::clicked, &dialog, [&] {
         if(selected.formState.value("kind")=="voice_message")return;
@@ -981,11 +1025,12 @@ void MessageComposer::showSavedDrafts()
         m_drafts[target] = selected; saveDraft(target);
         m_loading = true; restoreDraft(); m_loading = false; rebuildAttachments(); updateControls(); dialog.accept();
     });
-    copy->setEnabled(false); restore->setEnabled(false);
-    m_draftStore.indexAsync(&dialog, [&, populate](const QHash<QString, QString> &index) {
+    copy->setEnabled(false); restore->setEnabled(false); open->setEnabled(false);
+    m_draftStore.indexAsync(&dialog, [&, populate](const QHash<QString, ComposerDraftSummary> &index) {
         populate(index); if (!list->count()) hint->setText(tr("No saved drafts on this desktop."));
     });
     dialog.exec();
+    if (!requested.isEmpty()) emit draftSessionRequested(requested);
 }
 
 void MessageComposer::setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,

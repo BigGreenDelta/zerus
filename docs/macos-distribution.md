@@ -6,15 +6,20 @@ Apple Silicon Macs install Zerus from the tap
 [ufna/homebrew-zerus](https://github.com/ufna/homebrew-zerus):
 
 ```sh
-brew install --cask ufna/zerus/zerus           # stable releases
 brew install --cask ufna/zerus/zerus@nightly   # daily verified builds from main
 zerus-setup
 ```
 
+The first public macOS build is
+[nightly 0.42.2.r1291.g5d2e5d0.n17](https://github.com/ufna/zerus/releases/tag/nightly-38794972859).
+The stable `zerus` cask will appear with the first owner-triggered signed stable
+release; it is not yet available. After that, install it with
+`brew install --cask ufna/zerus/zerus`.
+
 | Cask | Built by | Version | Download |
 | --- | --- | --- | --- |
-| `zerus` | manual `release.yml` candidate, `publish.yml` | `0.42.0` | `releases/download/v0.42.0/` |
-| `zerus@nightly` | daily `nightly.yml`, `publish-nightly.yml` | `0.42.0.r1234.gabcdef0.n56` | `releases/download/nightly-RUN_ID/` |
+| `zerus` | manual `release.yml` candidate, `publish.yml` | `VERSION` | `releases/download/vVERSION/` |
+| `zerus@nightly` | daily `nightly.yml`, `publish-nightly.yml` | `VERSION.rCOUNT.gCOMMIT.nNUMBER` | `releases/download/nightly-RUN_ID/` |
 
 Each cask ships with the AUR packages of the same candidate: `zerus` with the
 stable packages, `zerus@nightly` with `zerus-ade-nightly-bin`. Both install the
@@ -99,8 +104,13 @@ scripts/ci/macos-bundle.sh`) and review the module SBOMs before committing.
 `macos-cask.yml` is a reusable workflow with one input, `channel`. `release.yml`
 calls it with `stable` when `macos_cask=true` (the default; it then requires
 `run_macos=true`) and `MACOS_CASKS_ENABLED` is `true`; `nightly.yml` calls it with
-`nightly` whenever the variable is `true`. Neither caller passes secrets. It runs
-three jobs after full CI:
+`nightly` whenever the variable is `true`. Both callers explicitly forward only
+the five Apple secret names declared by the reusable workflow. GitHub requires
+this forwarding even for environment secrets; without it their values are empty.
+The values remain in the main-only `macos-signing` environment and are resolved
+only by the signing job. The callers never use `secrets: inherit`. See
+[GitHub's reusable workflow secret rules](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow).
+It runs three jobs after full CI:
 
 1. **macOS bundle** (`macos-15`, no secrets) selects the release version (the
    product version, or the nightly version computed exactly like
@@ -121,12 +131,24 @@ three jobs after full CI:
    The job verifies the Team ID, Gatekeeper and the stapled ticket, then deletes the
    keychain and key files even on failure. A team API key passes its issuer ID; an
    individual API key leaves `APPLE_NOTARY_API_ISSUER_ID` empty.
+   Stapling and ticket validation retry a lost CloudKit connection
+   (`NSURLErrorDomain -1005`, exit 68) at most four times, after 5, 15, 30 and
+   60 seconds, on the same signed file. The bundle checker and cask image check
+   use the same validation policy. Other failures stop immediately; an exhausted
+   retry or invalid ticket prevents publication. Signing and notary submissions
+   are not retried by this policy.
 3. **macOS cask installation** (no secrets) checks the DMG signature and ticket,
    mounts it read-only and verifies the contained app, self-tests and Applications
    shortcut. It then renders the channel's cask, runs `brew style`,
    installs it from a local tap pointing at the candidate bytes, repeats the bundle
    checks on `/Applications/Zerus.app`, runs `zerus-setup` and `--remove` in a
    scratch home and uninstalls the cask.
+   After validating the image and mounted app with Gatekeeper and their stapled
+   tickets, CI installs the cask with Homebrew's default quarantine and assesses
+   the installed copy again before execution. Only after it passes does CI clear
+   that disposable copy's download attribute, so the normal first-open
+   confirmation cannot block unattended self-tests. Public install commands,
+   casks and release archives retain their normal quarantine behavior.
 
 Only entitlements with a concrete need are granted, and only to the application:
 `com.apple.security.automation.apple-events` with `NSAppleEventsUsageDescription`
@@ -311,12 +333,44 @@ successfully. The drag-to-Applications link and nested framework links survived
 image creation. Publication contracts cover both channels, immutable DMG
 checksums, old ZIP-only releases, and exclusion from website mirror storage.
 
-Still requiring a signed Zerus candidate or a published release:
+Production qualification later on 2026-10-15 used the exact unsigned artifact
+from [Nightly 38776672013](https://github.com/ufna/zerus/actions/runs/38776672013),
+source `8f7f68f67c6eadc0eb9bf6c4946ffa0e614a6bff`. Full CI and bundle tests
+passed, but that run stopped before signing because the reusable workflow's
+callers did not forward the environment secret names. Both callers now forward
+the explicit five-name allowlist; credential values remain in `macos-signing`.
+The production signing script independently qualified the saved Qt bundle in a
+temporary local keychain: Apple accepted the app and DMG, both tickets validated,
+and Gatekeeper accepted both. The read-only mounted app passed the CLI and GUI
+self-tests under library validation and reported the exact clean source commit.
+This local qualification was not published. Both rendered cask templates passed
+`brew style` in disposable local taps.
 
-- Notarization, Gatekeeper acceptance and launch under library validation with
-  one Team ID (an ad-hoc signature cannot satisfy it by design).
+The first published DMG comes from
+[Nightly 38794972859](https://github.com/ufna/zerus/actions/runs/38794972859),
+version `0.42.2.r1291.g5d2e5d0.n17`, from clean source
+`5d2e5d0955ab34f1e81ebd237a9b7eed2761eb7f`. Its complete CI matrix and all
+67 production Qt test suites passed. Apple accepted separate app and DMG
+submissions; the signing job stapled and verified both. An independent download
+matched the Actions artifact digest, and its read-only mounted app passed
+signature, ticket, Gatekeeper, CLI/GUI self-tests and exact source metadata checks.
+A transient CloudKit connection loss during CI ticket validation was resolved by
+retrying installation verification on the same signed artifact, without a rebuild.
+The clean macOS runner passed Homebrew style, installation, installed bundle and
+Gatekeeper checks, CLI/GUI self-tests, isolated setup/removal and uninstallation.
+[Publisher 38802915468](https://github.com/ufna/zerus/actions/runs/38802915468)
+published the immutable nightly, synchronized AUR and committed the nightly cask
+to `ufna/homebrew-zerus`. Anonymous downloads of the public DMG and ZIP match
+their Actions artifact bytes, `SHA256SUMS` and GitHub digests; the public cask
+matches the reviewed template, version and ZIP digest. `brew fetch --cask
+ufna/zerus/zerus@nightly` also downloaded and verified the public package without
+installing over the developer's app. The desktop/nightly mirror synchronized
+successfully and serves the same release and source commit; macOS downloads
+remain on GitHub.
+
+Still requiring interactive or subsequent release qualification:
+
 - Terminal automation in the signed application.
 - Installation from the public tap on a clean account, and an upgrade from one
   cask version to the next with running GUI, tmux session and native agent.
-- `brew style` of both casks and the channel switch between them (CI runs the
-  style check in the cask installation job).
+- The channel switch between stable and nightly once both casks are published.

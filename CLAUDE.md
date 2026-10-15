@@ -88,6 +88,17 @@ no-reply address instead if email privacy matters.
 
 ## Validation and handoff
 
+Session counts can reach tens of thousands or more. Histories, audit journals,
+logs and administrative views must use bounded pages, indexed queries and
+background I/O; do not load complete journals or grow per-session GUI caches
+without a bound. Keep pagination stable while new records arrive.
+
+Automatic tool approvals are a separate, dangerous desktop opt-in, off by
+default. Grant only a verified one-time native permission, reserve its private
+audit record durably before delivery, and retain exact run/conversation/question
+identity. Unknown delivery never authorizes replay. Ordinary questions, startup
+trust and broader persistent permission changes remain manual.
+
 Hosted CI runs the complete Linux/Arch/macOS/Windows matrix automatically on
 pushes to main and pull requests targeting main. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise

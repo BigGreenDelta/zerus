@@ -7,6 +7,7 @@ mod claude_trust;
 mod claude_permission;
 mod claude_resume;
 mod claude_question;
+mod claude_statusline;
 mod claude_subagents;
 mod attachments;
 mod computer_files;
@@ -305,9 +306,21 @@ pub fn merge_snapshot(box_value: Value) -> Result<Value> {
 /// ID (`$N`) by its listed name.
 pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Result<Value> {
     local_sessions()?;
-    archive::reconcile()?;
-    let (snapshot, names) = live_sessions()?;
-    let archived = archive::records()?;
+    // A rename renames the terminal session and moves its binding under the
+    // state lock. Read the panes and the saved records under it as well, so a
+    // listing sees a rename before it began or after it finished, never a
+    // pane under the new name with its binding still under the old one: that
+    // session would list twice (zerus-gd02). Archive reconciliation already
+    // read both under this lock; the listing reuses those reads and releases
+    // the lock before it summarizes the sessions.
+    let ((snapshot, names), (archived, bindings)) = if root().exists() {
+        let _guard = lock(None)?;
+        let (snapshot, names) = live_sessions()?;
+        let saved = archive::reconcile_locked(&snapshot)?;
+        ((snapshot, names), saved)
+    } else {
+        (live_sessions()?, Default::default())
+    };
     let marks = read_marks::load();
     let sessions = box_value
         .get_mut("sessions")
@@ -354,7 +367,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
     // Bounds question indexing for the whole listing.
     let budget = read_marks::question_budget();
     let mut process_work = processes::WorkSample::default();
-    for record in records()? {
+    for record in bindings {
         if archive::equivalent(&record, &archived) {
             continue;
         }
@@ -632,6 +645,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         return hooks::hook();
     }
     if command == "graph" { return session_graph::dispatch(args); }
+    if command == "statusline" {
+        return claude_statusline::run();
+    }
     if command == "voice" { return voice::dispatch(args); }
     if command == "file-read" { return computer_files::dispatch(args); }
     if command == "attachment" {
@@ -660,6 +676,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "search" {
         return search::dispatch(args);
+    }
+    if command == "schedules" {
+        return Err("Native schedule management is available for DeepSeek sessions; other agents report schedules read-only".into());
     }
     if command == "send-now" { return input_queue::dispatch(args); }
     if command == "send" {

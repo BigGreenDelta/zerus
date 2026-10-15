@@ -89,6 +89,15 @@ IMPLEMENTATION = os.environ.get("ZERUS_CONNECTOR_IMPLEMENTATION") or (
     "rust" if os.environ.get("ZERUS_CONNECTOR_COMMAND") else "python")
 
 
+# Settings a Rust build reads only with its non-default `test-hooks` feature,
+# which packages never enable: the default native timeout in seconds (Python's
+# is 45) and a factor that divides the connector's own retry spacing (30 s
+# between attempts under divergence b). Python ignores both, so a test that
+# needs one runs only against Rust.
+NATIVE_TIMEOUT_HOOK = "ZERUS_CONNECTOR_TEST_NATIVE_TIMEOUT"
+CLOCK_SCALE_HOOK = "ZERUS_CONNECTOR_TEST_CLOCK_SCALE"
+
+
 def ported_modules() -> set[str]:
     return set(json.loads((TESTS / "ported.json").read_text())["rust"])
 
@@ -192,6 +201,11 @@ def default_rules(listing_value: dict | None = None, help_text: str = HELP_TEXT)
     ]
 
 
+# Every rule key scripted_hgs.py reads.
+RULE_KEYS = frozenset({"id", "argv", "prefix", "stdin_fields", "times", "stdout", "stdout_text", "stdout_path",
+                       "stderr", "exit", "exec", "delay", "kill_parent", "fill"})
+
+
 class ScriptedHgs:
     """The harness side of scripted_hgs.py: its script, call log and PATH entry."""
 
@@ -209,7 +223,15 @@ class ScriptedHgs:
 
     def script(self, rules: list[dict]) -> None:
         """Replace the script; the next call reads it. A rule without an `id`
-        gets a fresh one, so its `times` counts only calls answered since."""
+        gets a fresh one, so its `times` counts only calls answered since. A
+        key scripted_hgs.py does not know is refused here, since it would
+        otherwise be ignored and widen the rule."""
+        for rule in rules:
+            unknown = set(rule) - RULE_KEYS
+            if unknown:
+                raise ValueError(f"scripted hgs rule has unknown keys {sorted(unknown)}: {rule}")
+            if not isinstance(rule.get("stdin_fields", {}), dict):
+                raise ValueError(f"scripted hgs `stdin_fields` must be an object: {rule}")
         self.rules = []
         for rule in rules:
             self._ids += 1
@@ -283,7 +305,11 @@ class FakeRelay:
     parameters, an unknown endpoint) is answered as the relay or nginx would and
     also recorded in `violations`, which BlackBoxCase fails on. Requests are
     queued as phones submit them and handed out one per long poll in the
-    relay's batch envelope; results follow the relay's claim rules.
+    relay's batch envelope; results follow the relay's claim rules. As the
+    relay does, it answers a peer heartbeat with 404 when its route is not in
+    the last heartbeat manifest it accepted, and with 409 when that route is
+    offline or names another machine, or when that heartbeat's snapshot did
+    not offer `gateway_one_hop` (the relay keeps such routes unguarded).
     """
 
     def __init__(self, token: str | None = None):
@@ -296,6 +322,8 @@ class FakeRelay:
         self.pending: collections.deque[str] = collections.deque()
         self.result_posts: list[tuple[str, object, int]] = []
         self.deliveries: list[tuple[str, int]] = []  # (request_id, index in exchanges)
+        self.manifest: dict[str, dict] = {}  # route_id -> peer row of the last accepted heartbeat
+        self.guarded = False  # whether that heartbeat's snapshot offered gateway_one_hop
         self.active_polls = 0
         self.max_polls = 2  # max_polls_per_credential
         self.url = ""
@@ -364,10 +392,28 @@ class FakeRelay:
         return [exchange for exchange in self.exchanges if exchange.method == "POST"
                 and exchange.path == "/v1/node/heartbeat" and exchange.status == 200]
 
+    def peer_heartbeats(self, route_id: str | None = None) -> list[Exchange]:
+        """Accepted peer heartbeats, for one route or all of them."""
+        return [exchange for exchange in self.exchanges if exchange.method == "POST" and exchange.status == 200
+                and re.fullmatch(r"/v1/node/peers/[^/]+/heartbeat", exchange.path)
+                and (route_id is None or exchange.path == f"/v1/node/peers/{route_id}/heartbeat")]
+
     def delivered_since(self, request_id: str, mark: int) -> int | None:
         """Index in `exchanges` of the poll that handed this identity out in
         delivery `mark` or later (`mark` is a length of `deliveries`)."""
         return next((index for identity, index in self.deliveries[mark:] if identity == request_id), None)
+
+    async def inject(self, delivered) -> str:
+        """Hand out `delivered` exactly as given, in its own batch, although no
+        relay would queue it (a non-canonical identity, a malformed envelope or
+        a non-object). Returns its key in `entries`: its request_id when that
+        is a new string, under which a result can then be uploaded."""
+        request_id = delivered.get("request_id") if isinstance(delivered, dict) else None
+        key = request_id if isinstance(request_id, str) and request_id not in self.entries else f"injected-{len(self.entries)}"
+        self.entries[key] = {"state": "queued", "delivered": delivered, "result": None}
+        self.pending.append(key)
+        await self.notify()
+        return key
 
     async def claimed(self, request: dict) -> None:
         """Register a submission an earlier connector process already claimed."""
@@ -437,11 +483,21 @@ class FakeRelay:
             problem = heartbeat_problem(exchange.body)
             if problem:
                 return self.refuse(exchange, 400, "invalid request", problem)
+            # A heartbeat without a machine_id withdraws every route, and one
+            # whose snapshot lacks gateway_one_hop leaves its routes unguarded
+            # (relay store/snapshots.rs and registry.rs).
+            self.manifest = {row["route_id"]: row for row in exchange.body.get("peers", [])}
+            self.guarded = supports(exchange.body["snapshot"], "gateway_one_hop")
             return 200, {"ok": True}
         if exchange.method == "POST" and len(parts) == 5 and parts[:3] == ["v1", "node", "peers"] and parts[4] == "heartbeat":
             problem = peer_heartbeat_problem(parts[3], exchange.body)
             if problem:
                 return self.refuse(exchange, 400, "invalid request", problem)
+            route = self.manifest.get(parts[3])
+            if route is None:
+                return 404, {"error": "not found"}
+            if not (route["online"] and self.guarded) or route["machine_id"] != exchange.body["machine_id"]:
+                return 409, {"error": "request identity or route conflicts"}
             return 200, {"ok": True}
         if exchange.method == "POST" and len(parts) == 5 and parts[:3] == ["v1", "node", "requests"] and parts[4] == "result":
             return self.result(exchange, parts[3])
@@ -474,7 +530,8 @@ class FakeRelay:
     def claimable(self, one_hop: bool) -> str | None:
         for request_id in self.pending:
             entry = self.entries[request_id]
-            if entry["state"] == "queued" and (one_hop or "gateway_route" not in entry["delivered"]):
+            routed = isinstance(entry["delivered"], dict) and "gateway_route" in entry["delivered"]
+            if entry["state"] == "queued" and (one_hop or not routed):
                 return request_id
         return None
 
@@ -536,6 +593,14 @@ def snapshot_problem(snapshot) -> str | None:
         if not isinstance(row, dict) or ("name" in row and not text_field(row["name"], 1024)):
             return "invalid snapshot session"
     return None
+
+
+def supports(snapshot, feature: str) -> bool:
+    """The relay's `protocol::supports` for a snapshot's features."""
+    capabilities = snapshot.get("mobile_capabilities") if isinstance(snapshot, dict) else None
+    return (isinstance(capabilities, dict) and type(capabilities.get("protocol_version")) is int
+            and capabilities["protocol_version"] == 1
+            and isinstance(capabilities.get("features"), list) and feature in capabilities["features"])
 
 
 def presence_problem(body) -> str | None:

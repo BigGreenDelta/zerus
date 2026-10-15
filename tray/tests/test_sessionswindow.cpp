@@ -80,6 +80,7 @@
 #include "SessionCardDelegate.h"
 #include "SessionOrganization.h"
 #include "MachineFilter.h"
+#include "ProjectFilter.h"
 #include "DashboardPage.h"
 #include "AccountUsage.h"
 #include "WorktreePanel.h"
@@ -196,6 +197,8 @@ private slots:
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
     void updatesEntryOpensExactSettingsPage();
     void fileCacheSettingsNavigation();
+    void automaticApprovalSettingsNavigation_data();
+    void automaticApprovalSettingsNavigation();
     void mobileConnectionSettingsOfferTheSharedDeliveryChoice();
     void controlOnlyComputerOffersOnlyRemoteMachines();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
@@ -208,6 +211,8 @@ private slots:
     // Chords a test rebinds end with it.
     void cleanup() { ShortcutRegistry::instance().resetAll(); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
+    void savedDraftsGoToTheirSession_data();
+    void savedDraftsGoToTheirSession();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
     void emptyProjectsSettingPreservesArchiveAndProjects();
@@ -233,6 +238,8 @@ private slots:
     void usageLimitBecomesToolbarChip();
     void dashboardAndMultiMachineNavigation();
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
+    void projectFilterCombinesScopesCountsAndNavigation();
+    void projectHeaderOffersFocusAndAdditiveFilter();
     void hiddenPagesRenderWhenShown();
     void pollsKeepUnchangedActivity();
     void multiSelectionKeepsConversationAndGroupMenu_data();
@@ -599,6 +606,67 @@ void TestSessionsWindow::workspaceRestoresDraftAcrossRestartAndSessionRemoval()
     restored.findChild<QPushButton *>("savedDrafts")->click();
 }
 
+void TestSessionsWindow::savedDraftsGoToTheirSession_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QString("dark");
+    QTest::newRow("light") << QString("light");
+}
+
+void TestSessionsWindow::savedDraftsGoToTheirSession()
+{
+    QFETCH(QString, theme); QSettings().setValue("workspace/theme", theme);
+    auto state = fleet(); auto box = state.local();
+    box.sessions[1].conversationId = "conversation-one"; box.sessions[1].subagentSource = "hooks";
+    box.sessions[1].subagents = {{"worker", QJsonObject{{"name", "Worker"}, {"state", "working"}}}};
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    const QString remote = "mac\nclaude/infra/review", child = "arch\nkimi/docs/research\nconversation-one\nworker", ended = "mac\nclaude/infra/ended";
+    ComposerDraftStore store;
+    for (const auto &[key, text] : {std::pair{remote, QString("Check the plan first")}, std::pair{child, QString("Ask the worker")},
+                                    std::pair{ended, QString("From an ended session")}}) {
+        ComposerDraft draft; draft.text = text; QVERIFY(store.save(key, draft));
+    }
+    SessionsWindow window(program()); window.setFleet(state); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+    auto *childComposer = window.findChild<MessageComposer *>("subagentComposer"); QVERIFY(childComposer);
+    const auto choose = [&](const QString &key, bool available) {
+        QTimer::singleShot(0, &window, [&, key, available] {
+            auto *dialog = window.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
+            auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 3);
+            for (int i = 0; i < list->count(); ++i) {
+                const auto *item = list->item(i);
+                QVERIFY(!item->text().section('\n', 0, 0).trimmed().isEmpty());
+                QVERIFY(list->visualItemRect(item).height() >= 2 * list->fontMetrics().height());
+            }
+            list->setFocus(); list->setCurrentRow(0);
+            QTest::keyClick(list, Qt::Key_Down); QCOMPARE(list->currentRow(), 1);
+            QTest::keyClick(list, Qt::Key_Up); QCOMPARE(list->currentRow(), 0);
+            for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(Qt::UserRole).toString() == key) list->setCurrentRow(i);
+            QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), key);
+            auto *open = dialog->findChild<QPushButton *>("openSavedDraftSession"); QCOMPARE(open->isEnabled(), available);
+            const auto preview = qEnvironmentVariable("HGS_SAVED_DRAFTS_PREVIEW");
+            if (key == ended && !preview.isEmpty()) {
+                QTRY_COMPARE(dialog->findChild<QPlainTextEdit *>("savedDraftPreview")->toPlainText(), QString("From an ended session"));
+                QDir().mkpath(preview); QTest::qWait(50);
+                QVERIFY(dialog->grab().save(preview + "/drafts-" + theme + ".png"));
+                dialog->resize(620, 460); QTest::qWait(50);
+                QVERIFY(dialog->grab().save(preview + "/drafts-narrow-" + theme + ".png"));
+            }
+            if (available) open->click(); else dialog->reject();
+        });
+        window.findChild<QPushButton *>("savedDrafts")->click();
+    };
+    choose(ended, false); QCOMPARE(composer->sessionKey(), QString("\ncodex/hgs/dashboard"));
+    choose(remote, true); QCOMPARE(composer->sessionKey(), remote);
+    QTRY_COMPARE(composer->editor()->toPlainText(), QString("Check the plan first"));
+    // A subagent key names this computer; Go to opens the subagent in its session.
+    choose(child, true); QCOMPARE(composer->sessionKey(), QString("\nkimi/docs/research"));
+    QCOMPARE(childComposer->sessionKey(), child); QTRY_COMPARE(childComposer->editor()->toPlainText(), QString("Ask the worker"));
+    QCOMPARE(window.findChild<SessionList *>("sessionList")->currentItem()->data(SessionRoles::ChildId).toString(), QString("worker"));
+    choose(remote, true); QCOMPARE(composer->sessionKey(), remote);
+    QVERIFY(window.findChild<SessionList *>("sessionList")->currentItem()->data(SessionRoles::ChildId).toString().isEmpty());
+}
+
 void TestSessionsWindow::workingCardsKeepTurnClockAcrossUpdates()
 {
     auto state=fleet(); auto box=state.local();
@@ -671,6 +739,86 @@ void TestSessionsWindow::machineChooserCountsFollowStateScopeWithoutMachineOrTex
     menu->popup(window.mapToGlobal(QPoint(100,100))); QCOMPARE(count("@local"),4); QCOMPARE(count("mac"),1);
     local.sessions.removeFirst(); state.setLocal(local,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(count("@local"),3); QCOMPARE(count("mac"),1); QVERIFY(menu->isVisible()); menu->hide();
+}
+
+void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
+{
+    SessionOrganization org;
+    const auto work = org.createGroup("Focus"), saved = org.createGroup("Focus"); // Names never identify the scope.
+    org.moveSession(org.observe("arch", "codex/hgs/dashboard", ""), work);
+    org.moveSession(org.observe("mac", "claude/infra/review", ""), work);
+    org.moveSession(org.observe("arch", "codex/website/navigation", ""), saved);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.resize(1100,760); window.show();
+    auto *projects = window.findChild<ProjectFilter *>(); auto *machines = window.findChild<MachineFilter *>();
+    auto *list = window.findChild<SessionList *>("sessionList");
+    const auto parents = [&] { int count=0; for(int i=0;i<list->count();++i) if(!list->item(i)->data(SessionRoles::Header).toBool()) ++count; return count; };
+    projects->setSelection({work}); QCOMPARE(parents(),2);
+    for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) if (button->property("filter")=="all") QCOMPARE(button->property("count").toInt(),2);
+    projects->setSelection({work,saved}); QCOMPARE(parents(),3);
+    auto *menu = projects->button()->menu(); menu->popup(window.mapToGlobal(QPoint(100,100))); QTRY_VERIFY(menu->isVisible());
+    const auto choice = [&](const QString &id) -> QCheckBox * {
+        for (auto *check : menu->findChildren<QCheckBox *>("projectFilterChoice")) if (check->property("project")==id) return check;
+        return nullptr;
+    };
+    auto *workChoice=choice(work), *savedChoice=choice(saved); QVERIFY(workChoice); QVERIFY(savedChoice);
+    QCOMPARE(workChoice->property("sessionCount").toInt(),2); QCOMPARE(savedChoice->property("sessionCount").toInt(),1);
+    workChoice->click(); QCOMPARE(projects->selection(),QSet<QString>{saved}); QVERIFY(menu->isVisible()); workChoice->click();
+    machines->setSelection({"mac"}); QCOMPARE(parents(),1);
+    QCOMPARE(choice(work),workChoice); QCOMPARE(choice(saved),savedChoice); QVERIFY(menu->isVisible());
+    QCOMPARE(workChoice->property("sessionCount").toInt(),1); QCOMPARE(savedChoice->property("sessionCount").toInt(),0);
+    menu->hide(); machines->setSelection({});
+    // Search uses the exact logical membership for both metadata and content hits.
+    projects->setSelection({work}); auto *search=window.findChild<QLineEdit *>("search"); search->setText("navigation");
+    auto *results=window.findChild<QListWidget *>("searchResults"); QCOMPARE(results->count(),0);
+    projects->setSelection({saved}); QCOMPARE(results->count(),1); search->clear();
+    window.showProjects(); window.showSessionList();
+    QCOMPARE(projects->selection(),QSet<QString>{saved}); QCOMPARE(parents(),1);
+    for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) if (button->property("filter")=="active") button->click();
+    QCOMPARE(parents(),0); // The selected project has a saved session only.
+    for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) if (button->property("filter")=="all") button->click();
+    QCOMPARE(projects->selection(),QSet<QString>{saved}); QCOMPARE(parents(),1);
+    // A catalog refresh, session rename and explicit all-current-projects selection stay exact.
+    auto state=fleet(); auto local=state.local(); local.sessions[2].runId="saved-run";
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    local.sessions[2].name="codex/website/renamed"; state.setLocal(local,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QCOMPARE(parents(),1); QCOMPARE(projects->selection(),QSet<QString>{saved});
+    const auto preview=qEnvironmentVariable("HGS_PROJECT_FILTER_PREVIEW");
+    if(!preview.isEmpty()) {
+        QDir().mkpath(preview); projects->setSelection({work,saved});
+        for(const auto &theme:{QStringLiteral("dark"),QStringLiteral("light")}) {
+            auto *themeChoice=window.findChild<QComboBox *>("workspaceTheme"); QVERIFY(themeChoice);
+            themeChoice->setCurrentIndex(themeChoice->findData(theme));
+            QTest::qWait(100); QVERIFY(window.grab().save(preview+"/projects-"+theme+".png"));
+            menu->popup(window.mapToGlobal(QPoint(110,180))); QTest::qWait(50); QVERIFY(menu->grab().save(preview+"/chooser-"+theme+".png")); menu->hide();
+        }
+    }
+    window.showSession("mac","claude/infra/review"); QVERIFY(projects->selection().isEmpty()); QCOMPARE(parents(),5);
+}
+
+void TestSessionsWindow::projectHeaderOffersFocusAndAdditiveFilter()
+{
+    SessionOrganization org; const auto work=org.createGroup("Work"), docs=org.createGroup("Docs");
+    org.moveSession(org.observe("arch","codex/hgs/dashboard",""),work); org.moveSession(org.observe("mac","claude/infra/review",""),docs);
+    QSettings().setValue("workspace/organization",QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
+    auto *list=window.findChild<SessionList *>("sessionList"); auto *projects=window.findChild<ProjectFilter *>();
+    const auto openMenu=[&](const QString &id) -> QMenu * {
+        for(int i=0;i<list->count();++i) if(list->item(i)->data(SessionRoles::Header).toBool()&&list->item(i)->data(SessionRoles::Group)==id) {
+            list->scrollToItem(list->item(i)); list->customContextMenuRequested(list->visualItemRect(list->item(i)).center());
+            return window.findChild<QMenu *>("sessionGroupMenu");
+        }
+        return nullptr;
+    };
+    const auto action=[](QMenu *menu,const QString &name) -> QAction * { for(auto *a:menu->actions()) if(a->objectName()==name)return a;return nullptr; };
+    auto *menu=openMenu(work); QVERIFY(menu); auto *add=action(menu,"toggleProjectFilter"); QVERIFY(add); add->trigger(); menu->hide();
+    QCOMPARE(projects->selection(),QSet<QString>{work});
+    projects->setSelection({}); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+    menu=openMenu(docs); QVERIFY(menu); action(menu,"toggleProjectFilter")->trigger(); menu->hide();
+    projects->setSelection({work,docs}); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+    menu=openMenu(work); QVERIFY(menu); action(menu,"filterOnlyProject")->trigger(); menu->hide(); QCOMPARE(projects->selection(),QSet<QString>{work});
+    QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+    menu=openMenu(work); QVERIFY(menu); action(menu,"clearProjectFilter")->trigger(); menu->hide(); QVERIFY(projects->selection().isEmpty());
 }
 
 void TestSessionsWindow::dashboardAndMultiMachineNavigation()
@@ -6589,14 +6737,15 @@ void TestSessionsWindow::collapsingKeepsRowsInPlace()
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     auto *panel = window.findChild<QWidget *>("sessionListPanel"); auto *list = window.findChild<SessionList *>("sessionList");
     auto *toggle = window.findChild<QPushButton *>("sessionPanelToggle"); auto *chips = window.findChild<MachineFilter *>();
+    auto *projects = window.findChild<ProjectFilter *>();
     const auto top = [&] { return list->mapTo(panel, QPoint()).y(); };
     for (bool filtered : {false, true}) {
-        if (filtered) { chips->setSelection({"mac"}); QVERIFY(chips->isVisible()); }
+        if (filtered) { chips->setSelection({"mac"}); projects->setSelection({"ungrouped"}); QVERIFY(chips->isVisible()); QVERIFY(projects->isVisible()); }
         // The chip row shows at once and moves the list down when the layout runs,
         // which can take a while under load: sample the docked position once the
         // list sits below the laid-out row and stays there.
         int previous = -1;
-        QTRY_VERIFY((!filtered || (chips->height() > 0 && top() > chips->geometry().bottom()))
+        QTRY_VERIFY((!filtered || (chips->height() > 0 && top() > projects->geometry().bottom()))
                     && [&] { const int now = top(); return std::exchange(previous, now) == now; }());
         const int docked = top();
         // Each frame of the transition keeps the list where it was, also before
@@ -6608,6 +6757,7 @@ void TestSessionsWindow::collapsingKeepsRowsInPlace()
         QTRY_COMPARE(list->property("expansion").toReal(), 0.0); frames << top();
         // A poll rebuilds the collapsed list; at no point is it laid out lower.
         window.setFleet(fleet()); frames << top(); QTest::qWait(20); frames << top();
+        QVERIFY(projects->isHidden());
         toggle->click(); QTRY_COMPARE(list->property("expansion").toReal(), 1.0); frames << top();
         for (int frame : frames) QCOMPARE(frame, docked);
     }
@@ -8704,6 +8854,35 @@ void TestSessionsWindow::fileCacheSettingsNavigation(){
         files->findChild<QLineEdit *>("downloadCacheFolder")->setText("/Users/example/Downloads/Zerus Files");
         window.resize(1180, 820); QTest::qWait(80);
         QVERIFY(window.grab().save(qEnvironmentVariable("HGS_TEST_DOWNLOAD_SETTINGS_PREVIEW")));
+    }
+}
+
+void TestSessionsWindow::automaticApprovalSettingsNavigation_data(){
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QString("dark"); QTest::newRow("light") << QString("light");
+}
+
+void TestSessionsWindow::automaticApprovalSettingsNavigation(){
+    QFETCH(QString,theme); QSettings().setValue("workspace/theme",theme);
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray journal = R"PY(elif c=='--help':print('hgs approval-log begin|finish|list|detail')
+elif c=='approval-log':
+ p=json.load(sys.stdin)
+ if a[1]=='list':print(json.dumps(dict(entries=[dict(id=i,at=1792075200000+i*1000,host='desktop-a',session='claude/sample/review',prompt='Run this tool?',status=('unknown' if i==5 else 'approved')) for i in range(5,0,-1)],next=None,previous=None)))
+ elif a[1]=='detail':print(json.dumps(dict(id=p['id'],status='unknown',question=dict(questions=[dict(id='approval',question='Run this tool?',body='printf fixture',options=[dict(id='yes',label='Yes')])]),answers=[dict(question_id='approval',selected_option_ids=['yes'])],detail='Delivery was not confirmed. Check Activity or Terminal.')))
+)PY";
+    const auto path=m_dir->filePath("approval-settings-"+theme);
+    QVERIFY(FakeCli::install(path,original.readAll().replace("if False:pass\n","if False:pass\n"+journal)));
+    SessionsWindow window(FakeCli::program(path)); window.setFleet(fleet()); window.resize(1280,900); window.show(); window.showUpdates();
+    auto *sections=window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    QCOMPARE(sections->item(7)->text(),QString("Automatic approvals")); sections->setCurrentRow(7);
+    auto *page=window.findChild<AutomaticApprovalSettings *>("automaticApprovalSettings"); QVERIFY(page); QVERIFY(page->isVisible());
+    QVERIFY(!page->findChild<QCheckBox *>("automaticApprovalsEnabled")->isChecked());
+    auto *table=page->findChild<QTableWidget *>("approvalJournal"); QTRY_COMPARE(table->rowCount(),5);
+    table->setCurrentCell(0,0); auto *detail=page->findChild<QPlainTextEdit *>("approvalJournalDetail");
+    QTRY_VERIFY(detail->toPlainText().contains("printf fixture")); QVERIFY(detail->toPlainText().contains("Selected answer: Yes"));
+    if (qEnvironmentVariableIsSet("HGS_AUTOMATIC_APPROVALS_PREVIEW")) {
+        QTest::qWait(80); QVERIFY(window.grab().save(qEnvironmentVariable("HGS_AUTOMATIC_APPROVALS_PREVIEW")+"-"+theme+".png"));
     }
 }
 

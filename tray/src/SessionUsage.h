@@ -46,6 +46,8 @@ private:
             else hint<<tr("The provider has not reported the window size. Percentage is unavailable.");
             if(m_context.value("estimated").toBool())hint<<tr("Approximate context size reported by the provider.");
             if(m_context.value("limit_source")=="model_config")hint<<tr("Window size from this model's native configuration.");
+            if(capacity && m_context.value("limit_source")=="native_statusline")
+                hint<<tr("Window size that Claude Code's status line reports for %1.").arg(m_context.value("limit_model").toString());
             if(m_recorded)hint<<tr("Last recorded values. Live context is not confirmed.");
         } else hint<<tr("The provider has not reported context usage for this conversation yet.");
         hint<<tr("Open session usage in Details.");setToolTip(hint.join('\n'));setAccessibleName(tr("Context: %1").arg(text())+(known && !capacity ? tr(" (capacity unknown)") : QString()));setAccessibleDescription(toolTip());

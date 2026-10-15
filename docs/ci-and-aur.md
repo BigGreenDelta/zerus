@@ -118,6 +118,7 @@ save them.
 | Family | Job | Key after the prefix | Saved when | Bound |
 | --- | --- | --- | --- | --- |
 | `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
+| `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.85.0 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
 | `arch-cargo-v1-` | Arch package | Month, `Cargo.lock` hash | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `windows-qt-6.10.3-` | Windows | Hash of the Qt pin and installer | Exact key missed; desktop build passed | The pinned Qt archives, no WebEngine |
@@ -298,6 +299,14 @@ coverage changes model and effort in a fresh session, accepts Claude's own cache
 notice in a resumed conversation, and requires the session-only transcript
 receipt while `settings.json` stays unchanged. A session-only change made in
 Terminal must reach hgs through `PostModelSwitch` with the exact model ID.
+`tests/test_claude_statusline_native.py` starts the real TUI through a tracked
+`hgs claude` launch, with the private home, state folder and socket and the
+loopback API of `tests/model_api_fixture.py`. Claude 2.1.296 coverage requires the
+user's own status line on screen and its `settings.json` unchanged, and the window
+from Claude's status line input in `hgs inspect` for the exact run, conversation and
+model: before the first reply, after a reply, after a session-only model change, a
+compaction and a clear, and in a resumed run. In a linked worktree whose repository's
+local settings set a status line, Claude keeps that status line and no window is reported.
 
 ### Unix tmux census
 
@@ -751,10 +760,11 @@ prints folders relative to the real one, which the suites place projects by.
 
 On Linux and macOS, Claude Code runs every `tests/test_claude_*_native.py` suite
 plus the Claude clear and compaction fixtures: exact input, questions, approvals,
-trust, resume, clear, compaction and session-only model settings. Each test
-launches the real TUI under `env -i` with a fixture API key, a loopback or local
-fake API and no nonessential traffic, so no account, telemetry or model request
-leaves the runner. On Windows each agent runs its class of
+trust, resume, clear, compaction, session-only model settings and the status line
+context window. Each test launches the real TUI under `env -i`, or through a tracked
+`hgs` launch without the caller's `ANTHROPIC_` and `CLAUDE` variables, with a fixture
+API key, a loopback or local fake API and no nonessential traffic, so no account,
+telemetry or model request leaves the runner. On Windows each agent runs its class of
 `tests/test_windows_native_agents.py` through the session host instead.
 
 Real native checks run at 95x47 and 110x35 terminal sizes with animations explicitly
