@@ -60,6 +60,9 @@ class SessionActions(unittest.TestCase):
                 self.assertEqual(receipt['status'],'submitted')
                 self.wait_for(lambda:'Queued follow-up two' in self.tmux('capture-pane','-p','-t',self.pane)
                               and 'Queued follow-up inputs' not in self.tmux('capture-pane','-p','-t',self.pane))
+                # Before Codex's Interrupt hook the turn still counts as busy, so only the
+                # screen can hide the queue: no queue panel is left to show or send.
+                self.assertIsNone(transport.inspect(self).get('input_queue'))
                 transport.interrupted_turn(self)
                 info=transport.inspect(self)
                 self.assertEqual((info['phase'],info['activity']),('interrupted','unknown'))
@@ -69,7 +72,7 @@ class SessionActions(unittest.TestCase):
                 self.assertFalse(info['interrupted_message_can_send'])
                 self.assertEqual(info['interrupted_message_reason'],'terminal has a draft, dialog, or unrecognized prompt; '
                                  'open Terminal and return to an empty agent prompt')
-                transport.send(self,transport.payload(self,text='next'),success=False)
+                self.assertIn('terminal has a draft',transport.send(self,transport.payload(self,text='next'),success=False))
                 # One Escape and nothing else: no Enter submitted the draft and no text was pasted.
                 self.assertEqual(self.received()[len(before):],b'\x1b')
                 self.assertIn('\n› Queued follow-up one\n  Queued follow-up two\n',self.tmux('capture-pane','-p','-t',self.pane))
