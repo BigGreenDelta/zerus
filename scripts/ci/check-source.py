@@ -9,9 +9,200 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# A Unix child of the desktop inherits every descriptor not yet close-on-exec
+# (tray/src/ChildProcess.h). In tray/src each QProcess therefore goes through
+# ChildProcess::inheritStdioOnly(), directly or through a function that passes
+# its QProcess parameter there, in the function that creates it and before it
+# starts. Only these files may start children otherwise:
+CHILD_PROCESS_EXEMPT = {
+    "tray/src/ChildProcess.h": "implements inheritStdioOnly() and startDetached()",
+    "tray/src/WindowsTerminalBackend.cpp": "the app links it only on Windows, where inheritStdioOnly() does nothing",
+}
+CHILD_PROCESS_SOURCES = re.compile(r"tray/src/.+\.(?:cpp|h|mm)")
+SEE_CHILD_PROCESS = "(tray/src/ChildProcess.h)"
+LEXEME = re.compile(r"//|/\*|[\"']")
+LITERAL = {'"': re.compile(r'"(?:\\.|[^"\\\n])*"?'), "'": re.compile(r"'(?:\\.|[^'\\\n])*'?")}
+# Encoding and raw prefixes; a quote after any other word character separates digits.
+LITERAL_PREFIX = re.compile(r"(?:\A|\W)(?:u8|[uUL])?(R?)\Z")
+TYPE_HEADER = re.compile(r"\b(?:class|struct|union|enum|namespace|extern)\b(?![^<>]*>)")
+BRACKET = re.compile(r"[(){}\[\]]")
+ARGUMENT = re.compile(r"[(){}\[\],]")
+VARIABLE = r"[A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*)*"
+
+
+def code_only(text):
+    """The text with comments and literals blanked, keeping every offset and line."""
+    out, at = list(text), 0
+    while match := LEXEME.search(text, at):
+        start = match.start()
+        prefix = LITERAL_PREFIX.search(text, max(0, start - 4), start)
+        if match[0] == "//":
+            end = text.find("\n", start)
+        elif match[0] == "/*":
+            end = text.find("*/", start + 2) + 2
+        elif match[0] == "'" and prefix is None:
+            at = start + 1
+            continue
+        elif prefix and prefix[1]:
+            delimiter = text[start + 1:text.find("(", start)]
+            end = text.find(")" + delimiter + '"', start)
+            end = end + len(delimiter) + 2 if end >= 0 else -1
+        else:
+            end = LITERAL[match[0]].match(text, start).end()
+        end = len(text) if end <= start else end
+        out[start:end] = [c if c == "\n" else " " for c in text[start:end]]
+        at = end
+    return "".join(out)
+
+
+def closing(code, start):
+    """The offset just after the bracket that closes the one at start."""
+    depth = 0
+    for match in BRACKET.finditer(code, start):
+        depth += 1 if match[0] in "({[" else -1
+        if depth == 0:
+            return match.end()
+    return len(code)
+
+
+def arguments(code, start):
+    """(start, end) of each top-level argument of the parenthesis at start."""
+    end, depth, spans, last = closing(code, start) - 1, 0, [], start + 1
+    for match in ARGUMENT.finditer(code, start + 1, end):
+        if match[0] != ",":
+            depth += 1 if match[0] in "({[" else -1
+        elif depth == 0:
+            spans.append((last, match.start()))
+            last = match.end()
+    return spans + [(last, end)]
+
+
+def plain(expression):
+    """A variable as written, without spaces, a dereference or this->."""
+    return re.sub(r"^[*&]*(?:this->)?", "", re.sub(r"\s+", "", expression))
+
+
+def function_end(code, offset):
+    """The end of the outermost function body around offset; None outside functions."""
+    stack, header = [], 0
+    for match in re.finditer(r"[{};]", code):
+        if match[0] == "{":
+            text = code[header:match.start()]
+            stack.append((match.start(), bool(TYPE_HEADER.search(text)) and ")" not in text))
+        elif match[0] == "}" and stack:
+            start, type_body = stack.pop()
+            if start < offset < match.end() and not type_body and all(outer for _, outer in stack):
+                return match.end()
+        header = match.end()
+    return None
+
+
+def configurers(code, kind):
+    """(function, argument index) of each function here that passes its QProcess parameter to inheritStdioOnly()."""
+    found = set()
+    for match in re.finditer(rf"\b(?:{kind})\s*[*&]\s*([A-Za-z_]\w*)\s*(?=[,)=])", code):
+        depth, opening = 0, match.start() - 1
+        while opening >= 0 and code[opening] not in ";{}" and (depth or code[opening] != "("):
+            depth += {")": 1, "(": -1}.get(code[opening], 0)
+            opening -= 1
+        if opening < 0 or code[opening] != "(":
+            continue
+        function = re.search(r"([A-Za-z_]\w*)\s*\Z", code[max(0, opening - 200):opening])
+        body = re.compile(r"(?:\s*(?:const|noexcept|override|final))*\s*\{").match(code, closing(code, opening))
+        if function and body and re.search(rf"\binheritStdioOnly\s*\(\s*\*?\s*{match[1]}\s*\)",
+                                           code[body.end():closing(code, body.end() - 1)]):
+            spans = arguments(code, opening)
+            found.add((function[1], next(i for i, (start, end) in enumerate(spans) if start <= match.start() < end)))
+    return found
+
+
+def creations(code, kind):
+    """(offset, end, variable names) of each QProcess made here; names are empty when none receives it."""
+    made = [(match.start(), match.end(), [match[1]]) for match in
+            re.finditer(rf"(?<![\w:<.])(?<!->)(?:{kind})\s+([A-Za-z_]\w*)\s*(?=[;({{\[])", code)
+            if not re.search(r"\btypedef\s*\Z", code[max(0, match.start() - 20):match.start()])]
+    for match in re.finditer(rf"\bnew\s+(?:{kind})\b|(?:\bstd\s*::\s*)?\bmake_(?:unique|shared)\s*<\s*(?:{kind})\s*>"
+                             rf"|\bQSharedPointer\s*<\s*(?:{kind})\s*>\s*::\s*create\b", code):
+        before = code[max(code.rfind(c, 0, match.start()) for c in ";{}") + 1:match.start()]
+        # p = new QProcess, p.reset(new QProcess), unique_ptr<QProcess> p(new ...) or a member initializer.
+        if assigned := re.search(rf"(?<!\w)((?:{VARIABLE}\s*=\s*)+)\Z", before):
+            names = [plain(part) for part in assigned[1].split("=") if part.strip()]
+        elif target := re.search(rf"({VARIABLE})\s*(?:\.|->)\s*reset\s*\(\s*\Z"
+                                 rf"|(?:(?<!-)>|(?<!:):|,)\s*([A-Za-z_]\w*)\s*[({{]\s*\Z", before):
+            names = [plain(target[1] or target[2])]
+        else:
+            names = []
+        made.append((match.start(), match.end(), names))
+    return sorted(made)
+
+
+def variables(names):
+    """A pattern for any of the names, with any spacing around . and ->."""
+    return "|".join(r"\s*(?:\.|->)\s*".join(map(re.escape, re.split(r"\.|->", name))) for name in names)
+
+
+def configured(code, names, helpers, start, end):
+    """Offsets in start..end where one of the names goes to inheritStdioOnly(), directly or through a helper."""
+    found = [match.start() for match in re.compile(
+        rf"\binheritStdioOnly\s*\(\s*\*?\s*(?:this\s*->\s*)?(?:{variables(names)})\s*\)").finditer(code, start, end)]
+    for function, position in helpers:
+        for match in re.compile(rf"(?<![\w.])(?<!->)\b{function}\s*\(").finditer(code, start, end):
+            spans = arguments(code, match.end() - 1)
+            if position < len(spans) and plain(code[slice(*spans[position])]) in names:
+                found.append(match.start())
+    return sorted(found)
+
+
+def child_process_findings(files):
+    """"file:line: reason" for each child a tray/src file may start with the GUI's descriptors."""
+    sources = {name: code_only(text) for name, text in files.items()
+               if CHILD_PROCESS_SOURCES.fullmatch(name) and name not in CHILD_PROCESS_EXEMPT and "QProcess" in text}
+    kinds = {name: "|".join(["QProcess", *re.findall(r"\busing\s+(\w+)\s*=\s*QProcess\s*;", code),
+                             *re.findall(r"\btypedef\s+QProcess\s+(\w+)\s*;", code)]) for name, code in sources.items()}
+    helpers = set().union(*(configurers(code, kinds[name]) for name, code in sources.items()))
+    problems = []
+    for name, code in sources.items():
+        kind, found = kinds[name], []
+        for match in re.finditer(rf"\b(?:{kind})\s*::\s*(startDetached|startCommand|start|execute)\b", code):
+            found.append((match.start(), f"QProcess::{match[1]}() bypasses ChildProcess::inheritStdioOnly(); use "
+                                         "ChildProcess::startDetached() or a QProcess passed to inheritStdioOnly()"))
+        for match in re.finditer(rf"\b(?:public|protected|private)\s+(?:virtual\s+)?(?:{kind})\b(?!\s*::)", code):
+            found.append((match.start(), "a QProcess subclass starts children this check cannot follow"))
+        made = creations(code, kind)
+        for index, (start, end, names) in enumerate(made):
+            if not names:
+                found.append((start, "assign the new QProcess to a variable and pass it to ChildProcess::inheritStdioOnly()"))
+                continue
+            scope = function_end(code, start)
+            limit = min([scope or len(code)] + [later for later, _, other in made[index + 1:] if set(other) & set(names)])
+            at = configured(code, names, helpers, end, limit)
+            if not at and scope is None:
+                # A member: the class may configure it in its other sources (Tool.h and Tool.cpp).
+                stem = name.rsplit(".", 1)[0]
+                at = [0 for other, text in files.items() if other != name and CHILD_PROCESS_SOURCES.fullmatch(other)
+                      and other.rsplit(".", 1)[0] == stem and configured(code_only(text), names, helpers, 0, len(text))]
+            started = re.compile(rf"(?<![\w.])(?<!->)(?:this\s*->\s*)?({variables(names)})\s*(\.|->)\s*"
+                                 rf"(startDetached|startCommand|start|open)\s*\(").search(code, end, limit)
+            if not at:
+                found.append((start, f"QProcess {names[0]} is not passed to ChildProcess::inheritStdioOnly() "
+                                     "in the function that creates it"))
+            elif started and started.start() < at[0]:
+                found.append((started.start(), f"{plain(started[1])}{started[2]}{started[3]}() comes before "
+                                               f"ChildProcess::inheritStdioOnly({plain(started[1])})"))
+        problems += [(name, code.count("\n", 0, offset) + 1, reason) for offset, reason in found]
+    return [f"{name}:{line}: {reason} {SEE_CHILD_PROCESS}." for name, line, reason in sorted(problems)]
+
 
 def main():
-    subprocess.run([sys.executable, "-m", "unittest", "discover", "-q", "-s", "tests", "-p", "test_source_privacy.py"], cwd=ROOT, check=True)
+    paths = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT).decode().split("\0")
+    # First, so that a desktop child the unit tests would also find shows only its findings.
+    sources = {name: (ROOT / name).read_text(encoding="utf-8") for name in set(filter(None, paths))
+               if CHILD_PROCESS_SOURCES.fullmatch(name) and (ROOT / name).is_file()}
+    if stale := sorted(set(CHILD_PROCESS_EXEMPT) - set(sources)):
+        raise SystemExit(f"Remove the child process exemption of missing {', '.join(stale)}.")
+    if problems := child_process_findings(sources):
+        raise SystemExit("\n".join(problems))
+    subprocess.run([sys.executable, "-m", "unittest", "discover", "-q", "-s", "tests", "-p", "test_source_*.py"], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(ROOT / "scripts/check-source-privacy.py")], check=True)
     subprocess.run(["git", "diff", "--check"], cwd=ROOT, check=True)
     version = (ROOT / "VERSION").read_text().strip()
@@ -40,7 +231,6 @@ def main():
             if match and (len(match[1]) not in {0, 4} or
                           match[2].strip() not in {"read", "write", "write-only", "none"}):
                 raise SystemExit(f"{workflow.name}: cache-mode requires a fixed workflow/job enum.")
-    paths = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT).decode().split("\0")
     for name in sorted(set(filter(None, paths))):
         path = ROOT / name
         if not path.is_file():
@@ -49,7 +239,7 @@ def main():
             ast.parse(path.read_text(), filename=name)
         elif path.read_bytes().split(b"\n", 1)[0].startswith((b"#!/bin/sh", b"#!/usr/bin/env bash")) or path.name in {"PKGBUILD", "PKGBUILD.in"}:
             subprocess.run(["bash", "-n", str(path)], check=True)
-    print("Source syntax, privacy and release version checks passed.")
+    print("Source syntax, privacy, child process and release version checks passed.")
 
 
 if __name__ == "__main__":
