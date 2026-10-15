@@ -2661,6 +2661,67 @@ exec {tmux} "$@"
                          (saved["run_id"], saved["conversation_id"], True))
         self.assertEqual([row["name"] for row in self.rows()], [new_name])
 
+    @unittest.skipIf(LEGACY_STATE, "fix introduced by the native lifecycle model")
+    def test_rename_before_the_listing_reads_pane_folders_keeps_the_live_folder(self):
+        # A listing reads its pane snapshot under the state lock and asks for
+        # the panes' current folders after releasing it. A session renamed in
+        # between lists under the name of its snapshot, still with the live
+        # folder of its pane rather than its saved one (zerus-18u1).
+        old_name, new_name = self.start(), "claude/p/renamed"
+        armed, renamed, release, status = (
+            self.root / name for name in ("rename-armed", "terminal-renamed",
+                                          "rename-release", "rename-status"))
+        def q(path):
+            return shlex.quote(str(path))
+        tmux = f"{shlex.quote(TMUX)} -S {shlex.quote(self.socket)} -f /dev/null"
+        # Only the listing sets LISTING_PROBE. Its folder query starts the
+        # rename and runs once the terminal session has its new name. The
+        # rename then holds its binding move until the listing has finished.
+        self.script("tmux", f'''#!/bin/sh
+if [ -n "$LISTING_PROBE" ]; then
+    case "$*" in *pane_current_path*)
+        if rm {q(armed)} 2>/dev/null; then
+            (env -u LISTING_PROBE {shlex.quote(str(HGS))} rename {shlex.quote(old_name)} {shlex.quote(new_name)}
+             echo $? >{q(status)}) </dev/null >/dev/null 2>&1 &
+            tries=0
+            until [ -e {q(renamed)} ] || [ -e {q(status)} ] || [ $tries -ge 1000 ]; do
+                tries=$((tries + 1)); sleep 0.01
+            done
+        fi ;;
+    esac
+    exec {tmux} "$@"
+fi
+if [ "$1" = rename-session ]; then
+    {tmux} "$@"; status=$?
+    touch {q(renamed)}
+    tries=0
+    until [ -e {q(release)} ] || [ $tries -ge 1500 ]; do
+        tries=$((tries + 1)); sleep 0.01
+    done
+    exit $status
+fi
+exec {tmux} "$@"
+''')
+        armed.touch()
+        try:
+            listing = subprocess.run([str(HGS), "ls", "--local", "--json"],
+                                     env=dict(self.env, LISTING_PROBE="1"),
+                                     capture_output=True, text=True, timeout=20)
+        finally:
+            release.touch()
+            if not armed.exists():
+                self.wait(status.exists)
+        self.assertEqual(listing.returncode, 0, listing.stdout + listing.stderr)
+        self.assertFalse(armed.exists())
+        self.assertTrue(renamed.exists())
+        self.assertEqual(status.read_text().strip(), "0")
+        sessions = json.loads(listing.stdout)["sessions"]
+        self.assertEqual([s["name"] for s in sessions], [old_name])
+        self.assertEqual(sessions[0]["cwd_source"], "tmux")
+        self.assertEqual(Path(sessions[0]["cwd"]).resolve(), self.project.resolve())
+        after = self.rows()
+        self.assertEqual([(row["name"], row["cwd_source"]) for row in after], [(new_name, "tmux")])
+
     def test_attached_terminal_title_changes_without_restarting_or_typing(self):
         old_name, new_name = "sh/p/before", "sh/p/after"
         self.t("new-session", "-d", "-s", old_name, "cat")
