@@ -107,8 +107,12 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
                 rename::remove_legacy(&record)?;
                 archive::remove_synced(&record_path(name))?;
             }
-        } else if let Some(scope)=scope {scope.result_record(&archived);}
-        else {println!("hgs: archived {name} ({})", string(&archived, "archive_id"));}
+        } else {
+            drop(_guard);
+            super::worktree_lifecycle::after_archive(&archived);
+            if let Some(scope)=scope {scope.result_record(&archived);}
+            else {println!("hgs: archived {name} ({})", string(&archived, "archive_id"));}
+        }
         return Ok(0);
     }
     let mut record = read(name)?;
@@ -131,7 +135,10 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     record["completion_source"] = json!("manual_terminate");
     record["completion_reason"] = json!("user_terminated");
     let id = archive::save(&record)?;
-    if let Some(scope)=scope {scope.result_record(&archive::read_archive(name,&id)?);} else {println!("hgs: terminated and archived {name} ({id})");}
+    let archived = archive::read_archive(name,&id)?;
+    drop(_guard);
+    super::worktree_lifecycle::after_archive(&record);
+    if let Some(scope)=scope {scope.result_record(&archived);} else {println!("hgs: terminated and archived {name} ({id})");}
     Ok(0)
 }
 

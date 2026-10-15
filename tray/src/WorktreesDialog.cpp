@@ -112,11 +112,12 @@ WorktreesDialog::WorktreesDialog(HgsClient *client, const SessionOrganization &p
     m_refresh->setText(tr("Refresh"));
     layout->addWidget(toolbar);
     m_status = new QLabel; m_status->setObjectName("worktreeOverviewStatus"); m_status->setTextFormat(Qt::PlainText); m_status->setWordWrap(true); layout->addWidget(m_status);
+    m_result = new QLabel; m_result->setObjectName("worktreeCleanupResult"); m_result->setTextFormat(Qt::PlainText); m_result->setWordWrap(true); m_result->hide(); layout->addWidget(m_result);
     auto *split = new QSplitter; split->setObjectName("worktreeWorkspaceSplit"); split->setChildrenCollapsible(false);
     m_tree = new QTreeWidget; m_tree->setObjectName("worktreeOverviewList"); m_tree->setColumnCount(4);
     m_tree->setHeaderLabels({tr("Worktree / branch"), tr("What remains"), tr("Size"), tr("Computer")});
     m_tree->setItemDelegateForColumn(0, new WorktreeNameDelegate(m_tree));
-    m_tree->setTextElideMode(Qt::ElideMiddle); m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_tree->setTextElideMode(Qt::ElideMiddle); m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_tree->setMinimumWidth(360); m_tree->header()->setStretchLastSection(false); m_tree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
     m_tree->header()->setSectionResizeMode(1, QHeaderView::Stretch); m_tree->setColumnWidth(0, 230);
     m_tree->header()->setSectionResizeMode(2, QHeaderView::Interactive); m_tree->setColumnWidth(2,110); m_tree->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
@@ -134,19 +135,37 @@ WorktreesDialog::WorktreesDialog(HgsClient *client, const SessionOrganization &p
     for (auto *filter : {m_project, m_computer, m_category, m_sort}) connect(filter, &QComboBox::currentIndexChanged, this, [this] { render(); });
     connect(m_search, &QLineEdit::textChanged, this, [this] { render(); });
     connect(m_showMain, &QCheckBox::toggled, this, [this] { render(); });
-    connect(m_tree, &QTreeWidget::itemSelectionChanged, this, [this] { showDetails(); });
+    connect(m_tree, &QTreeWidget::itemSelectionChanged, this, [this] {
+        const QSignalBlocker blocker(m_tree);
+        for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
+            auto *item = *it; if (!(item->flags() & Qt::ItemIsUserCheckable)) continue;
+            const auto identity = item->data(0, Qt::UserRole + 2).toString();
+            item->setCheckState(0, item->isSelected() ? Qt::Checked : Qt::Unchecked);
+            if (item->isSelected()) m_checked.insert(identity); else m_checked.remove(identity);
+        }
+        showDetails(); updateActions();
+    });
     connect(m_tree, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
         if (column != 0 || !item->parent()) return;
         const auto identity = item->data(0, Qt::UserRole + 2).toString();
-        if (item->checkState(0) == Qt::Checked) m_checked[identity] = item->data(0, Qt::UserRole + 4).toJsonObject()["fingerprint"].toString();
+        const bool checked = item->checkState(0) == Qt::Checked;
+        { const QSignalBlocker blocker(m_tree); item->setSelected(checked); }
+        if (checked) m_checked.insert(identity);
         else m_checked.remove(identity); updateActions();
     });
     connect(m_copy, &QPushButton::clicked, this, [this] { QApplication::clipboard()->setText(selectedRow()["path"].toString()); });
     connect(m_cleanup, &QPushButton::clicked, this, [this] {
+        const QSignalBlocker blocker(m_tree); m_checked.clear();
         for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
             auto *item = *it; const auto review = item->data(0, Qt::UserRole + 4).toJsonObject();
-            if (item->parent() && (item->flags() & Qt::ItemIsUserCheckable)) item->setCheckState(0, WorktreeReviewUi::category(review) == 0 ? Qt::Checked : Qt::Unchecked);
+            if (item->parent() && (item->flags() & Qt::ItemIsUserCheckable)) {
+                const auto source = m_sources.constFind(item->data(0, Qt::UserRole).toString());
+                const bool checked = source != m_sources.cend() && freshProof(*source, review) && WorktreeReviewUi::category(review) == 0;
+                item->setCheckState(0, checked ? Qt::Checked : Qt::Unchecked); item->setSelected(checked);
+                if (checked) m_checked.insert(item->data(0, Qt::UserRole + 2).toString());
+            }
         }
+        updateActions();
     });
     connect(m_remove, &QPushButton::clicked, this, &WorktreesDialog::cleanUp);
     auto *expiry = new QTimer(this); expiry->setObjectName("worktreeCacheTimer"); expiry->setInterval(15000);
@@ -417,9 +436,9 @@ void WorktreesDialog::render()
             if (group == 0) { ++candidates; candidateBytes += qint64(detail["disk_bytes"].toDouble()); candidateComplete &= detail["verdict"] == "missing" || detail["disk_complete"] == true; }
             const auto summary = (valid ? WorktreeReviewUi::summary(detail) : state(source, row))
                 + (valid && !online(source) ? tr(" · Offline snapshot") :
-                   valid && WorktreeReviewUi::removable(detail) && !freshProof(source,detail) ? tr(" · Refresh to select") : QString());
+                   valid && !freshProof(source,detail) ? tr(" · Will recheck before cleanup") : QString());
             rendered.append(QJsonObject{{"source", sourceKey}, {"row", row}, {"review", detail}, {"identity", key(source.host, path)}, {"group", group},
-                {"selectable", valid && freshProof(source,detail) && WorktreeReviewUi::removable(detail)}, {"projects", QJsonArray::fromStringList(projects)},
+                {"selectable", row["kind"] == "linked"}, {"projects", QJsonArray::fromStringList(projects)},
                 {"columns", QJsonArray{QFileInfo(path).fileName() + '\n' + detail["branch"].toString(), summary, WorktreeReviewUi::size(detail), source.machine}}});
         }
     }
@@ -443,10 +462,11 @@ void WorktreesDialog::render()
                 auto *item = new QTreeWidgetItem(heading, columns);
                 item->setData(0, Qt::UserRole, entry["source"].toString()); item->setData(0, Qt::UserRole + 1, entry["row"].toObject());
                 item->setData(0, Qt::UserRole + 2, entry["identity"].toString()); item->setData(0, Qt::UserRole + 3, entry["projects"].toArray()); item->setData(0, Qt::UserRole + 4, entry["review"].toObject());
-                const auto identity = entry["identity"].toString(), reviewFingerprint = entry["review"].toObject()["fingerprint"].toString();
+                const auto identity = entry["identity"].toString();
                 if (entry["selectable"].toBool()) {
                     item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
-                    item->setCheckState(0, m_checked.value(identity) == reviewFingerprint && !reviewFingerprint.isEmpty() ? Qt::Checked : Qt::Unchecked);
+                    item->setCheckState(0, m_checked.contains(identity) ? Qt::Checked : Qt::Unchecked);
+                    item->setSelected(m_checked.contains(identity));
                 } else { item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable); m_checked.remove(identity); }
                 const auto branch = entry["review"].toObject()["branch"].toString();
                 const auto kind = entry["row"].toObject()["kind"].toString();
@@ -454,11 +474,11 @@ void WorktreesDialog::render()
                     kind == "folder" || kind == "bare" ? columns[1] : tr("Branch: %1\n%2").arg(branch.isEmpty() ? tr("Detached HEAD") : branch, columns[1]));
                 item->setData(0, Qt::AccessibleDescriptionRole, description);
                 for (int column = 0; column < 4; ++column) item->setToolTip(column, description);
-                if (identity == selected) m_tree->setCurrentItem(item);
+                if (identity == selected) m_tree->setCurrentItem(item, 0, QItemSelectionModel::NoUpdate);
             }
             if (heading) { heading->setText(0, tr("%1 (%2)").arg(WorktreeReviewUi::categoryName(group)).arg(count)); heading->setExpanded(true); }
         }
-        if (!m_tree->currentItem() && m_tree->topLevelItemCount()) m_tree->setCurrentItem(m_tree->topLevelItem(0)->child(0));
+        if (!m_tree->currentItem() && m_tree->topLevelItemCount()) m_tree->setCurrentItem(m_tree->topLevelItem(0)->child(0), 0, QItemSelectionModel::NoUpdate);
         m_tree->verticalScrollBar()->setValue(scroll);
     }
     qint64 oldest=0;
@@ -507,10 +527,9 @@ QList<QJsonObject> WorktreesDialog::selectedEntries() const
     QList<QJsonObject> entries;
     for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
         const auto *item = *it; if (!item->parent() || !(item->flags() & Qt::ItemIsUserCheckable) || item->checkState(0) != Qt::Checked) continue;
-        const auto source = m_sources.constFind(item->data(0, Qt::UserRole).toString()); if (source == m_sources.cend() || !canClean(*source)) continue;
-        const auto row = item->data(0, Qt::UserRole + 1).toJsonObject(), review = reviewedRow(*source, row);
-        if (!freshProof(*source,review) || !WorktreeReviewUi::removable(review) || review["fingerprint"].toString() != m_checked.value(key(source->host, row["path"].toString()))) continue;
-        entries << QJsonObject{{"host", source->host}, {"machine", source->machine}, {"common_dir", source->catalog["common_dir"]}, {"row", review}};
+        const auto source = m_sources.constFind(item->data(0, Qt::UserRole).toString()); if (source == m_sources.cend()) continue;
+        const auto row = item->data(0, Qt::UserRole + 1).toJsonObject();
+        entries << QJsonObject{{"host", source->host}, {"machine", source->machine}, {"common_dir", source->catalog["common_dir"]}, {"row", row}, {"offline", !canClean(*source)}};
     }
     return entries;
 }
@@ -519,7 +538,10 @@ void WorktreesDialog::updateActions()
 {
     const auto entries = selectedEntries(); m_remove->setEnabled(!entries.isEmpty()); m_remove->setText(tr("Review cleanup (%1)…").arg(entries.size()));
     m_copy->setEnabled(!selectedRow()["path"].toString().isEmpty()); m_refresh->setEnabled(m_requests.isEmpty() && !m_reviewRequest);
-    bool candidate = false; for (QTreeWidgetItemIterator it(m_tree); *it; ++it) if ((*it)->parent() && ((*it)->flags() & Qt::ItemIsUserCheckable) && WorktreeReviewUi::category((*it)->data(0, Qt::UserRole + 4).toJsonObject()) == 0) candidate = true;
+    bool candidate = false; for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
+        const auto source = m_sources.constFind((*it)->data(0, Qt::UserRole).toString());
+        if ((*it)->parent() && source != m_sources.cend() && freshProof(*source, (*it)->data(0, Qt::UserRole + 4).toJsonObject()) && WorktreeReviewUi::category((*it)->data(0, Qt::UserRole + 4).toJsonObject()) == 0) candidate = true;
+    }
     m_cleanup->setEnabled(candidate);
 }
 
@@ -550,6 +572,7 @@ void WorktreesDialog::cleanUp()
     const auto entries = selectedEntries(); if (entries.isEmpty()) return;
     WorktreeBatchCleanupDialog dialog(m_client, entries, this); dialog.exec();
     if (dialog.attempted()) {
+        m_result->setText(dialog.summary()); m_result->show();
         m_changed |= dialog.changed(); m_checked.clear();
         for (const auto &entry : entries) {
             const auto host = entry["host"].toString(), common = entry["common_dir"].toString(), repository = key(host, common);

@@ -2,6 +2,15 @@
 
 Tracking issue: `zerus-2gk9`.
 
+Lifecycle update, 2026-10-15 (`zerus-2dnk`): the owner superseded the original
+manual-only restriction below. Terminate, explicit Archive and confirmed clean
+exit may remove a verified Zerus-created, clean and integrated checkout, keeping
+its branch and archive restoration recipe. Uncommitted/untracked/ignored data
+always requires manual review. The current manager also supports an explicit,
+content-fingerprinted discard confirmation; this exception never bypasses active,
+locked, nested, submodule or unknown-data protections. See the current worktree
+section in `docs/reference.md`; the original design below is historical.
+
 ## Goal
 
 Let people remove Git worktrees they no longer need from Zerus, mainly from

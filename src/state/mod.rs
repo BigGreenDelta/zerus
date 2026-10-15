@@ -70,6 +70,7 @@ mod git_status;
 mod worktrees;
 mod worktree_cleanup;
 mod worktree_inspection;
+mod worktree_lifecycle;
 
 /// Current bounded native Git evidence for exact project/worktree placement.
 pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
@@ -293,10 +294,16 @@ fn home_relative_creation_rejects_windows_roots_and_drive_prefixes_before_effect
 }
 
 /// Enrich the CLI's tmux snapshot without a subprocess or a JSON stdin pipe.
-pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
+pub fn merge_snapshot(box_value: Value) -> Result<Value> {
+    merge_listing(box_value, &BTreeMap::new())
+}
+
+/// `merge_snapshot` of a listing; `ids` holds each listed session's immutable
+/// ID (`$N`) by its listed name.
+pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Result<Value> {
     local_sessions()?;
     archive::reconcile()?;
-    let snapshot = live()?;
+    let (snapshot, names) = live_sessions()?;
     let archived = archive::records()?;
     let marks = read_marks::load();
     let sessions = box_value
@@ -306,8 +313,31 @@ pub fn merge_snapshot(mut box_value: Value) -> Result<Value> {
     // The terminal listed these sessions before `snapshot`. Every live session
     // has a pane, so one that the later snapshot lacks ended in between: it is
     // not live, and its saved binding lists below with a state instead of as
-    // an untracked live row.
-    sessions.retain(|session| snapshot.contains_key(string(session, "name")));
+    // an untracked live row. A session renamed in between keeps its ID: it
+    // lists once, under the name that `snapshot` and its binding now hold.
+    let current = |listed: &str| ids.get(listed).and_then(|id| names.get(id)).cloned();
+    let held: std::collections::BTreeSet<String> = sessions
+        .iter()
+        .filter_map(|session| current(string(session, "name")))
+        .collect();
+    sessions.retain_mut(|session| {
+        let listed = string(session, "name").to_owned();
+        match current(&listed) {
+            Some(name) => {
+                if name != listed {
+                    let mut parts = name.splitn(3, '/');
+                    session["cmd"] = json!(parts.next().unwrap_or(""));
+                    session["project"] = json!(parts.next().filter(|s| !s.is_empty()));
+                    session["tag"] = json!(parts.next().filter(|s| !s.is_empty()));
+                    session["name"] = json!(name);
+                }
+                true
+            }
+            // Unknown or ended ID: the name decides, unless another listed
+            // session was renamed to it.
+            None => snapshot.contains_key(&listed) && !held.contains(&listed),
+        }
+    });
     let mut by_name = BTreeMap::new();
     for (index, session) in sessions.iter().enumerate() {
         by_name.insert(string(session, "name").to_owned(), index);
