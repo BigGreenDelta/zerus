@@ -91,9 +91,16 @@ export function apply(ctx,config) {
   ctx.llm.registerAdapter(['hgs-test'],new Adapter());
   // Hold a marked child's first step, before it records its subagent
   // descriptor, until the test creates the release file (as a slow checkpoint).
+  // An ARMED hold also arms the child's goal while it waits, so a test can see
+  // a disarm, and pauses it again on release so no goal round follows.
   ctx.on('agent/pre-step',async(request,next)=>{
-    const hold=request.agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/HOLD_CHILD_\w+/)?.[0];
+    const {agent}=request;
+    const hold=agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/HOLD_CHILD_\w+/)?.[0];
+    const armed=hold&&hold.startsWith('HOLD_CHILD_ARMED_')&&config?.holds&&!existsSync(join(config.holds,hold))&&ctx.goals.get(agent);
+    if(armed)ctx.goals.resume(agent,{id:armed.id,revision:armed.revision});
     for(let i=0;hold&&config?.holds&&i<300&&!existsSync(join(config.holds,hold));i++)await new Promise(resolve=>setTimeout(resolve,50));
+    const goal=armed&&ctx.goals.get(agent);
+    if(goal?.phase==='active')ctx.goals.pause(agent,{id:goal.id,revision:goal.revision});
     return next();
   });
   // Keep a marked child in its first pre-step, before it records its subagent
