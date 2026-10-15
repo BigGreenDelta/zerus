@@ -387,7 +387,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
                     .ok_or("invalid session")?
                     .extend(summary.as_object().ok_or("invalid summary")?.clone());
                 let questions = read_marks::pending_questions(&record, session, true, budget);
-                read_marks::enrich(session, &marks, journal::journal_name(&record), questions.as_deref());
+                read_marks::enrich_listing(session, &marks, journal::journal_name(&record), questions);
             }
             continue;
         }
@@ -410,7 +410,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
                 .unwrap()
                 .clone(),
         );
-        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), Some(&[]));
+        read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
         sessions.push(session);
     }
     for record in archived {
@@ -426,7 +426,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
                 .unwrap()
                 .clone(),
         );
-        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), Some(&[]));
+        read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
         sessions.push(session);
     }
     sessions.extend(dsh::snapshots()?);
@@ -436,7 +436,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
         if session.get("attention_signature").is_none() {
             let owner = string(session, "name").to_owned();
             let questions=if session["agent"]=="opencode" {session["pending_questions"].as_array().cloned().unwrap_or_default()}else{Vec::new()};
-            read_marks::enrich(session, &marks, &owner, Some(&questions));
+            read_marks::enrich_listing(session, &marks, &owner, Ok(Some(questions)));
         }
     }
 
