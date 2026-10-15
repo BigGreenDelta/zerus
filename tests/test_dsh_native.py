@@ -459,8 +459,8 @@ class NativeHarness(unittest.TestCase):
     def test_reads_do_not_add_effects_while_a_child_scope_unloads(self):
         # Native disposal unloads a finished child's Cordis scope before the
         # child leaves the live registry; the fixture holds that window open.
-        # Nothing may read the child before it: a read of the live child
-        # installs its model selection, which later reads would reuse.
+        # Nothing reads the child before it, so no earlier read can have
+        # installed a model selection that later reads would reuse.
         for mode in ('one-shot', 'continuable'):
             with self.subTest(mode=mode):
                 parent=self.create();hold='DISPOSING_CHILD_'+uuid.uuid4().hex
@@ -501,6 +501,39 @@ class NativeHarness(unittest.TestCase):
                 self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
                 done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'][child]['state']=='finished' else None)
                 self.assertEqual(done['subagent_completed_count'],1)
+
+    def test_reads_leave_a_starting_child_on_its_inherited_model(self):
+        # Upstream installs model selection only while composing a top-level
+        # agent; a child runs the route it inherits from its parent's request.
+        # Reads during its first step, which the fixture holds, must neither
+        # install the profile default on the child nor report it.
+        parent=self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
+        chosen={'provider':'hgs-test','model':'test-b','reasoningEffort':'off'}
+        self.cli('settings',parent,self.payload(parent,model='hgs-test/test-b',effort='off'))
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        def child_row():
+            return next((r for r in self.rpc('list')['items']
+                         if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
+        try:
+            row=self.wait(child_row);child=row['sessionId']
+            self.assertTrue(row['running'])
+            self.assertEqual(row['selection'],chosen)
+            native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+            self.assertTrue(native['live']);self.assertEqual(native['selection'],chosen)
+            result=subprocess.run([str(HGS),'inspect',parent['name'],'--agent',child],env=self.env,text=True,capture_output=True,timeout=35)
+            self.assertEqual(result.returncode,0,result.stderr)
+            shown=json.loads(result.stdout)
+            self.assertEqual((shown['model_provider'],shown['model'],shown['effort']),('hgs-test','test-b','off'))
+            # The parent keeps its live session selection.
+            parent_row=next(r for r in self.rpc('list')['items'] if r['sessionId']==parent['conversation_id'])
+            self.assertEqual(parent_row['selection'],chosen)
+        finally:
+            (self.root/'holds'/hold).touch()
+        def used():
+            native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+            return native['baseline']['values'].get('modelSelection',{}).get('lastUsed')
+        self.assertEqual(self.wait(used),chosen)
+        self.assertEqual(self.cli('inspect',parent)['model'],'test-b')
 
     def test_continuable_child_send_is_addressed_and_idempotent(self):
         parent, other = self.create(), self.create()

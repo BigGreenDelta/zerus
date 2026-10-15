@@ -11,11 +11,13 @@ export const inject = ['sessionController', 'agents', 'goals', 'llm', 'agentDefa
 
 export function apply(ctx, config) {
   const api = ctx.sessionController;
-  // These three extension seams are deliberately pinned to the tested release.
-  // In particular the public selectModel also changes the profile default.
+  // These extension seams are deliberately pinned to the tested release.
+  // In particular the public selectModel also changes the profile default, and
+  // only the private selection map tells whether an Agent has a selection.
   const control = api.agents;
   if (typeof control?.composeAgent !== 'function' || typeof control?.serializeImageAdmission !== 'function'
-      || typeof control?.selectForNextRequest !== 'function') throw new Error('HGS: incompatible official dsh session controller');
+      || typeof control?.selectForNextRequest !== 'function' || !(control.selections instanceof WeakMap))
+    throw new Error('HGS: incompatible official dsh session controller');
   const owned = new Map(), opening = new Map(), questions = new Map();
   const generation = randomUUID();
   const shellContext = new AsyncLocalStorage(), shellCalls = new Map(), jobCalls = new Map();
@@ -121,14 +123,19 @@ export function apply(ctx, config) {
     opening.set(sessionId, work);
     return work;
   }
-  // selectionFor installs prompt listeners on an Agent's first read, e.g. for a
-  // child. Native disposal unloads the Agent's Cordis scope before the Agent
-  // leaves the live registry, and Cordis rejects every new effect on a disposed
-  // (uid null) or unloading (state 5) fiber. Reads there use the stored selection.
+  // Upstream installs a model selection while composing a top-level Agent or
+  // changing its model. selectionFor would also install one on a read of any
+  // other Agent, such as a child: prompt listeners that take over its request
+  // route (the profile default before its first request), and an effect Cordis
+  // rejects on an unloading scope. Reads never install one; an Agent without
+  // one reports its stored selection, or before its first request its own route.
   const selectionOf = (agent, projections) => {
-    const fiber = agent.ctx.fiber;
-    if (fiber.uid !== null && fiber.state !== 5) return { ...control.selectionFor(agent).current };
-    return projections?.modelSelection?.next ?? null;
+    const installed = control.selections.get(agent);
+    if (installed) return { ...installed.current };
+    const stored = projections?.modelSelection?.next;
+    if (stored) return stored;
+    const { provider, model, reasoningEffort } = agent.options ?? {};
+    return provider && model ? { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) } : null;
   };
   const publicQuestions = sessionId => [...questions.values()].filter(q => q.sessionId === sessionId)
     .map(({ id, items, approval }) => ({ id, questions: items, approval: Boolean(approval) }));
