@@ -257,6 +257,7 @@ private slots:
     void nativeQueueStaysSeparateFromHistoryAndTracksIdentity();
     void attachmentDeliveryKeepsThumbnailAndViewport();
     void contextCounterKeepsPhysicalRightAlignment();
+    void contextCounterNamesTheReportedWindowSource();
     void failedMessageActionsFollowCardIdentity();
     void searchResultIsolatedFromLiveUpdatesAndReturnsToLatest();
     void searchResultClearsOnConversationChange();
@@ -890,6 +891,19 @@ void TestActivityView::contextCounterKeepsPhysicalRightAlignment()
         if(pixel.green()>pixel.red()+15 && pixel.green()>pixel.blue()+10) rightmost=qMax(rightmost,x);
     }
     QVERIFY2(rightmost>=image.width()-qCeil(12*image.devicePixelRatio()),"Context text must end at the physical right edge");
+}
+
+void TestActivityView::contextCounterNamesTheReportedWindowSource()
+{
+    SessionUsage::ContextButton button;
+    button.setData({{"context",QJsonObject{{"used",250000},{"limit",1000000},{"limit_source","native_statusline"},
+        {"limit_model","claude-opus-5-5[1m]"},{"limit_observed_at",1791018100}}}});
+    QVERIFY(button.property("contextPercent").isValid());
+    QVERIFY(button.toolTip().contains("Window size that Claude Code's status line reports for claude-opus-5-5[1m]."));
+    // Without the window, the warning stays and no source is named.
+    button.setData({{"context",QJsonObject{{"used",250000}}}});
+    QVERIFY(!button.toolTip().contains("status line"));
+    QVERIFY(button.toolTip().contains("The provider has not reported the window size."));
 }
 
 void TestActivityView::attachmentDeliveryKeepsThumbnailAndViewport()
