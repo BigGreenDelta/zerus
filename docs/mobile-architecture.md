@@ -138,8 +138,12 @@ own observation time: fresh Arch heartbeats cannot keep stale Mac data online.
 A withdrawn or explicitly offline route becomes unavailable immediately. An
 offline route stays listed beneath its gateway with `online: false` and no
 snapshot, so its computer ID, phone label and color remain stable, but it cannot
-be selected, claimed or receive a peer snapshot. After reconnection it needs a
-fresh peer observation before it becomes usable. Existing
+be selected, claimed or receive a peer snapshot. Its `last_seen_at` keeps the
+time of the last accepted peer heartbeat, or null if the relay never observed
+that native UUID on the route, so phones can show when it was last seen. Gateway
+heartbeats never refresh that time, and a changed native UUID starts a new route
+without it. After reconnection the route needs a fresh peer observation before
+it becomes usable, however recent the retained time is. Existing
 body, response and workspace resource limits continue to apply; peer count does
 not multiply the permitted size of an individual request or computer response.
 Peer snapshot storage is capped at 1 MiB of canonical JSON, as is the connector's
@@ -932,7 +936,9 @@ locally for up to two seconds and 32 native reads, avoiding a network roundtrip
 per index chunk. Cursored reads execute once. A partial resident adapter is
 reported as partial rather than a completed conversation.
 
-`last_seen_at` and event `created_at` use Unix epoch seconds.
+`last_seen_at` and event `created_at` use Unix epoch seconds. `last_seen_at`
+is the selected route's last accepted heartbeat (the gateway's own heartbeat for
+a direct route), retained while the computer is offline; null means none.
 
 ## Notifications
 
