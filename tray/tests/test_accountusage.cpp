@@ -10,6 +10,20 @@ static QJsonObject limitWindow(int minutes,double used,qint64 resetIn,const QDat
 class TestAccountUsage : public QObject {
     Q_OBJECT
 private slots:
+    void earlyResetNoticeRequiresFreshCompleteUsageAndKeepsNativeFailureSeparate() {
+        const auto now=QDateTime::currentSecsSinceEpoch();
+        QJsonObject data{{"status","ok"},{"checked_at",now},{"windows",QJsonArray{
+            limitWindow(300,0,3600,QDateTime::fromSecsSinceEpoch(now)),limitWindow(10080,0,86400,QDateTime::fromSecsSinceEpoch(now))}}};
+        QVERIFY(AccountUsage::limitRecoveryNotice(data,now-60,now).contains("send a message"));
+        QVERIFY(AccountUsage::limitRecoveryNotice(data,now+1,now).isEmpty());
+        QVERIFY(AccountUsage::limitRecoveryNotice(data,now-60,now+301).isEmpty());
+        for(const auto &key:{QString("offline"),QString("refresh_error")}) {auto stale=data;stale[key]=true;QVERIFY(AccountUsage::limitRecoveryNotice(stale,now-60,now).isEmpty());}
+        for(const auto windows:{QJsonArray{},QJsonArray{limitWindow(300,0,3600,QDateTime::fromSecsSinceEpoch(now))},
+            QJsonArray{limitWindow(300,0,3600,QDateTime::fromSecsSinceEpoch(now)),limitWindow(10080,100,86400,QDateTime::fromSecsSinceEpoch(now))},
+            QJsonArray{limitWindow(300,0,-1,QDateTime::fromSecsSinceEpoch(now)),limitWindow(10080,0,86400,QDateTime::fromSecsSinceEpoch(now))}}) {
+            auto unavailable=data;unavailable["windows"]=windows;QVERIFY(AccountUsage::limitRecoveryNotice(unavailable,now-60,now).isEmpty());
+        }
+    }
     void initTestCase() {
         QVERIFY(m_settings.isValid());
         QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("account-usage");

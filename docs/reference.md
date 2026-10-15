@@ -1920,6 +1920,21 @@ are kept; refreshing usage never retries a turn. Account percentages alone do
 not change a running agent's state. Failed refreshes and offline snapshots are
 labeled as last reported usage.
 
+Claude's **What do you want to do?** usage-limit menu appears in Activity even
+when the failed turn or a background shell leaves hook state at Error or Working.
+Choose the native stop, wait-and-continue, or usage-credit option explicitly;
+there is no preselected answer or automatic approval. Zerus verifies the exact
+process, conversation and complete current panel before each navigation key and
+one confirmation. Usage-credit setup continues in Terminal for any further
+billing consent; unfamiliar account choices are shown read-only there.
+
+After an early reset, fresh complete account usage below the limits shows
+**Usage available** beside the composer and explains how to continue. An open
+native limit menu still needs an answer, and a stopped turn still needs a new
+message. Stale, offline or failed usage reads cannot produce this notice, clear
+the native failure or trigger a retry. Claude's own wait continues under its
+native rules; Zerus does not change the shared recovery policy or enable credits.
+
 Codex failures come from the exact conversation's native error journal and
 structured failed turn completions, including compaction failures. Tool output
 and quoted error examples cannot change the session state. New native progress

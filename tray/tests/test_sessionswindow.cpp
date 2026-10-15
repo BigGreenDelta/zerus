@@ -236,6 +236,7 @@ private slots:
     void accountUsageRejectsOtherSessionReplies();
     void usageIndicatorSettingUpdatesFooter();
     void usageLimitBecomesToolbarChip();
+    void earlyQuotaResetExplainsPendingNativeChoiceAndKeepsDraft();
     void dashboardAndMultiMachineNavigation();
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void projectFilterCombinesScopesCountsAndNavigation();
@@ -1663,6 +1664,37 @@ void TestSessionsWindow::usageLimitBecomesToolbarChip()
     QVERIFY(chip->popover()->isVisible());
     // Switching session closes the popover rather than showing another account's limit.
     window.showSession("mac","claude/infra/review");QVERIFY(!chip->popover()->isVisible());
+}
+
+void TestSessionsWindow::earlyQuotaResetExplainsPendingNativeChoiceAndKeepsDraft()
+{
+    const auto now=QDateTime::currentSecsSinceEpoch();const QString hash(64,'a');
+    const auto quotaWindow=[now](int minutes,qint64 resetIn){return QJsonObject{{"window_minutes",minutes},{"used_percent",0},{"resets_at",double(now+resetIn)}};};
+    auto state=fleet();auto box=state.local();auto &session=box.sessions[0];
+    session.cmd="claude";session.runId="run-one";session.conversationId="conversation-one";session.accountId="native-claude";state.setLocal(box,0);
+    const QJsonObject card{{"source","claude_usage_limit"},{"question_id","claude-usage-limit:"+hash},{"question_hash",hash},
+        {"run_id","run-one"},{"conversation_id","conversation-one"},{"can_answer",true},{"answer_transport","claude_tui"},
+        {"questions",QJsonArray{QJsonObject{{"id","usage_limit"},{"question","What do you want to do?"},{"header","Usage limit"},
+            {"options",QJsonArray{QJsonObject{{"id","limit_0"},{"label","Stop and wait for limit to reset"}},
+                QJsonObject{{"id","limit_1"},{"label","Switch to usage credits"}}}}}}}};
+    QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},
+        {"runtime_state","live"},{"process_state","running"},{"last_event_at",double(now-60)},{"provider_status_at",double(now-60)},
+        {"phase","input"},{"activity","busy"},{"attention_id","claude-usage-limit:"+hash},
+        {"provider_error",QJsonObject{{"error_kind","quota"},{"at",double(now-60)},{"detail","Weekly limit reached"}}},
+        {"pending_questions",QJsonArray{card}},{"events",QJsonArray{}},{"cursor",0}};
+    SessionsWindow window(programInspecting("claude-limit-reset",details));window.setFleet(state);window.show();window.showSession({},"codex/hgs/dashboard");
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer,"Continue after my reset");
+    auto *usage=window.findChild<AccountUsageStore *>()->findChild<HgsClient *>();
+    usage->accountsReady(1,{},QJsonObject{{"id","native-claude"},{"status","ok"},{"checked_at",double(now)},
+        {"windows",QJsonArray{quotaWindow(300,3600),quotaWindow(10080,86400)}}});
+    auto *chip=window.findChild<ToolbarChip *>("usageLimitChip");
+    QTRY_VERIFY(chip->isVisible());QCOMPARE(chip->fullLabel(),QString("Usage available"));QCOMPARE(chip->tone(),ChipTone::Neutral);
+    QVERIFY(chip->toolTip().contains("Answer any open usage-limit choice"));
+    auto *question=window.findChild<QuestionCard *>();QVERIFY(question->isVisible());
+    const auto options=question->findChildren<QAbstractButton *>("questionOption");QCOMPARE(options.size(),2);
+    for(const auto *option:options)QVERIFY(!option->isChecked());
+    QVERIFY(!composer->findChild<QPushButton *>("sendMessage")->isEnabled());
+    QCOMPARE(composer->editor()->toPlainText(),QString("Continue after my reset"));
 }
 
 void TestSessionsWindow::accountUsageRejectsOtherSessionReplies()

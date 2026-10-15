@@ -93,6 +93,7 @@ public:
         m_active=(!job.isEmpty() && job.value("state")!="succeeded") || !m_failure.isEmpty(); refresh();
     }
     void finished(const QString &error) { m_pending=false;m_error=error;refresh(); }
+    void setUsageNotice(const QString &notice) { if(m_usageNotice!=notice){m_usageNotice=notice;refresh();} }
     bool active() const { return m_active; }
     QString detailText() const { return QStringList{m_status->text(),m_detail->text()}.join('\n').trimmed(); }
     Summary summary() const {
@@ -123,6 +124,7 @@ private:
                 : m_failure.value("error_kind")=="quota"
                 ? tr("The provider stopped this turn. Wait for the limit to reset or restore account access, then refresh usage and send a message to continue. Your draft is kept; Zerus will not retry automatically.")
                 : tr("The provider stopped this turn. Check Terminal and resolve the error, then send a message to continue. Your draft is kept."));
+            if(!m_usageNotice.isEmpty() && (sessionLimit || m_failure.value("error_kind")=="quota"))m_help->setText(m_usageNotice+"\n"+m_help->text());
             m_now->hide();m_cancel->setVisible(m_job.value("state")=="waiting");m_cancel->setEnabled(m_online&&!m_pending);notify();return;
         }
         const auto state=m_job.value("state").toString(); const bool waiting=state=="waiting";
@@ -145,7 +147,7 @@ private:
             || (m_failure.value("error_kind")=="session_limit" && m_job.value("class")!="session_limit"));
     }
     void notify() { if(summaryChanged)summaryChanged(); }
-    QJsonObject m_job,m_failure; bool m_online=false,m_pending=false,m_active=false; QString m_error;
+    QJsonObject m_job,m_failure; bool m_online=false,m_pending=false,m_active=false; QString m_error,m_usageNotice;
     QLabel *m_status,*m_detail,*m_help; QPushButton *m_now,*m_cancel,*m_history,*m_terminal,*m_usage,*m_settings;
 };
 }
