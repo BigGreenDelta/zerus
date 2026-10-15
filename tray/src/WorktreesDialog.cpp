@@ -106,7 +106,10 @@ WorktreesDialog::WorktreesDialog(HgsClient *client, const SessionOrganization &p
     m_sort = new QComboBox; m_sort->setObjectName("worktreeSort"); m_sort->setAccessibleName(tr("Sort worktrees"));
     m_sort->addItems({tr("Largest first"), tr("Oldest activity first"), tr("Folder name")});
     m_sort->setMinimumContentsLength(8); m_sort->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); m_sort->setMaximumWidth(210); searchRow->addWidget(m_sort);
-    m_refresh = new QPushButton; m_refresh->setObjectName("refreshWorktreeOverview"); configureWorkspaceIconButton(m_refresh, "refresh", tr("Check again"), palette().color(QPalette::Window).lightness() < 128); searchRow->addWidget(m_refresh);
+    m_refresh = new QPushButton; m_refresh->setObjectName("refreshWorktreeOverview"); configureWorkspaceIconButton(m_refresh, "refresh", tr("Refresh"), palette().color(QPalette::Window).lightness() < 128); searchRow->addWidget(m_refresh);
+    m_refresh->setMinimumSize(0,0); m_refresh->setMaximumSize(QWIDGETSIZE_MAX,QWIDGETSIZE_MAX);
+    m_refresh->setStyleSheet("QPushButton { padding:5px 10px; min-height:18px; }");
+    m_refresh->setText(tr("Refresh"));
     layout->addWidget(toolbar);
     m_status = new QLabel; m_status->setObjectName("worktreeOverviewStatus"); m_status->setTextFormat(Qt::PlainText); m_status->setWordWrap(true); layout->addWidget(m_status);
     auto *split = new QSplitter; split->setObjectName("worktreeWorkspaceSplit"); split->setChildrenCollapsible(false);
@@ -146,13 +149,25 @@ WorktreesDialog::WorktreesDialog(HgsClient *client, const SessionOrganization &p
         }
     });
     connect(m_remove, &QPushButton::clicked, this, &WorktreesDialog::cleanUp);
-    auto *expiry = new QTimer(this); expiry->setInterval(15000);
+    auto *expiry = new QTimer(this); expiry->setObjectName("worktreeCacheTimer"); expiry->setInterval(15000);
     connect(expiry, &QTimer::timeout, this, [this] {
-        QStringList stale; for (auto it = m_reviews.cbegin(); it != m_reviews.cend(); ++it) if (QDateTime::currentSecsSinceEpoch() - qint64(it.value()["sampled_at"].toDouble()) >= 300) stale << it.key();
-        if (stale.isEmpty()) return;
-        for (const auto &repository : stale) { invalidateReview(repository); }
-        render();
+        bool due=QDateTime::currentSecsSinceEpoch()>=m_autoRefreshAt, connected=false;
+        for(const auto &source:m_sources) {
+            connected |= online(source);
+            const auto age=QDateTime::currentSecsSinceEpoch()-qint64(source.catalog["received_at"].toDouble(source.catalog["sampled_at"].toDouble()));
+            due |= online(source)&&source.fresh&&(age<0||age>=3600);
+        }
+        if(due&&connected) refresh(); else render(); // Expire cleanup selection without discarding browsing data.
     }); expiry->start();
+    connect(m_client,&HgsClient::worktreeCacheInvalidated,this,[this](const QString &host,const QString &common) {
+        for(auto &source:m_sources) if(source.host==host&&source.catalog["common_dir"]==common) {
+            source.attempted=false; source.fresh=false;
+            const auto repository=key(host,common);const auto display=m_reviews.value(repository);
+            invalidateReview(repository);if(!display.isEmpty())m_reviews[repository]=display;
+        }
+        m_checked.clear();
+        QTimer::singleShot(0,this,[this]{pump();render();});
+    });
     connect(m_client, &HgsClient::worktreesReady, this,
         [this](quint64 id, const QString &host, const QString &path, const QJsonObject &data) {
             const auto request = m_requests.constFind(id);
@@ -231,9 +246,20 @@ void WorktreesDialog::setContext(const SessionOrganization &projects, const Flee
     }
     const auto context = QJsonDocument(QJsonArray{fleet.local().host, scope}).toJson(QJsonDocument::Compact);
     if (context != m_context) {
-        m_context = context; ++m_generation;
+        m_context = context; ++m_generation;m_autoRefreshAt=QDateTime::currentSecsSinceEpoch()+3600;
         m_sources = sources; m_checked.clear(); m_reviews.clear(); m_reviewErrors.clear(); m_reviewAttempted.clear();
-        for (auto &source : m_sources) source.catalog = m_client->worktreeSnapshot(source.host, source.path);
+        for (auto &source : m_sources) {
+            source.catalog = m_client->worktreeSnapshot(source.host, source.path);
+            const auto age=QDateTime::currentSecsSinceEpoch()-qint64(source.catalog["received_at"].toDouble(source.catalog["sampled_at"].toDouble()));
+            source.fresh=!source.catalog.isEmpty()&&!source.catalog["stale"].toBool()&&age>=0&&age<3600;
+            source.attempted=source.fresh;
+            const auto common=source.catalog["common_dir"].toString(), repository=key(source.host,common);
+            const auto review=m_client->worktreeReview(source.host,common,3600);
+            if(source.fresh&&!review.isEmpty()) {
+                m_reviews[repository]=review;m_reviewAttempted.insert(repository);
+                for(const auto &path:review["targeted_paths"].toArray())m_reviewAttempted.insert(key(repository,path.toString()));
+            }
+        }
         const auto project = m_project->currentData().toString(), computer = m_computer->currentData().toString();
         const QSignalBlocker projectBlock(m_project), computerBlock(m_computer);
         m_project->clear(); m_project->addItem(tr("All projects"), QString());
@@ -256,8 +282,12 @@ void WorktreesDialog::setContext(const SessionOrganization &projects, const Flee
 void WorktreesDialog::refresh()
 {
     if (!m_requests.isEmpty() || m_reviewRequest) return;
-    ++m_generation; m_reviews.clear(); m_reviewErrors.clear(); m_reviewAttempted.clear();
-    for (auto &source : m_sources) { source.attempted = false; source.fresh = false; source.error.clear(); }
+    m_autoRefreshAt=QDateTime::currentSecsSinceEpoch()+3600;
+    ++m_generation; m_checked.clear(); m_reviewErrors.clear(); m_reviewAttempted.clear();
+    for (auto &source : m_sources) {
+        m_client->invalidateWorktreeCache(source.host,source.catalog["common_dir"].toString());
+        source.attempted = false; source.fresh = false; source.error.clear();
+    }
     pump(); render();
 }
 
@@ -291,13 +321,22 @@ QJsonObject WorktreesDialog::selectedRow() const
 
 QJsonObject WorktreesDialog::reviewedRow(const Source &source, const QJsonObject &row) const
 {
-    if (!source.fresh || !source.error.isEmpty() || !online(source)) return {};
+    // Cached verdicts describe the last check, including while offline or refreshing.
+    // Selection and removal separately require a current online proof.
     const auto review = m_reviews.value(key(source.host, source.catalog["common_dir"].toString()));
     for (const auto &value : review["worktrees"].toArray()) if (value.toObject()["path"] == row["path"]) {
         const auto found = value.toObject(); const auto sampled = qint64(found["sampled_at"].toDouble(review["sampled_at"].toDouble()));
-        if (sampled > 0 && QDateTime::currentSecsSinceEpoch() >= sampled && QDateTime::currentSecsSinceEpoch() - sampled < 300) return found;
+        if (sampled > 0 && QDateTime::currentSecsSinceEpoch() >= sampled && QDateTime::currentSecsSinceEpoch() - sampled < 3600) return found;
     }
     return {};
+}
+
+bool WorktreesDialog::freshProof(const Source &source,const QJsonObject &row) const
+{
+    if(!canClean(source)) return false;
+    const auto sampled=qint64(row["sampled_at"].toDouble());
+    const auto age=QDateTime::currentSecsSinceEpoch()-sampled;
+    return sampled>0&&age>=0&&age<300;
 }
 
 QString WorktreesDialog::state(const Source &source, const QJsonObject &row) const
@@ -376,9 +415,11 @@ void WorktreesDialog::render()
             const auto haystack = path + ' ' + row["branch"].toString() + ' ' + projects.join(' ') + ' ' + related.join(' ');
             if (!haystack.contains(m_search->text().trimmed(), Qt::CaseInsensitive)) continue;
             if (group == 0) { ++candidates; candidateBytes += qint64(detail["disk_bytes"].toDouble()); candidateComplete &= detail["verdict"] == "missing" || detail["disk_complete"] == true; }
-            const auto summary = valid ? WorktreeReviewUi::summary(detail) : state(source, row);
+            const auto summary = (valid ? WorktreeReviewUi::summary(detail) : state(source, row))
+                + (valid && !online(source) ? tr(" · Offline snapshot") :
+                   valid && WorktreeReviewUi::removable(detail) && !freshProof(source,detail) ? tr(" · Refresh to select") : QString());
             rendered.append(QJsonObject{{"source", sourceKey}, {"row", row}, {"review", detail}, {"identity", key(source.host, path)}, {"group", group},
-                {"selectable", valid && WorktreeReviewUi::removable(detail)}, {"projects", QJsonArray::fromStringList(projects)},
+                {"selectable", valid && freshProof(source,detail) && WorktreeReviewUi::removable(detail)}, {"projects", QJsonArray::fromStringList(projects)},
                 {"columns", QJsonArray{QFileInfo(path).fileName() + '\n' + detail["branch"].toString(), summary, WorktreeReviewUi::size(detail), source.machine}}});
         }
     }
@@ -420,12 +461,19 @@ void WorktreesDialog::render()
         if (!m_tree->currentItem() && m_tree->topLevelItemCount()) m_tree->setCurrentItem(m_tree->topLevelItem(0)->child(0));
         m_tree->verticalScrollBar()->setValue(scroll);
     }
+    qint64 oldest=0;
+    for(const auto &source:m_sources) {
+        const auto at=qint64(source.catalog["received_at"].toDouble(source.catalog["sampled_at"].toDouble()));
+        if(at>0&&(oldest==0||at<oldest))oldest=at;
+    }
     const bool checking = !m_requests.isEmpty() || m_reviewRequest;
     m_status->setText(m_sources.isEmpty() ? tr("Add a project folder to see its worktrees.") :
         tr("%1 of %2 worktrees checked · %3 repositories%4").arg(checked).arg(linked).arg(repositories.size()).arg(checking ? tr(" · Checking…") : QString())
         + (scopeMachines.size()==1 ? " · "+*scopeMachines.cbegin() : QString())
         + tr(" · %1 cleanup candidates · %2%3 estimated").arg(candidates).arg(candidateComplete ? QString() : tr("at least "), QLocale().formattedDataSize(candidateBytes))
         + (partial ? tr(" · Catalog is incomplete; some folders are not shown.") : QString()));
+    if(oldest>0) m_status->setText(m_status->text()+tr(" · Updated %1").arg(QLocale().toString(QDateTime::fromSecsSinceEpoch(oldest).time(),QLocale::ShortFormat)));
+    m_status->setToolTip(tr("Browsing data is cached for one hour. Refresh after external Git changes or when cleanup checks expire (five minutes). Cleanup rechecks each folder before removal."));
     showDetails(); reviewSelection();
 }
 
@@ -450,7 +498,7 @@ void WorktreesDialog::showDetails()
     if (!reviewError.isEmpty()) context += "\n" + reviewError;
     detail["context"] = context;
     m_details->setContext(source->host, source->machine, row["path"].toString(), source->catalog["common_dir"].toString(), detail, related,
-        online(*source) && source->fresh && source->error.isEmpty() && source->catalog["state"] == "ok" && row["available"].toBool());
+        online(*source) && source->catalog["state"] == "ok" && row["available"].toBool());
     updateActions();
 }
 
@@ -461,7 +509,7 @@ QList<QJsonObject> WorktreesDialog::selectedEntries() const
         const auto *item = *it; if (!item->parent() || !(item->flags() & Qt::ItemIsUserCheckable) || item->checkState(0) != Qt::Checked) continue;
         const auto source = m_sources.constFind(item->data(0, Qt::UserRole).toString()); if (source == m_sources.cend() || !canClean(*source)) continue;
         const auto row = item->data(0, Qt::UserRole + 1).toJsonObject(), review = reviewedRow(*source, row);
-        if (!WorktreeReviewUi::removable(review) || review["fingerprint"].toString() != m_checked.value(key(source->host, row["path"].toString()))) continue;
+        if (!freshProof(*source,review) || !WorktreeReviewUi::removable(review) || review["fingerprint"].toString() != m_checked.value(key(source->host, row["path"].toString()))) continue;
         entries << QJsonObject{{"host", source->host}, {"machine", source->machine}, {"common_dir", source->catalog["common_dir"]}, {"row", review}};
     }
     return entries;

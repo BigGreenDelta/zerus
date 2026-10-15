@@ -1238,12 +1238,23 @@ background. Coverage reports checked/known worktrees and incomplete catalogs.
 After the first bounded repository review, unchecked known rows are checked
 individually, including rows beyond the native 64-row review limit. Catalogs
 remain bounded at 512 entries; this is not a scan of every folder on a computer.
-Offline snapshots remain readable but cannot be selected for removal. Expired
-checks are refreshed; changed fingerprints invalidate previous selections.
+Offline snapshots remain readable but cannot be selected for removal.
+Browsing data is retained for one hour, across closing and reopening the manager.
+The coverage line shows when catalogs were updated; **Refresh** rereads them and
+clears the selected cleanup candidates. The open manager refreshes hourly, and
+worktree creation/removal invalidates the affected computer/repository cache.
+External Git changes can be picked up with **Refresh**. Cleanup selections still
+require checks less than five minutes old: refresh before selecting expired
+candidates. Removal always repeats native safety checks; a cached browsing verdict
+never authorizes deletion. Changed fingerprints invalidate previous selections.
 
-Use **Read files and commits** (the inspector's refresh button) to view
-changed/untracked file names, tracked diffs and up to
-30 original commits absent from the base history. The base comparison is a
+Selecting a folder loads its files and commits after a short navigation debounce.
+The inspector distinguishes loading, an empty list and a failed read with retry.
+Its refresh button rereads the selected folder, including cached file previews.
+Changed/untracked file names, tracked diffs and up to
+30 original commits absent from the base history are available. Inspection and
+file previews are cached in bounded application memory for an hour, never written
+to the settings file. The base comparison is a
 two-way diff and can include later changes on the base. **Local files** previews
 ignored entries and their contents; **Sessions** opens the exact related
 conversation on its owning computer. Reads are bounded (200 changed files or

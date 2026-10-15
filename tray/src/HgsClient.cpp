@@ -912,6 +912,14 @@ void HgsClient::requestProjects(const QString &host)
 }
 
 namespace {
+void trimWorktreeCache(QHash<QString,QJsonObject> &cache) {
+    qsizetype bytes=0;for(const auto &entry:cache)bytes+=QJsonDocument(entry).toJson(QJsonDocument::Compact).size();
+    while(cache.size()>64||bytes>16*1024*1024) {
+        auto oldest=cache.begin();
+        for(auto i=cache.begin();i!=cache.end();++i)if(i.value()["received_at"].toDouble()<oldest.value()["received_at"].toDouble())oldest=i;
+        bytes-=QJsonDocument(oldest.value()).toJson(QJsonDocument::Compact).size();cache.erase(oldest);
+    }
+}
 QString worktreeCacheKey(const QString &executable,const QString &host,const QString &path) {
     return QString::fromLatin1(QCryptographicHash::hash((executable+'\n'+host+'\n'+path).toUtf8(),QCryptographicHash::Sha256).toHex());
 }
@@ -972,16 +980,27 @@ quint64 HgsClient::requestWorktrees(const QString &host,const QString &path,bool
     const quint64 request=++m_worktreeRequest;
     const auto cached=worktreeSnapshot(host,path);
     const auto age=QDateTime::currentSecsSinceEpoch()-qint64(cached.value("sampled_at").toDouble());
+    const auto hostKey=QString::fromUtf8(QJsonDocument(QJsonArray{host}).toJson(QJsonDocument::Compact));
+    const auto hostGeneration=m_worktreeCacheGenerations.value(hostKey);
     if(!refresh&&!cached.isEmpty()&&!cached.value("stale").toBool()&&age>=0&&age<30){
-        QTimer::singleShot(0,this,[this,request,host,path,cached]{emit worktreesReady(request,host,path,cached);});return request;
+        QTimer::singleShot(0,this,[this,request,host,path,cached,hostKey,hostGeneration]{
+            if(m_worktreeCacheGenerations.value(hostKey)!=hostGeneration)emit worktreesFailed(request,host,path,tr("Folder changed. Refresh its catalog."));
+            else emit worktreesReady(request,host,path,cached);
+        });return request;
     }
-    const auto key=host+'\n'+path;
+    const auto repository=host+'\n'+cached["common_dir"].toString();
+    const auto generation=m_worktreeCacheGenerations.value(repository);
+    const auto key=host+'\n'+path+'\n'+QString::number(generation)+':'+QString::number(hostGeneration);
     if(m_worktreesInFlight.contains(key)){m_worktreesInFlight[key].append({request,path});return request;}
     m_worktreesInFlight[key].append({request,path});
     QStringList args{"worktrees","--path",path,"--json"};if(refresh)args<<"--refresh";if(!host.isEmpty())args.prepend('@'+host);
-    runHgs(m_hgs,args,host.isEmpty()?6000:15000,this,[this,host,key](const QByteArray &out){
+    runHgs(m_hgs,args,host.isEmpty()?6000:15000,this,[this,host,key,repository,generation,hostKey,hostGeneration](const QByteArray &out){
         const auto requests=m_worktreesInFlight.take(key);
-        const auto data=out.size()<=2*1024*1024?QJsonDocument::fromJson(out).object():QJsonObject();
+        if(m_worktreeCacheGenerations.value(repository)!=generation||m_worktreeCacheGenerations.value(hostKey)!=hostGeneration) {
+            for(const auto &r:requests)emit worktreesFailed(r.first,host,r.second,tr("Folder changed. Refresh its catalog."));return;
+        }
+        auto data=out.size()<=2*1024*1024?QJsonDocument::fromJson(out).object():QJsonObject();
+        data["received_at"] = QDateTime::currentSecsSinceEpoch();
         if(!data.value("worktrees").isArray()||!data.value("state").isString()){
             for(const auto &r:requests)emit worktreesFailed(r.first,host,r.second,tr("Invalid worktree catalog response"));return;
         }
@@ -1006,18 +1025,16 @@ quint64 HgsClient::createWorktree(const QString &host,const QString &path,const 
     QStringList args{"worktrees","create","--path",path,"--common-dir",commonDir,"--branch",branch,
         "--base",base,"--destination",destination,"--request-id",token,"--json"};
     if(!host.isEmpty())args.prepend('@'+host);
-    runHgs(m_hgs,args,330000,this,[this,request,token,branch,commonDir](const QByteArray &out){
+    runHgs(m_hgs,args,330000,this,[this,request,token,branch,commonDir,host](const QByteArray &out){
+        invalidateWorktreeCache(host, commonDir);
         const auto data=QJsonDocument::fromJson(out).object();
         if(data["request_id"]!=token||data["status"]!="created"||data["branch"]!=branch||data["common_dir"]!=commonDir
             ||!QFileInfo(data["path"].toString()).isAbsolute()){
             emit worktreeCreated(request,false,{},tr("Creation could not be confirmed. Refresh the catalog and check the destination before retrying."));return;
         }
-        QSettings settings;auto snapshots=QJsonDocument::fromJson(settings.value("workspace/worktreeSnapshots").toByteArray()).object();
-        for(auto i=snapshots.begin();i!=snapshots.end();++i){auto value=i.value().toObject();
-            if(value["common_dir"]==commonDir&&value["machine"]==data["machine"]){value["stale"]=true;i.value()=value;}}
-        settings.setValue("workspace/worktreeSnapshots",QJsonDocument(snapshots).toJson(QJsonDocument::Compact));
         emit worktreeCreated(request,true,data,{});
-    },[this,request,destination](const QString &,const QString &error){
+    },[this,request,destination,host,commonDir](const QString &,const QString &error){
+        invalidateWorktreeCache(host, commonDir);
         emit worktreeCreated(request,false,{},error+tr("\nCheck %1 before retrying. Any created worktree is kept.").arg(destination));
     });
     return request;
@@ -1033,44 +1050,120 @@ QString cleanupError(const QString &host,const QString &detail) {
 }
 quint64 HgsClient::reviewWorktrees(const QString &host,const QString &path,const QString &worktree)
 {
-    const auto request=++m_worktreeRequest;const auto key=host+'\n'+path+'\n'+worktree;
+    const auto request=++m_worktreeRequest;
+    const auto repository=host+'\n'+path;const auto generation=m_worktreeCacheGenerations.value(repository);
+    const auto key=host+'\n'+path+'\n'+worktree+'\n'+QString::number(generation);
     if(m_reviewsInFlight.contains(key)){m_reviewsInFlight[key].append(request);return request;}
     m_reviewsInFlight[key].append(request);
     QStringList args{"worktrees","review","--path",path,"--json"};if(!worktree.isEmpty())args<<"--worktree"<<worktree;if(!host.isEmpty())args.prepend('@'+host);
-    runHgs(m_hgs,args,host.isEmpty()?30000:45000,this,[this,host,path,key,worktree](const QByteArray &out){
+    runHgs(m_hgs,args,host.isEmpty()?30000:45000,this,[this,host,path,key,worktree,repository,generation](const QByteArray &out){
         const auto requests=m_reviewsInFlight.take(key);
+        if(m_worktreeCacheGenerations.value(repository)!=generation) {
+            for(const auto id:requests)emit worktreeReviewFailed(id,host,path,tr("Folder changed. Refresh its cleanup review."));return;
+        }
         const auto data=out.size()<=4*1024*1024?QJsonDocument::fromJson(out).object():QJsonObject();
         if(!data.value("worktrees").isArray()||!data.value("state").isString()){for(const auto r:requests)emit worktreeReviewFailed(r,host,path,tr("Invalid worktree review response"));return;}
-        if(worktree.isEmpty()&&data["state"]=="ok")m_worktreeReviews.insert(host+'\n'+data["common_dir"].toString(),data);
+        if(data["state"]=="ok") {
+            const auto repository = host+'\n'+data["common_dir"].toString();
+            auto merged = worktree.isEmpty() ? data : m_worktreeReviews.value(repository);
+            QJsonArray rows;
+            if(!worktree.isEmpty()) for(const auto &row:merged["worktrees"].toArray()) if(row.toObject()["path"]!=worktree) rows.append(row);
+            for(const auto &value:data["worktrees"].toArray()) {
+                auto row=value.toObject(); if(!worktree.isEmpty()&&row["path"]!=worktree) continue;
+                row["sampled_at"]=data["sampled_at"]; rows.append(row);
+            }
+            if(!worktree.isEmpty()) {
+                auto targeted=merged["targeted_paths"].toArray();if(!targeted.contains(worktree))targeted.append(worktree);merged["targeted_paths"]=targeted;
+            }
+            merged["worktrees"]=rows; merged["sampled_at"]=data["sampled_at"];
+            merged["received_at"]=QDateTime::currentSecsSinceEpoch();
+            m_worktreeReviews.insert(repository,merged);
+            trimWorktreeCache(m_worktreeReviews);
+        }
         for(const auto r:requests)emit worktreeReviewReady(r,host,path,data);
     },[this,host,path,key](const QString &,const QString &detail){for(const auto r:m_reviewsInFlight.take(key))emit worktreeReviewFailed(r,host,path,cleanupError(host,detail));});
     return request;
 }
-QJsonObject HgsClient::worktreeReview(const QString &host,const QString &commonDir) const
+QJsonObject HgsClient::worktreeReview(const QString &host,const QString &commonDir,int maxAgeSeconds) const
 {
     const auto data=m_worktreeReviews.value(host+'\n'+commonDir);
     const auto age=QDateTime::currentSecsSinceEpoch()-qint64(data.value("sampled_at").toDouble());
-    return age>=0&&age<300?data:QJsonObject();
+    if(age<0||age>=maxAgeSeconds)return {};
+    auto result=data;QJsonArray rows;
+    for(const auto &value:data["worktrees"].toArray()) {
+        const auto row=value.toObject();const auto rowAge=QDateTime::currentSecsSinceEpoch()-qint64(row["sampled_at"].toDouble(data["sampled_at"].toDouble()));
+        if(rowAge>=0&&rowAge<maxAgeSeconds)rows.append(row);
+    }
+    result["worktrees"]=rows;return result;
 }
-quint64 HgsClient::inspectWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &file,int offset)
+void HgsClient::invalidateWorktreeCache(const QString &host,const QString &commonDir)
+{
+    ++m_worktreeCacheGenerations[QString::fromUtf8(QJsonDocument(QJsonArray{host}).toJson(QJsonDocument::Compact))];
+    ++m_worktreeCacheGenerations[host+'\n'+commonDir];
+    m_worktreeReviews.remove(host+'\n'+commonDir);
+    for(auto i=m_worktreeInspections.begin();i!=m_worktreeInspections.end();) {
+        const auto scope=QJsonDocument::fromJson(i.key().toUtf8()).array();
+        if(scope[0]==host&&scope[2]==commonDir) i=m_worktreeInspections.erase(i); else ++i;
+    }
+    QSettings settings; auto snapshots=QJsonDocument::fromJson(settings.value("workspace/worktreeSnapshots").toByteArray()).object();
+    for(auto i=snapshots.begin();i!=snapshots.end();++i) {
+        auto value=i.value().toObject();
+        // Keys include executable and host: another computer's identical path is unrelated.
+        if(value["common_dir"]==commonDir&&i.key()==worktreeCacheKey(m_hgs,host,value["path"].toString())) {value["stale"]=true;i.value()=value;}
+    }
+    settings.setValue("workspace/worktreeSnapshots",QJsonDocument(snapshots).toJson(QJsonDocument::Compact));
+    emit worktreeCacheInvalidated(host,commonDir);
+}
+void HgsClient::invalidateWorktreeInspection(const QString &host,const QString &path,const QString &commonDir)
+{
+    const auto target=QString::fromUtf8(QJsonDocument(QJsonArray{host,path,commonDir}).toJson(QJsonDocument::Compact));
+    ++m_worktreeCacheGenerations[target];
+    for(auto i=m_worktreeInspections.begin();i!=m_worktreeInspections.end();) {
+        const auto entry=QJsonDocument::fromJson(i.key().toUtf8()).array();
+        if(entry[0]==host&&entry[1]==path&&entry[2]==commonDir)i=m_worktreeInspections.erase(i);else ++i;
+    }
+}
+quint64 HgsClient::inspectWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &file,int offset,bool refresh)
 {
     const auto request=++m_worktreeRequest;
+    const auto scope=QString::fromUtf8(QJsonDocument(QJsonArray{host,path,commonDir,file,offset}).toJson(QJsonDocument::Compact));
+    const auto target=QString::fromUtf8(QJsonDocument(QJsonArray{host,path,commonDir}).toJson(QJsonDocument::Compact));
+    if(refresh)invalidateWorktreeInspection(host,path,commonDir);
+    const auto cached=m_worktreeInspections.value(scope);
+    const auto age=QDateTime::currentSecsSinceEpoch()-qint64(cached["received_at"].toDouble());
+    if(!refresh&&!cached.isEmpty()&&age>=0&&age<3600) {
+        const auto revision=m_worktreeCacheGenerations.value(host+'\n'+commonDir), targetRevision=m_worktreeCacheGenerations.value(target);
+        QTimer::singleShot(0,this,[this,request,host,path,file,cached,commonDir,revision,target,targetRevision]{
+            if(revision!=m_worktreeCacheGenerations.value(host+'\n'+commonDir)||targetRevision!=m_worktreeCacheGenerations.value(target))
+                emit worktreeInspectionFinished(request,host,path,file,{},tr("Folder data changed. Refresh to inspect it again."));
+            else emit worktreeInspectionFinished(request,host,path,file,cached,{});
+        });return request;
+    }
+    const auto repository=host+'\n'+commonDir;
+    const auto generation=m_worktreeCacheGenerations.value(repository), targetGeneration=m_worktreeCacheGenerations.value(target);
+    const auto flight=scope+QString::number(generation)+':'+QString::number(targetGeneration);
+    if(m_worktreeInspectionsInFlight.contains(flight)){m_worktreeInspectionsInFlight[flight].append(request);return request;}
+    m_worktreeInspectionsInFlight[flight].append(request);
+    const auto finish=[this,scope,flight,repository,generation,target,targetGeneration,host,path,file](QJsonObject data,QString error) {
+        if(m_worktreeCacheGenerations.value(repository)!=generation||m_worktreeCacheGenerations.value(target)!=targetGeneration){data={};error=tr("Folder data changed. Refresh to inspect it again.");}
+        if(error.isEmpty()) {
+            data["received_at"]=QDateTime::currentSecsSinceEpoch(); m_worktreeInspections[scope]=data;
+            // File contents live only in bounded process memory, never in QSettings.
+            trimWorktreeCache(m_worktreeInspections);
+        }
+        for(const auto id:m_worktreeInspectionsInFlight.take(flight))emit worktreeInspectionFinished(id,host,path,file,data,error);
+    };
     QStringList args{"worktrees","inspect","--path",path,"--common-dir",commonDir,"--json"};
-    if(!file.isEmpty())args<<"--file"<<file;
-    if(offset>0)args<<"--offset"<<QString::number(offset);
-    if(!host.isEmpty())args.prepend('@'+host);
-    runHgs(m_hgs,args,host.isEmpty()?30000:45000,this,[this,request,host,path,commonDir,file,offset](const QByteArray &out){
+    if(!file.isEmpty())args<<"--file"<<file;if(offset>0)args<<"--offset"<<QString::number(offset);if(!host.isEmpty())args.prepend('@'+host);
+    runHgs(m_hgs,args,host.isEmpty()?30000:45000,this,[finish,path,commonDir,file,offset](const QByteArray &out){
         const auto data=out.size()<=4*1024*1024?QJsonDocument::fromJson(out).object():QJsonObject();
         if(data["state"]!="ok"||data["path"]!=path||data["common_dir"]!=commonDir
            ||(!file.isEmpty()&&data["file"].toObject()["path"]!=file)
-           || (offset>0&&data["file"].toObject()["offset"].toInt(-1)!=offset)){
-            emit worktreeInspectionFinished(request,host,path,file,{},tr("Worktree inspection could not be verified. Refresh and try again."));return;
+           ||(offset>0&&data["file"].toObject()["offset"].toInt(-1)!=offset)) {
+            finish({},tr("Worktree inspection could not be verified. Refresh and try again."));return;
         }
-        emit worktreeInspectionFinished(request,host,path,file,data,{});
-    },[this,request,host,path,file](const QString &,const QString &error){
-        const auto message=error.contains("usage: hgs worktrees")?tr("Update Zerus on this computer to inspect worktree changes."):error;
-        emit worktreeInspectionFinished(request,host,path,file,{},message);
-    });
+        finish(data,{});
+    },[finish](const QString &,const QString &error){finish({},error.contains("usage: hgs worktrees")?tr("Update Zerus on this computer to inspect worktree changes."):error);});
     return request;
 }
 
@@ -1080,13 +1173,7 @@ quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const 
     QStringList args{"worktrees","remove","--path",path,"--common-dir",commonDir,"--fingerprint",fingerprint,"--request-id",token,"--json"};
     if(deleteBranch)args<<"--delete-branch";if(!host.isEmpty())args.prepend('@'+host);
     if(!ignoredFingerprint.isEmpty())args<<"--ignored-fingerprint"<<ignoredFingerprint;
-    const auto forget=[this,host,commonDir]{
-        // Removal changes the repository whatever the outcome; never trust old verdicts.
-        m_worktreeReviews.remove(host+'\n'+commonDir);
-        QSettings settings;auto snapshots=QJsonDocument::fromJson(settings.value("workspace/worktreeSnapshots").toByteArray()).object();
-        for(auto i=snapshots.begin();i!=snapshots.end();++i){auto value=i.value().toObject();if(value["common_dir"]==commonDir){value["stale"]=true;i.value()=value;}}
-        settings.setValue("workspace/worktreeSnapshots",QJsonDocument(snapshots).toJson(QJsonDocument::Compact));
-    };
+    const auto forget=[this,host,commonDir]{invalidateWorktreeCache(host,commonDir);};
     runHgs(m_hgs,args,330000,this,[this,request,token,path,forget](const QByteArray &out){
         forget();const auto data=QJsonDocument::fromJson(out).object();
         if(data["request_id"]!=token||(data["status"]!="removed"&&data["status"]!="forgotten")||data["path"]!=path){

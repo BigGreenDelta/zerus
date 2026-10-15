@@ -14,6 +14,7 @@
 #include "WorktreePanel.h"
 #include "NewSessionDialog.h"
 #include "WorktreesDialog.h"
+#include "WorktreeInspectionPanel.h"
 #include <QPlainTextEdit>
 #include <QTreeWidgetItemIterator>
 #include <QSplitter>
@@ -93,6 +94,8 @@ if c=='worktrees':
   source='review-full.json' if '--worktree' in a and os.path.exists('review-full.json') else 'review.json'
   sys.stdout.write(open(source).read())
  elif a[1:2]==['inspect']:
+  if os.path.exists('fail-inspect'):print('fixture inspection unavailable',file=sys.stderr);sys.exit(1)
+  if os.path.exists('slow-inspect'):time.sleep(0.4)
   o=[x for x in a[2:] if x!='--json'];v={}
   for i in range(0,len(o)-1,2):v[o[i]]=o[i+1]
   time.sleep(0.05)
@@ -107,6 +110,8 @@ if c=='worktrees':
    r.update({'review':json.load(open('review.json'))['worktrees'][1],
     'files':[{'path':'notes.txt','status':'??'}],'changes':{'text':'tracked diff'},
     'comparison':{'text':'base diff'},'commits':{'text':'1234567 retain this work'}})
+  if os.path.exists('empty-inspect'):
+   r['files']=[];r['changes']={'text':''};r['review']['ignored_count']=0;r['review']['ignored']=[]
   if os.path.exists('wrong-inspect'):r['path']='/wrong'
   dump(r)
  elif a[1:2]==['remove']:
@@ -127,7 +132,7 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
 )PY");program.close();QVERIFY(FakeCli::makeRunnable(program.fileName()));
     }
     void init(){
-        QSettings().clear();for(const auto *name:{"calls","fail-create","fail-remove","old-hgs","fail-catalog","wrong-inspect","review-full.json"})QFile::remove(dir.filePath(name));
+        QSettings().clear();for(const auto *name:{"calls","fail-create","fail-remove","old-hgs","fail-catalog","wrong-inspect","review-full.json","fail-inspect","empty-inspect","slow-inspect"})QFile::remove(dir.filePath(name));
         QFile response(dir.filePath("catalog.json"));QVERIFY(response.open(QIODevice::WriteOnly));response.write(QJsonDocument(catalog()).toJson());
         QFile reviewed(dir.filePath("review.json"));QVERIFY(reviewed.open(QIODevice::WriteOnly));reviewed.write(QJsonDocument(review()).toJson());
     }
@@ -162,6 +167,8 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         QTRY_VERIFY(cleanup->isEnabled());dialog.findChild<QCheckBox *>("showMainWorktreeFolders")->setChecked(true);tree->setCurrentItem(overviewRow(tree,"/repo"));QVERIFY(details->text().contains("This is the main checkout"));
         tree->setCurrentItem(overviewRow(tree,"/linked"));QVERIFY(details->text().contains("Local files outside Git"));
         cleanup->click();QCOMPARE(overviewRow(tree,"/linked")->checkState(0),Qt::Unchecked);QCOMPARE(overviewRow(tree,"/missing")->checkState(0),Qt::Checked);
+        // Finish the connected read before counting calls made while offline.
+        QTRY_COMPARE(dialog.findChild<QLabel *>("worktreeChangedFilesState")->text(),QString("1 changed file"));
         const auto before=calls().count("worktrees");auto local=machines.local();local.ok=false;machines.setLocal(local,QDateTime::currentMSecsSinceEpoch());dialog.setContext(projects,machines,false);
         QCOMPARE(overviewRows(tree).size(),4);QVERIFY(!cleanup->isEnabled());QVERIFY(!dialog.findChild<QPushButton *>("reviewSelectedWorktrees")->isEnabled());QVERIFY(details->text().contains("Last known"));QVERIFY(!dialog.findChild<QPushButton *>("inspectWorktreeChanges")->isEnabled());
         cleanup->click();QTest::qWait(80);QCOMPARE(calls().count("worktrees"),before);
@@ -179,9 +186,10 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         HgsClient client(FakeCli::program(script()));QSignalSpy loaded(&client,&HgsClient::worktreesReady);client.requestWorktrees({},"/repo");QTRY_COMPARE(loaded.size(),1);
         QFile fail(dir.filePath("fail-catalog"));QVERIFY(fail.open(QIODevice::WriteOnly));fail.close();
         SessionOrganization projects;const auto project=projects.createGroup("Work");projects.addFolder(project,"arch","/repo");WorktreesDialog dialog(&client,projects,fleet(),false);dialog.show();
+        auto *refresh=dialog.findChild<QPushButton *>("refreshWorktreeOverview");QTRY_VERIFY(refresh->isEnabled());refresh->click();
         auto *details=dialog.findChild<QLabel *>("worktreeOverviewDetails");QTRY_VERIFY(details->text().contains("fixture catalog unavailable"));
         auto *tree=dialog.findChild<QTreeWidget *>("worktreeOverviewList");QCOMPARE(overviewRows(tree).size(),2);auto *cleanup=dialog.findChild<QPushButton *>("selectCleanupCandidates");QVERIFY(!cleanup->isEnabled());
-        QVERIFY(!calls().contains("worktrees review"));QVERIFY(!calls().contains("worktrees remove"));QVERIFY(QFile::remove(fail.fileName()));dialog.findChild<QPushButton *>("refreshWorktreeOverview")->click();QTRY_VERIFY(cleanup->isEnabled());
+        QVERIFY(!calls().contains("worktrees remove"));QVERIFY(QFile::remove(fail.fileName()));dialog.findChild<QPushButton *>("refreshWorktreeOverview")->click();QTRY_VERIFY(cleanup->isEnabled());
     }
     void overviewOrdinaryFoldersNeverOfferCleanup(){
         QFile response(dir.filePath("catalog.json"));QVERIFY(response.open(QIODevice::WriteOnly));response.write(QJsonDocument(QJsonObject{{"state","not_repo"},{"path","/plain"},{"worktrees",QJsonArray{}}}).toJson());response.close();
@@ -341,6 +349,98 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         tabs->setCurrentIndex(3); auto *sessions=dialog.findChild<QListWidget *>("worktreeRelatedSessions"); QCOMPARE(sessions->count(),1); QVERIFY(!sessions->item(0)->icon().isNull());
         QCOMPARE(sessions->item(0)->data(Qt::UserRole).toString(),QString("kimi/repo/two"));
         QVERIFY(!calls().contains("worktrees remove"));
+    }
+    void overviewReopeningUsesCachedCatalogReviewAndInspection(){
+        SessionOrganization projects;const auto project=projects.createGroup("Work");projects.addFolder(project,"arch","/repo");
+        HgsClient client(FakeCli::program(script()));
+        {
+            WorktreesDialog dialog(&client,projects,fleet(),false);dialog.show();
+            QTRY_VERIFY(dialog.findChild<QPushButton *>("selectCleanupCandidates")->isEnabled());
+            auto *tree=dialog.findChild<QTreeWidget *>("worktreeOverviewList");tree->setCurrentItem(overviewRow(tree,"/linked"));
+            QTRY_VERIFY(dialog.findChild<QLabel *>("worktreeChangedFilesState")->text().contains("1 changed file"));
+            QVERIFY(dialog.findChild<QLabel *>("worktreeOverviewStatus")->text().contains("Updated"));
+        }
+        const auto catalogs=calls().count("worktrees --path"),reviews=calls().count("worktrees review");
+        const auto inspections=calls().count("worktrees inspect --path /linked");
+        {
+            WorktreesDialog dialog(&client,projects,fleet(),false);dialog.show();
+            auto *tree=dialog.findChild<QTreeWidget *>("worktreeOverviewList");tree->setCurrentItem(overviewRow(tree,"/linked"));
+            QTRY_VERIFY(dialog.findChild<QLabel *>("worktreeChangedFilesState")->text().contains("1 changed file"));
+            QCOMPARE(calls().count("worktrees --path"),catalogs);QCOMPARE(calls().count("worktrees review"),reviews);
+            QCOMPARE(calls().count("worktrees inspect --path /linked"),inspections);
+            auto *refresh=dialog.findChild<QPushButton *>("refreshWorktreeOverview");QTRY_VERIFY(refresh->isEnabled());refresh->click();
+            QTRY_VERIFY(calls().count("worktrees --path")>catalogs);QTRY_VERIFY(calls().count("worktrees review")>reviews);
+            QTRY_VERIFY(dialog.findChild<QPushButton *>("selectCleanupCandidates")->isEnabled());
+        }
+        // An expired disk catalog triggers a new bounded scan on the next opening.
+        QSettings settings;auto snapshots=QJsonDocument::fromJson(settings.value("workspace/worktreeSnapshots").toByteArray()).object();
+        for(auto i=snapshots.begin();i!=snapshots.end();++i){auto data=i.value().toObject();data["received_at"]=QDateTime::currentSecsSinceEpoch()-3601;i.value()=data;}
+        settings.setValue("workspace/worktreeSnapshots",QJsonDocument(snapshots).toJson());
+        const auto before=calls().count("worktrees --path");WorktreesDialog expired(&client,projects,fleet(),false);expired.show();
+        QTRY_VERIFY(calls().count("worktrees --path")>before);
+    }
+    void cachedBrowsingDoesNotExtendCleanupProof(){
+        auto data=review();data["sampled_at"]=QDateTime::currentSecsSinceEpoch()-301;
+        QFile file(dir.filePath("review.json"));QVERIFY(file.open(QIODevice::WriteOnly));file.write(QJsonDocument(data).toJson());file.close();
+        HgsClient client(FakeCli::program(script()));QSignalSpy ready(&client,&HgsClient::worktreeReviewReady);
+        client.reviewWorktrees({},"/repo/.git");QTRY_COMPARE(ready.size(),1);
+        QVERIFY(client.worktreeReview({},"/repo/.git").isEmpty());QVERIFY(!client.worktreeReview({},"/repo/.git",3600).isEmpty());
+        SessionOrganization projects;const auto project=projects.createGroup("Work");projects.addFolder(project,"arch","/repo");
+        QSignalSpy catalogReady(&client,&HgsClient::worktreesReady);client.requestWorktrees({},"/repo");QTRY_COMPARE(catalogReady.size(),1);
+        const auto before=calls().count("worktrees review");WorktreesDialog dialog(&client,projects,fleet(),false);dialog.show();
+        auto *row=overviewRow(dialog.findChild<QTreeWidget *>("worktreeOverviewList"),"/linked");QVERIFY(row);
+        QVERIFY(row->text(1).contains("Local files"));QVERIFY(!(row->flags()&Qt::ItemIsUserCheckable));
+        dialog.findChild<QPushButton *>("selectCleanupCandidates")->click();QVERIFY(!dialog.findChild<QPushButton *>("reviewSelectedWorktrees")->isEnabled());
+        QTest::qWait(200);QCOMPARE(calls().count("worktrees review"),before);QVERIFY(!calls().contains("worktrees remove"));
+    }
+    void inspectionStatesPaddingAndRetryAreExplicit(){
+        for(const auto *name:{"empty-inspect","slow-inspect"}){QFile marker(dir.filePath(name));QVERIFY(marker.open(QIODevice::WriteOnly));}
+        HgsClient client(FakeCli::program(script()));WorktreeInspectionPanel panel(&client);panel.resize(480,560);panel.show();
+        panel.setContext("mac","Mac","/linked","/repo/.git",{{"ignored_count",0}}, {},true);
+        auto *state=panel.findChild<QLabel *>("worktreeChangedFilesState");QVERIFY(state->text().contains("Loading"));
+        auto *files=panel.findChild<QTreeWidget *>("worktreeChangedFiles");QVERIFY(files->mapTo(&panel,QPoint()).x()>=20);
+        QVERIFY(!panel.findChild<QPlainTextEdit *>("worktreeChangesDiff")->toPlainText().contains("No tracked changes"));
+        QTRY_COMPARE(state->text(),QString("No changed files."));QVERIFY(panel.findChild<QLabel *>("worktreeLocalFilesState")->text().contains("No local files"));
+        QFile fail(dir.filePath("fail-inspect"));QVERIFY(fail.open(QIODevice::WriteOnly));fail.close();
+        auto *refresh=panel.findChild<QPushButton *>("inspectWorktreeChanges");refresh->click();QTRY_VERIFY(state->text().contains("Could not refresh files. Showing previous data."));
+        QVERIFY(panel.findChild<QLabel *>("worktreeInspectionStatus")->text().contains("fixture inspection unavailable"));
+        QVERIFY(QFile::remove(fail.fileName()));QVERIFY(QFile::remove(dir.filePath("empty-inspect")));refresh->click();QTRY_COMPARE(files->topLevelItemCount(),1);
+        QVERIFY(!calls().contains("worktrees remove"));
+        const auto raster=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");if(!raster.isEmpty())QVERIFY(panel.grab().save(raster+"/inspection-insets.png"));
+    }
+    void changedGitEvidenceRefreshesCachedInspection(){
+        HgsClient client(FakeCli::program(script()));WorktreeInspectionPanel panel(&client);panel.show();
+        panel.setContext("mac","Mac","/linked","/repo/.git",{{"fingerprint","first"}}, {},true);
+        auto *state=panel.findChild<QLabel *>("worktreeChangedFilesState");QTRY_COMPARE(state->text(),QString("1 changed file"));
+        QFile empty(dir.filePath("empty-inspect"));QVERIFY(empty.open(QIODevice::WriteOnly));empty.close();
+        panel.setContext("mac","Mac","/linked","/repo/.git",{{"fingerprint","changed"}}, {},true);
+        QTRY_COMPARE(state->text(),QString("No changed files."));QCOMPARE(calls().count("worktrees inspect"),2);
+        WorktreeInspectionPanel reopened(&client);reopened.show();reopened.setContext("mac","Mac","/linked","/repo/.git",{{"fingerprint","changed"}}, {},true);
+        QTRY_COMPARE(reopened.findChild<QLabel *>("worktreeChangedFilesState")->text(),QString("No changed files."));QCOMPARE(calls().count("worktrees inspect"),2);
+    }
+    void inspectionNavigationKeepsOnlyOneMetadataReadActive(){
+        QFile slow(dir.filePath("slow-inspect"));QVERIFY(slow.open(QIODevice::WriteOnly));slow.close();
+        HgsClient client(FakeCli::program(script()));WorktreeInspectionPanel panel(&client);panel.show();
+        panel.setContext("mac","Mac","/first","/repo/.git",{}, {},true);
+        QTRY_COMPARE(calls().count("worktrees inspect"),1);
+        for(int i=0;i<10;++i)panel.setContext("mac","Mac",QString("/folder-%1").arg(i),"/repo/.git",{}, {},true);
+        QTRY_COMPARE(panel.findChild<QLabel *>("worktreeChangedFilesState")->text(),QString("1 changed file"));
+        QCOMPARE(calls().count("worktrees inspect"),2);QVERIFY(calls().contains("--path /folder-9"));QVERIFY(!calls().contains("--path /folder-8"));
+    }
+    void inspectionCacheScopesRefreshesAndRejectsLateInvalidation(){
+        HgsClient client(FakeCli::program(script()));QSignalSpy ready(&client,&HgsClient::worktreeInspectionFinished);
+        client.inspectWorktree("mac","/linked","/repo/.git","notes.txt");client.inspectWorktree("mac","/linked","/repo/.git","notes.txt");
+        QTRY_COMPARE(ready.size(),2);QCOMPARE(calls().count("worktrees inspect"),1);
+        client.inspectWorktree("mac","/linked","/repo/.git","notes.txt");QTRY_COMPARE(ready.size(),3);QCOMPARE(calls().count("worktrees inspect"),1);
+        client.inspectWorktree({},"/linked","/repo/.git","notes.txt");QTRY_COMPARE(ready.size(),4);QCOMPARE(calls().count("worktrees inspect"),2);
+        client.inspectWorktree("mac","/linked","/repo/.git",{},0,true);QTRY_COMPARE(ready.size(),5);
+        client.inspectWorktree("mac","/linked","/repo/.git","notes.txt");QTRY_COMPARE(ready.size(),6);QCOMPARE(calls().count("worktrees inspect"),4);
+        client.inspectWorktree("mac","/linked","/repo/.git","notes.txt");client.invalidateWorktreeCache("mac","/repo/.git");QTRY_COMPARE(ready.size(),7);QVERIFY(!ready.last()[5].toString().isEmpty());
+        QFile slow(dir.filePath("slow-inspect"));QVERIFY(slow.open(QIODevice::WriteOnly));slow.close();
+        client.inspectWorktree("mac","/linked","/repo/.git","notes.txt");QTRY_COMPARE(calls().count("worktrees inspect"),5);
+        client.invalidateWorktreeCache("mac","/repo/.git");QTRY_COMPARE(ready.size(),8);QVERIFY(!ready.last()[5].toString().isEmpty());
+        // Invalidating one computer never evicts another computer's same path.
+        client.inspectWorktree({},"/linked","/repo/.git","notes.txt");QTRY_COMPARE(ready.size(),9);QCOMPARE(calls().count("worktrees inspect"),5);
     }
     void clientCachesCoalescesAndScopesSnapshots(){
         HgsClient client(FakeCli::program(script()));QSignalSpy ready(&client,&HgsClient::worktreesReady);
