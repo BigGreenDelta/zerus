@@ -89,6 +89,10 @@ if os.name == "nt":
         _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE), ("dwProcessId", wintypes.DWORD),
                     ("dwThreadId", wintypes.DWORD)]
 
+    KERNEL32.FormatMessageW.argtypes = (wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                                        wintypes.LPWSTR, wintypes.DWORD, ctypes.c_void_p)
+    FORMAT_MESSAGE_IGNORE_INSERTS = 0x00000200
+    FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000
     KERNEL32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
     KERNEL32.CreatePipe.argtypes = (ctypes.POINTER(wintypes.HANDLE), ctypes.POINTER(wintypes.HANDLE),
                                     ctypes.c_void_p, wintypes.DWORD)
@@ -267,6 +271,18 @@ def image_of(pid):
         KERNEL32.CloseHandle(handle)
 
 
+def system_message(code):
+    """The system's description of Windows error `code` in the user's language,
+    as Rust's `io::Error` shows it: FormatMessageW for the default language,
+    without its line break."""
+    buffer = ctypes.create_unicode_buffer(2048)
+    length = KERNEL32.FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, None, code, 0,
+                                     buffer, len(buffer), None)
+    if not length:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return buffer.value[:length].rstrip()
+
+
 def read_json(path):
     """The JSON object in `path` once it is complete, else None."""
     try:
@@ -325,9 +341,12 @@ class LifecycleCase(HostCase):
         self.control = self.root / "control"
 
     def hgs(self, *args, rc=0, env=None):
-        """Run the build under test, a portable copy, as the GUI would; never on the caller's console."""
+        """Run the build under test, a portable copy, as the GUI would; never on the caller's console.
+        hgs writes UTF-8 to pipes whatever the code pages, as the GUI reads it; a byte that is not
+        UTF-8 reads as U+FFFD."""
         result = subprocess.run([str(HGS), *args], env=env or self.env, cwd=self.work, capture_output=True,
-                                text=True, timeout=LIMIT * 2, creationflags=HIDDEN, stdin=subprocess.DEVNULL)
+                                encoding="utf-8", errors="replace", timeout=LIMIT * 2, creationflags=HIDDEN,
+                                stdin=subprocess.DEVNULL)
         if rc is not None:
             self.assertEqual(result.returncode, rc, f"hgs {' '.join(args)}\n{result.stdout}{result.stderr}")
         return result
@@ -425,20 +444,32 @@ class Launch(LifecycleCase):
         # the program, says why on the pane and ends at once, before any record
         # exists. The launch fails with what it said instead of reporting a start
         # that the GUI would wait for (zerus-ziq3.10).
-        denied = self.bin / "denied_agent.exe"
-        shutil.copy2(FAKE_AGENT, denied)
-        deny_execute(self, denied)
+        # The system describes the denial in the user's language, and a program's
+        # name may be outside ASCII and the ANSI and OEM code pages: both reach the
+        # launch's error and its ended-launch report intact, never as "?"
+        # (zerus-yyhy).
+        refused = f"{system_message(5)} (os error 5)"  # ERROR_ACCESS_DENIED
+        for program in ("denied_agent", "denied_агент"):
+            denied = self.bin / f"{program}.exe"
+            shutil.copy2(FAKE_AGENT, denied)
+            deny_execute(self, denied)
         for program, code, said in (("missing_agent", 127, "hgs: missing_agent: not found on PATH"),
-                                    ("denied_agent", 126, "hgs: denied_agent: Access is denied. (os error 5)")):
+                                    ("denied_agent", 126, f"hgs: denied_agent: {refused}"),
+                                    ("denied_агент", 126, f"hgs: denied_агент: {refused}")):
             with self.subTest(program=program):
                 name = f"{program}/project/x"
-                result = self.hgs(program, str(self.project), "--new", "-n", "x", "-d", "--launch-id",
-                                  str(uuid.uuid4()), rc=1)
+                launch_id = str(uuid.uuid4())
+                result = self.hgs(program, str(self.project), "--new", "-n", "x", "-d", "--launch-id", launch_id,
+                                  rc=1)
                 self.status()  # Remember the host process for the cleanup.
                 self.assertEqual(result.stdout, "")
                 self.assertIn(f"hgs: session {name} ended immediately (exit {code}):\n", result.stderr)
                 self.assertIn(said, result.stderr)
-                self.assertNotIn(name, self.sessions())
+                listing = json.loads(self.hgs("ls", "--json", "--local").stdout)
+                self.assertNotIn(name, [session["name"] for session in listing["sessions"]])
+                ended = [launch for launch in listing.get("ended_launches", []) if launch["launch_id"] == launch_id]
+                self.assertEqual([(launch["code"], said in launch["output"]) for launch in ended], [(code, True)],
+                                 ended)
                 self.assertIn(f"ended: exit {code} ", (self.state / "host.log").read_text(errors="replace"))
         # A program that runs is started once it has run for the startup time.
         started = time.monotonic()
