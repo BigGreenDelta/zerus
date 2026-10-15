@@ -15,7 +15,7 @@ PACKAGES = (PACKAGE,)
 
 
 def windows_asset(version):
-    return f"zerus-{version}-windows-x86_64.zip"
+    return windows_portable.asset_name(version)
 
 
 def nightly_version(product, count, commit, number):
@@ -96,10 +96,7 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
     if windows is not None:
         # Bounded reads of the zip directory, build-info.json and the pinned ConPTY
         # pair; nothing is extracted or run.
-        manifest = windows_portable.inspect(directory / windows)
-        require(manifest["source_commit"] == info["source_commit"] and
-                manifest["version"] == info["product_version"],
-                "Windows portable bundle belongs to another commit/version.")
+        windows_portable.require_build(directory / windows, info["source_commit"], info["product_version"])
     if macos:
         cask = directory / "homebrew/zerus@nightly.rb"
         require(sorted(path.name for path in (directory / "homebrew").iterdir()) == [cask.name] and

@@ -757,7 +757,7 @@ jobs:
             --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
           python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest \
             </dev/null 2>&1 | tee artifacts/test-results/portable.log
-      # Nightly assembly downloads this artifact from the same run.
+      # Stable and nightly assembly download this artifact from the same run.
       - name: Retain Windows portable zip and test logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

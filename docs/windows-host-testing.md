@@ -141,7 +141,11 @@ shows the reason instead of waiting for the session. A detached launch that
 starts returns after those 3 s; `hgs resume`, restores and forks do not wait. A
 session that ends later without a record, or at once with exit 0, is reported by
 the next listing in `ended_launches` instead ([JSON and external
-clients](reference.md#json-and-external-clients)). In the window above:
+clients](reference.md#json-and-external-clients)). Its supervisor reads its pane
+before the pseudoconsole has delivered everything, so the host replaces those
+lines in the supervisor's report with its pane's last lines once the output has
+drained (followed by the supervisor's error if the pane does not show it),
+before the session leaves the listing. In the window above:
 
 ```sh
 "$hgs" no_such_agent "$project" --new -n missing -d  # exit 1
@@ -367,8 +371,7 @@ The report and each class's log land in `artifacts/test-results/agent-compatibil
 UTF-8 mode keeps the suites' non-ASCII prompts from failing on a Windows code page;
 the runner also sets `PYTHONUTF8` for the suites. CI runs the same command in the
 `windows-host` job, outside the step's job like the host suites
-([CI](ci-and-aur.md#windows-real-agents-through-the-session-host)). Local sessions on
-Windows remain a preview until these suites pass there.
+([CI](ci-and-aur.md#windows-real-agents-through-the-session-host)).
 
 The input key cases also depend on the keyboard layout. Codex reads a control key
 through the console as its character plus the Ctrl state, and crossterm resolves that

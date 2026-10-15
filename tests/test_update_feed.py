@@ -32,7 +32,7 @@ def archive(packages):
 
 
 class FakeGitHub:
-    def __init__(self,android=False,nightly=False,windows=False):
+    def __init__(self,android=False,nightly=False,windows=False,stable='0.37.0'):
         self.calls=[];self.commit=COMMIT;self.rows=[];self.blobs={}
         if android:
             tag='android-dev-1';version='0.1.7';package=b'checked apk fixture';source=b'checked source fixture'
@@ -41,7 +41,7 @@ class FakeGitHub:
                        'source_snapshot':{'name':'zerus-source.tar.gz','sha256':hashlib.sha256(source).hexdigest(),'size':len(source)}}
             payload={'zerus.apk':package,'zerus-source.tar.gz':source}
         else:
-            version='0.37.0.r123.gaaaaaaa.n5' if nightly else '0.37.0';tag='nightly-1234' if nightly else 'v'+version
+            version='0.37.0.r123.gaaaaaaa.n5' if nightly else stable;tag='nightly-1234' if nightly else 'v'+version
             packages={'zerus-ade-nightly-bin':version+'-1'} if nightly else {'zerus':version+'-1','zerus-ade-bin':version+'-1','zerus-git':'0.37.0.r91.g1234567-2'}
             self.info={'schema':1,'version':version,'source_commit':COMMIT,'architecture':'x86_64','distribution':'Arch Linux','native_agents_bundled':False,'aur_packages':list(packages)}
             if nightly:self.info.update(channel='nightly',product_version='0.37.0',revision_count=123,workflow_run_id=1234,workflow_run_number=5,release_tag=tag)
@@ -152,16 +152,42 @@ class MirrorTest(unittest.TestCase):
         self.assertNotIn(name,self.client.calls)
         self.assertFalse((self.root/'downloads/nightly-1234'/name).exists())
         self.assertTrue((self.root/'downloads/nightly-1234/SHA256SUMS').is_file())
+    def test_stable_windows_zip_stays_on_github_and_out_of_the_v1_feed(self):
+        self.client=FakeGitHub(windows=True);name=self.client.info['windows_portable']
+        self.assertEqual(name,'zerus-0.37.0-windows-x86_64.zip')
+        self.root.mkdir();self.run_mirror()
+        published=json.loads((self.root/'updates/v1/desktop/stable.json').read_text())
+        # The same projection as a stable release without it: deployed GUIs reject unknown kinds.
+        self.assertEqual({row['kind'] for row in published['artifacts']},{'source','linux-archive','arch-package'})
+        self.assertNotIn(name,[row['name'] for row in published['artifacts']])
+        self.assertNotIn(name,self.client.calls)
+        self.assertFalse((self.root/'downloads/v0.37.0'/name).exists())
+        self.assertTrue((self.root/'downloads/v0.37.0/SHA256SUMS').is_file())
+        # Retrying the same release changes nothing and downloads nothing.
+        self.client.calls.clear();self.run_mirror();self.assertEqual(self.client.calls,[])
+    def test_stable_feed_moves_from_a_release_without_the_zip_to_one_with_it(self):
+        # 0.42.2 and earlier have no Windows zip; the release after it carries one.
+        self.client=FakeGitHub(stable='0.42.2');self.root.mkdir();self.run_mirror();path=self.root/'updates/v1/desktop/stable.json'
+        before=json.loads(path.read_text())
+        self.client=FakeGitHub(windows=True,stable='0.42.3');self.client.release.update(id=11,published_at='2026-10-15T12:00:00Z');self.client.seal()
+        self.run_mirror();after=json.loads(path.read_text())
+        self.assertEqual((after['releaseId'],after['versionName']),(11,'0.42.3'))
+        self.assertEqual([row['kind'] for row in after['artifacts']],[row['kind'] for row in before['artifacts']])
+        self.assertFalse((self.root/'downloads/v0.42.3/zerus-0.42.3-windows-x86_64.zip').exists())
+        # The older release still validates unchanged.
+        self.client=FakeGitHub(stable='0.42.2')
+        with tempfile.TemporaryDirectory() as stage:
+            self.assertEqual(feed.validate_and_fetch(self.client,self.client.release,Path(stage),'desktop','stable')[0],before)
     def test_windows_zip_digest_and_family_are_still_verified(self):
-        self.client=FakeGitHub(nightly=True,windows=True);name=self.client.info['windows_portable']
-        row=next(asset for asset in self.client.release['assets'] if asset['name']==name);row['digest']='sha256:'+'0'*64
-        with self.assertRaisesRegex(ValueError,'digest mismatch'):self.run_mirror(False,'desktop/nightly')
-        for info,selector in (({'windows_portable':'zerus-windows.zip'},'desktop/nightly'),({'windows_portable':None},'desktop/nightly')):
-            self.client=FakeGitHub(nightly=True,windows=True);self.client.info.update(info);self.client.seal()
-            with self.subTest(info=info),self.assertRaisesRegex(ValueError,'Unexpected'):self.run_mirror(False,selector)
-        # Stable releases have no Windows asset yet: a zip there still fails closed.
-        self.client=FakeGitHub(windows=True)
-        with self.assertRaisesRegex(ValueError,'Unexpected desktop asset family'):self.run_mirror(False)
+        for nightly,selector in ((True,'desktop/nightly'),(False,'desktop/stable')):
+            self.client=FakeGitHub(nightly=nightly,windows=True);name=self.client.info['windows_portable']
+            row=next(asset for asset in self.client.release['assets'] if asset['name']==name);row['digest']='sha256:'+'0'*64
+            with self.subTest(selector=selector),self.assertRaisesRegex(ValueError,'digest mismatch'):self.run_mirror(False,selector)
+            for info in ({'windows_portable':'zerus-windows.zip'},{'windows_portable':None},
+                         {'windows_portable':name.replace('-windows-','-windows-arm64-')}):
+                # A renamed, undeclared or foreign zip fails closed and keeps the old catalog.
+                self.client=FakeGitHub(nightly=nightly,windows=True);self.client.info.update(info);self.client.seal()
+                with self.subTest(selector=selector,info=info),self.assertRaisesRegex(ValueError,'Unexpected'):self.run_mirror(False,selector)
     def test_android_dirty_source_required_same_code_replacement_forbidden(self):
         self.client=FakeGitHub(android=True);self.root.mkdir();self.run_mirror(True,'android/dev')
         self.client.release['id']=11;self.client.release['published_at']='2026-10-10T12:00:00Z'

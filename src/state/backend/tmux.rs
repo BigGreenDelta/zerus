@@ -687,6 +687,11 @@ mod tests {
     }
 
     #[test]
+    fn a_supervisor_reports_its_launch_complete() {
+        assert!(!Tmux.completes_launch_reports());
+    }
+
+    #[test]
     fn launches_render_as_before() {
         let mut spec = LaunchSpec {
             name: "claude/p/t".into(),
