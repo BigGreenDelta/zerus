@@ -22,7 +22,8 @@ REPO = Path(__file__).resolve().parents[1]
 WINDOWS = os.name == 'nt'
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs.exe')).resolve()
 FAKE_SSH = Path(os.environ.get('HGS_TEST_FAKE_SSH', REPO / 'target/debug/examples/fake_ssh.exe')).resolve()
-LOCAL = 'hgs: Local sessions are not supported on Windows yet; choose a remote machine.\n'
+LOCAL = ('hgs: Local sessions are not enabled on this computer; enable them on the Machines page '
+         'or run hgs session-host install, or choose a remote machine.\n')
 URI = 'zerus://session?machine=11111111-2222-4333-8444-555555555555&host=peer&name=claude%2Fp&conversation=c1'
 
 
