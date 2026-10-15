@@ -219,6 +219,8 @@ class ResumedClearContext(unittest.TestCase):
   self.resumed();info=self.inspect()
   self.assertTrue(info['resume_message_can_send'],info.get('resume_message_reason'))
   self.assertTrue(info['clear_context_supported']);self.assertFalse(info['compact_context_supported'])
+  self.assertEqual(info['clear_context_reason'],'')
+  self.assertEqual(info['compact_context_reason'],'The agent has not confirmed the resumed conversation yet')
   self.assertIn('pause',info['allowed_actions'])
   self.assertEqual(self.clear()['status'],'confirmed');self.assertEqual(self.received(),b'/clear\r')
   current=json.loads(self.record_path.read_text())
@@ -226,6 +228,7 @@ class ResumedClearContext(unittest.TestCase):
   self.assertTrue(current['session_clear']['awaiting_session_start']);self.assertFalse(current.get('error'))
   fresh=self.inspect();self.assertEqual(fresh['session_clear']['type'],'SessionCleared')
   self.assertEqual(fresh['session_usage']['status'],'unavailable');self.assertFalse(fresh['clear_context_supported'])
+  self.assertEqual(fresh['clear_context_reason'],'The cleared conversation starts with the next message')
   # The next message starts the cleared conversation, whose SessionStart names it.
   self.assertTrue(fresh['resume_message_can_send'],fresh.get('resume_message_reason'))
   receipt=test_input.InputTransport.send(self,test_input.InputTransport.payload(self,text='Fresh request'))

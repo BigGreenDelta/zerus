@@ -653,12 +653,18 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         output["process_work"] = processes::WorkSample::default().summary(&record,
             archive_id.is_none() && panes.is_some() && output["activity"] == "idle" && output["phase"] == "idle");
     }
-    output["compact_context_supported"] = json!(archive_id.is_none() && clear_context::available(&record,panes.is_some()));
+    // Each unavailable action names its reason; an older host omits it.
+    let context_reason = if archive_id.is_some() { Some("Restore the archived session first".to_owned()) }
+        else { clear_context::unavailable(&record,panes.is_some()) };
+    output["compact_context_supported"] = json!(context_reason.is_none());
+    output["compact_context_reason"] = json!(context_reason.clone().unwrap_or_default());
     output["compact_context_request"] = record["compact_context_request"].clone();
     // The summary above verified a pending resume once; its message and
     // actions reuse that result instead of checking the terminal again.
-    output["clear_context_supported"] = json!(archive_id.is_none() && (clear_context::available(&record,panes.is_some())
+    output["clear_context_supported"] = json!(archive_id.is_none() && (context_reason.is_none()
         || clear_context::resumed_verified(&record,panes.is_some(),output["resume_message_can_send"] == true)));
+    output["clear_context_reason"] = json!(if output["clear_context_supported"] == true { String::new() }
+        else { context_reason.unwrap_or_default() });
     output["clear_context_dismiss"] = json!(archive_id.is_none() && output["clear_context_supported"] != true
         && clear_context::dismissable(&record,panes.is_some()) && !clear_context::startup_choice(&output["pending_questions"]));
     output["interrupt_supported"] = json!(archive_id.is_none() && interrupt::available(&record,panes.is_some()));
