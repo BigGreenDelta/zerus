@@ -526,6 +526,11 @@ add_executable(test_graphcanvas test_graphcanvas.cpp)
 target_include_directories(test_graphcanvas PRIVATE ../src)
 target_link_libraries(test_graphcanvas PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(graphcanvas test_graphcanvas)
+
+add_executable(test_graphprojection test_graphprojection.cpp)
+target_include_directories(test_graphprojection PRIVATE ../src)
+target_link_libraries(test_graphprojection PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(graphprojection test_graphprojection)
 set_tests_properties(graphcanvas PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_paintcache test_paintcache.cpp)

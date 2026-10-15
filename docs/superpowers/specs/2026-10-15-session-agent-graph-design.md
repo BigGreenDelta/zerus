@@ -452,8 +452,16 @@ atomic disk cache. Hidden views stop polling; removed routes discard stale repli
 and cached data. The CLI transport keeps request IDs and always includes `--json`,
 which old launch parsers reject before creating sessions.
 
-These components are not yet wired into the main navigation or fleet identity
-composition. Verified communication provenance, archive and full native-child
+A pure projection join now matches current Sessions presentation by exact
+configured route, provider, name, run and conversation. A stale or reused name
+cannot borrow a current card or authorize navigation. Multiple configured aliases
+of one native machine use one coherent projection; multiple bindings retain
+explicit action choices and conflicting project assignments remain visible.
+Unverified message claims cannot become communication edges. Canvas limits expose
+omitted records and prefer current bindings over unrelated recorded history.
+
+These components are not yet wired into the main navigation and fleet updates.
+Verified communication provenance, archive and full native-child
 coverage, final platform/performance qualification and Android transport remain
 unfinished. This milestone is not a usable Graph release;
 the first-release boundary below is unchanged.
