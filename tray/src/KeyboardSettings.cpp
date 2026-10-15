@@ -59,7 +59,7 @@ KeyboardSettings::KeyboardSettings(ShortcutRegistry &registry, QWidget *parent) 
     hint->setWordWrap(true);
     layout->addWidget(hint);
 
-    connect(m_tree, &QTreeWidget::itemDoubleClicked, this, &KeyboardSettings::editItem);
+    // activated covers double-click and Enter; connecting doubleClicked too would open the editor twice.
     connect(m_tree, &QTreeWidget::itemActivated, this, &KeyboardSettings::editItem);
     connect(m_tree, &QTreeWidget::currentItemChanged, this, [this] { updateButtons(); });
     connect(m_reset, &QPushButton::clicked, this, [this] {
@@ -191,6 +191,9 @@ void KeyboardSettings::editChord(const QString &id, int slot)
             if (slot < keys.size()) keys.removeAt(slot);
         } else if (slot < keys.size()) {
             keys[slot] = sequence;
+            // The same chord in both slots collapses to one.
+            for (int i = keys.size() - 1; i >= 0; --i)
+                if (i != slot && keys.at(i) == sequence) keys.removeAt(i);
         } else {
             keys.append(sequence);
         }

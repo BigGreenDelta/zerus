@@ -26,6 +26,8 @@ private slots:
     void protectedKeyIsRefusedWithAReason();
     void conflictAsksAndReassigns();
     void conflictDeclinedChangesNothing();
+    void doubleClickOpensTheEditorOnce();
+    void samePhraseInBothSlotsCollapses();
     void resetCommandAndResetAll();
     void marksChordsThatWorkInTerminal();
     void cheatSheetFiltersAndUpdates();
@@ -93,7 +95,7 @@ void TestKeyboardSettings::editingPersistsAChord()
         QTest::mouseClick(dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok), Qt::LeftButton);
     });
     auto *tree = settings.findChild<QTreeWidget *>("keyboardCommands");
-    emit tree->itemDoubleClicked(commandItem(tree, "go.anywhere"), 1);
+    emit tree->itemActivated(commandItem(tree, "go.anywhere"), 1);
     QCOMPARE(registry.keys("go.anywhere"), QList<QKeySequence>{QKeySequence("Ctrl+J")});
     QVERIFY(changed.count() >= 1);
     QCOMPARE(commandItem(tree, "go.anywhere")->text(1).left(6), QKeySequence("Ctrl+J").toString(QKeySequence::NativeText));
@@ -113,8 +115,9 @@ void TestKeyboardSettings::protectedKeyIsRefusedWithAReason()
         auto *reason = dialog->findChild<QLabel *>("keyboardEditReason");
         shown = reason->text();
         visible = !reason->isHidden();
-        QVERIFY(dialog->isVisible());
+        const bool stillOpen = dialog->isVisible();
         QTest::mouseClick(dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel), Qt::LeftButton);
+        QVERIFY(stillOpen);
     });
     settings.editChord("go.anywhere", 0);
     QVERIFY(visible);
@@ -158,6 +161,47 @@ void TestKeyboardSettings::conflictDeclinedChangesNothing()
     settings.editChord("go.anywhere", 0);
     QVERIFY(!registry.customized("go.anywhere"));
     QVERIFY(!registry.customized("session.new"));
+}
+
+void TestKeyboardSettings::doubleClickOpensTheEditorOnce()
+{
+    ShortcutRegistry registry(Platform::Linux);
+    KeyboardSettings settings(registry);
+    settings.resize(700, 700);
+    settings.show();
+    settings.activateWindow();
+    QVERIFY(QTest::qWaitForWindowActive(&settings));
+    auto *tree = settings.findChild<QTreeWidget *>("keyboardCommands");
+    auto *item = commandItem(tree, "go.anywhere");
+    tree->scrollToItem(item);
+    int opened = 0;
+    std::function<void()> close = [&] {
+        if (QWidget *modal = QApplication::activeModalWidget()) {
+            ++opened;
+            qobject_cast<QDialog *>(modal)->reject();
+            QTimer::singleShot(30, close);
+        }
+    };
+    QTimer::singleShot(30, close);
+    const QPoint point = tree->visualItemRect(item).center();
+    // QTest delivers the double-click event only after a first click.
+    QTest::mouseClick(tree->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(tree->columnViewportPosition(1) + 5, point.y()));
+    QTest::mouseDClick(tree->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(tree->columnViewportPosition(1) + 5, point.y()));
+    QTest::qWait(150);
+    QCOMPARE(opened, 1);
+}
+
+void TestKeyboardSettings::samePhraseInBothSlotsCollapses()
+{
+    ShortcutRegistry registry(Platform::Linux);
+    KeyboardSettings settings(registry);
+    registry.setKeys("go.anywhere", {QKeySequence("Ctrl+J"), QKeySequence("Ctrl+L")});
+    whenModal([](QWidget *dialog) {
+        dialog->findChild<QKeySequenceEdit *>("keyboardEdit")->setKeySequence(QKeySequence("Ctrl+J"));
+        QTest::mouseClick(dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok), Qt::LeftButton);
+    });
+    settings.editChord("go.anywhere", 1);
+    QCOMPARE(registry.keys("go.anywhere"), QList<QKeySequence>{QKeySequence("Ctrl+J")});
 }
 
 void TestKeyboardSettings::resetCommandAndResetAll()
