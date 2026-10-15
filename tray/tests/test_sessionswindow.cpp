@@ -320,6 +320,8 @@ private slots:
     void failedMessagesReconcileAndRetryWithoutLosingDrafts();
     void modelSettingsKeepSessionIdentity_data();
     void modelSettingsKeepSessionIdentity();
+    void scheduledSettingsApplyOncePerReady_data();
+    void scheduledSettingsApplyOncePerReady();
     void coldQuestionSubmissionRevalidatesConsent_data();
     void coldQuestionSubmissionRevalidatesConsent();
     void questionAnswersStayWithOriginalSession();
@@ -3078,6 +3080,158 @@ elif args[0]=='settings':
     QCOMPARE(composer->editor()->toPlainText(), QString("[File #1] Saved draft for original session"));
     QCOMPARE(composer->findChildren<QPushButton *>("removeAttachment").size(), 1);
     QTest::qWait(80); QCOMPARE(changes.size(), state == "running" ? 2 : 1);
+}
+
+void TestSessionsWindow::scheduledSettingsApplyOncePerReady_data()
+{
+    // What the attempt at the next Ready returns. There is none when the run or
+    // its conversation changes first.
+    // Without listedChooser only inspect of the selected session shows the
+    // chooser, as when it closed again between two fleet listings.
+    QTest::addColumn<bool>("keepSelected"); QTest::addColumn<QString>("retry"); QTest::addColumn<QString>("changed");
+    QTest::addColumn<bool>("listedChooser");
+    QTest::newRow("background-applied") << false << QString("applied") << QString() << true;
+    QTest::newRow("background-failed") << false << QString("Native model picker unavailable") << QString() << true;
+    QTest::newRow("background-new-run") << false << QString() << QString("run") << true;
+    QTest::newRow("background-new-conversation") << false << QString() << QString("conversation") << true;
+    QTest::newRow("selected-applied") << true << QString("applied") << QString() << true;
+    QTest::newRow("selected-inspected-chooser") << true << QString("applied") << QString() << false;
+}
+
+void TestSessionsWindow::scheduledSettingsApplyOncePerReady()
+{
+    // A chooser can appear between the idle listing and the dispatch of a
+    // pending change; dispatch then schedules it again. The change stays
+    // pending for one attempt per Ready transition, never a polling loop.
+    QFETCH(bool, keepSelected); QFETCH(QString, retry); QFETCH(QString, changed); QFETCH(bool, listedChooser);
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QString program = directory.filePath("hgs"), snapshot = directory.filePath("snapshot.json"), capture = directory.filePath("calls.jsonl");
+    QJsonObject details{{"tracked", true}, {"run_id", "run-original"}, {"conversation_id", "conversation-one"},
+        {"activity", "busy"}, {"phase", "tool"}, {"model", "gpt-6.1-sol"}, {"effort", "high"},
+        {"settings_change_supported", true}, {"settings_apply_when", "ready"},
+        {"model_options", QJsonArray{QJsonObject{{"id", "gpt-6.1-sol"}, {"effort_options", QJsonArray{"high", "xhigh"}}}}},
+        {"cursor", 0}, {"events", QJsonArray{}}};
+    QVERIFY(FakeCli::replace(snapshot, QJsonDocument(details).toJson()));
+    QFile executable(program); QVERIFY(executable.open(QIODevice::WriteOnly));
+    QByteArray body = "#!/usr/bin/env python3\nimport json,sys,pathlib,time\nroot=pathlib.Path(__file__).parent\nargs=sys.argv[1:]\n";
+    body += "outcomes=['scheduled','scheduled']+" + QJsonDocument(QJsonArray{retry}).toJson(QJsonDocument::Compact) + "\n";
+    // As in modelSettingsKeepSessionIdentity: replace snapshot.json atomically.
+    body += R"PY(def publish(data):
+ staged=root/'snapshot.tmp';staged.write_text(json.dumps(data))
+ for _ in range(250):
+  try:return staged.replace(root/'snapshot.json')
+  except PermissionError:time.sleep(.02)
+ sys.exit('snapshot.json stayed open')
+if args[0]=='inspect':
+ if args[1]=='codex/hgs/dashboard':print((root/'snapshot.json').read_text())
+ else:print(json.dumps({'tracked':True,'run_id':'run-other','conversation_id':'conversation-other','activity':'idle','phase':'idle','cursor':0,'events':[]}))
+elif args[0]=='settings':
+ p=json.load(sys.stdin)
+ calls=root/'calls.jsonl'
+ previous=calls.read_text().count('\n') if calls.exists() else 0
+ with calls.open('a') as out: out.write(json.dumps({'args':args,'payload':p})+'\n')
+ time.sleep(.12)
+ result=outcomes[previous] if previous<len(outcomes) else 'unexpected settings call'
+ data=json.loads((root/'snapshot.json').read_text())
+ if result=='scheduled':
+  # The terminal shows a chooser: dispatch schedules, and an apply of the
+  # pending change stays scheduled.
+  if 'expected_pending_id' not in p:
+   data['pending_model']=p['model'];data['pending_effort']=p['effort'];data['pending_settings_id']=p['request_id'];publish(data)
+  pending=p.get('expected_pending_id',p['request_id'])
+ elif result=='applied':
+  data['model']=p['model'];data['effort']=p['effort']
+  for field in ['pending_model','pending_effort','pending_settings_id']:data.pop(field,None)
+  publish(data)
+ else:
+  print(result,file=sys.stderr);sys.exit(1)
+ receipt={'status':result,'request_id':p['request_id'],'name':args[1],'run_id':p['expected_run_id'],
+  'conversation_id':p['expected_conversation_id'],'model':p['model'],'effort':p['effort']}
+ if result=='scheduled':receipt.update(pending_settings_id=pending,apply_when='ready')
+ print(json.dumps(receipt))
+)PY";
+    executable.write(body); executable.close(); QVERIFY(FakeCli::makeRunnable(executable.fileName()));
+    auto current = fleet(); auto box = current.local(); box.sessions[0].runId = "run-original";
+    current.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program)); window.setDetailsPollForTests(100, 200);
+    window.setFleet(current); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy inspections(client, &HgsClient::inspectionReady), changes(client, &HgsClient::settingsFinished);
+    QTRY_VERIFY(!inspections.isEmpty());
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    composer->findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *efforts = composer->findChild<QComboBox *>("sessionEffortChoice"); efforts->setCurrentIndex(efforts->findData("xhigh"));
+    auto *apply = composer->findChild<QPushButton *>("applySessionSettings"); QVERIFY(apply->isEnabled()); apply->click();
+    if (!keepSelected) window.showSession({}, "kimi/docs/research");
+    QTRY_COMPARE(changes.size(), 1); QVERIFY(changes[0][1].toBool());
+    QCOMPARE(changes[0][2].toJsonObject().value("status").toString(), QString("scheduled"));
+    const auto list = [&](const QString &activity, const QString &phase) {
+        box.sessions[0].activity = activity; box.sessions[0].phase = phase; box.sessions[0].processState = "running";
+        current.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(current);
+    };
+    const auto calls = [&] {
+        QFile recorded(capture); return recorded.open(QIODevice::ReadOnly) ? recorded.readAll().count('\n') : -1;
+    };
+    const auto published = [&] {
+        QFile file(snapshot); return QJsonDocument::fromJson(file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray()).object();
+    };
+    // Waits for two of the selected session's inspections, then counts calls.
+    QString selectedName = keepSelected ? "codex/hgs/dashboard" : "kimi/docs/research";
+    const auto settledCalls = [&] {
+        const auto seen = inspections.size(); QTest::qWait(150);
+        const auto inspected = [&] { return std::count_if(inspections.cbegin() + seen, inspections.cend(),
+            [&](const QList<QVariant> &reply) { return reply[1].toString() == selectedName; }); };
+        if (!QTest::qWaitFor([&] { return inspected() >= 2; }, 5000)) return -1;
+        return changes.size() == calls() ? int(changes.size()) : -1;
+    };
+    // The idle listing starts the automatic apply, but a chooser appeared in
+    // the meantime: dispatch schedules it.
+    list("idle", "idle");
+    QTRY_COMPARE(changes.size(), 2); QVERIFY(changes[1][1].toBool());
+    QCOMPARE(changes[1][2].toJsonObject().value("status").toString(), QString("scheduled"));
+    // No second attempt while the session stays Ready or shows the chooser.
+    list("idle", "idle"); list("idle", "idle"); QCOMPARE(settledCalls(), 2);
+    if (listedChooser) {
+        list("busy", "input"); QCOMPARE(settledCalls(), 2);
+        list("busy", "input"); QCOMPARE(settledCalls(), 2);
+    }
+    if (!changed.isEmpty()) {
+        // A new run or conversation never receives the earlier one's change.
+        if (changed == "run") box.sessions[0].runId = "run-two";
+        else box.sessions[0].conversationId = "conversation-two";
+        list("idle", "idle"); list("busy", "tool"); list("idle", "idle");
+        QCOMPARE(settledCalls(), 2);
+    } else {
+        list("idle", "idle");
+        if (keepSelected) {
+            // The selected session also needs inspect to report Ready.
+            QCOMPARE(settledCalls(), 2);
+            auto ready = published();
+            QVERIFY(ready.contains("pending_settings_id")); ready["settings_apply_when"] = "now";
+            QVERIFY(FakeCli::replace(snapshot, QJsonDocument(ready).toJson()));
+        }
+        QTRY_COMPARE(changes.size(), 3); QCOMPARE(changes[2][1].toBool(), retry == "applied");
+        auto *notice = window.findChild<QLabel *>("notice"); QVERIFY(notice);
+        if (retry == "applied") QVERIFY(notice->isHidden());
+        else { QVERIFY(notice->isVisible()); QVERIFY(notice->text().contains(retry)); }
+        // Applied or failed: later Ready transitions start nothing.
+        list("busy", "tool"); list("idle", "idle"); list("busy", "input"); list("idle", "idle");
+        QCOMPARE(settledCalls(), 3);
+    }
+    const auto attempts = changed.isEmpty() ? 3 : 2;
+    // Selecting the session with inspect reporting Ready starts nothing either.
+    auto ready = published();
+    ready["settings_apply_when"] = "now"; QVERIFY(FakeCli::replace(snapshot, QJsonDocument(ready).toJson()));
+    selectedName = "codex/hgs/dashboard"; window.showSession({}, selectedName); QCOMPARE(settledCalls(), attempts);
+    QFile recorded(capture); QVERIFY(recorded.open(QIODevice::ReadOnly));
+    QString pendingId;
+    for (const auto &line : recorded.readAll().split('\n')) {
+        if (line.isEmpty()) continue;
+        const auto payload = QJsonDocument::fromJson(line).object().value("payload").toObject();
+        QCOMPARE(payload.value("expected_run_id").toString(), QString("run-original"));
+        QCOMPARE(payload.value("effort").toString(), QString("xhigh"));
+        if (pendingId.isEmpty()) { QVERIFY(!payload.contains("expected_pending_id")); pendingId = payload.value("request_id").toString(); }
+        else QCOMPARE(payload.value("expected_pending_id").toString(), pendingId);
+    }
 }
 
 void TestSessionsWindow::messageDeliveryKeepsSessionIdentityAndDrafts()

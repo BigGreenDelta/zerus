@@ -349,6 +349,16 @@ private:
     QSet<QByteArray> m_settingsAttempts;
     struct PendingSettings { QString host, name, run, conversation, model, effort, id; };
     QHash<QString, PendingSettings> m_queuedSettings;
+    static QByteArray settingsIdentity(const QString &key, const PendingSettings &pending);
+    const SessionInfo *listedSettingsSession(const PendingSettings &pending) const;
+    bool settingsAttemptAllowed(const QString &key, const PendingSettings &pending, const QByteArray &identity) const;
+    void requestAutomaticSettings(const QString &key, const PendingSettings &pending, const QByteArray &identity);
+    // An automatic apply that dispatch scheduled instead, as when a chooser
+    // appeared after the idle listing, by session key. It runs once more after
+    // the listing or inspect shows the session leave Ready (`rearmed`).
+    struct ScheduledSettings { QByteArray identity; bool rearmed = false; };
+    QHash<QString, ScheduledSettings> m_scheduledSettings;
+    QByteArray m_settingsIdentity; // The automatic apply in flight.
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
     // Polls keep hidden pages' data current; these pages render when shown.
     bool m_sessionsStale = false, m_dashboardStale = false;
