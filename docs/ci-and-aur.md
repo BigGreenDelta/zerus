@@ -3,8 +3,9 @@
 This document describes the checks, package layout and publication workflow.
 [Zerus 0.37.0](https://github.com/ufna/zerus/releases/tag/v0.37.0) is the first
 public Arch x86_64 bundle. Stable release builds and GitHub/AUR publication remain
-separate manual workflows; verified nightlies publish automatically. Nightlies
-also carry a Windows x86_64 portable zip of the control console.
+separate manual workflows; verified nightlies publish automatically. Stable
+releases after 0.42.2 and nightlies also carry a Windows x86_64 portable zip of
+the control console.
 
 ## Continuous integration
 
@@ -142,9 +143,10 @@ count.
 
 The owner decided on 2026-10-13 that objects compiled by trusted main checks may
 feed published builds: the Arch package job produces the Dev, nightly and stable
-Arch candidates, and the Windows job the nightly portable zip. Cache directories
-stay outside the checkout (`/home/user/.cache/ccache`, `~/Library/Caches/ccache`
-and `RUNNER_TEMP`), so they never enter packages, the zip or uploaded artifacts.
+Arch candidates, and the Windows job the portable zip of stable and nightly
+releases. Cache directories stay outside the checkout
+(`/home/user/.cache/ccache`, `~/Library/Caches/ccache` and `RUNNER_TEMP`), so
+they never enter packages, the zip or uploaded artifacts.
 The Arch package job enables ccache for makepkg only through
 `/etc/makepkg.conf.d/ccache.conf` in its disposable container, after checking that
 the image's default `BUILDENV` differs only in `ccache`. The published recipes and
@@ -190,9 +192,10 @@ Release packaging covers **Arch x86_64** and, through the `zerus` and
 [macOS distribution](macos-distribution.md). Ordinary macOS CI checks build/test
 compatibility with Homebrew Qt; only stable and nightly candidates build, sign and
 notarize the bundle, and only once the repository variable `MACOS_CASKS_ENABLED`
-is `true`. Nightlies add the Windows x86_64 portable zip described below; a stable
-Windows asset is a separate owner decision. Intel Macs and Arch ARM are outside
-this package matrix.
+is `true`. Stable releases and nightlies add the Windows x86_64 portable zip
+described below (owner decision of 2026-10-14; 0.42.2 is the last stable release
+without it); Dev builds have none. Intel Macs and Arch ARM are outside this
+package matrix.
 
 All CI jobs have bounded timeouts. Checkout credentials are not persisted and
 Actions are pinned to commit SHAs. Dependabot proposes monthly grouped action/Cargo
@@ -521,7 +524,7 @@ provenance and the limits: at most 512 MiB compressed, the release mirror's
 asset limit, and 500 MB unpacked, the bound applied to whole nightly candidates.
 `conpty.dll` and `OpenConsole.exe` must be the pinned builds, by size and SHA-256
 read in memory, and no file of either name may sit anywhere but next to
-`hgs.exe`; nightly assembly and publication repeat these checks.
+`hgs.exe`; stable and nightly assembly and publication repeat these checks.
 With `--run --selftest` on Windows it extracts the zip and starts both
 executables with a minimal environment, without Qt or the bundle on `PATH`:
 `--version` of each, `hgs.exe ls --json --local` must report the control-only
@@ -531,7 +534,7 @@ disposable profile and must stage the pinned pair into the host image; it starts
 no host. The job uploads the zip and logs as `windows-x86_64-<commit>` without
 recompressing them and keeps them for seven days (three for schedules). Qt
 WebEngine, which made earlier zips about 140 MB (345 MB unpacked), is not part of
-it. Only nightly assembly uses that zip. On main pushes the [Dev channel](public-distribution.md#verified-main-dev-channel)
+it. Only stable and nightly assembly use that zip. On main pushes the [Dev channel](public-distribution.md#verified-main-dev-channel)
 waits for this job like every other suite, so a Windows failure also holds back
 Dev, but Dev candidates carry no Windows build.
 
@@ -587,12 +590,12 @@ On a Windows development PC the same steps run from Git Bash;
 The `windows-host` job runs the reviewed `win32-x64` Claude Code and Codex in
 isolated session hosts of the release `hgs.exe` on a standard `windows-2025` runner
 (M7 of [Windows Phase 2](superpowers/specs/2026-10-13-windows-native-host-design.md)).
-Local sessions on Windows remain a preview until it passes. It is selected with the
-Windows desktop job and the gate requires both, but it is a job of its own: a
-failure points at the host, and the desktop job keeps its time margin. Like that
-job it checks out text files unchanged and uses the same exact CPython; it builds
-the release binary from the `windows-cli-` Rust cache, which it restores and never
-saves, and fetches the [ConPTY pair](#the-bundled-conpty-pair) the same way.
+It is selected with the Windows desktop job and the gate requires both, but it is a
+job of its own: a failure points at the host, and the desktop job keeps its time
+margin. Like that job it checks out text files unchanged and uses the same exact
+CPython; it builds the release binary from the `windows-cli-` Rust cache, which it
+restores and never saves, and fetches the [ConPTY pair](#the-bundled-conpty-pair)
+the same way.
 
 It then runs `scripts/ci/agent-compatibility.py` with `HGS_TEST_BIN` and
 `HGS_TEST_CONPTY_DIR` ([native agent compatibility](#native-agent-compatibility-and-upstream-review)):
@@ -1063,11 +1066,12 @@ GitHub releases or a schedule.
 
 ### 1. Build and review a candidate
 
-`release.yml` runs quick checks plus full Linux CLI, Arch and macOS validation from
-one exact commit. macOS can be explicitly disabled. Windows is not selected:
-stable candidates carry no Windows asset. It consumes that run's
-Arch package, verifies its embedded version/source commit, assembles source and
-binary archives, rebuilds both stable recipes, runs namcap and seals the result.
+`release.yml` runs quick checks plus full Linux CLI, Arch, macOS and Windows
+validation from one exact commit. macOS can be explicitly disabled; Windows
+cannot, because the candidate carries the portable zip that this run tested. It
+consumes that run's Arch package and Windows zip, verifies their embedded
+version/source commit, assembles source and binary archives, rebuilds both stable
+recipes, runs namcap and seals the result.
 Stable and nightly candidates call the common `checks.yml` workflow directly
 with read-only cache access. Their verification never includes the main-push dev
 publisher or requests its tag-writing permissions.
@@ -1081,11 +1085,25 @@ cd /tmp/zerus-candidate
 sha256sum -c SHA256SUMS
 ```
 
-The artifact contains source/binary archives, two checked pacman packages,
-`release-info.json`, all three concrete `PKGBUILD`/`.SRCINFO` pairs, their sealed
-`zerus-VERSION-aur.tar.gz` archive and `SHA256SUMS` covering every release asset.
+The artifact contains source/binary archives, two checked pacman packages, the
+Windows portable zip `zerus-VERSION-windows-x86_64.zip`, `release-info.json`, all
+three concrete `PKGBUILD`/`.SRCINFO` pairs, their sealed `zerus-VERSION-aur.tar.gz`
+archive and `SHA256SUMS` covering every release asset.
 Git export attributes omit tracker, agent instructions/skills, workflows and
 prototype artwork from the source archive; runtime artwork and notices remain.
+
+The zip is the `windows-x86_64-<commit>` artifact of the same run, copied
+unchanged under its stable name, exactly as nightlies take theirs.
+`prepare-release.py` reads only its zip directory, a bounded `build-info.json` and
+the pinned ConPTY pair, requires the candidate's commit and version (the bundled
+`hgs-tray.exe` then reports that stable version with its commit and no Dev build
+number) and records the name as `windows_portable` in `release-info.json`.
+Validation and publication repeat these checks; nothing in the zip is extracted or
+executed. A manifest that names the zip requires exactly that file, and an
+undeclared zip fails. Candidates sealed without one, such as 0.42.2 and every
+earlier stable release, remain valid for publication retries; a later candidate
+without it fails validation, because portable Windows apps announce every stable
+release after 0.42.2 as a Windows update.
 
 Review the source commit, package logs, dependency/license inventory and recipes.
 `create_draft=true` additionally creates a GitHub draft; by default everything
@@ -1098,20 +1116,23 @@ verified package, remains available:
 
 ```sh
 python3 scripts/prepare-release.py --version "$(cat VERSION)" \
-  --package artifacts/zerus-git-EXACT_VERSION-x86_64.pkg.tar.zst --output dist
+  --package artifacts/zerus-git-EXACT_VERSION-x86_64.pkg.tar.zst \
+  --windows-zip artifacts/zerus-windows-x86_64.zip --output dist
 bash scripts/check-release-packages.sh dist
 ```
 
-The helper requires an empty output directory. Build artifacts are ignored and
-are never committed to the application or AUR repositories.
+The Windows zip must be the one CI built and tested from the same commit; stable
+releases after 0.42.2 carry it, and desktop apps rely on that. The helper requires
+an empty output directory. Build artifacts are ignored and are never committed to
+the application or AUR repositories.
 
 Once the repository variable `MACOS_CASKS_ENABLED` is `true`, the candidate run
 also builds the Apple Silicon bundle against the pinned official Qt, signs and
 notarizes it in the main-only `macos-signing` environment and installs the result
 through a local tap before assembly (`macos-cask.yml`). The candidate then uses
 release-info schema 2 and contains the `zerus-VERSION-macos-arm64.zip` asset and
-`homebrew/zerus.rb`. Until then, and with `-f macos_cask=false`, the candidate is
-Arch-only. Details, secrets and retry rules are in
+`homebrew/zerus.rb`. Until then, and with `-f macos_cask=false`, the candidate has
+no macOS asset. Details, secrets and retry rules are in
 [macOS distribution](macos-distribution.md).
 
 ### 2. Publish the reviewed candidate and update AUR and Homebrew
@@ -1138,6 +1159,17 @@ then pushes the stable source, binary and VCS recipe updates. AUR Git receives o
 `PKGBUILD` and `.SRCINFO`; release archives stay on GitHub. A macOS candidate also
 stages the cask in `ufna/homebrew-zerus` with a dry-run push before the GitHub
 write and pushes it after the AUR recipes.
+
+The Windows zip reaches the same release unchanged, and the publisher checks its
+layout and provenance again first. Release notes the publisher creates describe
+it; a `create_draft` draft keeps its own notes. Like the nightly zip it stays on
+GitHub: the zerus.dev mirror checks its sealed name and GitHub digest but neither
+stores it nor lists it in the v1 desktop feed. Deploy the updated
+`scripts/update_feed.py` to the mirror before publishing the first stable release
+with a zip: older mirror code accepts a zip only in nightlies and fails the whole
+`desktop/stable` job on that release. It keeps the previous stable catalog and,
+where the same job also runs `--dev-platform desktop`, the previous desktop Dev
+catalog too.
 
 The VCS flavor follows `main` automatically when users rebuild. Release-time sync
 updates its recipe when dependencies/build/package logic change; pure `pkgver`

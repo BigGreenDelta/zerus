@@ -34,8 +34,15 @@ class TestUpdates : public QObject {
             {"packages",QJsonObject{{"zerus-ade-bin","0.37.0-1"},{"zerus-git","0.37.0.r10.gaaaaaaa-1"}}},
             {"artifacts",QJsonArray{QJsonObject{{"kind","arch-package"},{"name","zerus-ade-bin-0.37.0-1-x86_64.pkg.tar.zst"},{"url","https://zerus.dev/downloads/v0.37.0/zerus-ade-bin-0.37.0-1-x86_64.pkg.tar.zst"},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}}}}};
     }
-    // A nightly catalog as scripts/update_feed.py publishes it (the Windows zip is
-    // linked from the release page only, never listed as an artifact).
+    // Stable and nightly catalogs as scripts/update_feed.py publishes them (the
+    // Windows zip is linked from the release page only, never listed as an artifact).
+    QJsonObject stableRaw(const QString &version) const {
+        const QString tag="v"+version,name="zerus-ade-bin-"+version+"-1-x86_64.pkg.tar.zst";
+        auto value=raw();value["versionName"]=version;value["releaseUrl"]="https://github.com/ufna/zerus/releases/tag/"+tag;
+        value["packages"]=QJsonObject{{"zerus-ade-bin",version+"-1"}};
+        value["artifacts"]=QJsonArray{QJsonObject{{"kind","arch-package"},{"name",name},{"url","https://zerus.dev/downloads/"+tag+"/"+name},{"sha256",QString(64,'b')},{"size",100},{"os","linux"},{"arch","x86_64"}}};
+        return value;
+    }
     QJsonObject nightlyRaw(const QString &version) const {
         const QString tag="nightly-123",name="zerus-ade-nightly-bin-"+version+"-1-x86_64.pkg.tar.zst";
         auto value=raw();value["channel"]="nightly";value["versionName"]=version;value["releaseUrl"]="https://github.com/ufna/zerus/releases/tag/"+tag;
@@ -134,14 +141,25 @@ private slots:
         QVERIFY(UpdateController::comparisonMessage(actual,catalog,"0.9.0",0,false).contains("No matching"));
 #endif
     }
-    void portableWindowsBuildFollowsNightlyReleases(){
-        auto stable=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(stable.valid);
+    void portableWindowsBuildFollowsStableAndNightlyReleases(){
+        auto stable=UpdateController::parseFeed(QJsonDocument(stableRaw("0.42.3")).toJson(),"stable");QVERIFY(stable.valid);
+        auto last=UpdateController::parseFeed(QJsonDocument(stableRaw("0.42.2")).toJson(),"stable");QVERIFY(last.valid);
+        auto older=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");QVERIFY(older.valid);
         auto nightly=UpdateController::parseFeed(QJsonDocument(nightlyRaw("0.38.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
         DesktopInstallation portable{"portable",{},{}};
-        // Stable releases carry no Windows build: never announced to a portable build.
-        QVERIFY(!UpdateController::portableUpdateAvailable("0.36.2",stable));
-        QCOMPARE(UpdateController::comparisonMessage(portable,stable,"0.36.2",0,false),QString("Stable releases do not include a Windows build yet. Choose the nightly channel to hear about newer Windows builds."));
-        // Nightlies do; the zip knows only its product version.
+        // Stable releases after 0.42.2 carry the zip, which knows only its product version.
+        QVERIFY(UpdateController::stableHasWindowsBuild("0.42.3"));QVERIFY(UpdateController::stableHasWindowsBuild("0.43.0"));QVERIFY(UpdateController::stableHasWindowsBuild("1.0.0"));
+        QVERIFY(!UpdateController::stableHasWindowsBuild("0.42.2"));QVERIFY(!UpdateController::stableHasWindowsBuild("0.37.0"));QVERIFY(!UpdateController::stableHasWindowsBuild("0.42.3.r10.gaaaaaaa.n5"));
+        QVERIFY(UpdateController::portableUpdateAvailable("0.42.2",stable));QVERIFY(UpdateController::portableUpdateAvailable("0.38.0",stable));
+        QCOMPARE(UpdateController::comparisonMessage(portable,stable,"0.42.2",0,false),QString("Zerus 0.42.3 is available. Download its Windows zip from the release page."));
+        QVERIFY(!UpdateController::portableUpdateAvailable("0.42.3",stable));QVERIFY(!UpdateController::portableUpdateAvailable("0.43.0",stable));QVERIFY(!UpdateController::portableUpdateAvailable("0.42.2-dev",stable));
+        QCOMPARE(UpdateController::comparisonMessage(portable,stable,"0.42.3",0,false),QString("Portable Windows build: there is no self-update, and no newer stable release is published."));
+        // Earlier stable releases have no zip: never announced to a portable build, even when newer.
+        QVERIFY(!UpdateController::portableUpdateAvailable("0.42.0",last));QVERIFY(!UpdateController::portableUpdateAvailable("0.36.2",older));
+        QCOMPARE(UpdateController::comparisonMessage(portable,last,"0.42.0",0,false),QString("Zerus 0.42.2 has no Windows build; stable releases after it carry one. Until then, choose the nightly channel to hear about newer Windows builds."));
+        QVERIFY(UpdateController::comparisonMessage(portable,older,"0.36.2",0,false).contains("Zerus 0.37.0 has no Windows build"));
+        QVERIFY(UpdateController::comparisonMessage(portable,last,"0.42.2",0,false).contains("no newer stable release"));
+        // Nightlies carry it too.
         QVERIFY(UpdateController::portableUpdateAvailable("0.37.0",nightly));
         QCOMPARE(UpdateController::comparisonMessage(portable,nightly,"0.37.0",0,false),QString("Zerus nightly 0.38.0.r10.gaaaaaaa.n5 is available. Download its Windows zip from the release page."));
         QVERIFY(!UpdateController::portableUpdateAvailable("0.38.0",nightly));QVERIFY(!UpdateController::portableUpdateAvailable("0.39.0",nightly));
@@ -149,34 +167,43 @@ private slots:
         QVERIFY(UpdateController::comparisonMessage(portable,nightly,"0.38.0",0,false).contains("no self-update"));
         QVERIFY(UpdateController::updateCommand(portable).isEmpty());QVERIFY(UpdateController::updateCommand(portable,"nightly").isEmpty());
         // The catalog itself is unchanged: a Windows client accepts exactly what Linux clients do.
-        for(auto value:{raw(),nightlyRaw("0.38.0.r10.gaaaaaaa.n5")}){
+        for(auto value:{raw(),stableRaw("0.42.3"),nightlyRaw("0.38.0.r10.gaaaaaaa.n5")}){
             const QString tag=value["releaseUrl"].toString().section('/',-1),channel=value["channel"].toString();
             auto artifacts=value["artifacts"].toArray();
             artifacts.append(QJsonObject{{"kind","windows-zip"},{"name","zerus-windows-x86_64.zip"},{"url","https://zerus.dev/downloads/"+tag+"/zerus-windows-x86_64.zip"},{"sha256",QString(64,'c')},{"size",100},{"os","windows"},{"arch","x86_64"}});
             value["artifacts"]=artifacts;QVERIFY2(!UpdateController::parseFeed(QJsonDocument(value).toJson(),channel).valid,qPrintable(channel));
         }
     }
-    void portableBuildDefaultsToNightlyAndNeverAnnouncesStable(){
+    void portableBuildDefaultsToNightlyAndFollowsStableNeverDev(){
 #ifdef Q_OS_WIN
         QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
-        const auto version=QCoreApplication::applicationVersion();QCoreApplication::setApplicationVersion("0.37.0");const auto restore=qScopeGuard([version]{QCoreApplication::setApplicationVersion(version);});
+        const auto version=QCoreApplication::applicationVersion();QCoreApplication::setApplicationVersion("0.42.2");const auto restore=qScopeGuard([version]{QCoreApplication::setApplicationVersion(version);});
         QFile executable(dir.path()+"/hgs-tray.exe");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
         QFile info(dir.path()+"/build-info.json");QVERIFY(info.open(QIODevice::WriteOnly));info.close();
-        const QByteArray stableFeed=QJsonDocument(raw()).toJson(),nightlyFeed=QJsonDocument(nightlyRaw("0.38.0.r10.gaaaaaaa.n5")).toJson(),devFeed=QJsonDocument(devRaw()).toJson();QStringList requested;
+        QByteArray stableFeed=QJsonDocument(stableRaw("0.42.3")).toJson();
+        const QByteArray nightlyFeed=QJsonDocument(nightlyRaw("0.43.0.r10.gaaaaaaa.n5")).toJson(),devFeed=QJsonDocument(devRaw()).toJson();QStringList requested;
         const auto fetch=[&](const QNetworkRequest &request){requested<<request.url().fileName();auto *reply=new FixtureReply;const auto name=request.url().fileName();const auto bytes=name=="nightly.json"?nightlyFeed:name=="dev.json"?devFeed:stableFeed;QTimer::singleShot(0,reply,[reply,bytes]{reply->finish(bytes);});return reply;};
         {
             UpdateController controller(nullptr,executable.fileName(),fetch);QSignalSpy notified(&controller,&UpdateController::newerReleaseVerified);
+            // The zip cannot tell a stable from a nightly release; nightly stays the portable default.
             QTRY_COMPARE(controller.installation().kind,QString("portable"));QCOMPARE(controller.channel(),QString("nightly"));
             controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested,QStringList{"nightly.json"});
             QVERIFY(controller.updateAvailable());QCOMPARE(notified.size(),1);QCOMPARE(controller.feed().releaseUrl,QString("https://github.com/ufna/zerus/releases/tag/nightly-123"));
+            // A stable release that carries the zip is announced on the stable channel.
+            controller.setChannel("stable");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("stable.json"));
+            QVERIFY(controller.updateAvailable());QCOMPARE(notified.size(),2);QCOMPARE(controller.feed().releaseUrl,QString("https://github.com/ufna/zerus/releases/tag/v0.42.3"));
+            QVERIFY(controller.comparison().contains("Download its Windows zip"));
             // Dev builds carry no Windows zip: never an update, never polled every 15 minutes.
             controller.setChannel("dev");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("dev.json"));
-            QVERIFY(controller.feed().valid);QVERIFY(!controller.updateAvailable());QCOMPARE(notified.size(),1);QVERIFY(controller.comparison().contains("Dev builds do not include"));
+            QVERIFY(controller.feed().valid);QVERIFY(!controller.updateAvailable());QCOMPARE(notified.size(),2);QVERIFY(controller.comparison().contains("Dev builds do not include"));
             QVERIFY(controller.updateToken().isEmpty());
-            // A deliberate stable choice is kept, and a newer stable release is not announced.
+            // A stable release without the zip (0.42.2 and earlier) is never announced, even when newer.
+            stableFeed=QJsonDocument(stableRaw("0.42.2")).toJson();QCoreApplication::setApplicationVersion("0.42.0");
             controller.setChannel("stable");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("stable.json"));
-            QVERIFY(controller.feed().valid);QVERIFY(!controller.updateAvailable());QCOMPARE(notified.size(),1);QVERIFY(controller.comparison().contains("nightly channel"));
+            QCOMPARE(controller.feed().version,QString("0.42.2"));QVERIFY(!controller.updateAvailable());QCOMPARE(notified.size(),2);QVERIFY(controller.comparison().contains("nightly channel"));
         }
+        // A channel the user chose is kept.
+        QSettings().setValue("updates/channel","stable");
         UpdateController restarted(nullptr,executable.fileName(),fetch);QTRY_COMPARE(restarted.installation().kind,QString("portable"));QCOMPARE(restarted.channel(),QString("stable"));
 #else
         QSKIP("Only Windows builds are portable");
@@ -186,7 +213,7 @@ private slots:
         // Dev builds carry a source and an Arch package, never a Windows zip.
         DesktopUpdateFeed dev;dev.valid=true;dev.buildNumber=50;dev.version="0.42.0 (dev 50)";
         DesktopInstallation portable;portable.kind="portable";DesktopInstallation source;source.kind="source";
-        QVERIFY(UpdateController::comparisonMessage(portable,dev,"0.39.0",0,false).contains("nightly channel"));
+        QVERIFY(UpdateController::comparisonMessage(portable,dev,"0.39.0",0,false).contains("stable or nightly channel"));
         QVERIFY(UpdateController::comparisonMessage(source,dev,"0.39.0",0,false).contains("main build 50"));
     }
     void installationKindFollowsTheFolderLayout(){

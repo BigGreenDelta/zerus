@@ -1,10 +1,17 @@
-Zerus @VERSION@ for Windows x86_64 (portable control console)
+Zerus @VERSION@ for Windows x86_64 (portable)
 hgs @CLI_VERSION@, Qt @QT_VERSION@, source commit @SOURCE_COMMIT@
 
 This folder is a portable Zerus control console. hgs-tray.exe manages agent
 sessions on remote Linux and macOS machines through the Windows OpenSSH client.
-Agents do not run on this Windows computer yet: local sessions, local accounts,
-the DeepSeek Native UI and the mobile gateway are not available on Windows.
+It can also run agents on this computer once you enable local sessions: choose
+Enable local sessions for this computer in Machines, or run
+hgs.exe session-host install. This stages the hgs CLI in
+%USERPROFILE%\.local\bin and a session host in
+%USERPROFILE%\.local\share\hgs\host; hgs.exe session-host uninstall disables
+local sessions again. Claude Code, Codex and Kimi Code then run here once
+installed; DeepSeek and OpenCode do not. Voice messages to sessions on this
+computer, the DeepSeek Native UI and the mobile gateway are not available on
+Windows.
 Documentation: https://github.com/ufna/zerus/blob/main/docs/installation.md#windows
 
 Requirements
@@ -36,8 +43,8 @@ Use
   account's profile folder.
 
 There is no installer and no automatic update. Newer builds come with the
-nightly releases at https://github.com/ufna/zerus/releases, and Settings >
-Updates reports them. To update, quit hgs-tray from its tray menu, then replace
+stable and nightly releases at https://github.com/ufna/zerus/releases, and
+Settings > Updates reports them. To update, quit hgs-tray from its tray menu, then replace
 this folder with a newer one. The executables are not code-signed, so
 Windows SmartScreen may ask for confirmation on the first start. Compare the
 zip with SHA256SUMS of its GitHub release, for example:

@@ -192,7 +192,7 @@ class Cleanup(Repository,unittest.TestCase):
             path=state/(hashlib.sha256(name.encode()).hexdigest()+'.json');record={'version':1,'name':name,'agent':'codex','launch_dir':str(cwd),'cwd':str(self.root)}
         path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(record))
     def test_review_separates_ready_review_and_blocked_checkouts(self):
-        merged=self.linked('merged');feature=self.linked('feature');self.commit(feature,'feature work')
+        merged=self.linked('merged');feature=self.linked('feature');(feature/'feature.txt').write_text('remaining work');self.commit(feature,'feature work',add=True)
         dirty=self.linked('dirty');(dirty/'.gitignore').write_text('changed\n')
         untracked=self.linked('untracked');(untracked/'notes.txt').write_text('keep')
         fresh=self.linked('fresh')
@@ -231,7 +231,7 @@ class Cleanup(Repository,unittest.TestCase):
         built=self.linked('built');(built/'target').mkdir();(built/'target'/'big.bin').write_bytes(b'x'*1000);(built/'target'/'small').write_bytes(b'y'*24)
         gone=self.linked('gone');shutil.rmtree(gone);self.age(built)
         data=self.review();row=self.row(built,data)
-        self.assertEqual(row['verdict'],'ready',row);self.assertEqual(row['ignored'],[{'path':'target','bytes':1024,'complete':True}]);self.assertEqual(row['ignored_bytes'],1024)
+        self.assertEqual(row['verdict'],'review',row);self.assertIn('ignored_data',codes(row['notes']));self.assertEqual(row['ignored'],[{'path':'target','bytes':1024,'complete':True}]);self.assertEqual(row['ignored_bytes'],1024)
         row=self.row(gone,data);self.assertEqual(row['verdict'],'missing');self.assertFalse(row['available'])
     def test_remove_rechecks_fingerprint_and_keeps_branch(self):
         tree=self.linked('task');self.age(tree);before=self.row(tree);self.catalog()
@@ -244,7 +244,7 @@ class Cleanup(Repository,unittest.TestCase):
         self.assertNotIn(str(tree.resolve()),[r['path'] for r in self.catalog()['worktrees']])
     def test_remove_deletes_ignored_data_and_only_merged_branches(self):
         merged=self.linked('merged');(merged/'target').mkdir();(merged/'target'/'out').write_text('build');self.age(merged)
-        result=self.remove(merged,self.row(merged)['fingerprint'],extra=('--delete-branch',));self.assertEqual(result.returncode,0,result.stderr)
+        reviewed=self.row(merged);result=self.remove(merged,reviewed['fingerprint'],extra=('--delete-branch','--ignored-fingerprint',reviewed['ignored_fingerprint']));self.assertEqual(result.returncode,0,result.stderr)
         data=json.loads(result.stdout);self.assertTrue(data['branch_deleted']);self.assertFalse(merged.exists());self.assertEqual(self.git('-C',str(self.repo),'branch','--list','feature/merged'),'')
         feature=self.linked('feature');self.commit(feature,'unmerged');self.age(feature)
         result=self.remove(feature,self.row(feature)['fingerprint'],extra=('--delete-branch',));self.assertEqual(result.returncode,0,result.stderr)
@@ -264,6 +264,60 @@ class Cleanup(Repository,unittest.TestCase):
         self.assertNotEqual(dry.returncode,0);self.assertTrue(clean.exists())
         relative=subprocess.run([str(HGS),'worktrees','remove','--path','clean','--common-dir',str(self.repo/'.git'),'--fingerprint',row['fingerprint'],'--json'],cwd=self.root,env=self.env,text=True,capture_output=True,timeout=30)
         self.assertNotEqual(relative.returncode,0);self.assertTrue(clean.exists())
+    def inspect(self,path,file=None,common=None):
+        return subprocess.run([str(HGS),'worktrees','inspect','--path',str(path),'--common-dir',str(common or self.repo/'.git'),*(['--file',file] if file else []),'--json'],env=self.env,text=True,capture_output=True,timeout=30)
+    def test_ignored_notes_are_not_candidates_and_require_exact_consent(self):
+        tree=self.linked('local-data');(tree/'artifacts').mkdir();notes=tree/'artifacts'/'research.txt';notes.write_text('important synthetic notes');self.age(tree)
+        row=self.row(tree);self.assertEqual(row['verdict'],'review');self.assertIn('ignored_data',codes(row['notes']))
+        refused=self.remove(tree,row['fingerprint']);self.assertNotEqual(refused.returncode,0);self.assertIn('explicitly confirm',refused.stderr);self.assertTrue(notes.exists())
+        notes.write_text('changed important synthetic notes')
+        stale=self.remove(tree,row['fingerprint'],extra=('--ignored-fingerprint',row['ignored_fingerprint']))
+        self.assertNotEqual(stale.returncode,0);self.assertIn('changed since',stale.stderr);self.assertTrue(notes.exists())
+        current=self.row(tree);allowed=self.remove(tree,current['fingerprint'],extra=('--ignored-fingerprint',current['ignored_fingerprint']))
+        self.assertEqual(allowed.returncode,0,allowed.stderr);self.assertFalse(tree.exists())
+    def test_equivalent_content_explains_squash_but_keeps_original_branch(self):
+        tree=self.linked('squashed');(tree/'result.txt').write_text('finished feature');self.commit(tree,'original feature',add=True)
+        (self.repo/'result.txt').write_text('finished feature');self.commit(self.repo,'squash integration',add=True);self.age(tree)
+        row=self.row(tree);self.assertFalse(row['merged']);self.assertEqual(row['integration']['kind'],'same_tree');self.assertEqual(row['integration']['base'],'main');self.assertEqual(row['verdict'],'ready')
+        result=self.remove(tree,row['fingerprint'],extra=('--delete-branch',));self.assertEqual(result.returncode,0,result.stderr);self.assertFalse(json.loads(result.stdout)['branch_deleted'])
+        self.assertTrue(self.git('-C',str(self.repo),'branch','--list','feature/squashed'))
+    def test_cherry_pick_equivalence_survives_later_base_work(self):
+        tree=self.linked('picked');(tree/'feature.txt').write_text('feature');self.commit(tree,'original',add=True)
+        commit=self.git('-C',str(tree),'rev-parse','HEAD')
+        (self.repo/'other.txt').write_text('base change');self.commit(self.repo,'unrelated',add=True)
+        self.git('-C',str(self.repo),'-c','user.name=Fixture','-c','user.email=fixture@example.test','cherry-pick',commit);self.age(tree)
+        row=self.row(tree);self.assertFalse(row['merged']);self.assertEqual(row['integration']['kind'],'equivalent_patches');self.assertEqual(row['verdict'],'ready')
+    def test_inspection_reads_actual_changes_commits_and_local_files(self):
+        tree=self.linked('inspect');(tree/'committed.txt').write_text('useful feature');self.commit(tree,'valuable work',add=True)
+        (tree/'committed.txt').write_text('unsaved change');(tree/'new.txt').write_text('untracked notes');(tree/'artifacts').mkdir();(tree/'artifacts'/'notes.txt').write_text('ignored research')
+        result=self.inspect(tree);self.assertEqual(result.returncode,0,result.stderr);data=json.loads(result.stdout)
+        self.assertEqual(data['path'],str(tree.resolve()));self.assertEqual(data['common_dir'],str((self.repo/'.git').resolve()));self.assertIn('unsaved change',data['changes']['text']);self.assertIn('valuable work',data['commits']['text'])
+        self.assertEqual({f['path'] for f in data['files']},{'committed.txt','new.txt'})
+        folder=json.loads(self.inspect(tree,'artifacts').stdout);self.assertEqual(folder['file']['entries'][0]['path'],'artifacts/notes.txt')
+        preview=json.loads(self.inspect(tree,'artifacts/notes.txt').stdout);self.assertEqual(preview['file']['text'],'ignored research')
+        self.assertEqual((tree/'committed.txt').read_text(),'unsaved change');self.assertTrue((tree/'new.txt').exists())
+    def test_inspection_refuses_escape_symlinks_and_wrong_repository(self):
+        tree=self.linked('inspect-guard');outside=self.root/'private.txt';outside.write_text('outside fixture data')
+        (tree/'link').symlink_to(outside);(tree/'directory-link').symlink_to(self.root,target_is_directory=True)
+        for name in ('../private.txt','link','directory-link/private.txt','/etc/passwd'):
+            with self.subTest(name=name):
+                result=self.inspect(tree,name);self.assertNotEqual(result.returncode,0);self.assertNotIn('outside fixture data',result.stdout)
+        other=self.root/'other-repo';self.git('init','-q',str(other))
+        self.assertNotEqual(self.inspect(tree,common=other/'.git').returncode,0)
+    def test_inspection_bounds_text_and_marks_binary(self):
+        tree=self.linked('inspect-limits');(tree/'large.txt').write_bytes(b'x'*(200*1024));(tree/'binary').write_bytes(b'one\x00two')
+        large=json.loads(self.inspect(tree,'large.txt').stdout)['file'];self.assertTrue(large['truncated']);self.assertLessEqual(len(large['text']),128*1024)
+        binary=json.loads(self.inspect(tree,'binary').stdout)['file'];self.assertTrue(binary['binary']);self.assertEqual(binary['text'],'')
+    def test_inspection_pages_directory_and_rejects_special_files(self):
+        tree=self.linked('inspect-pages');directory=tree/'artifacts';directory.mkdir()
+        for i in range(205):(directory/f'notes-{i}.txt').write_text(f'notes {i}')
+        first=json.loads(self.inspect(tree,'artifacts').stdout)['file'];self.assertEqual(len(first['entries']),200);self.assertEqual(first['next_offset'],200)
+        result=subprocess.run([str(HGS),'worktrees','inspect','--path',str(tree),'--common-dir',str(self.repo/'.git'),'--file','artifacts','--offset','200','--json'],env=self.env,capture_output=True,text=True,timeout=8)
+        self.assertEqual(result.returncode,0,result.stderr);second=json.loads(result.stdout)['file'];self.assertEqual(len(second['entries']),5);self.assertIsNone(second['next_offset'])
+        self.assertEqual(len({e['path'] for e in first['entries']+second['entries']}),205)
+        root=json.loads(self.inspect(tree,'.').stdout)['file'];self.assertIn('artifacts',[e['path'] for e in root['entries']])
+        if hasattr(os,'mkfifo'):
+            os.mkfifo(tree/'pipe');result=self.inspect(tree,'pipe');self.assertNotEqual(result.returncode,0);self.assertIn('ordinary files',result.stderr)
     def test_forget_missing_checkout_keeps_branch_and_locks(self):
         gone=self.linked('gone');shutil.rmtree(gone);row=self.row(gone);self.assertEqual(row['verdict'],'missing')
         result=self.remove(gone,row['fingerprint']);self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(json.loads(result.stdout)['status'],'forgotten')

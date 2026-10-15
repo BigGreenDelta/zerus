@@ -327,10 +327,11 @@ pub(super) fn catalog(path: &Path, refresh: bool) -> Value {
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
-    if let Some(action @ ("create" | "review" | "remove")) = action {
+    if let Some(action @ ("create" | "review" | "inspect" | "remove")) = action {
         let value = match action {
             "create" => create(&args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
+            "inspect" => super::worktree_inspection::command(&args[1..])?,
             _ => super::worktree_cleanup::remove_command(&args[1..])?,
         };
         println!("{value}");
