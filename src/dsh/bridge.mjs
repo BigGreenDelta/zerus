@@ -47,6 +47,27 @@ export function apply(ctx, config) {
   });
   const recovery = new Map(), recoveryReceipts = new Map();
   const compactions = new Map(), compactReceipts = new Set();
+  const forkReceipts = new Map(), forking = new Map();
+  // Optional official Schedule bundle. Absent means unknown, never "no tasks".
+  const scheduleService = () => ctx.get('schedule');
+  const recurringKinds = new Set(['every', 'daily', 'weekly', 'cron']);
+  async function scheduleSummaries() {
+    const schedule = scheduleService();
+    if (typeof schedule?.catalog !== 'function') return null;
+    try {
+      const summaries = new Map();
+      for (const entry of await schedule.catalog()) {
+        if (entry.status !== 'active') continue;
+        const summary = summaries.get(entry.sessionId) ?? { count: 0, recurring: 0, nextAt: null };
+        const at = Date.parse(entry.scheduledAt) / 1000;
+        summary.count += 1;
+        if (recurringKinds.has(entry.kind)) summary.recurring += 1;
+        if (Number.isFinite(at) && (summary.nextAt === null || at < summary.nextAt)) summary.nextAt = at;
+        summaries.set(entry.sessionId, summary);
+      }
+      return summaries;
+    } catch { return null; }
+  }
   const compactionPublic = sessionId => compactions.get(sessionId)?.public ?? null;
   const recoveryPublic = sessionId => recovery.get(sessionId)?.public ?? null;
   async function recoveryEnabled() {
@@ -255,25 +276,149 @@ export function apply(ctx, config) {
       childMode: child?.mode, childSendSupported: !unstarted && child?.mode === 'continuable' && Boolean(parentLive), goal,
       pendingQuestions: publicQuestions(sessionId), selection, accountStatus: status, authRequired: needsSignIn(selection, status),
       live: Boolean(live), owned: owned.has(sessionId), nativeRecovery: recoveryPublic(sessionId), interruptSupported: typeof api.cancel === 'function',
-      compactSupported: Boolean(live && ctx.commands.find(live,'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'), compactRequest: agentId ? null : compactionPublic(sessionId) };
+      compactSupported: Boolean(live && ctx.commands.find(live,'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'), compactRequest: agentId ? null : compactionPublic(sessionId),
+      // Native fork copies the latest completed-turn prefix. An older page
+      // can hold it; the native operation remains the authoritative check.
+      forkSupported: !agentId && typeof api.fork === 'function',
+      forkReady: !agentId && (page.hasMore === true || page.records.some(row => row.event?.type === 'turn/end')) };
+  }
+  // The official fork remote creates a new session identity from the exact
+  // latest completed-turn prefix and leaves its live Agent with the native
+  // Session Controller. Receipts make an uncertain reply retryable.
+  async function fork(p) {
+    if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh before forking');
+    if (typeof p.requestId !== 'string' || !/^[0-9a-f-]{36}$/.test(p.requestId)) throw new Error('Invalid fork request ID');
+    const previous = forkReceipts.get(p.requestId) ?? await forking.get(p.requestId);
+    if (previous) {
+      if (previous.sourceSessionId !== p.sessionId) throw new Error('Fork request ID was already used for another session');
+      return previous;
+    }
+    if (typeof api.fork !== 'function') throw new Error('Native fork is unavailable');
+    const work = (async () => {
+      const source = await ctx.sessionQuery.observeSession(p.sessionId, { projectionMode: 'none' });
+      let cwd;
+      try {
+        if (source.header.origin === 'subagent') throw new Error('Fork the parent session; a child belongs to its parent');
+        if (typeof p.cwd !== 'string' || source.header.cwd !== p.cwd) throw new Error('Native session belongs to another folder');
+        cwd = source.header.cwd;
+      } finally { source[Symbol.dispose](); }
+      const { sessionId } = await api.fork({ sessionId: p.sessionId });
+      const created = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' });
+      try {
+        if (sessionId === p.sessionId || created.header.parentSession !== p.sessionId || created.header.cwd !== cwd
+            || created.header.origin === 'subagent')
+          throw new Error(`Native fork ${sessionId} does not match its source; inspect Native UI`);
+      } finally { created[Symbol.dispose](); }
+      const receipt = { requestId: p.requestId, sourceSessionId: p.sessionId, sessionId, cwd, generation,
+        live: Boolean(ctx.agents.get(sessionId)), owned: owned.has(sessionId) };
+      if (typeof p.title === 'string' && p.title) {
+        try { await api.rename({ sessionId, title: p.title }); }
+        catch (error) { receipt.titleError = String(error?.message ?? error); }
+      }
+      forkReceipts.set(p.requestId, receipt);
+      if (forkReceipts.size > 1000) forkReceipts.delete(forkReceipts.keys().next().value);
+      return receipt;
+    })().finally(() => forking.delete(p.requestId));
+    forking.set(p.requestId, work);
+    return work;
+  }
+  // Text parts and identities only: reasoning and stream records stay private.
+  const publicSources = new Set(['user', 'user-question-reply']);
+  function publicMessage(event) {
+    const assistant = event.type === 'assistant/message';
+    const message = assistant ? event.data?.message : event.data;
+    const content = typeof message?.content === 'string' ? message.content
+      : (Array.isArray(message?.content) ? message.content : []).filter(part => part?.type === 'text' && typeof part.text === 'string')
+        .map(part => ({ type: 'text', text: part.text }));
+    const body = { id: message?.id, role: message?.role, content };
+    return { type: event.type, seq: event.seq, time: event.time,
+      data: assistant ? { message: body } : { ...body, source: { kind: event.data?.source?.kind } } };
+  }
+  // Exact bound sessions only, through the store's literal case-insensitive
+  // event scan. It works without the optional full-text index and never
+  // resumes an Agent. Each hit is re-read so callers see the complete event,
+  // including its source, and only public message parts.
+  async function searchHistory(p) {
+    const query = typeof p.query === 'string' ? p.query.trim() : '';
+    if (!query || query.length > 500 || query.includes('\0')) throw new Error('Invalid search query');
+    if (!Array.isArray(p.sessionIds) || p.sessionIds.length > 500 || p.sessionIds.some(id => typeof id !== 'string'))
+      throw new Error('Invalid search sessions');
+    const perSession = Math.min(Math.max(Number.isSafeInteger(p.perSession) ? p.perSession : 20, 1), 50);
+    // Interactive search waits for every host; later sessions report skipped.
+    const deadline = Date.now() + 5000;
+    const sessions = [];
+    for (const sessionId of new Set(p.sessionIds)) {
+      if (Date.now() > deadline) { sessions.push({ sessionId, status: 'skipped' }); continue; }
+      try {
+        const matches = await ctx.sessionQuery.filterEvents(sessionId, [
+          { kind: 'type', values: ['user/message', 'assistant/message'] }, { kind: 'text', text: query }]);
+        // Newest first. Injected context is a user message too, so reads are
+        // bounded separately from the person's and the agent's own messages.
+        const events = [];
+        let read = 0;
+        for (const match of [...matches].reverse()) {
+          if (events.length === perSession || read === perSession * 2 || Date.now() > deadline) break;
+          read += 1;
+          const { target } = await ctx.sessionQuery.readEvent({ sessionId, seq: match.seq, before: 0, after: 0 });
+          if (target?.seq === match.seq && (target.type === 'assistant/message' || publicSources.has(target.data?.source?.kind)))
+            events.push(publicMessage(target));
+        }
+        sessions.push({ sessionId, status: 'ok', events, truncated: read < matches.length });
+      } catch (error) {
+        sessions.push({ sessionId, status: error?.code === 'SESSION_QUERY_SESSION_NOT_FOUND' ? 'missing' : 'unavailable' });
+      }
+    }
+    return { generation, sessions };
+  }
+  // Official Schedule tasks bound to one exact session. Reads, deletion and
+  // edits never activate it; update is the native compare-and-set.
+  async function schedules(p) {
+    const schedule = scheduleService();
+    if (typeof p.sessionId !== 'string' || !p.sessionId) throw new Error('Choose a native session');
+    if (!schedule) return { available: false, generation };
+    if (p.action === 'list') {
+      const items = (await schedule.catalog()).filter(entry => entry.sessionId === p.sessionId);
+      return { available: true, generation, items };
+    }
+    if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh schedules');
+    if (typeof p.id !== 'string' || !p.id) throw new Error('Choose a scheduled task');
+    const exact = { sessionId: p.sessionId, id: p.id };
+    switch (p.action) {
+      case 'history': return { available: true, generation, result: await schedule.history({ ...exact, limit: p.limit,
+        ...(p.before === undefined ? {} : { before: p.before }) }) };
+      case 'delete': return { available: true, generation, result: await schedule.delete(exact) };
+      case 'update': {
+        if (!p.expected || typeof p.expected !== 'object') throw new Error('Expected task record is required');
+        const request = { ...exact, expected: p.expected };
+        for (const key of ['title', 'prompt', 'change']) if (p[key] !== undefined) request[key] = p[key];
+        return { available: true, generation, result: await schedule.update(request) };
+      }
+      default: throw new Error('Unsupported schedule action');
+    }
   }
   async function execute(request) {
     if (closing) throw new Error('Native host is stopping');
     const p = request.params ?? {};
     switch (request.method) {
-      case 'ping': return { protocol: 1, version: '0.2.0-rc.2', generation, accountPermissions: true, sessionActions: true };
+      case 'ping': return { protocol: 1, version: '0.2.0-rc.2', generation, accountPermissions: true, sessionActions: true,
+        nativeOperations: ['fork', 'history-search', 'schedules'], schedule: Boolean(scheduleService()) };
       case 'list': {
         const list = await api.list({}, new AbortController().signal);
         const status = await accountStatus();
+        const scheduled = await scheduleSummaries();
         return { ...list, generation, items: list.items.map(row => {
           const agent = ctx.agents.get(row.sessionId);
           const selection = agent ? selectionOf(agent, row.projections?.values) : null;
           return { ...row, selection, accountStatus: status, authRequired: needsSignIn(selection, status),
             goal: agent ? ctx.goals.get(agent) ?? null : row.projections?.values.goal ?? null,
-            pendingQuestions: publicQuestions(row.sessionId), nativeRecovery: recoveryPublic(row.sessionId) };
+            pendingQuestions: publicQuestions(row.sessionId), nativeRecovery: recoveryPublic(row.sessionId),
+            ...(scheduled ? { schedules: scheduled.get(row.sessionId) ?? { count: 0, recurring: 0, nextAt: null } } : {}) };
         }) };
       }
       case 'inspect': return inspect(p);
+      case 'fork': return fork(p);
+      case 'search-history': return searchHistory(p);
+      case 'schedules': return schedules(p);
       case 'job-output':
       case 'job-stop': {
         if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh Processes');

@@ -63,6 +63,10 @@ class NativeHarness(unittest.TestCase):
                 {'id': 'hgs-native-dsh', 'name': str(bridge), 'config': {'socket': cls.sock, 'recoveryPolicy': str(cls.state / 'recovery/policy.json')}},
             ]},
         ]
+        if getattr(cls, 'SCHEDULE_BUNDLE', False):
+            # The rows of the official optional bundle; shipped profiles omit them.
+            patch[-1]['insert'] += [{'id': 'time-context', 'name': '@deepseek-ai/dsh-time-context'},
+                                    {'id': 'schedule', 'name': '@deepseek-ai/dsh-schedule'}]
         overlay = cls.root / 'patch.json'
         overlay.write_text(json.dumps(patch))
         # hgs ls and the recovery worker also list tmux sessions. An existing
@@ -106,10 +110,10 @@ class NativeHarness(unittest.TestCase):
             raise RuntimeError(response.get('error', str(response)))
         return response['value']
 
-    def create(self):
+    def create(self, **native):
         sid = 'session-' + str(uuid.uuid4())
         name = 'dsh/test/' + str(uuid.uuid4())[:8]
-        self.rpc('create', {'sessionId': sid, 'cwd': str(self.workspace), 'title': name})
+        self.rpc('create', {'sessionId': sid, 'cwd': str(self.workspace), 'title': name, **native})
         binding = {'backend': 'dsh', 'name': name, 'conversation_id': sid, 'run_id': str(uuid.uuid4()),
                    'agent_home': str(self.home), 'cwd': str(self.workspace), 'created': time.time()}
         directory = self.state / 'dsh/bindings'; directory.mkdir(exist_ok=True)
@@ -799,6 +803,171 @@ class NativeHarness(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.rpc('answer', {'sessionId':b['conversation_id'],'id':question['question_id'],
                                 'generation':data['host_generation'],'answers':[]})
+
+    def hgs(self, *args, request=None):
+        return subprocess.run([str(HGS), *args], input=json.dumps(request) if request is not None else None,
+                              env=self.env, cwd=REPO, text=True, capture_output=True, timeout=35)
+
+    def bindings(self):
+        return {b['name']: b for b in (json.loads(p.read_text()) for p in (self.state / 'dsh/bindings').glob('*.json'))}
+
+    def test_native_fork_binds_the_exact_new_session_and_keeps_the_source(self):
+        source = self.create()
+        tag = 'fork-' + uuid.uuid4().hex[:8]
+        # Native fork copies a completed turn; an empty conversation has none.
+        empty = self.cli('inspect', source)
+        self.assertFalse(empty['fork_supported'])
+        self.assertEqual(empty['fork_reason'], 'Wait for a completed reply before forking')
+        self.assertNotIn('fork', empty['allowed_actions'])
+        refused = self.hgs('fork', source['name'], '-n', tag, '-d')
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertNotIn(source['name'].rsplit('/', 1)[0] + '/' + tag, self.bindings())
+        self.cli('send', source, self.payload(source, text='FORK_SOURCE_MARKER', attachments=[]))
+        ready = self.wait(lambda: d if (d := self.cli('inspect', source))['fork_supported'] else None)
+        self.assertEqual(ready['fork_reason'], '')
+        self.assertIn('fork', ready['allowed_actions'])
+        stale = self.hgs('fork', source['name'], '-n', tag, '-d', '--expected-run-id', 'old-run')
+        self.assertNotEqual(stale.returncode, 0)
+        forked = self.hgs('fork', source['name'], '-n', tag, '-d', '--expected-run-id', source['run_id'],
+                          '--expected-conversation-id', source['conversation_id'])
+        self.assertEqual(forked.returncode, 0, forked.stderr)
+        name = source['name'].rsplit('/', 1)[0] + '/' + tag
+        self.assertEqual(forked.stdout.strip(), f"hgs: forked {source['name']} as {name}")
+        bindings = self.bindings()
+        fork = bindings[name]
+        self.assertEqual(bindings[source['name']], source)
+        self.assertTrue(fork['conversation_id'].startswith('session-'))
+        self.assertNotEqual(fork['conversation_id'], source['conversation_id'])
+        for key in ('agent_home', 'cwd'):
+            self.assertEqual(fork[key], source[key])
+        self.assertEqual((fork['fork_parent_id'], fork['fork_source_name']), (source['conversation_id'], source['name']))
+        self.assertFalse(list((self.state / 'dsh/forks').glob('*.json')))
+        row = next(r for r in self.rpc('list')['items'] if r['sessionId'] == fork['conversation_id'])
+        self.assertEqual(row['parentSessionId'], source['conversation_id'])
+        self.assertEqual(row['projections']['values']['title'], tag)
+        # The fork starts from the source's history and then diverges.
+        data = self.cli('inspect', fork)
+        self.assertEqual((data['name'], data['conversation_id'], data['run_id']), (name, fork['conversation_id'], fork['run_id']))
+        self.assertTrue(any(e['type'] == 'UserPromptSubmit' and e['detail'] == 'FORK_SOURCE_MARKER' for e in data['events']))
+        self.assertEqual(data['fork_parent_id'], source['conversation_id'])
+        # The native engine owns the forked live agent until its host restarts.
+        self.assertEqual(data['runtime_state'], 'live')
+        self.assertNotIn('pause', data['allowed_actions'])
+        self.cli('send', fork, self.payload(fork, text='FORK_ONLY_MARKER', attachments=[]))
+        self.wait(lambda: any(e['type'] == 'AgentMessage' and 'FORK_ONLY_MARKER' in e['detail'] for e in self.cli('inspect', fork)['events']))
+        self.assertFalse(any('FORK_ONLY_MARKER' in e['detail'] for e in self.cli('inspect', source)['events']))
+        duplicate = self.hgs('fork', source['name'], '-n', tag, '-d')
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertIn('already uses this name', duplicate.stderr)
+        # The scoped mobile action reports the exact new identity it created.
+        request = {'request_id': str(uuid.uuid4()), 'action': 'fork', 'expected_run_id': source['run_id'],
+                   'expected_conversation_id': source['conversation_id'], 'tag': tag + '-scoped'}
+        scoped = self.hgs('session-action', source['name'], '--json', request=request)
+        self.assertEqual(scoped.returncode, 0, scoped.stderr)
+        receipt = json.loads(scoped.stdout)
+        self.assertEqual(receipt['status'], 'completed', receipt)
+        target = self.bindings()[name + '-scoped']
+        self.assertEqual(receipt['result_target'], {'name': target['name'], 'run_id': target['run_id'],
+                                                    'conversation_id': target['conversation_id']})
+        self.assertEqual(self.bindings()[source['name']], source)
+
+    def test_native_fork_keeps_the_source_permission_preset(self):
+        # The fork replays the source's permission events; Zerus applies none.
+        def preset(sid):
+            return self.rpc('inspect', {'sessionId': sid})['baseline']['values']['permissions']['currentValue']
+        provider = self.create()
+        bypass = self.create(permissionMode='bypass')
+        self.assertEqual(preset(bypass['conversation_id']), 'danger-full-access')
+        self.assertNotEqual(preset(provider['conversation_id']), 'danger-full-access')
+        for source in (provider, bypass):
+            self.cli('send', source, self.payload(source, text='FORK_PERMISSION_MARKER', attachments=[]))
+            self.wait(lambda: self.cli('inspect', source)['fork_supported'])
+            tag = 'perm-' + uuid.uuid4().hex[:8]
+            forked = self.hgs('fork', source['name'], '-n', tag, '-d')
+            self.assertEqual(forked.returncode, 0, forked.stderr)
+            fork = self.bindings()[source['name'].rsplit('/', 1)[0] + '/' + tag]
+            self.assertEqual(preset(fork['conversation_id']), preset(source['conversation_id']))
+
+    def test_history_search_returns_exact_public_deepseek_messages(self):
+        needle = 'NEEDLE' + uuid.uuid4().hex[:8]
+        target, other = self.create(), self.create()
+        self.cli('send', target, self.payload(target, text=f'Find {needle} here', attachments=[]))
+        self.cli('send', other, self.payload(other, text='Nothing to find', attachments=[]))
+        for b in (target, other):
+            self.wait(lambda: any(e['type'] == 'AgentMessage' for e in self.cli('inspect', b)['events']))
+        result = self.hgs('search', '--query', needle.lower())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        hits = data['results']
+        self.assertEqual({(h['name'], h['run_id'], h['conversation_id'], h['agent']) for h in hits},
+                         {(target['name'], target['run_id'], target['conversation_id'], 'dsh')})
+        self.assertEqual(sorted(h['role'] for h in hits), ['assistant', 'user'])
+        user = next(h for h in hits if h['role'] == 'user')
+        self.assertEqual(user['content'], f'Find {needle} here')
+        self.assertEqual(user['event']['source'], 'dsh_native')
+        self.assertGreater(user['at'], 0)
+        self.assertNotIn('PRIVATE_TEST_REASONING', result.stdout)
+        self.assertEqual(data['unavailable_sessions'], 0)
+        # Context the harness injects as user messages is not the person's.
+        injected = json.loads(self.hgs('search', '--query', 'Current runtime context').stdout)
+        self.assertFalse([h for h in injected['results'] if h['agent'] == 'dsh'])
+
+    def test_schedules_refuse_without_the_native_bundle(self):
+        b = self.create()
+        self.assertFalse(self.rpc('ping')['schedule'])
+        result = self.hgs('schedules', b['name'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Native Schedule is not enabled', result.stderr)
+        rows = json.loads(self.hgs('ls', '--local', '--json').stdout)['sessions']
+        self.assertNotIn('schedules', next(r for r in rows if r['name'] == b['name']))
+
+
+@unittest.skipUnless(DSH and HGS.exists(), 'official dsh and built hgs required')
+class NativeSchedules(unittest.TestCase):
+    """The official optional Schedule bundle, managed per exact session."""
+    SCHEDULE_BUNDLE = True
+    setUpClass = NativeHarness.__dict__['setUpClass']
+    tearDownClass = NativeHarness.__dict__['tearDownClass']
+    rpc = NativeHarness.__dict__['rpc']
+    create = NativeHarness.create
+    cli = NativeHarness.cli
+    payload = NativeHarness.payload
+    wait = NativeHarness.wait
+    hgs = NativeHarness.hgs
+
+    def test_schedule_list_edit_and_delete_are_bound_to_one_session(self):
+        b, other = self.create(), self.create()
+        self.cli('send', b, self.payload(b, text='SCHEDULE_FIXTURE', attachments=[]))
+        listed = self.wait(lambda: d if (d := json.loads(self.hgs('schedules', b['name']).stdout))['items'] else None)
+        self.assertEqual((listed['name'], listed['run_id'], listed['conversation_id']), (b['name'], b['run_id'], b['conversation_id']))
+        [item] = listed['items']
+        self.assertEqual((item['title'], item['kind'], item['status'], item['recurring']), ('Fixture check', 'every', 'active', True))
+        self.assertGreater(item['scheduled_at'], time.time())
+        self.assertEqual(json.loads(self.hgs('schedules', other['name']).stdout)['items'], [])
+        row = self.wait(lambda: next((r for r in json.loads(self.hgs('ls', '--local', '--json').stdout)['sessions']
+                                      if r['name'] == b['name'] and r.get('schedules', {}).get('count')), None))
+        self.assertEqual(row['schedules'], {'count': 1, 'recurring': 1, 'next_at': item['scheduled_at']})
+        def change(binding, **fields):
+            fields = {'expected_generation': listed['generation'], 'id': item['id'], **fields}
+            return self.hgs('schedules', binding['name'], '--json', request=self.payload(binding, **fields))
+        stale = change(b, action='update', title='Old host', expected_generation='old-generation')
+        self.assertNotEqual(stale.returncode, 0)
+        renamed = change(b, action='update', title='Renamed check', expected=item['record'])
+        self.assertEqual(renamed.returncode, 0, renamed.stderr)
+        self.assertTrue(json.loads(renamed.stdout)['result']['updated'])
+        conflict = json.loads(change(b, action='update', title='Conflict', expected=item['record']).stdout)
+        self.assertEqual(conflict['result']['code'], 'schedule_conflict')
+        history = json.loads(change(b, action='history', limit=10).stdout)['result']
+        self.assertEqual(history['records'], [])
+        # Another session cannot reach this task through its own identity.
+        foreign = json.loads(change(other, action='delete').stdout)['result']
+        self.assertEqual((foreign['deleted'], foreign['code']), (False, 'schedule_not_found'))
+        self.assertEqual([i['title'] for i in json.loads(self.hgs('schedules', b['name']).stdout)['items']], ['Renamed check'])
+        deleted = json.loads(change(b, action='delete').stdout)['result']
+        self.assertTrue(deleted['deleted'])
+        self.assertEqual(json.loads(self.hgs('schedules', b['name']).stdout)['items'], [])
+        self.wait(lambda: next(r for r in json.loads(self.hgs('ls', '--local', '--json').stdout)['sessions']
+                               if r['name'] == b['name'])['schedules']['count'] == 0)
 
 
 if __name__ == '__main__':
