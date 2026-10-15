@@ -1,5 +1,6 @@
 """Developer ID signing must cover nested code inside-out and never release unnotarized bytes."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -102,6 +103,57 @@ class Signing(unittest.TestCase):
                     sign.sign_disk_image(self.app, self.app.parent / "Zerus.dmg", "identity", None,
                                          Path("/keys/AuthKey.p8"), "ABC123DEF4", None)
                 staple.assert_not_called()
+
+    def test_stapler_retries_lost_connections_on_the_same_file_then_validates(self):
+        command = ["xcrun", "stapler", "staple", str(self.app)]
+        lost = subprocess.CompletedProcess(command, 68, "NSURLErrorDomain Code=-1005", "")
+        accepted = subprocess.CompletedProcess(command, 0, "Stapled\n", "")
+        with mock.patch.object(sign.subprocess, "run", side_effect=[lost, lost, accepted, accepted]) as run, \
+                mock.patch.object(sign.time, "sleep") as sleep, \
+                mock.patch("sys.stdout", new_callable=io.StringIO), \
+                mock.patch("sys.stderr", new_callable=io.StringIO):
+            sign.staple(self.app)
+        self.assertEqual(sleep.call_args_list, [mock.call(5), mock.call(15)])
+        self.assertEqual(run.call_args_list, [mock.call(command, capture_output=True, text=True)] * 3 +
+                         [mock.call(["xcrun", "stapler", "validate", str(self.app)], check=True)])
+
+    def test_stapler_exhausted_transport_retries_are_fatal_without_validation(self):
+        command = ["xcrun", "stapler", "staple", str(self.app)]
+        lost = subprocess.CompletedProcess(command, 68, "", "NSURLErrorDomain Code=-1005")
+        with mock.patch.object(sign.subprocess, "run", return_value=lost) as run, \
+                mock.patch.object(sign.time, "sleep") as sleep, \
+                mock.patch("sys.stdout", new_callable=io.StringIO), \
+                mock.patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(subprocess.CalledProcessError) as error:
+                sign.staple(self.app)
+        self.assertEqual(error.exception.returncode, 68)
+        self.assertEqual(run.call_count, 5)
+        self.assertTrue(all(call.args[0] == command for call in run.call_args_list))
+        self.assertEqual(sleep.call_args_list, [mock.call(n) for n in (5, 15, 30, 60)])
+
+    def test_stapler_does_not_retry_permanent_errors_or_failed_validation(self):
+        command = ["xcrun", "stapler", "staple", str(self.app)]
+        for code, message in ((68, "Record not found"), (1, "NSURLErrorDomain Code=-1005"),
+                              (68, "The ticket is invalid")):
+            with self.subTest(code=code, message=message), \
+                    mock.patch.object(sign.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        command, code, message, "")) as run, \
+                    mock.patch.object(sign.time, "sleep") as sleep, \
+                    mock.patch("sys.stdout", new_callable=io.StringIO), \
+                    mock.patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    sign.staple(self.app)
+                self.assertEqual(run.call_count, 1)
+                sleep.assert_not_called()
+        validation = ["xcrun", "stapler", "validate", str(self.app)]
+        with mock.patch.object(sign.subprocess, "run", side_effect=[
+                subprocess.CompletedProcess(command, 0, "", ""),
+                subprocess.CalledProcessError(65, validation)]) as run, \
+                mock.patch.object(sign.time, "sleep") as sleep:
+            with self.assertRaises(subprocess.CalledProcessError):
+                sign.staple(self.app)
+            self.assertEqual(run.call_count, 2)
+            sleep.assert_not_called()
 
     @unittest.skipUnless(sys.platform == "darwin", "disk images require macOS")
     def test_readonly_disk_image_preserves_bundle_and_applications_link(self):

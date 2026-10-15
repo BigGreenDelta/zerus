@@ -126,6 +126,11 @@ It runs three jobs after full CI:
    The job verifies the Team ID, Gatekeeper and the stapled ticket, then deletes the
    keychain and key files even on failure. A team API key passes its issuer ID; an
    individual API key leaves `APPLE_NOTARY_API_ISSUER_ID` empty.
+   Stapling retries a lost CloudKit connection (`NSURLErrorDomain -1005`, exit
+   68) at most four times, after 5, 15, 30 and 60 seconds, on the same signed
+   file. Other failures stop immediately; an exhausted retry or failed ticket
+   validation prevents release output. Signing and notary submissions are not
+   retried by this policy.
 3. **macOS cask installation** (no secrets) checks the DMG signature and ticket,
    mounts it read-only and verifies the contained app, self-tests and Applications
    shortcut. It then renders the channel's cask, runs `brew style`,
@@ -316,12 +321,22 @@ successfully. The drag-to-Applications link and nested framework links survived
 image creation. Publication contracts cover both channels, immutable DMG
 checksums, old ZIP-only releases, and exclusion from website mirror storage.
 
-Still requiring a signed Zerus candidate or a published release:
+Production qualification later on 2026-10-15 used the exact unsigned artifact
+from [Nightly 38776672013](https://github.com/ufna/zerus/actions/runs/38776672013),
+source `8f7f68f67c6eadc0eb9bf6c4946ffa0e614a6bff`. Full CI and bundle tests
+passed, but that run stopped before signing because the reusable workflow's
+callers did not forward the environment secret names. Both callers now forward
+the explicit five-name allowlist; credential values remain in `macos-signing`.
+The production signing script independently qualified the saved Qt bundle in a
+temporary local keychain: Apple accepted the app and DMG, both tickets validated,
+and Gatekeeper accepted both. The read-only mounted app passed the CLI and GUI
+self-tests under library validation and reported the exact clean source commit.
+This local qualification was not published. Both rendered cask templates passed
+`brew style` in disposable local taps.
 
-- Notarization, Gatekeeper acceptance and launch under library validation with
-  one Team ID (an ad-hoc signature cannot satisfy it by design).
+Still requiring interactive or subsequent release qualification:
+
 - Terminal automation in the signed application.
 - Installation from the public tap on a clean account, and an upgrade from one
   cask version to the next with running GUI, tmux session and native agent.
-- `brew style` of both casks and the channel switch between them (CI runs the
-  style check in the cask installation job).
+- The channel switch between stable and nightly once both casks are published.
