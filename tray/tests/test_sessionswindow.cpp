@@ -8578,9 +8578,10 @@ struct PushFixture {
         QFile original(base); if (!original.open(QIODevice::ReadOnly)) return false;
         const QByteArray confirm = " print(json.dumps({'status':'submitted','request_id':payload['request_id'],'name':a[1],'run_id':payload['expected_run_id'],"
             "'conversation_id':payload['expected_conversation_id'],'first_message':not payload['expected_conversation_id']}))\n";
-        const QByteArray send = mode == Send::Refuse ? " print('refused by the fixture',file=sys.stderr);sys.exit(1)\n"
-            : mode == Send::Uncertain ? " print('delivery uncertain: the fixture lost the reply',file=sys.stderr);sys.exit(1)\n"
-            : mode == Send::Slow ? " __import__('time').sleep(3)\n" + confirm : confirm;
+        // Every branch is a QByteArray: MSVC rejects a conditional that mixes literals with one.
+        const QByteArray send = mode == Send::Refuse ? QByteArray(" print('refused by the fixture',file=sys.stderr);sys.exit(1)\n")
+            : mode == Send::Uncertain ? QByteArray(" print('delivery uncertain: the fixture lost the reply',file=sys.stderr);sys.exit(1)\n")
+            : mode == Send::Slow ? QByteArray(" __import__('time').sleep(3)\n") + confirm : confirm;
         return FakeCli::install(script, original.readAll().replace("if False:pass\n", "if False:pass\n"
             "elif c=='inspect':print(open(__file__+'.details').read())\n"
             "elif c=='resume':pass\n"
