@@ -5,7 +5,10 @@
 //! keep those forms.
 //!
 //! The tmux backend issues exactly the commands hgs always has, in the same order,
-//! with the same arguments, stdin and stdio. Answers keep the terminal's own text
+//! with the same arguments, stdin and stdio. Only on Linux, where hgs runs in a
+//! user unit, a `new-session` first checks for a server (`list-sessions`); when
+//! none answers, it runs in a scope of its own (`tmux::scope`), so that stopping
+//! that unit leaves the agents running. Answers keep the terminal's own text
 //! where callers validate it, so their checks and messages stay where they were.
 //! Operations a backend lacks report local sessions as unavailable, as a Windows
 //! computer whose local sessions are not enabled does for all of them.
