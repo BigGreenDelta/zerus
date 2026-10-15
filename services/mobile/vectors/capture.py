@@ -1183,7 +1183,8 @@ def validation_cases() -> list[dict]:
     case("session/dash", "inspect", session="-help")
     case("session/at", "inspect", session="codex/example@host")
     case("session/control", "inspect", session="codex/example\tsession")
-    # The Rust relay refuses DEL in every text field; the reference relay's text() did not.
+    # The Rust relay's protocol::text refuses DEL (also payload/run-delete); the reference
+    # relay's text() refused only C0 controls.
     case("session/delete", "inspect", session="codex/example\x7fsession")
     case("computer-id/delete", "inspect", top={"computer_id": COMPUTER[:35] + "\x7f"})
     case("session/too-long", "inspect", session="c" * 513)
