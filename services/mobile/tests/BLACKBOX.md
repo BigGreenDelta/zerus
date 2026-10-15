@@ -170,9 +170,9 @@ The other `AttachmentRelayTests` are relay cases (R4).
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
-| `AttachmentValidationTests.test_paths_urls_controls_and_unknown_fields_are_rejected` | `test_bb_send.test_attachments_and_text_beyond_the_limits_never_reach_native`, `test_bb_attachment_read.InlineAttachmentTests.test_invalid_files_never_reach_native`; the attachment vectors of `validation/conversation.jsonl` in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` | covered |
-| `AttachmentValidationTests.test_native_file_and_total_limits_and_utf8_text` | `test_bb_send.test_attachments_at_the_native_limits_reach_native_unchanged`, `test_attachments_and_text_beyond_the_limits_never_reach_native`, `test_bb_attachment_read.InlineAttachmentTests.test_message_text_is_bounded_beside_files` | covered |
-| `AttachmentRelayTests.test_connector_accepts_large_request_response_independently` | `test_bb_send.test_attachments_at_the_native_limits_reach_native_unchanged` (a request above 26 MiB), `test_attachments_and_text_beyond_the_limits_never_reach_native`, `test_bb_attachment_read.InlineAttachmentTests.test_files_above_the_result_limit_reach_native_stdin_unchanged` | covered |
+| `AttachmentValidationTests.test_paths_urls_controls_and_unknown_fields_are_rejected` | `test_bb_send.test_attachments_and_text_beyond_the_limits_never_reach_native`; the attachment vectors of `validation/conversation.jsonl` in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` | covered |
+| `AttachmentValidationTests.test_native_file_and_total_limits_and_utf8_text` | `test_bb_send.test_attachments_at_the_native_limits_reach_native_unchanged`, `test_attachments_and_text_beyond_the_limits_never_reach_native` (`sizes.jsonl` `send-text-64KiB` and one byte more) | covered |
+| `AttachmentRelayTests.test_connector_accepts_large_request_response_independently` | `test_bb_send.test_attachments_at_the_native_limits_reach_native_unchanged` (a request above 26 MiB), `test_attachments_and_text_beyond_the_limits_never_reach_native` | covered |
 
 ### `test_mobile_child_send.py` (`ChildSendTests`)
 
@@ -235,12 +235,12 @@ The other `AttachmentRelayTests` are relay cases (R4).
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
-| `test_history_is_read_only_scoped_and_old_nodes_deny` | `test_bb_history_recovery.test_hgs_without_the_history_abi_runs_nothing`, `test_bb_history_pages.test_without_the_history_abi_nothing_runs`; the fields: the `history/*` vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing`; the read class: `test_bb_read_classes` | covered |
-| `test_fixture_pages_over_500_and_wrong_cursor_scope_rejected` | cursors pass unchanged: `test_bb_history_recovery.test_history_reads_pass_their_scoped_payload_unchanged`, `test_a_cursor_read_is_never_repeated_for_indexing`, `test_bb_history_pages.test_page_has_fixed_argv_and_exact_stdin`; paging is `fixture_hgs.py` behaviour | covered |
-| `test_wrong_history_ack_and_archive_match_fail_closed` | `test_bb_history_recovery.test_a_page_of_anything_else_fails_closed`, `test_bb_history_pages.test_mismatched_page_fails_closed` | covered |
+| `test_history_is_read_only_scoped_and_old_nodes_deny` | `test_bb_history_recovery.test_hgs_without_the_history_abi_runs_nothing`; the fields: the `history/*` vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` and, with the ABI offered, `test_bb_history_recovery.test_a_page_of_anything_else_fails_closed`; the read class: `test_bb_read_classes` | covered |
+| `test_fixture_pages_over_500_and_wrong_cursor_scope_rejected` | cursors pass unchanged: `test_bb_history_recovery.test_history_reads_pass_their_scoped_payload_unchanged`, `test_a_cursor_read_is_never_repeated_for_indexing`; paging is `fixture_hgs.py` behaviour | covered |
+| `test_wrong_history_ack_and_archive_match_fail_closed` | `test_bb_history_recovery.test_a_page_of_anything_else_fails_closed` | covered |
 | `test_recovery_five_field_identity_and_duplicate_no_repeat` | `test_bb_history_recovery.test_recovery_action_checks_the_waiting_job_then_acts_once`, `test_a_changed_job_or_a_mismatched_acknowledgement_never_repeats` | covered |
-| `test_head_locally_advances_bounded_index_and_partial_stops` | `test_bb_history_recovery.test_a_head_read_follows_local_indexing_while_it_progresses`, `test_bb_history_pages.test_indexing_head_is_reread_until_it_stops_progressing`; the 2 s budget: `test_bb_native_limits.test_a_read_out_of_its_budget_fails_and_its_child_is_killed` | covered |
-| `test_history_cursor_reads_are_not_repeated_for_indexing` | `test_bb_history_recovery.test_a_cursor_read_is_never_repeated_for_indexing`, `test_bb_history_pages.test_indexing_head_is_reread_until_it_stops_progressing` | covered |
+| `test_head_locally_advances_bounded_index_and_partial_stops` | `test_bb_history_recovery.test_a_head_read_follows_local_indexing_while_it_progresses`; the 2 s budget: `test_bb_native_limits.test_a_read_out_of_its_budget_fails_and_its_child_is_killed` | covered |
+| `test_history_cursor_reads_are_not_repeated_for_indexing` | `test_bb_history_recovery.test_a_cursor_read_is_never_repeated_for_indexing` | covered |
 | `test_native_recovery_uncertain_preserved` | `test_bb_history_recovery.test_recovery_action_checks_the_waiting_job_then_acts_once` | covered |
 
 ### `test_mobile_read.py`
@@ -268,9 +268,9 @@ The other `AttachmentRelayTests` are relay cases (R4).
 |---|---|---|
 | `VoiceValidationTests.test_operations_keep_session_and_exact_native_identity` | the voice vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` and `test_bb_speech.SpeechJobTests.test_vector_rejections_never_reach_native` | covered |
 | `VoiceValidationTests.test_routes_are_machine_identities_not_caller_aliases` | same | covered |
-| `VoiceConnectorTests.test_acceptance_is_scoped_durable_and_duplicate_never_reinvokes_native` | `test_bb_controls.test_voice_operations_reach_native_with_their_action_once`, `test_bb_speech.VoiceTests.test_message_is_accepted_once_for_its_conversation` | covered |
-| `VoiceConnectorTests.test_wrong_conversation_ack_is_uncertain_and_not_replayed` | `test_bb_controls.test_a_mismatched_voice_acknowledgement_never_repeats`, `test_bb_speech.VoiceTests.test_unconfirmed_message_is_uncertain_and_never_replays` | covered |
-| `VoiceConnectorTests.test_old_host_rejects_without_native_and_status_read_is_short_lived` | `test_bb_controls.test_hgs_without_the_voice_abi_advertises_and_runs_nothing`, `test_a_delivered_status_read_is_kept_only_two_minutes`, `test_bb_speech.VoiceTests.test_status_and_profiles_are_reads`, `test_bb_read_classes` | covered |
+| `VoiceConnectorTests.test_acceptance_is_scoped_durable_and_duplicate_never_reinvokes_native` | `test_bb_controls.test_voice_operations_reach_native_with_their_action_once` | covered |
+| `VoiceConnectorTests.test_wrong_conversation_ack_is_uncertain_and_not_replayed` | `test_bb_controls.test_a_mismatched_voice_acknowledgement_never_repeats` | covered |
+| `VoiceConnectorTests.test_old_host_rejects_without_native_and_status_read_is_short_lived` | `test_bb_controls.test_hgs_without_the_voice_abi_advertises_and_runs_nothing`, `test_a_delivered_status_read_is_kept_only_two_minutes`, `test_bb_speech.SpeechConfigurationTests.test_speech_and_its_configuration_are_separate_capabilities`, `test_bb_read_classes` | covered |
 
 ### Other modules with connector cases
 
@@ -306,8 +306,13 @@ catalog or creation receipt with its generic "connector could not record
 native outcome", which `test_bb_worktrees` pins.
 
 `test_mobile_attachments.py`, `test_mobile_history_recovery.py` and
-`test_mobile_voice.py` are mapped in their own tables above, together with
-the tests of these suites that cover them.
+`test_mobile_voice.py` are mapped in their own tables above. H2 and H3 both
+wrote suites for them; the integration kept one module per subject: H3's
+inline attachment, history page and voice message tests were merged into
+`test_bb_send`, `test_bb_history_recovery.HistoryTests` and
+`test_bb_controls.VoiceMessageTests` (keeping the cases those lacked), and
+H3's `test_bb_history_pages` kept only its inspection bounds, renamed
+`test_bb_inspection_bounds`.
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
@@ -318,9 +323,9 @@ the tests of these suites that cover them.
 | `test_mobile_terminal.TerminalFixture.test_real_fixture_subprocess_roundtrip_does_not_execute_text` | `test_bb_terminal.test_input_runs_once_after_a_fresh_preflight` (shell syntax stays literal stdin) | covered |
 | `test_mobile_terminal.TerminalRateBudget.test_four_frames_per_second_receipts_and_node_uplink_for_two_minutes` | Relay only: R4 | planned |
 | `test_mobile_terminal.TerminalRetention.test_sustained_reads_and_abandoned_results_expire_without_mutation_eviction` | Journal half: `test_bb_terminal.test_screens_leave_the_journal_after_two_minutes_and_inputs_stay`, `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay`; 5,100 sustained reads against the read cap: P2 `journal/caps.sql` in a Rust unit test (C1); relay half: R4 | partial |
-| `test_mobile_history.HistoryTests.test_large_unicode_history_keeps_full_question_identity_and_newest_user` | `test_bb_history_pages.test_large_inspection_loses_only_whole_oldest_rows_and_says_so` | covered |
-| `test_mobile_history.HistoryTests.test_mandatory_metadata_too_large_fails_without_cropping` | `test_bb_history_pages.test_oversized_disclosures_fail_without_cropping` | covered |
-| `test_mobile_history.HistoryTests.test_small_results_unchanged_and_no_event_is_partially_cropped` | `test_bb_history_pages.test_small_inspection_is_unchanged`, `test_vector_inspections_keep_their_recorded_rows` | covered |
+| `test_mobile_history.HistoryTests.test_large_unicode_history_keeps_full_question_identity_and_newest_user` | `test_bb_inspection_bounds.test_large_inspection_loses_only_whole_oldest_rows_and_says_so` | covered |
+| `test_mobile_history.HistoryTests.test_mandatory_metadata_too_large_fails_without_cropping` | `test_bb_inspection_bounds.test_oversized_disclosures_fail_without_cropping` | covered |
+| `test_mobile_history.HistoryTests.test_small_results_unchanged_and_no_event_is_partially_cropped` | `test_bb_inspection_bounds.test_small_inspection_is_unchanged`, `test_vector_inspections_keep_their_recorded_rows` | covered |
 | `test_mobile_history.HistoryConnectorTests.test_connector_read_returns_bounded_history_or_clear_metadata_failure` | the same two inspection tests | covered |
 | `test_mobile_attachment_read.ReadValidationTests.test_exact_receipt_position_and_bounded_range` | `test_bb_attachment_read.AttachmentReadTests.test_invalid_positions_and_fields_never_reach_native`, `test_foreign_identities_and_answers_are_refused` (with the `conversation.jsonl` cases) | covered |
 | `test_mobile_attachment_read.ReadValidationTests.test_operation_is_a_short_lived_read_outside_the_indexed_read_text` | `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay`; the `READ_SQL` text: `operations.json` | covered |

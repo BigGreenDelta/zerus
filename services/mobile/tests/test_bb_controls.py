@@ -358,7 +358,8 @@ class VoiceMessageTests(SessionCase):
                 self.script({"argv": ["voice", SESSION, "--json"], "stdout": answer})
                 request = submission("speech", name)
                 result = await self.submit(request, process)
-                self.assertEqual(result["state"], "completed")
+                expected = voice_message(request["request_id"]) if action == "submit" else answer
+                self.assertEqual(result, {"state": "completed", "result": expected, "error": None})
                 call = self.native_calls()[-1]
                 self.assertEqual(call["argv"], ["voice", SESSION, "--json"])
                 self.assertEqual(json.loads(call["stdin"]), {"action": action, **request["payload"]})
@@ -376,7 +377,8 @@ class VoiceMessageTests(SessionCase):
                 receipt = await self.submit(request, process)
                 self.assertEqual(receipt, {"state": state, "result": None, "error": VOICE_MISMATCH})
                 await self.assert_replays(request, receipt, process)
-        for answer in (voice_message(state="invented"), voice_message(revision="1"), {"message": voice_message()["message"]},
+        for answer in (voice_message(state="invented"), voice_message(state="sent"), voice_message(revision="1"),
+                       voice_message(revision=True), {"message": voice_message()["message"]},
                        voice_message(transcript=5)):
             with self.subTest(answer):
                 self.script({"argv": ["voice", SESSION, "--json"], "stdout": answer})
@@ -384,7 +386,15 @@ class VoiceMessageTests(SessionCase):
                                                          submission("speech", "valid/voice_submit")["payload"].items()
                                                          if key not in ("request_id", "expected_run_id",
                                                                         "expected_conversation_id")})
-                self.assertEqual(await self.submit(request, process), self.uncertain(VOICE_MISMATCH))
+                receipt = await self.submit(request, process)
+                self.assertEqual(receipt, self.uncertain(VOICE_MISMATCH))
+                await self.assert_replays(request, receipt, process)
+        # A status read fails on a transcript beyond 64 KiB of UTF-8, one byte more than the bound.
+        message_id = str(uuid.uuid4())
+        self.script({"argv": ["voice", SESSION, "--json"],
+                     "stdout": voice_message(message_id, state="submitted", transcript="x" * 65537)})
+        status = self.envelope("voice_status", {"message_id": message_id})
+        self.assertEqual(await self.submit(status, process), self.failed(VOICE_MISMATCH))
 
     async def test_hgs_without_the_voice_abi_advertises_and_runs_nothing(self):
         self.hgs.script(self.rules({"argv": ["voice", SESSION, "--json"], "stdout": voice_message()}, markers=()))

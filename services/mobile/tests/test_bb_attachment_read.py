@@ -1,9 +1,10 @@
-"""Black-box attachments: inline files in a send, and reading sent files back.
+"""Black-box attachment reads: reading sent files back.
 
 A phone reads a file by its delivery receipt and position, never by a path.
 The connector checks the exact conversation, reads the whole file through one
 native call, keeps a few verified files briefly in memory and serves 512 KiB
-ranges, because one relay result holds at most 1 MiB."""
+ranges, because one relay result holds at most 1 MiB. Inline files in a send
+are in `test_bb_send`, which took this module's inline attachment cases."""
 import asyncio
 import base64
 import hashlib
@@ -13,7 +14,7 @@ import unittest
 import uuid
 
 from bb_operations import (ARCHIVE, ARCHIVES, CONVERSATION, OPERATIONS, RECEIPTS, RUN, SESSION, OperationCase,
-                           help_text, listing, size_vector, validation_cases)
+                           help_text, listing, validation_cases)
 from connector_harness import MIB, BlackBoxCase, canonical, default_rules
 
 MESSAGE = "00000000-0000-4000-8000-000000000001"
@@ -21,7 +22,6 @@ MAX_FILE = OPERATIONS["constants"]["attachments.LIMITS"]["max_file_bytes"]
 CHUNK = OPERATIONS["constants"]["attachments.MAX_READ_BYTES"]
 NATIVE_OUTPUT = OPERATIONS["constants"]["attachment_reads.NATIVE_OUTPUT_BYTES"]
 IDENTITY = ["inspect", SESSION, "--skip-processes"]
-INLINE = "invalid or oversized inline attachment/message"
 
 
 def encoded(data: bytes) -> str:
@@ -69,70 +69,6 @@ class ScriptedAnswerTests(BlackBoxCase):
         self.assertEqual((delegated.returncode, delegated.stdout, delegated.stderr),
                          (4, b"real|a b|in", b"delegated\n"))
         self.assertEqual(self.hgs.finished(self.hgs.calls("real")[0]["pid"])["exit"], 4)
-
-
-class InlineAttachmentTests(OperationCase, BlackBoxCase):
-    async def asyncSetUp(self):
-        await super().asyncSetUp()
-        ack = {"request_id": "{{stdin.request_id}}", "status": "submitted", "name": SESSION, "run_id": RUN,
-               "conversation_id": CONVERSATION}
-        self.hgs.script([{"argv": ["send", SESSION, "--json"], "stdout": ack}] + default_rules(listing()))
-
-    def send(self, *files, text="Synthetic files"):
-        return self.operation("send", text=text, attachments=[
-            {"name": name, "mime": "application/octet-stream", "data_base64": encoded(data)} for name, data in files])
-
-    async def test_files_above_the_result_limit_reach_native_stdin_unchanged(self):
-        process = await self.launch()
-        for name, files in (("2 MiB", [("large.bin", b"x" * (2 * MIB))]),
-                            ("20 MiB in total", [("one.bin", b"a" * MAX_FILE), ("two.bin", b"b" * MAX_FILE)])):
-            with self.subTest(name):
-                request = self.send(*files)
-                mark = self.mark()
-                result = await self.submit(request, process, timeout=30)
-                self.assertEqual(result["state"], "completed", result)
-                [call] = self.since(mark, "send")
-                self.assertEqual(json.loads(call["stdin"]), request["payload"])
-                batch = next(exchange for exchange in self.relay.exchanges if request["request_id"] in exchange.delivered)
-                self.assertGreater(len(canonical(batch.response)), MIB)
-
-    async def test_invalid_files_never_reach_native(self):
-        process = await self.launch()
-        cases = [self.send(("one.bin", b"a" * MAX_FILE), ("two.bin", b"b" * MAX_FILE), ("three.bin", b"c")),
-                 self.send(("big.bin", b"x" * (MAX_FILE + 1))),
-                 self.send(("../escape.txt", b"x")), self.send(("empty.bin", b"")),
-                 self.send(*[(f"{index}.bin", b"x") for index in range(9)])]
-        with_path = self.send(("passwd", b"x"))
-        with_path["payload"]["attachments"][0]["path"] = "/etc/passwd"
-        not_canonical = self.send(("note.txt", b"x"))
-        not_canonical["payload"]["attachments"][0]["data_base64"] = "eA"
-        for request in (*cases, with_path, not_canonical):
-            with self.subTest(request["payload"]["attachments"][0]["name"], count=len(request["payload"]["attachments"])):
-                mark = self.mark()
-                self.assertEqual(await self.submit(request, process, timeout=30),
-                                 {"state": "failed", "result": None, "error": INLINE})
-                self.assertEqual(self.since(mark, "send"), [])
-        await self.assert_rejections(process, [case for case in validation_cases("conversation", {"send"})
-                                               if "attachment" in case["id"]], [["send"]])
-
-    async def test_message_text_is_bounded_beside_files(self):
-        process = await self.launch()
-        for identity in ("send-text-64KiB", "send-text-64KiB+1"):  # 64 KiB of UTF-8, then one byte more.
-            with self.subTest(identity):
-                payload, expect = size_vector(identity)
-                mark = self.mark()
-                result = await self.submit(self.operation("send", text=payload["text"]), process)
-                if expect["error"] is None:
-                    self.assertEqual(result["state"], "completed", result)
-                else:
-                    self.assertEqual(result, {"state": "failed", "result": None, "error": expect["receipt_error"]})
-                self.assertEqual(len(self.since(mark, "send")), 0 if expect["error"] else 1)
-        # A file needs no text.
-        request = self.send(("note.txt", b"x"), text="")
-        request["payload"]["attachments"][0]["reference"] = "[Image #1]"
-        mark = self.mark()
-        self.assertEqual((await self.submit(request, process))["state"], "completed")
-        self.assertEqual(json.loads(self.since(mark, "send")[0]["stdin"]), request["payload"])
 
 
 class AttachmentReadTests(OperationCase, BlackBoxCase):

@@ -1,20 +1,20 @@
-"""Black-box speech jobs, speech configuration and voice messages.
+"""Black-box speech jobs and speech configuration.
 
-Speech and its configuration are computer-scoped and carry no session; voice
-messages belong to one exact conversation. Credentials arrive only sealed for
-the computer, and only allowlisted native fields become durable receipts."""
+Speech and its configuration are computer-scoped and carry no session.
+Credentials arrive only sealed for the computer, and only allowlisted native
+fields become durable receipts. Voice messages, which belong to one exact
+conversation, are in `test_bb_controls.VoiceMessageTests`, which took this
+module's voice message cases; their vectors and capability stay here."""
 import base64
 import json
 import os
 import unittest
 import uuid
 
-from bb_operations import (CONVERSATION, RUN, SESSION, OperationCase, help_text, listing, real_hgs, size_vector,
-                           validation_cases)
+from bb_operations import OperationCase, help_text, listing, real_hgs, size_vector, validation_cases
 from connector_harness import BlackBoxCase, default_rules
 
 SPEECH = ["speech", "--json"]
-VOICE = ["voice", SESSION, "--json"]
 MACHINE = "00000000-0000-4000-8000-000000000001"
 ALGORITHM = "P256-HKDF-SHA256-A256GCM"
 SECRET = "BB-FIXTURE-ONLY-KEY"
@@ -52,11 +52,6 @@ def configuration(**changes) -> dict:
             "adapters": [{"id": "gigaam", "models": ["v3_e2e_rnnt"], "devices": ["cpu", "cuda"]}, {"id": "openai_http"}],
             "profiles": [], "credential_key": {"key_id": "a" * 64, "algorithm": ALGORITHM,
                                                "public_key_spki": base64.b64encode(bytes(91)).decode()}, **changes}
-
-
-def message(identity: str = "{{stdin.request_id}}", **changes) -> dict:
-    return {"schema": 1, "message": {"id": identity, "run_id": RUN, "conversation_id": CONVERSATION, "revision": 1,
-                                     "state": "queued", **changes}}
 
 
 class SpeechCase(OperationCase, BlackBoxCase):
@@ -275,58 +270,6 @@ class SpeechConfigurationTests(SpeechCase):
                                 expected_revision=changed["revision"], profile_id="example")
         self.assertEqual((await execute(removal))["state"], "completed")
         self.assertEqual((await execute(self.computer("speech_config")))["profiles"], [])
-
-
-class VoiceTests(SpeechCase):
-    def voice(self, operation="voice_submit", **payload):
-        if operation == "voice_submit":
-            payload = {"speech": {"machine_id": MACHINE, "profile_id": "gigaam-ru"}, "audio": audio(), **payload}
-        return self.operation(operation, **payload)
-
-    async def test_message_is_accepted_once_for_its_conversation(self):
-        self.answer(VOICE, "submit", message())
-        process = await self.launch()
-        request = self.voice()
-        mark = self.mark()
-        result = await self.submit(request, process)
-        self.assertEqual(result, {"state": "completed", "error": None,
-                                  "result": message(request["request_id"])})
-        [call] = self.since(mark, "voice")
-        self.assertEqual((call["argv"], json.loads(call["stdin"])), (VOICE, {"action": "submit", **request["payload"]}))
-        await self.delivered(process, request)
-        self.assertEqual(await self.submit(request, process, redeliver=True), result)
-        self.assertEqual(len(self.since(mark, "voice")), 1)
-
-    async def test_unconfirmed_message_is_uncertain_and_never_replays(self):
-        process = await self.launch()
-        for name, answer in (("conversation", message(conversation_id="another-conversation")),
-                             ("revision", message(revision=True)), ("state", message(state="sent"))):
-            with self.subTest(name):
-                self.answer(VOICE, "submit", answer)
-                request = self.voice()
-                mark = self.mark()
-                result = await self.submit(request, process)
-                self.assertEqual(result, {"state": "uncertain", "result": None,
-                                          "error": "native voice acknowledgement did not match"})
-                await self.delivered(process, request)
-                self.assertEqual(await self.submit(request, process, redeliver=True), result)
-                self.assertEqual(len(self.since(mark, "voice")), 1)
-
-    async def test_status_and_profiles_are_reads(self):
-        process = await self.launch()
-        identity = str(uuid.uuid4())
-        for name, operation, action, payload, answer, state in (
-                ("status", "voice_status", "status", {"message_id": identity},
-                 message(identity, state="submitted", transcript="Synthetic voice message"), "completed"),
-                ("long transcript", "voice_status", "status", {"message_id": identity},
-                 message(identity, transcript="x" * 65537), "failed"),
-                ("profiles", "voice_profiles", "profiles", {}, {"schema": 1, "computers": []}, "completed")):
-            with self.subTest(name):
-                self.answer(VOICE, action, answer)
-                result = await self.submit(self.voice(operation, **payload), process)
-                self.assertEqual(result["state"], state, result)
-                if state == "completed":
-                    self.assertEqual(result["result"], answer)
 
 
 if __name__ == "__main__":

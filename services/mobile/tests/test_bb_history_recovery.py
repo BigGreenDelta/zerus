@@ -4,13 +4,14 @@ A history read passes its scoped payload unchanged and keeps only a page of
 exactly this request, session, run and conversation; a head read follows
 local indexing briefly while it progresses, a cursor read never repeats. A
 recovery action acts only on the exact waiting job, once. A computer whose
-hgs lacks either ABI runs neither.
+hgs lacks either ABI runs neither. (H3's history page tests were merged into
+`HistoryTests`; `test_bb_inspection_bounds` covers history in inspections.)
 """
 import json
 import unittest
 import uuid
 
-from session_harness import ARCHIVE, CONVERSATION, RUN, SESSION, SessionCase, submission
+from session_harness import ARCHIVE, CONVERSATION, RUN, SESSION, SessionCase, submission, text, validation
 
 HISTORY = ["history", SESSION, "--json"]
 ENVELOPE = "native public history identity or envelope did not match"
@@ -32,9 +33,11 @@ class HistoryTests(SessionCase):
 
     async def test_history_reads_pass_their_scoped_payload_unchanged(self):
         process = await self.launch()
-        for name, extra in (("valid/history", {}), ("history/anchor", {}), ("history/archive", {"archive_id": ARCHIVE})):
+        requests = [(name, submission("control", name), extra) for name, extra in
+                    (("valid/history", {}), ("history/anchor", {}), ("history/archive", {"archive_id": ARCHIVE}))]
+        requests.append(("unicode cursor", self.envelope("history", {"before": "opaque cursor \u00e9"}), {}))
+        for name, request, extra in requests:
             with self.subTest(name):
-                request = submission("control", name)
                 self.hgs.script(self.rules({"argv": HISTORY, "stdout": page(**extra)}))
                 before = len(self.native_calls())
                 result = await self.submit(request, process)
@@ -49,12 +52,17 @@ class HistoryTests(SessionCase):
 
     async def test_a_page_of_anything_else_fails_closed(self):
         process = await self.launch()
-        for changes in ({"run_id": "replacement-run"}, {"conversation_id": "other"}, {"name": "other"},
-                        {"request_id": str(uuid.uuid4())}, {"archive_id": ARCHIVE}, {"agent_id": "child"},
-                        {"events": {}}, {"history_epoch": 1}, {"head": []}):
-            with self.subTest(changes):
-                self.hgs.script(self.rules({"argv": HISTORY, "stdout": page(**changes)}))
-                request = self.envelope("history", {})
+        cases = [({}, page(**changes)) for changes in (
+            {"run_id": "replacement-run"}, {"conversation_id": "other"}, {"name": "other"},
+            {"request_id": str(uuid.uuid4())}, {"archive_id": ARCHIVE}, {"agent_id": "child"},
+            {"events": {}}, {"history_epoch": 1}, {"head": []})]
+        cases += [({}, {key: value for key, value in page().items() if key != "history_epoch"}),
+                  ({"archive_id": ARCHIVE}, page()),  # a live page for an archive read
+                  ({"agent_id": "child"}, page(agent_id="child", parent_conversation_id=CONVERSATION))]
+        for payload, answer in cases:
+            with self.subTest(payload=payload, answer=answer):
+                self.hgs.script(self.rules({"argv": HISTORY, "stdout": answer}))
+                request = self.envelope("history", payload)
                 receipt = await self.submit(request, process)
                 self.assertEqual(receipt, self.failed(ENVELOPE))
                 await self.assert_replays(request, receipt, process)
@@ -62,6 +70,13 @@ class HistoryTests(SessionCase):
         unknown = self.envelope("history", {"archive_id": str(uuid.uuid4())})
         self.assertEqual(await self.submit(unknown, process),
                          self.failed("archive must match a fresh exact local snapshot entry"))
+        # The rejected history vectors fail the same way while hgs offers the ABI.
+        rejected = [row for row in validation("control")[1]
+                    if row["submission"].get("operation") == "history" and row["connector"]["decision"] == "reject"]
+        self.assertTrue(rejected)
+        for row in rejected:
+            with self.subTest(row["id"]):
+                self.assertEqual(await self.submit(row["submission"], process), self.failed(text(row["connector"]["error"])))
         self.assertEqual(len(self.native_calls()), before)
 
     async def test_a_head_read_follows_local_indexing_while_it_progresses(self):
