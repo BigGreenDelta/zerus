@@ -138,6 +138,13 @@ class ProcessObjectTest(unittest.TestCase):
         self.assertEqual(findings(initialized), [])
         self.assertEqual(findings(initialized.replace("ChildProcess::", "// ")), [f"{NAME}:1: " + UNCONFIGURED.format("m_process")])
 
+    def test_an_alias_from_a_header_is_a_process_where_it_is_included(self):
+        header = {"tray/src/Worker.h": "#pragma once\n#include <QProcess>\n\nusing Worker = QProcess;\n"}
+        text = "#include \"Worker.h\"\n\nvoid Launcher::run()\n{\n    Worker worker;\n    worker.start();\n}\n"
+        self.assertEqual(findings(text, others=header), [f"{NAME}:5: " + UNCONFIGURED.format("worker")])
+        self.assertEqual(findings(text.replace("    worker.start", "    ChildProcess::inheritStdioOnly(worker);\n    worker.start"),
+                                  others=header), [])
+
     def test_processes_the_check_cannot_follow_fail(self):
         unnamed = ("assign the new QProcess to a variable and pass it to ChildProcess::inheritStdioOnly() "
                    "(tray/src/ChildProcess.h).")

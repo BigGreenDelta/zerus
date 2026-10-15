@@ -157,12 +157,22 @@ def configured(code, names, helpers, start, end):
     return sorted(found)
 
 
+def process_aliases(code):
+    """Names that using or typedef declares here for QProcess."""
+    return [*re.findall(r"\busing\s+(\w+)\s*=\s*(?:::\s*)?QProcess\s*;", code),
+            *re.findall(r"\btypedef\s+(?:::\s*)?QProcess\s+(\w+)\s*;", code)]
+
+
 def child_process_findings(files):
     """"file:line: reason" for each child a tray/src file may start with the GUI's descriptors."""
-    sources = {name: code_only(text) for name, text in files.items()
-               if CHILD_PROCESS_SOURCES.fullmatch(name) and name not in CHILD_PROCESS_EXEMPT and "QProcess" in text}
-    kinds = {name: "|".join(["QProcess", *re.findall(r"\busing\s+(\w+)\s*=\s*QProcess\s*;", code),
-                             *re.findall(r"\btypedef\s+QProcess\s+(\w+)\s*;", code)]) for name, code in sources.items()}
+    checked = {name: text for name, text in files.items()
+               if CHILD_PROCESS_SOURCES.fullmatch(name) and name not in CHILD_PROCESS_EXEMPT}
+    # An alias a header declares reaches the files that include it, which need not name QProcess.
+    shared = sorted({alias for name, text in checked.items() if name.endswith(".h") and "QProcess" in text
+                     for alias in process_aliases(code_only(text))})
+    mention = re.compile(r"\b(?:" + "|".join(["QProcess", *shared]) + r")\b")
+    sources = {name: code_only(text) for name, text in checked.items() if mention.search(text)}
+    kinds = {name: "|".join(dict.fromkeys(["QProcess", *shared, *process_aliases(code)])) for name, code in sources.items()}
     helpers = set().union(*(configurers(code, kinds[name]) for name, code in sources.items()))
     problems = []
     for name, code in sources.items():
