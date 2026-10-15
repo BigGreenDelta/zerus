@@ -83,15 +83,30 @@ fn rpc(_: &Value, _: &str, _: Value) -> Result<Value> {
     Err(UNSUPPORTED.into())
 }
 #[cfg(not(unix))]
+fn search_rpc(_: &Value, _: Value) -> Result<Value> {
+    Err(UNSUPPORTED.into())
+}
+#[cfg(not(unix))]
 fn ensure_host(_: &Value) -> Result<()> {
     Err(UNSUPPORTED.into())
 }
 #[cfg(unix)]
 fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
+    rpc_within(record, method, params, Duration::from_secs(35))
+}
+/// Interactive search waits at most this long for one host: the adapter's own
+/// 5 s scan budget plus a margin. A host that does not answer counts as
+/// unavailable instead of holding up every other provider's results.
+#[cfg(unix)]
+fn search_rpc(record: &Value, params: Value) -> Result<Value> {
+    rpc_within(record, "search-history", params, Duration::from_secs(7))
+}
+#[cfg(unix)]
+fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
     let mut socket = UnixStream::connect(host_dir(record).join("host.sock"))
         .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
     socket
-        .set_read_timeout(Some(Duration::from_secs(35)))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|e| e.to_string())?;
     socket
         .set_write_timeout(Some(Duration::from_secs(10)))
@@ -876,10 +891,16 @@ pub(super) fn history_search(records: &[&Value], query: &str, per_session: usize
     for record in records {
         homes.entry(string(record, "agent_home")).or_default().push(record);
     }
+    // Hosts are independent processes: ask them concurrently, each bounded.
+    let answers: Vec<Option<Value>> = std::thread::scope(|scope| {
+        let queries: Vec<_> = homes.values().map(|group| scope.spawn(move || {
+            let ids: Vec<&str> = group.iter().map(|record| string(record, "conversation_id")).collect();
+            search_rpc(group[0], json!({"query":query,"sessionIds":ids,"perSession":per_session})).ok()
+        })).collect();
+        queries.into_iter().map(|query| query.join().ok().flatten()).collect()
+    });
     let mut found = BTreeMap::new();
-    for group in homes.values() {
-        let ids: Vec<&str> = group.iter().map(|record| string(record, "conversation_id")).collect();
-        let answer = rpc(group[0], "search-history", json!({"query":query,"sessionIds":ids,"perSession":per_session})).ok();
+    for (group, answer) in homes.values().zip(answers) {
         for record in group {
             // The host's time budget skips later sessions: limited, not unavailable.
             let session = answer.as_ref().and_then(|answer| answer["sessions"].as_array()?.iter()

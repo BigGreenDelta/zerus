@@ -7,6 +7,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 
@@ -67,6 +68,11 @@ class DeepSeekScopedActions(unittest.TestCase):
                     # An older resident adapter answers every newer request this way.
                     client.sendall((json.dumps({"ok": False, "error": "Unsupported HGS native request"}) + "\n").encode())
                     continue
+                elif method == "search-history":
+                    event = {"type": "user/message", "seq": 3, "time": 1791742557000,
+                             "data": {"role": "user", "content": "Find the fixture needle", "source": {"kind": "user"}}}
+                    value = {"generation": self.generation, "sessions": [
+                        {"sessionId": sid, "status": "ok", "events": [event], "truncated": False} for sid in params["sessionIds"]]}
                 elif method == "fork":
                     if not self.fork_reply:
                         # The native fork may exist, but its reply is lost.
@@ -164,6 +170,34 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.assertEqual([call["method"] for call in self.calls], ["ping", "ping", "ping", "search-history"])
         self.assertEqual(self.bindings(), before)
         self.assertEqual(json.loads(self.binding.read_text()), self.record)
+
+    def test_unresponsive_hosts_do_not_hold_up_search(self):
+        # Two other DeepSeek accounts whose hosts accept and never answer.
+        self.native = True
+        silent = []
+        for index in range(2):
+            home = self.root / f"silent-{index}"
+            name = f"dsh/example/silent-{index}"
+            record = {**self.record, "name": name, "conversation_id": f"session-silent-{index}", "agent_home": str(home)}
+            (self.binding.parent / (hashlib.sha256(name.encode()).hexdigest() + ".json")).write_text(json.dumps(record))
+            host = self.root / "state/dsh/hosts" / hashlib.sha256(str(home).encode()).hexdigest()[:16]
+            host.mkdir(parents=True)
+            server = socket.socket(socket.AF_UNIX); server.bind(str(host / "host.sock")); server.listen(4)
+            silent.append(server)
+        try:
+            started = time.monotonic()
+            result = subprocess.run([str(HGS), "search", "--query", "needle"], env=self.env,
+                                    capture_output=True, text=True, timeout=120)
+            elapsed = time.monotonic() - started
+        finally:
+            for server in silent:
+                server.close()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        # The desktop gives a local search 12 s; one bounded wait covers every host.
+        self.assertLess(elapsed, 11)
+        self.assertEqual([(hit["name"], hit["content"]) for hit in data["results"]], [(self.name, "Find the fixture needle")])
+        self.assertEqual(data["unavailable_sessions"], 2)
 
     def test_uncertain_fork_reply_is_adopted_by_the_same_request(self):
         self.native = True
