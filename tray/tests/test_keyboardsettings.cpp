@@ -26,12 +26,14 @@ private slots:
     void protectedKeyIsRefusedWithAReason();
     void conflictAsksAndReassigns();
     void conflictDeclinedChangesNothing();
+    void conflictReassignsEveryOverlap();
     void doubleClickOpensTheEditorOnce();
     void samePhraseInBothSlotsCollapses();
     void resetCommandAndResetAll();
     void marksChordsThatWorkInTerminal();
     void cheatSheetFiltersAndUpdates();
     void cheatSheetListsFixedKeys();
+    void terminalRuleFollowsThePlatform();
     void customizeIsRequested();
 private:
     static QTreeWidgetItem *commandItem(QTreeWidget *tree, const QString &id);
@@ -163,6 +165,39 @@ void TestKeyboardSettings::conflictDeclinedChangesNothing()
     QVERIFY(!registry.customized("session.new"));
 }
 
+// Every command that a chord would make ambiguous loses it, after one question,
+// and so does the edited command's other slot.
+void TestKeyboardSettings::conflictReassignsEveryOverlap()
+{
+    ShortcutRegistry registry(Platform::Linux);
+    KeyboardSettings settings(registry);
+    const auto portable = [](const char *chord) { return QKeySequence::fromString(chord, QKeySequence::PortableText); };
+    registry.setKeys("go.anywhere", {portable("Ctrl+K"), portable("Ctrl+J, Ctrl+K")});
+    registry.setKeys("session.new", {portable("Ctrl+N"), portable("Ctrl+J, Ctrl+N")});
+    registry.setKeys("panel.toggle", {portable("Ctrl+I"), portable("Ctrl+J, Ctrl+I")});
+    QStringList questions;
+    std::function<void()> answer = [&] {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        if (!box) return;
+        questions.append(box->text());
+        QTest::mouseClick(box->button(QMessageBox::Yes), Qt::LeftButton);
+        QTimer::singleShot(30, answer);
+    };
+    whenModal([&](QWidget *dialog) {
+        dialog->findChild<QKeySequenceEdit *>("keyboardEdit")->setKeySequence(portable("Ctrl+J"));
+        QTimer::singleShot(30, answer);
+        QTest::mouseClick(dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok), Qt::LeftButton);
+    });
+    settings.editChord("panel.toggle", 0);
+    QCOMPARE(questions.size(), 1);
+    QVERIFY2(questions[0].contains(Shortcuts::title(*Shortcuts::command("go.anywhere"))), qPrintable(questions[0]));
+    QVERIFY2(questions[0].contains(Shortcuts::title(*Shortcuts::command("session.new"))), qPrintable(questions[0]));
+    QCOMPARE(registry.keys("go.anywhere"), QList<QKeySequence>{portable("Ctrl+K")});
+    QCOMPARE(registry.keys("session.new"), QList<QKeySequence>{portable("Ctrl+N")});
+    QCOMPARE(registry.keys("panel.toggle"), QList<QKeySequence>{portable("Ctrl+J")});
+    QCOMPARE(registry.conflict("panel.toggle", portable("Ctrl+J")), QString());
+}
+
 void TestKeyboardSettings::doubleClickOpensTheEditorOnce()
 {
     ShortcutRegistry registry(Platform::Linux);
@@ -286,6 +321,36 @@ void TestKeyboardSettings::cheatSheetListsFixedKeys()
     for (int i = 0; i < list->topLevelItemCount(); ++i)
         if (list->topLevelItem(i)->text(0) == "Fixed keys" && list->topLevelItem(i)->childCount() > 5) fixedGroup = true;
     QVERIFY(fixedGroup);
+}
+
+// Settings and the cheat sheet explain the Terminal rule of their platform in
+// one text, and the cheat sheet lists Terminal's own copy and paste keys.
+void TestKeyboardSettings::terminalRuleFollowsThePlatform()
+{
+    const QString other = Shortcuts::terminalRule(Platform::Linux), mac = Shortcuts::terminalRule(Platform::MacOS);
+    QCOMPARE(Shortcuts::terminalRule(Platform::Windows), other);
+    for (const char *part : {"Ctrl or Ctrl+Shift with a digit", "Tab", "Page Up", "Page Down", "backtick", "comma", "Ctrl+Shift+Enter"})
+        QVERIFY2(other.contains(QLatin1String(part)), part);
+    for (const char *part : {"⌘", "except ⌘C and ⌘V", "⌃Tab", "⌃⇧Tab", "⌃`", "Every other ⌃ chord and every ⌥ chord goes to the agent"})
+        QVERIFY2(mac.contains(QString::fromUtf8(part)), part);
+    QVERIFY(!mac.contains("Page Up"));
+    const auto native = [](Qt::KeyboardModifiers modifiers, Qt::Key key) {
+        return QKeySequence(QKeyCombination(modifiers, key)).toString(QKeySequence::NativeText);
+    };
+    for (const auto platform : {Platform::Linux, Platform::MacOS}) {
+        ShortcutRegistry registry(platform);
+        const QString rule = Shortcuts::terminalRule(platform);
+        KeyboardSettings settings(registry);
+        QVERIFY(settings.findChild<QLabel *>("keyboardTerminalNote")->text().startsWith(rule));
+        ShortcutsDialog dialog(registry);
+        QCOMPARE(dialog.findChild<QLabel *>("shortcutsTerminalNote")->text(), rule);
+        // Terminal copies and pastes with Command-C and Command-V on macOS.
+        const Qt::KeyboardModifiers copy = platform == Platform::MacOS ? Qt::ControlModifier : Qt::ControlModifier | Qt::ShiftModifier;
+        QString keys;
+        QTreeWidgetItemIterator it(dialog.findChild<QTreeWidget *>("shortcutsList"));
+        for (; *it; ++it) if ((*it)->text(0) == "Copy and paste in Terminal") keys = (*it)->text(1);
+        QCOMPARE(keys, native(copy, Qt::Key_C) + ", " + native(copy, Qt::Key_V));
+    }
 }
 
 void TestKeyboardSettings::customizeIsRequested()

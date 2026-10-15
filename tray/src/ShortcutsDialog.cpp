@@ -12,8 +12,10 @@ namespace {
 QString native(const QKeySequence &sequence) { return sequence.toString(QKeySequence::NativeText); }
 
 // Keys that keep their behavior and cannot be rebound. Spec: "Fixed keys".
-QList<QPair<QString, QString>> fixedKeys()
+QList<QPair<QString, QString>> fixedKeys(Shortcuts::Platform platform)
 {
+    // Terminal copies and pastes with Command-C and Command-V on macOS.
+    const Qt::KeyboardModifiers terminalCopy = platform == Shortcuts::Platform::MacOS ? Qt::ControlModifier : Qt::ControlModifier | Qt::ShiftModifier;
     QString ctrl = native(QKeySequence(Qt::CTRL));
     if (ctrl.endsWith(QLatin1Char('+'))) ctrl.chop(1);
     if (ctrl.isEmpty()) ctrl = QStringLiteral("Ctrl");
@@ -31,7 +33,7 @@ QList<QPair<QString, QString>> fixedKeys()
         {native(QKeySequence(Qt::Key_Menu)) + comma + native(QKeySequence(Qt::SHIFT | Qt::Key_F10)), QObject::tr("Context menu")},
         {ctrl + QStringLiteral("-click"), QObject::tr("Select several items")},
         {native(QKeySequence(Qt::Key_Space)) + comma + native(QKeySequence(Qt::Key_Escape)), QObject::tr("Stop voice capture")},
-        {native(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C)) + comma + native(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_V)),
+        {native(QKeySequence(QKeyCombination(terminalCopy, Qt::Key_C))) + comma + native(QKeySequence(QKeyCombination(terminalCopy, Qt::Key_V))),
          QObject::tr("Copy and paste in Terminal")},
         {native(QKeySequence(Qt::SHIFT | Qt::Key_PageUp)) + comma + native(QKeySequence(Qt::SHIFT | Qt::Key_PageDown)),
          QObject::tr("Scroll Terminal")},
@@ -61,7 +63,7 @@ ShortcutsDialog::ShortcutsDialog(ShortcutRegistry &registry, QWidget *parent) : 
     m_list->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_list->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     layout->addWidget(m_list, 1);
-    auto *note = new QLabel(tr("In Terminal, only chords starting with Ctrl and a digit, Tab, Page Up, Page Down, backtick or comma reach the window; everything else goes to the agent."));
+    auto *note = new QLabel(Shortcuts::terminalRule(m_registry.platform()));
     note->setObjectName("shortcutsTerminalNote");
     note->setWordWrap(true);
     layout->addWidget(note);
@@ -101,7 +103,7 @@ void ShortcutsDialog::rebuild()
         const QString chord = chords.join(QStringLiteral(", "));
         if (matches(title, chord)) new QTreeWidgetItem(groupItem(Shortcuts::group(command)), {title, chord});
     }
-    for (const auto &fixed : fixedKeys())
+    for (const auto &fixed : fixedKeys(m_registry.platform()))
         if (matches(fixed.second, fixed.first)) new QTreeWidgetItem(groupItem(tr("Fixed keys")), {fixed.second, fixed.first});
     m_list->expandAll();
     m_list->resizeColumnToContents(1);

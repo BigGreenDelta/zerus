@@ -57,6 +57,7 @@ private slots:
     void routerIgnoresOtherWindows();
     void routerYieldsOnTheRealInputPath();
     void comboBoxKeepsItsPopupKeys();
+    void routerForgetsAYieldedOverrideAtTheWindow();
 private:
     QTemporaryDir m_settings;
 };
@@ -222,6 +223,12 @@ void TestShortcuts::conflictsIncludeSequencePrefixes()
     QCOMPARE(registry.conflict("session.new", QKeySequence("Ctrl+J")), QString());
     registry.setKeys("go.anywhere", {});
     QCOMPARE(registry.conflict("session.new", QKeySequence("Ctrl+K")), QString());
+    // Two commands sharing a prefix both conflict with it.
+    registry.setKeys("go.anywhere", {QKeySequence("Ctrl+J, Ctrl+K")});
+    registry.setKeys("panel.toggle", {QKeySequence("Ctrl+I"), QKeySequence("Ctrl+J, Ctrl+I")});
+    QCOMPARE(registry.conflicts("session.new", QKeySequence("Ctrl+J")), (QStringList{"go.anywhere", "panel.toggle"}));
+    QCOMPARE(registry.conflicts("panel.toggle", QKeySequence("Ctrl+J")), QStringList{"go.anywhere"});
+    QVERIFY(registry.conflicts("session.new", QKeySequence()).isEmpty());
 }
 
 namespace {
@@ -422,6 +429,39 @@ void TestShortcuts::comboBoxKeepsItsPopupKeys()
     // Other bound chords still reach the window.
     QTest::keyClick(window.windowHandle(), Qt::Key_K, Qt::ControlModifier);
     QCOMPARE(find, 1);
+    // An editable combo box keeps the focus itself, not in its line edit.
+    combo->setEditable(true); combo->lineEdit()->setFocus(); QTRY_COMPARE(QApplication::focusWidget(), combo);
+    combo->received.clear();
+    QTest::keyClick(window.windowHandle(), Qt::Key_Down, Qt::AltModifier);
+    QCOMPARE(commands, 0);
+    QCOMPARE(combo->received, QList<QKeyCombination>{QKeyCombination(Qt::AltModifier, Qt::Key_Down)});
+}
+
+// An override sent straight to an ancestor of the focus, after a yielded one
+// ended at the window, is no part of that one even at the same address.
+void TestShortcuts::routerForgetsAYieldedOverrideAtTheWindow()
+{
+    QWidget window; auto *layout = new QVBoxLayout(&window);
+    auto *panel = new QWidget; auto *inner = new QVBoxLayout(panel); layout->addWidget(panel);
+    auto *terminal = new TerminalScreen; inner->addWidget(terminal);
+    int tabs = 0;
+    auto *action = new QAction(&window); action->setShortcut(QKeySequence("Ctrl+Tab"));
+    QObject::connect(action, &QAction::triggered, &window, [&tabs] { ++tabs; }); window.addAction(action);
+    ShortcutRouter router(&window, Platform::Linux); qApp->installEventFilter(&router);
+    const auto removeRouter = qScopeGuard([&router] { qApp->removeEventFilter(&router); });
+    window.show(); QVERIFY(QTest::qWaitForWindowActive(&window));
+    terminal->setFocus(); QTRY_VERIFY(terminal->hasFocus());
+    // Records the overrides the panel itself receives.
+    struct Seen : QObject {
+        int count = 0;
+        bool eventFilter(QObject *, QEvent *event) override { if (event->type() == QEvent::ShortcutOverride) ++count; return false; }
+    } seen;
+    panel->installEventFilter(&seen);
+    QKeyEvent override(QEvent::ShortcutOverride, Qt::Key_Tab, Qt::ControlModifier);
+    override.ignore(); QApplication::sendEvent(terminal, &override);
+    QCOMPARE(seen.count, 0); // Yielded: no ancestor claims it.
+    override.ignore(); QApplication::sendEvent(panel, &override);
+    QCOMPARE(seen.count, 1);
 }
 
 QTEST_MAIN(TestShortcuts)

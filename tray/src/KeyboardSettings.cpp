@@ -6,6 +6,7 @@
 #include <QHeaderView>
 #include <QKeySequenceEdit>
 #include <QLabel>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTreeWidget>
@@ -51,7 +52,7 @@ KeyboardSettings::KeyboardSettings(ShortcutRegistry &registry, QWidget *parent) 
     row->addWidget(m_resetAll);
     row->addStretch();
     layout->addLayout(row);
-    auto *note = new QLabel(tr("In Terminal, only chords that start with Ctrl and a digit, Tab, Page Up, Page Down, backtick or comma, and Ctrl+Shift+Enter reach the window (on macOS, every command chord except copy and paste). Everything else goes to the agent, bound or not. Chords marked \"Works in Terminal\" can leave a terminal."));
+    auto *note = new QLabel(Shortcuts::terminalRule(m_registry.platform()) + QLatin1Char(' ') + tr("Chords marked ✓ work in Terminal."));
     note->setObjectName("keyboardTerminalNote");
     note->setWordWrap(true);
     layout->addWidget(note);
@@ -172,16 +173,19 @@ void KeyboardSettings::editChord(const QString &id, int slot)
             reason->setVisible(true);
             return;
         }
-        if (!sequence.isEmpty()) {
-            const QString other = m_registry.conflict(id, sequence);
-            if (!other.isEmpty()) {
+        // Every other command whose chord equals the sequence or is a prefix
+        // either way loses that chord, after one question naming them all.
+        if (const QStringList others = m_registry.conflicts(id, sequence); !others.isEmpty()) {
+            QStringList names;
+            for (const auto &other : others) {
                 const auto *otherCommand = Shortcuts::command(other);
-                const QString name = otherCommand ? Shortcuts::title(*otherCommand) : other;
-                if (QMessageBox::question(&dialog, tr("Shortcut in use"), tr("Already used by %1. Reassign?").arg(name)) != QMessageBox::Yes)
-                    return;
+                names.append(otherCommand ? Shortcuts::title(*otherCommand) : other);
+            }
+            if (QMessageBox::question(&dialog, tr("Shortcut in use"), tr("Already used by %1. Reassign?").arg(QLocale().createSeparatedList(names))) != QMessageBox::Yes)
+                return;
+            for (const auto &other : others) {
                 auto otherKeys = m_registry.keys(other);
-                for (int i = otherKeys.size() - 1; i >= 0; --i)
-                    if (overlaps(otherKeys.at(i), sequence)) otherKeys.removeAt(i);
+                otherKeys.removeIf([&sequence](const QKeySequence &key) { return overlaps(key, sequence); });
                 m_registry.setKeys(other, otherKeys);
             }
         }
@@ -191,10 +195,11 @@ void KeyboardSettings::editChord(const QString &id, int slot)
             if (slot < keys.size()) keys.removeAt(slot);
         } else if (slot < keys.size()) {
             keys[slot] = sequence;
-            // The same chord in both slots collapses to one.
+            // The other slot goes when it is the same chord or a prefix either way.
             for (int i = keys.size() - 1; i >= 0; --i)
-                if (i != slot && keys.at(i) == sequence) keys.removeAt(i);
+                if (i != slot && overlaps(keys.at(i), sequence)) keys.removeAt(i);
         } else {
+            keys.removeIf([&sequence](const QKeySequence &key) { return overlaps(key, sequence); });
             keys.append(sequence);
         }
         m_registry.setKeys(id, keys);

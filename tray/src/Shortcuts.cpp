@@ -196,6 +196,14 @@ bool protectedInTextField(QKeyCombination key, Platform)
 }
 
 QString text(const QKeySequence &sequence) { return sequence.toString(QKeySequence::NativeText); }
+
+// As terminalSafe() decides, in the platform's own notation.
+QString terminalRule(Platform platform)
+{
+    if (platform == Platform::MacOS)
+        return QCoreApplication::translate("Shortcuts", "In Terminal, a command's chord reaches Zerus only when it uses ⌘ (except ⌘C and ⌘V) or is ⌃Tab, ⌃⇧Tab or ⌃`. Every other ⌃ chord and every ⌥ chord goes to the agent, bound or not.");
+    return QCoreApplication::translate("Shortcuts", "In Terminal, a command's chord reaches Zerus only when it is Ctrl or Ctrl+Shift with a digit, Tab, Page Up, Page Down, backtick or comma, or Ctrl+Shift+Enter. Everything else goes to the agent, bound or not.");
+}
 }
 
 ShortcutRegistry::ShortcutRegistry(Shortcuts::Platform platform, QObject *parent) : QObject(parent), m_platform(platform) {}
@@ -264,16 +272,23 @@ QString ShortcutRegistry::tooltip(const QString &caption, const QString &id) con
 
 QString ShortcutRegistry::conflict(const QString &id, const QKeySequence &sequence) const
 {
-    if (sequence.isEmpty()) return {};
+    return conflicts(id, sequence).value(0);
+}
+
+QStringList ShortcutRegistry::conflicts(const QString &id, const QKeySequence &sequence) const
+{
+    QStringList result;
+    if (sequence.isEmpty()) return result;
     for (const auto &command : Shortcuts::commands()) {
         const QString other = QLatin1String(command.id);
         if (other == id) continue;
         for (const auto &key : keys(other))
             // Equal, or one is a prefix of the other, which would make it ambiguous.
-            if (key.matches(sequence) != QKeySequence::NoMatch || sequence.matches(key) != QKeySequence::NoMatch)
-                return other;
+            if (key.matches(sequence) != QKeySequence::NoMatch || sequence.matches(key) != QKeySequence::NoMatch) {
+                result.append(other); break;
+            }
     }
-    return {};
+    return result;
 }
 
 ShortcutRouter::ShortcutRouter(QWidget *window, Shortcuts::Platform platform, QObject *parent)
@@ -303,11 +318,11 @@ static bool textField(const QWidget *widget)
 }
 
 // A combo box opens its list with Alt+Up, Alt+Down and F4, also where a command
-// uses them. An editable combo box has the focus in its line edit.
+// uses them. An editable combo box keeps the focus itself (its line edit's focus
+// proxy) and forwards keys to the line edit.
 static bool comboPopupKey(const QWidget *focus, QKeyCombination key)
 {
-    if (!qobject_cast<const QComboBox *>(focus)
-        && !(qobject_cast<const QLineEdit *>(focus) && qobject_cast<const QComboBox *>(focus->parentWidget()))) return false;
+    if (!qobject_cast<const QComboBox *>(focus)) return false;
     const auto mods = key.keyboardModifiers();
     return (mods == Qt::AltModifier && (key.key() == Qt::Key_Up || key.key() == Qt::Key_Down))
         || (mods == Qt::NoModifier && key.key() == Qt::Key_F4);
@@ -323,7 +338,14 @@ bool ShortcutRouter::eventFilter(QObject *watched, QEvent *event)
     QWidget *focus = QApplication::focusWidget();
     if (!m_window || !focus || focus->window() != m_window) return false;
     // A yielded override propagates to the focus widget's ancestors; none may claim it.
-    if (watched != focus) return event == m_yielded && static_cast<QWidget *>(watched)->isAncestorOf(focus);
+    // Propagation ends at the window, so an override sent straight to an
+    // ancestor later cannot match a stale address.
+    if (watched != focus) {
+        auto *widget = static_cast<QWidget *>(watched);
+        const bool yielded = event == m_yielded && widget->isAncestorOf(focus);
+        if (widget->isWindow()) m_yielded = nullptr;
+        return yielded;
+    }
     m_yielded = nullptr;
     const auto key = Shortcuts::combination(static_cast<QKeyEvent *>(event));
     if (comboPopupKey(focus, key)) { event->accept(); return true; }
@@ -347,6 +369,7 @@ bool ShortcutRouter::eventFilter(QObject *watched, QEvent *event)
         if (!(bound.count() > 1 && Shortcuts::selectionKey(key) && !hasSelection(focus))) return false;
     }
     event->ignore();
-    m_yielded = event;
+    // A focused window has no ancestors to propagate to.
+    m_yielded = focus->isWindow() ? nullptr : event;
     return true;
 }
