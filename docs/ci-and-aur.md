@@ -295,7 +295,8 @@ message in native history. `tests/test_claude_settings_native.py` drives the
 real `/model` picker with a synthetic model catalog and history. Claude 2.1.296
 coverage changes model and effort in a fresh session, accepts Claude's own cache
 notice in a resumed conversation, and requires the session-only transcript
-receipt while `settings.json` stays unchanged.
+receipt while `settings.json` stays unchanged. A session-only change made in
+Terminal must reach hgs through `PostModelSwitch` with the exact model ID.
 
 ### Unix tmux census
 

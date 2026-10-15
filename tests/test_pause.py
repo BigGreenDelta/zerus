@@ -33,6 +33,11 @@ agent = pathlib.Path(sys.argv[0]).name
 if sys.argv[1:] == ['--help']:
     print('--no-daemon' if not (home / 'old-codex').exists() else 'Legacy Codex help')
     sys.exit(0)
+if sys.argv[1:] == ['--version']:
+    # hgs reads Claude Code's version before it registers PostModelSwitch.
+    version = home / 'claude-version'
+    print(version.read_text().strip() if version.exists() else '2.1.296 (Claude Code)')
+    sys.exit(0)
 if agent == "kimi" and sys.argv[1:3] == ["session", "list"]:
     print(json.dumps([{"id": p.stem} for p in (home / "history").glob("*.jsonl")]))
     sys.exit(0)
@@ -625,7 +630,8 @@ class Lifecycle(Harness):
         settings.write_text(json.dumps({"custom": True, "hooks": {"Stop": [
             {"hooks": [{"type": "command", "command": "true"}]}]}}))
         launcher = self.project / "run_claude.sh"
-        launcher.write_text('#!/bin/sh\nexec claude "$@"\n')
+        probed = self.root / "launcher-probed"
+        launcher.write_text('#!/bin/sh\n[ "$1" = --version ] && : > ' + shlex.quote(str(probed)) + '\nexec claude "$@"\n')
         launcher.chmod(0o755)
         name = self.start()
         self.hgs("pause", name)
@@ -635,6 +641,46 @@ class Lifecycle(Harness):
         self.assertTrue(settings.is_symlink())
         self.assertTrue(data["custom"])
         self.assertEqual(len(data["hooks"]["Stop"]), 2)
+        # A launcher runs only under supervision: its version is never read.
+        self.assertFalse(probed.exists())
+        self.assertNotIn("PostModelSwitch", data["hooks"])
+
+    @unittest.skipIf(LEGACY_STATE, "Claude's PostModelSwitch requires the native CLI")
+    def test_claude_model_switch_hook_records_the_exact_model(self):
+        settings = self.root / ".claude/settings.json"
+        # Older Claude Code would stop every start at a warning for the unknown event.
+        (self.root / "claude-version").write_text("2.1.295 (Claude Code)\n")
+        name = self.start()
+        hooks = json.loads(settings.read_text())["hooks"]
+        self.assertIn("Stop", hooks)
+        self.assertNotIn("PostModelSwitch", hooks)
+        self.hgs("pause", name)
+        (self.root / "claude-version").unlink()
+        self.resume(name)
+        hooks = json.loads(settings.read_text())["hooks"]
+        self.assertEqual(hooks["PostModelSwitch"], hooks["Stop"])
+        self.assertNotIn("PreModelSwitch", hooks)
+        # The payload of Claude Code 2.1.296 after /model in Terminal.
+        binding = self.binding(name)
+        switch = dict(transcript_path=binding["transcript"], cwd=str(self.project), prompt_id=str(uuid.uuid4()),
+                      from_model="claude-opus-5-5", to_model="claude-fable-5-1", requested_model="fable",
+                      source="command", context_tokens=0, prompt_cache_warm=False, cache_ttl="5m",
+                      estimated_cache_write_usd=0, pricing="catalog")
+        self.send_event(name, "PostModelSwitch", **switch)
+        self.assertEqual(self.binding(name)["model"], "claude-fable-5-1")
+        info = json.loads(self.hgs("inspect", name))
+        self.assertEqual(info["model"], "claude-fable-5-1")
+        self.assertEqual((info["activity"], info["phase"]), ("idle", "idle"))
+        # It changes the session's model, not its Activity.
+        self.assertNotIn("PostModelSwitch", [event["type"] for event in info["events"]])
+        # Another conversation's switch and an invalid model change nothing.
+        self.send_event(name, "PostModelSwitch", **dict(switch, session_id="foreign", to_model="claude-haiku-5-5"))
+        self.send_event(name, "PostModelSwitch", **dict(switch, to_model="-flag"))
+        self.assertEqual(self.binding(name)["model"], "claude-fable-5-1")
+        # An automatic switch has no /model receipt in the transcript.
+        self.send_event(name, "PostModelSwitch", **dict(switch, from_model="claude-fable-5-1",
+                                                        to_model="claude-sonnet-5-5", requested_model=None, source="auto"))
+        self.assertEqual(json.loads(self.hgs("inspect", name))["model"], "claude-sonnet-5-5")
 
     def test_failed_resume_keeps_binding_and_no_fresh_fallback(self):
         name = self.start()

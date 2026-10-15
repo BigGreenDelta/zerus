@@ -36,6 +36,26 @@ fn events(agent: &str) -> Vec<&'static str> {
     events
 }
 
+/// The oldest Claude Code whose `PostModelSwitch` hgs has verified: the exact
+/// model after each switch (`from_model`, `to_model`, `requested_model`,
+/// `source`). The event name first appears in 2.1.251.
+const CLAUDE_MODEL_SWITCH: Version = (2, 1, 296);
+
+/// Events of `agent` that only newer versions have, each with the oldest
+/// version hgs registers it for. Claude Code (2.1.200 and 2.1.296 alike) stops
+/// every start at a settings warning while `settings.json` names a hook event
+/// it does not know, so these are added only for a version read from the
+/// agent's native CLI, never for a project launcher or a version that cannot
+/// be read. `PreModelSwitch` stays
+/// unregistered: its allow would also skip Claude's cache-miss confirmation
+/// for the user.
+fn versioned_events(agent: &str) -> &'static [(&'static str, Version)] {
+    match agent {
+        "claude" => &[("PostModelSwitch", CLAUDE_MODEL_SWITCH)],
+        _ => &[],
+    }
+}
+
 fn owns_hook(command: &str) -> bool {
     let Ok(argv) = shell_words::split(command) else {
         return false;
@@ -284,13 +304,16 @@ fn merge_kimi(
 /// The JSON hook configuration text `original` of `agent` with an hgs entry
 /// for each of its events, or `None` when every event has one: then nothing
 /// is written. New events repeat the hgs entry already there, exactly;
-/// only without one is `fresh` asked for the entry to write.
+/// only without one is `fresh` asked for the entry to write. An event of
+/// `versioned_events` without an entry asks `version` for the agent's version
+/// and is added only when that version has it.
 fn merge_json(
     original: &str,
     path: &Path,
     agent: &str,
     windows: bool,
     fresh: &mut dyn FnMut() -> Result<Entry>,
+    version: &mut dyn FnMut() -> Option<Version>,
 ) -> Result<Option<String>> {
     let mut document: Value = if original.trim().is_empty() {
         json!({})
@@ -314,30 +337,44 @@ fn merge_json(
         .flatten()
         .find_map(|hook| Entry::owned(hook, windows));
     let mut changed = false;
-    for event in events(agent) {
-        let entries = hooks
+    let versioned = versioned_events(agent)
+        .iter()
+        .map(|&(event, oldest)| (event, Some(oldest)));
+    for (event, oldest) in events(agent)
+        .into_iter()
+        .map(|event| (event, None))
+        .chain(versioned)
+    {
+        let installed = match hooks.get(event) {
+            Some(entries) => entries
+                .as_array()
+                .ok_or("hook event must be an array")?
+                .iter()
+                .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+                .flatten()
+                .any(|hook| Entry::owned(hook, windows).is_some()),
+            None => false,
+        };
+        // A version that lacks the event, or cannot be read, gets no key for it.
+        if installed || oldest.is_some_and(|oldest| version().is_none_or(|v| v < oldest)) {
+            continue;
+        }
+        let group = match &entry {
+            Some(entry) => entry.group(),
+            None => {
+                let new = fresh()?;
+                let group = new.group();
+                entry = Some(new);
+                group
+            }
+        };
+        hooks
             .entry(event)
             .or_insert_with(|| json!([]))
             .as_array_mut()
-            .ok_or("hook event must be an array")?;
-        let installed = entries
-            .iter()
-            .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-            .flatten()
-            .any(|hook| Entry::owned(hook, windows).is_some());
-        if !installed {
-            let group = match &entry {
-                Some(entry) => entry.group(),
-                None => {
-                    let new = fresh()?;
-                    let group = new.group();
-                    entry = Some(new);
-                    group
-                }
-            };
-            entries.push(group);
-            changed = true;
-        }
+            .ok_or("hook event must be an array")?
+            .push(group);
+        changed = true;
     }
     if !changed {
         return Ok(None);
@@ -377,14 +414,24 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
         Err(error) => return Err(error.to_string()),
     };
     let executable = runner_executable()?;
+    let installed = Installed {
+        program,
+        agent: if agent == "claude" { "Claude Code" } else { agent },
+        version: std::cell::OnceCell::new(),
+    };
     let merged = if agent == "kimi" {
         merge_kimi(&original, &path, cfg!(windows), &mut || {
             fresh_command(&executable)
         })?
     } else {
-        merge_json(&original, &path, agent, cfg!(windows), &mut || {
-            fresh_entry(agent, &executable, program)
-        })?
+        merge_json(
+            &original,
+            &path,
+            agent,
+            cfg!(windows),
+            &mut || fresh_entry(agent, &executable, &installed),
+            &mut || installed.native_version(agent),
+        )?
     };
     let Some(content) = merged else {
         return Ok(());
@@ -402,6 +449,30 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
     Ok(())
 }
 
+/// The agent whose hooks an installation writes: its executable `program`, its
+/// name for messages, and the version `program --version` reports, read at
+/// most once and only when a hook depends on it.
+struct Installed<'a> {
+    program: &'a str,
+    agent: &'a str,
+    version: std::cell::OnceCell<Result<Version>>,
+}
+
+impl Installed<'_> {
+    fn version(&self) -> Result<Version> {
+        self.version
+            .get_or_init(|| version::agent_version(self.program, self.agent))
+            .clone()
+    }
+
+    /// The version of the native CLI `cli`, never of a project launcher such
+    /// as `run_claude.sh`: a launcher runs only under supervision, since it may
+    /// prompt or unlock secrets, so its version stays unknown.
+    fn native_version(&self, cli: &str) -> Option<Version> {
+        (self.program == cli).then(|| self.version().ok()).flatten()
+    }
+}
+
 /// The command line a hook runs `executable __state hook` with.
 #[cfg(unix)]
 fn fresh_command(executable: &str) -> Result<String> {
@@ -413,7 +484,7 @@ fn fresh_command(executable: &str) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn fresh_entry(_agent: &str, executable: &str, _program: &str) -> Result<Entry> {
+fn fresh_entry(_agent: &str, executable: &str, _installed: &Installed) -> Result<Entry> {
     fresh_command(executable).map(Entry::shell)
 }
 
@@ -423,26 +494,101 @@ fn fresh_command(executable: &str) -> Result<String> {
 }
 
 #[cfg(windows)]
-fn fresh_entry(agent: &str, executable: &str, program: &str) -> Result<Entry> {
+fn fresh_entry(agent: &str, executable: &str, installed: &Installed) -> Result<Entry> {
     if agent == "claude" {
-        let version = windows::agent_version(program, "Claude Code")?;
-        windows::claude_entry(executable, version, windows::git_bash().is_some())
+        windows::claude_entry(executable, installed.version()?, windows::git_bash().is_some())
     } else {
         windows::codex_entry(executable)
     }
 }
 
+/// Agent versions, `MAJOR.MINOR.PATCH`, and reading the installed one.
+mod version {
+    use super::Result;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    pub(super) type Version = (u64, u64, u64);
+
+    /// How long `--version` may take: a first start of a large agent under
+    /// real-time scanning is slow, and a hook form is decided once.
+    const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
+
+    /// The first `MAJOR.MINOR.PATCH` word of `text` (a `--version` answer such
+    /// as `2.1.296 (Claude Code)` or `codex-cli 0.162.0`), any suffix after
+    /// `-` or `+` ignored.
+    pub(super) fn version_in(text: &str) -> Option<Version> {
+        text.split_whitespace().find_map(|word| {
+            let word = word.strip_prefix('v').unwrap_or(word);
+            let core = word.split(['-', '+']).next()?;
+            let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+            let version = (parts.next()??, parts.next()??, parts.next()??);
+            parts.next().is_none().then_some(version)
+        })
+    }
+
+    /// The version that `program --version` reports, without a session's
+    /// identity. A version that cannot be read is an error: a form chosen
+    /// without it would be kept for ever.
+    pub(super) fn agent_version(program: &str, agent: &str) -> Result<Version> {
+        let fail = |why: String| {
+            format!(
+                "cannot read the {agent} version ({program} --version: {why}), which decides \
+                 its tracking hook form; set HGS_TRACKING=0 to run it untracked"
+            )
+        };
+        let mut output = tempfile::tempfile().map_err(|e| fail(e.to_string()))?;
+        let mut command = crate::platform::agent_command(&[program.to_owned(), "--version".into()])
+            .map_err(|e| fail(e.to_string()))?;
+        command
+            .env_remove("HGS_RUN_ID")
+            .env_remove("HGS_SESSION")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(output.try_clone().map_err(|e| fail(e.to_string()))?);
+        // On Unix in a process group of its own, so a timeout also stops
+        // whatever a wrapper script started.
+        #[cfg(unix)]
+        let spawned = crate::platform::spawn_group(&mut command);
+        #[cfg(windows)]
+        let spawned = crate::platform::spawn(&mut command);
+        let mut child = spawned.map_err(|e| fail(e.to_string()))?;
+        let deadline = Instant::now() + VERSION_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|e| fail(e.to_string()))? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                crate::platform::kill_process_group(&mut child);
+                let _ = child.wait();
+                return Err(fail("timed out".into()));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        if !status.success() {
+            return Err(fail(format!("exit {status}")));
+        }
+        let mut text = String::new();
+        output
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| output.take(64 * 1024).read_to_string(&mut text))
+            .map_err(|e| fail(e.to_string()))?;
+        version_in(&text).ok_or_else(|| fail(format!("no version in {:?}", text.trim())))
+    }
+}
+
+use self::version::Version;
+
 /// The Windows hook forms of spec D12. The decisions are plain functions
-/// tested on every platform; probing the installed agents is Windows-only.
+/// tested on every platform; finding Git Bash is Windows-only.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod windows {
-    use super::{Entry, Result, HOOK_ARGS};
+    use super::{Entry, Result, Version, HOOK_ARGS};
 
     /// The oldest Claude Code whose exec-form hooks (`command` plus `args`, no
     /// shell) hgs has verified: the settings schema of 2.1.296 describes them.
     pub(super) const CLAUDE_EXEC_FORM: Version = (2, 1, 296);
-
-    pub(super) type Version = (u64, u64, u64);
 
     /// Characters that Git Bash, `cmd.exe`, `CreateProcess` and PowerShell
     /// read differently inside double quotes: `"` ends them, `%` expands a
@@ -554,83 +700,13 @@ mod windows {
         })
     }
 
-    /// The first `MAJOR.MINOR.PATCH` word of `text` (a `--version` answer such
-    /// as `2.1.296 (Claude Code)` or `codex-cli 0.162.0`), any suffix after
-    /// `-` or `+` ignored.
-    pub(super) fn version_in(text: &str) -> Option<Version> {
-        text.split_whitespace().find_map(|word| {
-            let word = word.strip_prefix('v').unwrap_or(word);
-            let core = word.split(['-', '+']).next()?;
-            let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
-            let version = (parts.next()??, parts.next()??, parts.next()??);
-            parts.next().is_none().then_some(version)
-        })
-    }
-
     #[cfg(windows)]
-    pub(super) use self::probe::{agent_version, git_bash};
+    pub(super) use self::probe::git_bash;
 
     #[cfg(windows)]
     mod probe {
-        use super::{version_in, Result, Version};
         use crate::state::nonempty_env;
-        use std::io::{Read, Seek, SeekFrom};
         use std::path::PathBuf;
-        use std::process::Stdio;
-        use std::time::{Duration, Instant};
-
-        /// How long `--version` may take: a first start of a large agent
-        /// under real-time scanning is slow, and a hook form is decided once.
-        const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
-
-        /// The version that `program --version` reports, without a session's
-        /// identity. A version that cannot be read is an error: a form chosen
-        /// without it would be kept for ever.
-        pub(in crate::state::hooks) fn agent_version(
-            program: &str,
-            agent: &str,
-        ) -> Result<Version> {
-            let fail = |why: String| {
-                format!(
-                    "cannot read the {agent} version ({program} --version: {why}), which decides \
-                     its tracking hook form; set HGS_TRACKING=0 to run it untracked"
-                )
-            };
-            let mut output = tempfile::tempfile().map_err(|e| fail(e.to_string()))?;
-            let mut command =
-                crate::platform::agent_command(&[program.to_owned(), "--version".into()])
-                    .map_err(|e| fail(e.to_string()))?;
-            let mut child = crate::platform::spawn(
-                command
-                    .env_remove("HGS_RUN_ID")
-                    .env_remove("HGS_SESSION")
-                    .stdin(Stdio::null())
-                    .stderr(Stdio::null())
-                    .stdout(output.try_clone().map_err(|e| fail(e.to_string()))?),
-            )
-            .map_err(|e| fail(e.to_string()))?;
-            let deadline = Instant::now() + VERSION_TIMEOUT;
-            let status = loop {
-                if let Some(status) = child.try_wait().map_err(|e| fail(e.to_string()))? {
-                    break status;
-                }
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(fail("timed out".into()));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            };
-            if !status.success() {
-                return Err(fail(format!("exit {status}")));
-            }
-            let mut text = String::new();
-            output
-                .seek(SeekFrom::Start(0))
-                .and_then(|_| output.take(64 * 1024).read_to_string(&mut text))
-                .map_err(|e| fail(e.to_string()))?;
-            version_in(&text).ok_or_else(|| fail(format!("no version in {:?}", text.trim())))
-        }
 
         /// The Git Bash that Claude Code would run a hook's shell form with:
         /// `CLAUDE_CODE_GIT_BASH_PATH`, Git for Windows in Program Files, or
@@ -708,7 +784,10 @@ pub(super) fn hook() -> Result<i32> {
         && !external_agents::main_start(&record, &event) {
         return Ok(0);
     }
-    if !events(string(&record, "agent")).contains(&kind) {
+    let agent = string(&record, "agent");
+    if !events(agent).contains(&kind)
+        && !versioned_events(agent).iter().any(|(event, _)| *event == kind)
+    {
         return Ok(0);
     }
     if pause_active(&record) && ["UserPromptSubmit", "PreToolUse", "TurnStarted"].contains(&kind) {
@@ -764,6 +843,8 @@ pub(super) fn hook() -> Result<i32> {
                 "resume_settings",
                 "effort_source_path",
                 "effort_source_offset",
+                "model_source_path",
+                "model_source_offset",
             ] {
                 record.as_object_mut().unwrap().remove(key);
             }
@@ -934,12 +1015,20 @@ mod tests {
         Ok(Some(content))
     }
 
+    /// A merge for an agent whose version cannot be read.
     fn json_merge(original: &str, agent: &str, windows: bool, fresh: Entry) -> Option<String> {
         let mut asked = 0;
-        let merged = merge_json(original, &path(), agent, windows, &mut || {
-            asked += 1;
-            Ok(fresh.clone())
-        })
+        let merged = merge_json(
+            original,
+            &path(),
+            agent,
+            windows,
+            &mut || {
+                asked += 1;
+                Ok(fresh.clone())
+            },
+            &mut || None,
+        )
         .unwrap();
         assert!(asked <= 1);
         merged
@@ -947,9 +1036,14 @@ mod tests {
 
     /// A merge that must reuse the hgs entry already there.
     fn json_reuse(original: &str, agent: &str, windows: bool) -> Option<String> {
-        merge_json(original, &path(), agent, windows, &mut || {
-            Err("a fresh entry was asked for".into())
-        })
+        merge_json(
+            original,
+            &path(),
+            agent,
+            windows,
+            &mut || Err("a fresh entry was asked for".into()),
+            &mut || None,
+        )
         .unwrap()
     }
 
@@ -1005,18 +1099,26 @@ mod tests {
             (r#"{"hooks": []}"#, "hooks must be an object"),
             (r#"{"hooks": {"Stop": {}}}"#, "hook event must be an array"),
         ] {
-            let result = merge_json(original, &path(), "claude", false, &mut || {
-                Ok(Entry::shell(UNIX.into()))
-            });
+            let result = merge_json(
+                original,
+                &path(),
+                "claude",
+                false,
+                &mut || Ok(Entry::shell(UNIX.into())),
+                &mut || None,
+            );
             assert_eq!(result.unwrap_err(), error);
         }
-        assert!(
-            merge_json("{", &path(), "claude", false, &mut || Ok(Entry::shell(
-                UNIX.into()
-            )))
-            .unwrap_err()
-            .starts_with("cannot read /config/file: ")
-        );
+        assert!(merge_json(
+            "{",
+            &path(),
+            "claude",
+            false,
+            &mut || Ok(Entry::shell(UNIX.into())),
+            &mut || None
+        )
+        .unwrap_err()
+        .starts_with("cannot read /config/file: "));
     }
 
     #[test]
@@ -1163,17 +1265,17 @@ mod tests {
     #[test]
     fn versions_are_read_from_version_answers() {
         assert_eq!(
-            forms::version_in("2.1.296 (Claude Code)\n"),
+            version::version_in("2.1.296 (Claude Code)\n"),
             Some((2, 1, 296))
         );
-        assert_eq!(forms::version_in("codex-cli 0.162.0"), Some((0, 162, 0)));
-        assert_eq!(forms::version_in("kimi v2.1.1-beta.3"), Some((2, 1, 1)));
+        assert_eq!(version::version_in("codex-cli 0.162.0"), Some((0, 162, 0)));
+        assert_eq!(version::version_in("kimi v2.1.1-beta.3"), Some((2, 1, 1)));
         assert_eq!(
-            forms::version_in("tool 1.2.3+build.7 extra 4.5.6"),
+            version::version_in("tool 1.2.3+build.7 extra 4.5.6"),
             Some((1, 2, 3))
         );
         for text in ["", "Claude Code", "2.1", "1.2.3.4", "x1.2.3", "2.1.x"] {
-            assert_eq!(forms::version_in(text), None, "{text:?}");
+            assert_eq!(version::version_in(text), None, "{text:?}");
         }
         assert!((2, 1, 296) > (2, 1, 99));
     }
@@ -1292,5 +1394,158 @@ mod tests {
         assert_eq!(marker_line("a\r\nb", "a", false), None);
         assert_eq!(marker_line("a\r\nb", "a", true), Some((0, 3)));
         assert_eq!(marker_line("ab\na\n", "a", false), Some((3, 2)));
+    }
+
+    /// A merge for an agent that reports `version`, which says how often it was asked.
+    fn versioned_merge(
+        original: &str,
+        agent: &str,
+        windows: bool,
+        fresh: Entry,
+        version: Option<Version>,
+    ) -> (Option<String>, usize) {
+        let mut asked = 0;
+        let merged = merge_json(
+            original,
+            &path(),
+            agent,
+            windows,
+            &mut || Ok(fresh.clone()),
+            &mut || {
+                asked += 1;
+                version
+            },
+        )
+        .unwrap();
+        (merged, asked)
+    }
+
+    #[test]
+    fn claude_model_switch_is_registered_only_for_versions_that_have_it() {
+        let unix = Entry::shell(UNIX.into());
+        let older = json_merge(r#"{"model": "opus"}"#, "claude", false, unix.clone()).unwrap();
+        // Older Claude Code stops every start at a warning for an event it does
+        // not know, so neither its key nor PreModelSwitch is ever written.
+        for version in [None, Some((2, 1, 295)), Some((2, 0, 9))] {
+            let (merged, asked) = versioned_merge(
+                r#"{"model": "opus"}"#,
+                "claude",
+                false,
+                unix.clone(),
+                version,
+            );
+            assert_eq!(merged.as_ref(), Some(&older), "{version:?}");
+            assert_eq!(asked, 1);
+            let (merged, asked) = versioned_merge(&older, "claude", false, unix.clone(), version);
+            assert_eq!((merged, asked), (None, 1), "{version:?}");
+        }
+        let hooks: Value = serde_json::from_str(&older).unwrap();
+        assert!(hooks["hooks"].get("PostModelSwitch").is_none());
+        assert!(hooks["hooks"].get("PreModelSwitch").is_none());
+        // A version that has it gets the entry already there, and nothing else changes.
+        for version in [CLAUDE_MODEL_SWITCH, (2, 1, 300), (2, 2, 0), (3, 0, 0)] {
+            let (merged, asked) = versioned_merge(
+                &older,
+                "claude",
+                false,
+                Entry::shell("unused".into()),
+                Some(version),
+            );
+            let merged = merged.unwrap();
+            assert_eq!(asked, 1);
+            assert_eq!(
+                hook_entries(&merged, "PostModelSwitch"),
+                hook_entries(&older, "Stop")
+            );
+            let mut document: Value = serde_json::from_str(&merged).unwrap();
+            document["hooks"]
+                .as_object_mut()
+                .unwrap()
+                .remove("PostModelSwitch");
+            assert_eq!(document, serde_json::from_str::<Value>(&older).unwrap());
+            assert!(document["hooks"].get("PreModelSwitch").is_none());
+            // Once it is there, the version is never read again.
+            assert_eq!(
+                versioned_merge(&merged, "claude", false, unix.clone(), None),
+                (None, 0)
+            );
+        }
+        // A fresh configuration gets every event with one entry.
+        let (fresh, _) =
+            versioned_merge("", "claude", false, unix.clone(), Some(CLAUDE_MODEL_SWITCH));
+        let fresh = fresh.unwrap();
+        for event in events("claude").into_iter().chain(["PostModelSwitch"]) {
+            assert_eq!(
+                hook_entries(&fresh, event),
+                [json!({"type": "command", "command": UNIX, "timeout": 5})]
+            );
+        }
+        // The user's own PostModelSwitch hook stays, beside hgs's.
+        let user = json!({"type": "command", "command": "notify-send switched"});
+        let mut document: Value = serde_json::from_str(&older).unwrap();
+        document["hooks"]["PostModelSwitch"] = json!([{"matcher": "opus", "hooks": [user]}]);
+        let (merged, _) = versioned_merge(
+            &document.to_string(),
+            "claude",
+            false,
+            unix.clone(),
+            Some(CLAUDE_MODEL_SWITCH),
+        );
+        let merged = merged.unwrap();
+        assert_eq!(
+            hook_entries(&merged, "PostModelSwitch"),
+            [user, hook_entries(&older, "Stop")[0].clone()]
+        );
+        let (merged, _) = versioned_merge(
+            &document.to_string(),
+            "claude",
+            false,
+            unix.clone(),
+            Some((2, 1, 295)),
+        );
+        assert_eq!(merged, None);
+        // Only Claude has versioned events; Codex is never asked.
+        let codex = json_merge("", "codex", false, unix.clone()).unwrap();
+        assert_eq!(
+            versioned_merge("", "codex", false, unix.clone(), Some((9, 9, 9))),
+            (Some(codex), 0)
+        );
+        // Windows repeats the exec form there too.
+        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
+        let (settings, _) =
+            versioned_merge("", "claude", true, exec.clone(), Some(CLAUDE_MODEL_SWITCH));
+        let settings = settings.unwrap();
+        assert_eq!(
+            hook_entries(&settings, "PostModelSwitch"),
+            hook_entries(&settings, "Stop")
+        );
+        assert_eq!(
+            Entry::owned(&hook_entries(&settings, "PostModelSwitch")[0], true),
+            Some(exec)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_switch_version_never_runs_a_project_launcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let marker = folder.path().join("launcher-ran");
+        let launcher = folder.path().join("run_claude.sh");
+        let script = format!("#!/bin/sh\n: > '{}'\necho '2.1.296 (Claude Code)'\n", marker.display());
+        fs::write(&launcher, script).unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        let program = launcher.to_string_lossy();
+        let installed = Installed {
+            program: &program,
+            agent: "Claude Code",
+            version: std::cell::OnceCell::new(),
+        };
+        // A launcher may prompt or unlock secrets: its version stays unknown.
+        assert_eq!(installed.native_version("claude"), None);
+        assert!(!marker.exists());
+        // The same script read as the agent itself answers.
+        assert_eq!(installed.native_version(&program), Some(CLAUDE_MODEL_SWITCH));
+        assert!(marker.exists());
     }
 }

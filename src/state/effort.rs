@@ -777,13 +777,41 @@ fn ready(record: &Value) -> bool {
             .is_some_and(|v| v.values().any(|c| string(c, "state") == "working"))
 }
 
+/// Claude's PostModelSwitch: the exact model the session runs from now on,
+/// after /model in Terminal or from Zerus, an automatic switch or a resume. It
+/// stands until the transcript records a later turn or /model receipt; the
+/// transcript's length now marks the history it replaces.
+pub(super) fn observe_switch(record: &mut Value, event: &Value) {
+    let model = string(event, "to_model");
+    if string(record, "agent") != "claude" || !safe_model(model) {
+        return;
+    }
+    record["model"] = json!(model);
+    match claude_transcript(record) {
+        Ok(path) => {
+            // Claude writes the transcript with its first message.
+            record["model_source_offset"] = json!(fs::metadata(&path).map_or(0, |meta| meta.len()));
+            record["model_source_path"] = json!(path.to_string_lossy());
+        }
+        Err(_) => {
+            let fields = record.as_object_mut().unwrap();
+            fields.remove("model_source_path");
+            fields.remove("model_source_offset");
+        }
+    }
+}
+
 fn settings(record: &Value, live_pane: bool) -> Settings {
     let mut value = history(record);
     let confirmed = string(record, "effort_source_path") == value.path
         && record["effort_source_offset"]
             .as_u64()
             .is_some_and(|offset| offset >= value.offset);
-    if value.model.is_empty() || confirmed {
+    let switched = string(record, "model_source_path") == value.path
+        && record["model_source_offset"]
+            .as_u64()
+            .is_some_and(|offset| offset >= value.offset);
+    if value.model.is_empty() || confirmed || switched {
         value.model = string(record, "model").into();
     }
     if value.effort.is_empty() || confirmed {
@@ -2684,6 +2712,54 @@ mod tests {
         let other = json!({"agent":"claude","agent_home":home.path(),"conversation_id":"another","transcript":path});
         assert!(history(&other).model.is_empty());
         assert!(settings_reason(&other, &catalog(&other)).contains("confirm this conversation"));
+    }
+
+    #[test]
+    fn claude_model_switch_names_the_exact_model_until_newer_history() {
+        let home = claude_home();
+        let id = "22222222-3333-4444-8555-666666666666";
+        let path = home.path().join(format!("{id}.jsonl"));
+        let turn = |model: &str| json!({"type":"assistant","sessionId":id,"isSidechain":false,
+            "requestedModel":model,"effort":"high","message":{"model":model,"content":[]}}).to_string() + "\n";
+        let switch = |model: Value| json!({"hook_event_name":"PostModelSwitch","session_id":id,
+            "from_model":"claude-opus-5-5","to_model":model,"requested_model":null,"source":"auto"});
+        fs::write(&path, turn("claude-opus-5-5")).unwrap();
+        let mut record = json!({"agent":"claude","agent_home":home.path(),"conversation_id":id,"transcript":path,
+            "model":"claude-opus-5-5","effort":"low"});
+        // /model in Terminal names the exact ID before Claude's next turn; effort stays Claude's.
+        observe_switch(&mut record, &switch(json!("claude-haiku-5-5")));
+        assert_eq!(record["model"], "claude-haiku-5-5");
+        assert_eq!(record["model_source_offset"], fs::metadata(&path).unwrap().len());
+        let value = settings(&record, false);
+        assert_eq!((value.model.as_str(), value.effort.as_str()), ("claude-haiku-5-5", "high"));
+        // An automatic switch has no /model receipt, and its model need not be in the picker.
+        observe_switch(&mut record, &switch(json!("claude-sonnet-5-5[1m]")));
+        assert_eq!(settings(&record, false).model, "claude-sonnet-5-5[1m]");
+        // A later turn is newer evidence.
+        fs::write(&path, turn("claude-opus-5-5") + &turn("claude-fable-5-1")).unwrap();
+        assert_eq!(settings(&record, false).model, "claude-fable-5-1");
+        // Invalid models, and other agents, change nothing.
+        let before = record.clone();
+        for model in [json!(""), json!("-flag"), json!("x".repeat(121)), json!("a\nb"), json!(5), Value::Null] {
+            observe_switch(&mut record, &switch(model));
+            assert_eq!(record, before);
+        }
+        let mut codex = json!({"agent":"codex","model":"gpt-6-astra"});
+        observe_switch(&mut codex, &switch(json!("claude-haiku-5-5")));
+        assert_eq!(codex, json!({"agent":"codex","model":"gpt-6-astra"}));
+        // Before the first message there is no transcript: every row written later is newer.
+        let fresh = home.path().join("33333333-4444-4555-8666-777777777777.jsonl");
+        let mut first = json!({"agent":"claude","agent_home":home.path(),
+            "conversation_id":"33333333-4444-4555-8666-777777777777","transcript":fresh});
+        observe_switch(&mut first, &switch(json!("claude-haiku-5-5")));
+        assert_eq!((first["model_source_path"].as_str(), first["model_source_offset"].as_u64()), (fresh.to_str(), Some(0)));
+        assert_eq!(settings(&first, false).model, "claude-haiku-5-5");
+        // An unconfirmed transcript keeps the model, with no stale mark.
+        let mut unconfirmed = json!({"agent":"claude","conversation_id":id,"transcript":"relative.jsonl",
+            "model_source_path":"relative.jsonl","model_source_offset":5});
+        observe_switch(&mut unconfirmed, &switch(json!("claude-haiku-5-5")));
+        assert_eq!(unconfirmed, json!({"agent":"claude","conversation_id":id,"transcript":"relative.jsonl",
+            "model":"claude-haiku-5-5"}));
     }
 
     #[test]
