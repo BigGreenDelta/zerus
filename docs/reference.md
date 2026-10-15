@@ -918,8 +918,11 @@ A stopped Claude session resumes with a choice made in Zerus through `--model` a
 `--effort`; otherwise it starts with the account's settings.
 
 Busy-session choices, and choices made while the terminal shows a chooser, remain
-**Pending** until the agent is ready, including after navigation away. A message
-sent before application uses the current model.
+**Pending** until the agent is ready, including after navigation away. If a
+chooser appears while the desktop applies a choice, the choice stays **Pending**
+and the desktop tries once each time the session becomes ready again. A failed
+or refused application, a new run and a new conversation end these attempts. A
+message sent before application uses the current model.
 **Save for resume** stores a stopped session's choice without starting it. A stale
 queued setting cannot replace a newer choice from another device.
 If a message or another client already consumed or replaced it, Zerus refreshes
