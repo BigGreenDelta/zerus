@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import zipfile
 import urllib.parse
+import zlib
 
 from update_feed import (GitHub, HEX40, HEX64, ORIGIN, REPOSITORY, directory,
                          check_android_sequence, file_hash, fsync_directory, require, safe_name, timestamp)
@@ -158,26 +159,33 @@ def unpack(raw, destination):
     if isinstance(raw, bytes):
         require(len(raw) <= MAX_BYTES, 'Artifact archive exceeds limit')
         raw = io.BytesIO(raw)
-    with zipfile.ZipFile(raw) as archive:
-        members = archive.infolist()
-        require(1 <= len(members) <= 17, 'Unexpected artifact member count')
-        names = set()
-        total = 0
-        for item in members:
-            name = safe_name(item.filename)
-            mode = (item.external_attr >> 16) & 0o170000
-            require(name not in names and mode in (0, 0o100000) and not item.is_dir()
-                    and 0 < item.file_size <= MAX_FILE_BYTES, 'Unsafe artifact archive member')
-            names.add(name)
-            total += item.file_size
-            require(total <= MAX_BYTES, 'Expanded artifact archive exceeds limit')
-            with archive.open(item) as source, (destination / name).open('xb') as output:
-                copied = 0
-                while block := source.read(65536):
-                    copied += len(block)
-                    require(copied <= item.file_size, 'Archive member exceeds seal')
-                    output.write(block)
-                require(copied == item.file_size, 'Truncated artifact member')
+    try:
+        with zipfile.ZipFile(raw) as archive:
+            members = archive.infolist()
+            require(1 <= len(members) <= 17, 'Unexpected artifact member count')
+            names = set()
+            total = 0
+            for item in members:
+                name = safe_name(item.filename)
+                mode = (item.external_attr >> 16) & 0o170000
+                # Actions archives store or deflate; never ask for passwords or other codecs.
+                require(name not in names and mode in (0, 0o100000) and not item.is_dir()
+                        and item.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+                        and not item.flag_bits & 0x1
+                        and 0 < item.file_size <= MAX_FILE_BYTES, 'Unsafe artifact archive member')
+                names.add(name)
+                total += item.file_size
+                require(total <= MAX_BYTES, 'Expanded artifact archive exceeds limit')
+                with archive.open(item) as source, (destination / name).open('xb') as output:
+                    copied = 0
+                    while block := source.read(65536):
+                        copied += len(block)
+                        require(copied <= item.file_size, 'Archive member exceeds seal')
+                        output.write(block)
+                    require(copied == item.file_size, 'Truncated artifact member')
+    except (zipfile.BadZipFile, zlib.error, EOFError):
+        # Truncated or corrupt compressed data fails like any other unsafe archive.
+        raise ValueError('Invalid artifact archive') from None
 
 
 class DevGitHub(GitHub):

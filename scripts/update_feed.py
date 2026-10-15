@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import datetime as dt
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
+import zlib
 
 REPOSITORY = 'ufna/zerus'
 ORIGIN = 'https://zerus.dev'
@@ -21,6 +24,10 @@ HEX40 = re.compile(r'[a-f0-9]{40}\Z')
 HEX64 = re.compile(r'[a-f0-9]{64}\Z')
 ASSET_LIMIT = 512*1024*1024
 RELEASE_LIMIT = 2*1024*1024*1024
+# Validation, archive and transport errors. Entry points report them with a fixed
+# line only: their text can carry signed CDN URLs or credential context.
+MIRROR_FAILURES = (ValueError, OSError, KeyError, TypeError, UnicodeError, EOFError, zlib.error,
+                   zipfile.BadZipFile, tarfile.TarError, http.client.HTTPException)
 
 
 def require(value, message):
@@ -86,14 +93,14 @@ class GitHub:
                 require(download or accept=='application/octet-stream','Unexpected API redirect')
                 api=False;self.asset_origin(url);accept='application/octet-stream'
                 continue
-            except (OSError,urllib.error.URLError):raise ValueError('GitHub transport unavailable') from None
+            except (OSError,urllib.error.URLError,http.client.HTTPException):raise ValueError('GitHub transport unavailable') from None
             with response:
                 length=response.headers.get('Content-Length')
                 require(length is None or length.isdecimal() and int(length)<=limit,'Upstream body exceeds limit')
                 total=0
                 while True:
                     try:block=response.read(65536)
-                    except OSError:raise ValueError('GitHub transport interrupted') from None
+                    except (OSError,http.client.HTTPException):raise ValueError('GitHub transport interrupted') from None
                     if not block:break
                     total+=len(block);require(total<=limit,'Upstream body exceeds limit')
                     yield block
@@ -177,23 +184,27 @@ def checksums(raw):
 def aur_versions(path):
     """Read bounded .SRCINFO data; never extract or execute package recipes."""
     versions={};seen=set();size=0
-    with tarfile.open(path,'r:gz') as archive:
-        for index,member in enumerate(archive):
-            require(index<32 and member.isfile() and member.size<=256*1024,'Unsafe AUR metadata member')
-            match=re.fullmatch(r'aur/(zerus(?:-git|-ade-bin|-ade-nightly-bin)?)/(PKGBUILD|\.SRCINFO)',member.name)
-            require(match and member.name not in seen,'Unexpected/duplicate AUR metadata path')
-            seen.add(member.name);size+=member.size;require(size<=2*1024*1024,'AUR metadata exceeds bounds')
-            if match[2]!='.SRCINFO':continue
-            content=archive.extractfile(member).read().decode('utf-8');fields={}
-            for line in content.splitlines():
-                key,sep,value=line.strip().partition(' = ')
-                if sep and key in {'pkgbase','pkgname','pkgver','pkgrel','epoch'}:
-                    require(key not in fields,'Duplicate package identity field');fields[key]=value
-            require(fields.get('pkgbase')==match[1] and fields.get('pkgname')==match[1],'AUR package identity mismatch')
-            version=fields.get('pkgver','');rel=fields.get('pkgrel','');epoch=fields.get('epoch')
-            require(re.fullmatch(r'[0-9][A-Za-z0-9.+_~:-]{0,119}',version) and re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',rel),'Invalid actual package version')
-            require(epoch is None or re.fullmatch(r'[0-9]+',epoch),'Invalid package epoch')
-            versions[match[1]]=(epoch+':' if epoch else '')+version+'-'+rel
+    try:
+        with tarfile.open(path,'r:gz') as archive:
+            for index,member in enumerate(archive):
+                require(index<32 and member.isfile() and member.size<=256*1024,'Unsafe AUR metadata member')
+                match=re.fullmatch(r'aur/(zerus(?:-git|-ade-bin|-ade-nightly-bin)?)/(PKGBUILD|\.SRCINFO)',member.name)
+                require(match and member.name not in seen,'Unexpected/duplicate AUR metadata path')
+                seen.add(member.name);size+=member.size;require(size<=2*1024*1024,'AUR metadata exceeds bounds')
+                if match[2]!='.SRCINFO':continue
+                content=archive.extractfile(member).read().decode('utf-8');fields={}
+                for line in content.splitlines():
+                    key,sep,value=line.strip().partition(' = ')
+                    if sep and key in {'pkgbase','pkgname','pkgver','pkgrel','epoch'}:
+                        require(key not in fields,'Duplicate package identity field');fields[key]=value
+                require(fields.get('pkgbase')==match[1] and fields.get('pkgname')==match[1],'AUR package identity mismatch')
+                version=fields.get('pkgver','');rel=fields.get('pkgrel','');epoch=fields.get('epoch')
+                require(re.fullmatch(r'[0-9][A-Za-z0-9.+_~:-]{0,119}',version) and re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',rel),'Invalid actual package version')
+                require(epoch is None or re.fullmatch(r'[0-9]+',epoch),'Invalid package epoch')
+                versions[match[1]]=(epoch+':' if epoch else '')+version+'-'+rel
+    except (tarfile.TarError,EOFError,zlib.error):
+        # A truncated or corrupt sealed archive fails like other invalid metadata.
+        raise ValueError('Invalid AUR metadata archive') from None
     require(bool(versions),'Missing actual package versions')
     return versions
 

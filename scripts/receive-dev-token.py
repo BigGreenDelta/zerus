@@ -6,10 +6,15 @@ from importlib.util import module_from_spec, spec_from_file_location
 import json
 from pathlib import Path
 import sys
-import zipfile
+
+if sys.version_info < (3, 11):
+    # Checked before the mirror modules load. Exit 1: retrying cannot help, and
+    # only exit 75 asks Publish Dev to retry.
+    print('Dev publication requires Python 3.11 or newer; previous catalogs retained', file=sys.stderr)
+    raise SystemExit(1)
 
 from dev_updates import DevGitHub, identity
-from update_feed import REPOSITORY, private_root, require
+from update_feed import MIRROR_FAILURES, REPOSITORY, private_root, require
 
 
 def publisher():
@@ -54,9 +59,15 @@ def main():
     except BlockingIOError:
         print('Mirror busy; retry the same verified CI run', file=sys.stderr)
         return 75
-    except (ValueError, OSError, KeyError, TypeError, UnicodeError, zipfile.BadZipFile):
+    except MIRROR_FAILURES:
         # A job token or signed CDN URL must never enter publication logs.
         print('Dev publication validation or transport failed; previous catalogs retained', file=sys.stderr)
+        return 1
+    except Exception as error:
+        # Publish Dev logs are public: defects report only their class name.
+        # Exit 1 like any failure; only a busy mirror (75) is retried.
+        print(f'Dev publication failed unexpectedly ({type(error).__name__}); previous catalogs retained',
+              file=sys.stderr)
         return 1
 
 

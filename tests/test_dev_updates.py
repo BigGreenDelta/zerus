@@ -4,15 +4,19 @@ import contextlib
 import datetime as dt
 import importlib.util
 import hashlib
+import http.client
 import io
 import json
 from pathlib import Path
 import shutil
+import struct
 import sys
+import tarfile
 import tempfile
 import unittest
 import urllib.error
 import zipfile
+import zlib
 from email.message import Message
 from unittest.mock import patch
 
@@ -27,6 +31,9 @@ spec.loader.exec_module(publisher)
 
 COMMIT = 'a' * 40
 NOW = dt.datetime(2026, 10, 11, tzinfo=dt.timezone.utc)
+TOKEN = 'fixture-ephemeral-read-token'
+DEV_FAILED = 'Dev mirror validation or transport failed; previous catalogs retained\n'
+RECEIVER_FAILED = 'Dev publication validation or transport failed; previous catalogs retained\n'
 
 
 def run(number=1):
@@ -56,6 +63,33 @@ def candidate(base, platform='desktop', number=1):
     sealed = base / f'candidate-{platform}-{number}'
     info = dev.seal(source, sealed, platform, number+100, number, COMMIT, NOW.isoformat(), apk)
     return info, sealed
+
+
+def actions_archive(source, damage=None, compression=zipfile.ZIP_DEFLATED):
+    """The candidate as an Actions ZIP; damage rewrites the first member's compressed bytes."""
+    raw = io.BytesIO()
+    with zipfile.ZipFile(raw, 'w', compression) as output:
+        for path in sorted(source.iterdir()):
+            output.write(path, path.name)
+    data = raw.getvalue()
+    if damage:
+        item = zipfile.ZipFile(io.BytesIO(data)).infolist()[0]
+        name, extra = struct.unpack('<HH', data[item.header_offset+26:item.header_offset+30])
+        start = item.header_offset + 30 + name + extra
+        data = data[:start] + damage(data[start:start+item.compress_size]) + data[start+item.compress_size:]
+    return data
+
+
+class Interrupted(io.BytesIO):
+    """A response that fails mid-body, as a dropped HTTP/1.1 connection does."""
+    headers = {}
+    def read(self, size=-1):
+        raise http.client.IncompleteRead(b'partial body', 65536)
+
+
+def interrupted(client):
+    client.opener = type('Opener', (), {'open': lambda self, request, timeout: Interrupted()})()
+    return client
 
 
 class FakeGitHub:
@@ -477,6 +511,110 @@ class DevUpdateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 client.candidate(retry, 'desktop', Path(temp))
             self.assertEqual(list(Path(temp).iterdir()), [])
+
+
+class EntryPointFailureTests(unittest.TestCase):
+    """Mirror and public Publish Dev logs carry one fixed line, never exception text or a traceback."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.root = self.base / 'mirror'
+        self.client = FakeGitHub(self.base)
+        self.client.api = lambda path: self.client.run
+    def tearDown(self):
+        self.temp.cleanup()
+    def run_main(self, main, argv, request=b''):
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(sys, 'argv', argv), patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(request))), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main()
+        return code, out.getvalue(), err.getvalue()
+    def publish(self, client=None, **failures):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(publisher.mirror, 'token', return_value=TOKEN))
+            stack.enter_context(patch.object(publisher, 'DevGitHub', return_value=client or self.client))
+            for name, error in failures.items():
+                stack.enter_context(patch.object(publisher, name, side_effect=error))
+            return self.run_main(publisher.main, ['publisher', '--root', str(self.root), '--platform', 'desktop'])
+    def receive(self, client=None, **failures):
+        request = json.dumps({'runId': 101, 'token': TOKEN}).encode()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(receiver, 'DevGitHub', return_value=client or self.client))
+            for name, error in failures.items():
+                stack.enter_context(patch.object(receiver, name, side_effect=error))
+            return self.run_main(receiver.main, ['receiver', '--root', str(self.root)], request)
+    def test_interrupted_github_body_reports_the_fixed_line(self):
+        self.assertEqual(self.publish(interrupted(dev.DevGitHub(TOKEN))), (1, '', DEV_FAILED))
+        self.assertEqual(self.receive(interrupted(dev.DevGitHub(TOKEN))), (1, '', RECEIVER_FAILED))
+        self.assertFalse(self.root.exists())
+    def test_corrupt_or_truncated_actions_archive_reports_the_fixed_line(self):
+        valid = actions_archive(self.client.path)
+        for kind, data in (('invalid deflate', actions_archive(self.client.path, lambda raw: b'\xff' * len(raw))),
+                           ('truncated', valid[:len(valid)//2])):
+            with self.subTest(kind=kind):
+                shutil.rmtree(self.root, ignore_errors=True)
+                # The GitHub digest matches these bytes; only reading the archive fails.
+                self.client.candidate = lambda selected, platform, root: dev.unpack(data, root)
+                self.assertEqual(self.publish(), (1, '', DEV_FAILED))
+                self.assertFalse(self.root.exists())
+                self.assertEqual(self.receive(), (1, '', RECEIVER_FAILED))
+                self.assertEqual([p.name for p in self.root.iterdir()], ['.mirror.lock'])
+                with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(ValueError, 'Invalid artifact archive'):
+                    dev.unpack(data, Path(temp))
+        with tempfile.TemporaryDirectory() as temp:
+            dev.unpack(valid, Path(temp))
+            self.assertEqual(sorted(p.name for p in Path(temp).iterdir()), sorted(p.name for p in self.client.path.iterdir()))
+    def test_unpack_refuses_encrypted_and_unexpected_codec_members(self):
+        def encrypted(data):
+            # Set the encryption flag in the central directory, which zipfile consults.
+            central = data.index(b'PK\x01\x02')
+            flags = struct.unpack('<H', data[central+8:central+10])[0] | 0x1
+            return data[:central+8] + struct.pack('<H', flags) + data[central+10:]
+        for kind, data in (('encrypted', encrypted(actions_archive(self.client.path))),
+                           ('bzip2', actions_archive(self.client.path, compression=zipfile.ZIP_BZIP2))):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                with self.assertRaisesRegex(ValueError, 'Unsafe artifact archive member'):
+                    dev.unpack(data, Path(temp))
+                self.assertEqual(list(Path(temp).iterdir()), [])
+    def test_every_transport_and_archive_error_class_reports_the_fixed_line(self):
+        detail = 'https://productionresultssa10.blob.core.windows.net/signed?sig=fixture-private-detail'
+        for error in (http.client.IncompleteRead(detail.encode(), 1), http.client.BadStatusLine(detail),
+                      tarfile.ReadError(detail), EOFError(detail), zlib.error(detail), ValueError(detail)):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(self.publish(synchronize=error), (1, '', DEV_FAILED))
+                self.assertEqual(self.receive(receive=error), (1, '', RECEIVER_FAILED))
+    def test_busy_mirror_still_asks_publish_dev_to_retry(self):
+        import fcntl
+        self.root.mkdir()
+        with (self.root / '.mirror.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.receive(), (75, '', 'Mirror busy; retry the same verified CI run\n'))
+    def test_unexpected_defect_reports_only_its_class_and_interrupts_still_propagate(self):
+        error = RuntimeError('fixture-private-detail ' + TOKEN)
+        self.assertEqual(self.publish(synchronize=error),
+                         (1, '', 'Dev mirror failed unexpectedly (RuntimeError); previous catalogs retained\n'))
+        # Exit 1, not 75: Publish Dev retries only a busy mirror.
+        self.assertEqual(self.receive(receive=error),
+                         (1, '', 'Dev publication failed unexpectedly (RuntimeError); previous catalogs retained\n'))
+        for interrupt in (KeyboardInterrupt(), SystemExit(3)):
+            with self.subTest(interrupt=type(interrupt).__name__):
+                with self.assertRaises(type(interrupt)):
+                    self.publish(synchronize=interrupt)
+                with self.assertRaises(type(interrupt)):
+                    self.receive(receive=interrupt)
+    def test_python_older_than_311_is_refused_before_mirror_modules_load(self):
+        scripts = Path(dev.__file__).parent
+        for name, message in (('publish-dev-feed.py', 'Dev mirror requires Python 3.11 or newer'),
+                              ('receive-dev-token.py', 'Dev publication requires Python 3.11 or newer')):
+            out, err = io.StringIO(), io.StringIO()
+            check = importlib.util.spec_from_file_location('old_python_' + name[:-3].replace('-', '_'), scripts / name)
+            with self.subTest(script=name), patch.object(sys, 'version_info', (3, 10, 14, 'final', 0)), \
+                 patch.dict(sys.modules, {'update_feed': None, 'dev_updates': None}), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                 self.assertRaises(SystemExit) as refused:
+                check.loader.exec_module(importlib.util.module_from_spec(check))
+            self.assertEqual((refused.exception.code, out.getvalue(), err.getvalue()),
+                             (1, '', message + '; previous catalogs retained\n'))
 
 
 if __name__ == '__main__':

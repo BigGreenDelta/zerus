@@ -412,6 +412,13 @@ runtime deadline should bound the entire job; each network socket has a 30-secon
 timeout. A fifteen-minute timer leaves additional anonymous API headroom. Failed jobs retain the old catalog;
 there is no automatic deletion of immutable historical assets.
 
+`publish-update-feed.py`, `publish-dev-feed.py` and `receive-dev-token.py`
+refuse Python older than 3.11 and report every failure on standard error as one
+fixed line, never as exception text or a traceback. Validation, archive and
+transport failures share each script's `... failed; previous catalogs retained`
+line; an unexpected defect names only its exception class. Failures exit 1,
+except that the receiver exits 75 for a busy mirror, which `Publish Dev` retries.
+
 Public releases can be read anonymously. For larger catalogs, optionally supply
 a read-only GitHub credential using `GITHUB_TOKEN_FILE` (a systemd credential
 path), `GH_TOKEN` or `GITHUB_TOKEN`. Only `api.github.com` requests receive it;
