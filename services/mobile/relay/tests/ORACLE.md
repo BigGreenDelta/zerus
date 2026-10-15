@@ -28,8 +28,8 @@ Totals: 26 tests in `test_relay.py`, 21 in `test_relay_peers.py`, 27 in
 `test_rust_relay.py`'s own, 13 in relay classes of other modules, 16
 `validate_request` call sites, 1 in `test_vectors.py`, 2 in `test_relay_cli.py`
 and 10 served through the fixture fallback or the `test_rust_relay.py` store.
-Of these, 11 are dropped; every other one has a passing Rust contract, a
-black-box test or an R3 or P3 owner as listed.
+Of these, 9 are dropped outright; every other one has a passing Rust
+contract, a black-box test or an R3 or P3 owner as listed.
 
 ## `test_relay.py`
 
@@ -42,12 +42,12 @@ no Rust replacement before this slice.
 | `RelayTests.test_health_capabilities_and_local_only_administration` | `http_contracts::health_capabilities_and_administration_stay_off_the_api` | Rust, R3 |
 | `RelayTests.test_pair_once_and_expiry_and_hash_storage` | `http_contracts::pairing_is_single_use_expires_and_keeps_only_hashes`, `contracts::scoped_pairing_and_rates` | Rust, R3 |
 | `RelayTests.test_pair_rate_limit` | `contracts::scoped_pairing_and_rates`, `http_contracts::an_untrusted_peer_cannot_rotate_forwarding_headers` | Rust, R3 |
-| `RelayTests.test_failed_authentication_rate_limit` | `contracts::http_rate_and_lane_refusals_are_answered_after_bounded_drain` (the login limit), `http_contracts::anonymous_abuse_keeps_authenticated_and_health_access` | Rust, R3 |
+| `RelayTests.test_failed_authentication_rate_limit` | `operation_contracts::terminal_frames_fit_each_credentials_rate_budget` (20 refusals, then 429), `contracts::http_rate_and_lane_refusals_are_answered_after_bounded_drain`, `http_contracts::anonymous_abuse_keeps_authenticated_and_health_access` | Rust, R3 |
 | `RelayTests.test_workspace_and_role_isolation` | `http_contracts::credentials_are_scoped_to_their_role_and_workspace`, `contracts::scoped_pairing_and_rates` | Rust, R3 |
 | `RelayTests.test_durable_claim_duplicate_result_and_owner` | `contracts::claims_and_receipts_never_replay` | Rust, R3 |
 | `RelayTests.test_single_claim_and_request_validation` | `contracts::claims_and_receipts_never_replay`; the invalid envelopes: `operation_contracts::queue_settings_recovery_and_process_controls_are_exact_and_gated` and P3 | Rust, R3 |
 | `RelayTests.test_expiry_restart_and_late_result` | `contracts::expired_claims_and_revocation_are_terminal`, `contracts::restart_retires_claims_only_on_sqlite`, `contracts::budgets_reserve_results_and_release_on_expiry` | Rust, R3 |
-| `RelayTests.test_queue_limit_retention_tombstones` | `contracts::budgets_reserve_results_and_release_on_expiry` (queue limit), `contracts::claims_and_receipts_never_replay` (tombstone after retention) | Rust, R3 |
+| `RelayTests.test_queue_limit_retention_tombstones` | `contracts::budgets_reserve_results_and_release_on_expiry` (queue limit), `operation_contracts::expired_mutation_history_leaves_a_tombstone_that_never_replays`, `contracts::claims_and_receipts_never_replay` (tombstone after retention) | Rust, R3 |
 | `RelayTests.test_claim_timeout_and_revoke` | `contracts::expired_claims_and_revocation_are_terminal`, `operation_contracts::node_revocation_charges_errors_and_releases_reservations_exactly` | Rust, R3 |
 | `RelayTests.test_device_logout_revokes_token_and_cancels_queue` | `http_contracts::credentials_are_scoped_to_their_role_and_workspace` | Rust, R3 |
 | `RelayTests.test_old_read_history_does_not_consume_mutation_tombstones` | `operation_contracts::reads_leave_after_an_hour_and_mutations_keep_their_receipts` | Rust, R3 |
@@ -62,7 +62,7 @@ no Rust replacement before this slice.
 | `RelayTests.test_push_retries_are_bounded_and_provider_gone_removes_registration` | `push_contracts::retries_are_bounded_and_an_unregistered_token_is_removed`, `push_contracts::fcm_messages_carry_only_generic_string_data` (the provider's unregistered answer) | Rust |
 | `RelayTests.test_retired_unifiedpush_registration_is_removed_on_delivery` | `contracts::retired_unifiedpush_registration_is_removed_on_delivery`; its wake job leaves too: `http_contracts::background_maintenance_and_wakes_resume_after_failures` | Rust |
 | `RelayTests.test_fcm_sdk_message_is_generic_data_only` | `push_contracts::fcm_messages_carry_only_generic_string_data` (`push::fcm_message` and `push::fcm_unregistered`, extracted from the delivery path for this) | Rust |
-| `RelayTests.test_mark_read_is_exact_and_capability_gated` | `contracts::mark_read_payload_is_exact_and_capability_gated` | Rust, R3 |
+| `RelayTests.test_mark_read_is_exact_and_capability_gated` | `contracts::mark_read_payload_is_exact_and_capability_gated`; the declared operation set: `operation_contracts::context_commands_are_gated_per_operation_and_protocol_version` | Rust, R3 |
 | `RelayTests.test_set_mobile_delivery_request_validation` | `contracts::mobile_delivery_is_computer_scoped_and_capability_gated` | Rust, R3 |
 | `FilesystemTests.test_private_database_and_no_parent_chmod` | `private_files::the_sqlite_store_is_private_and_never_changes_its_parent` (R5 deletes it with SQLite), `private_files::the_configuration_is_an_owner_only_regular_file` (the private file that remains) | Rust |
 
@@ -126,7 +126,7 @@ R3 rewrites this module; its 21 borrowed `RelayTests` are mapped above.
 | `test_idle_polls_leave_ordinary_authenticated_admission_free` | `http_contracts::idle_polls_leave_ordinary_authenticated_admission_free` | Rust |
 | `test_readiness_flood_coalesces_database_probes` | `http_contracts::readiness_probes_coalesce_while_the_database_is_held` | Rust |
 | `test_cancelled_poll_keeps_slot_until_durable_cleanup_finishes` | `http_contracts::a_cancelled_poll_keeps_its_slot_until_durable_cleanup_finishes` | Rust |
-| `test_byte_parser_preserves_stdlib_json_semantics` | Python's own byte parser against `json.loads`. The Rust relay decodes with serde_json under the same bounds: `codec::goldens_match_python`, `codec::python_default_form_matches_cpython`, `contracts::python_float_and_unicode_differential`; non-finite numbers: `http_contracts::cursors_waits_and_routing_flags_are_strict` | Dropped (parser), Rust (semantics) |
+| `test_byte_parser_preserves_stdlib_json_semantics` | Python's own byte parser against `json.loads`. The Rust relay decodes with serde_json under the same bounds; the same accepted and refused bodies: `codec::bodies_parse_as_python_json_loads_does` (lone surrogates differ, below), `codec::goldens_match_python`, `codec::python_default_form_matches_cpython`, `contracts::python_float_and_unicode_differential`; non-finite numbers: `http_contracts::cursors_waits_and_routing_flags_are_strict` | Dropped (parser), Rust (semantics) |
 | `test_wide_json_tokens_and_aggregate_are_bounded_before_decoding` | The bounds: `codec::parse_limits_count_containers_strings_and_scalars`, `codec::a_request_at_the_relay_maximum_needs_the_batch_margins`; "before `json.loads` runs" is Python's decoder memory | Rust (bounds), Dropped (decoder) |
 | `test_parser_releases_input_immediately_with_cyclic_gc_disabled` | CPython reference cycles and garbage collection | Dropped |
 | `test_worker_error_releases_input_without_cyclic_collection` | CPython reference cycles and garbage collection | Dropped |
@@ -137,8 +137,8 @@ R3 rewrites this module; its 21 borrowed `RelayTests` are mapped above.
 
 | Python test | Replacement | Status |
 |---|---|---|
-| `NotificationTests.test_unrelated_notifications_do_not_spin_idle_topic` | Python's per-topic `Notifications` registry. Rust polls share one bounded broadcast channel, skip other topics in `App::wait` and reread durably every five seconds; a notification is only a hint. | Dropped |
-| `NotificationTests.test_new_waiters_do_not_reuse_signalled_event` | The same registry's event objects | Dropped |
+| `NotificationTests.test_unrelated_notifications_do_not_spin_idle_topic` | Python's per-topic `Notifications` registry. Rust polls share one bounded broadcast channel, skip other topics in `App::wait` and reread durably every five seconds; a notification is only a hint. What a poll sees: `http_contracts::long_polls_wake_promptly_and_only_for_their_own_news` | Dropped (registry), Rust (wakes) |
+| `NotificationTests.test_new_waiters_do_not_reuse_signalled_event` | The same registry's event objects; a poll that starts after earlier news: `http_contracts::long_polls_wake_promptly_and_only_for_their_own_news` | Dropped (registry), Rust (wakes) |
 | `NotificationTests.test_idle_topic_cardinality_is_bounded` | The same registry's topic table; Rust keeps no per-topic state | Dropped |
 | `SQLiteResourceTests.test_cancellation_drains_worker_and_retains_capacity` | Python's `SyncStoreAdapter` worker threads and slots. Rust uses SQLx's pool and RAII transaction permits (`db.rs`). | Dropped |
 | `SQLiteResourceTests.test_worker_failures_release_payload_without_cyclic_gc` | CPython garbage collection | Dropped |
@@ -162,7 +162,7 @@ The connector classes of these modules stay until the Python connector goes
 | `test_mobile_context.ContextRelayTests.test_node_declares_each_operation_and_protocol_explicitly` | `operation_contracts::context_commands_are_gated_per_operation_and_protocol_version` | Rust |
 | `test_mobile_context.ContextRelayTests.test_relay_rejects_extra_archive_invalid_identity_and_compaction_id` | `operation_contracts::context_payloads_are_exact` | Rust |
 | `test_mobile_controls.CoreRelayTests.test_extension_caps_old_clients_and_read_retention` | `operation_contracts::inspection_and_send_extensions_need_their_advertised_features`, `operation_contracts::reads_leave_after_an_hour_and_mutations_keep_their_receipts`; its `validate_request` calls: P3 | Rust, P3 |
-| `test_mobile_terminal.TerminalRateBudget.test_four_frames_per_second_receipts_and_node_uplink_for_two_minutes` | `operation_contracts::terminal_frames_fit_each_credentials_rate_budget` | Rust |
+| `test_mobile_terminal.TerminalRateBudget.test_four_frames_per_second_receipts_and_node_uplink_for_two_minutes` | `operation_contracts::terminal_frames_fit_each_credentials_rate_budget`, over HTTP so the limits are the ones the relay applies | Rust |
 | `test_mobile_terminal.TerminalRetention.test_sustained_reads_and_abandoned_results_expire_without_mutation_eviction` | `operation_contracts::sustained_screens_and_abandoned_reads_expire_without_evicting_input`, `operation_contracts::terminal_input_needs_a_fresh_computer_and_expires_before_delivery`. Its Journal half is now `TerminalJournalRetention.test_sustained_screens_leave_the_journal_and_inputs_stay`, a connector test mapped in `BLACKBOX.md`. | Rust |
 
 `ContextConnectorTests` and `ContextFixtureTests` need no relay; their module
@@ -237,6 +237,12 @@ owner can decide whether any is a contract question:
 - Python's `RateLimits` also bounded authenticated requests globally and per
   IP address. Rust bounds them per credential (2,400 a minute) and by its
   admission lanes; the Terminal budget fits both.
+- A body holding a lone UTF-16 surrogate escape, such as `"\ud800"`, is
+  refused with 400 by Rust, whose strings must be valid Unicode
+  (`codec::bodies_parse_as_python_json_loads_does`). Python's `json.loads`
+  keeps it, so Python accepts it wherever it does not check the text, for
+  example in a heartbeat snapshot or in the answers of an `answer`, and
+  refuses it in checked text such as a send's.
 - Rust appends presence `alert` events beside ordinary events and queues wakes
   only for them; Python wakes phones on every ordinary event. The contracts
   that compare event lists skip `alert` rows. This is the reviewed presence

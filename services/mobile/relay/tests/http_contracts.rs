@@ -15,7 +15,7 @@ use zerus_relay::{
     http::App,
     json::digest,
     protocol::MIB,
-    store::Role,
+    store::{Role, Submission},
 };
 
 mod common;
@@ -275,6 +275,105 @@ async fn idle_polls_leave_ordinary_authenticated_admission_free() {
         .unwrap();
     assert_eq!(submitted.status(), 202);
     drop(polls);
+    server.stop().await;
+    f.close().await;
+}
+
+/// A long poll ends as soon as its own computer or workspace has news, well
+/// inside the five-second durable reread, and never early for another
+/// workspace's news, for news of its workspace that is not for it, or for
+/// news from before it started.
+#[tokio::test]
+async fn long_polls_wake_promptly_and_only_for_their_own_news() {
+    let f = Fixture::new().await;
+    let other = f
+        .store
+        .provision("Other workspace", "Other computer")
+        .await
+        .unwrap();
+    let paired = f
+        .store
+        .pair(s(&other, "pair_code"), "Other phone")
+        .await
+        .unwrap();
+    let (other_phone, other_node) = (
+        f.store
+            .authenticate(s(&paired, "device_token"), Role::Device)
+            .await
+            .unwrap(),
+        f.store
+            .authenticate(s(&other, "node_token"), Role::Node)
+            .await
+            .unwrap(),
+    );
+    let question = |phase: &str| json!({"sessions":[{"name":"codex/project/news","run_id":"r","conversation_id":"c","phase":phase,"attention_id":"q"}]});
+    let beat = |node: &zerus_relay::store::Credential, snapshot: Value| {
+        let store = f.store.clone();
+        let node = node.clone();
+        async move {
+            let encoded = zerus_relay::json::canonical(&snapshot).unwrap();
+            store
+                .heartbeat(&node, &json!({ "snapshot": snapshot }), &encoded)
+                .await
+                .unwrap();
+        }
+    };
+    // News from before the polls start: a request queued and claimed, and
+    // a heartbeat baseline.
+    let earlier = f.command("inspect");
+    f.submit(&earlier).await.unwrap();
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_some());
+    beat(&f.node, question("working")).await;
+    let server = Server::start(&f.store).await;
+    let client = Client::new();
+    let open = |path: &str, token: &str| {
+        tokio::spawn(client.get(server.at(path)).bearer_auth(token).send())
+    };
+    let node_poll = open("/v1/node/requests?wait=25", node(&f));
+    let phone_poll = open("/v1/events?wait=25", phone(&f));
+    assert!(eventually(|| async { leases(&f).await == 2 }).await);
+    // Another workspace's request and question.
+    let mut elsewhere = f.command("inspect");
+    elsewhere["computer_id"] = other["node_id"].clone();
+    f.store
+        .submit(&other_phone, &Submission::new(elsewhere).unwrap())
+        .await
+        .unwrap();
+    beat(&other_node, question("working")).await;
+    beat(&other_node, question("input")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!node_poll.is_finished() && !phone_poll.is_finished());
+    // A request for this computer ends its poll at once; the phone's poll
+    // has no event yet and keeps waiting.
+    let b = f.command("inspect");
+    let started = Instant::now();
+    f.submit(&b).await.unwrap();
+    let claimed: Value = node_poll.await.unwrap().unwrap().json().await.unwrap();
+    assert_eq!(claimed["requests"][0]["request_id"], b["request_id"]);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!phone_poll.is_finished());
+    // An event of this workspace ends the phone's poll at once.
+    let started = Instant::now();
+    beat(&f.node, question("input")).await;
+    let page: Value = phone_poll.await.unwrap().unwrap().json().await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    let kinds: Vec<_> = page["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] != "alert")
+        .map(|e| (e["computer_id"].clone(), e["kind"].clone()))
+        .collect();
+    assert_eq!(kinds, [(json!(f.node.id), json!("attention"))]);
     server.stop().await;
     f.close().await;
 }

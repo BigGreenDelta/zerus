@@ -16,7 +16,9 @@ use zerus_relay::{
 };
 
 mod common;
+mod support;
 use common::Fixture;
+use support::Server;
 
 const SESSION: &str = "codex/example/mobile";
 const ARCHIVE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -141,10 +143,23 @@ async fn receipt(f: &Fixture, b: &Value) -> Value {
 async fn context_commands_are_gated_per_operation_and_protocol_version() {
     let f = Fixture::new().await;
     let n = f.node.id.clone();
+    // The relay declares exactly the operations the Python connector
+    // advertises with every capability, as its golden vectors record them.
+    let vectors: Value =
+        serde_json::from_str(include_str!("../../vectors/operations.json")).unwrap();
+    let declared = protocol::capabilities(vec![])["operations"].clone();
+    let set = |v: &Value| -> std::collections::BTreeSet<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|op| op.as_str().unwrap().to_string())
+            .collect()
+    };
     assert_eq!(
-        protocol::capabilities(vec![])["operations"],
-        json!(protocol::OPERATIONS)
+        set(&declared),
+        set(&vectors["capabilities"]["all"]["operations"])
     );
+    assert_eq!(declared, json!(protocol::OPERATIONS));
     let compact = || command(&n, "compact_context", json!({}));
     let clear = || command(&n, "clear_context", json!({}));
     // A computer that advertises nothing, or other operations, gets neither.
@@ -457,6 +472,29 @@ async fn reads_leave_after_an_hour_and_mutations_keep_their_receipts() {
     f.close().await;
 }
 
+/// After the retention period a mutation keeps only its identity: the same
+/// request is answered with the bodiless receipt and is never delivered again.
+#[tokio::test]
+async fn expired_mutation_history_leaves_a_tombstone_that_never_replays() {
+    let f = Fixture::new().await;
+    let b = command(&f.node.id, "send", json!({"text":"Hello"}));
+    f.submit(&b).await.unwrap();
+    complete(&f, &b).await;
+    age(&f, "updated", &b, 8.0 * 86400.0).await;
+    f.store.maintain(false).await.unwrap();
+    let tombstone = f.submit(&b).await.unwrap();
+    assert_eq!(
+        (tombstone["state"].clone(), tombstone["result"].clone()),
+        (json!("completed"), Value::Null)
+    );
+    let mut changed = b.clone();
+    changed["session"] = json!("changed");
+    assert_eq!(status(&f, &changed).await, 409);
+    assert!(f.store.claim(&f.node, true).await.unwrap().is_none());
+    f.check_accounting().await;
+    f.close().await;
+}
+
 #[tokio::test]
 async fn read_quota_never_consumes_mutation_capacity() {
     let f = Fixture::new().await;
@@ -642,6 +680,8 @@ fn terminal_input_is_literal_bounded_and_keys_are_allowlisted() {
         text(json!("no enter"), json!(false)),
         text(json!(""), json!(true)),
         text(json!("x".repeat(65536)), json!(false)),
+        // The bound counts the text, not its larger escaped form.
+        text(json!("\"\\\t".repeat(21000)), json!(true)),
         key("Enter"),
         key("C-c"),
         key("BTab"),
@@ -659,9 +699,19 @@ fn terminal_input_is_literal_bounded_and_keys_are_allowlisted() {
         set(key("Enter"), "text", json!("also text")),
         set(key("Enter"), "terminal_binding_id", json!("A".repeat(64))),
         without(key("Enter"), "terminal_binding_id"),
+        set(
+            key("Enter"),
+            "archive_id",
+            json!(Uuid::new_v4().to_string()),
+        ),
+        set(key("Enter"), "action", json!("input")),
     ] {
         assert_eq!(wire(&b), 400, "{b}");
     }
+    // Only the relay sets the input window; a phone cannot.
+    let mut windowed = key("Enter");
+    windowed["expires_at"] = json!(1_900_000_000.0);
+    assert_eq!(wire(&windowed), 400);
 }
 
 #[tokio::test]
@@ -779,9 +829,19 @@ async fn archive_ids_are_exact_on_reads_and_refused_on_ordinary_mutations() {
             "{archive}"
         );
     }
-    for op in ["send", "answer", "interrupt"] {
-        let b = command(&n, op, json!({"text":"Hello","archive_id":ARCHIVE}));
-        assert_eq!(status(&f, &b).await, 400, "{op}");
+    // Each mutation is valid without the archive and refused with it.
+    for (op, extra) in [
+        ("send", json!({"text":"Hello"})),
+        (
+            "answer",
+            json!({"question_id":"q","expected_question_hash":"h","answers":{}}),
+        ),
+        ("interrupt", json!({"expected_turn_started":1.5})),
+    ] {
+        let b = command(&n, op, extra);
+        assert_eq!(wire(&b), 202, "{op}");
+        let archived = set(b, "archive_id", json!(ARCHIVE));
+        assert_eq!(status(&f, &archived).await, 400, "{op}");
     }
     assert_eq!(
         f.submit(&inspect(&n, json!({}))).await.unwrap()["state"],
@@ -1112,64 +1172,68 @@ async fn speech_and_management_status_belong_to_the_original_phone_and_computer(
     f.close().await;
 }
 
-async fn rate_count(f: &Fixture, key: &Value) -> i64 {
-    let row = f
+/// Sets a credential's request count in its open one-minute window.
+async fn spend(f: &Fixture, c: &Credential, count: i64) {
+    let key = json!([c.role.table(), c.workspace, c.id]);
+    let changed = f
         .store
         .db
-        .one(
-            "SELECT count FROM rate_limits WHERE key=?",
-            args![&digest(canonical(key).unwrap())],
+        .exec(
+            "UPDATE rate_limits SET count=? WHERE key=?",
+            args![count, &digest(canonical(&key).unwrap())],
         )
         .await
-        .unwrap()
         .unwrap();
-    i(&row, "count")
+    assert_eq!(changed, 1, "the window is open");
 }
 
+/// Over HTTP, so the limits are the ones the relay applies to each request.
 #[tokio::test]
 async fn terminal_frames_fit_each_credentials_rate_budget() {
     let f = Fixture::new().await;
-    let key = |c: &Credential| json!([c.role.table(), c.workspace, c.id]);
-    let (phone, node) = (key(&f.phone), key(&f.node));
-    // Four frames a second for the one-minute window: each frame is a phone
+    let server = Server::start(&f.store).await;
+    let client = reqwest::Client::new();
+    let (phone, node) = (
+        s(&f.paired, "device_token"),
+        s(&f.credentials, "node_token"),
+    );
+    let get = |path: &str, token: &str| {
+        let request = client.get(server.at(path)).bearer_auth(token).send();
+        async move { request.await.unwrap().status().as_u16() }
+    };
+    let (computers, claims) = ("/v1/computers", "/v1/node/requests");
+    // The first request opens each credential's one-minute window.
+    assert_eq!(get(computers, phone).await, 200);
+    assert_eq!(get(claims, node).await, 200);
+    // Four frames a second for the whole window: each frame is a phone
     // submission and three receipt reads, and a node claim and result.
-    for _ in 0..4 * 60 {
-        for _ in 0..4 {
-            f.store.rate(&phone, 2400, false).await.unwrap();
-        }
-        for _ in 0..2 {
-            f.store.rate(&node, 2400, false).await.unwrap();
-        }
+    spend(&f, &f.phone, 4 * 4 * 60 - 1).await;
+    assert_eq!(get(computers, phone).await, 200);
+    spend(&f, &f.node, 2 * 4 * 60 - 1).await;
+    assert_eq!(get(claims, node).await, 200);
+    // The budget is 2,400 requests a credential, with room to spare, and
+    // still a bound that leaves other credentials alone.
+    spend(&f, &f.phone, 2399).await;
+    assert_eq!(get(computers, phone).await, 200);
+    assert_eq!(get(computers, phone).await, 429);
+    assert_eq!(get(claims, node).await, 200);
+    // Failed logins and pairing keep their own, much smaller, bounds.
+    for _ in 0..20 {
+        assert_eq!(get(computers, "not-a-credential").await, 401);
     }
-    assert_eq!(
-        (rate_count(&f, &phone).await, rate_count(&f, &node).await),
-        (960, 480)
-    );
-    // The budget is per credential, with room to spare, and still a bound.
-    f.store
-        .db
-        .exec(
-            "UPDATE rate_limits SET count=2399 WHERE key=?",
-            args![&digest(canonical(&phone).unwrap())],
-        )
-        .await
-        .unwrap();
-    f.store.rate(&phone, 2400, false).await.unwrap();
-    assert_eq!(
-        f.store
-            .rate(&phone, 2400, false)
-            .await
-            .unwrap_err()
-            .0
-            .as_u16(),
-        429
-    );
-    f.store.rate(&node, 2400, false).await.unwrap();
-    // Pairing keeps its own, much smaller, anonymous bound.
-    let pairing = json!(["pair", "127.0.0.1"]);
+    assert_eq!(get(computers, "not-a-credential").await, 429);
+    let pair = || {
+        let request = client
+            .post(server.at("/v1/pair"))
+            .json(&json!({"code":"synthetic-invalid","device_name":"Synthetic phone"}))
+            .send();
+        async move { request.await.unwrap().status().as_u16() }
+    };
     for _ in 0..10 {
-        f.store.rate(&pairing, 10, true).await.unwrap();
+        assert_eq!(pair().await, 401);
     }
-    assert!(f.store.rate(&pairing, 10, true).await.is_err());
+    assert_eq!(pair().await, 429);
+    assert_eq!(get(claims, node).await, 200);
+    server.stop().await;
     f.close().await;
 }
