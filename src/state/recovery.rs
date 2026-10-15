@@ -793,6 +793,7 @@ fn worker() -> Result<i32> {
     let Some(owner) = service_worker::acquire(
         &worker_lock(),
         &standby_lock(),
+        lock_file,
         || SERVICE.is_current(),
         replaced,
         Duration::from_secs(1),

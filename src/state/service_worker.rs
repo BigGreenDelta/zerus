@@ -5,10 +5,11 @@
 //! be started again every few seconds, forever. It waits for the lock instead,
 //! holding a standby lock meanwhile, and any other worker gives way to it
 //! between rounds, so the service ends up owning the work.
-use super::{lock_file, Result};
+use super::Result;
 use crate::platform::FileLock;
 use fs2::FileExt;
 use std::{
+    fs::File,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -51,8 +52,8 @@ pub(super) fn waiting(standby: &Path) -> bool {
     crate::status::locked(standby)
 }
 
-fn take(path: &Path) -> Result<Option<FileLock>> {
-    let file = lock_file(path)?;
+fn take(open: &impl Fn(&Path) -> Result<File>, path: &Path) -> Result<Option<FileLock>> {
+    let file = open(path)?;
     Ok(file
         .try_lock_exclusive()
         .is_ok()
@@ -63,10 +64,12 @@ fn take(path: &Path) -> Result<Option<FileLock>> {
 /// the service's worker waits for the lock, or another worker holds it and
 /// this one is not the service's. The service's worker waits instead, polling
 /// every `poll`, until it holds the lock or its executable is `replaced`.
-/// `is_service` runs only when another worker holds the lock.
+/// `open` opens either lock file, so that each kind of worker keeps its own
+/// rules for them. `is_service` runs only when another worker holds the lock.
 pub(super) fn acquire(
     lock_path: &Path,
     standby_path: &Path,
+    open: impl Fn(&Path) -> Result<File>,
     is_service: impl FnOnce() -> bool,
     replaced: impl Fn() -> bool,
     poll: Duration,
@@ -76,7 +79,7 @@ pub(super) fn acquire(
     if waiting(standby_path) {
         return Ok(None);
     }
-    let lock = lock_file(lock_path)?;
+    let lock = open(lock_path)?;
     let owner = |lock, standby| Owner {
         _lock: FileLock::held(lock),
         standby,
@@ -97,7 +100,7 @@ pub(super) fn acquire(
         // A worker probing the standby lock at this instant only delays it;
         // without it the worker still waits, and is not started again.
         if standby.is_none() {
-            standby = take(standby_path).unwrap_or(None);
+            standby = take(&open, standby_path).unwrap_or(None);
         }
         if replaced() {
             return Ok(None);
@@ -180,7 +183,8 @@ fn current(_: &Service) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::File, time::Instant};
+    use crate::state::lock_file;
+    use std::time::Instant;
 
     #[test]
     fn systemd_unit_is_the_leaf_of_the_systemd_hierarchy() {
@@ -270,9 +274,16 @@ mod tests {
     #[test]
     fn free_lock_is_taken_without_asking_the_service_manager() {
         let f = fixture();
-        let owner = acquire(&f.lock, &f.standby, || panic!("not asked"), || false, POLL)
-            .unwrap()
-            .expect("free lock");
+        let owner = acquire(
+            &f.lock,
+            &f.standby,
+            lock_file,
+            || panic!("not asked"),
+            || false,
+            POLL,
+        )
+        .unwrap()
+        .expect("free lock");
         assert!(crate::status::locked(&f.lock));
         assert!(!owner.yields());
         // The service's worker starts waiting: this worker gives way between rounds.
@@ -292,6 +303,7 @@ mod tests {
         let owner = acquire(
             &f.lock,
             &f.standby,
+            lock_file,
             || {
                 asked = true;
                 false
@@ -309,7 +321,15 @@ mod tests {
     fn other_worker_leaves_the_free_lock_to_a_waiting_service_worker() {
         let f = fixture();
         let _service = hold(&f.standby);
-        let owner = acquire(&f.lock, &f.standby, || panic!("not asked"), || false, POLL).unwrap();
+        let owner = acquire(
+            &f.lock,
+            &f.standby,
+            lock_file,
+            || panic!("not asked"),
+            || false,
+            POLL,
+        )
+        .unwrap();
         assert!(owner.is_none());
         assert!(!crate::status::locked(&f.lock));
     }
@@ -319,7 +339,9 @@ mod tests {
         let f = fixture();
         let executor = hold(&f.lock);
         let (lock, standby) = (f.lock.clone(), f.standby.clone());
-        let waiter = std::thread::spawn(move || acquire(&lock, &standby, || true, || false, POLL));
+        let waiter = std::thread::spawn(move || {
+            acquire(&lock, &standby, lock_file, || true, || false, POLL)
+        });
         // While it waits it announces itself, and other workers give way to it.
         eventually(|| waiting(&f.standby));
         std::thread::sleep(POLL * 5);
@@ -348,6 +370,7 @@ mod tests {
                 acquire(
                     &f.lock,
                     &f.standby,
+                    lock_file,
                     || true,
                     || replaced.load(std::sync::atomic::Ordering::SeqCst),
                     POLL,
@@ -360,5 +383,40 @@ mod tests {
         // The service manager starts the new version, which waits in turn.
         assert!(!waiting(&f.standby));
         assert!(crate::status::locked(&f.lock));
+    }
+
+    #[test]
+    fn the_callers_opener_opens_both_lock_files() {
+        let f = fixture();
+        let executor = hold(&f.lock);
+        let opened = std::sync::Mutex::new(Vec::new());
+        let open = |path: &Path| {
+            opened.lock().unwrap().push(path.to_path_buf());
+            lock_file(path)
+        };
+        let owner = std::thread::scope(|scope| {
+            let waiter =
+                scope.spawn(|| acquire(&f.lock, &f.standby, open, || true, || false, POLL));
+            eventually(|| waiting(&f.standby));
+            drop(executor);
+            waiter.join().unwrap().unwrap()
+        });
+        assert!(owner.is_some());
+        assert_eq!(
+            opened.lock().unwrap()[..2],
+            [f.lock.clone(), f.standby.clone()]
+        );
+        drop(owner);
+        // A lock file the opener refuses ends the attempt with its error.
+        let refused = acquire(
+            &f.lock,
+            &f.standby,
+            |_| Err("refused".into()),
+            || panic!("not asked"),
+            || false,
+            POLL,
+        );
+        assert_eq!(refused.err().as_deref(), Some("refused"));
+        assert!(!crate::status::locked(&f.lock));
     }
 }
