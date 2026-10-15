@@ -46,12 +46,12 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.ci = (ROOT / ".github/workflows/ci.yml").read_text()
 
     def dev_selected(self, workflow, name, results, cancelled=False, event='push',
-                     ref='refs/heads/main', repository='ufna/zerus', enabled='true', private=False):
+                     ref='refs/heads/main', repository='ufna/zerus', enabled='true', private=False, macos='true'):
         expression = field(job(workflow, name), 'if')
         # Without a status function GitHub adds success() over the dependency
         # chain, including the deliberately skipped PR/manual branch on main.
         self.assertIn('!cancelled()', expression)
-        expression = expression.replace('&&', ' and ')
+        expression = expression.replace('&&', ' and ').replace('||', ' or ')
         expression = re.sub(r'!(?!=)', 'not ', expression)
         expression = re.sub(r'\bfalse\b', 'False', expression)
         # Job IDs such as dev-android are not Python identifiers.
@@ -60,14 +60,14 @@ class WorkflowSecurityTests(unittest.TestCase):
             'cancelled': lambda: cancelled,
             'github': SimpleNamespace(repository=repository, ref=ref, event_name=event,
                                       event=SimpleNamespace(repository=SimpleNamespace(private=private))),
-            'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled),
+            'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled, MACOS_CASKS_ENABLED=macos),
             'needs': {key: SimpleNamespace(result=value) for key,value in results.items()},
         }))
 
     def test_dev_requires_exact_main_gate_without_inheriting_skipped_review(self):
-        passed = {'gate':'success', 'automatic':'success', 'dev-android':'success', 'review':'skipped'}
+        passed = {'gate':'success', 'automatic':'success', 'dev-android':'success', 'dev-macos':'success', 'review':'skipped'}
         self.assertTrue(self.dev_selected(self.ci, 'dev', passed))
-        for key in ['gate','automatic','dev-android']:
+        for key in ['gate','automatic','dev-android','dev-macos']:
             for result in ['failure','cancelled','skipped']:
                 with self.subTest(key=key, result=result):
                     self.assertFalse(self.dev_selected(self.ci, 'dev', {**passed,key:result}))
@@ -76,6 +76,15 @@ class WorkflowSecurityTests(unittest.TestCase):
                           dict(enabled=''), dict(private=True)]:
             with self.subTest(overrides=overrides):
                 self.assertFalse(self.dev_selected(self.ci, 'dev', passed, **overrides))
+        self.assertTrue(self.dev_selected(self.ci, 'dev', {**passed,'dev-macos':'skipped'}, macos=''))
+        self.assertFalse(self.dev_selected(self.ci, 'dev', {**passed,'dev-macos':'failure'}, macos=''))
+        self.assertTrue(self.dev_selected(self.ci, 'dev-macos', passed))
+        for overrides in [dict(macos=''),dict(enabled=''),dict(event='pull_request'),dict(event='workflow_dispatch'),
+                          dict(ref='refs/heads/feature'),dict(repository='example/zerus'),dict(private=True),dict(cancelled=True)]:
+            self.assertFalse(self.dev_selected(self.ci, 'dev-macos', passed, **overrides))
+        for key in ['gate','automatic']:
+            for result in ['failure','cancelled','skipped']:
+                self.assertFalse(self.dev_selected(self.ci, 'dev-macos', {**passed,key:result}))
 
     def test_dev_reusable_jobs_preserve_status_and_candidate_success_checks(self):
         dev = (ROOT / '.github/workflows/dev.yml').read_text()
@@ -844,7 +853,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 for runner in re.findall(r'"((?:ubuntu|macos|windows)-[^"]+)"', text):
                     self.assertIn(runner, labels)
 
-    def test_dev_candidates_follow_the_whole_main_matrix_but_take_only_the_arch_package(self):
+    def test_dev_candidates_follow_the_whole_main_matrix_and_include_the_checked_mac_bundle(self):
         # Dev starts after the main gate, which selects every suite on a push,
         # Windows included: a Windows failure also holds back Dev.
         selected = dict(re.findall(r"(?m)^      (run_\w+): \$\{\{ (.*) \}\}$", job(self.ci, "automatic")))
@@ -853,12 +862,12 @@ class WorkflowSecurityTests(unittest.TestCase):
             with self.subTest(suite=name):
                 self.assertTrue(eval(expression.replace("||", " or "), {"__builtins__": {}}, {
                     "github": SimpleNamespace(event_name="push"), "inputs": SimpleNamespace(**{name: False})}))
-        self.assertIn("    needs: [gate, automatic, dev-android]\n", job(self.ci, "dev"))
+        self.assertIn("    needs: [gate, automatic, dev-android, dev-macos]\n", job(self.ci, "dev"))
         # The v2 Dev catalogs have no Windows artifact kind; the portable zip
         # stays a GitHub asset of stable and nightly releases.
         dev = (ROOT / ".github/workflows/dev.yml").read_text()
-        downloads = re.findall(r"uses: actions/download-artifact@\S+ # v[\d.]+\n        with:\n          name: (.+)", dev)
-        self.assertEqual(downloads, ["arch-x86_64-${{ github.sha }}"])
+        downloads = re.findall(r"uses: actions/download-artifact@\S+ # v[\d.]+\n(?:        if: inputs.macos\n)?        with:\n          name: (.+)", dev)
+        self.assertEqual(downloads, ["arch-x86_64-${{ github.sha }}", "macos-signed-${{ github.sha }}"])
         self.assertEqual(dev.count("actions/download-artifact@"), len(downloads))
         self.assertNotIn("windows-x86_64", dev)
 
@@ -1122,10 +1131,10 @@ class WorkflowSecurityTests(unittest.TestCase):
             self.assertNotIn("secrets.", job(text, name), name)
             self.assertNotIn("environment:", job(text, name), name)
         self.assertNotIn("environment: release", text)
-        for name in ("release.yml", "nightly.yml"):
+        for name in ("release.yml", "nightly.yml", "ci.yml"):
             workflow = (ROOT / ".github/workflows" / name).read_text()
             self.assertNotIn("secrets: inherit", workflow, name)
-            macos = job(workflow, "macos")
+            macos = job(workflow, "dev-macos" if name == "ci.yml" else "macos")
             forwarded = dict(re.findall(r"(?m)^      (\w+): \$\{\{ secrets\.(\w+) \}\}$", macos))
             self.assertEqual(forwarded, {secret: secret for secret in apple_secrets}, name)
             for secret in apple_secrets:
@@ -1176,9 +1185,14 @@ class WorkflowSecurityTests(unittest.TestCase):
         for workflow in (ROOT / ".github/workflows").glob("*.yml"):
             text = workflow.read_text()
             if "HOMEBREW_TAP_DEPLOY_KEY" in text:
-                self.assertIn(workflow.name, {"publish.yml", "publish-nightly.yml"})
-                self.assertRegex(job(text, "publish"), r"(?m)^    environment: release$")
-                self.assertIn("--tap-ssh-key", job(text, "publish"))
+                self.assertIn(workflow.name, {"publish.yml", "publish-nightly.yml", "publish-dev.yml"})
+                publish = job(text, "homebrew" if workflow.name == "publish-dev.yml" else "publish")
+                self.assertRegex(publish, r"(?m)^    environment: release$")
+                self.assertIn("--tap-ssh-key", publish)
+                if workflow.name == "publish-dev.yml":
+                    self.assertIn("    needs: publish\n", publish)
+                    self.assertIn("group: release-publication", publish)
+                    self.assertIn("persist-credentials: false", publish)
 
 if __name__ == "__main__":
     unittest.main()

@@ -118,6 +118,15 @@ class TestUpdates : public QObject {
     DesktopUpdateFeed nightlyCatalog(const QString &version) const {
         return UpdateController::parseFeed(QJsonDocument(nightlyRaw(version)).toJson(),"nightly");
     }
+    QJsonObject withMacos(QJsonObject value) const {
+        const QString version=value["versionName"].toString();
+        const QString prefix=value["channel"]=="dev"?QString("https://zerus.dev/downloads/dev-desktop-%1/").arg(value["buildId"].toInteger()):QString(value["releaseUrl"].toString()).replace("/tag/","/download/")+"/";
+        const QString archive="zerus-"+version+"-macos-arm64.zip",image="zerus-"+version+"-macos-arm64.dmg";
+        QJsonArray downloads;for(const auto &name:{archive,image})downloads.append(QJsonObject{{"name",name},{"url",prefix+name},{"size",100},{"sha256",QString(64,'a')}});
+        value["macos"]=QJsonObject{{"asset",archive},{"minimum_system_version","14.0"},{"qt_version","6.11.2"},{"team_id","ABCDE12345"},{"notarization_id","0123abcd-4567-89ef-0123-456789abcdef"},
+            {"dmg",QJsonObject{{"asset",image},{"notarization_id","1123abcd-4567-89ef-0123-456789abcdef"}}},{"downloads",downloads}};
+        return value;
+    }
     void tool(const QString &path,const QByteArray &script){QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write(script);file.close();QVERIFY(file.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));}
 private slots:
     void devVersionSequenceIsVisibleAndMatchesTheFeed(){
@@ -187,6 +196,9 @@ private slots:
         DesktopInstallation actual{"package","zerus-ade-bin","0.9.0-1"};
 #ifdef Q_OS_MACOS
         const QString cask="brew install --cask ufna/zerus/zerus";
+        QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains("No macOS build"));
+        QVERIFY(!UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains(cask));
+        catalog=UpdateController::parseFeed(QJsonDocument(withMacos(raw())).toJson(),"stable");
         QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains("unconfirmed"));
         QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.99.0",0,false).contains(cask));
         QVERIFY(UpdateController::comparisonMessage(unknown,catalog,"0.9.0",0,false).contains("Update available"));
@@ -296,22 +308,35 @@ private slots:
 #endif
     }
     void homebrewCaskOwnership(){
+#ifdef Q_OS_WIN
+        QSKIP("Homebrew ownership uses Unix symlinks; QFile::link creates shortcuts on Windows");
+#endif
         QTemporaryDir dir;QVERIFY(dir.isValid());const QString exe=dir.path()+"/Applications/Zerus.app/Contents/MacOS/hgs-tray";QVERIFY(QDir().mkpath(QFileInfo(exe).path()));
         const QString brew=dir.path()+"/brew",nightly="0.38.0.r812.gabcdef0.n41";
         auto owner=[&](const QString &path,const QStringList &prefixes){return UpdateController::homebrewInstallation(path,prefixes);};
         QCOMPARE(owner(exe,{brew}).kind,QString());
         QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/0.38.0"));QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/.metadata"));
+        // Merely having this cask installed must not claim another copy of the app.
+        QCOMPARE(owner(exe,{brew}).kind,QString());
+        QVERIFY(QFile::link(dir.path()+"/Applications/Zerus.app",brew+"/Caskroom/zerus/0.38.0/Zerus.app"));
         auto stable=owner(exe,{dir.path()+"/missing",brew});QCOMPARE(stable.kind,QString("homebrew-cask"));QCOMPARE(stable.package,QString("zerus"));QCOMPARE(stable.version,QString("0.38.0"));
         QCOMPARE(owner(dir.path()+"/Applications/hgs-tray.app/Contents/MacOS/hgs-tray",{brew}).kind,QString());
         QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/0.38.1"));QCOMPARE(owner(exe,{brew}).kind,QString());
         QVERIFY(QDir(brew+"/Caskroom/zerus").removeRecursively());
         QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus@nightly/"+nightly));
+        QVERIFY(QFile::link(dir.path()+"/Applications/Zerus.app",brew+"/Caskroom/zerus@nightly/"+nightly+"/Zerus.app"));
         auto daily=owner(exe,{brew});QCOMPARE(daily.kind,QString("homebrew-cask"));QCOMPARE(daily.package,QString("zerus@nightly"));QCOMPARE(daily.version,nightly);
         // Conflicting casks cannot both own the application; the owner stays unknown.
         QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/0.38.0"));QCOMPARE(owner(exe,{brew}).kind,QString());
         QVERIFY(QDir(brew+"/Caskroom/zerus").removeRecursively());QVERIFY(QDir().mkpath(brew+"/Caskroom/zerus/"+nightly));QCOMPARE(owner(exe,{brew}).kind,QString());
         QVERIFY(UpdateController::prefersNightly({"homebrew-cask","zerus@nightly",nightly}));QVERIFY(UpdateController::prefersNightly({"package","zerus-ade-nightly-bin","1"}));
         QVERIFY(!UpdateController::prefersNightly({"homebrew-cask","zerus","0.38.0"}));
+        QVERIFY(QDir(brew+"/Caskroom").removeRecursively());
+        const QString dev=brew+"/Caskroom/zerus@dev/0.39.0-dev.50";QVERIFY(QDir().mkpath(dev));
+        QVERIFY(QFile::link(dir.path()+"/Applications/Zerus.app",dev+"/Zerus.app"));
+        QCOMPARE(owner(exe,{brew}).package,QString("zerus@dev"));QCOMPARE(owner(exe,{brew}).version,QString("0.39.0-dev.50"));
+        QVERIFY(QDir().mkpath(dir.path()+"/Other/Zerus.app/Contents/MacOS"));
+        QCOMPARE(owner(dir.path()+"/Other/Zerus.app/Contents/MacOS/hgs-tray",{brew}).kind,QString());
     }
     void homebrewCaskInstructions(){
         const DesktopInstallation stable{"homebrew-cask","zerus","0.36.0"},nightly{"homebrew-cask","zerus@nightly","0.37.0.r60.gaaaaaaa.n7"};
@@ -319,31 +344,95 @@ private slots:
         QCOMPARE(UpdateController::updateCommand(nightly,"nightly"),QString("brew upgrade --cask zerus@nightly"));
         QCOMPARE(UpdateController::updateCommand(stable,"nightly"),QString("brew uninstall --cask zerus && brew install --cask ufna/zerus/zerus@nightly"));
         QCOMPARE(UpdateController::updateCommand(nightly,"stable"),QString("brew uninstall --cask zerus@nightly && brew install --cask ufna/zerus/zerus"));
-        QVERIFY(UpdateController::updateCommand(stable,"dev").isEmpty());
+        QCOMPARE(UpdateController::updateCommand(stable,"dev"),QString("brew uninstall --cask zerus && brew install --cask ufna/zerus/zerus@dev"));
         QVERIFY(UpdateController::updateCommand({"homebrew-cask","zerus; sudo command","0.36.0"}).isEmpty());
-        auto catalog=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");
+        auto catalog=UpdateController::parseFeed(QJsonDocument(withMacos(raw())).toJson(),"stable");
         QVERIFY(UpdateController::comparisonMessage(stable,catalog,"0.36.0",0,false).contains("brew upgrade --cask zerus"));
         auto current=stable;current.version="0.37.0";QVERIFY(UpdateController::comparisonMessage(current,catalog,"0.37.0",0,false).contains("at least as new"));
         QVERIFY(UpdateController::comparisonMessage(nightly,catalog,"0.37.0",0,false).contains("brew install --cask ufna/zerus/zerus"));
-        auto daily=nightlyCatalog("0.37.0.r61.gbbbbbbb.n8");QVERIFY(daily.valid);
+        auto daily=UpdateController::parseFeed(QJsonDocument(withMacos(nightlyRaw("0.37.0.r61.gbbbbbbb.n8"))).toJson(),"nightly");QVERIFY(daily.valid);
         QVERIFY(UpdateController::comparisonMessage(nightly,daily,"0.37.0",0,false).contains("brew upgrade --cask zerus@nightly"));
         auto newest=nightly;newest.version="0.37.0.r61.gbbbbbbb.n8";QVERIFY(UpdateController::comparisonMessage(newest,daily,"0.37.0",0,false).contains("at least as new"));
         QVERIFY(UpdateController::comparisonMessage(stable,daily,"0.37.0",0,false).contains("ufna/zerus/zerus@nightly"));
-        DesktopUpdateFeed dev;dev.valid=true;dev.buildNumber=50;dev.version="0.37.0 (dev 50)";
-        QVERIFY(UpdateController::comparisonMessage(stable,dev,"0.37.0",0,false).contains("zerus@nightly"));
+        auto dev=devRaw();dev["versionName"]="0.38.0-dev.50";
+        auto development=UpdateController::parseFeed(QJsonDocument(withMacos(dev)).toJson(),"dev");
+        QVERIFY(UpdateController::comparisonMessage(stable,development,"0.37.0",0,false).contains("zerus@dev"));
     }
     void installationGuidesNameTheirPackageManager(){
-        auto cask=UpdateController::installationGuide({"homebrew-cask","zerus@nightly","0.37.0.r60.gaaaaaaa.n7"},"nightly");
+        const auto feed=UpdateController::parseFeed(QJsonDocument(withMacos(nightlyRaw("0.37.0.r60.gaaaaaaa.n7"))).toJson(),"nightly");
+        auto cask=UpdateController::installationGuide({"homebrew-cask","zerus@nightly","0.37.0.r60.gaaaaaaa.n7"},"nightly",feed);
         QVERIFY(cask.ownership.contains("Homebrew cask: zerus@nightly"));QVERIFY(cask.ownership.contains("0.37.0.r60.gaaaaaaa.n7"));
         QCOMPARE(cask.command,QString("Homebrew: brew upgrade --cask zerus@nightly"));
         QVERIFY(!cask.command.contains("AUR"));QVERIFY(!cask.instructions.contains("AUR"));QVERIFY(cask.instructions.contains("Restart to finish update"));
-        auto dev=UpdateController::installationGuide({"homebrew-cask","zerus","0.37.0"},"dev");QVERIFY(dev.command.isEmpty());QVERIFY(dev.instructions.isEmpty());
+        auto dev=UpdateController::installationGuide({"homebrew-cask","zerus","0.37.0"},"dev");QVERIFY(dev.command.isEmpty());QVERIFY(dev.instructions.contains("Check for updates"));
         DesktopInstallation package{"package","zerus-ade-bin","0.36.2-1",true,"paru"};auto arch=UpdateController::installationGuide(package,"stable");
         QCOMPARE(arch.command,QString("Full system update: paru -Syu zerus-ade-bin"));QVERIFY(arch.ownership.contains("Arch-based"));QVERIFY(arch.instructions.contains("AUR helper"));
         DesktopInstallation local{"unknown",{},{},true,"yay"};auto optional=UpdateController::installationGuide(local,"stable");
         QCOMPARE(optional.command,QString("Optional AUR installation: yay -Syu zerus-ade-bin"));QCOMPARE(optional.copyName,QString("Copy optional installation command"));
         auto build=UpdateController::installationGuide({"source",{},{}},"stable");QVERIFY(build.command.isEmpty());QVERIFY(build.instructions.isEmpty());QVERIFY(build.ownership.contains("Git checkout"));
         auto portable=UpdateController::installationGuide({"portable",{},{}},"nightly");QVERIFY(portable.ownership.contains("Portable Windows build"));QVERIFY(portable.command.isEmpty());QVERIFY(portable.instructions.isEmpty());
+    }
+    void macosCatalogOriginsAndBuildSequences(){
+        auto dev=devRaw();dev["versionName"]="0.38.0-dev.50";
+        for(auto value:{withMacos(raw()),withMacos(nightlyRaw("0.37.0.r61.gbbbbbbb.n8")),withMacos(dev)}){
+            const auto channel=value["channel"].toString();
+            const auto feed=UpdateController::parseFeed(QJsonDocument(value).toJson(),channel);QVERIFY(feed.valid);
+            QVERIFY(feed.macosDmgUrl.endsWith("-macos-arm64.dmg"));
+            QCOMPARE(UpdateController::downloadUrl({"macos-bundle",{},"0.37.0"},feed,"macos"),QUrl(feed.macosDmgUrl));
+            QVERIFY(UpdateController::downloadUrl({"portable",{},{}},feed,"windows").isEmpty());
+            for(const auto &key:{"url","name","size","sha256"}){
+                auto bad=value;auto mac=bad["macos"].toObject();auto rows=mac["downloads"].toArray();auto row=rows[1].toObject();row[key]=QString("https://example.invalid/foreign.dmg");rows[1]=row;mac["downloads"]=rows;bad["macos"]=mac;
+                QVERIFY2(!UpdateController::parseFeed(QJsonDocument(bad).toJson(),channel).valid,key);
+            }
+        }
+        auto feed=UpdateController::parseFeed(QJsonDocument(withMacos(dev)).toJson(),"dev");
+        for(const auto &kind:{"homebrew-cask","macos-bundle"}){
+            DesktopInstallation installed{kind,"zerus@dev","0.38.0-dev.49"};
+            QVERIFY(UpdateController::macosUpdateAvailable(installed,feed));
+            installed.version="0.38.0-dev.50";QVERIFY(!UpdateController::macosUpdateAvailable(installed,feed));
+            installed.version="0.38.0-dev.51";QVERIFY(!UpdateController::macosUpdateAvailable(installed,feed));
+            installed.version="0.37.0";QVERIFY(!UpdateController::macosUpdateAvailable(installed,feed));
+        }
+        const DesktopInstallation manual{"macos-bundle",{},"0.38.0-dev.49"};
+        auto guide=UpdateController::installationGuide(manual,"dev",feed);
+        QVERIFY(guide.command.isEmpty());QVERIFY(guide.instructions.contains("DMG"));QVERIFY(guide.instructions.contains("Restart"));
+        const auto noMac=UpdateController::parseFeed(QJsonDocument(raw()).toJson(),"stable");
+        for(const auto &installation:{manual,DesktopInstallation{"homebrew-cask","zerus@dev","0.38.0-dev.49"}}){
+            QVERIFY(!UpdateController::macosUpdateAvailable(installation,noMac));
+            QVERIFY(UpdateController::downloadUrl(installation,noMac,"macos").isEmpty());
+            guide=UpdateController::installationGuide(installation,"stable",noMac);
+            QVERIFY(guide.command.isEmpty());QVERIFY(guide.instructions.contains("No macOS build"));
+        }
+    }
+    void downloadedMacBundleIdentityAndChannel(){
+        QTemporaryDir dir;const QString contents=dir.path()+"/Zerus.app/Contents",executable=contents+"/MacOS/hgs-tray";QVERIFY(QDir().mkpath(contents+"/MacOS"));
+        {QFile file(executable);QVERIFY(file.open(QIODevice::WriteOnly));}
+        auto write=[&](const QString &release,const QString &identifier=QStringLiteral("com.hgdev.hgs-tray")){
+            QFile file(contents+"/Info.plist");if(!file.open(QIODevice::WriteOnly))return false;
+            file.write(QString("<plist><dict><key>CFBundleIdentifier</key><string>%1</string><key>CFBundleExecutable</key><string>hgs-tray</string><key>CFBundleName</key><string>Zerus</string><key>CFBundleShortVersionString</key><string>0.37.0</string><key>ZerusReleaseVersion</key><string>%2</string></dict></plist>").arg(identifier,release).toUtf8());return true;
+        };
+        for(const auto &release:{"0.37.0","0.37.0.r61.gbbbbbbb.n8","0.38.0-dev.50"}){
+            QVERIFY(write(release));const auto installation=UpdateController::macosBundleInstallation(executable);
+            QCOMPARE(installation.kind,QString("macos-bundle"));QCOMPARE(installation.version,QString(release));
+            QCOMPARE(UpdateController::preferredChannel(installation),UpdateController::releaseChannel(release));
+        }
+        for(const auto &release:{"../app","0.38.0","0.36.0-dev.50","0.38.0.r61.gbbbbbbb.n8"}){
+            QVERIFY(write(release));QVERIFY(UpdateController::macosBundleInstallation(executable).kind.isEmpty());
+        }
+        QVERIFY(write("0.38.0-dev.50","app.example.foreign"));QVERIFY(UpdateController::macosBundleInstallation(executable).kind.isEmpty());
+#ifdef Q_OS_MACOS
+        QVERIFY(write("0.38.0-dev.50"));QSettings().setValue("updates/automatic",false);
+        auto value=devRaw();value["versionName"]="0.38.0-dev.51";value["buildNumber"]=51;const auto bytes=QJsonDocument(withMacos(value)).toJson();
+        auto fetch=[bytes](const QNetworkRequest &){auto *reply=new FixtureReply;QTimer::singleShot(0,reply,[reply,bytes]{reply->finish(bytes);});return reply;};
+        UpdateController controller(nullptr,executable,fetch);QTRY_COMPARE(controller.installation().kind,QString("macos-bundle"));
+        QCOMPARE(controller.channel(),QString("dev"));QCOMPARE(controller.installedDisplayVersion(),QString("0.38.0-dev.50"));
+        UpdatesWidget widget(nullptr,&controller);UrlRecorder browser;controller.check();QTRY_VERIFY(controller.feed().valid);
+        QVERIFY(controller.updateAvailable());auto *download=widget.findChild<QPushButton*>("updatesDownload");QVERIFY(download);QVERIFY(!download->isHidden());QCOMPARE(download->text(),QString("Download DMG"));
+        download->click();QCOMPARE(browser.urls,QList<QUrl>{QUrl(controller.feed().macosDmgUrl)});
+        controller.setChannel("stable");QCOMPARE(controller.installedDisplayVersion(),QString("0.38.0-dev.50"));
+        UpdateController restored(nullptr,executable,fetch);QTRY_COMPARE(restored.installation().kind,QString("macos-bundle"));QCOMPARE(restored.channel(),QString("stable"));
+        QVERIFY(write("0.38.0-dev.51"));controller.refreshBundleState();QVERIFY(controller.restartRequired());
+#endif
     }
     void installationInstructionsOpenThePlatformSection(){
         // README.md has no Installation section any more: the guide is docs/installation.md.

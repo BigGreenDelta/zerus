@@ -6,11 +6,12 @@ import re
 import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
-# One cask per update channel. Both install the same Zerus.app and conflict with each other.
-CASKS = {"stable": "zerus", "nightly": "zerus@nightly"}
+# Every channel installs the same Zerus.app; the casks conflict with each other.
+CASKS = {"stable": "zerus", "nightly": "zerus@nightly", "dev": "zerus@dev"}
 MINIMUM_SYSTEM = "14.0"
 STABLE = re.compile(r"\d+\.\d+\.\d+")
 NIGHTLY = re.compile(r"\d+\.\d+\.\d+\.r\d+\.g[0-9a-f]{7}\.n(\d+)")
+DEV = re.compile(r"\d+\.\d+\.\d+-dev\.([1-9]\d*)")
 NIGHTLY_TAG = re.compile(r"nightly-[1-9]\d*")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -40,7 +41,8 @@ def cask_for(channel):
 
 
 def _channel_version(version, channel):
-    pattern = NIGHTLY if cask_for(channel) == CASKS["nightly"] else STABLE
+    cask_for(channel)
+    pattern = {"stable": STABLE, "nightly": NIGHTLY, "dev": DEV}[channel]
     _require(isinstance(version, str) and pattern.fullmatch(version), f"Cask version must be a {channel} version.")
 
 
@@ -52,6 +54,10 @@ def render_cask(version, digest, channel="stable", tag=None):
         # Nightly prereleases are immutable; the tag holds the workflow run ID, not the version.
         _require(isinstance(tag, str) and NIGHTLY_TAG.fullmatch(tag), "Nightly cask needs its nightly release tag.")
         text = text.replace("@RELEASE_TAG@", tag)
+    elif channel == "dev":
+        _require(isinstance(tag, str) and re.fullmatch(r"dev-desktop-[1-9]\d*", tag),
+                 "Dev cask needs its immutable mirror build directory.")
+        text = text.replace("@BUILD_DIRECTORY@", tag)
     return text.replace("@VERSION@", version).replace("@SHA256@", digest)
 
 
@@ -73,9 +79,9 @@ def cask_version_key(version, channel="stable"):
         _channel_version(version, channel)
     except ValueError:
         raise ValueError("Unexpected cask version; inspect the tap manually.") from None
-    if channel == "nightly":
+    if channel in ("nightly", "dev"):
         # Build numbers of the Nightly workflow only grow; the product version may not.
-        return (int(NIGHTLY.fullmatch(version).group(1)),)
+        return (int((DEV if channel == "dev" else NIGHTLY).fullmatch(version).group(1)),)
     return tuple(int(part) for part in version.split("."))
 
 
@@ -100,6 +106,36 @@ def validate_macos_info(info, version, channel="stable"):
     _require(macos["minimum_system_version"] == MINIMUM_SYSTEM, "Unexpected macOS provenance: minimum system version.")
     _require(info.get("homebrew_casks") == [cask_for(channel)], "Unexpected Homebrew cask family.")
     return macos
+
+
+def catalog_macos(metadata, version, channel, prefix, seals):
+    """An additive catalog field; legacy clients keep their existing artifact list."""
+    validate_macos_info({"macos": metadata, "homebrew_casks": [cask_for(channel)]}, version, channel)
+    downloads = []
+    for name in macos_assets(metadata):
+        seal = seals[name]
+        downloads.append({"name": name, "url": prefix + name, "size": seal["size"], "sha256": seal["sha256"]})
+    result = dict(metadata, downloads=downloads)
+    validate_catalog_macos(result, version, channel, prefix)
+    return result
+
+
+def validate_catalog_macos(value, version, channel, prefix):
+    """Validate names, signing provenance and exact download origins before using URLs."""
+    _channel_version(version, channel)
+    _require(isinstance(value, dict), "Invalid macOS catalog metadata.")
+    metadata = {key: item for key, item in value.items() if key != "downloads"}
+    validate_macos_info({"macos": metadata, "homebrew_casks": [cask_for(channel)]}, version, channel)
+    rows = value.get("downloads")
+    names = macos_assets(metadata)
+    _require(isinstance(rows, list) and len(rows) == len(names), "Missing macOS catalog downloads.")
+    for name, row in zip(names, rows):
+        _require(isinstance(row, dict) and set(row) == {"name", "url", "size", "sha256"}
+                 and row["name"] == name and row["url"] == prefix + name
+                 and type(row["size"]) is int and 0 < row["size"] <= 512 * 1024**2
+                 and isinstance(row["sha256"], str) and DIGEST.fullmatch(row["sha256"]),
+                 "Invalid macOS catalog download seal.")
+    return rows
 
 
 def add_macos(output, source, version, info, channel="stable"):

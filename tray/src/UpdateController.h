@@ -14,7 +14,7 @@ struct DesktopUpdateFeed {
     qint64 releaseId=0;
     qint64 buildNumber=0;
     QString sourceCommit;
-    QString sourceUrl, packageUrl;
+    QString sourceUrl, packageUrl, macosZipUrl, macosDmgUrl;
 };
 struct DesktopInstallation {
     QString kind="checking", package, version;
@@ -37,7 +37,11 @@ public:
     static DesktopUpdateFeed parseFeed(const QByteArray &data,const QString &channel);
     static bool isArchLinux(const QByteArray &osRelease);
     static QString updateCommand(const DesktopInstallation &installation,const QString &channel="stable");
-    static InstallationGuide installationGuide(const DesktopInstallation &installation,const QString &channel);
+    static InstallationGuide installationGuide(const DesktopInstallation &installation,const QString &channel,const DesktopUpdateFeed &feed={});
+    static QUrl downloadUrl(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &platform=runningPlatform());
+    static QString releaseChannel(const QString &version);
+    static bool macosUpdateAvailable(const DesktopInstallation &installation,const DesktopUpdateFeed &feed);
+    QString installedDisplayVersion() const;
     // The desktop platform this build runs on: "linux", "macos" or "windows" (else empty).
     static QString runningPlatform();
     // The installation guide (docs/installation.md on GitHub) at the section for `platform`:
@@ -54,9 +58,11 @@ public:
     static bool claimNotification(const QString &token);
     static bool isUpdateToken(const QString &token);
     static QString comparisonMessage(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &appVersion,int comparison,bool compared);
-    // The zerus or zerus@nightly cask that installed this Zerus.app with its version. The
+    // The stable, nightly or dev cask that installed this Zerus.app with its version. The
     // kind stays empty unless exactly one cask owns exactly one installed version.
     static DesktopInstallation homebrewInstallation(const QString &canonicalExecutable,const QStringList &prefixes);
+    static DesktopInstallation macosBundleInstallation(const QString &canonicalExecutable);
+    static QString preferredChannel(const DesktopInstallation &installation);
     // Installations that follow nightly builds until the user picks a channel.
     static bool prefersNightly(const DesktopInstallation &installation);
     static bool nightlyIsNewer(const QString &installed,const QString &released);

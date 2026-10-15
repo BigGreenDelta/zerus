@@ -22,10 +22,11 @@
 
 namespace {
 const QStringList packages={"zerus","zerus-git","zerus-ade-bin","zerus-ade-nightly-bin"};
-const QStringList casks={"zerus","zerus@nightly"};
+const QStringList casks={"zerus","zerus@nightly","zerus@dev"};
 int g_testCommandTimeoutMs=0; // 0: the 5 s deadline
 const char *stableVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z";
 const char *nightlyVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+\\.r[0-9]+\\.g[a-f0-9]{7}\\.n([0-9]{1,15})\\z";
+const char *devVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+-dev\\.([1-9][0-9]{0,14})\\z";
 // The newest stable release published without the Windows portable zip; every
 // later stable release carries it, as nightly releases do. Stable publication
 // enforces this (LAST_STABLE_WITHOUT_WINDOWS in scripts/release_common.py).
@@ -34,6 +35,42 @@ bool matches(const QString &s,const char *pattern){return QRegularExpression(QSt
 bool integer(const QJsonValue &v,qint64 low,qint64 high){double n=v.toDouble(-1);return v.isDouble()&&std::isfinite(n)&&std::floor(n)==n&&n>=low&&n<=high;}
 bool safe(const QString &s){return matches(s,"\\A[A-Za-z0-9][A-Za-z0-9._+-]{0,179}\\z")&&!s.contains("..");}
 QString configuredChannel(){QString c=QSettings().value("updates/channel","stable").toString();return c=="nightly"||c=="dev"?c:"stable";}
+bool macosInstallation(const DesktopInstallation &installation){return installation.kind=="homebrew-cask"||installation.kind=="macos-bundle";}
+bool parseMacos(const QJsonObject &raw,const QString &version,const QString &prefix,DesktopUpdateFeed &result){
+    if(!raw.contains("macos"))return true;
+    if(!raw["macos"].isObject())return false;
+    const auto mac=raw["macos"].toObject();
+    const auto archive=QString("zerus-%1-macos-arm64.zip").arg(version),image=QString("zerus-%1-macos-arm64.dmg").arg(version);
+    const char *uuid="\\A[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\\z";
+    if(mac["asset"]!=archive||mac["minimum_system_version"]!="14.0"||!matches(mac["team_id"].toString(),"\\A[A-Z0-9]{10}\\z")||!matches(mac["qt_version"].toString(),stableVersion)||!matches(mac["notarization_id"].toString(),uuid))return false;
+    QStringList names{archive};
+    if(mac.contains("dmg")){
+        if(!mac["dmg"].isObject())return false;const auto dmg=mac["dmg"].toObject();
+        if(dmg.size()!=2||dmg["asset"]!=image||!matches(dmg["notarization_id"].toString(),uuid))return false;
+        names<<image;
+    }
+    if(mac.size()!=(names.size()==2?7:6)||!mac["downloads"].isArray())return false;
+    const auto downloads=mac["downloads"].toArray();if(downloads.size()!=names.size())return false;
+    for(qsizetype i=0;i<names.size();++i){
+        if(!downloads[i].isObject())return false;const auto row=downloads[i].toObject();
+        if(row.size()!=4||row["name"]!=names[i]||row["url"]!=prefix+names[i]||!integer(row["size"],1,512*1024*1024)||!matches(row["sha256"].toString(),"\\A[a-f0-9]{64}\\z"))return false;
+    }
+    result.macosZipUrl=prefix+archive;if(names.size()==2)result.macosDmgUrl=prefix+image;
+    return true;
+}
+QHash<QString,QString> bundleValues(const QString &path){
+    QFile file(path);if(!file.open(QIODevice::ReadOnly)||file.size()>256*1024)return {};
+    QXmlStreamReader xml(&file);QHash<QString,QString> values;
+    if(!xml.readNextStartElement()||xml.name()!=QLatin1String("plist")||!xml.readNextStartElement()||xml.name()!=QLatin1String("dict"))return {};
+    while(xml.readNextStartElement()){
+        if(xml.name()!=QLatin1String("key"))return {};
+        const auto key=xml.readElementText();if(values.contains(key)||!xml.readNextStartElement())return {};
+        if(xml.name()==QLatin1String("string"))values.insert(key,xml.readElementText());
+        else {values.insert(key,{});xml.skipCurrentElement();}
+    }
+    while(!xml.atEnd())xml.readNext();
+    return xml.hasError()?QHash<QString,QString>():values;
+}
 DesktopUpdateFeed parseDev(const QByteArray &data){
     DesktopUpdateFeed result;
     if(data.size()>256*1024)return result;
@@ -59,6 +96,8 @@ DesktopUpdateFeed parseDev(const QByteArray &data){
     const auto number=raw["buildNumber"].toInteger();
     const auto suffix=QRegularExpression("-dev\\.([0-9]+)\\z").match(version);
     if(suffix.hasMatch()&&suffix.captured(1)!=QString::number(number))return result;
+    if(raw.contains("macos")&&(!matches(version,devVersion)||!raw["macos"].toObject().contains("dmg")))return result;
+    if(!parseMacos(raw,version,QString("https://zerus.dev/downloads/dev-desktop-%1/").arg(id),result))return {};
     result.valid=true;result.releaseId=id;result.buildNumber=number;result.sourceCommit=commit;result.releaseUrl=raw["buildUrl"].toString();result.version=suffix.hasMatch()?version:version+QString("-dev.%1").arg(number);return result;
 }
 }
@@ -82,6 +121,35 @@ QString UpdateController::installedVersion(){
     if(info["devBuildNumber"].toInteger()>0||info["sourceCommit"].toString().isEmpty())return version;
     const auto source=info["sourceCommit"].toString().left(7);
     return info["sourceDirty"].toBool()?tr("%1 (local changes %2)").arg(version,source):QString("%1 (%2)").arg(version,source);
+}
+QString UpdateController::installedDisplayVersion() const{
+    return macosInstallation(m_installation)&&!m_installation.version.isEmpty()?m_installation.version:installedVersion();
+}
+QString UpdateController::releaseChannel(const QString &version){
+    if(matches(version,devVersion))return "dev";
+    if(matches(version,nightlyVersion))return "nightly";
+    return matches(version,stableVersion)?QStringLiteral("stable"):QString();
+}
+QString UpdateController::preferredChannel(const DesktopInstallation &installation){
+    if(macosInstallation(installation))return releaseChannel(installation.version);
+    return prefersNightly(installation)?QStringLiteral("nightly"):QStringLiteral("stable");
+}
+QUrl UpdateController::downloadUrl(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &platform){
+    if(!feed.valid||installation.kind=="portable")return {};
+    if(platform=="macos"&&!feed.macosZipUrl.isEmpty())return QUrl(feed.macosDmgUrl.isEmpty()?feed.macosZipUrl:feed.macosDmgUrl);
+    if(feed.buildNumber>0&&!macosInstallation(installation))return QUrl(installation.arch?feed.packageUrl:feed.sourceUrl);
+    return {};
+}
+bool UpdateController::macosUpdateAvailable(const DesktopInstallation &installation,const DesktopUpdateFeed &feed){
+    if(!feed.valid||feed.macosZipUrl.isEmpty()||!macosInstallation(installation))return false;
+    const auto channel=releaseChannel(feed.version);
+    if(channel.isEmpty()||channel!=releaseChannel(installation.version))return false;
+    if(channel=="nightly")return nightlyIsNewer(installation.version,feed.version);
+    if(channel=="dev"){
+        const QRegularExpression pattern(QString::fromLatin1(devVersion));
+        return pattern.match(feed.version).captured(1).toLongLong()>pattern.match(installation.version).captured(1).toLongLong();
+    }
+    return plainStableIsNewer(installation.version,feed.version);
 }
 
 DesktopUpdateFeed UpdateController::parseFeed(const QByteArray &data,const QString &channel){
@@ -110,7 +178,8 @@ DesktopUpdateFeed UpdateController::parseFeed(const QByteArray &data,const QStri
     }
     if(!package)return result;
     QJsonObject versions;if(raw.contains("packages")){if(!raw["packages"].isObject())return result;versions=raw["packages"].toObject();for(auto it=versions.begin();it!=versions.end();++it)if(!packages.contains(it.key())||!it.value().isString()||!matches(it.value().toString(),"\\A(?:[0-9]+:)?[0-9][A-Za-z0-9.+_~:-]{0,119}-[0-9]+(?:\\.[0-9]+)*\\z"))return result;}
-    result.version=version;result.releaseUrl=release;result.packages=versions;result.valid=true;result.releaseId=raw["releaseId"].toInteger();return result;
+    if(!parseMacos(raw,version,"https://github.com/ufna/zerus/releases/download/"+tag+"/",result))return {};
+    result.version=version;result.releaseUrl=release;result.sourceCommit=raw["sourceCommit"].toString();result.packages=versions;result.valid=true;result.releaseId=raw["releaseId"].toInteger();return result;
 }
 
 bool UpdateController::isArchLinux(const QByteArray &osRelease){
@@ -128,7 +197,7 @@ bool UpdateController::isArchLinux(const QByteArray &osRelease){
 }
 QString UpdateController::updateCommand(const DesktopInstallation &installation,const QString &channel){
     if(installation.kind=="homebrew-cask"){
-        const QString wanted=channel=="stable"?QStringLiteral("zerus"):channel=="nightly"?QStringLiteral("zerus@nightly"):QString();
+        const QString wanted=channel=="stable"?QStringLiteral("zerus"):channel=="nightly"?QStringLiteral("zerus@nightly"):channel=="dev"?QStringLiteral("zerus@dev"):QString();
         if(wanted.isEmpty()||!casks.contains(installation.package))return {};
         if(wanted==installation.package)return "brew upgrade --cask "+wanted;
         // The casks conflict: switching channels replaces one with the other.
@@ -143,15 +212,24 @@ QString UpdateController::updateCommand(const DesktopInstallation &installation,
     if(!installation.arch||installation.kind=="checking")return {};
     return installation.helper+QStringLiteral(" -Syu ")+(channel=="nightly"?QStringLiteral("zerus-ade-nightly-bin"):QStringLiteral("zerus-ade-bin"));
 }
-InstallationGuide UpdateController::installationGuide(const DesktopInstallation &installation,const QString &channel){
+InstallationGuide UpdateController::installationGuide(const DesktopInstallation &installation,const QString &channel,const DesktopUpdateFeed &feed){
     InstallationGuide guide;
     if(installation.kind=="package")guide.ownership=tr("Package: %1\nInstalled package: %2").arg(installation.package,installation.version.isEmpty()?tr("unconfirmed"):installation.version);
     else if(installation.kind=="homebrew-cask")guide.ownership=tr("Homebrew cask: %1\nInstalled version: %2").arg(installation.package,installation.version);
+    else if(installation.kind=="macos-bundle")guide.ownership=tr("macOS app installed from a download\nInstalled version: %1").arg(installation.version);
     else if(installation.kind=="source")guide.ownership=tr("Local build in a Git checkout; update and rebuild deliberately.");
     else if(installation.kind=="checking")guide.ownership=tr("Checking installation ownership…");
     else if(installation.kind=="portable")guide.ownership=tr("Portable Windows build %1. Download newer builds from the release page.").arg(QCoreApplication::applicationVersion());
     else guide.ownership=tr("Local / manually installed build; package ownership unconfirmed.");
     if(installation.arch)guide.ownership+=tr("\nSystem: Arch-based Linux");
+    if(macosInstallation(installation)){
+        if(!feed.valid){guide.instructions=tr("Check for updates to see the available macOS build and update instructions.");return guide;}
+        if(feed.macosZipUrl.isEmpty()){guide.instructions=tr("No macOS build is published in this channel yet. Choose another channel.");return guide;}
+        if(installation.kind=="macos-bundle"){
+            guide.instructions=feed.macosDmgUrl.isEmpty()?tr("Download and extract the ZIP, then move Zerus into Applications and confirm replacing the app."):tr("Download the DMG, drag Zerus into Applications and confirm replacing the app.");
+            guide.instructions+=tr(" Then choose Restart to finish update. Your agents and tmux sessions keep running.");return guide;
+        }
+    }
     const QString value=updateCommand(installation,channel);
     if(installation.kind=="homebrew-cask"){
         if(value.isEmpty())return guide;
@@ -181,7 +259,7 @@ QUrl UpdateController::installationInstructionsUrl(const DesktopInstallation &in
     // README.md no longer has an Installation section; anchors are GitHub heading slugs.
     QUrl url(QStringLiteral("https://github.com/ufna/zerus/blob/main/docs/installation.md"));
     if(platform=="linux")url.setFragment(installation.arch?QStringLiteral("arch-linux"):QStringLiteral("local-installation"));
-    else if(platform=="macos")url.setFragment(QStringLiteral("macos-homebrew"));
+    else if(platform=="macos")url.setFragment(installation.kind=="macos-bundle"?QStringLiteral("macos-dmg"):QStringLiteral("macos-homebrew"));
     else if(platform=="windows")url.setFragment(QStringLiteral("windows"));
     return url;
 }
@@ -225,18 +303,21 @@ QString UpdateController::comparisonMessage(const DesktopInstallation &installat
         return portableUpdateAvailable(appVersion,feed)?tr("Zerus nightly %1 is available. Download its Windows zip from the release page.").arg(feed.version)
                                                        :tr("Portable Windows build: there is no self-update, and nightly builds of the same version cannot be compared. The release page has the newest Windows zip.");
     }
-    if(installation.kind=="homebrew-cask"){
-        const bool daily=installation.package=="zerus@nightly";
-        if(feed.buildNumber>0)return tr("Dev builds are not published for Homebrew. The zerus@nightly cask follows main daily.");
-        const bool nightlyFeed=matches(feed.version,nightlyVersion);
-        const QString channel=nightlyFeed?QStringLiteral("nightly"):QStringLiteral("stable");
-        if(daily!=nightlyFeed)return tr("This Homebrew cask follows %1 builds. To switch, run: %2").arg(daily?tr("nightly"):tr("stable"),updateCommand(installation,channel));
-        const bool newer=daily?nightlyIsNewer(installation.version,feed.version):plainStableIsNewer(installation.version,feed.version);
-        return newer?tr("Update available. Run %1; the Homebrew tap may still be propagating.").arg(updateCommand(installation,channel)):tr("Installed Homebrew cask is at least as new as this release.");
+    if(macosInstallation(installation)){
+        if(feed.macosZipUrl.isEmpty())return tr("No macOS build is published in this channel yet. Choose another channel.");
+        const QString channel=releaseChannel(feed.version),installed=releaseChannel(installation.version);
+        if(channel!=installed){
+            if(installation.kind=="homebrew-cask")return tr("This installation follows %1 builds. To switch to %2, run: %3").arg(installed,channel,updateCommand(installation,channel));
+            return tr("This installation follows %1 builds. Download the %2 macOS app to switch channels.").arg(installed,channel);
+        }
+        if(!macosUpdateAvailable(installation,feed))return tr("Installed macOS build is at least as new as this release.");
+        return installation.kind=="homebrew-cask"?tr("Update available. Run %1; the Homebrew tap may still be propagating.").arg(updateCommand(installation,channel))
+                                                  :tr("Update available. Download the macOS app and replace Zerus in Applications.");
     }
     if(feed.buildNumber>0)return tr("Verified main build %1 is published. Use its source or platform package to update this installation.").arg(feed.buildNumber);
 #ifdef Q_OS_MACOS
     Q_UNUSED(comparison);Q_UNUSED(compared);
+    if(feed.macosZipUrl.isEmpty())return tr("No macOS build is published in this channel yet. This local build can be updated from source.");
     const QString cask=matches(feed.version,nightlyVersion)?QStringLiteral("brew install --cask ufna/zerus/zerus@nightly"):QStringLiteral("brew install --cask ufna/zerus/zerus");
     if(plainStableIsNewer(appVersion,feed.version))return tr("Update available for this local build. Rebuild it, or install the Homebrew cask: %1").arg(cask);
     return tr("Local build: release freshness is unconfirmed. Rebuild deliberately, or install the Homebrew cask: %1").arg(cask);
@@ -262,13 +343,29 @@ DesktopInstallation UpdateController::homebrewInstallation(const QString &canoni
         for(const QString &cask:casks){
             const QDir caskroom(prefix+"/Caskroom/"+cask);if(!caskroom.exists())continue;
             owners<<cask;
-            for(const QString &name:caskroom.entryList(QDir::Dirs|QDir::NoDotAndDotDot))if(matches(name,cask=="zerus"?stableVersion:nightlyVersion))versions<<name;
+            for(const QString &name:caskroom.entryList(QDir::Dirs|QDir::NoDotAndDotDot))if(matches(name,cask=="zerus"?stableVersion:cask=="zerus@dev"?devVersion:nightlyVersion))versions<<name;
         }
         if(owners.isEmpty())continue;
-        if(owners.size()==1&&versions.size()==1){result.kind="homebrew-cask";result.package=owners.first();result.version=versions.first();}
+        if(owners.size()==1&&versions.size()==1){
+            const QFileInfo link(prefix+"/Caskroom/"+owners.first()+"/"+versions.first()+"/Zerus.app");
+            if(link.isSymLink()&&link.canonicalFilePath()==bundle.canonicalPath()){
+                result.kind="homebrew-cask";result.package=owners.first();result.version=versions.first();
+            }
+        }
         return result;
     }
     return result;
+}
+DesktopInstallation UpdateController::macosBundleInstallation(const QString &canonicalExecutable){
+    DesktopInstallation result;result.kind.clear();
+    const QFileInfo executable(canonicalExecutable);QDir directory=executable.absoluteDir();
+    if(executable.fileName()!="hgs-tray"||directory.dirName()!="MacOS"||!directory.cdUp()||directory.dirName()!="Contents")return result;
+    const auto values=bundleValues(directory.filePath("Info.plist"));
+    const auto version=values.value("CFBundleShortVersionString"),release=values.value("ZerusReleaseVersion");
+    if(values.value("CFBundleIdentifier")!="com.hgdev.hgs-tray"||values.value("CFBundleExecutable")!="hgs-tray"||values.value("CFBundleName")!="Zerus"||!matches(version,stableVersion)||releaseChannel(release).isEmpty())return result;
+    const auto base=release.section("-dev.",0,0);
+    if(release!=version&&!release.startsWith(version+".r")&&!(matches(release,devVersion)&&plainStableIsNewer(version,base)))return result;
+    result.kind="macos-bundle";result.version=release;return result;
 }
 bool UpdateController::prefersNightly(const DesktopInstallation &installation){
     return installation.package=="zerus-ade-nightly-bin"||(installation.kind=="homebrew-cask"&&installation.package=="zerus@nightly");
@@ -280,17 +377,9 @@ bool UpdateController::nightlyIsNewer(const QString &installed,const QString &re
     return local.hasMatch()&&available.hasMatch()&&available.captured(1).toLongLong()>local.captured(1).toLongLong();
 }
 QString UpdateController::bundleRelease(const QString &infoPlistPath){
-    QFile file(infoPlistPath);if(!file.open(QIODevice::ReadOnly)||file.size()>256*1024)return {};
-    QXmlStreamReader xml(&file);QString key;QHash<QString,QString> values;
-    while(!xml.atEnd()){
-        xml.readNext();if(!xml.isStartElement())continue;
-        if(xml.name()==QLatin1String("key")){key=xml.readElementText();continue;}
-        if(xml.name()==QLatin1String("string")&&!key.isEmpty()&&!values.contains(key))values.insert(key,xml.readElementText());
-        key.clear();
-    }
-    if(xml.hasError())return {};
+    const auto values=bundleValues(infoPlistPath);
     const QString release=values.value("ZerusReleaseVersion"),version=values.value("CFBundleShortVersionString");
-    if(matches(release,stableVersion)||matches(release,nightlyVersion))return release;
+    if(!releaseChannel(release).isEmpty())return release;
     return matches(version,"\\A[0-9]+(?:\\.[0-9]+){1,3}\\z")?version:QString();
 }
 bool UpdateController::bundleReplaced(const QString &executable,const QString &startedRelease){
@@ -387,10 +476,11 @@ void UpdateController::sourceInstallation(const QString &executable){
 void UpdateController::detectInstallation(const QString &executable){
     QString canonical=QFileInfo(executable).canonicalFilePath();if(canonical.isEmpty()){m_installation.kind="unknown";emit changed();compare();return;}
 #ifdef Q_OS_MACOS
-    const auto cask=homebrewInstallation(canonical,{QStringLiteral("/opt/homebrew"),QStringLiteral("/usr/local")});
-    if(cask.kind=="homebrew-cask"){
-        m_installation.kind=cask.kind;m_installation.package=cask.package;m_installation.version=cask.version;
-        if(prefersNightly(m_installation)&&!QSettings().contains("updates/channel")){QSettings().setValue("updates/channel","nightly");m_feed={};restoreCatalog();}
+    auto mac=homebrewInstallation(canonical,{QStringLiteral("/opt/homebrew"),QStringLiteral("/usr/local")});
+    if(mac.kind.isEmpty())mac=macosBundleInstallation(canonical);
+    if(macosInstallation(mac)){
+        m_installation=mac;
+        if(!QSettings().contains("updates/channel")){QSettings().setValue("updates/channel",preferredChannel(m_installation));m_feed={};restoreCatalog();}
         emit changed();compare();return;
     }
 #endif
@@ -427,6 +517,9 @@ void UpdateController::completeComparison(bool newer,const QString &message){
 }
 void UpdateController::compare(){
     if(!m_feed.valid||m_installation.kind=="checking")return;
+    if(macosInstallation(m_installation)){
+        completeComparison(macosUpdateAvailable(m_installation,m_feed),comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;
+    }
     if(channel()=="dev"){
         QString installedCommit;
 #ifdef ZERUS_SOURCE_COMMIT
@@ -436,9 +529,7 @@ void UpdateController::compare(){
     }
     if(m_installation.kind!="package"){
         const auto version=QCoreApplication::applicationVersion();
-        // A cask compares its installed version; a replaced bundle is reported by restartRequired().
         bool newer=m_installation.kind=="portable"?portableUpdateAvailable(version,m_feed):channel()=="stable"&&plainStableIsNewer(version,m_feed.version);
-        if(m_installation.kind=="homebrew-cask")newer=m_installation.package=="zerus@nightly"?channel()=="nightly"&&nightlyIsNewer(m_installation.version,m_feed.version):channel()=="stable"&&plainStableIsNewer(m_installation.version,m_feed.version);
         completeComparison(newer,comparisonMessage(m_installation,m_feed,version,0,false));return;
     }
     if(m_installation.package=="zerus-git"||m_installation.version.isEmpty()||!m_feed.packages.contains(m_installation.package)){completeComparison(false,comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;}

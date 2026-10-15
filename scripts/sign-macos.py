@@ -26,7 +26,7 @@ MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\
           b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # A stable release, or a nightly built from that product version.
-RELEASE = re.compile(r"\d+\.\d+\.\d+(?:\.r\d+\.g[0-9a-f]{7}\.n\d+)?")
+RELEASE = re.compile(r"\d+\.\d+\.\d+(?:\.r\d+\.g[0-9a-f]{7}\.n\d+|-dev\.[1-9]\d*)?")
 
 
 def is_mach_o(path):

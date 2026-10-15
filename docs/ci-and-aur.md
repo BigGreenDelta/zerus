@@ -63,8 +63,10 @@ attempt has no gate record, an earlier successful gate counts (a failed-job retr
 does not rerun it); an earlier failed or cancelled gate means waiting. Any
 other gate result, repeated API failures or a 135-minute wait fail the job without
 an upload; **Re-run failed jobs** then rebuilds the candidate. `dev.yml` assembles
-the desktop candidate and moves the `dev` tag only after the gate and this job
-succeed. Release builds skip the `lintVital` tasks: the gate requires the
+the desktop candidate and moves the `dev` tag only after the gate, this job
+and the enabled Mac candidate succeed. Main CI invokes `macos-cask.yml` after
+the gate with `channel: dev`; its full bundle/sign/notarize/install checks produce
+the same signed ZIP and DMG later sealed into the desktop candidate. Release builds skip the `lintVital` tasks: the gate requires the
 Android job, whose `lintRelease` covers those fatal checks for the same commit
 and variant.
 
@@ -1522,5 +1524,5 @@ GitHub latest remains `v0.42.0`. A fresh isolated desktop controller discovered 
 real public Dev feed, emitted one verified notice, persisted its channel choice
 and suppressed a duplicate check. Retention keeps three Dev builds per platform,
 a 72-hour retirement grace and the shared 20 GiB limit. Desktop installation stays
-explicit; macOS Dev currently offers source and notices while its signed binary
-distribution remains tracked in `zerus-osef.2`.
+explicit. Mac Dev now uses the same candidate/mirror with signed ZIP and DMG
+assets and `zerus@dev`; see [Mac publication](macos-distribution.md#publication).
