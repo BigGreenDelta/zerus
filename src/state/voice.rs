@@ -2,7 +2,6 @@
 //! a separately supervised worker recognizes and delivers without a client.
 use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use fs2::FileExt;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1047,21 +1046,48 @@ fn native_refusal(error: &str) -> (&'static str, &'static str) {
         ("agent_not_ready","The original agent could not accept this message yet. Check Activity or Terminal; the recording is preserved.")
     }
 }
-fn worker() -> Result<i32> {
-    let store = Store::open()?;
-    let lock = crate::platform::refuse_link(crate::platform::private_open(
+/// The installed service runs `hgs voice worker` under this unit or label.
+const SERVICE: service_worker::Service = service_worker::Service {
+    unit: "hgs-voice.service",
+    label: "com.hgdev.hgs-voice",
+};
+/// Held by the worker that processes voice messages.
+fn worker_lock() -> PathBuf {
+    root().join("voice/worker.lock")
+}
+/// Held by the service's worker while it waits for the worker lock.
+fn standby_lock() -> PathBuf {
+    root().join("voice/service.lock")
+}
+/// Opens a lock file of the worker, never through a symbolic link.
+fn open_lock(path: &Path) -> Result<File> {
+    crate::platform::refuse_link(crate::platform::private_open(
         OpenOptions::new().create(true).truncate(false).write(true),
     ))
-    .open(root().join("voice/worker.lock"))
-    .map_err(err)?;
-    if lock.try_lock_exclusive().is_err() {
-        return Ok(0);
-    }
+    .open(path)
+    .map_err(err)
+}
+fn worker() -> Result<i32> {
+    let store = Store::open()?;
     let executable = std::env::current_exe().map_err(err)?;
     let identity = |path: &Path| crate::platform::file_identity(path).map(|i| (i.device, i.inode));
     let original = identity(&executable);
+    let replaced = || identity(&executable) != original;
+    // launchd and systemd start their worker again 10 s after it exits, so it
+    // waits for a worker a client started; that worker then gives way to it.
+    let Some(owner) = service_worker::acquire(
+        &worker_lock(),
+        &standby_lock(),
+        open_lock,
+        || SERVICE.is_current(),
+        replaced,
+        Duration::from_secs(1),
+    )?
+    else {
+        return Ok(0);
+    };
     loop {
-        if identity(&executable) != original {
+        if replaced() || owner.yields() {
             return Ok(0);
         }
         let config = crate::config::Config::load().map_err(|e| e.message)?;
@@ -1097,6 +1123,11 @@ fn ensure_worker() -> Result<()> {
             &["--user", "start", "--no-block", "hgs-voice.service"],
         )
     {
+        return Ok(());
+    }
+    // A running worker, or the service's worker waiting to take over, needs
+    // no detached one.
+    if crate::status::locked(&worker_lock()) || service_worker::waiting(&standby_lock()) {
         return Ok(());
     }
     let mut cmd = Command::new(std::env::current_exe().map_err(err)?);

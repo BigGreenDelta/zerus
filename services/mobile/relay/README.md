@@ -17,33 +17,78 @@ cargo +1.85.0 clippy --locked --all-targets -- -D warnings
 cargo +1.85.0 test --locked
 ```
 
-The PostgreSQL contract is explicit, never silently treated as passed by a local
-SQLite run. Point `ZERUS_RELAY_TEST_DATABASE_URL` at a **disposable** PostgreSQL
-instance whose fixture role may create databases. The test creates and removes
-a uniquely named database; credentials are not logged:
+The server is the default `server` feature. Without it the library is only the
+API v1 codec (`json`), envelope validation (`protocol`) and `error`, with none
+of the HTTP, database or TLS crates, for the outbound connector:
 
 ```sh
+cargo +1.85.0 clippy --locked --no-default-features --lib --test codec -- -D warnings
+cargo +1.85.0 test --locked --no-default-features --test codec
+```
+
+The image and the infra packager copy only `Cargo.toml`, `Cargo.lock`, `.cargo`
+and `src/**/*.rs|*.sql`, so the crate has no build script, declared test target,
+path dependency or include from outside `src/`
+([the source check](../../../tests/test_source_relay_inputs.py)).
+
+### PostgreSQL tests
+
+The storage contracts (`tests/contracts.rs`, `tests/directory_create.rs` and
+`tests/administration.rs`) and the connector HTTP suites run on PostgreSQL. Point
+`ZERUS_RELAY_TEST_DATABASE_URL` at a **disposable** server whose role may create
+databases: each test creates its own `relay_test_<uuid>` database and drops it
+afterwards, also when it fails, and credentials are not logged. The Python
+fixtures also drop theirs after Ctrl+C; a killed or interrupted `cargo test` can
+leave some behind. Without the variable the Rust contracts fall back to a
+private SQLite file and the connector HTTP suites skip; a local SQLite run never
+stands in for PostgreSQL. CI sets `ZERUS_REQUIRE_RELAY_E2E=1`, which turns that
+fallback and those skips into failures. A one-line server on a random loopback
+port, whose data, leftovers included, leaves with the container:
+
+```sh
+docker run --rm -d --name zerus-relay-test-postgres -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17.11-alpine -c max_connections=300
+until docker exec zerus-relay-test-postgres pg_isready -qh 127.0.0.1; do sleep 1; done
+export ZERUS_RELAY_TEST_DATABASE_URL="postgresql://postgres@$(docker port zerus-relay-test-postgres 5432)/postgres"
+```
+
+With 32 test threads the parallel contracts peak near PostgreSQL's default of
+100 connections, hence the higher limit. Then, in this directory (the
+cross-worker contracts exist only on PostgreSQL and run explicitly):
+
+```sh
+cargo +1.85.0 test --locked
 cargo +1.85.0 test --locked --test contracts postgres_cross_worker -- --ignored
 ```
 
-From the repository root, with the `services/mobile` test dependencies installed:
+From the repository root, with `services/mobile` and
+`services/mobile/tests/requirements.txt` (the test-only database driver)
+installed in a Python 3.11+ virtual environment:
 
 ```sh
 export ZERUS_RELAY_BINARY="$PWD/services/mobile/relay/target/debug/zerus-relay"
+export ZERUS_DIRECTORY_TEST_HGS="$PWD/target/debug/hgs"
 export PATH="$PWD/services/mobile/relay/target/debug:$PATH"
-python -m unittest discover -s services/mobile/tests -p test_rust_relay.py -v
-python -m unittest discover -s services/mobile/tests -p 'test*end_to_end.py' -v
-python -m unittest discover -s services/mobile/tests -p test_peer_migration.py -v
+python -m unittest discover -s services/mobile/tests -v
+docker stop zerus-relay-test-postgres
 ```
 
-These replay the released Python HTTP assertions against a Rust process and
-exercise the actual Python connector with synthetic native subprocesses. They
-include persisted Python receipts, exact canonical hashes, Unicode, attachments,
-one-hop routing and cancellation. The full reference/connector suite remains
-`python -m unittest discover -s services/mobile/tests -v`. The reference Python
+`relay_fixture.start_relay` gives every end-to-end, peer, presence, directory,
+speech and speech-configuration HTTP test its own database. It seeds it only
+through the `zerus-relay` command line (`provision`, `node`, `invite`,
+`revoke-*`) and `/v1/pair`, waits for `/readyz`, and the suites read no database
+directly: the storage effects they used to inspect are Rust contracts. These
+suites exercise the actual Python connector with synthetic native subprocesses,
+exact canonical hashes, Unicode, attachments, one-hop routing and cancellation.
+`test_rust_relay.py` still replays the released Python HTTP assertions,
+including persisted Python receipts, against the Rust relay on a Python-written
+SQLite store. Without `ZERUS_RELAY_BINARY`, the fixture serves the retained
+Python reference relay on a private SQLite store and the Rust-only suites skip.
+Hosted CI runs the discover once with both variables, `ZERUS_REQUIRE_RELAY_E2E=1`
+and `ZERUS_DIRECTORY_TEST_HGS` naming the built `hgs`, then repeats
+`-p 'test_mobile_speech*.py'` without `ZERUS_RELAY_BINARY`. The reference Python
 HTTP module is retained as an independent compatibility oracle, not selected by
-the supported server CLI. `zerus-mobile` delegates administration/serving to
-`zerus-relay`; the offline `migrate-sqlite` utility remains Python.
+the supported server CLI. `zerus-mobile` delegates administration and serving to
+`zerus-relay`.
 
 ## Boundaries
 
@@ -78,6 +123,11 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   are decoded from borrowed raw JSON so the legal object key
   `$serde_json::private::Number` cannot be interpreted as serializer metadata.
   Legacy Python receipt tests cover this key as well as Unicode and large numbers.
+  The encoder sorts keys itself rather than trusting `Map` order, which
+  serde_json's `preserve_order` feature would change; CI rejects that feature.
+  `python_default_len` measures plain `json.dumps` output, as the connector's
+  size bounds do. `tests/codec.rs` compares both forms with CPython on 20,000
+  seeded values and documents the parse limits, including a claim batch's margin.
 - `store/requests.rs` owns queue admission, result reservations, committed claims,
   receipts, expiry and permanent mutation identity tombstones. A prepared
   submission owns one canonical payload plus small typed metadata; SQL work does
@@ -96,7 +146,11 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   requests uncertain. It never reroutes a claimed request. A peer the gateway
   manifest marks offline stays listed on its computer with `online: false` and
   no snapshot; it is never selected, claimed or updated by a peer heartbeat, and
-  needs a fresh peer heartbeat after it is marked online again.
+  needs a fresh peer heartbeat after it is marked online again. Its
+  `last_seen_at` keeps the last accepted peer heartbeat (null if this native
+  UUID was never observed on the route) for display only: availability counts a
+  peer route's time only while it stores a snapshot accepted since it was last
+  marked online, and gateway heartbeats never refresh it.
 - `store/snapshots.rs` separates liveness and event-free snapshot changes from
   shared payload accounting. Event publication and wake jobs have transactional
   caps. Lock order is global event accounting, payload shard when needed,
@@ -217,6 +271,14 @@ workers together: an older worker would wake phones for every event, reject the
 `presence` field and serve `alert` rows without `alert_kind`. The offline
 SQLite-to-PostgreSQL migration does not carry candidates or `alert_kind`;
 phones ignore such migrated alert rows.
+
+Offline peer routes keep `computer_routes.last_seen` instead of clearing it,
+with no schema change or API field change. Replace all PostgreSQL workers
+together: an older worker clears the time on its own offline transitions and,
+for up to 45 seconds after the last peer heartbeat, could treat a peer that the
+gateway marks online again as fresh before its next peer heartbeat. The Python
+reference relay keeps the time with the same freshness rule, so a Rust-to-Python
+rollback stays safe.
 
 Attachment reads add only the `attachment_history` partial index (schema version
 1; the Python reference creates it too). Its first `CREATE INDEX` scans the

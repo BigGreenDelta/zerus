@@ -11,6 +11,13 @@ class MarkdownPresentationTest {
         return (result.blocks.single() as MarkdownBlock.Paragraph).content
     }
 
+    @Test fun computerDocumentLinksKeepTheirExactUnicodePath() {
+        val path="/workspace/example/Пример_документов/Сводная итог.xlsx"
+        val link=paragraph("[Download spreadsheet](<$path>)").filterIsInstance<MarkdownInline.Link>().single()
+        assertNull(link.safeUrl)
+        assertEquals(ComputerFileReference(path),link.fileReference)
+    }
+
     @Test fun headingsParagraphsAndInlineStylesFollowCommonMark() {
         val source = (1..6).joinToString("\n\n") { "${"#".repeat(it)} Heading $it" } +
             "\n\nA **strong and *nested***, ~~removed~~, `x < y` &amp; value.\nSoft  \nHard"

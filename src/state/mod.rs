@@ -9,6 +9,7 @@ mod claude_resume;
 mod claude_question;
 mod claude_subagents;
 mod attachments;
+mod computer_files;
 pub(crate) mod voice;
 mod interrupt;
 mod clear_context;
@@ -34,6 +35,7 @@ mod kimi_tui_choice;
 mod lifecycle;
 mod provider_errors;
 mod recovery;
+mod service_worker;
 mod session_limits;
 mod provider_messages;
 mod processes;
@@ -70,6 +72,7 @@ mod git_status;
 mod worktrees;
 mod worktree_cleanup;
 mod worktree_inspection;
+mod worktree_lifecycle;
 
 /// Current bounded native Git evidence for exact project/worktree placement.
 pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
@@ -640,6 +643,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         return hooks::hook();
     }
     if command == "voice" { return voice::dispatch(args); }
+    if command == "file-read" { return computer_files::dispatch(args); }
     if command == "attachment" {
         return attachments::dispatch(args);
     }

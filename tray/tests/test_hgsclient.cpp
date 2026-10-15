@@ -6,6 +6,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSettings>
 #include <QThread>
 #include <atomic>
 #include <memory>
@@ -17,13 +18,20 @@
 #include "FakeCli.h"
 #include "FleetState.h"
 #include "HgsClient.h"
+#include "DownloadCache.h"
 #include "ProcessRunner.h"
 #include "SessionPresentation.h"
 #include "NativeSessionCapabilities.h"
 
 class TestHgsClient : public QObject {
     Q_OBJECT
+    std::unique_ptr<QTemporaryDir> m_settings;
 private slots:
+    void initTestCase() {
+        m_settings = std::make_unique<QTemporaryDir>(); QVERIFY(m_settings->isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings->path());
+    }
     void parsesBox();
     void parsesSharedReadState();
     void readMarksUseStdinAndAcceptOnlyHostAnswers();
@@ -78,6 +86,7 @@ private slots:
     void nativeApiSessionsRetainExactCapabilities();
     void attachmentsUseCapturedIdentityAndValidateResponses();
     void downloadsRequireExactSavedFileReceipts();
+    void cachedDownloadsPreserveRequestIdentityAndCleanFailures();
     void gitStatusReadsAreSharedAndScopedToMachineAndFolder();
     void pollsLaunchOffTheGuiThreadAndReportOnIt();
     void destroyedClientKillsItsPolls();
@@ -116,6 +125,48 @@ void TestHgsClient::downloadsRequireExactSavedFileReceipts()
     const auto shortcutRequest = client.downloadFile("remote", "/remote/remote.lnk", shortcut);
     QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready.first()[0].toULongLong(), shortcutRequest); QVERIFY(failed.isEmpty());
 #endif
+}
+
+void TestHgsClient::cachedDownloadsPreserveRequestIdentityAndCleanFailures()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto root = dir.filePath("Zerus Files"), fixture = dir.filePath("hgs");
+    QSettings settings; const auto oldFolder = settings.value("downloads/folder"), oldLimit = settings.value("downloads/cacheBytes");
+    const auto restore = qScopeGuard([&] {
+        if (oldFolder.isValid()) settings.setValue("downloads/folder", oldFolder); else settings.remove("downloads/folder");
+        if (oldLimit.isValid()) settings.setValue("downloads/cacheBytes", oldLimit); else settings.remove("downloads/cacheBytes");
+    });
+    settings.setValue("downloads/folder", root); settings.setValue("downloads/cacheBytes", 0);
+    QVERIFY(FakeCli::install(fixture, R"PY(#!/usr/bin/env python3
+import sys,json,pathlib
+a=sys.argv[1:];host=a[0][1:];path=a[a.index('--path')+1];target=a[a.index('--output')+1]
+pathlib.Path(target).write_bytes(host.encode())
+if path.endswith('fail.txt'): sys.exit(1)
+print(json.dumps(dict(host=host,path=path,local_path=target,bytes=999 if path.endswith('bad.txt') else len(host))))
+)PY"));
+    HgsClient client(FakeCli::program(fixture));
+    QSignalSpy ready(&client, &HgsClient::fileDownloaded), failed(&client, &HgsClient::fileDownloadFailed);
+    const auto one = client.downloadFileToCache("one", "/remote/same.txt"), two = client.downloadFileToCache("two", "/other/same.txt");
+    QTRY_COMPARE(ready.size(), 2); QVERIFY(failed.isEmpty());
+    QSet<QString> names;
+    for (const auto &receipt : ready) {
+        const auto id = receipt[0].toULongLong(); const auto path = receipt[1].toString();
+        QVERIFY(id == one || id == two); QCOMPARE(QFileInfo(path).absolutePath(), root);
+        QFile file(path); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), id == one ? QByteArray("one") : QByteArray("two"));
+        names.insert(path);
+    }
+    QCOMPARE(names.size(), 2); ready.clear();
+    const auto broken = client.downloadFileToCache("one", "/remote/bad.txt"), failure = client.downloadFileToCache("one", "/remote/fail.txt");
+    QTRY_COMPARE(failed.size(), 2); QVERIFY(ready.isEmpty());
+    QSet<quint64> ids; for (const auto &receipt : failed) ids.insert(receipt[0].toULongLong());
+    QCOMPARE(ids, (QSet<quint64>{broken, failure}));
+    QTRY_VERIFY(QDir(root).entryList({".zerus-part-*"}, QDir::Files | QDir::Hidden).isEmpty());
+    QCOMPARE(DownloadCache::usage(root).files, 2);
+    // An unusable cache reports against the same ID before any transfer starts.
+    const auto blocked = dir.filePath("not a folder"); QFile file(blocked); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+    settings.setValue("downloads/folder", blocked);
+    const auto prepFailed = client.downloadFileToCache("one", "/remote/same.txt");
+    QTRY_COMPARE(failed.size(), 3); QCOMPARE(failed.last()[0].toULongLong(), prepFailed); QVERIFY(ready.isEmpty());
 }
 
 void TestHgsClient::cliVersionUsesConfiguredExecutableAndRefreshes()

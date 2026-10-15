@@ -229,7 +229,9 @@ fn turn_origin<'a>(record: &Value, event: &'a Value) -> Option<&'a str> {
 }
 
 pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
-    if string(event, "hook_event_name") == "SessionHeartbeat" {
+    // Kimi's heartbeat and Claude's model switch change state, not Activity;
+    // the model selector shows the switch.
+    if ["SessionHeartbeat", "PostModelSwitch"].contains(&string(event, "hook_event_name")) {
         return Ok(());
     }
     let mut data = json!({"type": event["hook_event_name"], "at": now(), "run_id": record["run_id"],
@@ -456,44 +458,67 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     if live_pane {
         // Native startup choosers have no hook. A later recognized panel wins;
         // an unrecognized chooser before a conversation stays visible read-only.
-        type Current = fn(&Value) -> Option<Value>;
-        let choosers: [(Current, &str, &str); 10] = [
-            (claude_approval::current, "approval", "Claude is waiting for your tool or safety approval"),
-            (claude_resume::current, "approval", "Claude is waiting for your conversation resume choice"),
-            (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
-            (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
-            (codex_trust::current, "approval", "Codex is waiting for folder trust approval"),
-            (codex_hooks_trust::current, "approval", "Codex is waiting for hook trust review"),
-            (codex_update::current, "input", "Codex is waiting for an update choice"),
-            (codex_goal_resume::current, "input", "Codex is waiting for your paused goal choice"),
-            (kimi_trust::current, "approval", "Kimi is waiting for folder trust approval"),
-            (kimi_cache_hint::current, "input", "Kimi is waiting for your context choice"),
-        ];
-        let mut recognized = false;
-        for (current, phase, detail) in choosers {
-            if let Some(question) = current(record) {
-                recognized = true;
-                output["activity"] = json!("busy");
-                output["phase"] = json!(phase);
-                output["attention_id"] = question["question_id"].clone();
-                output["status_detail"] = json!(detail);
-            }
+        let recognized = terminal_chooser(record);
+        if let Some((question, phase, detail)) = &recognized {
+            output["activity"] = json!("busy");
+            output["phase"] = json!(phase);
+            output["attention_id"] = question["question_id"].clone();
+            output["status_detail"] = json!(detail);
         }
         // A resumed conversation reported this panel as an unknown terminal state.
         if output["attention_id"].as_str().is_some_and(|id| id.starts_with("codex-goal-resume:")) {
             output["activity_detail"] = output["status_detail"].clone();
             output["resume_message_reason"] = json!(codex_goal_resume::WAIT);
         }
-        let fallback = if recognized { None } else { startup_choice::current(record) };
+        let fallback = if recognized.is_some() { None } else { startup_choice::current(record) };
+        let shown = recognized.is_some() || fallback.is_some();
         if let Some(question) = fallback {
             output["activity"] = json!("busy");
             output["phase"] = json!("input");
             output["attention_id"] = question["question_id"].clone();
             output["status_detail"] = json!(startup_choice::detail(record, &question));
         }
+        if shown {
+            wait_for_chooser(&mut output);
+        }
     }
     recovery::enrich(record, &mut output);
     output
+}
+
+/// The native chooser the terminal shows, which no hook reports: its
+/// question, the phase the summary shows and its detail. A later recognized
+/// panel wins. Dispatch refuses each of them (`input::checked_input`).
+pub(super) fn terminal_chooser(record: &Value) -> Option<(Value, &'static str, &'static str)> {
+    type Current = fn(&Value) -> Option<Value>;
+    let choosers: [(Current, &str, &str); 10] = [
+        (claude_approval::current, "approval", "Claude is waiting for your tool or safety approval"),
+        (claude_resume::current, "approval", "Claude is waiting for your conversation resume choice"),
+        (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
+        (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
+        (codex_trust::current, "approval", "Codex is waiting for folder trust approval"),
+        (codex_hooks_trust::current, "approval", "Codex is waiting for hook trust review"),
+        (codex_update::current, "input", "Codex is waiting for an update choice"),
+        (codex_goal_resume::current, "input", "Codex is waiting for your paused goal choice"),
+        (kimi_trust::current, "approval", "Kimi is waiting for folder trust approval"),
+        (kimi_cache_hint::current, "input", "Kimi is waiting for your context choice"),
+    ];
+    choosers
+        .into_iter()
+        .filter_map(|(current, phase, detail)| current(record).map(|question| (question, phase, detail)))
+        .last()
+}
+
+/// A chooser only the terminal shows leaves the saved activity idle, so the
+/// summary offered the actions that need Ready before it recognized the
+/// chooser. Dispatch refuses the chooser, as for clear and compaction: a live
+/// fork and an effort change wait until it is answered, and a settings change
+/// is scheduled for Ready instead of applied now.
+fn wait_for_chooser(output: &mut Value) {
+    if let Some(reason) = clear_context::answer_first(string(output, "phase")) {
+        fork::wait_for_chooser(output, reason);
+        effort::wait_for_chooser(output, reason);
+    }
 }
 
 const MESSAGE_EVENTS_LIMIT: usize = 100;
@@ -651,12 +676,18 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         output["process_work"] = processes::WorkSample::default().summary(&record,
             archive_id.is_none() && panes.is_some() && output["activity"] == "idle" && output["phase"] == "idle");
     }
-    output["compact_context_supported"] = json!(archive_id.is_none() && clear_context::available(&record,panes.is_some()));
+    // Each unavailable action names its reason; an older host omits it.
+    let context_reason = if archive_id.is_some() { Some("Restore the archived session first".to_owned()) }
+        else { clear_context::unavailable_shown(&record,panes.is_some(),&output) };
+    output["compact_context_supported"] = json!(context_reason.is_none());
+    output["compact_context_reason"] = json!(context_reason.clone().unwrap_or_default());
     output["compact_context_request"] = record["compact_context_request"].clone();
     // The summary above verified a pending resume once; its message and
     // actions reuse that result instead of checking the terminal again.
-    output["clear_context_supported"] = json!(archive_id.is_none() && (clear_context::available(&record,panes.is_some())
+    output["clear_context_supported"] = json!(archive_id.is_none() && (context_reason.is_none()
         || clear_context::resumed_verified(&record,panes.is_some(),output["resume_message_can_send"] == true)));
+    output["clear_context_reason"] = json!(if output["clear_context_supported"] == true { String::new() }
+        else { context_reason.unwrap_or_default() });
     output["clear_context_dismiss"] = json!(archive_id.is_none() && output["clear_context_supported"] != true
         && clear_context::dismissable(&record,panes.is_some()) && !clear_context::startup_choice(&output["pending_questions"]));
     output["interrupt_supported"] = json!(archive_id.is_none() && interrupt::available(&record,panes.is_some()));
@@ -901,6 +932,9 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
     }
     if event["model"].is_string() {
         record["model"] = json!(clipped(&event["model"], 120));
+    }
+    if kind == "PostModelSwitch" {
+        effort::observe_switch(record, event);
     }
     for field in ["effort", "reasoning_effort", "thinking_effort"] {
         // Claude hooks report the turn's applied effort as {"level": ...}.
@@ -1207,6 +1241,38 @@ mod attention_regressions {
     use super::*;
 
     #[test]
+    fn a_terminal_chooser_holds_back_forks_and_immediate_settings_as_dispatch_does() {
+        // A Ready saved record; the summary shows a chooser only the terminal
+        // reports. Dispatch refuses it, so inspect and the listing agree.
+        let mut record = telemetry::stale_hook_child();
+        record["base"] = json!(["kimi"]);
+        let shown = |phase: &str| {
+            let mut output = fork::summary(&record, true);
+            for part in [session_action::summary(&record, true, &None),
+                json!({"phase":phase,"settings_apply_when":"now","effort_change_supported":true,"effort_change_reason":""})] {
+                output.as_object_mut().unwrap().extend(part.as_object().unwrap().clone());
+            }
+            wait_for_chooser(&mut output);
+            output
+        };
+        let ready = shown("idle");
+        assert_eq!((&ready["fork_supported"], &ready["fork_reason"]), (&json!(true), &json!("")));
+        assert!(ready["allowed_actions"].as_array().unwrap().contains(&json!("fork")));
+        assert_eq!((&ready["settings_apply_when"], &ready["effort_change_supported"]), (&json!("now"), &json!(true)));
+        for (phase, reason) in [("input", "Wait until the agent's question is answered"),
+            ("approval", "Wait until the agent's approval request is answered")] {
+            let output = shown(phase);
+            assert_eq!((&output["fork_supported"], &output["fork_reason"]), (&json!(false), &json!(reason)), "{phase}");
+            assert!(!output["allowed_actions"].as_array().unwrap().contains(&json!("fork")), "{phase}");
+            assert_eq!(output["action_reasons"]["fork"], reason, "{phase}");
+            // The change is scheduled for Ready; `hgs effort` refuses it.
+            assert_eq!(output["settings_apply_when"], "ready", "{phase}");
+            assert_eq!((&output["effort_change_supported"], &output["effort_change_reason"]), (&json!(false), &json!(reason)), "{phase}");
+            assert!(output["allowed_actions"].as_array().unwrap().contains(&json!("rename")), "{phase}");
+        }
+    }
+
+    #[test]
     fn claude_pasted_content_keeps_only_the_text_the_person_sent() {
         let sent = "Activity misses replies\n\nInspect the attached image at \"/private/one.png\"";
         assert_eq!(pasted_text(&format!("<pasted_content id=\"1b93\">\n{sent}\n</pasted_content id=\"1b93\">")), sent);
@@ -1334,6 +1400,23 @@ mod attention_regressions {
         assert_eq!(record["effort"], "xhigh");
         update_activity(&mut record, &json!({"hook_event_name":"Stop","effort":{"level":"turbo"}}));
         assert_eq!(record["effort"], "xhigh");
+    }
+    #[test]
+    fn claude_model_switch_sets_the_main_model_without_activity() {
+        let mut record = json!({"agent":"claude","model":"claude-opus-5-5","activity":"idle","phase":"idle",
+            "main_done":true,"active_tools":{},"subagents":{}});
+        let switch = json!({"hook_event_name":"PostModelSwitch","session_id":"s","from_model":"claude-opus-5-5",
+            "to_model":"claude-haiku-5-5","requested_model":"haiku","source":"command","context_tokens":0});
+        update_activity(&mut record, &switch);
+        assert_eq!(record["model"], "claude-haiku-5-5");
+        assert_eq!((&record["activity"], &record["phase"], &record["main_done"]), (&json!("idle"), &json!("idle"), &json!(true)));
+        assert!(record.get("last_main_progress_at").is_none());
+        // A subagent's switch is not the session's.
+        let mut child = switch.clone();
+        child["agent_id"] = json!("child");
+        child["to_model"] = json!("claude-sonnet-5-5");
+        update_activity(&mut record, &child);
+        assert_eq!(record["model"], "claude-haiku-5-5");
     }
     #[test]
     fn compaction_has_its_own_clock_and_survives_duplicate_start_and_queued_input() {

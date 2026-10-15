@@ -1,5 +1,4 @@
 """Exercise the checked-in workflow trust predicate and final success gate."""
-import configparser
 import datetime
 import importlib.util
 import io
@@ -281,27 +280,29 @@ class WorkflowSecurityTests(unittest.TestCase):
         # Line endings are fixed before checking out the exact tested commit.
         self.assertLess(windows.index("core.autocrlf false"), windows.index("actions/checkout@"))
         self.assertIn("ref: ${{ needs.source.outputs.commit }}\n          persist-credentials: false", windows)
-        # One exact interpreter; Qt's installer runs only from hash-locked wheels
-        # in its own environment, and its cache key covers that lock.
+        # One exact interpreter, and no Python package installed: Qt comes from
+        # the verified archives of its pin, and its cache key covers the pin and
+        # the installer.
         self.assertIn("uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0\n"
                       "        with:\n          python-version: '3.13.15'\n", windows)
         self.assertNotIn("install-qt-action", windows)
-        self.assertEqual(windows.count("pip install"), 1)
-        self.assertIn('"$aqt_python" -m pip install --no-input --disable-pip-version-check --require-hashes '
-                      '--only-binary :all: \\\n            -r scripts/ci/aqt-requirements.txt </dev/null', windows)
-        self.assertIn('python -m venv "$RUNNER_TEMP/aqt"', windows)
-        self.assertIn('"$aqt_python" -m aqt -c scripts/ci/aqt-settings.ini install-qt windows desktop 6.10.3 '
-                      'win64_msvc2022_64 \\\n'
-                      '            -m qtmultimedia --outputdir "$RUNNER_TEMP/Qt" </dev/null', windows)
-        # One worker: parallel archives raced py7zr's Windows path check.
-        settings = configparser.ConfigParser()
-        settings.read_string((ROOT / "scripts/ci/aqt-settings.ini").read_text())
-        self.assertEqual({name: dict(settings[name]) for name in settings.sections()}, {"aqt": {"concurrency": "1"}})
+        self.assertNotIn("pip install", windows)
+        self.assertNotRegex(windows, r"\baqt\b")
+        qt = json.loads((ROOT / "packaging/windows/qt.json").read_text())
+        version, prefix = qt["qt_version"], qt["prefix"]
+        self.assertEqual(windows.count("scripts/install-qt-windows.py --output"), 1)
+        self.assertIn("        if: steps.qt-cache.outputs.cache-hit != 'true'\n"
+                      '        run: python scripts/install-qt-windows.py --output "$RUNNER_TEMP/Qt" </dev/null\n', windows)
+        # A restored cache is checked against the pin too, before the build uses it.
+        use = next(step for step in self.checks_steps("windows-desktop") if f"- name: Use Qt {version}\n" in step)
+        self.assertIn('python scripts/install-qt-windows.py --check "$RUNNER_TEMP/Qt" </dev/null\n', use)
+        self.assertIn(f'qt=$(cygpath -w "$RUNNER_TEMP/Qt/{prefix}")', use)
         # Qt WebEngine is an optional Linux plugin; the Windows bundle never ships it.
         self.assertNotIn("qtwebengine", windows)
-        self.assertIn("if: steps.qt-cache.outputs.cache-hit != 'true'", windows)
-        self.assertIn("key: windows-qt-6.10.3-win64_msvc2022_64-qtmultimedia-"
-                      "${{ hashFiles('scripts/ci/aqt-requirements.txt') }}", windows)
+        self.assertNotIn("qtwebengine", json.dumps(qt))
+        self.assertIn(f"key: windows-qt-{version}-win64_msvc2022_64-${{{{ hashFiles('packaging/windows/qt.json', "
+                      "'scripts/install-qt-windows.py', 'scripts/qt_archives.py') }}", windows)
+        self.assertIn(f"key: windows-ccache-v1-${{{{ runner.arch }}}}-qt{version}-", windows)
         # A new stable Rust release must not fail an unchanged commit.
         self.assertIn("cargo +1.85.0 clippy --locked --all-targets -- -D warnings", windows)
         self.assertNotRegex(windows, r"(?m)^\s*cargo clippy")
@@ -379,31 +380,16 @@ class WorkflowSecurityTests(unittest.TestCase):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         self.assertEqual(checks.count("android-gradle-v1-"), 2)
 
-    def test_qt_installer_dependencies_are_exact_hashed_wheels(self):
-        lock = (ROOT / "scripts/ci/aqt-requirements.txt").read_text()
-        lines = [line for line in lock.splitlines() if not line.lstrip().startswith("#")]
-        requirements = lines[0::2]
-        hashes = lines[1::2]
-        self.assertEqual(len(requirements), len(hashes))
-        pins = {}
-        for requirement, digest in zip(requirements, hashes):
-            # No options (index URLs, editable or local paths), only name==version and one hash.
-            self.assertRegex(requirement, r"^[a-z0-9][a-z0-9.-]*==[0-9][A-Za-z0-9.]* \\$")
-            self.assertRegex(digest, r"^    --hash=sha256:[0-9a-f]{64}$")
-            name, version = requirement[:-2].split("==")
-            self.assertNotIn(name, pins)
-            pins[name] = version
-        self.assertEqual((pins.get("aqtinstall"), pins.get("py7zr")), ("3.3.0", "1.1.3"))
-
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
-        self.assertIn("needs: [source, quick, relay, android, cli, arch, arch-package, mac-desktop, windows-desktop, "
-                      "windows-host]", gate)
+        self.assertIn("needs: [source, quick, relay, connector, android, cli, arch, arch-package, mac-desktop, "
+                      "windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        base = {"source": "success", "quick": "success", "relay": "success", "android": "success", "cli": "success",
-                "arch": "success", "arch-package": "success", "mac-desktop": "success"}
+        base = {"source": "success", "quick": "success", "relay": "success", "connector": "success",
+                "android": "success", "cli": "success", "arch": "success", "arch-package": "success",
+                "mac-desktop": "success"}
         # Both Windows jobs are selected together, and each must pass on its own.
         windows = ("windows-desktop", "windows-host")
         for name in windows:
@@ -421,12 +407,14 @@ class WorkflowSecurityTests(unittest.TestCase):
                     else:
                         with self.assertRaises(SystemExit):
                             exec(code, {})
-        # Quick checks and the Android check always run; the Arch package is
-        # selected exactly with Arch desktop.
+        # Quick checks, the connector and the Android check always run; the Arch
+        # package is selected exactly with Arch desktop.
         base.update(dict.fromkeys(windows, "success"))
         arch_skipped = {**base, "arch": "skipped", "arch-package": "skipped"}
         for results, run_arch, success in [
             ({**base, "quick": "failure"}, "true", False), ({**base, "quick": "skipped"}, "true", False),
+            ({**base, "connector": "failure"}, "true", False), ({**base, "connector": "skipped"}, "true", False),
+            ({**base, "connector": "cancelled"}, "true", False), ({**arch_skipped, "connector": "skipped"}, "false", False),
             ({**base, "android": "failure"}, "true", False), ({**base, "android": "skipped"}, "true", False),
             ({**base, "android": "cancelled"}, "true", False), ({**arch_skipped, "android": "skipped"}, "false", False),
             ({**base, "arch-package": "failure"}, "true", False), ({**base, "arch-package": "skipped"}, "true", False),
@@ -471,8 +459,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
                      "run: cargo +1.85.0 test --locked"):
             self.assertIn(line, quick)
-        for name in ("quick", "relay", "android", "cli", "arch", "arch-package", "mac-desktop", "windows-desktop",
-                     "windows-host"):
+        for name in ("quick", "relay", "connector", "android", "cli", "arch", "arch-package", "mac-desktop",
+                     "windows-desktop", "windows-host"):
             with self.subTest(job=name):
                 self.assertEqual(field(job(checks, name), "needs"), "source")
                 self.assertIn("ref: ${{ needs.source.outputs.commit }}", job(checks, name))
@@ -489,6 +477,87 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertIn("\ncheck() {\n", text)
                 self.assertNotIn("ccache", text)
         self.assertNotIn("--nocheck", (ROOT / "scripts/build-arch-package.sh").read_text())
+
+    def test_relay_job_runs_every_mobile_service_module(self):
+        relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
+        python = '"$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests'
+        # One discover covers every module except the black-box connector suites
+        # against Rust; only the speech suites repeat against the Python reference relay.
+        self.assertEqual(re.findall(rf"(?m)^          (.*){re.escape(python)}(.*)$", relay),
+                         [("", " -p 'test_[!b]*.py' -v"),
+                          ("env -u ZERUS_RELAY_BINARY ", " -p 'test_mobile_speech*.py' -v")])
+        # The pattern leaves out exactly the black-box modules, which the connector job runs.
+        tests = ROOT / "services/mobile/tests"
+        self.assertEqual({path.name for path in tests.glob("test_b*.py")},
+                         {path.name for path in tests.glob("test_bb_*.py")})
+        self.assertTrue(list(tests.glob("test_bb_*.py")))
+        for variable in ("ZERUS_RELAY_BINARY", "ZERUS_DIRECTORY_TEST_HGS"):
+            self.assertIn(f"\n          export {variable}=", relay)
+        # The relay fixtures' database driver is a test-only requirement.
+        self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile'
+                      " -r services/mobile/tests/requirements.txt\n", relay)
+
+    def test_relay_job_runs_contracts_and_fixtures_on_postgresql(self):
+        relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
+        # Without the service URL the Rust contracts fall back to SQLite or are
+        # ignored and the Rust fixture suites skip; the requirement fails instead.
+        postgres = [step for step in steps(relay) if "ZERUS_RELAY_TEST_DATABASE_URL" in step]
+        self.assertEqual([re.match(r"      - name: (.*)", step)[1] for step in postgres],
+                         ["Rust format, lint and PostgreSQL storage contracts",
+                          "Released HTTP and outbound connector compatibility"])
+        for step in postgres:
+            self.assertIn("\n        env:\n          ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:"
+                          "${{ job.services.postgres.ports['5432'] }}/postgres\n"
+                          '          ZERUS_REQUIRE_RELAY_E2E: "1"\n', step)
+        for contract in ("", " --test contracts postgres_cross_worker -- --ignored"):
+            self.assertIn(f"\n          cargo +1.85.0 test --locked{contract}\n", postgres[0])
+        self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests'
+                      " -p 'test_[!b]*.py' -v\n", postgres[1])
+
+    def test_connector_job_runs_the_black_box_suites_against_both_connectors(self):
+        connector = job((ROOT / ".github/workflows/checks.yml").read_text(), "connector")
+        self.assertEqual(field(connector, "runs-on"), "ubuntu-24.04")
+        self.assertNotRegex(connector, r"(?m)^    if:")
+        self.assertIn("'connector': True,", job((ROOT / ".github/workflows/checks.yml").read_text(), "gate"))
+        for text in ("secrets", "vars.", "environment:", "permissions", "github.token", "continue-on-error"):
+            with self.subTest(forbidden=text):
+                self.assertNotIn(text, connector)
+        self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", connector),
+                         ["actions/checkout", "actions/cache/restore", "actions/cache/save"])
+        rust = next(step for step in steps(connector) if "name: Format, lint and dependency boundaries" in step)
+        for command in ("fmt --check", "clippy --locked --all-targets -- -D warnings",
+                        "clippy --locked --all-targets --features test-hooks -- -D warnings",
+                        "build --locked --features test-hooks", "build --locked"):
+            self.assertIn(f"\n          cargo +1.85.0 {command}\n", rust)
+        self.assertIn("        working-directory: services/mobile/connector\n", rust)
+        self.assertIn("""grep -q 'serde_json feature "preserve_order"'""", rust)
+        self.assertIn("(axum|sqlx|reqwest|openssl-sys|native-tls)", rust)
+        tests = next(step for step in steps(connector) if "name: Vector, binary and handoff tests" in step)
+        for variable in ("ZERUS_CONNECTOR_TEST_PYTHON", "ZERUS_CONNECTOR_TEST_HGS"):
+            self.assertIn(f"\n          {variable}: ", tests)
+        self.assertIn("run: cargo +1.85.0 test --locked\n", tests)
+        python = '"$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests'
+        black_box = next(step for step in steps(connector) if "name: Black-box suites against the" in step)
+        self.assertEqual(re.findall(rf"(?m)^ +(.*){re.escape(python)}(.*)$", black_box),
+                         [("", " -p 'test_bb_*.py' -v"), ("", " -p 'test_bb_*.py' -v")])
+        self.assertIn('ZERUS_CONNECTOR_COMMAND="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/'
+                      'zerus-mobile-connector" \\\n', black_box)
+        ported = json.loads((ROOT / "services/mobile/tests/ported.json").read_text())["rust"]
+        self.assertEqual(ported, sorted(set(ported)))
+        for module in ported:
+            self.assertTrue((ROOT / f"services/mobile/tests/{module}.py").is_file(), module)
+
+    def test_relay_job_checks_the_protocol_library_alone(self):
+        relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
+        rust = next(step for step in steps(relay) if "name: Rust format, lint and PostgreSQL storage contracts" in step)
+        # The connector links the library without the server feature on Rust 1.85.
+        for command in ("clippy --locked --no-default-features --lib --test codec -- -D warnings",
+                        "build --locked --no-default-features --lib",
+                        "test --locked --no-default-features --test codec"):
+            self.assertIn(f"\n          cargo +1.85.0 {command}\n", rust)
+        self.assertIn('library="$(cargo +1.85.0 tree --locked --no-default-features --target all -e normal', rust)
+        self.assertIn("\n          serde_features\n          serde_features --no-default-features\n", rust)
+        self.assertIn("""grep -q 'serde_json feature "preserve_order"'""", rust)
 
     def test_arch_package_job_alone_produces_the_candidate_artifact(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
@@ -602,21 +671,24 @@ class WorkflowSecurityTests(unittest.TestCase):
         rust = {"quick": ("msrv-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.85.0 -Vv"),
                 "cli": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
                 "windows-desktop": ("windows-cli-${{ runner.arch }}-", "rustc -Vv"),
-                "windows-host": ("windows-cli-${{ runner.arch }}-", "rustc -Vv")}
+                "windows-host": ("windows-cli-${{ runner.arch }}-", "rustc -Vv"),
+                "connector": ("connector-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.85.0 -Vv")}
         for name, (family, rustc) in rust.items():
             with self.subTest(job=name):
                 self.assertIn(f'echo "rustc=$({rustc} | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"\n'
                               f'          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"\n',
                               self.checks_step(name, "rust"))
                 restore = self.checks_step(name, "rust-cache")
-                self.assertIn(f"          key: {family}{identity}${{{{ hashFiles('Cargo.lock') }}}}\n"
+                # Each cache follows the lock of what it builds.
+                lock = "services/mobile/connector/Cargo.lock" if name == "connector" else "Cargo.lock"
+                self.assertIn(f"          key: {family}{identity}${{{{ hashFiles('{lock}') }}}}\n"
                               f"          restore-keys: {family}{identity}\n", restore)
         cargo = self.checks_step("arch-package", "cargo-cache")
         self.assertIn("          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-${{ hashFiles('Cargo.lock') }}\n"
                       "          restore-keys: arch-cargo-v1-${{ steps.epoch.outputs.month }}-\n", cargo)
         for name, step_id in (("quick", "rust-cache"), ("cli", "rust-cache"), ("windows-desktop", "rust-cache"),
-                              ("arch-package", "cargo-cache"), ("windows-desktop", "qt-cache"),
-                              ("android", "gradle-cache")):
+                              ("connector", "rust-cache"), ("arch-package", "cargo-cache"),
+                              ("windows-desktop", "qt-cache"), ("android", "gradle-cache")):
             with self.subTest(job=name, cache=step_id):
                 # Exact content keys: 200-800 MB entries are saved only when missing.
                 self.assertNotIn("run_id", self.checks_step(name, step_id))
@@ -954,7 +1026,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         exec(compile(inline_python(job(self.ci, "cache-trim")), "workflow-cache-trim", "exec"), namespace)
         def entry(number, key, created, ref="refs/heads/main"):
             return {"id": number, "key": key, "ref": ref, "created_at": created, "size_in_bytes": 1}
-        qt = "windows-qt-6.10.3-win64_msvc2022_64-qtmultimedia-"
+        qt = "windows-qt-6.10.3-win64_msvc2022_64-"
         caches = [
             entry(1, "arch-ccache-v1-100", "2026-10-12T10:00:00.123456Z"),
             entry(2, "arch-ccache-v1-101", "2026-10-12T11:00:00Z"),
@@ -1034,9 +1106,14 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertNotRegex(text, r"actions/cache[@/]")
         sign = job(text, "sign")
         self.assertRegex(sign, r"(?m)^    environment: macos-signing$")
-        for secret in ("MACOS_DEVELOPER_ID_P12", "MACOS_DEVELOPER_ID_P12_PASSWORD", "APPLE_NOTARY_API_KEY_P8",
-                       "APPLE_NOTARY_API_KEY_ID", "APPLE_NOTARY_API_ISSUER_ID"):
+        apple_secrets = {"MACOS_DEVELOPER_ID_P12", "MACOS_DEVELOPER_ID_P12_PASSWORD", "APPLE_NOTARY_API_KEY_P8",
+                         "APPLE_NOTARY_API_KEY_ID", "APPLE_NOTARY_API_ISSUER_ID"}
+        declarations = text.split("    secrets:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(set(re.findall(r"(?m)^      (\w+):$", declarations)), apple_secrets)
+        for secret in apple_secrets:
             self.assertIn(f"secrets.{secret}", sign)
+            required = "false" if secret == "APPLE_NOTARY_API_ISSUER_ID" else "true"
+            self.assertIn(f"      {secret}:\n        required: {required}", declarations)
         self.assertIn("vars.MACOS_TEAM_ID", sign)
         self.assertIn('test "$WORKFLOW_REF" = refs/heads/main', sign)
         self.assertRegex(sign, r"if: always\(\)\n        run: bash scripts/ci/macos-keychain.sh delete")
@@ -1046,9 +1123,12 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertNotIn("environment: release", text)
         for name in ("release.yml", "nightly.yml"):
             workflow = (ROOT / ".github/workflows" / name).read_text()
-            self.assertNotIn("MACOS_DEVELOPER_ID", workflow, name)
-            self.assertNotIn("APPLE_NOTARY", workflow, name)
             self.assertNotIn("secrets: inherit", workflow, name)
+            macos = job(workflow, "macos")
+            forwarded = dict(re.findall(r"(?m)^      (\w+): \$\{\{ secrets\.(\w+) \}\}$", macos))
+            self.assertEqual(forwarded, {secret: secret for secret in apple_secrets}, name)
+            for secret in apple_secrets:
+                self.assertNotIn(f"secrets.{secret}", workflow.replace(macos, ""), name)
 
     def assemble_runs(self, workflow, verify, macos, enabled, requested=True):
         expression = field(job(workflow, "assemble"), "if")

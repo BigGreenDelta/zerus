@@ -16,7 +16,24 @@ REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "target/debug/hgs")).resolve()
 TMUX = shutil.which("tmux")
 
-FAKE_AGENT = r'''
+# Fixture agents redraw from Python signal handlers, which run between
+# bytecodes. A signal that lands after the agent last checked for one and
+# before it blocks in read() waits there for the next key, so the redraw never
+# comes. Each handled signal also writes a byte to the wakeup pipe, so the
+# select returns and the handler runs wherever the signal landed.
+SIGNAL_SAFE_READ = r'''
+import os, select, signal
+wake, waker = os.pipe()
+os.set_blocking(waker, False)
+signal.set_wakeup_fd(waker, warn_on_full_buffer=False)
+def read_input(fd):
+    while True:
+        ready = select.select([fd, wake], [], [])[0]
+        if wake in ready: os.read(wake, 4096)
+        if fd in ready: return os.read(fd, 65536)
+'''
+
+FAKE_AGENT = SIGNAL_SAFE_READ + r'''
 import json, os, pathlib, signal, subprocess, sys, termios, time, tty
 root = pathlib.Path(os.environ['INPUT_FIXTURE'])
 fd = sys.stdin.fileno()
@@ -36,7 +53,7 @@ signal.signal(signal.SIGUSR2, launch)
 (root / 'agent-pid').write_text(str(os.getpid()))
 try:
     while True:
-        value = os.read(fd, 65536)
+        value = read_input(fd)
         if not value: break
         with (root / 'received').open('ab') as file: file.write(value)
         # Optionally redraw like an agent that stops its turn on Escape.
@@ -154,10 +171,16 @@ class InputTransport(unittest.TestCase):
 
     def screen(self, value, cursor):
         import signal
-        (self.root / "screen").write_bytes(value.encode())
+        # Successive screens often leave the cursor in the same cell, so the
+        # cursor alone can still be the previous screen's. The agent writes a
+        # new title after this screen and tmux applies output in order: once
+        # the pane has that title, the whole screen is drawn.
+        self.frames = getattr(self, "frames", 0) + 1
+        title = "input-test-screen-%d" % self.frames
+        (self.root / "screen").write_bytes(value.encode() + b"\x1b]2;" + title.encode() + b"\x1b\\")
         os.kill(self.record["pid"], signal.SIGUSR1)
         self.wait_for(lambda: self.tmux("display-message", "-p", "-t", self.pane,
-                                      "#{cursor_x}:#{cursor_y}").strip() == cursor)
+                                      "#{pane_title} #{cursor_x}:#{cursor_y}").strip() == title + " " + cursor)
 
     def fresh_unconfirmed(self):
         self.record.update(run_identity_version=1,

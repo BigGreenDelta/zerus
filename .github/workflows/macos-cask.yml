@@ -2,8 +2,8 @@ name: macOS cask
 
 # Builds, signs, notarizes and installs the Apple Silicon bundle of one Homebrew
 # channel for an already verified main revision. Only release.yml and nightly.yml
-# call it; neither passes secrets. The signing job alone reads the macos-signing
-# environment, whose deployment policy admits only main.
+# call it and explicitly forward the five Apple secret names. The signing job
+# alone reads their values from macos-signing, whose policy admits only main.
 on:
   workflow_call:
     inputs:
@@ -11,6 +11,17 @@ on:
         description: Homebrew channel of the candidate, stable or nightly
         type: string
         required: true
+    secrets:
+      MACOS_DEVELOPER_ID_P12:
+        required: true
+      MACOS_DEVELOPER_ID_P12_PASSWORD:
+        required: true
+      APPLE_NOTARY_API_KEY_P8:
+        required: true
+      APPLE_NOTARY_API_KEY_ID:
+        required: true
+      APPLE_NOTARY_API_ISSUER_ID:
+        required: false
 
 permissions:
   contents: read
@@ -57,7 +68,7 @@ jobs:
               output.write(f'release={release}\n')
           print(f'Building the {channel} macOS bundle {release}.')
           PY
-      - run: brew install cmake ninja
+      - run: brew install cmake ninja tmux
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: Install the pinned official Qt
         run: python3 scripts/install-qt-macos.py --output "$RUNNER_TEMP/qt"
@@ -81,7 +92,8 @@ jobs:
     name: macOS signing and notarization
     needs: bundle
     runs-on: macos-15
-    timeout-minutes: 150
+    # Separate accepted submissions for the app and its final, signed disk image.
+    timeout-minutes: 270
     environment: macos-signing
     steps:
       - name: Require upstream main
@@ -150,6 +162,7 @@ jobs:
         with:
           name: macos-signed-${{ github.sha }}
           path: artifacts/macos-signed
+      - run: brew install tmux
       - name: Install the candidate cask from a local tap
         env:
           CHANNEL: ${{ inputs.channel }}

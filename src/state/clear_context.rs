@@ -169,17 +169,115 @@ pub(super) fn event(record: &Value) -> Option<Value> {
 }
 
 fn unblocked(record: &Value) -> bool {
-    !pause_active(record) && string(record,"error").is_empty()
-        && !record["clear_context_request"].is_object()
-        && !awaiting_start(record)
-        && !compact_context::pending(record)
+    blocked(record).is_none()
+}
+fn blocked(record: &Value) -> Option<String> {
+    let error = string(record,"error");
+    Some(if pause_active(record) { "Wait for the session to finish pausing".into() }
+    else if !error.is_empty() { format!("The session reported an error: {}", journal::clipped(&json!(error),240)) }
+    // A confirmed Codex clear keeps its request until the deferred SessionStart.
+    else if awaiting_start(record) { "The cleared conversation starts with the next message".into() }
+    else if record["clear_context_request"].is_object() {
+        "The requested context clear is not confirmed yet. Check Terminal".into()
+    } else if record["compact_context_request"]["status"] == "uncertain" {
+        "The last compaction was not confirmed. Check Terminal".into()
+    } else if compact_context::pending(record) { "Wait for compaction to finish".into() }
+    else { return None; })
 }
 pub(super) fn available(record: &Value, live: bool) -> bool {
-    live && AGENTS.contains(&string(record,"agent"))
-        && !string(record,"conversation_id").is_empty()
-        && record["activity"]=="idle" && record["phase"]=="idle"
-        && string(record,"expected_id").is_empty()
-        && unblocked(record)
+    unavailable(record, live).is_none()
+}
+/// Why native clear and compaction are unavailable, in the person's words;
+/// `None` exactly when `available`. A busy session names the work that keeps
+/// it from Ready, as the session tree lists it: the main agent's turn and
+/// tools, and each working subagent with its current tool.
+pub(super) fn unavailable(record: &Value, live: bool) -> Option<String> {
+    if !live { return Some("The agent is not running".into()); }
+    if !AGENTS.contains(&string(record,"agent")) { return Some("This provider does not support native context actions".into()); }
+    if string(record,"conversation_id").is_empty() { return Some("Wait for a confirmed conversation".into()); }
+    if let Some(reason) = blocked(record) { return Some(reason); }
+    if !string(record,"expected_id").is_empty() { return Some("The agent has not confirmed the resumed conversation yet".into()); }
+    // Kimi profile groups can outlast the main turn's Stop, which records the
+    // session idle; like the listing, wait for them and other remaining work.
+    if telemetry::settled(record) { return None; }
+    Some(waiting(record, string(record,"phase")))
+}
+/// `unavailable` as an inspection reports it. A native chooser recognized
+/// only in the terminal, such as Kimi's context choice, leaves the saved
+/// activity idle; the summary shows it as a question or an approval, and
+/// dispatch refuses it (`input::checked_ready`), so both actions wait for it.
+pub(super) fn unavailable_shown(record: &Value, live: bool, shown: &Value) -> Option<String> {
+    unavailable(record, live).or_else(|| answer_first(string(shown,"phase")).map(Into::into))
+}
+/// What an idle-only action waits for while the session shows a question or
+/// an approval, or `None` for any other phase. Clear, compaction, forks and
+/// effort changes share it for a chooser that only the terminal shows.
+pub(super) fn answer_first(phase: &str) -> Option<&'static str> {
+    match phase {
+        "input" => Some("Wait until the agent's question is answered"),
+        "approval" => Some("Wait until the agent's approval request is answered"),
+        _ => None,
+    }
+}
+fn waiting(record: &Value, phase: &str) -> String {
+    if let Some(reason) = answer_first(phase) { return reason.into(); }
+    match phase {
+        "compacting" => "Wait for compaction to finish".into(),
+        phase => {
+            let work = working(record, ["working","tool"].contains(&phase));
+            if work.is_empty() { "Wait until the agent reports Ready".into() }
+            else { format!("Wait until the agent reports Ready. Still working: {work}") }
+        }
+    }
+}
+/// The work recorded as running, at most three items and a count of the rest.
+/// The main agent counts only while its own turn runs: an interrupted or
+/// failed turn has ended, and its state awaits the agent's next report.
+/// Children are named as the listing names them, Kimi profiles by group.
+fn working(record: &Value, main_turn: bool) -> String {
+    let mut items = Vec::new();
+    if main_turn && record["main_done"] != true {
+        let mut tools: Vec<_> = record["active_tools"].as_object().into_iter().flatten().map(|(_, tool)| tool).collect();
+        tools.sort_by(|a,b| a["started"].as_f64().unwrap_or(0.0).total_cmp(&b["started"].as_f64().unwrap_or(0.0)));
+        let mut names: Vec<String> = Vec::new();
+        for tool in tools {
+            let name = journal::clipped(&tool["name"],60);
+            if !name.is_empty() && !names.contains(&name) { names.push(name); }
+        }
+        items.push(match names.as_slice() {
+            [] => "main agent".to_owned(),
+            [only] => format!("main agent running {only}"),
+            [first, second] => format!("main agent running {first} and {second}"),
+            [first, rest @ ..] => format!("main agent running {first} and {} other tools", rest.len()),
+        });
+    }
+    let mut children: Vec<_> = record["subagents"].as_object().into_iter().flatten()
+        .filter(|(_, child)| telemetry::child_working(record, child) && telemetry::listed(record, child)).collect();
+    children.sort_by(|(a_id,a),(b_id,b)| b["updated"].as_f64().unwrap_or(0.0)
+        .total_cmp(&a["updated"].as_f64().unwrap_or(0.0)).then_with(|| a_id.cmp(b_id)));
+    for (id, child) in children {
+        let name = journal::clipped(&child["name"],60);
+        let label = if name.is_empty() { journal::clipped(&json!(id),60) } else { name };
+        let tool = journal::clipped(&child["current_tool"],60);
+        items.push(if tool.is_empty() { format!("subagent “{label}”") } else { format!("subagent “{label}” running {tool}") });
+    }
+    if telemetry::grouped_active(record) > 0 {
+        for (profile, group) in record["subagent_groups"].as_object().into_iter().flatten() {
+            let count = group["active_count"].as_u64().unwrap_or(0);
+            let profile = journal::clipped(&json!(profile),60);
+            match count {
+                0 => {}
+                1 => items.push(format!("1 “{profile}” subagent")),
+                _ => items.push(format!("{count} “{profile}” subagents")),
+            }
+        }
+    }
+    if items.len() > 3 {
+        let rest = items.len() - 3;
+        items.truncate(3);
+        items.push(format!("and {rest} more"));
+    }
+    items.join(", ")
 }
 /// Codex defers SessionStart after `hgs resume` until the next turn. A verified
 /// resume may clear before it: the clear's own SessionStart then names the new
@@ -355,6 +453,140 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 }
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn unavailable_context_actions_name_the_blocking_condition_and_work() {
+        let idle=json!({"agent":"claude","run_id":"run","conversation_id":"conversation","activity":"idle","phase":"idle",
+            "main_done":true,"active_tools":{},"subagents":{}});
+        let check=|record:&Value,live:bool,expected:Option<&str>|{
+            let reason=unavailable(record,live);
+            assert_eq!(reason.as_deref(),expected,"{record}");
+            assert_eq!(available(record,live),reason.is_none(),"{record}");
+        };
+        check(&idle,true,None);
+        check(&idle,false,Some("The agent is not running"));
+        let changed=|key:&str,value:Value|{let mut record=idle.clone();record[key]=value;record};
+        check(&changed("agent",json!("opencode")),true,Some("This provider does not support native context actions"));
+        check(&changed("conversation_id",json!("")),true,Some("Wait for a confirmed conversation"));
+        let pid=std::process::id();
+        check(&changed("pausing",json!({"pid":pid,"start":process_start(pid)})),true,Some("Wait for the session to finish pausing"));
+        check(&changed("error",json!("agent resumed a different conversation")),true,
+            Some("The session reported an error: agent resumed a different conversation"));
+        check(&changed("clear_context_request",json!({"request_id":"r","conversation_id":"conversation"})),true,
+            Some("The requested context clear is not confirmed yet. Check Terminal"));
+        let awaiting=changed("session_clear",json!({"run_id":"run","conversation_id":"conversation","awaiting_session_start":true}));
+        check(&awaiting,true,Some("The cleared conversation starts with the next message"));
+        let mut requested=awaiting.clone();requested["clear_context_request"]=json!({"request_id":"r","conversation_id":"conversation"});
+        check(&requested,true,Some("The cleared conversation starts with the next message"));
+        for status in ["submitted","compacting"] {
+            check(&changed("compact_context_request",json!({"status":status})),true,Some("Wait for compaction to finish"));
+        }
+        check(&changed("compact_context_request",json!({"status":"uncertain"})),true,
+            Some("The last compaction was not confirmed. Check Terminal"));
+        for status in ["completed","failed","cancelled"] { check(&changed("compact_context_request",json!({"status":status})),true,None); }
+        check(&changed("expected_id",json!("conversation")),true,Some("The agent has not confirmed the resumed conversation yet"));
+        let busy=|phase:&str|{let mut record=idle.clone();record["activity"]=json!("busy");record["phase"]=json!(phase);record};
+        check(&busy("compacting"),true,Some("Wait for compaction to finish"));
+        check(&busy("input"),true,Some("Wait until the agent's question is answered"));
+        check(&busy("approval"),true,Some("Wait until the agent's approval request is answered"));
+        // Busy evidence without a recorded worker still explains the wait.
+        check(&busy("working"),true,Some("Wait until the agent reports Ready"));
+        check(&changed("activity",json!("unknown")),true,Some("Wait until the agent reports Ready"));
+        // The parent finished its turn; one workflow child still works.
+        let mut child=busy("working");
+        child["subagents"]=json!({"worker":{"name":"workflow-subagent","state":"working","current_tool":"Bash","updated":2.0},
+            "done":{"name":"Explore","state":"finished","updated":3.0}});
+        check(&child,true,Some("Wait until the agent reports Ready. Still working: subagent “workflow-subagent” running Bash"));
+        // The main turn names its tools once each, in start order; newer children
+        // come first, and more than three items are counted.
+        let mut many=busy("tool");many["main_done"]=json!(false);
+        many["active_tools"]=json!({"b":{"name":"Read","started":2.0},"a":{"name":"Bash","started":1.0},"c":{"name":"Bash","started":3.0}});
+        many["subagents"]=json!({"one":{"name":"general-purpose","state":"working","updated":1.0},
+            "two":{"name":"","state":"working","current_tool":"Grep","updated":4.0},
+            "three":{"name":"Explore","state":"working","updated":2.0},"four":{"name":"Plan","state":"working","updated":3.0}});
+        check(&many,true,Some("Wait until the agent reports Ready. Still working: main agent running Bash and Read, \
+            subagent “two” running Grep, subagent “Plan”, and 2 more"));
+        many["active_tools"]["d"]=json!({"name":"Edit","started":4.0});many["subagents"]=json!({});
+        check(&many,true,Some("Wait until the agent reports Ready. Still working: main agent running Bash and 2 other tools"));
+        many["active_tools"]=json!({});
+        check(&many,true,Some("Wait until the agent reports Ready. Still working: main agent"));
+        // An interrupted or failed turn has ended: only its children still work.
+        for phase in ["interrupted","error","unknown"] {
+            let mut ended=many.clone();ended["activity"]=json!("unknown");ended["phase"]=json!(phase);
+            ended["active_tools"]=json!({"a":{"name":"Bash","started":1.0}});
+            ended["subagents"]=json!({"worker":{"name":"workflow-subagent","state":"working"}});
+            check(&ended,true,Some("Wait until the agent reports Ready. Still working: subagent “workflow-subagent”"));
+            ended["subagents"]=json!({});
+            check(&ended,true,Some("Wait until the agent reports Ready"));
+        }
+        // Kimi profile groups count their active tasks.
+        let mut kimi=busy("working");kimi["agent"]=json!("kimi");
+        kimi["subagent_groups"]=json!({"coder":{"active_count":2},"reviewer":{"active_count":1},"idle":{"active_count":0}});
+        check(&kimi,true,Some("Wait until the agent reports Ready. Still working: 2 “coder” subagents, 1 “reviewer” subagent"));
+        // A native Kimi roster counts only its own children.
+        kimi["kimi_native_roster"]=json!(true);
+        kimi["subagents"]=json!({"hook":{"name":"coder","state":"working"},"native":{"name":"agent-1","state":"working","native_roster":true}});
+        check(&kimi,true,Some("Wait until the agent reports Ready. Still working: subagent “agent-1”"));
+        // The main turn's Stop can leave the saved activity idle while the
+        // listing still shows work: Kimi profile groups, open tools or working
+        // children keep both actions unavailable.
+        let groups_waiting="Wait until the agent reports Ready. Still working: 2 “coder” subagents, 1 “reviewer” subagent";
+        let mut groups=changed("agent",json!("kimi"));
+        groups["subagent_groups"]=json!({"coder":{"active_count":2},"reviewer":{"active_count":1},"idle":{"active_count":0}});
+        check(&groups,true,Some(groups_waiting));
+        check(&groups,false,Some("The agent is not running"));
+        // A Kimi hook names only a profile: its entry stands for that group,
+        // which the listing counts instead of one invented child.
+        groups["subagents"]=json!({"coder":{"name":"coder","state":"working"},"reviewer":{"name":"reviewer","state":"finished"}});
+        check(&groups,true,Some(groups_waiting));
+        let mut working_groups=groups.clone();working_groups["activity"]=json!("busy");working_groups["phase"]=json!("working");
+        check(&working_groups,true,Some(groups_waiting));
+        // An external child is listed beside the profile groups.
+        groups["subagents"]["helper"]=json!({"name":"helper","state":"working","external":true,"updated":1.0});
+        check(&groups,true,Some("Wait until the agent reports Ready. Still working: subagent “helper”, \
+            2 “coder” subagents, 1 “reviewer” subagent"));
+        // A native roster replaces the profile counts with its own children.
+        groups["subagents"]=json!({});groups["kimi_native_roster"]=json!(true);
+        check(&groups,true,None);
+        groups["subagent_groups"]["coder"]["active_count"]=json!(0);groups["subagent_groups"]["reviewer"]["active_count"]=json!(0);
+        groups.as_object_mut().unwrap().remove("kimi_native_roster");
+        check(&groups,true,None);
+        let mut tool=idle.clone();tool["active_tools"]=json!({"a":{"name":"Bash","started":1.0}});
+        check(&tool,true,Some("Wait until the agent reports Ready"));
+        let mut children=idle.clone();
+        children["subagents"]=json!({"worker":{"name":"Explore","state":"working","current_tool":"Grep"}});
+        check(&children,true,Some("Wait until the agent reports Ready. Still working: subagent “Explore” running Grep"));
+        // Finished and unknown children are no current work.
+        for state in ["finished","unknown"] {
+            children["subagents"]["worker"]["state"]=json!(state);
+            check(&children,true,None);
+        }
+    }
+    #[test] fn context_actions_agree_with_dispatch_on_the_ready_state_the_listing_reports() {
+        // Inspect offers clear and compaction exactly when dispatch accepts
+        // the session (input::checked_ready), whatever a replaced hook says.
+        assert_eq!(unavailable(&telemetry::stale_hook_child(),true),None);
+        for (case,record) in telemetry::remaining_work() {
+            assert!(unavailable(&record,true).is_some_and(|reason| reason.starts_with("Wait ")),"{case}");
+        }
+    }
+    #[test] fn terminal_choosers_keep_inspected_context_actions_waiting() {
+        // The summary shows a terminal-only chooser over an idle saved record;
+        // dispatch refuses it, so inspect reports both actions unavailable.
+        let idle=json!({"agent":"kimi","run_id":"run","conversation_id":"conversation","activity":"idle","phase":"idle",
+            "main_done":true,"active_tools":{},"subagents":{}});
+        let shown=|phase:&str| json!({"activity":if phase=="idle" {"idle"} else {"busy"},"phase":phase});
+        assert_eq!(unavailable_shown(&idle,true,&shown("input")).as_deref(),Some("Wait until the agent's question is answered"));
+        assert_eq!(unavailable_shown(&idle,true,&shown("approval")).as_deref(),
+            Some("Wait until the agent's approval request is answered"));
+        assert_eq!(unavailable_shown(&idle,true,&shown("idle")),None);
+        // A provider failure shown over an idle saved record keeps both
+        // actions, as dispatch does.
+        assert_eq!(unavailable_shown(&idle,true,&json!({"activity":"attention","phase":"error"})),None);
+        // Earlier reasons keep their precedence.
+        assert_eq!(unavailable_shown(&idle,false,&shown("input")).as_deref(),Some("The agent is not running"));
+        let mut working=idle.clone();working["active_tools"]=json!({"a":{"name":"Bash","started":1.0}});
+        working["activity"]=json!("busy");working["phase"]=json!("tool");working["main_done"]=json!(false);
+        assert_eq!(unavailable_shown(&working,true,&shown("approval")),unavailable(&working,true));
+    }
     #[test] fn clear_hooks_require_a_changed_conversation_and_keep_the_observed_time() {
         let original=json!({"run_id":"run","conversation_id":"old"});
         let mut record=original.clone();

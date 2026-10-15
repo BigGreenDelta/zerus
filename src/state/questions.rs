@@ -130,6 +130,7 @@ pub(super) fn from_hook(record: &Value, event: &Value) -> Option<Value> {
 }
 
 pub(super) fn observe(record: &mut Value, event: &Value) {
+    claude_approval::observe_children(record,event);
     if !string(event, "agent_id").is_empty() {
         return;
     }
@@ -716,6 +717,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         atomic(&receipt_path,&receipt.to_string()).map_err(|e|format!("delivery uncertain: {e}"))?;
         println!("{receipt}");return Ok(0);
     }
+    // Update now says whether Codex still runs its installer.
+    let mut update_phase = None;
     let delivery = if string(&record,"agent")=="claude" && string(&question,"source")=="hook" {
         claude_question::answer(&record,&question,&answers)
     } else if string(&question, "source") == "claude_tool_approval" {
@@ -729,7 +732,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     } else if string(&question, "source") == "codex_hooks_trust" {
         codex_hooks_trust::answer(&record, &question, &answers)
     } else if string(&question, "source") == "codex_update" {
-        codex_update::answer(&record, &question, &answers)
+        codex_update::answer(&record, &question, &answers).map(|phase| update_phase = phase)
     } else if string(&question, "source") == "codex_goal_resume" {
         codex_goal_resume::answer(&record, &question, &answers)
     } else if string(&question, "source") == "codex_folder_trust" {
@@ -757,6 +760,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             || (question["source"] == "codex_update" && answers[0]["selected_option_ids"][0] == "update_now")
         {
             receipt["open_terminal"] = json!(true);
+        }
+        if let Some(phase) = update_phase {
+            receipt["codex_update"] = json!(phase);
         }
         let id = answers[0]["selected_option_ids"][0].as_str().unwrap_or("");
         let item = &question["questions"][0];

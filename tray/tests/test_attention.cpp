@@ -34,7 +34,7 @@ void TestAttention::nativeChildCountersPreserveUnknownEvidence()
 {
     SessionInfo s; s.activity="idle"; s.subagentActiveCount=2; s.subagentTotalCount=6;
     s.subagentCountsComplete=false;
-    for (const auto &source : {QString("dsh_native"), QString("kimi_native"), QString("mixed_hooks")}) {
+    for (const auto &source : {QString("dsh_native"), QString("kimi_native"), QString("opencode_native"), QString("mixed_hooks")}) {
         s.subagentSource=source;
         QCOMPARE(SessionPresentation::childCount(s,false,true,false),QString("2+"));
         QCOMPARE(SessionPresentation::childCount(s,false,true,true),QString("2+/6"));
@@ -42,6 +42,12 @@ void TestAttention::nativeChildCountersPreserveUnknownEvidence()
     s.subagentSource="dsh_native";s.subagentActiveCount=0;s.subagentTotalCount=1;
     QCOMPARE(SessionPresentation::childCount(s,false,true,false),QString("0+"));
     QVERIFY(SessionPresentation::childCount(s,false,false,false).isEmpty());
+    // OpenCode's API host never confirms classic child work; unknown stays visible.
+    s.subagentSource="opencode_native";s.subagentActiveCount=0;s.subagentTotalCount=2;
+    QCOMPARE(SessionPresentation::childCount(s,false,true,true),QString("0+/2"));
+    s.subagentCountsComplete=true;
+    QVERIFY(SessionPresentation::childCount(s,false,true,false).isEmpty());
+    QCOMPARE(SessionPresentation::childCount(s,true,true,true),QString("0 active / 2 total"));
 }
 
 void TestAttention::replyWaitsForLiveBackgroundShellToFinish()

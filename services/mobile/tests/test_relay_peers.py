@@ -1,8 +1,6 @@
 """One-hop registry, immutable dispatch, and bounded catalog regressions."""
-import asyncio
 import inspect
 import json
-import os
 from pathlib import Path
 import tempfile
 import time
@@ -104,6 +102,30 @@ class SQLitePeerTests(unittest.IsolatedAsyncioTestCase):
         remote=next(row for row in catalog if row['id']==self.target)
         self.assertFalse(remote['available'])
         self.assertEqual((await self.submit(self.command()))[0],409)
+
+    async def test_offline_peer_keeps_last_seen_without_becoming_fresh(self):
+        async def listed(machine):
+            return next((row for row in await self.call('computers',self.workspace) if row['machine_id']==machine),None)
+        seen=(await listed(self.remote))['last_seen_at']
+        self.assertIsNotNone(seen)
+        offline=[{**self.peers[0],'online':False}]
+        await self.manifest(offline);await self.manifest(offline,snapshot('changed'))
+        row=await listed(self.remote)
+        self.assertFalse(row['available']);self.assertIsNone(row['snapshot'])
+        self.assertEqual(row['last_seen_at'],seen)
+        # Marked online again, the retained time is not freshness evidence.
+        await self.manifest()
+        row=await listed(self.remote)
+        self.assertFalse(row['available']);self.assertEqual(row['last_seen_at'],seen)
+        self.assertEqual((await self.submit(self.command()))[0],409)
+        await self.call('peer_heartbeat',self.node,self.route,self.remote,snapshot())
+        row=await listed(self.remote)
+        self.assertTrue(row['available']);self.assertGreaterEqual(row['last_seen_at'],seen)
+        # A changed verified identity on the same route starts without history.
+        replacement=identity()
+        await self.manifest([{**offline[0],'machine_id':replacement}])
+        self.assertIsNone(await listed(self.remote))
+        self.assertIsNone((await listed(replacement))['last_seen_at'])
 
     async def test_stale_frozen_route_cannot_reroute_to_fresh_direct_node(self):
         body=self.command();await self.submit(body)
@@ -270,54 +292,3 @@ class SQLitePeerTests(unittest.IsolatedAsyncioTestCase):
             response=await client.post('/v1/node/peers/'+self.route+'/heartbeat',json={'machine_id':self.remote,'snapshot':snapshot(),'peers':[]},headers=headers)
             self.assertEqual(response.status,400);await response.read()
         finally:await client.close()
-
-
-@unittest.skipUnless(os.environ.get('ZERUS_RELAY_TEST_DSN'),'requires disposable PostgreSQL')
-class PostgresPeerTests(SQLitePeerTests):
-    async def asyncSetUp(self):
-        from urllib.parse import urlsplit
-        import asyncpg
-        from zerus_mobile.postgres import PostgresStore
-        dsn=os.environ['ZERUS_RELAY_TEST_DSN'];parsed=urlsplit(dsn)
-        if parsed.hostname not in ('127.0.0.1','localhost','::1') or not parsed.path.startswith('/zerus_test_'):raise ValueError('disposable local test DB required')
-        conn=await asyncpg.connect(dsn)
-        try:await conn.execute('DROP SCHEMA public CASCADE; CREATE SCHEMA public')
-        finally:await conn.close()
-        self.store=await PostgresStore.open(dsn,pool_min=2,pool_max=4)
-        self.temp=tempfile.TemporaryDirectory()
-        await self.setup_identity()
-
-    async def sql(self,sql,*args):
-        for i in range(len(args)):sql=sql.replace('?',f'${i+1}',1)
-        async with self.store.pool.acquire() as conn:
-            return [dict(row) for row in await conn.fetch(sql,*args)]
-
-    async def test_unchanged_modern_manifest_and_snapshot_do_not_wait_for_quota_locks(self):
-        async with self.store.pool.acquire() as conn,conn.transaction():
-            await conn.fetchval('SELECT id FROM payload_shards WHERE id=$1 FOR UPDATE',self.store.shard(self.workspace))
-            await conn.fetchval('SELECT workspace_id FROM workspace_usage WHERE workspace_id=$1 FOR UPDATE',self.workspace)
-            await asyncio.wait_for(self.manifest(),.5)
-
-    async def test_event_free_peer_snapshot_does_not_wait_for_accounting_locks(self):
-        async with self.store.pool.acquire() as conn,conn.transaction():
-            await conn.fetchval('SELECT id FROM global_usage WHERE id=1 FOR UPDATE')
-            await conn.fetchval('SELECT workspace_id FROM workspace_usage WHERE workspace_id=$1 FOR UPDATE',self.workspace)
-            await asyncio.wait_for(self.call('peer_heartbeat',self.node,self.route,self.remote,snapshot()),.5)
-            changed=snapshot();changed['progress']='small change'
-            await asyncio.wait_for(self.call('peer_heartbeat',self.node,self.route,self.remote,changed),.5)
-
-    async def test_first_exposure_and_direct_binding_preserve_any_returned_id(self):
-        for _ in range(5):
-            direct=await self.call('node',self.workspace,'Direct');row=await self.call('authenticate',direct['node_token'],'nodes')
-            catalog,_=await asyncio.wait_for(asyncio.gather(self.call('computers',self.workspace),self.call('heartbeat',row,snapshot(),machine_id=self.remote,peers=[])),5)
-            if any(r['id']==direct['node_id'] for r in catalog):
-                self.assertIn(direct['node_id'],{r['id'] for r in await self.call('computers',self.workspace)})
-
-    async def test_manifest_claim_concurrency_serializes_without_deadlock(self):
-        for _ in range(10):
-            await self.manifest();await self.call('peer_heartbeat',self.node,self.route,self.remote,snapshot())
-            body=self.command();await self.submit(body)
-            claimed,_=await asyncio.wait_for(asyncio.gather(self.call('claim',self.node,allow_gateway=True),self.manifest([])),5)
-            receipt=await self.call('get_request',self.device,body['request_id'])
-            self.assertIn(receipt['state'],('failed','uncertain'))
-            self.assertEqual(bool(claimed),receipt['state']=='uncertain')

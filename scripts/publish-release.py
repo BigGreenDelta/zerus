@@ -182,9 +182,15 @@ def publish_github(candidate, info, sums, nightly=False):
     verify_tag(tag, commit)
     release = release_for_tag(tag)
     if release is None:
-        macos = (f"On Apple Silicon Macs, install with `brew install --cask ufna/zerus/zerus` "
+        cask = "zerus@nightly" if nightly else "zerus"
+        macos = (f"On Apple Silicon Macs, install with `brew install --cask ufna/zerus/{cask}` "
                  f"and run `zerus-setup` once. The Homebrew tap updates after GitHub and AUR publication.\n\n"
                  if info.get("macos") else "")
+        if info.get("macos", {}).get("dmg"):
+            image = info["macos"]["dmg"]["asset"]
+            macos += (f"Or [download the signed macOS disk image]"
+                      f"(https://github.com/{REPOSITORY}/releases/download/{tag}/{image}), "
+                      f"open it and drag Zerus into Applications. macOS 14 or later and Apple Silicon required.\n\n")
         notes = (f"Arch Linux x86_64{' and Apple Silicon macOS' if macos else ''} ADE bundle.\n\n"
                  f"Install a stable binary with `yay -S zerus-ade-bin`, stable sources with `yay -S zerus`, "
                  f"or upstream main with `yay -S zerus-git`. Run `zerus-setup` once as your normal user. "
@@ -196,6 +202,7 @@ def publish_github(candidate, info, sums, nightly=False):
             notes = (f"Automatically verified Arch Linux x86_64 nightly from upstream main.\n\n"
                      f"Install with `yay -S zerus-ade-nightly-bin`. This replaces another Zerus package flavor. "
                      f"Run `zerus-setup` once as your normal user; services remain opt-in.\n\n"
+                     f"{macos}"
                      f"Product version: `{info['product_version']}`. Source commit: `{commit}`. "
                      f"Build run: https://github.com/{REPOSITORY}/actions/runs/{info['workflow_run_id']}.\n\n"
                      f"Native agents are installed separately. Verify downloads using `SHA256SUMS`.\n")

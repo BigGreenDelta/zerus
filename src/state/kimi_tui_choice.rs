@@ -59,7 +59,41 @@ pub(super) fn answer(
     acknowledged: fn(&str) -> bool,
     expect_exit: bool,
 ) -> Result<()> {
-    navigate(record, question, chosen, option_count, parse, acknowledged, expect_exit, false, Duration::ZERO)
+    navigate(record, question, chosen, option_count, parse, acknowledged, expect_exit, false, Duration::ZERO, None)
+        .map(drop)
+}
+
+/// Recognizes the agent's announcement that a handed-off command started.
+type Started<'a> = &'a dyn Fn(&str) -> bool;
+
+/// What a choice that hands the terminal to a native command observed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Handoff {
+    /// The pinned process announced the command and still runs it.
+    Running,
+    /// The pinned process exited.
+    Exited,
+}
+
+// Codex's Update now hands the terminal to an installer: Codex leaves raw mode
+// and clears its picker at once, announces the command, runs it and exits. The
+// verified input terminal that acknowledges other choices never returns, so
+// after the single Enter the choice is delivered once the pinned process shows
+// `started` or exits within `bound`. Past the usual 2 s, waiting continues only
+// while the chooser is gone and the process no longer owns an input terminal.
+// Nothing waits for the command itself, which continues in Terminal.
+pub(super) fn answer_handoff(
+    record: &Value,
+    question: &Value,
+    chosen: usize,
+    option_count: usize,
+    parse: fn(&Value, &str) -> Option<(Value, usize)>,
+    started: Started<'_>,
+    bound: Duration,
+) -> Result<Handoff> {
+    let handoff = Some((started, bound));
+    navigate(record, question, chosen, option_count, parse, |_| false, false, false, Duration::ZERO, handoff)?
+        .ok_or_else(|| "delivery uncertain: The agent's selection did not finish".into())
 }
 
 // Claude shows queued tool approvals one after another, so the next complete
@@ -73,7 +107,57 @@ pub(super) fn answer_queued(
     acknowledged: fn(&str) -> bool,
     navigation_settle: Duration,
 ) -> Result<()> {
-    navigate(record, question, chosen, option_count, parse, acknowledged, false, true, navigation_settle)
+    navigate(record, question, chosen, option_count, parse, acknowledged, false, true, navigation_settle, None)
+        .map(drop)
+}
+
+// After the single Enter of a handoff choice: the agent's own announcement on
+// the pinned pane, or the pinned process exiting, delivers it.
+fn handed_off(
+    record: &Value,
+    parse: fn(&Value, &str) -> Option<(Value, usize)>,
+    started: Started<'_>,
+    sent: Instant,
+    bound: Duration,
+) -> Result<Handoff> {
+    let acknowledgement = sent + Duration::from_secs(2);
+    loop {
+        // A longer wait for the handoff polls less often.
+        std::thread::sleep(Duration::from_millis(if Instant::now() < acknowledgement { 40 } else { 200 }));
+        let active = read_run(string(record, "name"), string(record, "run_id"))?
+            .ok_or("Session disappeared after answer")?;
+        if ["pane", "pid", "process_start"]
+            .iter()
+            .any(|key| active[*key] != record[*key])
+        {
+            return Err("Agent changed after answer".into());
+        }
+        if !process_alive(&active) {
+            return Ok(Handoff::Exited);
+        }
+        let screen = match capture(&active) {
+            Ok(screen) => screen,
+            // The pane can end with the process between these checks; the
+            // next poll then sees the exit.
+            Err(_) if Instant::now() < sent + bound => continue,
+            Err(error) => return Err(error),
+        };
+        if started(&screen) {
+            return Ok(if process_alive(&active) { Handoff::Running } else { Handoff::Exited });
+        }
+        let now = Instant::now();
+        if now >= sent + bound {
+            return Err("The agent has not started the chosen command; inspect Terminal".into());
+        }
+        // Past the usual acknowledgement only a handoff in progress keeps the
+        // wait open: a chooser still shown, or an agent back in input mode,
+        // did not take the choice as expected.
+        if now >= acknowledgement
+            && (parse(&active, &screen).is_some() || input::checked_terminal(&active, false).is_ok())
+        {
+            return Err("The agent has not confirmed the selection; inspect Terminal".into());
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -87,7 +171,8 @@ fn navigate(
     expect_exit: bool,
     queued: bool,
     navigation_settle: Duration,
-) -> Result<()> {
+    handoff: Option<(Started<'_>, Duration)>,
+) -> Result<Option<Handoff>> {
     let mut touched = false;
     let result = (|| {
         // One verified arrow at a time: never apply a saved index to a different
@@ -113,6 +198,9 @@ fn navigate(
             }
             touched = true;
             backend::current().send(string(&active, "pane"), &[backend::Key::Named(key)])?;
+            if let (Some((started, bound)), "Enter") = (handoff, key) {
+                return handed_off(record, parse, started, Instant::now(), bound).map(Some);
+            }
             let expected = if key == "Down" {
                 panel.1 + 1
             } else {
@@ -132,7 +220,7 @@ fn navigate(
                 }
                 if !process_alive(&active) {
                     if key == "Enter" && expect_exit {
-                        return Ok(());
+                        return Ok(None);
                     }
                     return Err("Agent exited before confirming the answer".into());
                 }
@@ -170,7 +258,7 @@ fn navigate(
                         // mode between the check above and this capture. Only
                         // a terminal verified after this screen acknowledges.
                         match input::checked_terminal(&active, false) {
-                            Ok(()) => return Ok(()),
+                            Ok(()) => return Ok(None),
                             Err(_) if settling => continue,
                             Err(error) => return Err(error),
                         }

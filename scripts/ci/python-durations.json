@@ -31,7 +31,7 @@
  "test_codex_hooks_trust.Questions": 9,
  "test_codex_trust.FolderTrust": 11,
  "test_codex_trust.Questions": 10,
- "test_codex_update.CodexUpdate": 9,
+ "test_codex_update.CodexUpdate": 28,
  "test_codex_update.NativeCodexUpdate": 0,
  "test_codex_update.Questions": 10,
  "test_compact_context.ClearContext": 11,

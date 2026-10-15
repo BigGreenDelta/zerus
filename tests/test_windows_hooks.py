@@ -45,7 +45,7 @@ import unittest
 import uuid
 
 from test_windows_host import FAKE_AGENT, HGS, HIDDEN, LIMIT
-from test_windows_lifecycle import LifecycleCase, deny_execute, read_events, read_json
+from test_windows_lifecycle import LifecycleCase, deny_execute, read_events, read_json, system_message
 
 # What `hgs __state hook` answers a payload without a session ID.
 NO_SESSION = "hook did not supply a valid session_id"
@@ -266,8 +266,9 @@ class TrackedHooks(LifecycleCase):
         # The hook form depends on the version and is kept once written (D12),
         # so the supervisor refuses before it writes anything or starts Claude.
         # The launch, as the GUI runs it, fails with the supervisor's reason
-        # (zerus-ziq3.10): one that cannot run claude.exe at all, too.
-        cases = [("unread", "no version in \"Claude Code\""), ("denied", "Access is denied. (os error 5)")]
+        # (zerus-ziq3.10): one that cannot run claude.exe at all, too, in the
+        # system's language (zerus-yyhy).
+        cases = [("unread", "no version in \"Claude Code\""), ("denied", f"{system_message(5)} (os error 5)")]
         for tag, why in cases:
             with self.subTest(tag=tag):
                 env, _, ready = self.agent_env("claude", tag)

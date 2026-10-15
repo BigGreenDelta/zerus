@@ -1,12 +1,14 @@
 """The macOS bundle must reference only itself and the system, for Apple Silicon only."""
 import ast
 import importlib.util
+import os
 from pathlib import Path
 import plistlib
 import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -74,6 +76,36 @@ Load command 20
 
 
 class BundleChecks(unittest.TestCase):
+    def test_selftest_exposes_tmux_with_an_isolated_home_and_socket_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tmux = root / "tmux"
+            tmux.write_text("#!/bin/sh\nprintf 'tmux fixture\\n'\n")
+            tmux.chmod(0o755)
+            bundle = root / "Zerus.app"
+            binaries = bundle / "Contents/MacOS"
+            binaries.mkdir(parents=True)
+            for name in ("hgs", "hgs-tray"):
+                executable = binaries / name
+                executable.write_text(f"#!{sys.executable}\n" + '''import os, pathlib, subprocess
+assert os.environ["HOME"] != "/nonexistent/parent-home"
+assert pathlib.Path(os.environ["HOME"]).is_dir()
+assert os.environ["TMUX_TMPDIR"] == os.environ["HOME"]
+assert "TMUX" not in os.environ and "HGS_SESSION" not in os.environ
+assert "/nonexistent/parent-bin" not in os.environ["PATH"]
+assert subprocess.check_output(["tmux", "-V"], text=True).strip() == "tmux fixture"
+''')
+                executable.chmod(0o755)
+            with mock.patch.object(check.shutil, "which", return_value=str(tmux)), \
+                    mock.patch.dict(os.environ, {"HOME": "/nonexistent/parent-home", "TMUX": "parent-socket",
+                                                 "HGS_SESSION": "parent-session", "PATH": "/nonexistent/parent-bin"}):
+                self.assertEqual(check.run_selftest(bundle), [])
+
+    def test_selftest_reports_missing_tmux_before_executing_the_bundle(self):
+        with mock.patch.object(check.shutil, "which", return_value=None):
+            self.assertEqual(check.run_selftest(Path("/nonexistent/Zerus.app")),
+                             ["bundle self-tests require tmux (brew install tmux)"])
+
     def test_load_commands_are_parsed(self):
         self.assertEqual(check.load_commands(OTOOL), [
             ("LC_BUILD_VERSION", "13.0"),
@@ -180,7 +212,7 @@ class BundleChecks(unittest.TestCase):
             self.assertEqual(module.MINIMUM_SYSTEM, floor, module.__name__)
         names = {"13.0": ":ventura", "14.0": ":sonoma", "15.0": ":sequoia"}
         for template in sorted((ROOT / "packaging/homebrew").glob("*.rb.in")):
-            self.assertIn(f'depends_on macos: ">= {names[floor]}"', template.read_text(encoding="utf-8"),
+            self.assertIn(f'depends_on macos: {names[floor]}', template.read_text(encoding="utf-8"),
                           template.name)
 
 

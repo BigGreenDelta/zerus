@@ -71,6 +71,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] clear-context <session> --json   clear the idle agent context using its native command
        hgs [@host] interrupt <session> --json   interrupt the current turn, keep the session
        hgs [@host] attachment <session> --request ID --index N --conversation ID   read a sent attachment
+       hgs [@host] file-read <session> --json   read a document on the conversation computer
        hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
@@ -99,7 +100,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]
        hgs [@host] worktrees review --path PATH [--worktree WORKTREE] [--json]   cleanup verdicts and fingerprints
        hgs [@host] worktrees inspect --path WORKTREE --common-dir DIR [--file RELATIVE_PATH] [--json]   bounded read-only changes
-       hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch] [--json]
+       hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--delete-branch] [--json]
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
@@ -537,7 +538,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read"
-        | "attachment" | "recovery" | "voice" => {
+        | "attachment" | "file-read" | "recovery" | "voice" => {
             if command == "dirs" && has(args, "--create") && dry {
                 return Err(Error::new(1, "folder creation does not support --dry-run"));
             }
@@ -846,7 +847,7 @@ fn remote(
             all
         }
         "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "opencode" | "attachment" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),

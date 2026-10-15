@@ -1,7 +1,9 @@
 //! The tmux backend. Every call spawns plain `tmux` by name, so a PATH shim and an
 //! inherited `TMUX` or `TMUX_TMPDIR` select the server; no call passes `-L`, `-S`
 //! or `-f`. Exact names are `=NAME` for session commands and `=NAME:` (the
-//! session's pane) for pane and option commands.
+//! session's pane) for pane and option commands. On Linux a `new-session` that
+//! may start the server runs in a scope of its own when hgs runs in a user unit
+//! (`scope`); it still spawns that same `tmux` command.
 use super::{
     ClientExit, ClientRow, DryRun, InputClaim, InputState, Key, LaunchSpec, Listing, PaneField,
     PaneInfo, PanePath, PaneRow, Paste, SessionRow, StageErrors, Target, TerminalBackend,
@@ -16,15 +18,40 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+#[cfg(target_os = "linux")]
+mod scope;
+
 pub(crate) struct Tmux;
 
 /// `tmux ARGS` with captured output. With `check`, a failure becomes tmux's own
 /// message, or "tmux command failed" when it printed none.
 fn tmux(args: &[String], check: bool) -> Result<Output> {
-    let output = Command::new("tmux")
-        .args(args)
-        .output()
-        .map_err(|e| format!("tmux: {e}"))?;
+    checked(Command::new("tmux").args(args).output(), check)
+}
+
+/// Run tmux `args`, a command that may start the server, with `run`. Where that
+/// server would belong to the user unit hgs runs in, the command runs in a scope
+/// of its own (`scope`). When systemd-run could not make the scope, tmux never
+/// ran, and the command runs as it always has unless `rerun` refuses the result.
+fn starting<T>(
+    args: &[String],
+    run: impl Fn(&mut Command) -> T,
+    rerun: impl FnOnce(&T) -> bool,
+) -> T {
+    #[cfg(target_os = "linux")]
+    if let Some(scope) = scope::Scope::new(|| Tmux.server_running()) {
+        let result = run(&mut scope.command(args));
+        if scope.started() || !rerun(&result) {
+            return result;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = rerun;
+    run(Command::new("tmux").args(args))
+}
+
+fn checked(output: io::Result<Output>, check: bool) -> Result<Output> {
+    let output = output.map_err(|e| format!("tmux: {e}"))?;
     if check && !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(if error.is_empty() {
@@ -332,7 +359,8 @@ impl TerminalBackend for Tmux {
         platform::capture("tmux", &arguments).map(PaneInfo::new)
     }
     fn start(&self, spec: &LaunchSpec) -> Result<()> {
-        tmux(&start_args(spec), true).map(drop)
+        let output = starting(&start_args(spec), Command::output, |_| true);
+        checked(output, true).map(drop)
     }
     fn set_run_marker(&self, name: &str, run_id: &str) -> Result<()> {
         tmux(
@@ -471,16 +499,20 @@ impl TerminalBackend for Tmux {
     }
 
     fn launch(&self, spec: &LaunchSpec) -> CliResult<ClientExit> {
-        let mut command = Command::new("tmux");
-        command.args(launch_args(spec));
+        let arguments = launch_args(spec);
         if spec.detached {
-            let code = platform::code(command.status()?);
+            let code = platform::code(starting(&arguments, Command::status, |_| true)?);
             return Ok(ClientExit {
                 code,
                 server_died: false,
             });
         }
-        let code = platform::wait_interactive(&mut command)?;
+        // A signal while systemd-run makes the scope cancels the launch.
+        let code = starting(
+            &arguments,
+            platform::wait_interactive,
+            |result| !matches!(result, Ok(code) if *code > 128),
+        )?;
         Ok(ClientExit {
             code,
             server_died: self.client_done(code),

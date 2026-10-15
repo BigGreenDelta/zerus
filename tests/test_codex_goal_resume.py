@@ -15,7 +15,7 @@ OBJECTIVE = ('Finish the example export: verify the staging copy, compare row co
 
 # A 100-cell pane: Codex centers the 72-cell dialog over the transcript, which
 # stays visible in the 14 cells on each side.
-FAKE = r'''
+FAKE = fixtures.SIGNAL_SAFE_READ + r'''
 import os,pathlib,signal,sqlite3,sys,termios,textwrap,tty
 root=pathlib.Path(os.environ['INPUT_FIXTURE']);fd=sys.stdin.fileno();original=termios.tcgetattr(fd);tty.setraw(fd)
 os.write(1,b'\x1b[?2004h');selected=0;open_dialog=True;buf=b''
@@ -37,7 +37,7 @@ def render(*args):
 signal.signal(signal.SIGUSR1,render);render();(root/'agent-pid').write_text(str(os.getpid()))
 try:
  while True:
-  value=os.read(fd,65536)
+  value=read_input(fd)
   if not value:break
   with (root/'received').open('ab') as f:f.write(value)
   buf+=value
@@ -111,6 +111,9 @@ class CodexGoalResume(unittest.TestCase):
         state = self.inspect()
         self.assertEqual((state['phase'], state['attention_id']), ('input', self.card['question_id']))
         self.assertEqual(state['activity_detail'], 'Codex is waiting for your paused goal choice')
+        # The resumed conversation is unconfirmed: no fork, and settings wait.
+        self.assertEqual((state['fork_supported'], state['fork_reason']), (False, 'Wait for a confirmed conversation before forking'))
+        self.assertNotIn('fork', state['allowed_actions']);self.assertEqual(state['settings_apply_when'], 'ready')
         self.assertTrue(self.card['question_id'].startswith('codex-goal-resume:'))
         self.assertEqual((self.card['source'], self.card['can_answer']), ('codex_goal_resume', True))
         item = self.card['questions'][0]

@@ -9,6 +9,7 @@ const MAX_WORKFLOWS: usize = 128;
 const MAX_ENTRIES: usize = 4096;
 const TAIL_BYTES: u64 = 64 * 1024;
 const INTERRUPTED: &str = "[Request interrupted by user]";
+const INTERRUPTED_TOOL_USE: &str = "[Request interrupted by user for tool use]";
 
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 160 && !id.contains(['/', '\\'])
@@ -79,6 +80,20 @@ fn owned_row(row: &Value, session: &str, id: &str) -> bool {
     row["isSidechain"] == true && row["agentId"] == id && row["sessionId"] == session
 }
 
+/// Claude writes the tool-use interruption after the error results of the calls
+/// it stopped. Only that one exact owned parent row binds the marker to them.
+fn stopped_calls(lines: &[&[u8]], marker: &Value, session: &str, id: &str, at: f64) -> bool {
+    let parent = string(marker, "parentUuid");
+    let rows: Vec<Value> = lines.iter().filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .filter(|row| !parent.is_empty() && row["uuid"] == parent).collect();
+    let [row] = rows.as_slice() else { return false; };
+    let parent_at = search::timestamp(&row["timestamp"]);
+    owned_row(row, session, id) && row["type"] == "user" && row["message"]["role"] == "user"
+        && parent_at > 0.0 && parent_at <= at
+        && row["message"]["content"].as_array().is_some_and(|parts| !parts.is_empty() && parts.iter().all(|part|
+            part["type"] == "tool_result" && !string(part, "tool_use_id").is_empty() && part["is_error"] == true))
+}
+
 fn workflow_result(path: &Path, session: &str, id: &str, result_hash: &str) -> bool {
     let Some(parent) = path.parent().filter(|p| p.parent().is_some_and(|p| p.ends_with("workflows"))) else { return false; };
     let Ok(parent) = crate::platform::canonical(parent) else { return false; };
@@ -119,7 +134,7 @@ fn workflow_result(path: &Path, session: &str, id: &str, result_hash: &str) -> b
 
 fn native_turn(path: &Path, session: &str, id: &str) -> Option<Value> {
     let key = format!("{session}/{id}");
-    let value = scan_cache::cached("claude-child-turn-v3", path, &key, || {
+    let value = scan_cache::cached("claude-child-turn-v4", path, &key, || {
         let mut file = File::open(path).ok()?;
         let offset = file.metadata().ok()?.len().saturating_sub(TAIL_BYTES);
         file.seek(SeekFrom::Start(offset)).ok()?;
@@ -137,8 +152,10 @@ fn native_turn(path: &Path, session: &str, id: &str) -> Option<Value> {
         if offset > 0 && index == 0 { return Some(Value::Null); }
         let Ok(row) = serde_json::from_slice::<Value>(line) else { return Some(Value::Null); };
         let content = &row["message"]["content"];
-        let exact_marker = content.as_array().is_some_and(|parts| parts.len() == 1
-            && parts[0]["type"] == "text" && parts[0]["text"] == INTERRUPTED);
+        let marker = content.as_array().and_then(|parts| match parts.as_slice() {
+            [part] if part["type"] == "text" => [INTERRUPTED, INTERRUPTED_TOOL_USE].into_iter().find(|m| part["text"] == *m),
+            _ => None,
+        }).filter(|_| row["type"] == "user" && row["userType"] == "external" && row["message"]["role"] == "user");
         if !owned_row(&row, session, id) || row["isMeta"] == true || row["isApiErrorMessage"] == true {
             return Some(Value::Null);
         }
@@ -146,9 +163,13 @@ fn native_turn(path: &Path, session: &str, id: &str) -> Option<Value> {
         if at <= 0.0 { return Some(Value::Null); }
         let text = content.as_array().into_iter().flatten().filter(|p| p["type"] == "text")
             .map(|p| string(p, "text")).collect::<String>();
-        let (state, kind, detail) = if row["type"] == "user" && row["userType"] == "external"
-            && row["message"]["role"] == "user" && exact_marker {
-            ("finished", "interrupt", "Request interrupted by user".to_owned())
+        let (state, kind, detail) = if let Some(marker) = marker {
+            // An unbound tool-use marker is neither a completion nor new work.
+            if marker == INTERRUPTED_TOOL_USE
+                && !stopped_calls(&lines[usize::from(offset > 0)..index], &row, session, id, at) {
+                return Some(Value::Null);
+            }
+            ("finished", "interrupt", marker.trim_matches(['[', ']']).to_owned())
         } else if row["type"] == "assistant" && row["message"]["role"] == "assistant"
             && row["message"]["stop_reason"] == "end_turn"
             && content.as_array().is_some_and(|parts| !parts.is_empty()
@@ -203,7 +224,13 @@ pub(super) fn reconcile(record: &mut Value) {
         let Some(at) = evidence["at"].as_f64() else { continue; };
         let refresh_result = at == updated && child["tracking_evidence"]["source"] == "claude_transcript"
             && child["tracking_evidence"]["native_id"] == evidence["id"] && evidence["kind"] == "end_turn";
-        if (at <= updated && !refresh_result) || at <= child["started"].as_f64().unwrap_or(updated) { continue; }
+        // An earlier hgs saved a tool-use interruption as a new child message.
+        // The same native row, with no newer hook, now settles that turn.
+        let reclassified = at == updated && child["tracking_evidence"]["source"] == "claude_transcript"
+            && child["tracking_evidence"]["kind"] == "user_message" && evidence["kind"] == "interrupt"
+            && !string(&evidence, "id").is_empty() && child["tracking_evidence"]["native_id"] == evidence["id"];
+        if (at <= updated && !refresh_result && !reclassified)
+            || at <= child["started"].as_f64().unwrap_or(updated) { continue; }
         let workflow_confirmed = evidence["kind"] == "end_turn"
             && workflow_result(&path, &session, &id, string(&evidence,"text_hash"));
         // The workflow result can arrive after the native completion was saved.
@@ -266,8 +293,155 @@ mod tests {
     }
 
     fn write(path: &Path, row: &Value) {
+        write_rows(path, std::slice::from_ref(row));
+    }
+
+    fn write_rows(path: &Path, rows: &[Value]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, format!("{row}\n")).unwrap();
+        fs::write(path, rows.iter().map(|row| row.to_string() + "\n").collect::<String>()).unwrap();
+    }
+
+    /// The tail Claude 2.1.296 writes when a workflow child's running call is
+    /// stopped: the owned call, its rejected error result, then the tool-use
+    /// interruption row linked to that result.
+    fn tool_use_interruption() -> Vec<Value> {
+        let row = |kind: &str, uuid: &str, parent: &str, at: &str| json!({"parentUuid":parent,
+            "isSidechain":true,"promptId":"prompt-one","agentId":"worker","type":kind,"uuid":uuid,
+            "timestamp":at,"userType":"external","entrypoint":"cli","cwd":"/synthetic/project",
+            "sessionId":SESSION,"version":"2.1.296"});
+        let mut call = row("assistant", "native-call", "native-prompt", "2026-10-15T09:41:07.120Z");
+        call["message"] = json!({"role":"assistant","type":"message","stop_reason":"tool_use",
+            "content":[{"type":"tool_use","id":"toolu_call","name":"Bash","input":{"command":"make check"}}]});
+        let mut rejected = row("user", "rejected-result", "native-call", "2026-10-15T09:41:09.512Z");
+        rejected["message"] = json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_call",
+            "is_error":true,"content":"The user doesn't want to proceed with this tool use."}]});
+        rejected["toolUseResult"] = json!("User rejected tool use");
+        rejected["toolDenialKind"] = json!("user-rejected");
+        rejected["sourceToolAssistantUUID"] = json!("native-call");
+        let mut marker = row("user", "interrupt-marker", "rejected-result", "2026-10-15T09:41:09.517Z");
+        marker["message"] = json!({"role":"user","content":[{"type":"text","text":INTERRUPTED_TOOL_USE}]});
+        vec![call, rejected, marker]
+    }
+
+    #[test]
+    fn tool_use_interruption_settles_child_and_enables_context_actions() {
+        let (_temp, mut record, root) = fixture();
+        let rows = tool_use_interruption();
+        write_rows(&root.join("workflows/wf-fixture/agent-worker.jsonl"), &rows);
+        assert!(!clear_context::available(&record, true));
+        reconcile(&mut record);
+        let child = &record["subagents"]["worker"];
+        assert_eq!(child["state"], "finished");
+        assert_eq!(child["current_tool"], "");
+        assert_eq!(child["detail"], "Request interrupted by user for tool use");
+        assert_eq!(child["completion_source"], "claude_transcript_interrupt");
+        assert_eq!(child["tracking_evidence"], json!({"source":"claude_transcript","kind":"interrupt",
+            "at":search::timestamp(&rows[2]["timestamp"]),"native_id":"interrupt-marker"}));
+        assert_eq!(child["reply_id"], "earlier-child-reply");
+        assert_eq!(record["reply_id"], "parent-reply");
+        assert_eq!(record["read"]["reply_id"], "parent-reply");
+        assert_eq!(record["activity"], "idle");
+        assert_eq!(record["phase"], "idle");
+        assert!(clear_context::available(&record, true));
+        let settled = record.clone();
+        reconcile(&mut record);
+        assert_eq!(record, settled);
+    }
+
+    #[test]
+    fn earlier_message_classification_of_the_same_interruption_is_corrected() {
+        let rows = tool_use_interruption();
+        let at = search::timestamp(&rows[2]["timestamp"]);
+        for scenario in ["same-row", "other-row", "unidentified-row", "newer-hook", "hook-evidence", "resumed-tool"] {
+            let (_temp, mut record, root) = fixture();
+            let mut rows = rows.clone();
+            // An hgs that did not know this marker saved it as resumed child work.
+            let child = &mut record["subagents"]["worker"];
+            child["updated"] = json!(at);
+            child["completion_source"] = json!("claude_transcript_user_message");
+            child["tracking_evidence"] = json!({"source":"claude_transcript","kind":"user_message",
+                "at":at,"native_id":"interrupt-marker"});
+            match scenario {
+                "other-row" => child["tracking_evidence"]["native_id"] = json!("earlier-message"),
+                "unidentified-row" => {
+                    rows[2].as_object_mut().unwrap().remove("uuid");
+                    child["tracking_evidence"]["native_id"] = Value::Null;
+                }
+                "newer-hook" => child["updated"] = json!(at + 1.0),
+                "hook-evidence" => child["tracking_evidence"]["source"] = json!("hook"),
+                "resumed-tool" => child["tracking_evidence"]["kind"] = json!("tool_use"),
+                _ => (),
+            }
+            write_rows(&root.join("agent-worker.jsonl"), &rows);
+            let before = record.clone();
+            reconcile(&mut record);
+            if scenario == "same-row" {
+                let child = &record["subagents"]["worker"];
+                assert_eq!(child["state"], "finished");
+                assert_eq!(child["current_tool"], "");
+                assert_eq!(child["completion_source"], "claude_transcript_interrupt");
+                assert_eq!(child["tracking_evidence"]["kind"], "interrupt");
+                assert_eq!(child["tracking_evidence"]["native_id"], "interrupt-marker");
+                assert_eq!(child["reply_id"], "earlier-child-reply");
+                assert_eq!(record["phase"], "idle");
+                assert_eq!(record["read"], before["read"]);
+                assert!(clear_context::available(&record, true));
+                let settled = record.clone();
+                reconcile(&mut record);
+                assert_eq!(record, settled);
+            } else {
+                assert_eq!(record, before, "{scenario}");
+            }
+        }
+    }
+
+    #[test]
+    fn unbound_or_altered_tool_use_markers_never_finish_children() {
+        // Literal or reshaped text is an ordinary child message: new activity.
+        let ordinary = ["extra-part", "quoted", "near-miss"];
+        for scenario in ["no-parent", "missing-parent", "successful-result", "mixed-result", "foreign-parent",
+            "later-parent", "duplicate-parent", "assistant-parent", "foreign-agent", "foreign-session",
+            "main-transcript", "internal", "string-content", "meta", "extra-part", "quoted", "near-miss",
+            "plain-text-parent"] {
+            let (_temp, mut record, root) = fixture();
+            let mut rows = tool_use_interruption();
+            match scenario {
+                "no-parent" => { rows[2].as_object_mut().unwrap().remove("parentUuid"); }
+                "missing-parent" => { rows.remove(1); }
+                "successful-result" => rows[1]["message"]["content"][0]["is_error"] = json!(false),
+                "mixed-result" => rows[1]["message"]["content"].as_array_mut().unwrap()
+                    .push(json!({"type":"tool_result","tool_use_id":"toolu_other","content":"Done"})),
+                "foreign-parent" => rows[1]["agentId"] = json!("other"),
+                "later-parent" => rows[1]["timestamp"] = json!("2026-10-15T09:41:10Z"),
+                "duplicate-parent" => { let copy = rows[1].clone(); rows.insert(1, copy); }
+                "assistant-parent" => rows[2]["parentUuid"] = json!("native-call"),
+                "foreign-agent" => rows[2]["agentId"] = json!("other"),
+                "foreign-session" => rows[2]["sessionId"] = json!("foreign"),
+                "main-transcript" => rows[2]["isSidechain"] = json!(false),
+                "internal" => rows[2]["userType"] = json!("internal"),
+                "string-content" => rows[2]["message"]["content"] = json!(INTERRUPTED_TOOL_USE),
+                "meta" => rows[2]["isMeta"] = json!(true),
+                "extra-part" => rows[2]["message"]["content"].as_array_mut().unwrap()
+                    .push(json!({"type":"text","text":"Continue"})),
+                "quoted" => rows[2]["message"]["content"][0]["text"] = json!(format!("Example: {INTERRUPTED_TOOL_USE}")),
+                "near-miss" => rows[2]["message"]["content"][0]["text"] = json!("[Request interrupted by user for tool use"),
+                "plain-text-parent" => rows[1]["message"]["content"] = json!([{"type":"text","text":"Stop"}]),
+                _ => unreachable!(),
+            }
+            write_rows(&root.join("agent-worker.jsonl"), &rows);
+            let before = record.clone();
+            reconcile(&mut record);
+            if ordinary.contains(&scenario) {
+                assert_eq!(record["subagents"]["worker"]["tracking_evidence"]["kind"], "user_message", "{scenario}");
+            } else {
+                assert_eq!(record, before, "{scenario}");
+            }
+            assert_eq!(record["subagents"]["worker"]["state"], "working", "{scenario}");
+            assert_eq!(record["subagents"]["worker"]["reply_id"], "earlier-child-reply");
+            assert_eq!(record["phase"], "working", "{scenario}");
+            assert_eq!(record["read"], before["read"]);
+            assert!(!clear_context::available(&record, true), "{scenario}");
+        }
     }
 
     #[test]
@@ -290,22 +464,27 @@ mod tests {
 
     #[test]
     fn interruption_does_not_settle_other_child_or_parent_work() {
-        for (key, value) in [("main_done", json!(false)),
-            ("active_tools", json!({"tool":{"name":"Bash"}})),
-            ("subagent_groups", json!({"group":{"active_count":1}}))] {
+        for tail in [vec![marker()], tool_use_interruption()] {
+            for (key, value) in [("main_done", json!(false)),
+                ("active_tools", json!({"tool":{"name":"Bash"}})),
+                ("subagent_groups", json!({"group":{"active_count":1}}))] {
+                let (_temp, mut record, root) = fixture();
+                record[key] = value;
+                write_rows(&root.join("agent-worker.jsonl"), &tail);
+                reconcile(&mut record);
+                assert_eq!(record["subagents"]["worker"]["state"], "finished");
+                assert_eq!(record["phase"], "working");
+                assert!(!clear_context::available(&record, true), "{key}");
+            }
             let (_temp, mut record, root) = fixture();
-            record[key] = value;
-            write(&root.join("agent-worker.jsonl"), &marker());
+            record["subagents"]["live"] = json!({"name":"Review","state":"working","updated":2.0});
+            write_rows(&root.join("agent-worker.jsonl"), &tail);
             reconcile(&mut record);
             assert_eq!(record["subagents"]["worker"]["state"], "finished");
+            assert_eq!(record["subagents"]["live"]["state"], "working");
             assert_eq!(record["phase"], "working");
+            assert!(!clear_context::available(&record, true));
         }
-        let (_temp, mut record, root) = fixture();
-        record["subagents"]["live"] = json!({"name":"Review","state":"working","updated":2.0});
-        write(&root.join("agent-worker.jsonl"), &marker());
-        reconcile(&mut record);
-        assert_eq!(record["subagents"]["live"]["state"], "working");
-        assert_eq!(record["phase"], "working");
     }
 
     #[test]

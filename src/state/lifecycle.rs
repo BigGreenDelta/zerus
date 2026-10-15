@@ -318,19 +318,7 @@ pub(super) fn safe_to_pause(record: &Value) -> bool {
 /// `safe_to_pause` with the verification of a pending resume supplied by the
 /// caller; it is asked only when no confirmed idle conversation qualifies.
 pub(super) fn pausable(record: &Value, resumed_idle: impl FnOnce() -> bool) -> bool {
-    telemetry::grouped_active(record) == 0
-        && !record["active_tools"]
-            .as_object()
-            .map(|tools| !tools.is_empty())
-            .unwrap_or(false)
-        && !record["subagents"]
-            .as_object()
-            .map(|children| {
-                children
-                    .values()
-                    .any(|child| telemetry::child_working(record, child))
-            })
-            .unwrap_or(false)
+    !telemetry::work_remains(record)
         && ((string(record, "activity") == "idle" && string(record, "expected_id").is_empty())
             // Codex defers SessionStart after resume until the next turn; a
             // verified resume waits at its restored conversation's empty composer.
@@ -544,7 +532,7 @@ fn session_spec(
     replaces: Option<&str>,
 ) -> Result<backend::LaunchSpec> {
     let name = string(record, "name");
-    if !Path::new(string(record, "launch_dir")).is_dir() {
+    if !(Path::new(string(record, "launch_dir")).is_dir() || archive_id.is_some() && super::worktree_lifecycle::restorable(record)) {
         return Err(format!(
             "{name}: directory is missing: {}",
             string(record, "launch_dir")
@@ -602,6 +590,12 @@ fn print_resume(spec: &backend::LaunchSpec) {
 fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     let archived = archive::read_archive(name, id)?;
     recipes::verify_history(&archived, true)?;
+    if let Some(scope)=scope {scope.check(&archived)?;}
+    {
+        let _guard = lock(None)?;
+        if live()?.contains_key(name) || record_path(name).exists() { return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring")); }
+    }
+    if !dry { super::worktree_lifecycle::restore(&archived)?; }
     let run_id = uuid::Uuid::new_v4().to_string();
     let spec = resume_spec(&archived, &run_id, Some(id))?;
     let _guard = lock(None)?;

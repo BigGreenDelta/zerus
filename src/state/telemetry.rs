@@ -19,6 +19,33 @@ pub(super) fn child_working(record: &Value, child: &Value) -> bool {
         || child["external"] == true || child["native_roster"] == true)
 }
 
+/// Whether the listing names this child. A Kimi hook names only a profile,
+/// so its entry stands for that profile's group; a native roster lists its own.
+pub(super) fn listed(record: &Value, child: &Value) -> bool {
+    string(record, "agent") != "kimi" || child["external"] == true
+        || (record["kimi_native_roster"] == true && child["native_roster"] == true)
+}
+
+/// Work that keeps a session from Ready beside its recorded activity: Kimi
+/// profile groups, which can outlast the main turn's Stop, open tools and
+/// working children. Idle-only actions such as pause, clear and compaction
+/// wait for all of it.
+pub(super) fn work_remains(record: &Value) -> bool {
+    grouped_active(record) > 0
+        || record["active_tools"].as_object().is_some_and(|tools| !tools.is_empty())
+        || record["subagents"].as_object().is_some_and(|children| {
+            children.values().any(|child| child_working(record, child))
+        })
+}
+
+/// Ready as the listing reports it: the saved activity is idle and no work
+/// remains. Clear, compaction, settings and forks share this check, so none
+/// of them acts while the listing shows work, and none waits for a Kimi hook
+/// entry the native roster has replaced.
+pub(super) fn settled(record: &Value) -> bool {
+    string(record, "activity") == "idle" && string(record, "phase") == "idle" && !work_remains(record)
+}
+
 /// Kimi external hooks expose a profile name, not the Swarm child's identity.
 /// Count observed tasks per profile without assigning a Stop to an invented ID.
 pub(super) fn observe(record: &mut Value, event: &Value) {
@@ -125,8 +152,7 @@ fn children(record: &Value) -> Value {
     let mut roster = serde_json::Map::new();
     if let Some(children) = children {
         for (id, child) in children {
-            if string(record, "agent") == "kimi" && child["external"] != true
-                && (!native_kimi || child["native_roster"] != true) {
+            if !listed(record, child) {
                 continue;
             }
             roster.insert(id.clone(), json!({"name":string(child,"name"),
@@ -244,4 +270,64 @@ pub(super) fn summary(
         String::new()
     });
     result
+}
+
+/// A Ready Kimi session whose native roster replaced the profile hooks. A
+/// missed profile Stop left the hook entry working and its group counted;
+/// neither is work any more, and the listing reports the session Ready.
+#[cfg(test)]
+pub(super) fn stale_hook_child() -> Value {
+    json!({"agent":"kimi","run_id":"run","conversation_id":"conversation","activity":"idle","phase":"idle",
+        "main_done":true,"active_tools":{},"kimi_native_roster":true,
+        "subagent_groups":{"coder":{"label":"coder","active_count":1,"completed_count":0,"total_count":1}},
+        "subagents":{"coder":{"name":"coder","state":"working"},
+            "agent-1":{"name":"agent-1","state":"finished","native_roster":true}}})
+}
+
+/// `stale_hook_child` with work the listing still shows. Each case keeps
+/// every idle-only action waiting.
+#[cfg(test)]
+pub(super) fn remaining_work() -> Vec<(&'static str, Value)> {
+    let changed = |change: &dyn Fn(&mut Value)| {
+        let mut record = stale_hook_child();
+        change(&mut record);
+        record
+    };
+    vec![
+        ("working native child", changed(&|r| r["subagents"]["agent-1"]["state"] = json!("working"))),
+        ("working external child", changed(&|r| {
+            r["subagents"]["helper"] = json!({"name":"helper","state":"working","external":true});
+        })),
+        ("open tool", changed(&|r| r["active_tools"] = json!({"a":{"name":"Bash","started":1.0}}))),
+        ("main turn", changed(&|r| { r["activity"] = json!("busy"); r["phase"] = json!("working"); })),
+        ("approval", changed(&|r| { r["activity"] = json!("busy"); r["phase"] = json!("approval"); })),
+        ("question", changed(&|r| { r["activity"] = json!("busy"); r["phase"] = json!("input"); })),
+        ("compaction", changed(&|r| { r["activity"] = json!("busy"); r["phase"] = json!("compacting"); })),
+        // Without the native roster the profile hooks keep their authority.
+        ("profile group", changed(&|r| {
+            r.as_object_mut().unwrap().remove("kimi_native_roster");
+            r["subagents"]["coder"]["state"] = json!("finished");
+        })),
+        ("hook child", changed(&|r| {
+            r.as_object_mut().unwrap().remove("kimi_native_roster");
+            r["subagent_groups"]["coder"]["active_count"] = json!(0);
+        })),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_replaced_kimi_hook_child_is_no_work_and_listed_work_remains() {
+        let stale = stale_hook_child();
+        assert!(!work_remains(&stale) && settled(&stale));
+        assert!(lifecycle::pausable(&stale, || false));
+        let summary = summary(&stale, &json!({"runtime_state":"live","activity":"idle","phase":"idle"}), "", "");
+        assert_eq!((&summary["subagent_active_count"], &summary["activity_summary"]), (&json!(0), &json!("Ready")));
+        for (case, record) in remaining_work() {
+            assert!(!settled(&record), "{case}");
+            assert!(!lifecycle::pausable(&record, || false), "{case}");
+        }
+    }
 }

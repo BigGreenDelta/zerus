@@ -1,4 +1,6 @@
 #include "UpdateController.h"
+#include "UpdatesWidget.h"
+#include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -15,6 +17,62 @@
 #include <QDateTime>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression>
+#include <QSet>
+#ifdef Q_OS_UNIX
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+#include "ChildProcess.h"
+
+namespace {
+#ifdef Q_OS_UNIX
+// A request's pipe ProcessRunner's macOS worker is still creating: pipe() made it
+// and close-on-exec follows only afterwards. High numbers keep its ends apart from
+// the descriptor a listing of /dev/fd opens.
+struct CreatingPipe {
+    int ends[2]={-1,-1};
+    CreatingPipe(){int made[2];if(::pipe(made)!=0)return;for(int i=0;i<2;++i){ends[i]=::fcntl(made[i],F_DUPFD,64);::close(made[i]);}}
+    ~CreatingPipe(){for(int fd:ends)if(fd>=0)::close(fd);}
+    bool valid() const{return ends[0]>=64&&ends[1]>=64;}
+};
+// The descriptors in a child's `ls /dev/fd`.
+QList<int> descriptors(const QString &path){
+    QFile file(path);QList<int> open;if(!file.open(QIODevice::ReadOnly))return open;
+    for(const auto &name:file.readAll().simplified().split(' '))if(!name.isEmpty())open<<name.toInt();
+    return open;
+}
+#endif
+// The anchors GitHub gives a Markdown file: each heading's text in lower case without
+// punctuation other than hyphens and underscores, spaces turned into hyphens and a
+// -1, -2 suffix on repeats, plus explicit <a id> anchors. Fenced code has none.
+QSet<QString> markdownAnchors(const QString &path){
+    QSet<QString> anchors;QFile file(path);if(!file.open(QIODevice::ReadOnly|QIODevice::Text))return anchors;
+    QHash<QString,int> seen;bool fenced=false;
+    const QRegularExpression heading("\\A#{1,6}\\s+(.+?)\\s*#*\\s*\\z"),explicitAnchor("<a\\s+(?:id|name)=\"([^\"]+)\""),punctuation("[^\\w\\- ]",QRegularExpression::UseUnicodePropertiesOption);
+    for(const auto &line:QString::fromUtf8(file.readAll()).split('\n')){
+        if(line.trimmed().startsWith("```")){fenced=!fenced;continue;}
+        if(fenced)continue;
+        for(auto found=explicitAnchor.globalMatch(line);found.hasNext();)anchors<<found.next().captured(1);
+        const auto match=heading.match(line);if(!match.hasMatch())continue;
+        QString slug=match.captured(1).toLower().remove(punctuation).replace(' ','-');
+        const int repeat=seen.value(slug);seen[slug]=repeat+1;
+        anchors<<(repeat?slug+"-"+QString::number(repeat):slug);
+    }
+    return anchors;
+}
+}
+
+// Stands in for the desktop browser: QDesktopServices hands web links here.
+class UrlRecorder final : public QObject {
+    Q_OBJECT
+public:
+    UrlRecorder(){for(const auto *scheme:{"https","http"})QDesktopServices::setUrlHandler(scheme,this,"record");}
+    ~UrlRecorder() override{for(const auto *scheme:{"https","http"})QDesktopServices::unsetUrlHandler(scheme);}
+    QList<QUrl> urls;
+public slots:
+    void record(const QUrl &url){urls<<url;}
+};
 
 class FixtureReply : public QNetworkReply {
     QByteArray bytes; qint64 position=0;
@@ -287,6 +345,56 @@ private slots:
         auto build=UpdateController::installationGuide({"source",{},{}},"stable");QVERIFY(build.command.isEmpty());QVERIFY(build.instructions.isEmpty());QVERIFY(build.ownership.contains("Git checkout"));
         auto portable=UpdateController::installationGuide({"portable",{},{}},"nightly");QVERIFY(portable.ownership.contains("Portable Windows build"));QVERIFY(portable.command.isEmpty());QVERIFY(portable.instructions.isEmpty());
     }
+    void installationInstructionsOpenThePlatformSection(){
+        // README.md has no Installation section any more: the guide is docs/installation.md.
+        const QString guide="https://github.com/ufna/zerus/blob/main/docs/installation.md";
+        const DesktopInstallation package{"package","zerus-ade-bin","0.36.2-1",true,"paru"},source{"source",{},{}},cask{"homebrew-cask","zerus","0.37.0"},portable{"portable",{},{}};
+        auto archSource=source;archSource.arch=true;
+        QCOMPARE(UpdateController::installationInstructionsUrl(package,"linux"),QUrl(guide+"#arch-linux"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(archSource,"linux"),QUrl(guide+"#arch-linux"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(source,"linux"),QUrl(guide+"#local-installation"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(cask,"macos"),QUrl(guide+"#macos-homebrew"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(source,"macos"),QUrl(guide+"#macos-homebrew"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(portable,"windows"),QUrl(guide+"#windows"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(source,"windows"),QUrl(guide+"#windows"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(source,"freebsd"),QUrl(guide));
+#if defined(Q_OS_MACOS)
+        QCOMPARE(UpdateController::runningPlatform(),QString("macos"));
+#elif defined(Q_OS_WIN)
+        QCOMPARE(UpdateController::runningPlatform(),QString("windows"));
+#elif defined(Q_OS_LINUX)
+        QCOMPARE(UpdateController::runningPlatform(),QString("linux"));
+#endif
+        QCOMPARE(UpdateController::installationInstructionsUrl(archSource),UpdateController::installationInstructionsUrl(archSource,UpdateController::runningPlatform()));
+        // Every section the button can open is a heading of the guide in this checkout.
+        const auto anchors=markdownAnchors(QStringLiteral(ZERUS_INSTALLATION_GUIDE));
+        QVERIFY2(anchors.contains("checking-for-updates"),ZERUS_INSTALLATION_GUIDE);
+        for(const char *platform:{"linux","macos","windows"})for(bool arch:{false,true}){
+            DesktopInstallation installation{"unknown",{},{}};installation.arch=arch;
+            const QString section=UpdateController::installationInstructionsUrl(installation,platform).fragment();
+            QVERIFY2(anchors.contains(section),qPrintable(QString("%1 opens the missing section #%2").arg(platform,section)));
+        }
+    }
+    void installationInstructionsButtonOpensThePlatformSection(){
+        QSettings().setValue("updates/automatic",false);
+        auto *controller=UpdateController::instance();
+        // The shared controller settles its ownership in this test, not in a later one.
+        QTRY_VERIFY_WITH_TIMEOUT(controller->installation().kind!="checking",15000);
+        UrlRecorder browser;UpdatesWidget widget;
+        auto *details=widget.findChild<QPushButton *>("updatesDetailsToggle");QVERIFY(details);details->click();
+        auto *instructions=widget.findChild<QPushButton *>("updatesInstructions");QVERIFY(instructions);
+        QCOMPARE(instructions->text(),QString("Installation instructions"));
+        instructions->click();
+        QUrl expected("https://github.com/ufna/zerus/blob/main/docs/installation.md");
+#if defined(Q_OS_MACOS)
+        expected.setFragment("macos-homebrew");
+#elif defined(Q_OS_WIN)
+        expected.setFragment("windows");
+#elif defined(Q_OS_LINUX)
+        expected.setFragment(controller->installation().arch?"arch-linux":"local-installation");
+#endif
+        QCOMPARE(browser.urls,QList<QUrl>{expected});
+    }
     void nightlyBuildsCompareByBuildNumber(){
         QVERIFY(UpdateController::nightlyIsNewer("0.38.0.r812.gabcdef0.n41","0.38.0.r815.g1234567.n42"));
         QVERIFY(UpdateController::nightlyIsNewer("0.38.0.r812.gabcdef0.n9","0.38.0.r815.g1234567.n10"));
@@ -323,6 +431,28 @@ private slots:
         plist("0.38.0.r815.g1234567.n42");controller.refreshBundleState();QVERIFY(controller.restartRequired());QVERIFY(changed.count()>0);
 #endif
     }
+    void restartHelperIsDetachedWithOnlyStdio(){
+#ifndef Q_OS_UNIX
+        QSKIP("The restart helper reopens a macOS bundle");
+#else
+        if(!ChildProcess::inheritsStdioOnly)QSKIP("This Qt cannot close inherited descriptors");
+        // In place of /bin/sh, record what the helper gets instead of reopening a bundle.
+        QTemporaryDir dir;QVERIFY(dir.isValid());const QString shell=dir.path()+"/sh",bundle=dir.path()+"/Zerus.app";
+        tool(shell,"#!/bin/sh\nout=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$out/arguments\"\necho \"$PPID\" > \"$out/parent\"\nls /dev/fd > \"$out/fds.part\" && mv \"$out/fds.part\" \"$out/fds\"\n");
+        // The GUI may be quitting while ProcessRunner creates a request's pipe; the helper
+        // then waits for it to exit and must not keep that request's input open meanwhile.
+        const CreatingPipe creating;QVERIFY(creating.valid());const qint64 pid=QCoreApplication::applicationPid();
+        QVERIFY(UpdateController::startRestartHelper(bundle,pid,shell));
+        QTRY_VERIFY(QFileInfo::exists(dir.path()+"/fds"));
+        QFile arguments(dir.path()+"/arguments");QVERIFY(arguments.open(QIODevice::ReadOnly));
+        QCOMPARE(QString::fromUtf8(arguments.readAll()).split('\n',Qt::SkipEmptyParts),QStringList({"-c","while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open -a \"$2\" --args --sessions","zerus-restart",QString::number(pid),bundle}));
+        // Detached: not a child of this process, so it outlives it.
+        QFile parent(dir.path()+"/parent");QVERIFY(parent.open(QIODevice::ReadOnly));const qint64 parentPid=parent.readAll().trimmed().toLongLong();
+        QVERIFY(parentPid>0);QVERIFY(parentPid!=pid);
+        const auto open=descriptors(dir.path()+"/fds");const auto shown=QDebug::toString(open).toLatin1();
+        QVERIFY2(open.contains(1),shown.constData());for(int fd:creating.ends)QVERIFY2(!open.contains(fd),shown.constData());
+#endif
+    }
     void canonicalOwnershipAsync(){
 #ifdef Q_OS_LINUX
         QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);qputenv("ZERUS_TEST_LOG",(dir.path()+"/args.json").toUtf8());
@@ -338,6 +468,21 @@ private slots:
     void unknownOwnerNeverOffersReplacement(){
 #ifdef Q_OS_LINUX
         QTemporaryDir dir;auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);tool(dir.path()+"/pacman","#!/usr/bin/python3\nimport sys\nprint('custom-owner' if sys.argv[1]=='-Qqo' else 'custom-owner 2.1-1')\n");QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();UpdateController controller(nullptr,executable.fileName());QTRY_VERIFY_WITH_TIMEOUT(!controller.installation().version.isEmpty(),2000);QCOMPARE(controller.installation().package,QString("custom-owner"));QVERIFY(UpdateController::updateCommand(controller.installation()).isEmpty());qputenv("PATH",oldPath);
+#endif
+    }
+    void packageProbesInheritOnlyStdio(){
+#ifdef Q_OS_LINUX
+        if(!ChildProcess::inheritsStdioOnly)QSKIP("This Qt cannot close inherited descriptors");
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);const auto restorePath=qScopeGuard([oldPath]{qputenv("PATH",oldPath);});
+        tool(dir.path()+"/pacman","#!/bin/sh\nif [ \"$1\" = -Qqo ]; then ls /dev/fd > \"$0.fds.part\" && mv \"$0.fds.part\" \"$0.fds\"; echo zerus-ade-bin; else echo 'zerus-ade-bin 0.36.2-1'; fi\n");
+        QFile executable(dir.path()+"/gui");QVERIFY(executable.open(QIODevice::WriteOnly));executable.close();
+        // A probe started while a request's pipe is being created must not keep that
+        // request's input open, like every other child of the GUI (ChildProcess.h).
+        const CreatingPipe creating;QVERIFY(creating.valid());
+        UpdateController controller(nullptr,executable.fileName());QTRY_VERIFY_WITH_TIMEOUT(!controller.installation().version.isEmpty(),5000);
+        const auto open=descriptors(dir.path()+"/pacman.fds");const auto shown=QDebug::toString(open).toLatin1();
+        QVERIFY2(open.contains(0)&&open.contains(1)&&open.contains(2),shown.constData());for(int fd:creating.ends)QVERIFY2(!open.contains(fd),shown.constData());
 #endif
     }
     void verifiedCatalogSurvivesRestartAndRejectsCorruption(){

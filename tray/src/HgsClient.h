@@ -10,6 +10,10 @@
 #include <QSet>
 #include <QString>
 #include <QStringList>
+#include <memory>
+
+class QTimer;
+namespace DownloadCache { struct Pending; }
 
 struct SessionInfo {
     QJsonObject recovery;
@@ -177,7 +181,7 @@ public:
                            const QString &branch, const QString &base, const QString &destination);
     // Cleanup verdicts are computed on the owning machine. Whole-repository reviews
     // stay cached for five minutes for the Clean up reminder; removal repeats every
-    // check there, never forces and is never retried automatically.
+    // check there. Discard needs its own content proof; failures are never replayed.
     quint64 reviewWorktrees(const QString &host, const QString &path, const QString &worktree = {});
     quint64 inspectWorktree(const QString &host, const QString &path, const QString &commonDir, const QString &file = {}, int offset = 0, bool refresh = false);
     // Browsing may retain a review for an hour; cleanup callers keep the default five-minute limit.
@@ -185,7 +189,7 @@ public:
     void invalidateWorktreeCache(const QString &host, const QString &commonDir);
     QJsonObject worktreeReview(const QString &host, const QString &commonDir, int maxAgeSeconds = 300) const;
     quint64 removeWorktree(const QString &host, const QString &path, const QString &commonDir,
-                           const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {});
+                           const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {}, const QString &discardFingerprint = {});
     quint64 requestDirectories(const QString &host, const QString &path, bool hidden = false);
     quint64 createDirectory(const QString &host, const QString &path);
     bool requestInspection(const QString &host, const QString &name, qint64 after = 0, const QString &archiveId = {}, bool includeProcesses = true);
@@ -199,6 +203,7 @@ public:
     quint64 requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});
     quint64 downloadFile(const QString &host, const QString &path, const QString &destination);
+    quint64 downloadFileToCache(const QString &host, const QString &path);
     static constexpr qsizetype MaximumMessageBytes = 64 * 1024;
     static constexpr qsizetype MaximumAttachmentBytes = 10 * 1024 * 1024;
     static constexpr qsizetype MaximumAttachmentsBytes = 20 * 1024 * 1024;
@@ -256,6 +261,7 @@ signals:
     void attachmentReady(quint64 request, const QJsonObject &file, const QByteArray &bytes);
     void fileDownloaded(quint64 request, const QString &destination);
     void fileDownloadFailed(quint64 request, const QString &error);
+    void downloadCacheWarning(const QString &error);
     void attachmentFailed(quint64 request, const QString &detail);
     void nativeUiReady(quint64 request, const QJsonObject &connection);
     void nativeUiFailed(quint64 request, const QString &error);
@@ -306,6 +312,7 @@ signals:
     void worktreeReviewFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
     void worktreeInspectionFinished(quint64 request, const QString &host, const QString &path, const QString &file, const QJsonObject &data, const QString &error);
     void worktreeRemoved(quint64 request, bool ok, const QJsonObject &result, const QString &error);
+    void worktreeCleanupFinished(const QString &host, const QString &operation, const QJsonObject &result);
     void directoriesReady(quint64 request, const QString &host, const QJsonObject &data);
     void directoryCreated(quint64 request, const QString &host, const QJsonObject &data);
     void directoryCreationFailed(quint64 request, const QString &host, const QString &detail);
@@ -318,6 +325,12 @@ signals:
     void writeDone(const QString &op, bool ok, const QString &detail);
 
 private:
+    void transferFile(quint64 id, const QString &host, const QString &path, const QString &destination,
+                      const std::shared_ptr<DownloadCache::Pending> &pending = {});
+    void scheduleDownloadCacheTrim();
+    void trimDownloadCache();
+    QTimer *m_downloadCacheTimer = nullptr;
+    bool m_downloadCacheTrimBusy = false;
     void pumpGitStatus();
     QHash<QString, QJsonObject> m_gitStatusCache;
     QHash<QString, qint64> m_gitStatusRequestedAt;

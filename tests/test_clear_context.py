@@ -2,7 +2,7 @@
 import json, subprocess, time, unittest, uuid
 import test_input
 
-AGENT = r'''
+AGENT = test_input.SIGNAL_SAFE_READ + r'''
 import os, pathlib, sys, termios, tty, json, uuid, signal
 root=pathlib.Path(os.environ['INPUT_FIXTURE']); fd=sys.stdin.fileno(); old=termios.tcgetattr(fd);tty.setraw(fd)
 text='';agent='codex'
@@ -19,7 +19,7 @@ def show(*args):
 signal.signal(signal.SIGUSR1,show);os.write(1,b'\x1b[?2004h');show();(root/'agent-pid').write_text(str(os.getpid()))
 try:
  while True:
-  value=os.read(fd,65536)
+  value=read_input(fd)
   with (root/'received').open('ab') as f:f.write(value)
   if (root/'freeze').exists():continue
   for c in value:
@@ -182,6 +182,46 @@ class ClearContext(unittest.TestCase):
   self.record['activity']='busy';self.record['phase']='working';self.write_record();self.clear(success=False);self.assertEqual(self.received(),b'')
   self.record['activity']='idle';self.record['phase']='idle';self.write_record()
   test_input.InputTransport.screen(self,'\x1b[2J\x1b[H› unsent draft', '14:0');self.clear(success=False);self.assertEqual(self.received(),b'')
+ def test_replaced_kimi_hook_entry_keeps_ready_actions_consistent(self):
+  # Kimi's native catalog replaces the profile hooks; a missed profile Stop
+  # leaves their entry working. The listing reports Ready, and inspect,
+  # dispatch, forks and settings agree, while a working catalog child still
+  # keeps every action waiting.
+  import os,signal
+  (self.root/'provider').write_text('kimi');os.kill(self.record['pid'],signal.SIGUSR1)
+  self.wait_for(lambda:'│ >' in self.tmux('capture-pane','-p','-t',self.pane))
+  home=self.root/'kimi-home';session=home/'sessions'/'workspace'/self.conversation_id
+  for agent in ('main','agent-1'):(session/'agents'/agent).mkdir(parents=True)
+  (session/'agents'/'main'/'wire.jsonl').write_text('{}\n')
+  started=time.time()*1000
+  (session/'state.json').write_text(json.dumps(dict(id=self.conversation_id,version=2,updatedAt=started,agents={
+      'main':dict(homedir=str(session/'agents'/'main')),
+      'agent-1':dict(homedir=str(session/'agents'/'agent-1'),parentAgentId='main',labels=dict(profileName='coder'))})))
+  def child(*kinds):
+   rows=[dict(type=kind,agentId='agent-1',turnId=0,outcome='done',time=started+index+1) for index,kind in enumerate(kinds)]
+   (session/'agents'/'agent-1'/'wire.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
+  child('agent.turn.started')
+  self.record.update(agent='kimi',agent_home=str(home),base=['kimi'],main_done=True,
+                     subagent_groups=dict(coder=dict(label='coder',active_count=1,completed_count=0,total_count=1)),
+                     subagents={'coder':dict(name='coder',state='working')})
+  self.write_record()
+  info=self.inspect();waiting='Wait until the agent reports Ready. Still working: subagent \u201ccoder\u201d'
+  self.assertEqual(info['subagent_source'],'kimi_native')
+  for action in ('clear_context','compact_context'):
+   self.assertFalse(info[action+'_supported'],action);self.assertEqual(info[action+'_reason'],waiting,action)
+  self.assertFalse(info['fork_supported']);self.assertEqual(info['settings_apply_when'],'ready')
+  self.assertIn('busy',self.clear(success=False));self.assertEqual(self.received(),b'')
+  child('agent.turn.started','agent.turn.ended')
+  ls=subprocess.run([str(test_input.HGS),'ls','--local','--json'],env=self.env,text=True,capture_output=True,timeout=12)
+  self.assertEqual(ls.returncode,0,ls.stderr)
+  row=next(r for r in json.loads(ls.stdout)['sessions'] if r['name']==self.name)
+  self.assertEqual((row['activity'],row['activity_summary'],row['subagent_active_count']),('idle','Ready',0))
+  self.assertEqual(json.loads(self.record_path.read_text())['subagents']['coder']['state'],'working')
+  info=self.inspect()
+  for action in ('clear_context','compact_context','fork'):
+   self.assertTrue(info[action+'_supported'],action);self.assertEqual(info[action+'_reason'],'',action)
+  self.assertEqual(info['settings_apply_when'],'now')
+  self.assertEqual(self.clear()['status'],'confirmed');self.assertEqual(self.received(),b'/clear\r')
  def test_uncertain_input_does_not_press_enter_or_retry(self):
   (self.root/'freeze').touch();p=dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id)
   self.assertIn('uncertain',self.clear(p,False));self.assertEqual(self.received(),b'/clear')
@@ -219,6 +259,8 @@ class ResumedClearContext(unittest.TestCase):
   self.resumed();info=self.inspect()
   self.assertTrue(info['resume_message_can_send'],info.get('resume_message_reason'))
   self.assertTrue(info['clear_context_supported']);self.assertFalse(info['compact_context_supported'])
+  self.assertEqual(info['clear_context_reason'],'')
+  self.assertEqual(info['compact_context_reason'],'The agent has not confirmed the resumed conversation yet')
   self.assertIn('pause',info['allowed_actions'])
   self.assertEqual(self.clear()['status'],'confirmed');self.assertEqual(self.received(),b'/clear\r')
   current=json.loads(self.record_path.read_text())
@@ -226,6 +268,7 @@ class ResumedClearContext(unittest.TestCase):
   self.assertTrue(current['session_clear']['awaiting_session_start']);self.assertFalse(current.get('error'))
   fresh=self.inspect();self.assertEqual(fresh['session_clear']['type'],'SessionCleared')
   self.assertEqual(fresh['session_usage']['status'],'unavailable');self.assertFalse(fresh['clear_context_supported'])
+  self.assertEqual(fresh['clear_context_reason'],'The cleared conversation starts with the next message')
   # The next message starts the cleared conversation, whose SessionStart names it.
   self.assertTrue(fresh['resume_message_can_send'],fresh.get('resume_message_reason'))
   receipt=test_input.InputTransport.send(self,test_input.InputTransport.payload(self,text='Fresh request'))

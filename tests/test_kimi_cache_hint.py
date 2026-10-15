@@ -3,7 +3,7 @@
 import json, os, signal, subprocess, unittest, uuid
 import test_input as fixtures
 from test_questions import Questions
-FAKE = r'''
+FAKE = fixtures.SIGNAL_SAFE_READ + r'''
 import json,os,pathlib,signal,sys,termios,tty
 root=pathlib.Path(os.environ['INPUT_FIXTURE']);fd=sys.stdin.fileno();original=termios.tcgetattr(fd);tty.setraw(fd)
 os.write(1,b'\x1b[?2004h');selected=0;buf=b''
@@ -18,7 +18,7 @@ def render(*args):
 signal.signal(signal.SIGUSR1,render);render();(root/'agent-pid').write_text(str(os.getpid()))
 try:
  while True:
-  value=os.read(fd,65536)
+  value=read_input(fd)
   if not value:break
   with (root/'received').open('ab') as f:f.write(value)
   buf+=value
@@ -59,6 +59,35 @@ class CacheHint(unittest.TestCase):
         p=fixtures.InputTransport.payload(self)
         e=fixtures.InputTransport.send(self,p,success=False)
         self.assertIn('context choice',e);self.assertEqual(self.received(),b'')
+    def test_context_actions_wait_for_the_choice_as_dispatch_does(self):
+        # The saved record stays idle; the terminal chooser alone keeps both
+        # actions unavailable, with the reason, as dispatch refuses them.
+        info=self.inspect();self.assertEqual((info['activity'],info['phase']),('busy','input'))
+        for action in ('clear_context','compact_context'):
+            self.assertFalse(info[action+'_supported'],action)
+            self.assertEqual(info[action+'_reason'],"Wait until the agent's question is answered",action)
+        for command in ('clear-context','compact-context'):
+            request=dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id)
+            r=subprocess.run([str(fixtures.HGS),command,self.name,'--json'],env=self.env,input=json.dumps(request),
+                             text=True,capture_output=True,timeout=12)
+            self.assertNotEqual(r.returncode,0,command);self.assertIn('context choice',r.stderr,command)
+        self.assertEqual(self.received(),b'')
+    def test_fork_and_settings_wait_for_the_choice_as_dispatch_does(self):
+        # The saved record is Ready; the terminal chooser alone keeps a fork
+        # unavailable and schedules a settings change, in inspect and the list.
+        self.record.update(base=['kimi']);self.write_record()
+        reason="Wait until the agent's question is answered"
+        ls=subprocess.run([str(fixtures.HGS),'ls','--local','--json'],env=self.env,text=True,capture_output=True,timeout=12)
+        self.assertEqual(ls.returncode,0,ls.stderr)
+        row=next(r for r in json.loads(ls.stdout)['sessions'] if r['name']==self.name)
+        for info in (self.inspect(),row):
+            self.assertEqual((info['fork_supported'],info['fork_reason']),(False,reason))
+            self.assertNotIn('fork',info['allowed_actions']);self.assertEqual(info['action_reasons']['fork'],reason)
+            self.assertEqual(info['settings_apply_when'],'ready')
+        r=subprocess.run([str(fixtures.HGS),'fork',self.name,'-n','branch','-d','--dry-run'],env=self.env,
+                         text=True,capture_output=True,timeout=12)
+        self.assertNotEqual(r.returncode,0,r.stdout);self.assertIn('context choice',r.stderr)
+        self.assertEqual(self.received(),b'')
     def test_all_native_options_and_stable_identity_during_navigation(self):
         for choice in range(4):
             with self.subTest(choice=choice):

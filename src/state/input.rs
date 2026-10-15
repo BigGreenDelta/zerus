@@ -174,14 +174,25 @@ pub(super) fn checked_resumed(name: &str, run_id: &str, conversation_id: &str) -
 pub(super) fn checked_settings(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
     if !conversation_id.is_empty() { return checked_ready(name, run_id, conversation_id); }
     let record = checked_input(name, run_id, conversation_id, true)?;
-    if !first_message_candidate(&record)
-        || telemetry::grouped_active(&record) > 0
-        || record["active_tools"].as_object().is_some_and(|tools| !tools.is_empty())
-        || record["subagents"].as_object().is_some_and(|children| children.values().any(|child| string(child, "state") == "working"))
-    {
+    if !first_message_ready(&record) {
         return Err("The new session is not ready for model settings; refresh or open Terminal".into());
     }
     Ok(record)
+}
+
+/// A new session waiting at its first prompt with no work remaining, as the
+/// listing reports it; its settings may change before the first message.
+pub(super) fn first_message_ready(record: &Value) -> bool {
+    first_message_candidate(record) && !telemetry::work_remains(record)
+}
+
+/// Settings changes, clear and compaction require an entirely idle session:
+/// Ready as the listing reports it, which also gates forks.
+fn idle_only(record: &Value) -> Result<()> {
+    if telemetry::settled(record) {
+        return Ok(());
+    }
+    Err("agent is busy or waiting for approval; wait for Ready or use Terminal".into())
 }
 
 /// Failed and interrupted turns may already accept another message at the native
@@ -201,7 +212,16 @@ pub(super) fn attention_message_summary(record: &Value, output: &mut Value, live
             string(record, "conversation_id"),
             true,
         )
-        .and_then(|current| checked_terminal(&current, true))
+        .and_then(|current| {
+            checked_terminal(&current, true).map_err(|error| {
+                // Stop returns ordinary Codex follow-ups to its input as one draft.
+                if prefix == "interrupted" && error == DRAFT && input_queue::returned_by_stop(&current) {
+                    RETURNED_FOLLOW_UPS.into()
+                } else {
+                    error
+                }
+            })
+        })
     } else {
         Err("The agent is not running. Resume it before sending.".into())
     };
@@ -284,21 +304,8 @@ fn checked_input(
     }
     // Text can be submitted to a working agent's native composer. The terminal
     // checks below still require an empty recognized prompt, never a dialog.
-    // Settings changes continue to require an entirely idle session.
-    if !allow_working
-        && (string(&record, "activity") != "idle"
-            || string(&record, "phase") != "idle"
-            || telemetry::grouped_active(&record) > 0
-            || record["active_tools"]
-                .as_object()
-                .is_some_and(|tools| !tools.is_empty())
-            || record["subagents"].as_object().is_some_and(|children| {
-                children
-                    .values()
-                    .any(|child| string(child, "state") == "working")
-            }))
-    {
-        return Err("agent is busy or waiting for approval; wait for Ready or use Terminal".into());
+    if !allow_working {
+        idle_only(&record)?;
     }
     if record["input_pending_at"]
         .as_f64()
@@ -442,6 +449,16 @@ fn codex_model_footer(footer: &str, model: Option<&str>) -> bool {
         && words.next().is_none()
 }
 
+/// Codex's one-line model/folder status: this session's exact model or a GPT
+/// label, then a folder.
+fn codex_status_row(plain: &str, model: Option<&str>) -> bool {
+    let footer = plain.to_ascii_lowercase();
+    (codex_model_footer(plain, model) || footer.trim_start().starts_with("gpt-"))
+        && footer.split_once(" · ").is_some_and(|(_, path)| {
+            shown_path::status_folder(path, crate::platform::home().as_deref())
+        })
+}
+
 fn codex_footer_model(record: &Value) -> Option<&str> {
     if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
         return Some(model);
@@ -554,10 +571,7 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
                 // Windows Codex prints `~\…` or a drive path (`shown_path`).
                 let single_line_footer = placeholder
                     && lines[index + 1..].iter().all(|line| line.trim().is_empty())
-                    && (exact_model || footer.trim_start().starts_with("gpt-"))
-                    && footer.split_once(" · ").is_some_and(|(_, path)| {
-                        shown_path::status_folder(path, crate::platform::home().as_deref())
-                    });
+                    && codex_status_row(&plain, model);
                 return input_background || single_line_footer
                     || lines.last().is_some_and(|line| {
                         let plain: String = styled_row(line).iter().map(|(ch, _)| ch).collect();
@@ -604,10 +618,40 @@ pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
             cursor_y,
             codex_footer_model(record),
         ) {
-            return Err("terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt".into());
+            return Err(DRAFT.into());
         }
     }
     Ok(())
+}
+
+const DRAFT: &str = "terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt";
+/// The send-block reason while Codex's input holds exactly the follow-ups Stop returned.
+const RETURNED_FOLLOW_UPS: &str =
+    "The queued follow-ups are back in Codex's input as an unsent draft. Submit or clear them in Terminal.";
+
+/// The whole draft in Codex's input: its `›` row and indented continuation rows,
+/// then a blank row before the model/folder status row of its footer in the last
+/// two screen rows. The cursor must be above that blank row; any other layout is unread.
+pub(super) fn codex_draft(record: &Value, screen: &str, cursor_y: usize) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    let model = codex_footer_model(record);
+    let footer = (lines.len().saturating_sub(2)..lines.len())
+        .find(|&index| codex_status_row(lines[index], model))?;
+    let (start, first) = lines[..footer]
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, row)| Some((index, row.strip_prefix('›')?)))?;
+    let rows = &lines[start + 1..footer];
+    if !(start..footer - 1).contains(&cursor_y)
+        || rows.last().is_none_or(|row| !row.is_empty())
+        || rows.iter().any(|row| !row.is_empty() && !row.starts_with("  "))
+    {
+        return None;
+    }
+    let first = first.strip_prefix(' ').unwrap_or(first);
+    let rows = rows.iter().map(|row| row.get(2..).unwrap_or(""));
+    Some(std::iter::once(first).chain(rows).collect::<Vec<_>>().join("\n").trim_end().to_owned())
 }
 
 pub(super) fn safe_filename(name: &str, index: usize) -> String {
@@ -801,6 +845,27 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_only_dispatch_and_new_session_settings_follow_the_listing() {
+        // Clear, compaction and settings dispatch accept the Ready session the
+        // listing reports, though a replaced Kimi hook entry still says working.
+        let first = |record: &Value| {
+            let mut record = record.clone();
+            record["conversation_id"] = json!("");
+            record["last_event_at"] = json!(0);
+            record["run_identity_version"] = json!(1);
+            record["supervisor"] = json!({});
+            record
+        };
+        let stale = telemetry::stale_hook_child();
+        assert!(idle_only(&stale).is_ok());
+        assert!(first_message_candidate(&first(&stale)) && first_message_ready(&first(&stale)));
+        for (case, record) in telemetry::remaining_work() {
+            assert_eq!(idle_only(&record).unwrap_err(),
+                "agent is busy or waiting for approval; wait for Ready or use Terminal", "{case}");
+            assert!(!first_message_ready(&first(&record)), "{case}");
+        }
+    }
     #[test]
     fn a_paste_shows_by_its_end_through_wrapping_or_as_a_placeholder() {
         let envelope = "<send_user_message_question_reply>\n[{\"answer\":\"Two\",\"question\":\"Which option?\"}]\n</send_user_message_question_reply>";

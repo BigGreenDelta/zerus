@@ -36,10 +36,25 @@ job durations live in ignored `artifacts/test-results/`. Set
 `ZERUS_BUILD_JOBS` to limit desktop build parallelism. Run
 `cargo +1.85.0 test --locked` for the minimum supported Rust.
 
+`check-source.py` keeps the desktop's Unix children from inheriting its descriptors
+([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects
+`QProcess::startDetached()` and `QProcess::execute()`, and every `QProcess` must go to
+`ChildProcess::inheritStdioOnly()`, directly or through a function that passes its
+parameter there, in the function that creates it (for a member, a constructor of its
+class) and before it starts.
+`CHILD_PROCESS_EXEMPT` in the script names the files that may start children
+otherwise, each with its reason.
+
 A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare a
 [tmux census](docs/ci-and-aur.md#unix-tmux-census) of the branch with one of main.
 `scripts/ci/check-windows-target.sh` type-checks the Windows target from Linux or
 macOS.
+
+On macOS the Rust standard library marks a child's pipes close-on-exec only after
+creating them, so a child that another thread starts in between inherits them and
+holds that exchange's input or output open until it exits. Where threads of one
+`hgs` process can spawn at the same time (mobile peer discovery, speech computer
+discovery), every such spawn goes through `platform::spawn_in_turn`.
 
 The CLI script also builds `examples/fake_agent.rs`, a native stand-in agent for
 terminal tests that need a real process rather than a script, such as those that
@@ -95,11 +110,25 @@ The ordinary `kwinwindowlayer` test runs on a private D-Bus session with a fake
 compositor and never controls the user's desktop.
 
 For the Rust mobile relay, run `cargo +1.85.0 test --locked` inside
-`services/mobile/relay`, then the explicit PostgreSQL and connector contracts
-in [its README](services/mobile/relay/README.md). The Docker image uses that Rust
-binary. For the connector and reference compatibility fixtures, install
-`services/mobile` in a Python 3.11+
-virtual environment and run `python -m unittest discover -s services/mobile/tests -v`.
+`services/mobile/relay`. The Docker image uses that Rust binary. For the Rust
+mobile connector, run `cargo +1.85.0 test --locked` inside
+`services/mobile/connector`; [its README](services/mobile/connector/README.md)
+names the variables its Python and `hgs` handoff tests need and how the
+black-box suites run against its binary. For the Python connector and reference
+compatibility fixtures, install `services/mobile` and
+`services/mobile/tests/requirements.txt` in a Python 3.11+ virtual environment
+and run `python -m unittest discover -s services/mobile/tests -v`.
+The relay storage contracts and the connector HTTP suites need PostgreSQL:
+without `ZERUS_RELAY_TEST_DATABASE_URL` the contracts use SQLite and the HTTP
+suites skip instead of running the Rust relay. Start a disposable server with
+one line:
+
+```sh
+docker run --rm -d --name zerus-relay-test-postgres -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17.11-alpine -c max_connections=300
+```
+
+Then follow [the relay's PostgreSQL tests](services/mobile/relay/README.md#postgresql-tests)
+for the variables and commands; each test creates and drops its own database.
 These tests use synthetic subprocesses and isolated databases, without live native
 agents. For Android, run `./gradlew testDebugUnitTest lintDebug assembleDebug` from
 `mobile/android` with JDK 17 or 21 and Android SDK 36. Every CI run, PRs included,
@@ -126,21 +155,18 @@ You need:
 - Visual Studio 2022 with the x64 C++ tools and a Windows SDK; its own CMake
   (3.22 or later is needed for the Windows tests) and Ninja are used;
 - Rust for MSVC: stable, and 1.85.0 with clippy;
-- Python 3.9 or later for the Qt test fixtures, 3.11 or later for the packaging
-  scripts, and 3.13 for the hash-locked Qt installer;
-- Git for Windows with Git Bash;
+- Python 3.9 or later for the Qt test fixtures and 3.11 or later for the
+  packaging scripts;
+- Git for Windows with Git Bash, and 7-Zip;
 - Qt 6.10.3 `msvc2022_64` with Qt Multimedia (no Qt WebEngine: the embedded
   DeepSeek Native UI is an optional Linux plugin).
-  CI installs it with `scripts/ci/aqt-requirements.txt` (aqtinstall 3.3.0 cannot
-  install Qt 6.11 or later for Windows yet) and one worker from
-  `scripts/ci/aqt-settings.ini`; the same works locally:
+  CI installs the official archives pinned in `packaging/windows/qt.json`, each
+  verified before 7-Zip extracts it. The same works locally and makes
+  `~/Qt/6.10.3/msvc2022_64` (`--seven-zip` names 7-Zip when `7z` is not on
+  `PATH`):
 
 ```sh
-python -m venv ~/aqt
-~/aqt/Scripts/python -m pip install --require-hashes --only-binary :all: \
-    -r scripts/ci/aqt-requirements.txt
-~/aqt/Scripts/python -m aqt -c scripts/ci/aqt-settings.ini \
-    install-qt windows desktop 6.10.3 win64_msvc2022_64 -m qtmultimedia --outputdir ~/Qt
+python scripts/install-qt-windows.py --output ~/Qt
 ```
 
 Clone with `git clone -c core.autocrlf=false`, as CI does: test fixtures and

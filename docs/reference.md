@@ -151,6 +151,19 @@ Kimi `config.toml`, preserving other hooks and making a `.pre-hgs` backup before
 first edit. It respects `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME`.
 Handlers do nothing outside an `hgs` run. `HGS_TRACKING=0` disables registration for
 new launches. Native hook trust still requires an explicit user choice in Codex.
+Claude Code's `PostModelSwitch` is registered only once `claude --version` reports
+2.1.296 or later: older versions stop every start at a settings warning for a hook
+event they do not know. Until then each launch reads the version again; a version
+that cannot be read gets no such event. A launch through a project `run_claude.sh`
+never reads it, because a launcher runs only under supervision. Once registered,
+the version is read again only when the `claude` executable changes; a version older
+than 2.1.296 then has hgs remove its own `PostModelSwitch` entries before a tracked
+start, dropping the event only when nothing else is left in it; started outside hgs
+or with `HGS_TRACKING=0` first, it still warns until then. The user's own hooks for
+that event stay, and older versions still warn about those. An unreadable version or
+a launcher keeps the entry, as does a wrapper script that starts another Claude Code
+without itself changing: delete the entry from its `settings.json` by hand there.
+`PreModelSwitch` is never registered.
 Tracked Codex needs `--no-daemon`; the integration has been verified with 0.160.0,
 while 0.155.1 lacks that required flag.
 
@@ -488,10 +501,99 @@ clears selection. Context menus and shortcuts preserve the target identity.
 **Clear archive…** requires confirmation, preserves offline records and excludes
 new records created after the confirmation snapshot; native history remains.
 
-Common shortcuts: Ctrl/Command-F searches, Ctrl/Command-R refreshes, Enter opens the
-selected live session and Escape closes the current transient UI; it never closes
-the workspace.
-An archive needs explicit **Restore**; Enter does not start it.
+Enter opens the selected live session and Escape closes the current transient UI;
+it never closes the workspace. An archive needs explicit **Restore**; Enter does
+not start it. The other keyboard commands are listed below.
+
+<a id="keyboard"></a>
+
+### Keyboard
+
+**Mod** is Ctrl on Linux and Windows and Command (⌘) on macOS. **Control** is the
+physical Control key everywhere; macOS keeps Command-Tab and Command-` for its
+application and window switchers.
+
+| Command | Linux / Windows | macOS |
+|---|---|---|
+| Overview, Sessions, Projects, Machines, Accounts | Ctrl+1 … Ctrl+5 | ⌘1 … ⌘5 |
+| Settings | Ctrl+, | ⌘, |
+| Go to… (sessions, projects, accounts, machines, commands) | Ctrl+K | ⌘K |
+| Keyboard shortcuts | F1, Ctrl+/ | F1, ⌘/ |
+| Next / previous session | Alt+↓ / Alt+↑, Ctrl+PgDn / Ctrl+PgUp | ⌥↓ / ⌥↑, ⌘⌥↓ / ⌘⌥↑ |
+| Next / previous session that needs attention | Alt+Shift+↓ / ↑ | ⌥⇧↓ / ↑ |
+| New session | Ctrl+N | ⌘N |
+| Rename session | F2 | F2 |
+| Search sessions | Ctrl+F | ⌘F |
+| Refresh | Ctrl+R, F5 | ⌘R, F5 |
+| Next / previous tab (Activity, Terminal, Processes, Native UI) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
+| Switch between Activity and Terminal | Ctrl+` | ⌃` |
+| Show or hide the side panel | Ctrl+I | ⌘I |
+| Next / previous area (list, conversation, message field, side panel) | F6 / Shift+F6 | F6 / ⇧F6 |
+| Send message (also Enter) | Ctrl+Enter | ⌘↩ |
+| Send queued messages now | Ctrl+Shift+Enter | ⌘⇧↩ |
+| Send and push now | Ctrl+X, Ctrl+S | ⌃X, ⌃S |
+| Increase, decrease, reset content scale | Ctrl+= / Ctrl+- / Ctrl+0 | ⌘= / ⌘- / ⌘0 |
+
+Session navigation moves through the visible list, or the search results while
+they are shown, and skips project headers and subagents; it does not wrap.
+Attention navigation moves among the sessions of the same list that match the
+**Needs attention** filter, wraps around and opens a collapsed project. Tab
+cycling skips hidden tabs. From Terminal, Ctrl+` returns to Activity with the
+cursor in the message field.
+
+**Send queued messages now** runs the agent's own send-now action for the queue
+shown in Activity, exactly like its **Send now** button; it never sends the text
+being typed. **Send and push now** sends the typed message and, once the agent
+shows it in its queue, sends that queue now. With an empty message field it is
+the same as Send queued messages now. If the message does not appear in the
+queue within 20 seconds, for example because the agent took it directly or a
+dialog such as the cold cache warning is still open, or the session's run or
+conversation changes, the push is dropped with a notice; the message is never
+resent. Selecting another session drops the push at once, and a new push
+replaces one that is still waiting. A message with attachments but no text is
+sent without a push, because the queue cannot be matched without text. Without
+a selection, Ctrl+X starts this sequence; with a selection it still cuts. As in
+every Qt key sequence, a key other than Ctrl+S after Ctrl+X cancels the
+sequence and is not typed.
+
+**Terminal keeps the agent's keys.** While Terminal has focus on Linux and
+Windows, a key reaches Zerus only when a command uses it and it is Ctrl or
+Ctrl+Shift with a digit, Tab, PgUp, PgDn, ` or comma, or Ctrl+Shift+Enter.
+Ctrl+letters (Ctrl+C, Ctrl+R, the agent's own Ctrl+X Ctrl+S), Alt chords,
+Escape, Enter and function keys go to the agent. On macOS every Command chord
+except ⌘C and ⌘V reaches Zerus, and of the Control chords only ⌃Tab, ⌃⇧Tab, ⌃`
+and ⌃⇧`.
+
+**Text fields keep their editing keys.** In the message field and search, a
+command's key wins over the field except for copy, cut, paste, undo, redo,
+select all, word and line movement and deletion (Ctrl, Command or Alt with
+arrows, Home, End, Backspace or Delete), and keys without Ctrl, Command or Alt.
+Function keys are not editing keys: F1, F2, F5 and F6 reach Zerus without a
+modifier. So Alt+↑/↓ switches sessions even while typing, and on Linux Ctrl+K
+opens Go to instead of deleting to the end of the line. A focused drop-down
+list keeps Alt+↑/↓ and F4 to open it, and the Projects dialog's list keeps
+Alt+↑/↓ to reorder projects.
+
+**Go to** (Ctrl+K) searches sessions (not archived), projects, accounts,
+machines, sections and commands by name; start the query with `>` to list only
+sections and commands. With an empty query, sessions opened recently come
+first, then the others in the order of the session list. Enter opens the
+result; Escape or the Go to chord again closes the popup. A session opens
+under the current filter when it is visible there; otherwise the filter
+changes to All sessions. A project selects its first session, or opens
+Projects with that project selected when it has none.
+
+**Settings → Keyboard** changes any command's chords (up to two per command,
+each a key or a two-key sequence), marks the chords that also work in
+Terminal, and resets one command or all of them. Keys used for typing,
+navigation, text editing, context menus and Terminal copy/paste cannot be
+assigned. A chord already used by another command can be reassigned after
+confirmation. Changes apply at once and are stored on this device.
+**Keyboard shortcuts** (F1) lists the current chords and these fixed keys:
+Enter and Shift+Enter in the message field, Escape, Tab and Shift+Tab, Tab to take
+a suggestion, list navigation keys, Menu and Shift+F10, Ctrl/Command-click,
+Space and Escape during voice capture, Ctrl+Shift+C/V (⌘C/⌘V on macOS) and
+Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the Projects dialog's list.
 
 <a id="activity"></a>
 
@@ -606,7 +708,16 @@ Claude shows it. Stopped before its first reply, Claude rewinds the turn and
 puts the prompt back into its own input instead; HGS then moves exactly that
 text from Terminal to the message field (Ctrl+Y in Terminal brings it back) and
 leaves any other input untouched. Supported DeepSeek hosts use native cancel.
-Native queue behavior still applies: Codex Escape may start a queued follow-up.
+Native queue behavior still applies. When Codex lists pending steers ("press esc
+to interrupt and send immediately"), Escape submits them at once and any queued
+follow-ups after that turn. Ordinary Codex follow-ups queued alone are not sent:
+Codex interrupts the turn and returns them to its input in Terminal as one
+unsent draft. Activity can send again once that input is empty, so submit, edit
+or clear the draft in Terminal first. HGS notes the follow-ups the Codex panel
+lists when Stop sends Escape; while Codex reports that turn interrupted and its
+input holds exactly them, Activity says the queued follow-ups are back in Codex's
+input. An edited draft, any other draft and follow-ups Stop did not see listed
+keep the general notice to return Terminal to an empty prompt.
 Uncertain interruption is not repeated. Stop notices name the original session
 and computer even if you navigate away. If the turn has already ended or is
 waiting for input, no interruption is sent and no action is needed; Zerus refreshes
@@ -629,15 +740,30 @@ path (`C:\work\a.cpp:12`, `C:/work/a.cpp` or `file:///C:/work/a.cpp`); a share
 (`\\server\share\…`) never opens. The file dialog shows and copies a path on this
 Windows computer with backslashes (`C:\work\a.cpp`); remote machines keep their
 `/` separators. Local references can open the file or its parent folder; remote
-references identify the host and offer **Download…** and
-**Download and open…**, with a local Save dialog, plus an SSH terminal. Downloads
-use that machine's configured SSH profile and SFTP, stream directly to disk and
-replace the chosen destination only after a successful transfer. Errors remain
+references identify the host and offer **Download…**, **Download and open** and
+an SSH terminal. **Download…** asks where to save. **Download and open** saves
+automatically in the local Downloads folder under `Zerus Files`, then opens that
+copy. Each request downloads a fresh copy; existing names are preserved with
+numbered suffixes such as `report (1).pdf`, including simultaneous downloads.
+Downloads use that machine's configured SSH profile and SFTP, stream directly to
+disk and publish the destination only after a successful transfer. Errors remain
 in the dialog; a saved copy can be opened with **Open local copy**. Offline or
 unresolved relative references explain why downloading is unavailable. The
 download continues if its dialog is closed, with a completion or error notice;
 an explicitly requested open still happens after successful saving. The
 120-second transfer deadline leaves an existing destination unchanged on failure.
+
+**Settings → Files** controls the local downloaded-copy cache. **Never clear** is
+the default. An optional size limit removes the oldest completed copies created
+by **Download and open**, without touching manual downloads, unrelated files or
+copies whose contents were edited. An internal index tracks ownership; files
+that have been moved or whose contents changed are no longer cleanup candidates.
+Transfers in progress and newly completed copies are protected for one minute so the default
+application can consume them. Usage may briefly exceed the limit, including a
+single oversized file; periodic cleanup runs while Zerus is open and on its next
+start. Enabling or reducing a limit requires confirmation. Cleanup and inventory
+run outside the UI thread.
+
 `hgs @host download --path REMOTE_PATH --output LOCAL_FILE` provides the same
 transfer from the CLI, including empty files and paths starting with `~/`.
 Display alone downloads or launches
@@ -747,6 +873,22 @@ the decision. Without a matching permission request, or when the full command
 is clipped, the card offers **Open Terminal**. With a complete matching request,
 Activity can submit the native **Yes** or **No** choice. Claude's unattended
 denial countdown stays visible without replacing the request as it ticks.
+Desktop keeps the card's scroll, chosen option and review delay through these
+countdown updates. A changed command, warning or set of choices requires a new
+review.
+
+Bash approvals from Claude's subagents and workflows use the same Activity
+choices when one recorded child permission request matches the complete visible
+command. The answer is bound to that child request as well as the parent run and
+conversation; a repeated command is a new request. Identical pending requests
+from multiple children, missing hook evidence and clipped commands remain
+read-only. Other child tool approvals still require Terminal. A child's answer
+never interrupts the parent or clears a sibling's request; completion follows
+that child's own native events. Parent progress alone does not settle child
+permissions. Pending evidence is bounded without evicting an ambiguous request;
+if its limit is exceeded, approvals remain in Terminal until the next native
+session starts. Read-only native choices are visibly disabled, with **Open
+Terminal** as their action.
 
 Claude Code can also ask its own questions without an agent tool call, such as
 whether to switch models after a safeguard stop. Activity shows the question and
@@ -794,10 +936,22 @@ For Codex hooks, **Review hooks** opens the native browser in Terminal;
 Review input with an uncertain result is never retried automatically.
 Codex's **Update available** picker shows both versions and the exact update
 command. **Update now** switches to Terminal while Codex runs that command; Codex
-then exits and the session needs an explicit resume. **Skip** and **Skip until
-next version** continue startup, and Codex records the dismissal itself. Only
-reviewed npm, Bun, Vite+, pnpm, Homebrew and standalone Unix commands are
-recognized; other or clipped commands stay in Terminal.
+then exits and the session needs an explicit resume. Codex leaves the picker and
+input mode at once and prints `Updating Codex via` with the command before running
+it. That announcement for the exact command, or Codex exiting, confirms the choice
+within 15 seconds, however long the installer takes. Zerus does not wait for the
+installer: the `hgs answer` receipt's `codex_update` is `installing` while Codex
+runs it, or `exited`. Without either confirmation, delivery stays uncertain and
+Enter is never sent again. **Skip** and **Skip until next version** continue
+startup, and Codex records the dismissal itself. Only reviewed npm, Bun, Vite+,
+pnpm, Homebrew and standalone Unix commands are recognized; other or clipped
+commands stay in Terminal.
+
+After **Update now**, the desktop shows a notice for that state: Codex is still
+installing its update, or it has exited and the session needs a resume. An
+older host's receipt has no `codex_update`; the desktop then only switches to
+Terminal.
+
 After a resume, Codex asks **Resume paused goal?** when the conversation's goal
 is paused, stalled or limited by usage. Activity shows the goal from Codex's goal
 database once the centered dialog over the transcript shows the same goal and
@@ -854,11 +1008,19 @@ warns that the next message re-reads the full history and uses more tokens: the
 selector states this before **Apply**, and Zerus then accepts only that built-in
 notice. A confirmation requested by a `PreModelSwitch` hook is declined and
 reported, as is a picker without the session-only choice; use Terminal for those.
+With Claude Code 2.1.296 or later, its `PostModelSwitch` hook names the exact model
+of every switch at once: `/model` in Terminal, a change from Zerus, an automatic
+switch or a resume. The selector shows that model until the transcript records a
+later turn or `/model` receipt; the switch itself adds no Activity entry.
 A stopped Claude session resumes with a choice made in Zerus through `--model` and
 `--effort`; otherwise it starts with the account's settings.
 
-Busy-session choices remain **Pending** until the agent is ready, including after
-navigation away. A message sent before application uses the current model.
+Busy-session choices, and choices made while the terminal shows a chooser, remain
+**Pending** until the agent is ready, including after navigation away. If a
+chooser appears while the desktop applies a choice, the choice stays **Pending**
+and the desktop tries once each time the session becomes ready again. A failed
+or refused application, a new run and a new conversation end these attempts. A
+message sent before application uses the current model.
 **Save for resume** stores a stopped session's choice without starting it. A stale
 queued setting cannot replace a newer choice from another device.
 If a message or another client already consumed or replaced it, Zerus refreshes
@@ -866,6 +1028,24 @@ the current settings without retrying the stale request or showing a failure.
 `hgs [@host] settings SESSION --json` exposes the same scoped operation.
 
 Native clear/compact operations are capability-gated and require exact identity.
+When they are unavailable, `hgs inspect` reports why in `clear_context_reason` and
+`compact_context_reason`, empty while the action is available. A busy session names
+what keeps it from Ready: the main agent's turn and tools, and each working subagent
+with its current tool, up to three, then a count. The actions follow the status the
+session list shows, so Kimi profile groups still working after the main turn ended
+keep them unavailable and are named by profile, such as `2 “code” subagents`.
+Applying settings and forking a running session wait for the same Ready, and a
+profile hook entry that Kimi's native subagent catalog has replaced holds back
+none of them. A chooser recognized only on the terminal, such as Kimi's context
+choice after an idle period, keeps clearing, compaction, forks and effort changes
+unavailable until it is answered; `fork_reason` and `effort_change_reason` give the
+same reason as `clear_context_reason`. A model settings change made meanwhile is
+saved as **Pending** (`settings_apply_when` is `ready`), and no key reaches the
+chooser.
+The desktop shows the reason as the tooltip of the disabled **Clear context**,
+**Clear session** and **Compact and continue** actions, and as a line in the
+cold-cache confirmation.
+Hosts from before these fields leave the actions disabled without a reason.
 **Clear session** requires confirmation naming the session and host, preserves
 unsent drafts and rechecks identity. While Claude shows an approval, question or
 another chooser, **Clear session** asks for a separate **Dismiss and clear**
@@ -940,7 +1120,11 @@ not proof that the agent's task or process has ended.
 Claude child tracking reconciles hooks with exact native history, including
 workflow children. A final assistant `end_turn`, a successful `toolEndsTurn`
 result bound to its exact owned tool call, or a final **Request interrupted by
-user** row can settle a turn even when `SubagentStop` is missing. Matching
+user** row can settle a turn even when `SubagentStop` is missing. Its **for tool
+use** variant settles only when it follows the owned error results of the
+stopped calls; an unbound marker changes nothing. A tool-use interruption that an
+earlier hgs version recorded as new child work settles from the same native row
+unless a newer hook arrived. Matching
 workflow `started`/`result` attempts independently confirm the same reply.
 Later native child activity can recover a missing start; newer hooks take
 precedence. Silence and a completed parent never prove child completion.
@@ -961,9 +1145,12 @@ entry becomes unknown rather than a fabricated completed result.
 DeepSeek uses each child's exact native API entry within one host generation.
 A child never inherits its parent's running status. Missing, contradictory or
 cross-generation observations remain unknown; desktop and Android counters
-retain the `+` uncertainty marker. The current OpenCode adapter does not expose
-child sessions. Inspection reports native tracking evidence without changing
-reply/read identities or restarting agents.
+retain the `+` uncertainty marker. OpenCode lists the native sessions whose
+recorded parent is the exact conversation and reads each child's own newest
+message: a recorded turn end is finished, anything else stays unknown, because
+another OpenCode process runs those children
+([OpenCode children](opencode.md#child-sessions)). Inspection reports native
+tracking evidence without changing reply/read identities or restarting agents.
 
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
@@ -1046,7 +1233,9 @@ project placement. A session that ends before it appears and leaves no record,
 such as an agent that cannot start after the launch reported it started, also
 removes the placeholder: a notice shows its exit code and last lines, as its
 computer reports them in `ended_launches` ([JSON and external
-clients](#json-and-external-clients)); a hidden launch status ends silently.
+clients](#json-and-external-clients)), and stays when the launch command
+reports afterwards; a hidden launch status ends silently but still shows a
+later launch error.
 Existing names and unrelated sessions are never repurposed.
 **Open terminal window** is off by default and remembered separately from the tray
 open mode; DeepSeek uses its embedded native interface.
@@ -1238,15 +1427,18 @@ background. Coverage reports checked/known worktrees and incomplete catalogs.
 After the first bounded repository review, unchecked known rows are checked
 individually, including rows beyond the native 64-row review limit. Catalogs
 remain bounded at 512 entries; this is not a scan of every folder on a computer.
-Offline snapshots remain readable but cannot be selected for removal.
+Offline snapshots remain readable and selectable for review; removal stays
+unavailable until the owning computer supplies a fresh check.
 Browsing data is retained for one hour, across closing and reopening the manager.
 The coverage line shows when catalogs were updated; **Refresh** rereads them and
 clears the selected cleanup candidates. The open manager refreshes hourly, and
 worktree creation/removal invalidates the affected computer/repository cache.
-External Git changes can be picked up with **Refresh**. Cleanup selections still
-require checks less than five minutes old: refresh before selecting expired
-candidates. Removal always repeats native safety checks; a cached browsing verdict
-never authorizes deletion. Changed fingerprints invalidate previous selections.
+External Git changes can be picked up with **Refresh**. **Select candidates** uses
+checks less than five minutes old. Selecting rows is independent of deletion
+eligibility: Ctrl/Cmd-click, Shift-click and checkboxes select multiple folders in
+any group. **Review cleanup** always checks the selected targets afresh; native
+removal repeats those checks under the repository and session locks. A cached
+browsing verdict never authorizes deletion.
 
 Selecting a folder loads its files and commits after a short navigation debounce.
 The inspector distinguishes loading, an empty list and a failed read with retry.
@@ -1272,10 +1464,12 @@ have session icons and retain their exact conversation targets.
 **Select candidates** selects only currently visible, verified cleanup candidates.
 Folders with local files outside Git require individual selection, even when
 Git reports them clean and merged. **Review cleanup** shows the exact selected
-folders across repositories and computers, estimated space and branch handling.
+folders across repositories and computers, branch handling and why any folder
+must stay. Folders outside the candidates group can be selected and removed too.
 Local data needs a separate explicit checkbox; deletion checks its reviewed
 metadata fingerprint again. A missing folder only loses its Git registration.
-Each result remains visible, and failures or uncertain replies are not replayed. **Stop after this folder**
+After complete success the dialog closes and the overview shows the result.
+Partial results and errors remain open; uncertain replies are not replayed. **Stop after this folder**
 lets the current operation finish and leaves the remaining folders untouched.
 
 Integration evidence distinguishes ancestor commits, identical file trees and
@@ -1283,7 +1477,7 @@ cherry-pick-equivalent patches. Equivalent content is useful when reviewing
 squash/cherry-pick workflows, but only Git ancestry permits optional branch
 removal. Original branches otherwise remain available.
 
-Removal is always explicit and is reviewed on the computer that owns the
+Manual removal is explicit and is reviewed on the computer that owns the
 checkout. **Clean up…** in Projects or the session inspector lists the linked
 worktrees of the repository as **Ready** (preselected), **Review** (removable but
 with notes such as local ignored files, unmerged commits, archived sessions or activity in the last
@@ -1293,27 +1487,50 @@ review runs at most every five minutes while the panel is visible and never
 removes anything. A worktree row's menu offers **Remove worktree…** or
 **Forget missing worktree…** for that checkout alone.
 
-A worktree is blocked when it is the main checkout or bare, is locked, has
-uncommitted or untracked files, contains another worktree, has initialized
+A worktree is protected when it is the main checkout or bare, is locked,
+contains another worktree or Git repository, has initialized
 submodules, has a detached commit that no branch, tag or remote branch contains,
 or is used by a process of this user or by a running, paused or saved Zerus
 session (archive the sessions first). Git's own removal would silently delete a
-nested worktree inside an ignored folder; Zerus refuses it.
+nested worktree inside an ignored folder; Zerus refuses it. An incomplete local
+file inventory, unreadable session bindings or special files also block removal.
+Uncommitted and untracked files require a separate **Permanently discard**
+confirmation in the manager. That consent is bound to the exact file contents
+and staged Git blobs (bounded to 64 MiB and two seconds), and does not override
+any other protection. A changed or incomplete proof requires a new review.
 
 Confirmation lists the folders, the ignored data deleted with them (such as build
 output) and any branches that will be deleted. Each removal then repeats the
 review under the repository lock used by creation, compares the reviewed
-fingerprint and runs `git worktree remove` without force, one worktree at a time.
+fingerprint and runs `git worktree remove`, one worktree at a time. It uses
+`--force` only for that explicit content-bound discard, never automatically.
 **Also delete merged branches** (off by default, remembered locally) uses
 `git branch -d` only for branches merged into the main checkout's branch or
 `origin/HEAD`; other branches are kept. A failure is reported for that worktree
 and never retried automatically.
 
-When **Move to archive** succeeds for the last session in a linked worktree, the
-status bar briefly offers **Clean up worktree…**, which opens the same review for
-that worktree. The CLI is `hgs [@host] worktrees review --path PATH
+After **Terminate**, explicit **Move to archive**, or a confirmed clean native
+exit, the owning CLI automatically removes only verified Zerus-created
+checkouts that are clean, have no local ignored data, have no remaining session
+or process, and are proven integrated by ancestry, identical tree or equivalent
+patches. It never fetches or deletes the branch. Ownership requires both a
+private creation receipt and the matching nonce in Git's per-worktree metadata;
+older or externally created worktrees remain manual. Folder/branch naming is
+not ownership evidence. Automatic cleanup has bounded checks and never changes
+a successful archive into a failed termination. A lost removal acknowledgement
+is reported as unconfirmed, with no automatic replay.
+
+The desktop reports successful automatic cleanup, or keeps **Review remaining
+worktree…** with the reason for keeping it after Terminate/Archive. This action
+does not expire after a minute. Archives keep the exact branch/head needed to
+recreate an automatically removed checkout on explicit **Restore**; a changed
+branch or occupied destination is refused. Browsing and dry runs never recreate
+a folder. Plain Pause never cleans up.
+
+The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE
---common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch]
+--common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH]
+[--discard-fingerprint HASH] [--delete-branch]
 --json`. Explicit inspection is `hgs [@host] worktrees inspect --path WORKTREE
 --common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.
@@ -1460,9 +1677,10 @@ Choose **OpenCode** in New session to use its separate native API adapter.
 Select its native account and an offered `provider/model`, or retain the native
 model default. The initial adapter supports text/voice conversations, native
 questions and permissions, status/history, Stop, model selection, pause/resume,
-rename and forgetting a saved binding. Terminal, attachments, children,
-archive/fork and context reset/compaction remain unavailable with explicit
-capabilities. See [OpenCode setup and reviewed version](opencode.md).
+rename and forgetting a saved binding. Child sessions are read-only. Terminal,
+attachments, child messages, archive/fork and context reset/compaction remain
+unavailable with explicit capabilities. See
+[OpenCode setup and reviewed version](opencode.md).
 
 <a id="deepseek"></a>
 
@@ -1594,7 +1812,14 @@ executor lock. CLI operations are `hgs [@host] recovery get|set|sync|action`, wi
 JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.
 On Linux, client policy refreshes start the configured user service without
 restarting an active executor. A detached worker remains the fallback when no
-installed service or usable user manager is available.
+installed service or usable user manager is available; refreshes start none
+while a worker runs. The service's own worker (the job's process as launchd
+reports it, or the unit's main process as systemd reports it, not another
+process in the unit's control group; only when systemd cannot answer does the
+control group decide) never exits because another worker holds
+the executor lock, which would make the service manager start it again every 10
+seconds: it waits for the lock, and a detached worker hands over to it between
+rounds.
 
 Open Zerus clients synchronize policy versions over HGS/SSH every 15 seconds;
 offline machines catch up later and executors keep their saved local policy.
@@ -1691,6 +1916,21 @@ hgs: the tmux server died; terminal restored, sessions on this box are gone
 A client failure while tmux remains alive does not trigger terminal reset sequences
 that could corrupt the normal screen. Saved conversation bindings can still be
 restored after server loss, but tmux is not a reboot-persistence mechanism.
+
+On Linux, tmux built with systemd support puts each pane in a `tmux-spawn-*.scope`
+that is `PartOf=` the unit holding the tmux server, so stopping that unit ends every
+pane, whatever its `KillMode=`. When `hgs` runs in a user service manager unit (the
+desktop GUI, the mobile connector, the recovery and swarm workers, a desktop
+terminal) and no server answers on the selected socket, it runs the `new-session`
+that starts the server through `systemd-run --user --scope`, in a transient
+`hgs-tmux-<uuid>.scope` that holds only tmux and is collected when the server
+exits. Stopping or restarting the unit that launched the first session then leaves
+the agents running; stopping that scope itself ends the server and its agents. A
+running server is never moved, restarted or replaced: one started earlier, by an
+older `hgs` or by a plain `tmux` command, stays in its unit until it exits.
+Outside a user unit (an SSH login, macOS), without a reachable user manager or
+`systemd-run`, or when systemd cannot create the scope, `hgs` starts tmux as
+before.
 
 The optional `tmux.conf` binds Ctrl-V to `hgs paste` for the remote image clipboard
 bridge. At attach, `HGS_CLIENT` records the viewing host; an SSH hop forwards it
@@ -1865,7 +2105,9 @@ service's GUI and opens the workspace there. It starts its own GUI only when
 the service stops or does not answer in time. A GUI that a launch started while
 the service was stopped keeps the socket, and a later service start then exits
 without a GUI of its own.
-The desktop version appears in the rail and Settings. **Settings → About** also
+The desktop version in the rail opens **About**; its tooltip shows the complete
+installed version, including the Dev build number or local source identity.
+**Settings → About** also
 shows the configured `hgs` CLI version, read when About opens; an unavailable or
 unrecognized response remains explicit instead of using a compiled-in value.
 Closing a workspace never owns agent process lifetime. Local machine settings,

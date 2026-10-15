@@ -54,7 +54,8 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
 }
 
 /// An exclusive lock on an auxiliary file, or None when another process still
-/// holds it at `deadline`. Never use it for the default state lock.
+/// holds it at `deadline`. Use writer_until for the default state lock so that
+/// its recovery protocol runs as well.
 pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Option<Guard>> {
     private_dir(path.parent().ok_or("invalid lock path")?)?;
     let file = lock_file(path)?;
@@ -66,6 +67,16 @@ pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Op
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
     }
+}
+
+/// The normal writer-lock recovery, with a bounded admission wait for optional
+/// lifecycle cleanup. Never turn a busy writer into an unbounded archive exit.
+pub(super) fn writer_until(deadline: std::time::Instant) -> Result<Option<Guard>> {
+    private_dir(&root())?;
+    let Some(guard) = lock_until(&root().join(".lock"), deadline)? else { return Ok(None); };
+    rename::recover_locked()?;
+    rename::sync_legacy_locked()?;
+    Ok(Some(guard))
 }
 
 /// An owner-only lock file, never written. Windows locks a byte range only

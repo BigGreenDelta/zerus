@@ -1,5 +1,7 @@
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "WorktreeBatchCleanupDialog.h"
+#include "DownloadCache.h"
 #include "SessionFileDrop.h"
 #include "SessionCardDelegate.h"
 #include "SessionPanelDock.h"
@@ -31,6 +33,7 @@
 #include "QuestionCard.h"
 #include "RecoveryWidgets.h"
 #include "SettingsPage.h"
+#include "Shortcuts.h"
 #include "ContentScale.h"
 #include "ActivityWidth.h"
 #include "UpdateController.h"
@@ -295,7 +298,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         button->setIconSize(QSize(20, 20)); button->setFixedSize(34, 32); return button;
     };
     m_brand = new SwarmButton; m_brand->setObjectName("brandMark");
-    m_brand->setFixedSize(42,44); m_brand->setCheckable(true); m_brand->setToolTip(tr("Home — Zerus %1").arg(version)); m_brand->setAccessibleName(tr("Home dashboard"));
+    m_brand->setFixedSize(42,44); m_brand->setCheckable(true); m_brand->setProperty("caption", tr("Home — Zerus %1").arg(version)); m_brand->setAccessibleName(tr("Home dashboard"));
     connect(m_brand,&QPushButton::clicked,this,[this] { m_pages->setCurrentIndex(3); m_brand->setChecked(true); emit refreshRequested(); });
     side->addWidget(m_brand); side->addSpacing(8);
     auto *create = iconButton("add", tr("New session"), "newSession");
@@ -318,14 +321,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_machinesNav, &QPushButton::clicked, this, [this]() {
         m_pages->setCurrentIndex(2); m_machinesNav->setChecked(true); m_sessionsNav->setChecked(false); m_projectsNav->setChecked(false);
     });
-    auto *refresh = new QPushButton(this); refresh->hide();
-    connect(refresh, &QPushButton::clicked, this, [this]() { emit refreshRequested(); inspect(); m_machinesPage->reload(); });
     side->addStretch();
     auto *windowPin = m_windowPin = iconButton("unpinned", tr("Keep Zerus above other windows"), "windowPin"); windowPin->setCheckable(true);
     windowPin->setFixedSize(42, 44); windowPin->setIconSize(QSize(24,24)); side->addWidget(windowPin);
     auto *settingsButton = m_settingsNav = iconButton("settings", tr("Settings"), "workspaceSettings"); settingsButton->setCheckable(true); settingsButton->setFixedSize(42, 44); settingsButton->setIconSize(QSize(24,24)); side->addWidget(settingsButton);
     connect(settingsButton, &QPushButton::clicked, this, &SessionsWindow::showWorkspaceSettings);
-    auto *versionLabel = label(version, "appVersion"); versionLabel->setAlignment(Qt::AlignCenter); side->addWidget(versionLabel);
+    auto *versionButton = new QPushButton(UpdateController::buildInfo()["versionName"].toString().section('-', 0, 0));
+    versionButton->setObjectName("appVersion"); versionButton->setFixedSize(42, 24);
+    versionButton->setCursor(Qt::PointingHandCursor); versionButton->setAutoDefault(false);
+    versionButton->setAccessibleName(tr("About Zerus"));
+    versionButton->setToolTip(tr("Zerus %1\nOpen About").arg(UpdateController::installedVersion()));
+    versionButton->setAccessibleDescription(versionButton->toolTip()); side->addWidget(versionButton);
+    connect(versionButton, &QPushButton::clicked, this, [this] { showWorkspaceSettings(); m_settingsPage->openAbout(); });
     // The stylesheet paints each rail button's full rect. macOS layout margins
     // (4 px above, 8 px below a push button) would let neighbours overlap.
     for (int i = 0; i < side->count(); ++i)
@@ -418,6 +425,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             if (found == m_entries.cend() || (!run.isEmpty() && found->session.runId != run)) {
                 showNotice(tr("This session changed. Search again to see its current history."), true); return;
             }
+            pushSelectionChanged(key);
             // The search list owns selection while it is shown, including archive
             // hits. Keep the regular list's selection in sync for normal navigation.
             m_selectedKey.clear();
@@ -601,6 +609,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             {"conversation_id",message.value("conversation_id")},{"submitted_at",message.value("created_at")},{"attachments",QJsonArray{message.value("audio")}}});
         if(key==m_selectedKey){reconcileMessages();renderDetails();m_activityView->jumpToLatest();inspect();}
     });
+    connect(&m_client, &HgsClient::downloadCacheWarning, this, [this](const QString &error) { showNotice(error, true); });
     auto openFileReference = [this](const QString &href) {
         const auto *entry = selected(); if (!entry) return;
         const auto target = SessionFileReference::parse(href); if (!target.valid()) return;
@@ -630,7 +639,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         auto *hint = new QLabel(local ? (path.isEmpty() ? tr("The session folder is unknown. Copy the path to locate this file.")
             : tr("Open with your default application, or copy the path."))
-            : tr("Download a copy from %1 to this computer, then open it with your default application.").arg(machine));
+            : tr("Download… lets you choose where to save. Download and open saves a copy in Downloads/Zerus Files and opens it with your default application."));
         hint->setObjectName("sessionFileHint");
         hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
         hint->setTextFormat(Qt::PlainText); hint->setWordWrap(true); layout->addWidget(hint);
@@ -656,7 +665,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             progress->setAccessibleName(tr("Downloading file from %1").arg(machine));
             progress->setRange(0, 0); progress->setTextVisible(false); progress->hide(); layout->insertWidget(layout->count() - 1, progress);
             auto *download = buttons->addButton(tr("Download…"), QDialogButtonBox::ActionRole); download->setObjectName("downloadSessionFile");
-            auto *open = buttons->addButton(tr("Download and open…"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
+            auto *open = buttons->addButton(tr("Download and open"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
+            open->setToolTip(tr("Save automatically to %1 and open the local copy.").arg(QDir::toNativeSeparators(DownloadCache::directory())));
             auto *savedOpen = buttons->addButton(tr("Open local copy"), QDialogButtonBox::ActionRole); savedOpen->setObjectName("openDownloadedSessionFile"); savedOpen->hide();
             const QString remotePath = path.isEmpty() && target.path.startsWith("~/") ? target.path : path;
             const bool downloadable = online && !remotePath.isEmpty();
@@ -665,15 +675,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             else if (remotePath.isEmpty()) hint->setText(tr("The session folder is unknown. Copy the path or use the SSH terminal to locate the file."));
             auto startDownload = [&, download, open, savedOpen, progress, remotePath](bool opening) {
                 if (pending) return;
-                const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-                QFileDialog save(&dialog, tr("Save local copy"), QDir(downloads.isEmpty() ? QDir::homePath() : downloads).filePath(QFileInfo(remotePath).fileName()));
-                save.setObjectName("sessionFileSaveDialog"); save.setAcceptMode(QFileDialog::AcceptSave); save.setFileMode(QFileDialog::AnyFile);
-                if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
-                const auto destination = save.selectedFiles().first();
+                QString destination = DownloadCache::directory();
+                if (!opening) {
+                    const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+                    QFileDialog save(&dialog, tr("Save local copy"), QDir(downloads.isEmpty() ? QDir::homePath() : downloads).filePath(QFileInfo(remotePath).fileName()));
+                    save.setObjectName("sessionFileSaveDialog"); save.setAcceptMode(QFileDialog::AcceptSave); save.setFileMode(QFileDialog::AnyFile);
+                    if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
+                    destination = save.selectedFiles().first();
+                }
                 download->setEnabled(false); open->setEnabled(false); savedOpen->hide();
                 progress->show(); hint->setText(tr("Downloading from %1 to %2…\nThe download continues if you close this dialog.").arg(machine, destination));
                 openAfterDownload = opening;
-                pending = m_client.downloadFile(host, remotePath, destination);
+                pending = opening ? m_client.downloadFileToCache(host, remotePath) : m_client.downloadFile(host, remotePath, destination);
                 auto *completion = new QObject(this);
                 const QPointer<QDialog> shownDialog(&dialog);
                 const auto request = pending;
@@ -958,15 +971,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::nativeSessionLaunched, this, [this](const QString &id, bool ok, const QString &error) {
         // A listing can report the launch ended before its command returns; its
         // notice stays and nothing waits to open a session that never appears.
-        const bool ended = m_endedLaunches.remove(id);
         if (ok) {
-            if (!ended) { m_nativeLaunchToOpen=id; showNotice(tr("Session started. Loading activity…")); }
+            if (!takeEndedLaunch(id)) { m_nativeLaunchToOpen=id; showNotice(tr("Session started. Loading activity…")); }
         } else {
             newSessionLaunchFailed(id, error);
         }
         emit refreshRequested();
     });
-    connect(&m_client, &HgsClient::questionAnswered, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &receipt) {
+    connect(&m_client, &HgsClient::questionAnswered, this, [this](quint64 request, const QString &, const QString &name, const QJsonObject &receipt) {
         const auto pending = m_pendingAnswers.value(request);
         // Hook review and Codex's native installer continue in Terminal.
         const bool openTerminal = !pending.key.isEmpty() && pending.key == m_selectedKey
@@ -974,8 +986,22 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             && pending.questionHash == receipt.value("question_hash").toString()
             && m_details.value("run_id") == receipt.value("run_id")
             && receipt.value("open_terminal").toBool();
+        // After Update now, the receipt says whether Codex still runs its
+        // installer or has exited; older hosts omit it.
+        QString updateNotice;
+        if (!pending.key.isEmpty() && pending.questionId.startsWith("codex-update:")
+            && pending.questionHash == receipt.value("question_hash").toString()) {
+            const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == pending.key; });
+            const QString target = entry == m_entries.cend() ? name : tr("%1 (%2)").arg(entry->session.name, entry->machine);
+            const QString phase = receipt.value("codex_update").toString();
+            if (phase == "installing")
+                updateNotice = tr("Codex in %1 is installing its update in Terminal. Resume the session after Codex exits.").arg(target);
+            else if (phase == "exited")
+                updateNotice = tr("Codex in %1 exited after its update. Check the result in Terminal, then resume the session.").arg(target);
+        }
         finishQuestion(request, true);
         if (openTerminal) { m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession(); }
+        if (!updateNotice.isEmpty()) showNotice(updateNotice);
     });
     connect(&m_client, &HgsClient::questionAnswerFailed, this, [this](quint64 request, const QString &, const QString &, const QString &error, bool uncertain) {
         finishQuestion(request, false, error, uncertain);
@@ -1014,6 +1040,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(m_question, &QuestionCard::draftRestored, this, [this] { renderDetails(); });
     connect(m_composer, &MessageComposer::sendRequested, this, [this](const QString &key,const QString &text,const QList<MessageAttachment> &files){sendMessage(key,text,files);});
+    // Send and push now: only this field's messages enter the session's native queue.
+    m_composer->setPushEnabled(true);
+    connect(m_composer, &MessageComposer::pushRequested, this, &SessionsWindow::armPush);
+    connect(m_composer, &MessageComposer::sendNowRequested, this, [this] { sendQueuedNow(); });
     // An unsent draft becomes the row's status (see SessionDelegate::statusOf).
     const auto draftChanged = [this](const QString &key) {
         for (int row = 0; row < m_sessions->count(); ++row) {
@@ -1042,10 +1072,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::settingsFinished, this, [this](quint64 request, bool ok, const QJsonObject &receipt, const QString &error) {
         if (request != m_settingsRequest) return;
         m_settingsRequest = 0;
+        // Dispatch schedules an automatic apply when the session left Ready
+        // after the idle listing, as for a chooser that appeared meanwhile. It
+        // stays queued for one more attempt after the next Ready transition;
+        // a failure, a refusal and an applied change end automatic attempts.
+        const bool scheduledAgain = ok && receipt.value("status") == "scheduled" && m_settingsAutomatic;
+        if (scheduledAgain) m_scheduledSettings[m_settingsKey] = {m_settingsIdentity};
+        else m_scheduledSettings.remove(m_settingsKey);
         if (ok && receipt.value("status") == "scheduled" && !m_settingsAutomatic) {
             m_queuedSettings[m_settingsKey] = {m_settingsHost, m_settingsName, m_settingsRun, m_settingsConversation,
                 receipt.value("model").toString(), receipt.value("effort").toString(), receipt.value("pending_settings_id").toString(receipt.value("request_id").toString())};
-        } else m_queuedSettings.remove(m_settingsKey);
+        } else if (!scheduledAgain) m_queuedSettings.remove(m_settingsKey);
+        m_settingsIdentity.clear();
         if (m_selectedKey == m_settingsKey && m_details.value("run_id").toString() == m_settingsRun
             && m_details.value("conversation_id").toString() == m_settingsConversation && ok) {
             const bool scheduled = receipt.value("status") == "scheduled";
@@ -1339,10 +1377,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     statusLayout->addWidget(m_usageStrip,0,Qt::AlignRight);
     workspace->addWidget(statusBar); root->addLayout(workspace, 1);
 
-    auto *searchShortcut = new QShortcut(QKeySequence::Find, this);
-    connect(searchShortcut, &QShortcut::activated, this, [this] { showSessionList(); m_search->setFocus(); m_search->selectAll(); });
-    auto *refreshShortcut = new QShortcut(QKeySequence::Refresh, this); connect(refreshShortcut, &QShortcut::activated, refresh, &QPushButton::click);
-    auto *refreshR = new QShortcut(QKeySequence("Ctrl+R"), this); connect(refreshR, &QShortcut::activated, refresh, &QPushButton::click);
+    // Search, refresh and the other commands are keyboard actions (setupShortcuts()).
     auto *escape = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     // Escape never closes Zerus. A search being typed is cleared first;
     // otherwise, like Escape in Terminal, it stops the selected session's
@@ -1353,13 +1388,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         else if (m_pages->currentIndex() == 0 && m_composer->requestInterrupt()) return;
         else if (!m_search->text().isEmpty()) m_search->clear();
     });
-    connect(m_activityView, &ActivityView::queueSendNowRequested, this, [this](const QString &id) {
-        const auto *entry = selected(); const auto queue = m_details["input_queue"].toObject();
-        if (!entry || !entry->online || m_queueSendRequest || id.isEmpty() || queue["id"] != id || !queue["can_send_now"].toBool()) return;
-        m_queueSendKey = m_selectedKey;
-        m_queueSendRequest = m_client.requestQueueSendNow(entry->host, entry->session.name, m_details["run_id"].toString(), m_details["conversation_id"].toString(), id);
-        renderDetails();
-    });
+    connect(m_activityView, &ActivityView::queueSendNowRequested, this, [this](const QString &id) { if (!id.isEmpty()) sendQueuedNow(id); });
     connect(&m_client, &HgsClient::queueSendFinished, this, [this](quint64 request, bool ok, const QJsonObject &, const QString &error) {
         if (request != m_queueSendRequest) return;
         const bool current = m_queueSendKey == m_selectedKey; m_queueSendRequest = 0; m_queueSendKey.clear();
@@ -1396,7 +1425,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(&m_client, &HgsClient::writeDone, this, [this](const QString &operation, bool ok, const QString &detail) {
         if (finishSelectionAction(operation, ok, detail)) return;
-        if (m_archivedWorktree.size() == 4 && operation == QStringLiteral("archive %1").arg(m_archivedWorktree[1])) {
+        if (m_archivedWorktree.size() == 4 && (operation == QStringLiteral("archive %1").arg(m_archivedWorktree[1]) || operation == QStringLiteral("terminate %1").arg(m_archivedWorktree[1]))) {
             if (ok) offerWorktreeCleanup(); else m_archivedWorktree.clear();
         }
         if (!ok && (operation == QStringLiteral("resume %1").arg(m_startSend.name) || operation == QStringLiteral("fresh %1").arg(m_startSend.name)))
@@ -1434,6 +1463,20 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         showNotice(ok ? (renamed ? tr("Session renamed. Refreshing…") : tr("Session updated. Refreshing…")) : detail, !ok);
         emit refreshRequested(); rebuild(); inspect();
     });
+    connect(&m_client, &HgsClient::worktreeCleanupFinished, this, [this](const QString &host, const QString &operation, const QJsonObject &result) {
+        if (m_archivedWorktree.size() != 4 || m_archivedWorktree[0] != host || (!m_archivedWorktree[2].isEmpty() && m_archivedWorktree[2] != result["path"].toString())
+            || (!m_archivedWorktree[3].isEmpty() && m_archivedWorktree[3] != result["common_dir"].toString())
+            || (operation != "archive " + m_archivedWorktree[1] && operation != "terminate " + m_archivedWorktree[1])) return;
+        m_archivedWorktree[2] = result["path"].toString(); m_archivedWorktree[3] = result["common_dir"].toString();
+        if (result["status"] == "removed") {
+            m_worktreeCleanup->hide(); m_archivedWorktree.clear();
+            showNotice(tr("Worktree removed automatically. The branch and archived conversation are kept.")); updateWorktrees();
+        } else {
+            m_worktreeCleanup->setText(result["status"] == "unconfirmed" ? tr("Check worktree cleanup…") : tr("Review remaining worktree…"));
+            m_worktreeCleanup->setToolTip(result["reason"].toString()); m_worktreeCleanup->show();
+            showNotice(tr("Worktree kept for review: %1").arg(result["reason"].toString()));
+        }
+    });
     connect(&m_client, &HgsClient::gitStatusChanged, this, [this](const QString &host, const QString &path) {
         // Update only the Git role. Asynchronous repository reads must not run
         // session selection/inspection or move composer focus.
@@ -1465,6 +1508,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_readTimer.setInterval(400); connect(&m_readTimer, &QTimer::timeout, this, &SessionsWindow::checkViewedReply);
     applyTheme(); applyContentScale(); rebuild();
+    setupShortcuts();
 }
 
 // Only session content follows this preference. Workspace chrome, including
@@ -1521,7 +1565,9 @@ void SessionsWindow::applyTheme()
         QLabel { color:%2; background:transparent; }
         QWidget#sidebar { background:%3; border-right:1px solid %4; }
         QLabel#brand { font-size:32px; font-weight:700; letter-spacing:-2px; color:%5; }
-        QLabel#appVersion { font-size:9px; color:%6; }
+        QPushButton#appVersion { font-size:9px; color:%6; background:transparent; border:1px solid transparent; border-radius:5px; padding:0; min-height:22px; }
+        QPushButton#appVersion:hover { color:%2; background:%7; }
+        QPushButton#appVersion:focus[keyboardFocus="true"] { border-color:%5; }
         QLabel#eyebrow { font-size:10px; font-weight:600; letter-spacing:1px; color:%6; }
         QLabel#heading { font-size:16px; font-weight:600; }
         QLabel#detailTitle { font-size:16px; font-weight:600; }
@@ -1556,7 +1602,7 @@ void SessionsWindow::applyTheme()
         QListWidget#settingsSections::item { padding:11px 10px;margin-bottom:5px;border-radius:6px; }
         QListWidget#settingsSections::item:selected { background:%10;color:%5; }
         QListWidget#settingsSections::item:hover { background:%7; }
-        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QDialog#speechProfileEditor QScrollArea, QWidget#speechEditorContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
+        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QWidget#downloadCacheSettings, QDialog#speechProfileEditor QScrollArea, QWidget#speechEditorContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
         QDialog#speechProfileEditor QScrollBar:vertical { background:%1; width:10px; margin:0; border:0; }
         QDialog#speechProfileEditor QScrollBar:horizontal { background:%1; height:10px; margin:0; border:0; }
         QDialog#speechProfileEditor QScrollBar::handle:vertical { background:%4; border-radius:4px; min-height:24px; }
@@ -1605,7 +1651,8 @@ void SessionsWindow::applyTheme()
         QTableWidget#swarmConflictChoices::item { padding:8px 10px; }
         QTreeWidget#worktreeCatalog::item, QTreeWidget#processList::item { padding:6px 4px; }
         QTableWidget#projectFolders::item { padding:0 10px; }
-        QSpinBox { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
+        QSpinBox, QDoubleSpinBox#downloadCacheSize { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
+        QDoubleSpinBox#downloadCacheSize:disabled { color:%6; background:%1; }
         QListWidget#machineProfiles, QListWidget#accountProfiles, QListWidget#speechProfiles, QListWidget#launchAccount { background:%3; color:%2; border:1px solid %4; border-radius:8px; }
         QListWidget#machineProfiles::item, QListWidget#speechProfiles::item { padding:14px 10px; border-bottom:1px solid %4; }
         QListWidget#accountProfiles::item { padding:6px 10px; border-bottom:1px solid %4; }
@@ -1821,8 +1868,8 @@ void SessionsWindow::setInspectorVisible(bool visible)
     const QSignalBlocker blocker(m_inspectorToggle); m_inspectorToggle->setChecked(visible);
     m_inspectorToggle->setProperty("glyph", visible ? "collapse-panel" : "inspector");
     m_inspectorToggle->setIcon(workspaceIcon(m_inspectorToggle->property("glyph").toString(), QColor(m_muted)));
-    m_inspectorToggle->setToolTip(visible ? tr("Collapse side panel") : tr("Show tasks, agents, details and worktrees"));
-    m_inspectorToggle->setAccessibleName(m_inspectorToggle->toolTip());
+    m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show tasks, agents, details and worktrees"));
+    m_inspectorToggle->setToolTip(ShortcutRegistry::instance().tooltip(m_inspectorToggle->accessibleName(), "panel.toggle"));
     m_inspectorToggle->show();
     if (restoreFocus) m_inspectorToggle->setFocus(keyboardFocus ? Qt::TabFocusReason : Qt::MouseFocusReason);
     if (visible) {
@@ -2016,6 +2063,21 @@ void SessionsWindow::showWorkspaceSettings()
 }
 
 void SessionsWindow::setFleet(const FleetState &fleet) {
+    // A native clean exit may remove its managed checkout without a GUI write.
+    // Expire only repositories whose exact live run has newly reached Archive.
+    QSet<QString> expired;
+    const auto completed = [&](const BoxState &before, const BoxState &after, const QString &host) {
+        for (const auto &old : before.sessions) {
+            if (old.state == "archived" || !old.gitWorktree || old.gitCommonDir.isEmpty() || old.runId.isEmpty()) continue;
+            for (const auto &current : after.sessions) if (current.state == "archived" && current.runId == old.runId && current.conversationId == old.conversationId) {
+                const auto key=host+'\n'+old.gitCommonDir;
+                if (!expired.contains(key)) { expired.insert(key); m_client.invalidateWorktreeCache(host,old.gitCommonDir); }
+                break;
+            }
+        }
+    };
+    completed(m_fleet.local(),fleet.local(),{});
+    for (const auto &host : fleet.peerNames()) if (const auto *before=m_fleet.peer(host)) completed(*before,*fleet.peer(host),host);
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setLocalSessions(fleet.local().localSessions); m_settingsPage->setPeers(fleet.peerNames());
     m_settingsPage->setMobileGateway(fleet.local().localSessions&&MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Posix);
@@ -2242,9 +2304,21 @@ void SessionsWindow::savePendingLaunches()
     QSettings settings; settings.setValue("workspace/pendingLaunches", QJsonDocument(m_pendingLaunches).toJson(QJsonDocument::Compact)); settings.sync();
 }
 
+bool SessionsWindow::takeEndedLaunch(const QString &launchId, QJsonObject *launch)
+{
+    const auto it = std::find_if(m_endedLaunches.begin(), m_endedLaunches.end(), [&](const auto &ended) { return ended.first == launchId; });
+    if (it == m_endedLaunches.end()) return false;
+    if (launch) *launch = it->second;
+    m_endedLaunches.erase(it); return true;
+}
+
 void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QString &error)
 {
-    const QString name = m_pendingLaunches.value(launchId).toObject().value("tag").toString();
+    // A listing that reported the launch ended already showed its reason and last
+    // lines. A hidden launch status showed nothing, so its failure still names it.
+    QJsonObject ended;
+    if (takeEndedLaunch(launchId, &ended) && ended.value("show_pending").toBool()) return;
+    const QString name = (ended.isEmpty() ? m_pendingLaunches.value(launchId).toObject() : ended).value("tag").toString();
     m_pendingLaunches.remove(launchId); savePendingLaunches();
     rebuild();
     showNotice(error.isEmpty() ? tr("Could not start session %1. Check the terminal.").arg(name)
@@ -2254,7 +2328,7 @@ void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QStri
 void SessionsWindow::placeLaunchedSessions()
 {
     bool changed = false;
-    QString ended;
+    QString ended, endedLaunch;
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     for (auto it = m_pendingLaunches.begin(); it != m_pendingLaunches.end();) {
         const auto launch = it.value().toObject();
@@ -2282,10 +2356,18 @@ void SessionsWindow::placeLaunchedSessions()
         const auto end = !consumed && box && box->ok ? box->endedLaunches.value(it.key()) : QJsonObject();
         if (!end.isEmpty() && std::none_of(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
                 return entry.host == host && entry.session.launchId == it.key(); })) {
-            consumed = true; m_endedLaunches.insert(it.key());
+            consumed = true; m_endedLaunches.append({it.key(), launch});
+            // Terminal launches and launches restored after a restart never
+            // report a result, so only the newest ended launches are kept.
+            constexpr qsizetype EndedLaunchLimit = 16;
+            if (m_endedLaunches.size() > EndedLaunchLimit) m_endedLaunches.removeFirst();
             if (m_nativeLaunchToOpen == it.key()) m_nativeLaunchToOpen.clear();
             // A hidden launch status stays hidden.
             if (launch.value("show_pending").toBool()) {
+                // Only the last ended notice shows. A launch whose notice it
+                // replaces showed nothing, so its later failure still names it.
+                for (auto &[id, shown] : m_endedLaunches) if (id == endedLaunch) shown["show_pending"] = false;
+                endedLaunch = it.key();
                 const QString name = launch.value("tag").toString(); const auto code = end.value("code");
                 ended = code.isDouble() ? tr("Session %1 ended before it appeared (exit code %2).").arg(name).arg(code.toInteger())
                     : tr("Session %1 ended before it appeared.").arg(name);
@@ -2740,7 +2822,7 @@ void SessionsWindow::updateAttentionIndicator()
         .arg(m_dark ? "#ffda76" : "#a66000",m_dark ? "#30250c" : "#ffffff"));
     m_attentionBadge->setVisible(m_attentionCount > 0);
     const QString hint = m_attentionCount ? tr("Sessions — %1 need attention").arg(m_attentionCount) : tr("Sessions");
-    m_sessionsNav->setAccessibleName(hint); m_sessionsNav->setToolTip(hint);
+    m_sessionsNav->setAccessibleName(hint); m_sessionsNav->setToolTip(ShortcutRegistry::instance().tooltip(hint, "go.sessions"));
     m_brand->setProperty("attentionCount",m_attentionCount);
     m_brand->setAppearance(m_dark ? QColor(Qt::white) : QColor(m_accent), QColor(m_dark ? "#ffda76" : "#a66000"),
         m_attentionCount > 0, QSettings().value("workspace/reduceMotion", false).toBool());
@@ -2798,8 +2880,10 @@ void SessionsWindow::selectSession()
     const QString child = item ? item->data(SessionRoles::ChildId).toString() : QString();
     const QString key = item ? item->data(child.isEmpty() ? KeyRole : SessionRoles::ParentKey).toString() : QString();
     if (key != m_selectedKey) {
+        pushSelectionChanged(key);
         m_readCandidate.clear(); m_readSelectionKey.clear();
         m_selectedKey = key; m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear();
+        rememberRecentSession(key);
         m_processPollAge.invalidate();m_inspectionAge.invalidate();
         m_childrenHtml.clear(); m_activityView->setSessionKey(key); m_composer->setSessionKey(key);
         const auto *entry = selected();
@@ -2925,7 +3009,7 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
         // The conversation changed under this terminal. Fetch its initial window;
         // a cursor from the previous conversation must never skip the new history.
         m_events = data.value("events").toArray(); m_cursor = 0; m_details = data; m_processPollAge.invalidate();
-        reconcileMessages(); renderDetails(); inspect(); return;
+        reconcileMessages(); renderDetails(); pushInspected(entry->key, m_details); inspect(); return;
     }
     const auto previousRoster = childRoster(*entry);
     const auto inspected=SessionPresentation::inspected(entry->session,data);
@@ -2951,7 +3035,30 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     }
     while (m_events.size() > 500) m_events.removeFirst();
     m_cursor = data.value("cursor").toInteger(); reconcileMessages(); renderDetails(); applyPendingModelSettings();
+    pushInspected(entry->key, m_details);
     if (statusChanged || previousRoster != childRoster(*entry)) rebuild();
+}
+
+namespace {
+// Why the host reports a native context action ("clear", "compact")
+// unavailable. Older hosts omit the reason: the action keeps its usual text.
+QString contextActionReason(const QJsonObject &details, const QString &action)
+{
+    if (details.value(action + "_context_supported").toBool()) return {};
+    return details.value(action + "_context_reason").toString().simplified();
+}
+QString contextReasonSentence(const QString &reason)
+{
+    return reason.isEmpty() || QStringLiteral(".!?…").contains(reason.back()) ? reason : reason + '.';
+}
+// A disabled context action shows that reason instead of its usual tooltip.
+template<typename Control> void explainContextAction(Control *control, const QString &reason)
+{
+    if (!control->property("usualToolTip").isValid()) control->setProperty("usualToolTip", control->toolTip());
+    // Reported names stay literal, as in the cold-cache line.
+    control->setToolTip(reason.isEmpty() ? control->property("usualToolTip").toString()
+        : Qt::convertFromPlainText(contextReasonSentence(reason), Qt::WhiteSpaceNormal));
+}
 }
 
 void SessionsWindow::renderDetails()
@@ -2983,6 +3090,9 @@ void SessionsWindow::renderDetails()
     const auto cacheWarning=entry?CacheStatus::warning(m_details):QString();m_cacheWarning->setText(cacheWarning);m_cacheWarning->setVisible(!cacheWarning.isEmpty());
     m_cacheDetail->setText(CacheStatus::details(m_details,recorded));m_cacheClear->setVisible(!cacheWarning.isEmpty());
     m_cacheClear->setEnabled(entry && entry->online && !m_clearRequest && m_details.value("clear_context_supported").toBool());
+    // An offline host's last inspection no longer explains the action.
+    const bool reported=entry && entry->online;
+    explainContextAction(m_cacheClear,reported?contextActionReason(m_details,"clear"):QString());
     const bool mainContext=m_subagentId.isEmpty();
     m_detailsClear->setVisible(mainContext);m_detailsContext->setVisible(mainContext);
     const bool canClear=mainContext && entry && entry->online && entry->session.state!="archived"
@@ -2990,6 +3100,9 @@ void SessionsWindow::renderDetails()
         && !m_details.value("run_id").toString().isEmpty() && !m_details.value("conversation_id").toString().isEmpty()
         && (m_details.value("clear_context_supported").toBool() || m_details.value("clear_context_dismiss").toBool());
     m_detailsClear->setEnabled(canClear);
+    // A Claude chooser still allows Dismiss and clear.
+    const auto clearReason=reported && !m_details.value("clear_context_dismiss").toBool()?contextActionReason(m_details,"clear"):QString();
+    explainContextAction(m_detailsClear,clearReason);explainContextAction(m_clearAction,clearReason);
     m_detailsClear->setText(m_clearRequest?tr("Clearing…"):tr("Clear session"));
     // A live agent clears natively; a stopped one starts fresh instead.
     const bool stopped=entry && (entry->session.state=="paused" || entry->session.state=="stopped");
@@ -3378,49 +3491,97 @@ void SessionsWindow::changeModelSettings(const QString &key, const QString &mode
     renderDetails();
 }
 
+QByteArray SessionsWindow::settingsIdentity(const QString &key, const PendingSettings &pending)
+{
+    return QJsonDocument(QJsonArray{key, pending.run, pending.conversation, pending.id, pending.model, pending.effort}).toJson(QJsonDocument::Compact);
+}
+
+// The listing's row for a queued change's run and conversation; null without a
+// current listing or after either changed.
+const SessionInfo *SessionsWindow::listedSettingsSession(const PendingSettings &pending) const
+{
+    const auto *box = pending.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(pending.host);
+    if (!box || !box->ok || (pending.host.isEmpty() && !m_connectionError.isEmpty())) return nullptr;
+    for (const auto &session : box->sessions)
+        if (session.name == pending.name && session.runId == pending.run
+            && (session.conversationId.isEmpty() || session.conversationId == pending.conversation)) return &session;
+    return nullptr;
+}
+
+static bool listedReady(const SessionInfo &session)
+{
+    return session.state == "running" && session.phase == "idle" && session.activity == "idle" && session.processState == "running";
+}
+
+// Each pending change gets one automatic attempt. One that dispatch scheduled
+// gets one more per Ready transition: after the session left Ready, once the
+// listing and, for the selected session, inspect both show it Ready again.
+// Never turn a failed native change into a polling loop.
+bool SessionsWindow::settingsAttemptAllowed(const QString &key, const PendingSettings &pending, const QByteArray &identity) const
+{
+    if (!m_settingsAttempts.contains(identity)) return true;
+    const auto scheduled = m_scheduledSettings.constFind(key);
+    if (scheduled == m_scheduledSettings.cend() || scheduled->identity != identity || !scheduled->rearmed) return false;
+    const auto *session = listedSettingsSession(pending);
+    if (!session || !listedReady(*session)) return false;
+    return key != m_selectedKey || (m_details.value("run_id").toString() == pending.run
+        && m_details.value("conversation_id").toString() == pending.conversation && m_details.value("settings_apply_when") == "now");
+}
+
+void SessionsWindow::requestAutomaticSettings(const QString &key, const PendingSettings &pending, const QByteArray &identity)
+{
+    m_settingsKey = key; m_settingsHost = pending.host; m_settingsName = pending.name;
+    m_settingsRun = pending.run; m_settingsConversation = pending.conversation; m_settingsAutomatic = true;
+    m_settingsAttempts.insert(identity); m_settingsIdentity = identity; m_scheduledSettings.remove(key);
+    m_settingsRequest = m_client.requestSettings(pending.host, pending.name, pending.model, pending.effort, pending.run, pending.conversation, pending.id);
+    renderDetails();
+}
+
 void SessionsWindow::applyPendingModelSettings()
 {
     const auto *entry = selected();
     if (!entry) return;
     const QString model = m_details.value("pending_model").toString(), effort = m_details.value("pending_effort").toString();
-    if (model.isEmpty() && effort.isEmpty()) { m_queuedSettings.remove(entry->key); return; }
+    if (model.isEmpty() && effort.isEmpty()) { m_queuedSettings.remove(entry->key); m_scheduledSettings.remove(entry->key); return; }
     const QString pendingId = m_details.value("pending_settings_id").toString();
     if (pendingId.isEmpty()) return;
-    m_queuedSettings[entry->key] = {entry->host, entry->session.name, m_details.value("run_id").toString(),
+    const QString key = entry->key;
+    const PendingSettings pending{entry->host, entry->session.name, m_details.value("run_id").toString(),
         m_details.value("conversation_id").toString(), model, effort, pendingId};
-    if (!modelSettingsBlockReason(*entry).isEmpty() || m_details.value("settings_apply_when") != "now") return;
-    const auto identity = QJsonDocument(QJsonArray{entry->key, m_details.value("run_id"), m_details.value("conversation_id"),
-        pendingId, model, effort}).toJson(QJsonDocument::Compact);
-    if (m_settingsAttempts.contains(identity)) return;
-    m_settingsKey = entry->key; m_settingsRun = m_details.value("run_id").toString();
-    m_settingsConversation = m_details.value("conversation_id").toString();
-    m_settingsHost = entry->host; m_settingsName = entry->session.name; m_settingsAutomatic = true;
-    m_settingsAttempts.insert(identity); // Never turn a failed native change into a polling loop.
-    m_settingsRequest = m_client.requestSettings(entry->host, entry->session.name, model, effort, m_settingsRun, m_settingsConversation, pendingId);
-    renderDetails();
+    m_queuedSettings[key] = pending;
+    const auto identity = settingsIdentity(key, pending);
+    if (m_details.value("settings_apply_when") != "now") {
+        // Inspect shows the session not Ready, as while a chooser waits.
+        const auto scheduled = m_scheduledSettings.find(key);
+        if (scheduled != m_scheduledSettings.end() && scheduled->identity == identity) scheduled->rearmed = true;
+        return;
+    }
+    if (modelSettingsBlockReason(*entry).isEmpty() && settingsAttemptAllowed(key, pending, identity))
+        requestAutomaticSettings(key, pending, identity);
 }
 
 void SessionsWindow::applyQueuedModelSettings()
 {
+    // The listing shows whether a session whose automatic apply was scheduled
+    // left Ready. A change dropped or replaced meanwhile needs no other attempt.
+    for (auto it = m_scheduledSettings.begin(); it != m_scheduledSettings.end();) {
+        const auto queued = m_queuedSettings.constFind(it.key());
+        if (queued == m_queuedSettings.cend() || settingsIdentity(it.key(), *queued) != it->identity) { it = m_scheduledSettings.erase(it); continue; }
+        if (const auto *session = listedSettingsSession(*queued); session && !listedReady(*session)) it->rearmed = true;
+        ++it;
+    }
     if (m_settingsRequest || m_pending || !m_renameKey.isEmpty() || !m_forkKey.isEmpty()) return;
-    for (auto it = m_queuedSettings.begin(); it != m_queuedSettings.end(); ++it) {
-        const auto pending = it.value();
-        if (pending.id.isEmpty() || m_terminating.contains(it.key())) continue;
-        const auto *box = pending.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(pending.host);
-        if (!box || !box->ok || (pending.host.isEmpty() && !m_connectionError.isEmpty()) || m_composer->isSending(it.key())) continue;
+    for (auto it = m_queuedSettings.cbegin(); it != m_queuedSettings.cend(); ++it) {
+        const QString key = it.key(); const auto pending = it.value();
+        if (pending.id.isEmpty() || m_terminating.contains(key) || m_composer->isSending(key)) continue;
         bool answering = false;
-        for (const auto &answer : m_pendingAnswers) answering |= answer.key == it.key();
+        for (const auto &answer : m_pendingAnswers) answering |= answer.key == key;
         if (answering) continue;
-        const auto session = std::find_if(box->sessions.cbegin(), box->sessions.cend(), [&](const SessionInfo &s) { return s.name == pending.name && s.runId == pending.run; });
-        if (session == box->sessions.cend() || session->state != "running" || session->phase != "idle"
-            || session->activity != "idle" || session->processState != "running") continue;
-        const auto identity = QJsonDocument(QJsonArray{it.key(), pending.run, pending.conversation, pending.id, pending.model, pending.effort}).toJson(QJsonDocument::Compact);
-        if (m_settingsAttempts.contains(identity)) continue;
-        m_settingsAttempts.insert(identity);
-        m_settingsKey = it.key(); m_settingsHost = pending.host; m_settingsName = pending.name;
-        m_settingsRun = pending.run; m_settingsConversation = pending.conversation; m_settingsAutomatic = true;
-        m_settingsRequest = m_client.requestSettings(pending.host, pending.name, pending.model, pending.effort, pending.run, pending.conversation, pending.id);
-        renderDetails(); return;
+        const auto *session = listedSettingsSession(pending);
+        if (!session || !listedReady(*session)) continue;
+        const auto identity = settingsIdentity(key, pending);
+        if (!settingsAttemptAllowed(key, pending, identity)) continue;
+        requestAutomaticSettings(key, pending, identity); return;
     }
 }
 
@@ -3817,6 +3978,19 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
         compact->setToolTip(tr("Run native /compact, then send this draft only after successful completion."));
         auto *clear=dialog.addButton(tr("Clear context"),QMessageBox::ActionRole);
         clear->setEnabled(m_details.value("clear_context_supported").toBool() && !m_clearRequest);
+        // Name what the host reports blocking each unavailable action, such as
+        // a subagent or tool that is still working.
+        const auto compactReason=contextActionReason(m_details,"compact"),clearReason=contextActionReason(m_details,"clear");
+        explainContextAction(compact,compactReason);explainContextAction(clear,clearReason);
+        QStringList unavailable;
+        if(!compactReason.isEmpty() && compactReason==clearReason)
+            unavailable<<tr("Compact and continue and Clear context are unavailable. %1").arg(contextReasonSentence(compactReason));
+        else {
+            if(!compactReason.isEmpty())unavailable<<tr("Compact and continue is unavailable. %1").arg(contextReasonSentence(compactReason));
+            if(!clearReason.isEmpty())unavailable<<tr("Clear context is unavailable. %1").arg(contextReasonSentence(clearReason));
+        }
+        // Reported names stay literal: the format also applies to this line.
+        if(!unavailable.isEmpty()){dialog.setInformativeText(unavailable.join('\n'));dialog.setTextFormat(Qt::PlainText);}
         auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);dialog.exec();
         if(dialog.clickedButton()!=proceed && dialog.clickedButton()!=clear && dialog.clickedButton()!=compact)return;
         entry=selected();
@@ -3888,6 +4062,9 @@ void SessionsWindow::deliverMessage(const QString &key, const QString &host, con
                 }
                 const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId);
                 m_pendingMessages.insert(request, {key, runId, conversationId});
+                if (m_push && m_push->key == key && !m_push->request && m_push->text == text) {
+                    m_push->request = request; m_push->run = runId; m_push->conversation = conversationId;
+                }
                 auto &messages = m_localMessages[key];
                 for(int i=messages.size();i-- >0;) {
                     const auto previous=messages[i].toObject();
@@ -3914,6 +4091,7 @@ void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &
     const auto pending = m_pendingMessages.take(request);
     const QString detail = uncertain ? tr("Delivery is not confirmed. Check Terminal before retrying. %1").arg(error) : error;
     m_composer->deliveryFinished(pending.key, ok, detail, uncertain);
+    pushSendFinished(request, ok, uncertain);
     auto &messages = m_localMessages[pending.key];
     for (qsizetype i = 0; i < messages.size(); ++i) {
         auto message = messages.at(i).toObject();
@@ -4471,22 +4649,23 @@ void SessionsWindow::archiveSession()
     if (!e || !e->online || m_pending || !m_renameKey.isEmpty() || (e->session.state != "paused" && e->session.state != "stopped")) return;
     const QString host = e->host, name = e->session.name;
     ++m_worktreeCleanupRevision; m_worktreeCleanup->hide();
-    m_archivedWorktree = e->session.gitWorktree && !e->session.gitRoot.isEmpty()
-        ? QStringList{host, name, e->session.gitRoot, e->session.gitCommonDir} : QStringList{};
+    const bool inspected = m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
+    m_archivedWorktree = {host,name,inspected ? m_details.value("git_root").toString() : e->session.gitWorktree ? e->session.gitRoot : QString(),
+        inspected ? m_details.value("git_common_dir").toString() : e->session.gitWorktree ? e->session.gitCommonDir : QString()};
     m_pending = true; m_restoreKey.clear(); m_client.archiveSession(host, name);
     showNotice(tr("Moving session to archive…")); renderDetails();
 }
 
 void SessionsWindow::offerWorktreeCleanup()
 {
+    if (m_archivedWorktree.size() != 4 || m_archivedWorktree[2].isEmpty()) return;
     const auto host = m_archivedWorktree[0], name = m_archivedWorktree[1], root = m_archivedWorktree[2];
     // Another running, paused or saved session keeps the checkout in use.
     for (const auto &entry : m_entries)
-        if (entry.host == host && entry.session.name != name && entry.session.state != "archived" && entry.session.gitRoot == root) { m_archivedWorktree.clear(); return; }
+        if (entry.host == host && entry.session.name != name && entry.session.state != "archived" && entry.session.gitRoot == root) return;
     m_worktreeCleanup->setToolTip(tr("Review %1 for removal. Nothing is removed without your confirmation.").arg(root));
     m_worktreeCleanup->show();
-    const int revision = ++m_worktreeCleanupRevision;
-    QTimer::singleShot(60000, m_worktreeCleanup, [this, revision] { if (revision == m_worktreeCleanupRevision) { m_worktreeCleanup->hide(); m_archivedWorktree.clear(); } });
+    m_worktreeCleanup->setText(tr("Review remaining worktree…")); ++m_worktreeCleanupRevision;
 }
 
 void SessionsWindow::cleanUpArchivedWorktree()
@@ -4494,7 +4673,8 @@ void SessionsWindow::cleanUpArchivedWorktree()
     if (m_archivedWorktree.size() != 4) return;
     const auto offer = m_archivedWorktree; m_archivedWorktree.clear(); ++m_worktreeCleanupRevision; m_worktreeCleanup->hide();
     // The common directory still answers after the worktree folder is gone.
-    WorktreeCleanupDialog dialog(&m_client, offer[0], offer[0].isEmpty() ? m_fleet.local().host : offer[0], offer[3].isEmpty() ? offer[2] : offer[3], offer[2], this);
+    WorktreeBatchCleanupDialog dialog(&m_client, {QJsonObject{{"host",offer[0]}, {"machine",offer[0].isEmpty() ? m_fleet.local().host : offer[0]},
+        {"common_dir",offer[3].isEmpty() ? offer[2] : offer[3]}, {"row",QJsonObject{{"path",offer[2]}, {"kind","linked"}}}}}, this);
     dialog.exec();
     if (dialog.changed()) { emit refreshRequested(); updateWorktrees(); }
 }
@@ -4616,6 +4796,10 @@ void SessionsWindow::terminateSession()
     }
     m_pending = true; m_restoreKey.clear();
     if(live){
+        ++m_worktreeCleanupRevision; m_worktreeCleanup->hide();
+        const bool inspected=m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
+        m_archivedWorktree = keepArchive ? QStringList{host,name,inspected ? m_details.value("git_root").toString() : original.session.gitWorktree ? original.session.gitRoot : QString(),
+            inspected ? m_details.value("git_common_dir").toString() : original.session.gitWorktree ? original.session.gitCommonDir : QString()} : QStringList{};
         m_terminationFinished.remove(original.key);m_terminating.insert(original.key,original);m_terminationCommand=original.key;
         showNotice(tr("Terminating %1…").arg(name));rebuild();
     }

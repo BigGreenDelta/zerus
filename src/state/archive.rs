@@ -187,6 +187,8 @@ pub(super) fn manual_scoped(name: &str, dry: bool, scope: Option<&session_action
     record["completion_reason"] = json!("user_archived");
     if let Some(scope)=scope {scope.changing();}
     let id = save(&record)?;
+    drop(_guard);
+    super::worktree_lifecycle::after_archive(&record);
     if let Some(scope)=scope {scope.result(name,string(&record,"run_id"),string(&record,"conversation_id"),Some(&id));}
     else {println!("hgs: archived {name} ({id})");}
     Ok(0)

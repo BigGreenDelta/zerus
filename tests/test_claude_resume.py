@@ -2,6 +2,7 @@
 """Claude cold-conversation consent on a private terminal; no real history."""
 import os
 import signal
+import subprocess
 import time
 import unittest
 import uuid
@@ -66,6 +67,19 @@ class ResumeConsent(unittest.TestCase):
         self.assertFalse(any(o.get('selected') for o in self.card['questions'][0]['options']))
         self.assertIn('conversation resume choice', fixtures.InputTransport.send(
             self, fixtures.InputTransport.payload(self), success=False))
+        self.assertEqual(self.received(), b'')
+
+    def test_fork_and_settings_wait_for_the_choice_as_dispatch_does(self):
+        # The saved record is Ready; the resume choice alone keeps a fork
+        # unavailable and schedules settings, as dispatch refuses the chooser.
+        self.record.update(base=['claude']);self.write_record()
+        state = self.inspect();reason = "Wait until the agent's approval request is answered"
+        self.assertEqual((state['fork_supported'], state['fork_reason']), (False, reason))
+        self.assertNotIn('fork', state['allowed_actions']);self.assertEqual(state['action_reasons']['fork'], reason)
+        self.assertEqual(state['settings_apply_when'], 'ready')
+        r = subprocess.run([str(fixtures.HGS), 'fork', self.name, '-n', 'branch', '-d', '--dry-run'], env=self.env,
+                           text=True, capture_output=True, timeout=12)
+        self.assertNotEqual(r.returncode, 0, r.stdout);self.assertIn('conversation resume choice', r.stderr)
         self.assertEqual(self.received(), b'')
 
     def test_explicit_resume_navigates_up_and_repeated_receipt_sends_no_keys(self):

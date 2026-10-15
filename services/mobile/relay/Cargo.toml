@@ -9,34 +9,66 @@ description = "Bounded, durable API v1 relay for Zerus"
 [[bin]]
 name = "zerus-relay"
 path = "src/main.rs"
+required-features = ["server"]
+
+# Without "server" the library is only the API v1 codec, envelope validation and
+# error type, for the outbound connector: no HTTP server, database or TLS stack.
+[features]
+default = ["server"]
+server = [
+    "dep:axum",
+    "dep:bytes",
+    "dep:clap",
+    "dep:fs2",
+    "dep:futures-util",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:ipnet",
+    "dep:ring",
+    "dep:rustls-pemfile",
+    "dep:libc",
+    "dep:rand",
+    "dep:reqwest",
+    "dep:serde",
+    "dep:sqlx",
+    "dep:tempfile",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tower",
+    "dep:url",
+    "uuid/v4",
+    "uuid/serde",
+]
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"], optional = true }
 base64 = "0.22"
-bytes = "1"
-clap = { version = "4", features = ["derive"] }
-fs2 = "0.4"
-futures-util = "0.3"
-http-body-util = "0.1"
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio", "service"] }
-ipnet = { version = "2", features = ["serde"] }
-ring = "0.17"
-rustls-pemfile = "2"
-libc = "0.2"
-rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+bytes = { version = "1", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+fs2 = { version = "0.4", optional = true }
+futures-util = { version = "0.3", optional = true }
+http = "1"
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio", "service"], optional = true }
+ipnet = { version = "2", features = ["serde"], optional = true }
+ring = { version = "0.17", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+libc = { version = "0.2", optional = true }
+rand = { version = "0.8", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
 ryu = "1"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", features = ["arbitrary_precision", "float_roundtrip", "raw_value"] }
 sha2 = "0.10"
-sqlx = { version = "0.8.6", default-features = false, features = ["any", "sqlite", "postgres", "runtime-tokio-rustls"] }
-tempfile = "3"
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["io", "rt"] }
-tower = { version = "0.5", features = ["util"] }
-url = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["any", "sqlite", "postgres", "runtime-tokio-rustls"], optional = true }
+tempfile = { version = "3", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+tokio-util = { version = "0.7", features = ["io", "rt"], optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
+url = { version = "2", optional = true }
+uuid = "1"
 
 [profile.release]
 strip = true

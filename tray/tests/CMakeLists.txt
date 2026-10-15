@@ -202,6 +202,14 @@ target_include_directories(test_appconfig PRIVATE ../src)
 target_link_libraries(test_appconfig PRIVATE Qt6::Test Qt6::Core hgs-tray-core hgs-single-instance)
 zerus_add_test(appconfig test_appconfig)
 
+add_executable(test_downloadcache test_downloadcache.cpp)
+target_link_libraries(test_downloadcache PRIVATE Qt6::Test hgs-tray-core)
+zerus_add_test(downloadcache test_downloadcache)
+
+add_executable(test_downloadcachesettings test_downloadcachesettings.cpp)
+target_link_libraries(test_downloadcachesettings PRIVATE Qt6::Test hgs-tray-ui)
+zerus_add_test(downloadcachesettings test_downloadcachesettings)
+
 add_executable(test_hgsclient test_hgsclient.cpp)
 target_include_directories(test_hgsclient PRIVATE ../src)
 target_link_libraries(test_hgsclient PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
@@ -438,6 +446,16 @@ target_include_directories(test_shortcuts PRIVATE ../src)
 target_link_libraries(test_shortcuts PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(shortcuts test_shortcuts)
 
+add_executable(test_gotodialog test_gotodialog.cpp)
+target_include_directories(test_gotodialog PRIVATE ../src)
+target_link_libraries(test_gotodialog PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(gotodialog test_gotodialog)
+
+add_executable(test_keyboardsettings test_keyboardsettings.cpp)
+target_include_directories(test_keyboardsettings PRIVATE ../src)
+target_link_libraries(test_keyboardsettings PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(keyboardsettings test_keyboardsettings)
+
 add_executable(test_composertoolbar test_composertoolbar.cpp)
 target_include_directories(test_composertoolbar PRIVATE ../src)
 target_link_libraries(test_composertoolbar PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
@@ -516,7 +534,7 @@ zerus_add_test(attachmentviewer test_attachmentviewer)
 set_tests_properties(attachmentviewer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_externalfile test_externalfile.cpp)
-target_link_libraries(test_externalfile PRIVATE Qt6::Test Qt6::Gui hgs-external-file)
+target_link_libraries(test_externalfile PRIVATE Qt6::Test Qt6::Gui hgs-external-file hgs-tray-core)
 zerus_add_test(externalfile test_externalfile)
 set_tests_properties(externalfile PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -538,6 +556,7 @@ set_tests_properties(markdownobjects PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 
 add_executable(test_updates test_updates.cpp)
 target_link_libraries(test_updates PRIVATE hgs-updates Qt6::Test)
+target_compile_definitions(test_updates PRIVATE ZERUS_INSTALLATION_GUIDE="${PROJECT_SOURCE_DIR}/../docs/installation.md")
 zerus_add_test(updates test_updates)
 set_tests_properties(updates PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 target_link_libraries(test_sessionswindow PRIVATE hgs-updates)

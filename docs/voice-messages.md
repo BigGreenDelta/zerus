@@ -74,6 +74,16 @@ The speech machine may be another configured computer, resolved and verified by
 its stable machine UUID from the conversation computer. Client SSH aliases are
 never interpreted as server-side routes.
 
+An installed per-user service runs `hgs voice worker`: `hgs-voice.service` on
+Linux, `com.hgdev.hgs-voice` on macOS. On Linux a submission starts that
+service; otherwise it starts a detached worker, unless a worker already runs or
+the service's worker waits to take over. The service's own worker (the process
+launchd or systemd reports for the job or unit; only when systemd cannot
+answer does the unit's control group decide) never exits because another
+worker holds the worker lock, which would make the service manager start it
+again every 10 seconds: it waits for the lock, and a detached worker hands over
+to it between rounds.
+
 The workflow states are `queued`, `transcribing`, `ready`, `waiting_agent`,
 `delivering`, `submitted`, `failed`, `cancelled` and `uncertain`. The same message
 UUID survives every transition. Only recognized text is delivered to the native
@@ -97,7 +107,10 @@ contains `action`, `request_id`, `expected_run_id` and
 `expected_conversation_id`. Actions:
 
 * `profiles`: returns `computers`, each containing `machine_id`, `name`,
-  `profiles`, `available` and an optional `reason`.
+  `profiles`, `available` and an optional `reason`. Computers are queried
+  concurrently, but their transport processes start one at a time: on macOS a
+  query started in between could inherit another's pipes and hold that request
+  open until it ends itself.
 * `submit`: also contains `speech: {machine_id, profile_id}` and
   `audio: {format: "pcm_s16le", sample_rate: 16000, channels: 1, data_base64}`.
   Recording duration is bounded to 120 seconds. The request UUID is the permanent

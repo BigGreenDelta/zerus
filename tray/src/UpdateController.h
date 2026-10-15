@@ -38,6 +38,12 @@ public:
     static bool isArchLinux(const QByteArray &osRelease);
     static QString updateCommand(const DesktopInstallation &installation,const QString &channel="stable");
     static InstallationGuide installationGuide(const DesktopInstallation &installation,const QString &channel);
+    // The desktop platform this build runs on: "linux", "macos" or "windows" (else empty).
+    static QString runningPlatform();
+    // The installation guide (docs/installation.md on GitHub) at the section for `platform`:
+    // the AUR packages on Arch-based Linux, the source build on other Linux systems, the
+    // Homebrew cask on macOS and the portable zip on Windows; the whole guide elsewhere.
+    static QUrl installationInstructionsUrl(const DesktopInstallation &installation,const QString &platform=runningPlatform());
     static bool plainStableIsNewer(const QString &installed,const QString &released);
     // The portable Windows build (Phase 1: stable and nightly zips, none in Dev) against a catalog.
     static bool portableUpdateAvailable(const QString &appVersion,const DesktopUpdateFeed &feed);
@@ -59,6 +65,9 @@ public:
     // True when the application bundle on disk now holds another release than the one this
     // process started from, for example after `brew upgrade --cask zerus`.
     static bool bundleReplaced(const QString &executable,const QString &startedRelease);
+    // Starts the detached helper that opens `bundle` with --sessions once process `pid` has
+    // exited, with only stdio inherited. Tests pass another `shell` to see what it receives.
+    static bool startRestartHelper(const QString &bundle,qint64 pid,const QString &shell=QStringLiteral("/bin/sh"));
     // Tests only: the deadline of package-manager commands (5 s; 0 restores it), so
     // suites need not wait it out. The application keeps the default.
     static void setCommandTimeoutForTests(int ms);

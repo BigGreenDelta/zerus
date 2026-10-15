@@ -7,7 +7,7 @@ import re
 import subprocess
 import tarfile
 
-from macos_release import cask_for, require_template_cask, validate_macos_info
+from macos_release import cask_for, macos_assets, require_template_cask, validate_macos_info
 
 REPOSITORY = "ufna/zerus"
 PACKAGES = ("zerus", "zerus-ade-bin", "zerus-git")
@@ -109,9 +109,9 @@ def finish_candidate(directory, packages=PACKAGES):
                     member.mtime = 0
                     with path.open("rb") as content:
                         bundled.addfile(member, content)
-    # Zips are sealed too; validation accepts only the declared macOS or Windows asset.
+    # Containers are sealed too; validation accepts only declared platform assets.
     assets = sorted([*directory.glob("*.tar.gz"), *directory.glob("*.pkg.tar.zst"), *directory.glob("*.zip"),
-                     directory / "release-info.json"])
+                     *directory.glob("*.dmg"), directory / "release-info.json"])
     (directory / "SHA256SUMS").write_text("".join(f"{sha256(path)}  {path.name}\n" for path in assets))
 
 
@@ -139,7 +139,7 @@ def validate_candidate(directory, version, commit=None):
         sums[name] = digest
     required = {f"zerus-{version}-{suffix}.tar.gz" for suffix in ("source", "arch-x86_64", "aur")} | {"release-info.json"}
     if macos:
-        required.add(macos["asset"])
+        required.update(macos_assets(macos))
     # Stable candidates sealed before the Windows zip joined them (0.42.2 and
     # earlier) have none; retrying their publication must keep working. Later ones
     # must carry it, and a manifest that names the zip requires exactly that file.

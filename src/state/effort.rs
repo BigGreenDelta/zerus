@@ -765,16 +765,34 @@ fn settings_reason(record: &Value, models: &[ModelOption]) -> &'static str {
     ""
 }
 
+/// Settings apply now while the session is Ready as the listing reports it, or
+/// while a new session waits at its first prompt; otherwise they wait for Ready.
 fn ready(record: &Value) -> bool {
-    ((string(record, "activity") == "idle" && string(record, "phase") == "idle")
-        || input::first_message_candidate(record))
-        && telemetry::grouped_active(record) == 0
-        && record["active_tools"]
-            .as_object()
-            .is_none_or(|v| v.is_empty())
-        && !record["subagents"]
-            .as_object()
-            .is_some_and(|v| v.values().any(|c| string(c, "state") == "working"))
+    telemetry::settled(record) || input::first_message_ready(record)
+}
+
+/// Claude's PostModelSwitch: the exact model the session runs from now on,
+/// after /model in Terminal or from Zerus, an automatic switch or a resume. It
+/// stands until the transcript records a later turn or /model receipt; the
+/// transcript's length now marks the history it replaces.
+pub(super) fn observe_switch(record: &mut Value, event: &Value) {
+    let model = string(event, "to_model");
+    if string(record, "agent") != "claude" || !safe_model(model) {
+        return;
+    }
+    record["model"] = json!(model);
+    match claude_transcript(record) {
+        Ok(path) => {
+            // Claude writes the transcript with its first message.
+            record["model_source_offset"] = json!(fs::metadata(&path).map_or(0, |meta| meta.len()));
+            record["model_source_path"] = json!(path.to_string_lossy());
+        }
+        Err(_) => {
+            let fields = record.as_object_mut().unwrap();
+            fields.remove("model_source_path");
+            fields.remove("model_source_offset");
+        }
+    }
 }
 
 fn settings(record: &Value, live_pane: bool) -> Settings {
@@ -783,7 +801,11 @@ fn settings(record: &Value, live_pane: bool) -> Settings {
         && record["effort_source_offset"]
             .as_u64()
             .is_some_and(|offset| offset >= value.offset);
-    if value.model.is_empty() || confirmed {
+    let switched = string(record, "model_source_path") == value.path
+        && record["model_source_offset"]
+            .as_u64()
+            .is_some_and(|offset| offset >= value.offset);
+    if value.model.is_empty() || confirmed || switched {
         value.model = string(record, "model").into();
     }
     if value.effort.is_empty() || confirmed {
@@ -821,6 +843,23 @@ fn settings(record: &Value, live_pane: bool) -> Settings {
 /// cost before Apply and then confirms only that built-in notice.
 const CLAUDE_NOTICE: &str = "In a conversation that already has replies, Claude re-reads the full history on the next message after a model or effort change. That response is slower and uses more tokens.";
 
+/// Why `hgs effort` is unavailable, or "". It dispatches through
+/// `input::checked_settings`, so it waits for Ready as the listing reports it,
+/// including Kimi profile groups that outlast the main turn's Stop.
+fn effort_reason(record: &Value, known: bool, running: bool) -> &'static str {
+    if !["codex", "kimi", "claude"].contains(&string(record, "agent")) {
+        "Use the provider's Terminal to change effort"
+    } else if !known {
+        "Waiting for the provider's model and effort settings"
+    } else if !running {
+        "Resume the session to change effort"
+    } else if !telemetry::settled(record) {
+        "Wait for Ready to change effort"
+    } else {
+        ""
+    }
+}
+
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     let value = settings(record, live_pane);
     let mut choices = options(record, &value.model);
@@ -828,17 +867,11 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     if string(record, "agent") == "codex" {
         choices.retain(|value| value != "ultra");
     }
-    let reason = if !["codex", "kimi", "claude"].contains(&string(record, "agent")) {
-        "Use the provider's Terminal to change effort"
-    } else if value.effort.is_empty() || choices.is_empty() {
-        "Waiting for the provider's model and effort settings"
-    } else if !live_pane || !process_alive(record) {
-        "Resume the session to change effort"
-    } else if string(record, "phase") != "idle" || string(record, "activity") != "idle" {
-        "Wait for Ready to change effort"
-    } else {
-        ""
-    };
+    let reason = effort_reason(
+        record,
+        !value.effort.is_empty() && !choices.is_empty(),
+        live_pane && process_alive(record),
+    );
     let models = catalog(record);
     let settings_reason = settings_reason(record, &models);
     let when = if !live_pane || !process_alive(record) {
@@ -858,6 +891,28 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         "pending_settings_id":string(pending,"request_id"),
         "effort_change_supported":reason.is_empty(),"effort_change_reason":reason,
         "effort_scope":"session"})
+}
+
+/// A live session's summary while a chooser that only the terminal shows
+/// waits for an answer. Its saved record stays idle, but `hgs effort` and an
+/// immediate settings change refuse the chooser (`input::checked_settings`):
+/// effort changes wait for it, and settings changes are scheduled for Ready,
+/// as `dispatch_settings` schedules them. Earlier reasons keep precedence.
+pub(super) fn wait_for_chooser(output: &mut Value, reason: &str) {
+    if output["settings_apply_when"] == "now" {
+        output["settings_apply_when"] = json!("ready");
+    }
+    if output["effort_change_supported"] == true {
+        output["effort_change_supported"] = json!(false);
+        output["effort_change_reason"] = json!(reason);
+    }
+}
+
+/// Whether a settings change applies now rather than waiting for Ready. A
+/// chooser that only the terminal shows leaves the saved record Ready, but
+/// applying refuses it and no key may reach it, so the change is scheduled.
+fn applies_now(record: &Value, running: bool) -> bool {
+    running && ready(record) && journal::terminal_chooser(record).is_none()
 }
 
 #[derive(Deserialize)]
@@ -2008,9 +2063,10 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         );
     }
     let mut receipt = json!({"request_id":id,"name":name,"digest":digest,"status":"scheduled","run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,"model":model.id,"effort":effort,"scope":"session","at":now()});
+    let immediate = applies_now(&record, running);
     if request.expected_pending_id.is_some() {
         let pending_id = string(&record["pending_settings"], "request_id").to_owned();
-        if running && ready(&record) {
+        if immediate {
             receipt["status"] = json!("in_progress");
             atomic(&receipt_path, &receipt.to_string())?;
             apply_pending(name, record)?;
@@ -2023,7 +2079,7 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         println!("{receipt}");
         return Ok(0);
     }
-    if running && ready(&record) {
+    if immediate {
         let native = Request {
             request_id: id,
             expected_run_id: request.expected_run_id,
@@ -2035,9 +2091,10 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         if !running {
             recipes::argv(&record)?;
         }
-        // No terminal bytes on a busy or stopped session. The UI applies this
-        // explicit request once Ready; send also applies it before the next idle
-        // message. A busy message keeps the currently active settings.
+        // No terminal bytes on a busy or stopped session, or to a chooser. The
+        // UI applies this explicit request once Ready; send also applies it
+        // before the next idle message. A busy message keeps the currently
+        // active settings.
         let original = record.clone();
         record["pending_settings"] = json!({"request_id":id,"model":model.id,"effort":effort,"run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,"receipt_name":name,"receipt_run_id":request.expected_run_id});
         record["resume_settings"] = json!({"model":model.id,"effort":effort});
@@ -2199,6 +2256,53 @@ pub(super) fn resume_argv(record: &Value, mut args: Vec<String>) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settings_apply_now_when_the_listing_reports_ready() {
+        assert!(ready(&telemetry::stale_hook_child()));
+        for (case, record) in telemetry::remaining_work() {
+            assert!(!ready(&record), "{case}");
+        }
+    }
+    #[test]
+    fn effort_changes_are_offered_when_dispatch_accepts_them() {
+        // `hgs effort` dispatches through input::checked_settings, which
+        // requires the listing's Ready; a Kimi profile group still working
+        // after the main Stop leaves the saved activity idle.
+        assert_eq!(effort_reason(&telemetry::stale_hook_child(), true, true), "");
+        for (case, record) in telemetry::remaining_work() {
+            assert_eq!(effort_reason(&record, true, true), "Wait for Ready to change effort", "{case}");
+        }
+        let mut kimi = telemetry::stale_hook_child();
+        kimi.as_object_mut().unwrap().remove("kimi_native_roster");
+        kimi["subagents"]["coder"]["state"] = json!("finished");
+        assert_eq!(effort_reason(&kimi, true, true), "Wait for Ready to change effort");
+        assert_eq!(effort_reason(&kimi, true, false), "Resume the session to change effort");
+        assert_eq!(effort_reason(&kimi, false, true), "Waiting for the provider's model and effort settings");
+        kimi["agent"] = json!("opencode");
+        assert_eq!(effort_reason(&kimi, true, true), "Use the provider's Terminal to change effort");
+    }
+    #[test]
+    fn a_terminal_chooser_schedules_settings_and_keeps_earlier_reasons() {
+        let reason = "Wait until the agent's question is answered";
+        let output = |when: &str, effort: &str| {
+            let mut output = json!({"settings_apply_when":when,"settings_change_supported":true,"settings_change_reason":"",
+                "effort_change_supported":effort.is_empty(),"effort_change_reason":effort});
+            wait_for_chooser(&mut output, reason);
+            output
+        };
+        assert_eq!(output("now", ""), json!({"settings_apply_when":"ready","settings_change_supported":true,
+            "settings_change_reason":"","effort_change_supported":false,"effort_change_reason":reason}));
+        // A busy or stopped session keeps its own timing and reasons.
+        for (when, effort) in [("ready", "Wait for Ready to change effort"), ("resume", "Resume the session to change effort")] {
+            assert_eq!(output(when, effort), json!({"settings_apply_when":when,"settings_change_supported":true,
+                "settings_change_reason":"","effort_change_supported":false,"effort_change_reason":effort}));
+        }
+        // A stopped or working session schedules without reading a chooser.
+        assert!(!applies_now(&telemetry::stale_hook_child(), false));
+        for (case, record) in telemetry::remaining_work() {
+            assert!(!applies_now(&record, true), "{case}");
+        }
+    }
     #[test]
     fn provider_settings_ignore_text_and_thinking_content() {
         assert_eq!(
@@ -2684,6 +2788,54 @@ mod tests {
         let other = json!({"agent":"claude","agent_home":home.path(),"conversation_id":"another","transcript":path});
         assert!(history(&other).model.is_empty());
         assert!(settings_reason(&other, &catalog(&other)).contains("confirm this conversation"));
+    }
+
+    #[test]
+    fn claude_model_switch_names_the_exact_model_until_newer_history() {
+        let home = claude_home();
+        let id = "22222222-3333-4444-8555-666666666666";
+        let path = home.path().join(format!("{id}.jsonl"));
+        let turn = |model: &str| json!({"type":"assistant","sessionId":id,"isSidechain":false,
+            "requestedModel":model,"effort":"high","message":{"model":model,"content":[]}}).to_string() + "\n";
+        let switch = |model: Value| json!({"hook_event_name":"PostModelSwitch","session_id":id,
+            "from_model":"claude-opus-5-5","to_model":model,"requested_model":null,"source":"auto"});
+        fs::write(&path, turn("claude-opus-5-5")).unwrap();
+        let mut record = json!({"agent":"claude","agent_home":home.path(),"conversation_id":id,"transcript":path,
+            "model":"claude-opus-5-5","effort":"low"});
+        // /model in Terminal names the exact ID before Claude's next turn; effort stays Claude's.
+        observe_switch(&mut record, &switch(json!("claude-haiku-5-5")));
+        assert_eq!(record["model"], "claude-haiku-5-5");
+        assert_eq!(record["model_source_offset"], fs::metadata(&path).unwrap().len());
+        let value = settings(&record, false);
+        assert_eq!((value.model.as_str(), value.effort.as_str()), ("claude-haiku-5-5", "high"));
+        // An automatic switch has no /model receipt, and its model need not be in the picker.
+        observe_switch(&mut record, &switch(json!("claude-sonnet-5-5[1m]")));
+        assert_eq!(settings(&record, false).model, "claude-sonnet-5-5[1m]");
+        // A later turn is newer evidence.
+        fs::write(&path, turn("claude-opus-5-5") + &turn("claude-fable-5-1")).unwrap();
+        assert_eq!(settings(&record, false).model, "claude-fable-5-1");
+        // Invalid models, and other agents, change nothing.
+        let before = record.clone();
+        for model in [json!(""), json!("-flag"), json!("x".repeat(121)), json!("a\nb"), json!(5), Value::Null] {
+            observe_switch(&mut record, &switch(model));
+            assert_eq!(record, before);
+        }
+        let mut codex = json!({"agent":"codex","model":"gpt-6-astra"});
+        observe_switch(&mut codex, &switch(json!("claude-haiku-5-5")));
+        assert_eq!(codex, json!({"agent":"codex","model":"gpt-6-astra"}));
+        // Before the first message there is no transcript: every row written later is newer.
+        let fresh = home.path().join("33333333-4444-4555-8666-777777777777.jsonl");
+        let mut first = json!({"agent":"claude","agent_home":home.path(),
+            "conversation_id":"33333333-4444-4555-8666-777777777777","transcript":fresh});
+        observe_switch(&mut first, &switch(json!("claude-haiku-5-5")));
+        assert_eq!((first["model_source_path"].as_str(), first["model_source_offset"].as_u64()), (fresh.to_str(), Some(0)));
+        assert_eq!(settings(&first, false).model, "claude-haiku-5-5");
+        // An unconfirmed transcript keeps the model, with no stale mark.
+        let mut unconfirmed = json!({"agent":"claude","conversation_id":id,"transcript":"relative.jsonl",
+            "model_source_path":"relative.jsonl","model_source_offset":5});
+        observe_switch(&mut unconfirmed, &switch(json!("claude-haiku-5-5")));
+        assert_eq!(unconfirmed, json!({"agent":"claude","conversation_id":id,"transcript":"relative.jsonl",
+            "model":"claude-haiku-5-5"}));
     }
 
     #[test]

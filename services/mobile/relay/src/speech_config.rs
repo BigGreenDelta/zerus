@@ -13,6 +13,7 @@ pub const OPERATIONS: &[&str] = &[
     "speech_profile_test",
     "speech_config_status",
 ];
+#[cfg(feature = "server")]
 pub const READ_SQL: &str = "('speech_config','speech_config_status')";
 
 fn bounded(value: &Value, maximum: usize, empty: bool) -> Result<&str> {
