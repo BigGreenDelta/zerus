@@ -442,6 +442,16 @@ fn codex_model_footer(footer: &str, model: Option<&str>) -> bool {
         && words.next().is_none()
 }
 
+/// Codex's one-line model/folder status: this session's exact model or a GPT
+/// label, then a folder.
+fn codex_status_row(plain: &str, model: Option<&str>) -> bool {
+    let footer = plain.to_ascii_lowercase();
+    (codex_model_footer(plain, model) || footer.trim_start().starts_with("gpt-"))
+        && footer.split_once(" · ").is_some_and(|(_, path)| {
+            shown_path::status_folder(path, crate::platform::home().as_deref())
+        })
+}
+
 fn codex_footer_model(record: &Value) -> Option<&str> {
     if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
         return Some(model);
@@ -554,10 +564,7 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
                 // Windows Codex prints `~\…` or a drive path (`shown_path`).
                 let single_line_footer = placeholder
                     && lines[index + 1..].iter().all(|line| line.trim().is_empty())
-                    && (exact_model || footer.trim_start().starts_with("gpt-"))
-                    && footer.split_once(" · ").is_some_and(|(_, path)| {
-                        shown_path::status_folder(path, crate::platform::home().as_deref())
-                    });
+                    && codex_status_row(&plain, model);
                 return input_background || single_line_footer
                     || lines.last().is_some_and(|line| {
                         let plain: String = styled_row(line).iter().map(|(ch, _)| ch).collect();
