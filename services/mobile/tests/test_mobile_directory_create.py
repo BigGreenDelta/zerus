@@ -9,6 +9,9 @@ import unittest
 import uuid
 from unittest.mock import AsyncMock, patch
 
+from aiohttp import ClientSession
+
+from relay_fixture import start_relay
 from zerus_mobile import context, launch
 from zerus_mobile.connector import Connector, ConnectorError, MUTATIONS
 from zerus_mobile.server import validate_request
@@ -365,21 +368,22 @@ class NativeDirectoryCreate(unittest.IsolatedAsyncioTestCase):
                 node.journal.close()
 
 
-@unittest.skipUnless(os.environ.get('ZERUS_RELAY_BINARY'), 'Explicit isolated Rust relay target required')
 class RustDirectoryHttp(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        import test_rust_relay as fixture
-        self.fixture = fixture
-        await fixture.RustHttpContracts.asyncSetUp(self)
-
-    async def asyncTearDown(self):
-        await self.fixture.RustHttpContracts.asyncTearDown(self)
+        relay = await start_relay(rust_only=True)
+        self.addAsyncCleanup(relay.cleanup)
+        self.node = relay.node
+        self.phone = await relay.pair('Example phone', relay.invitation['pair_code'])
+        self.client = ClientSession(base_url=relay.url)
+        self.addAsyncCleanup(self.client.close)
 
     def headers(self, node=False):
-        return self.fixture.RustHttpContracts.headers(self, node)
+        return {'Authorization': 'Bearer ' + (self.node['node_token'] if node else self.phone['device_token'])}
 
-    async def call(self, *args, **kwargs):
-        return await self.fixture.RustHttpContracts.call(self, *args, **kwargs)
+    async def call(self, method, route, body=None, node=False, expected=200, headers=None):
+        async with self.client.request(method, route, json=body, headers=headers or self.headers(node)) as response:
+            self.assertEqual(response.status, expected, await response.text())
+            return await response.json()
 
     def request(self, computer=None):
         request = DirectoryCreate.request(self, '/workspace/new folder')

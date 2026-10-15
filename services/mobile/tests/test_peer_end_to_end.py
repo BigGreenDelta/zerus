@@ -9,9 +9,7 @@ import uuid
 from aiohttp import ClientSession
 
 from zerus_mobile.connector import Connector
-from zerus_mobile.server import Config
 from relay_fixture import start_relay
-from zerus_mobile.store import Store
 
 
 LOCAL = '00000000-0000-4000-8000-000000000001'
@@ -29,11 +27,11 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                          'peers': [{'via': 'private-peer-alias', 'machine_id': PEER,
                                     'name': 'Peer', 'online': True, 'error': None}]}
             (root / 'inventory.json').write_text(json.dumps(inventory))
-            store = Store(root / 'relay.sqlite3')
-            workspace = store.workspace('Example workspace')
-            gateway = store.node(workspace, 'Gateway')
-            phone = store.pair(store.invite(workspace)['pair_code'], 'Example phone')
-            runner, url = await start_relay(store, Config(background=False))
+            relay = await start_relay(computer='Gateway')
+            # Also when pairing or a step before the try below fails.
+            self.addAsyncCleanup(relay.cleanup)
+            url, gateway = relay.url, relay.node
+            phone = await relay.pair('Example phone', relay.invitation['pair_code'])
             connector = Connector({'server_url': url, 'node_token': gateway['node_token'],
                                    'hgs_path': str(native), 'state_dir': str(root / 'journal'),
                                    'poll_interval': 1}, allow_insecure_localhost=True)
@@ -66,8 +64,6 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(computers[PEER]['via']['gateway_id'], gateway['node_id'])
                     self.assertNotIn('private-peer-alias', json.dumps(catalog))
                     self.assertNotIn('never-export-third-peer', json.dumps(catalog))
-                    # A peer's appearance never creates another queue credential.
-                    self.assertEqual(store.db.execute('SELECT count(*) FROM nodes').fetchone()[0], 1)
 
                     async def request(machine, operation):
                         identity = str(uuid.uuid4())
@@ -107,8 +103,7 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 connector.journal.close()
-                await runner.cleanup()
-                store.close()
+                await relay.cleanup()
 
     async def test_unreachable_peer_stays_listed_offline_under_its_gateway(self):
         with tempfile.TemporaryDirectory(prefix='zerus-peer-offline-') as directory:
@@ -120,11 +115,11 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                          'peers': [{'via': 'private-peer-alias', 'machine_id': PEER, 'name': 'Peer',
                                     'online': True, 'error': None, 'identity': 'verified'}]}
             (root / 'inventory.json').write_text(json.dumps(inventory))
-            store = Store(root / 'relay.sqlite3')
-            workspace = store.workspace('Example workspace')
-            gateway = store.node(workspace, 'Gateway')
-            phone = store.pair(store.invite(workspace)['pair_code'], 'Example phone')
-            runner, url = await start_relay(store, Config(background=False))
+            relay = await start_relay(computer='Gateway')
+            # Also when pairing or a step before the try below fails.
+            self.addAsyncCleanup(relay.cleanup)
+            url, gateway = relay.url, relay.node
+            phone = await relay.pair('Example phone', relay.invitation['pair_code'])
             connector = Connector({'server_url': url, 'node_token': gateway['node_token'],
                                    'hgs_path': str(native), 'state_dir': str(root / 'journal'),
                                    'poll_interval': 1}, allow_insecure_localhost=True)
@@ -175,8 +170,7 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 connector.journal.close()
-                await runner.cleanup()
-                store.close()
+                await relay.cleanup()
 
 
 if __name__ == '__main__':

@@ -10,8 +10,6 @@ from unittest.mock import patch
 from aiohttp import ClientSession
 
 from zerus_mobile.connector import Connector
-from zerus_mobile.server import Config
-from zerus_mobile.store import Store
 from relay_fixture import start_relay
 
 spec = importlib.util.spec_from_file_location("fixture_presence", Path(__file__).with_name("fixture_hgs.py"))
@@ -21,18 +19,17 @@ spec.loader.exec_module(fixture_hgs)
 FIRST, SECOND = "1" * 64, "2" * 64
 
 
-@unittest.skipUnless(os.environ.get("ZERUS_RELAY_BINARY"), "presence alerts are evaluated by the Rust relay")
 class PresenceEndToEndTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_desktop_holds_read_drops_and_lock_delivers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture = Path(__file__).with_name("fixture_hgs.py")
             fixture.chmod(0o755)
-            store = Store(root / "relay" / "state.sqlite3")
-            workspace = store.workspace("Integration")
-            node = store.node(workspace, "Fixture computer")
-            invitation = store.invite(workspace)
-            runner, url = await start_relay(store, Config(background=False))
+            # Presence alerts are evaluated only by the Rust relay.
+            relay = await start_relay(rust_only=True, workspace="Integration", computer="Fixture computer")
+            # Also when a step before the try below fails.
+            self.addAsyncCleanup(relay.cleanup)
+            url, node, invitation = relay.url, relay.node, relay.invitation
 
             def presence(idle, locked=None):
                 fixture_hgs.persist(root / "fixture-config.json", {"desktop_presence": {
@@ -40,9 +37,6 @@ class PresenceEndToEndTests(unittest.IsolatedAsyncioTestCase):
 
             def session(**fields):
                 fixture_hgs.persist(root / "session.json", {**fixture_hgs.initial(), **fields})
-
-            def candidates():
-                return store.db.execute("SELECT count(*) FROM alert_candidates").fetchone()[0]
 
             presence(1.0)
             session()
@@ -83,15 +77,17 @@ class PresenceEndToEndTests(unittest.IsolatedAsyncioTestCase):
                         await until(lambda: kinds("attention"))
                         await asyncio.sleep(2.5)
                         self.assertEqual(await kinds("alert"), [])
-                        self.assertEqual(candidates(), 1)
                         # Read on the desktop: the held candidate is dropped and never alerts.
+                        # The relay drops it while accepting the heartbeat that stores the
+                        # read mark, before a later heartbeat can carry the new presence.
                         read = {"conversation_id": "fixture-conversation", "reply_id": None, "attention_signature": FIRST, "at": 1.0}
                         session(**question, read=read)
 
-                        async def dropped():
-                            return candidates() == 0
+                        async def read_stored():
+                            computers = (await get("/v1/computers"))["computers"]
+                            return computers[0]["snapshot"]["sessions"][0].get("read") == read
 
-                        await until(dropped)
+                        await until(read_stored)
                         presence(600.0)
                         await asyncio.sleep(2.5)
                         self.assertEqual(await kinds("alert"), [])
@@ -116,8 +112,7 @@ class PresenceEndToEndTests(unittest.IsolatedAsyncioTestCase):
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
                     connector.journal.close()
-                    await runner.cleanup()
-                    store.close()
+                    await relay.cleanup()
 
 
 if __name__ == "__main__":

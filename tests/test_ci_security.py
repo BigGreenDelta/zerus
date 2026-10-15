@@ -484,20 +484,30 @@ class WorkflowSecurityTests(unittest.TestCase):
                          [("", " -v"), ("env -u ZERUS_RELAY_BINARY ", " -p 'test_mobile_speech*.py' -v")])
         for variable in ("ZERUS_RELAY_BINARY", "ZERUS_DIRECTORY_TEST_HGS"):
             self.assertIn(f"\n          export {variable}=", relay)
+        # The relay fixtures' database driver is a test-only requirement.
+        self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile'
+                      " -r services/mobile/tests/requirements.txt\n", relay)
 
-    def test_relay_job_runs_rust_contracts_on_postgresql(self):
+    def test_relay_job_runs_contracts_and_fixtures_on_postgresql(self):
         relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
-        # These contracts are ignored or fall back to SQLite without the service URL.
+        # Without the service URL the Rust contracts fall back to SQLite or are
+        # ignored and the Rust fixture suites skip; the requirement fails instead.
         postgres = [step for step in steps(relay) if "ZERUS_RELAY_TEST_DATABASE_URL" in step]
-        self.assertEqual(len(postgres), 1)
-        self.assertIn("\n          ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:"
-                      "${{ job.services.postgres.ports['5432'] }}/postgres\n", postgres[0])
-        for contract in ("--test contracts postgres_cross_worker -- --ignored", "--test administration"):
-            self.assertIn(f"\n          cargo +1.85.0 test --locked {contract}\n", postgres[0])
+        self.assertEqual([re.match(r"      - name: (.*)", step)[1] for step in postgres],
+                         ["Rust format, lint and PostgreSQL storage contracts",
+                          "Released HTTP and outbound connector compatibility"])
+        for step in postgres:
+            self.assertIn("\n        env:\n          ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:"
+                          "${{ job.services.postgres.ports['5432'] }}/postgres\n"
+                          '          ZERUS_REQUIRE_RELAY_E2E: "1"\n', step)
+        for contract in ("", " --test contracts postgres_cross_worker -- --ignored"):
+            self.assertIn(f"\n          cargo +1.85.0 test --locked{contract}\n", postgres[0])
+        self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -v\n',
+                      postgres[1])
 
     def test_relay_job_checks_the_protocol_library_alone(self):
         relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
-        rust = next(step for step in steps(relay) if "name: Rust format, lint and local storage contracts" in step)
+        rust = next(step for step in steps(relay) if "name: Rust format, lint and PostgreSQL storage contracts" in step)
         # The connector links the library without the server feature on Rust 1.85.
         for command in ("clippy --locked --no-default-features --lib --test codec -- -D warnings",
                         "build --locked --no-default-features --lib",

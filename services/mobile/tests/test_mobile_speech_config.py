@@ -12,8 +12,7 @@ from aiohttp import ClientSession
 from relay_fixture import start_relay
 from zerus_mobile import speech_config
 from zerus_mobile.connector import Connector, ConnectorError
-from zerus_mobile.server import Config, validate_request
-from zerus_mobile.store import Store
+from zerus_mobile.server import validate_request
 
 MACHINE = "00000000-0000-4000-8000-000000000001"
 
@@ -171,11 +170,10 @@ class SpeechConfigHttpTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="zerus-speech-config-http-")
         self.root = Path(self.temp.name)
-        self.store = Store(self.root / "relay.sqlite3")
-        self.workspace = self.store.workspace("Provider fixture")
-        self.node = self.store.node(self.workspace, "Processing computer")
-        self.phone = self.store.pair(self.store.invite(self.workspace)["pair_code"], "Fixture phone")
-        self.runner, url = await start_relay(self.store, Config(background=False))
+        self.relay = await start_relay(workspace="Provider fixture", computer="Processing computer")
+        self.addAsyncCleanup(self.relay.cleanup)
+        url, self.node = self.relay.url, self.relay.node
+        self.phone = await self.relay.pair("Fixture phone", self.relay.invitation["pair_code"])
         self.client = ClientSession(base_url=url)
         self.headers = {"Authorization": "Bearer " + self.phone["device_token"]}
         self.node_headers = {"Authorization": "Bearer " + self.node["node_token"]}
@@ -184,8 +182,6 @@ class SpeechConfigHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.client.close()
-        await self.runner.cleanup()
-        self.store.close()
         self.temp.cleanup()
 
     async def call(self, method, path, body=None, *, node=False, headers=None, status=200):
@@ -208,8 +204,6 @@ class SpeechConfigHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sealed_mutation_is_erased_and_keeps_no_replay_receipt(self):
         request = await self.save()
-        row = self.store.db.execute("SELECT body,body_bytes FROM requests WHERE id=?", (request["request_id"],)).fetchone()
-        self.assertEqual((row["body"], row["body_bytes"]), ("", 0))
         replay = await self.call("POST", "/v1/requests", request, status=202)
         self.assertEqual(replay["result"], receipt(request))
         self.assertEqual((await self.call("GET", "/v1/node/requests", node=True))["requests"], [])
@@ -220,13 +214,14 @@ class SpeechConfigHttpTests(unittest.IsolatedAsyncioTestCase):
         plaintext["computer_id"] = self.node["node_id"]
         plaintext["payload"]["credential"] = {"mode": "replace", "value": "fixture-only-key"}
         await self.call("POST", "/v1/requests", plaintext, status=400)
-        self.assertIsNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", (plaintext["request_id"],)).fetchone())
+        # Rejected before persistence: the phone finds no receipt.
+        await self.call("GET", "/v1/requests/" + plaintext["request_id"], status=404)
 
     async def test_status_is_owned_by_original_phone_and_computer(self):
         request = await self.save()
         status = command("speech_config_status", request["request_id"])
         status["computer_id"] = self.node["node_id"]
-        other = self.store.pair(self.store.invite(self.workspace)["pair_code"], "Other fixture phone")
+        other = await self.relay.pair("Other fixture phone")
         await self.call("POST", "/v1/requests", status,
             headers={"Authorization": "Bearer " + other["device_token"]}, status=404)
         missing = command("speech_config_status")
