@@ -6,6 +6,7 @@
 use crate::pyvalue::{compare_numbers, hashable, PyError, PyNumber, PyResult};
 use serde_json::{json, Map, Value};
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use zerus_relay::json;
 
 pub const STREAMS: [&str; 4] = [
@@ -148,7 +149,8 @@ pub fn bound_inspection(
             .then_with(|| STREAMS[a.stream].cmp(STREAMS[b.stream]))
             .then_with(|| a.index.cmp(&b.index))
     });
-    let mut removed: [Vec<usize>; 4] = Default::default();
+    // Sets, as Python's: a large listing loses most of its rows.
+    let mut removed: [HashSet<usize>; 4] = Default::default();
     for item in &rows {
         if size <= maximum as i64 {
             break;
@@ -158,7 +160,7 @@ pub fn bound_inspection(
         size += omitted[item.stream].to_string().len() as i64 - before;
         size -= item.length as i64 + if remaining[item.stream] > 1 { 2 } else { 0 };
         remaining[item.stream] -= 1;
-        removed[item.stream].push(item.index);
+        removed[item.stream].insert(item.index);
     }
     for (stream, indices) in removed.iter().enumerate() {
         if indices.is_empty() {

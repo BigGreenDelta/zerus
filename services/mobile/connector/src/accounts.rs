@@ -48,8 +48,12 @@ fn digits(text: &str, count: usize) -> Option<&str> {
 
 /// `accounts.iso_reset`: an RFC 3339 timestamp `datetime.fromisoformat`
 /// accepts. Python's `\d` also matches other decimal digits, which
-/// `fromisoformat` then refuses, so only ASCII digits pass either way.
+/// `fromisoformat` then refuses, so only ASCII digits pass either way; any
+/// other non-ASCII text is refused before the fields are sliced by byte.
 fn iso_reset(value: &str) -> bool {
+    if !value.is_ascii() {
+        return false;
+    }
     #[allow(clippy::type_complexity)]
     let parse = || -> Option<(u32, u32, u32, u32, u32, u32, Option<(u32, u32)>)> {
         let number = |text: &str| text.parse::<u32>().ok();
@@ -672,6 +676,11 @@ mod tests {
             "2025-10-09T12:00:00+23:60",
             "0000-01-01T00:00:00Z",
             "2025-10-09T12:00:00.1234567890Z",
+            // Multi-byte text where a field is cut by byte offset.
+            "\u{20ac}\u{20ac}\u{20ac}\u{20ac}-01-01T00:00:00Z",
+            "2025-\u{20ac}0-01T00:00:00Z",
+            "2025-01-01T00:00:00+\u{20ac}0:00",
+            "\u{663}\u{660}\u{662}\u{665}-10-09T12:00:00Z",
         ] {
             assert!(!iso_reset(invalid), "{invalid}");
         }

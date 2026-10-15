@@ -498,7 +498,10 @@ impl<N: Native + 'static> Connector<N> {
                     delay = (delay * 2.0).max(interval).min(60.0);
                 }
             }
-            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+            // Any finite `poll_interval` of at least 1 s is valid; one beyond
+            // Duration's range sleeps as long as tokio can, as Python's would.
+            let pause = Duration::try_from_secs_f64(delay).unwrap_or(Duration::MAX);
+            tokio::time::sleep(pause).await;
         }
     }
 
@@ -564,11 +567,13 @@ impl<N: Native + 'static> Connector<N> {
                     if attempts < REFUSED_ATTEMPTS {
                         continue;
                     }
-                    self.state.borrow_mut().refused.remove(&request_id);
                     log("WARNING", REJECTED);
                 }
                 Err(error) => return Err(error.into()),
             }
+            // Accepted, retired or given up: no attempt of this row is due
+            // any more, so it no longer shortens the long poll.
+            self.state.borrow_mut().refused.remove(&request_id);
             self.journal
                 .delivered(&request_id, self.wall())
                 .map_err(LoopError::Fatal)?;

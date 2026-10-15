@@ -20,14 +20,10 @@ import uuid
 
 from aiohttp import web
 
-from connector_harness import (BlackBoxCase, CONTEXT_KEYS, CONVERSATION_ID, FakeRelay, HELP_TEXT, IMPLEMENTATION,
-                               JSON_DEPTH, JSON_VALUES, MIB, RESTART_ERROR, RUN_ID, SESSION, canonical, default_rules,
-                               inspection, json_limits, stopped_journal)
+from connector_harness import (BlackBoxCase, CLOCK_SCALE_HOOK, CONTEXT_KEYS, CONVERSATION_ID, FakeRelay, HELP_TEXT,
+                               IMPLEMENTATION, JSON_DEPTH, JSON_VALUES, MIB, NATIVE_TIMEOUT_HOOK, RESTART_ERROR, RUN_ID,
+                               SESSION, canonical, default_rules, inspection, json_limits, stopped_journal)
 
-# Settings only a Rust build with the non-default `test-hooks` feature reads
-# (connector_harness.py names them on the suites branch).
-NATIVE_TIMEOUT_HOOK = "ZERUS_CONNECTOR_TEST_NATIVE_TIMEOUT"
-CLOCK_SCALE_HOOK = "ZERUS_CONNECTOR_TEST_CLOCK_SCALE"
 READ_HELP = HELP_TEXT + "hgs read <session> --json\n"
 READ_RECEIPT = {"ok": True, "applied": {"reply_id": False, "attention_signature": False}, "read": None}
 STORED_INVALID = "the stored native result could not be uploaded; this request will not execute again"
@@ -150,6 +146,27 @@ class ReadTests(RuntimeCase):
         for listing in self.hgs.calls("ls"):
             self.assertLessEqual(set(listing["fds"]), {0, 1, 2})
 
+    async def test_native_children_start_with_the_default_sigpipe_disposition(self):
+        # Both connectors ignore SIGPIPE themselves; their hgs children must
+        # not inherit that. A shell in front of the scripted hgs records its
+        # own ignored-signal mask before Python, which ignores SIGPIPE, starts.
+        if not os.path.isfile("/proc/self/status"):
+            self.skipTest("needs /proc")
+        record = self.scratch / "ignored-signals"
+        wrapper = self.scratch / "hgs-wrapper"
+        wrapper.write_text("#!/bin/sh\n"
+                           "while read -r key value; do\n"
+                           f"  if [ \"$key\" = SigIgn: ]; then echo \"$value\" >> '{record}'; fi\n"
+                           "done < /proc/$$/status\n"
+                           f"exec '{self.hgs.bin / 'hgs'}' \"$@\"\n")
+        wrapper.chmod(0o700)
+        process = await self.launch(self.config(hgs_path=str(wrapper)))
+        self.assertEqual((await self.submit(self.request("inspect"), process))["state"], "completed")
+        masks = record.read_text().split()
+        self.assertTrue(masks)
+        for mask in masks:
+            self.assertFalse(int(mask, 16) & 1 << (signal.SIGPIPE - 1), f"a native child ignores SIGPIPE: {mask}")
+
     async def test_a_request_at_the_relay_parse_limits_is_judged_not_refused(self):
         # The relay admits depth 32 and 50,000 values, then adds its batch
         # envelope: the connector parses the batch and judges the request.
@@ -196,6 +213,14 @@ class ReadTests(RuntimeCase):
             self.assertEqual(len(self.hgs.calls("inspect")), 1)
         finally:
             await elsewhere.stop()
+
+    async def test_a_poll_interval_beyond_any_timer_keeps_serving_requests(self):
+        # Any finite poll_interval of at least one second is valid: after its
+        # first heartbeat the connector waits as long as its timers allow.
+        process = await self.launch(self.config(poll_interval=1e20))
+        self.assertEqual((await self.submit(self.request("inspect"), process))["state"], "completed")
+        self.assertEqual(len(self.relay.heartbeats()), 1)
+        self.assertIsNone(process.returncode)
 
     async def test_logs_carry_neither_the_relay_url_nor_the_token(self):
         process = await self.launch()
@@ -397,6 +422,22 @@ class DivergenceTests(RuntimeCase):
         self.assertTrue(all(b - a >= 0.9 for a, b in zip(attempts, attempts[1:])), attempts)
         self.assertIn("Relay rejected a stored result; preserving local outcome", process.output())
         self.assertEqual(self.relay.state(refused["request_id"]), "claimed")
+
+    async def test_an_upload_accepted_on_its_second_attempt_restores_the_long_poll(self):
+        # Divergence b in both connectors: once the retried upload is
+        # accepted, no attempt is due any more and polls wait 25 s again.
+        refused = self.request("inspect")
+        path = f"/v1/node/requests/{refused['request_id']}/result"
+        self.relay.rule("POST", path, 422, times=1)
+        process = await self.launch(env={CLOCK_SCALE_HOOK: "30"})
+        await self.relay.queue(refused)
+        accepted = (await self.until(lambda: [exchange.index for exchange in self.relay.exchanges
+                                              if exchange.path == path and exchange.status == 200], 20,
+                                     "the accepted second attempt", process))[0]
+        polls = await self.until(lambda: [exchange for exchange in self.polls() if exchange.index > accepted], 10,
+                                 "the next poll", process)
+        self.assertEqual(polls[0].query, "wait=25")
+        self.assertEqual([status for _, status in self.relay.uploads(refused["request_id"])], [422, 200])
 
     async def test_a_stored_row_the_relay_cannot_accept_uploads_a_substitute(self):
         # Divergence g: Python re-encodes a stored NaN, which the relay
