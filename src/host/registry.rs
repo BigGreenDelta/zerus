@@ -6,9 +6,12 @@
 //! launch ID: a retried request returns the session the first one started,
 //! also for a while after that session ended; `launch_status` reports by the
 //! same ID how that session ended, with the last lines of its screen, so that
-//! a launch can report a program that could not start. Every request but
-//! `attach` and `supervisor_register`, which turn their connection into a
-//! stream, is answered here; the connection handling lives in `server.rs`.
+//! a launch can report a program that could not start. Those lines, read once
+//! the session's output has drained, also complete the report its supervisor
+//! left in the state directory (`state::launches::drained`) before the session
+//! leaves the listing. Every request but `attach` and `supervisor_register`,
+//! which turn their connection into a stream, is answered here; the
+//! connection handling lives in `server.rs`.
 //!
 //! A session starts only while local sessions are enabled (`enabled`, the
 //! marker check of `gate`): a create that races `hgs session-host uninstall`
@@ -40,8 +43,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    path::Path,
-    sync::{Arc, Condvar, Mutex, PoisonError},
+    path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex, OnceLock, PoisonError},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -188,6 +191,9 @@ pub(crate) struct Host<L: Launcher> {
     /// Creates run one at a time, so names and launch IDs are checked once.
     creating: Mutex<()>,
     recovery: Mutex<Recovery>,
+    /// Where the launches of the host's state directory keep their evidence;
+    /// unset, the host completes no launch report.
+    launch_reports: OnceLock<PathBuf>,
 }
 
 fn error(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
@@ -276,7 +282,13 @@ impl<L: Launcher> Host<L> {
             changed: Condvar::new(),
             creating: Mutex::new(()),
             recovery: Mutex::default(),
+            launch_reports: OnceLock::new(),
         })
+    }
+
+    /// Complete the launch reports in `folder` as their sessions end.
+    pub(crate) fn complete_launch_reports_in(&self, folder: PathBuf) {
+        let _ = self.launch_reports.set(folder);
     }
 
     /// Supervise the recovery worker with `start` once a client asks (D14).
@@ -681,6 +693,11 @@ impl<L: Launcher> Host<L> {
         // The output has drained: the screen holds what the program said
         // last, such as why it could not start.
         let output = last_lines(&session.joined_text(), ENDING_LINES, ENDING_BYTES);
+        // Before a listing can miss the session: what its supervisor read of
+        // the screen may lack the last lines.
+        if let Some(folder) = self.launch_reports.get() {
+            crate::state::launches::drained(folder, &session.launch_id, &output);
+        }
         let mut registry = self.registry();
         registry.sessions.remove(&session.id);
         registry.launches.insert(

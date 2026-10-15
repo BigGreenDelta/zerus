@@ -1090,7 +1090,7 @@ under `HGS_CONFIG_DIR`, and never touch agents, tmux servers, DeepSeek hosts or
 `hgs-recovery`. `hgs swarm get` reports `worker: {running, current}`; when a
 running worker stays outdated, Settings → Mobile connection asks you to restart the
 sync service. Windows has no service manager for the worker; the desktop app runs
-it there ([Windows control console](#windows)).
+it there ([Windows](#windows)).
 
 **Swarm → Conflicts** explains the affected session, archived session, project or
 folder. Compare the values and the computers that saved them. **Shown now** marks
@@ -1210,21 +1210,65 @@ The UI caches at most 64 snapshots and 8 MiB. Cleanup is described in
 
 ### Cleaning up worktrees
 
-**Worktrees…** in the Projects heading opens an overview across all visible
-projects and computers, without selecting a project folder first. Project and
-computer filters retain exact identities, even when names or paths match.
-Repositories linked from several projects or subfolders appear once per computer.
-The list shows each checkout's branch, path, related sessions and cleanup state;
-the details include the owning computer, commit and reasons that prevent removal.
-Catalog reads run two at a time. Cleanup review runs on demand for the selected
-repository; offline snapshots remain readable but cannot be cleaned up.
-**Clean up repository…** opens the existing batch review, and **Remove worktree…**
-or **Forget missing worktree…** opens it for the selected linked checkout.
+**Worktrees…** in the Projects heading opens a cleanup workspace across visible
+projects and computers. Repositories linked from several projects or subfolders
+appear once per computer; filters preserve exact project and machine identities.
+Four groups separate **Cleanup candidates**, **Review work**, **In use** and
+**Not checked**. Main checkouts and ordinary folders are hidden by default.
+Search, sort and refresh share one compact toolbar. **Filters** opens project,
+computer and state controls and the main-checkout toggle; its count shows active
+filters without taking height from the workspace. Folder names are emphasized,
+while a separate muted row with a Git branch icon identifies the branch.
+For a single-computer scope, the coverage line names that computer and the
+redundant computer column is hidden.
+Search matches folder, branch, project and related session names; sorting offers
+largest folders, oldest Git activity or folder names. Sizes are apparent file
+sizes, not a promise of physical disk space reclaimed; incomplete measurements
+are marked as lower bounds.
+
+Catalog reads run two at a time, and repository reviews run sequentially in the
+background. Coverage reports checked/known worktrees and incomplete catalogs.
+After the first bounded repository review, unchecked known rows are checked
+individually, including rows beyond the native 64-row review limit. Catalogs
+remain bounded at 512 entries; this is not a scan of every folder on a computer.
+Offline snapshots remain readable but cannot be selected for removal. Expired
+checks are refreshed; changed fingerprints invalidate previous selections.
+
+Use **Read files and commits** (the inspector's refresh button) to view
+changed/untracked file names, tracked diffs and up to
+30 original commits absent from the base history. The base comparison is a
+two-way diff and can include later changes on the base. **Local files** previews
+ignored entries and their contents; **Sessions** opens the exact related
+conversation on its owning computer. Reads are bounded (200 changed files or
+directory entries per page and 128 KiB per text preview), with truncation shown. **Browse all files** and **Next** continue beyond
+the largest ignored entries or the first directory page. Binary
+files are identified, and symlinks are not followed. Git refs are local snapshots;
+inspection never fetches. No-base and failed checks are reported explicitly.
+
+The inspector keeps its longer metadata under **Details**. Local file names use
+the available column width; browsing and pagination share one small navigation
+row. The empty text preview stays hidden until a file is opened, and both the
+file list and the opened preview keep usable, resizable space. Related sessions
+have session icons and retain their exact conversation targets.
+
+**Select candidates** selects only currently visible, verified cleanup candidates.
+Folders with local files outside Git require individual selection, even when
+Git reports them clean and merged. **Review cleanup** shows the exact selected
+folders across repositories and computers, estimated space and branch handling.
+Local data needs a separate explicit checkbox; deletion checks its reviewed
+metadata fingerprint again. A missing folder only loses its Git registration.
+Each result remains visible, and failures or uncertain replies are not replayed. **Stop after this folder**
+lets the current operation finish and leaves the remaining folders untouched.
+
+Integration evidence distinguishes ancestor commits, identical file trees and
+cherry-pick-equivalent patches. Equivalent content is useful when reviewing
+squash/cherry-pick workflows, but only Git ancestry permits optional branch
+removal. Original branches otherwise remain available.
 
 Removal is always explicit and is reviewed on the computer that owns the
 checkout. **Clean up…** in Projects or the session inspector lists the linked
 worktrees of the repository as **Ready** (preselected), **Review** (removable but
-with notes such as unmerged commits, archived sessions or activity in the last
+with notes such as local ignored files, unmerged commits, archived sessions or activity in the last
 24 hours), **Missing** (the folder is gone; only Git's record is forgotten) or
 **Blocked**. The button shows the number of ready and missing worktrees; that
 review runs at most every five minutes while the panel is visible and never
@@ -1251,7 +1295,9 @@ When **Move to archive** succeeds for the last session in a linked worktree, the
 status bar briefly offers **Clean up worktree…**, which opens the same review for
 that worktree. The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE
---common-dir DIR --fingerprint HASH [--delete-branch] --json`. Machines with an
+--common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch]
+--json`. Explicit inspection is `hgs [@host] worktrees inspect --path WORKTREE
+--common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.
 
 ## Machines and accounts
@@ -1429,7 +1475,7 @@ Arch packages, `~/.local/lib/...` from `tray/install.sh`), which alone needs Qt
 WebEngine (`qt6-webengine` is an optional dependency on Arch). The GUI loads it
 when a DeepSeek session is first shown. Without it, or on macOS, there is no
 Native UI tab, and Sign in, Open terminal and the other Native UI actions open
-the browser instead; the Windows control console does not offer the native UI
+the browser instead; Zerus on Windows does not offer the native UI
 ([Windows](installation.md#windows)). Builds choose with the CMake option
 `HGS_NATIVE_UI_PLUGIN` (`AUTO` by default: built when Qt WebEngine is found).
 `hgs native-ui SESSION --json` returns a private connection URL containing a token;
@@ -1769,7 +1815,7 @@ No reverse connection is created by default. Explicit peer setup uses
 
 | Desktop option | Purpose / default |
 |---|---|
-| `--hgs PATH` | CLI executable; otherwise `hgs=` in the tray config, PATH, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`; on Windows `hgs.exe` next to `hgs-tray.exe`, then PATH |
+| `--hgs PATH` | CLI executable; otherwise `hgs=` in the tray config, PATH, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`; on Windows `hgs.exe` next to `hgs-tray.exe`, then PATH, and the stable CLI once local sessions are enabled ([Windows](#windows)) |
 | `--local-poll MS` | Local tray polling, 2000 ms |
 | `--peer-poll MS` | Peer tray polling, 60000 ms |
 | `--terminal TEMPLATE` | External terminal launcher with `{cmd}` |
@@ -1797,34 +1843,61 @@ repository.
 
 <a id="windows"></a>
 
-## Windows control console
+## Windows
 
-On Windows, `hgs.exe` and `hgs-tray.exe` manage remote Linux and macOS machines;
-the local session host is not compiled in. See
-[installation and limitations](installation.md#windows).
+On Windows, `hgs.exe` and `hgs-tray.exe` manage remote Linux and macOS machines as
+a control console. Once local sessions are enabled on the computer, `hgs.exe` also
+runs agent sessions there, in a session host of the user on ConPTY
+([Windows Phase 2](superpowers/specs/2026-10-13-windows-native-host-design.md)).
+See [installation and limitations](installation.md#windows) and
+[testing the session host](windows-host-testing.md).
+
+**Local sessions.** `hgs session-host install | status | stop | uninstall [--json]`
+exists only on Windows and manages only the computer it runs on; for another
+machine, `hgs @host session-host` exits with code 2. `install` enables local
+sessions: it stages the stable CLI `%USERPROFILE%\.local\bin\hgs.exe` and a host
+image below `%USERPROFILE%\.local\share\hgs\host`, then writes the `local-sessions`
+marker in the configuration directory. `status` reports the marker, the staged
+files and the running host without starting one; `stop` stops an idle host;
+`uninstall` refuses while sessions run, then removes the marker and leaves the
+staged files. The marker alone decides, so a stopped or crashed host leaves the
+computer enabled with its saved sessions. The host starts with a launch, resume or
+fork, never with a listing, and exits a few seconds after its last session. Every
+session runs the stable CLI's `hgs.exe --run`, which starts the agent; tracked
+Claude Code, Codex and Kimi sessions get hooks that name the stable CLI. `hgs a`
+needs a console such as Windows Terminal, not the pipes of the mintty Git Bash
+window, and detaches with `Ctrl+B d`.
 
 **Commands.** Commands for another machine (`hgs @host …`) work as on Linux; the
-remote command stays `~/.local/bin/hgs` with POSIX quoting. Locally, `ls`,
-`machine`, `project`, `swarm` and `presence` work. `account ls` and `account
-default` without an ID print an empty catalog, and `account copy` works between
-two remote machines. Every other local command, such as `a`, `send`, `inspect` of a
-local session or a launch without `@host`, exits with code 2:
+remote command stays `~/.local/bin/hgs` with POSIX quoting. Until local sessions
+are enabled, `ls`, `machine`, `project`, `swarm`, `presence` and `session-host`
+work locally. `account ls` and `account default` without an ID print an empty
+catalog, and `account copy` works between two remote machines. Every other local
+command, such as `a`, `send`, `inspect` of a local session or a launch without
+`@host`, exits with code 2:
 
 ```text
-hgs: Local sessions are not supported on Windows yet; choose a remote machine.
+hgs: Local sessions are not enabled on this computer; enable them on the Machines page or run hgs session-host install, or choose a remote machine.
 ```
 
-The DeepSeek Native UI commands (`native-ui`, `account login native-dsh`, `a dsh/…`)
-and the mobile-peer commands also exit with code 2, each with its own message.
+With local sessions enabled, local session commands run this computer's sessions
+in the session host. `paste`, `clip` and `notify` still exit with code 2
+(`hgs: clip is not supported on Windows`), DeepSeek sessions and voice messages are
+refused with their own messages, and OpenCode is not supported there. The DeepSeek
+Native UI commands (`native-ui`, `account login native-dsh`, `a dsh/…`) and the
+mobile-peer commands exit with code 2 in both cases, each with its own message.
 
-**Listing.** The local element of `hgs ls --json` and `hgs ls --json --local` is a
-control-only box with `"local_sessions": false`, `projects: {}` and `sessions: []`.
-Its metrics include CPU, memory and uptime; load averages are null. Plain `hgs ls`
-prints `(control console: sessions run on remote machines)` for this computer, and
-`--dry-run ls` prints nothing for it. The computer's name is `HGS_SELF` when set,
-otherwise its lowercase `COMPUTERNAME`. Configuration and state live under `HOME`
-when set, otherwise `%USERPROFILE%`, in the usual `.config\hgs` and
-`.local\state\hgs` folders.
+**Listing.** Until local sessions are enabled, the local element of `hgs ls --json`
+and `hgs ls --json --local` is a control-only box with `"local_sessions": false`,
+`projects: {}` and `sessions: []`; plain `hgs ls` prints
+`(control console: sessions run on remote machines)` for this computer, and
+`--dry-run ls` prints nothing for it. With local sessions enabled, it lists this
+computer's projects and sessions as on Linux. Either way it carries `local_host`,
+the session host as found ([JSON](#json-and-external-clients)), and its metrics
+include CPU, memory and uptime; load averages are null. The computer's name is
+`HGS_SELF` when set, otherwise its lowercase `COMPUTERNAME`. Configuration and
+state live under `HOME` when set, otherwise `%USERPROFILE%`, in the usual
+`.config\hgs` and `.local\state\hgs` folders.
 
 **OpenSSH.** Windows OpenSSH never exits after it has used a synchronous pipe for
 one of its standard streams, the kind that Rust's standard library, Python and
@@ -1849,9 +1922,10 @@ kills leaves its folder behind until the next interactive link, which removes th
 folders of ended processes.
 
 **Embedded terminal.** The built-in Terminal runs `hgs.exe @host a SESSION
---existing` in a Windows pseudoconsole (ConPTY). Disconnect closes the
-pseudoconsole, waits up to a second and then ends `hgs.exe` and `ssh.exe` through a
-job object; the session keeps running on the remote machine.
+--existing`, or `hgs.exe a SESSION --existing` for a session on this computer, in a
+Windows pseudoconsole (ConPTY). Disconnect closes the pseudoconsole, waits up to a
+second and then ends `hgs.exe` and `ssh.exe` through a job object; the session
+keeps running on the remote machine or in the session host.
 
 **Machine setup.** `hgs machine setup` (**Install / update HGS…**) needs a source
 checkout on Windows. It packs the checkout with the system `tar.exe` and refuses one
@@ -1868,33 +1942,46 @@ desktop app, run `hgs swarm worker` in a terminal or `hgs swarm sync` when neede
 
 **Desktop app.** It uses the `hgs.exe` next to `hgs-tray.exe`, then the one on
 `PATH`; `--hgs` or `hgs=` in `tray.conf` overrides both, and the Linux and macOS
-fallback to `~/.local/bin` and Homebrew does not apply. Settings are in
+fallback to `~/.local/bin` and Homebrew does not apply. Without `--hgs` or `hgs=`,
+each start first asks that `hgs.exe` for `session-host status`, before the tray
+icon appears; once local sessions are enabled, the app then runs the stable CLI
+instead, after `session-host install` when that `hgs.exe` differs from the staged
+one and is at least as new. A small *Starting Zerus…* note shows while these
+checks take longer than half a second. Settings are in
 `%APPDATA%\hgdev\hgs-tray.ini`, with drafts beside it, and one instance runs per
-user. When the local box reports
-`local_sessions: false`, the app offers remote machines only: in New session,
-Overview, the tray menu, Accounts, Projects and search. The Machines page lists
-this computer as a control console without SSH settings. Settings → Mobile
-connection is hidden, automatic recovery settings are saved to the first
-reachable remote machine, no desktop presence is recorded, and this computer is
-listed at most once every 15 seconds. Attention notices are tray notifications
-with a taskbar badge. A start without options opens the workspace, because
-Windows 11 first hides a new notification icon in the overflow; `--background`
-starts in the notification area only, as a Startup-folder shortcut should.
-Starting `hgs-tray.exe` again opens the running app's workspace, unless with
-`--background`. After a main-thread watchdog abort, Windows Error Reporting
-restarts the app with the same settings in the background (`--background`,
-never `--sessions`): a window that opens by itself after a crash would be a
-surprise.
+user. When the local box reports `local_sessions: false`, the app offers remote
+machines only: in New session, Overview, the tray menu, Accounts, Projects and
+search. The Machines page lists this computer as a control console without SSH
+settings, with **Enable local sessions** (`hgs.exe session-host install`, after a
+confirmation), and shows the session host's state, PID, ConPTY, integrity level
+and Windows session in both modes. Automatic recovery settings of a control
+console are saved to the first reachable remote machine, and it is listed at most
+once every 15 seconds. With local sessions enabled, New session and Accounts offer
+this computer without DeepSeek and OpenCode, the shell entry is
+**Run PowerShell**, voice messages to its sessions are disabled with the reason as
+the tooltip, and it is listed at most once every 5 seconds. In both modes,
+Settings → Mobile connection is hidden and no desktop presence is recorded.
+Attention notices are tray notifications with a taskbar badge. A start without
+options opens the workspace, because Windows 11 first hides a new notification
+icon in the overflow; `--background` starts in the notification area only, as a
+Startup-folder shortcut should. Starting `hgs-tray.exe` again opens the running
+app's workspace, unless with `--background`. After a main-thread watchdog abort,
+Windows Error Reporting restarts the app with the same settings in the background
+(`--background`, never `--sessions`): a window that opens by itself after a crash
+would be a surprise.
 
-**Updates.** The portable zip has no installer or self-update, and only nightly
-releases carry it. Settings → Updates therefore uses the nightly channel by
-default on a portable installation. It reports a nightly with a newer product
-version than the running app and links to its release page; nightlies of the same
-product version cannot be told apart. Stable releases and Dev builds have no
-Windows build: on those channels Updates says so, never reports an update and
-offers no dev download. The zip is published on GitHub only: the zerus.dev mirror
-neither stores it nor lists it in the v1 desktop feed, and the v2 Dev catalogs
-have no Windows artifact.
+**Updates.** The portable zip has no installer or self-update. Stable releases
+after 0.42.2 and nightly releases carry the same tested zip. The zip cannot tell
+which of them it came from, so a portable installation starts on the nightly
+channel; choose Stable to follow stable releases only. Settings → Updates reports
+a stable release or nightly with a newer product version than the running app and
+links to its release page; nightlies of the same product version cannot be told
+apart. Stable 0.42.2 and earlier have no Windows build and are never reported as
+an update, even when newer: Updates says so and points to the nightly channel.
+Dev builds have no Windows build either: on that channel Updates says so, never
+reports an update and offers no dev download. The zip is published on GitHub
+only: the zerus.dev mirror neither stores it nor lists it in the v1 desktop feed,
+and the v2 Dev catalogs have no Windows artifact.
 
 ## JSON and external clients
 
@@ -1926,10 +2013,10 @@ an empty array. A minimal shape is:
 }
 ```
 
-A computer that runs no sessions of its own (`hgs.exe` on Windows) adds
-`"local_sessions": false` and returns empty `projects` and `sessions`. The key
-appears only when false; a missing key means true, so Linux and macOS snapshots
-are unchanged. [Windows control console](#windows).
+A computer that runs no sessions of its own (`hgs.exe` on Windows until local
+sessions are enabled) adds `"local_sessions": false` and returns empty `projects`
+and `sessions`. The key appears only when false; a missing key means true, so Linux
+and macOS snapshots are unchanged. [Windows](#windows).
 
 On Windows the local box also carries `local_host`, the session host as found
 (never started): `state` is `not-installed`, `stopped`, `running` or `unavailable`
@@ -1960,7 +2047,8 @@ appear newest first, at most 32, in `ended_launches`, as `{launch_id, name, code
 output}`. `code` is the exit code of the session's supervisor, or null when no
 supervisor reported one (a command that runs without one, a supervisor that was
 killed); `output` holds the last 8 lines (2 KiB) of the session's screen, followed
-by the error that stopped the supervisor. A detached launch records its launch ID
+by the error that stopped the supervisor (on Windows, as the screen shows both
+once the session's output has drained). A detached launch records its launch ID
 once the terminal has created the session, and a supervisor that ends within two
 minutes without a confirmed conversation records how; a run that confirmed one
 leaves its record to carry the launch ID instead. These records live in

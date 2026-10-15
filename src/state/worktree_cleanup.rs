@@ -44,7 +44,9 @@ fn plural(count: usize, word: &str) -> String {
 }
 
 fn text(bytes: Vec<u8>) -> String {
-    String::from_utf8_lossy(&bytes).trim_end_matches('\n').to_owned()
+    String::from_utf8_lossy(&bytes)
+        .trim_end_matches('\n')
+        .to_owned()
 }
 
 fn step(total: Instant, seconds: u64) -> Instant {
@@ -57,7 +59,11 @@ fn resolved(path: &Path) -> PathBuf {
     if let Ok(path) = crate::platform::canonical(path) {
         return path;
     }
-    match (path.parent().and_then(|p| crate::platform::canonical(p).ok()), path.file_name()) {
+    match (
+        path.parent()
+            .and_then(|p| crate::platform::canonical(p).ok()),
+        path.file_name(),
+    ) {
         (Some(parent), Some(name)) => parent.join(name),
         _ => path.to_path_buf(),
     }
@@ -81,13 +87,15 @@ fn reference(record: &Value) -> Reference {
 }
 
 fn deepseek_bindings() -> Vec<Reference> {
-    let files=["dsh/bindings","opencode/bindings"].into_iter().flat_map(|directory|fs::read_dir(root().join(directory)).into_iter().flatten());
+    let files = ["dsh/bindings", "opencode/bindings"]
+        .into_iter()
+        .flat_map(|directory| fs::read_dir(root().join(directory)).into_iter().flatten());
     files
         .flatten()
         .take(5000)
         .filter(|file| file.path().extension().is_some_and(|e| e == "json"))
         .filter_map(|file| serde_json::from_slice::<Value>(&fs::read(file.path()).ok()?).ok())
-        .filter(|record| ["dsh","opencode"].contains(&string(record,"backend")))
+        .filter(|record| ["dsh", "opencode"].contains(&string(record, "backend")))
         .map(|record| reference(&record))
         .collect()
 }
@@ -130,7 +138,11 @@ fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
 
 /// `Some(true)` when `commit` is reachable from `base`, `None` when Git failed.
 fn ancestor(cwd: &Path, commit: &str, base: &str, deadline: Instant) -> Option<bool> {
-    match git(cwd, &["merge-base", "--is-ancestor", commit, base], deadline) {
+    match git(
+        cwd,
+        &["merge-base", "--is-ancestor", commit, base],
+        deadline,
+    ) {
         Ok(_) => Some(true),
         Err(e) if e.state == "metadata_error" && e.detail.is_empty() => Some(false),
         Err(_) => None,
@@ -176,32 +188,57 @@ fn status(tree: &Path, deadline: Instant) -> std::result::Result<Status, GitErro
                 }
             }
         }
-        result.entries.push(String::from_utf8_lossy(field).into_owned());
+        result
+            .entries
+            .push(String::from_utf8_lossy(field).into_owned());
     }
     Ok(result)
 }
 
 /// Apparent size of an ignored entry, without following symlinks.
-fn size(path: &Path, entries: &mut usize, deadline: Instant) -> (u64, bool) {
+fn measure(path: &Path, entries: &mut usize, deadline: Instant) -> (u64, bool, String) {
     let mut total = 0;
     let mut pending = vec![path.to_path_buf()];
+    let mut complete = true;
+    let mut manifest = BTreeMap::new();
     while let Some(path) = pending.pop() {
         *entries += 1;
         if *entries > WALK_ENTRIES || Instant::now() >= deadline {
-            return (total, false);
+            complete = false;
+            break;
         }
         let Ok(metadata) = fs::symlink_metadata(&path) else {
+            complete = false;
             continue;
         };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+        manifest.insert(
+            path.to_string_lossy().into_owned(),
+            json!({
+                "size":metadata.len(), "modified":modified.map(|t| t.as_nanos().to_string()),
+                "directory":metadata.is_dir(), "link":fs::read_link(&path).ok()
+            }),
+        );
         if metadata.is_dir() {
-            if let Ok(children) = fs::read_dir(&path) {
-                pending.extend(children.flatten().map(|child| child.path()));
+            match fs::read_dir(&path) {
+                Ok(children) => {
+                    for child in children {
+                        match child {
+                            Ok(child) => pending.push(child.path()),
+                            Err(_) => complete = false,
+                        }
+                    }
+                }
+                Err(_) => complete = false,
             }
         } else {
             total += metadata.len();
         }
     }
-    (total, true)
+    (total, complete, fingerprint(json!(manifest)))
 }
 
 fn modified(path: &Path) -> f64 {
@@ -372,6 +409,12 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     };
     row["changes"] = json!(status.changes);
     row["untracked"] = json!(status.untracked);
+    row["changed_files"] = json!(status
+        .entries
+        .iter()
+        .filter(|s| !s.starts_with("!!"))
+        .take(100)
+        .collect::<Vec<_>>());
     if status.changes > 0 {
         reasons.push(reason(
             "changes",
@@ -394,7 +437,9 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     .unwrap_or_default();
     let mut lines = metadata.lines().map(PathBuf::from);
     let gitdir = lines.next();
-    let modules = lines.next().map(|m| if m.is_absolute() { m } else { path.join(m) });
+    let modules = lines
+        .next()
+        .map(|m| if m.is_absolute() { m } else { path.join(m) });
     if modules.is_some_and(|m| fs::read_dir(m).is_ok_and(|mut entries| entries.next().is_some())) {
         reasons.push(reason(
             "submodules",
@@ -439,10 +484,12 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     }
 
     let mut merged = None;
-    for (_, base) in &context.bases {
+    let mut integration = json!({"kind":"unknown"});
+    for (name, base) in &context.bases {
         match ancestor(&path, &head, base, step(total, 5)) {
             Some(true) => {
                 merged = Some(true);
+                integration = json!({"kind":"ancestor","base":name,"ref":base});
                 break;
             }
             Some(false) => merged = Some(false),
@@ -450,6 +497,50 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
         }
     }
     row["merged"] = json!(merged);
+    // Equivalent content is useful cleanup evidence, but never permission to
+    // delete the original branch: `merged` remains ancestry-only.
+    if merged != Some(true) {
+        for (name, base) in &context.bases {
+            if git(
+                &path,
+                &[
+                    "diff",
+                    "--quiet",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    &head,
+                    base,
+                    "--",
+                ],
+                step(total, 3),
+            )
+            .is_ok()
+            {
+                integration = json!({"kind":"same_tree","base":name,"ref":base});
+                break;
+            }
+            if let Ok(cherry) = git(&path, &["cherry", base, &head], step(total, 3)) {
+                let cherry = text(cherry);
+                if !cherry.is_empty() && cherry.lines().all(|line| line.starts_with("- ")) {
+                    integration = json!({"kind":"equivalent_patches","base":name,"ref":base});
+                    break;
+                }
+            }
+        }
+    }
+    if integration["kind"] == "unknown" && merged == Some(false) {
+        if let Some((name, base)) = context.bases.first() {
+            integration = json!({"kind":"remaining","base":name,"ref":base});
+        }
+    }
+    if let Some(base) = integration["ref"].as_str() {
+        integration["base_head"] = git(&path, &["rev-parse", "--verify", base], step(total, 2))
+            .ok()
+            .map(text)
+            .map_or(Value::Null, Value::String);
+    }
+    integration["remote_freshness"] = json!("local_refs_only");
+    row["integration"] = integration.clone();
     row["ahead"] = context
         .bases
         .first()
@@ -475,49 +566,72 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
         .map(text)
         .filter(|u| !u.is_empty())
     };
-    row["pushed"] = json!(upstream
-        .as_ref()
-        .and_then(|u| ancestor(&path, &head, u, step(total, 5))));
+    row["pushed"] =
+        json!(upstream
+            .as_ref()
+            .and_then(|u| ancestor(&path, &head, u, step(total, 5))));
     row["upstream"] = json!(upstream.map(|u| u.trim_start_matches("refs/remotes/").to_owned()));
 
     let deadline = (Instant::now() + WALK_TIME).min(total);
     let mut entries = 0;
-    let mut ignored: Vec<(String, u64, bool)> = status
+    let mut ignored: Vec<(String, u64, bool, String)> = status
         .ignored
         .iter()
         .map(|name| {
-            let (bytes, complete) = size(&path.join(name), &mut entries, deadline);
-            (name.clone(), bytes, complete)
+            let (bytes, complete, digest) = measure(&path.join(name), &mut entries, deadline);
+            (name.clone(), bytes, complete, digest)
         })
         .collect();
-    row["ignored_bytes"] = json!(ignored.iter().map(|(_, bytes, _)| bytes).sum::<u64>());
-    row["ignored_complete"] = json!(ignored.iter().all(|(_, _, complete)| *complete));
+    row["ignored_bytes"] = json!(ignored.iter().map(|(_, bytes, _, _)| bytes).sum::<u64>());
+    row["ignored_complete"] = json!(ignored.iter().all(|(_, _, complete, _)| *complete));
     row["ignored_count"] = json!(ignored.len());
+    row["ignored_fingerprint"] = json!(fingerprint(json!(ignored)));
     ignored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     row["ignored"] = json!(ignored
         .iter()
         .take(MAX_IGNORED)
-        .map(|(name, bytes, complete)| json!({"path":name,"bytes":bytes,"complete":complete}))
+        .map(|(name, bytes, complete, _)| json!({"path":name,"bytes":bytes,"complete":complete}))
         .collect::<Vec<_>>());
+    if !ignored.is_empty() {
+        notes.push(reason(
+            "ignored_data",
+            "Local files outside Git will be deleted. Review them before selecting this folder.",
+        ));
+        if row["ignored_complete"] != true {
+            reasons.push(reason(
+                "ignored_unavailable",
+                "Local files could not be fully checked. Review again before removal.",
+            ));
+        }
+    }
+    let (bytes, complete, _) = measure(&path, &mut 0, (Instant::now() + WALK_TIME).min(total));
+    row["disk_bytes"] = json!(bytes);
+    row["disk_complete"] = json!(complete);
 
     let base = context
         .bases
         .first()
         .map_or("the base branch", |(name, _)| name.as_str());
     match merged {
-        Some(false) => notes.push(reason(
+        Some(false) if integration["kind"] == "remaining" => notes.push(reason(
             "not_merged",
             match row["ahead"].as_u64() {
                 Some(count) => format!(
                     "{} not in {base}. Removing the worktree keeps the branch.",
                     plural(count as usize, "commit")
                 ),
-                None => format!("Has commits not in {base}. Removing the worktree keeps the branch."),
+                None => {
+                    format!("Has commits not in {base}. Removing the worktree keeps the branch.")
+                }
             },
         )),
         None if context.bases.is_empty() => notes.push(reason(
             "no_base",
             "No base branch was found, so the merge state is unknown.",
+        )),
+        None if integration["kind"] == "unknown" => reasons.push(reason(
+            "integration_unavailable",
+            "Integration could not be checked. Review again before removal.",
         )),
         _ => {}
     }
@@ -535,23 +649,21 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     }
     row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,
         "locked":row["locked"],"prunable":row["prunable"],"available":true,
-        "status":status.entries,"nested":row["nested"],"sessions":row["sessions"]})));
+        "status":status.entries,"nested":row["nested"],"sessions":row["sessions"],
+        "ignored":row["ignored_fingerprint"]})));
     finish(row, reasons, notes)
 }
 
 /// Assessment of the checkouts of the repository containing `path`; `only`
 /// limits it to one worktree, which may already be missing.
-fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
+pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
     let machine = crate::config::Config::load()
         .map(|c| c.host().to_owned())
         .unwrap_or_default();
-    let Ok(path) = crate::platform::canonical(path).map_err(|_| ()).and_then(|p| {
-        if p.is_dir() {
-            Ok(p)
-        } else {
-            Err(())
-        }
-    }) else {
+    let Ok(path) = crate::platform::canonical(path)
+        .map_err(|_| ())
+        .and_then(|p| if p.is_dir() { Ok(p) } else { Err(()) })
+    else {
         return json!({"path":path,"state":"folder_unavailable","detail":"Folder is missing or inaccessible",
             "worktrees":[],"machine":machine,"sampled_at":now()});
     };
@@ -561,7 +673,8 @@ fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             step(total, 3),
         )?;
-        let common = crate::platform::canonical(text(common)).map_err(|e| error("metadata_error", e.to_string()))?;
+        let common = crate::platform::canonical(text(common))
+            .map_err(|e| error("metadata_error", e.to_string()))?;
         let (trees, partial) = list(&path, &common, step(total, 3))?;
         let context = context(&common, &trees, step(total, 3));
         let wanted = only.map(|only| (only.to_path_buf(), resolved(only)));
@@ -595,8 +708,10 @@ fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
             rows.push(assess(tree, &trees, &context, total));
         }
         let base: Vec<_> = context.bases.iter().map(|(name, _)| name.clone()).collect();
-        Ok::<_, GitError>(json!({"state":"ok","path":path,"common_dir":common,"base":base,
-            "partial":partial || cut,"worktrees":rows,"machine":machine,"sampled_at":now()}))
+        Ok::<_, GitError>(
+            json!({"state":"ok","path":path,"common_dir":common,"base":base,
+            "partial":partial || cut,"worktrees":rows,"machine":machine,"sampled_at":now()}),
+        )
     })();
     result.unwrap_or_else(|e| {
         json!({"path":path,"state":e.state,"detail":e.detail,"worktrees":[],"machine":machine,"sampled_at":now()})
@@ -612,7 +727,8 @@ pub(super) fn review_command(args: &[String]) -> Result<Value> {
             "--json" => {}
             key @ ("--path" | "--worktree") => {
                 i += 1;
-                let value = PathBuf::from(args.get(i).ok_or_else(|| format!("{key} needs a folder"))?);
+                let value =
+                    PathBuf::from(args.get(i).ok_or_else(|| format!("{key} needs a folder"))?);
                 if !value.is_absolute() {
                     return Err(format!("{key} must be an absolute folder path"));
                 }
@@ -639,7 +755,7 @@ pub(super) fn review_command(args: &[String]) -> Result<Value> {
 }
 
 pub(super) fn remove_command(args: &[String]) -> Result<Value> {
-    const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--delete-branch] [--request-id ID] [--json]";
+    const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut delete_branch = false;
     let mut i = 0;
@@ -648,11 +764,17 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             "--json" => {}
             "--delete-branch" => delete_branch = true,
             "--dry-run" => return Err("worktree removal does not support --dry-run".into()),
-            key @ ("--path" | "--common-dir" | "--fingerprint" | "--request-id") => {
+            key @ ("--path"
+            | "--common-dir"
+            | "--fingerprint"
+            | "--ignored-fingerprint"
+            | "--request-id") => {
                 i += 1;
                 let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
                 if value.is_empty() || value.chars().any(char::is_control) {
-                    return Err(format!("{key} cannot be empty or contain control characters"));
+                    return Err(format!(
+                        "{key} cannot be empty or contain control characters"
+                    ));
                 }
                 if options.insert(key, value.as_str()).is_some() {
                     return Err(format!("duplicate {key}"));
@@ -662,7 +784,12 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         }
         i += 1;
     }
-    let required = |key| options.get(key).copied().ok_or_else(|| format!("{key} is required"));
+    let required = |key| {
+        options
+            .get(key)
+            .copied()
+            .ok_or_else(|| format!("{key} is required"))
+    };
     let target = Path::new(required("--path")?);
     let common = Path::new(required("--common-dir")?);
     let expected = required("--fingerprint")?;
@@ -697,14 +824,20 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     let cache = cache_file("repo", &common.to_string_lossy());
     private_dir(cache.parent().unwrap())?;
     let guard = crate::platform::private_open(
-        OpenOptions::new().create(true).truncate(false).read(true).write(true),
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true),
     )
     .open(cache.with_extension("lock"))
     .map_err(|e| e.to_string())?;
     let waited = Instant::now() + Duration::from_secs(10);
     while guard.try_lock_exclusive().is_err() {
         if Instant::now() >= waited {
-            return Err("Another worktree operation is running. Try again after it finishes.".into());
+            return Err(
+                "Another worktree operation is running. Try again after it finishes.".into(),
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -746,6 +879,11 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     if string(&row, "fingerprint") != expected {
         return Err("Worktree changed since the review. Review it again.".into());
     }
+    if row["ignored_count"].as_u64().unwrap_or(0) > 0
+        && options.get("--ignored-fingerprint").copied() != row["ignored_fingerprint"].as_str()
+    {
+        return Err("Review the local files outside Git and explicitly confirm their deletion before removing this worktree.".into());
+    }
     let missing = row["verdict"] == "missing";
     git(
         &common,
@@ -786,7 +924,9 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         }
     }
     drop(lock);
-    Ok(json!({"status":if missing {"forgotten"} else {"removed"},"path":path,"branch":branch,
+    Ok(
+        json!({"status":if missing {"forgotten"} else {"removed"},"path":path,"branch":branch,
         "branch_deleted":deleted,"branch_error":branch_error,"common_dir":common,
-        "request_id":options.get("--request-id"),"machine":data["machine"]}))
+        "request_id":options.get("--request-id"),"machine":data["machine"]}),
+    )
 }

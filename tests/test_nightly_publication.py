@@ -1,6 +1,5 @@
 """Contracts for trusted nightly provenance, immutable assets and AUR upgrades."""
 import copy
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -8,11 +7,11 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from homebrew_tap_fixture import make_tap_remote, remote_file
+from windows_portable_fixture import pinned_pair, portable_zip
 import conpty_pair
 import macos_release
 import nightly_common as nightly
@@ -34,29 +33,6 @@ COMMIT = "a" * 40
 TAG = "nightly-123"
 MACOS = {"qt_version": "6.11.2", "team_id": "ABCDE12345",
          "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef", "minimum_system_version": "14.0"}
-
-
-def portable_zip(path, commit=COMMIT, version="0.37.0", entries=()):
-    """A synthetic Windows portable zip with the complete required layout."""
-    manifest = {"product": "Zerus", "version": version, "cli_version": "1.48.0", "platform": "Windows",
-                "architecture": "x86_64", "qt_version": "6.10.3", "native_agents_bundled": False,
-                "source_commit": commit}
-    with zipfile.ZipFile(path, "w") as archive:
-        for name in windows_portable.REQUIRED:
-            data = json.dumps(manifest) if name == "build-info.json" else "tested " + name
-            archive.writestr(f"{windows_portable.TOP}/{name}", data)
-        for name, data in entries:
-            archive.writestr(name, data)
-    return path
-
-
-def pinned_pair():
-    """The ConPTY pin with the stand-ins of `portable_zip` as its pair."""
-    pin = copy.deepcopy(conpty_pair.load())
-    for name in conpty_pair.NAMES:
-        data = f"tested {name}".encode()
-        pin["files"][name].update(size=len(data), sha256=hashlib.sha256(data).hexdigest())
-    return pin
 
 
 class Download:
