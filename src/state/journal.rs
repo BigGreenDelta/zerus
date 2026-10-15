@@ -562,25 +562,25 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         }
     }
     let _guard = lock(None)?;
-    let untracked = || {
+    let untracked = |cwds| {
         let mut value = json!({"name": name, "tracked": false, "events": [], "cursor": 0});
         value
             .as_object_mut()
             .unwrap()
             .extend(telemetry::unavailable().as_object().unwrap().clone());
-        workspace::enrich(std::slice::from_mut(&mut value), &workspace::pane_cwds());
+        workspace::enrich(std::slice::from_mut(&mut value), &cwds);
         value
     };
     if archive_id.is_none() && !record_path(name).exists() {
         drop(_guard);
-        return Ok(untracked());
+        return Ok(untracked(workspace::pane_cwds()));
     }
     let mut record = if let Some(id) = archive_id {
         archive::read_archive(name, id)?
     } else {
         read(name)?
     };
-    let snapshot = live()?;
+    let (snapshot, names) = live_sessions()?;
     let panes = if archive_id.is_some() {
         None
     } else {
@@ -588,7 +588,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     };
     if panes.is_some() && !matches(&record, panes) {
         drop(_guard);
-        return Ok(untracked());
+        return Ok(untracked(workspace::snapshot_cwds(&names)));
     }
     if archive_id.is_none() && panes.is_some() {
         let _ = clear_context::observe_terminal(&mut record);
@@ -762,7 +762,10 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     output["message_events_max_bytes"] = json!(MESSAGE_EVENTS_BYTES);
     output["attachment_messages"] = attachments::messages(&record, "");
     output["voice_messages"] = conversation_history::inspected_voice_messages(&record, &output, None);
-    workspace::enrich(std::slice::from_mut(&mut output), &workspace::pane_cwds());
+    // The lock was released after `snapshot`, so a rename may have landed since.
+    // The pane folders go by the session IDs, which a rename keeps, to the name
+    // this inspection reports (zerus-byyw, as in `merge_listing`).
+    workspace::enrich(std::slice::from_mut(&mut output), &workspace::snapshot_cwds(&names));
     Ok(output)
 }
 

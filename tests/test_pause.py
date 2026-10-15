@@ -2661,27 +2661,25 @@ exec {tmux} "$@"
                          (saved["run_id"], saved["conversation_id"], True))
         self.assertEqual([row["name"] for row in self.rows()], [new_name])
 
-    @unittest.skipIf(LEGACY_STATE, "fix introduced by the native lifecycle model")
-    def test_rename_before_the_listing_reads_pane_folders_keeps_the_live_folder(self):
-        # A listing reads its pane snapshot under the state lock and asks for
-        # the panes' current folders after releasing it. A session renamed in
-        # between lists under the name of its snapshot, still with the live
-        # folder of its pane rather than its saved one (zerus-18u1).
-        old_name, new_name = self.start(), "claude/p/renamed"
+    def rename_during_folder_query(self, old_name, new_name, *command):
+        """Run `hgs *command` while `hgs rename old_name new_name` lands
+        between its pane snapshot and its pane folder query.
+
+        The command's folder query starts the rename and runs once the
+        terminal session has its new name. The rename then holds its binding
+        move until the command has finished. Returns the command's result."""
         armed, renamed, release, status = (
             self.root / name for name in ("rename-armed", "terminal-renamed",
                                           "rename-release", "rename-status"))
         def q(path):
             return shlex.quote(str(path))
         tmux = f"{shlex.quote(TMUX)} -S {shlex.quote(self.socket)} -f /dev/null"
-        # Only the listing sets LISTING_PROBE. Its folder query starts the
-        # rename and runs once the terminal session has its new name. The
-        # rename then holds its binding move until the listing has finished.
+        # Only the command under test sets FOLDER_PROBE.
         self.script("tmux", f'''#!/bin/sh
-if [ -n "$LISTING_PROBE" ]; then
+if [ -n "$FOLDER_PROBE" ]; then
     case "$*" in *pane_current_path*)
         if rm {q(armed)} 2>/dev/null; then
-            (env -u LISTING_PROBE {shlex.quote(str(HGS))} rename {shlex.quote(old_name)} {shlex.quote(new_name)}
+            (env -u FOLDER_PROBE {shlex.quote(str(HGS))} rename {shlex.quote(old_name)} {shlex.quote(new_name)}
              echo $? >{q(status)}) </dev/null >/dev/null 2>&1 &
             tries=0
             until [ -e {q(renamed)} ] || [ -e {q(status)} ] || [ $tries -ge 1000 ]; do
@@ -2704,23 +2702,45 @@ exec {tmux} "$@"
 ''')
         armed.touch()
         try:
-            listing = subprocess.run([str(HGS), "ls", "--local", "--json"],
-                                     env=dict(self.env, LISTING_PROBE="1"),
-                                     capture_output=True, text=True, timeout=20)
+            result = subprocess.run([str(HGS), *command],
+                                    env=dict(self.env, FOLDER_PROBE="1"),
+                                    capture_output=True, text=True, timeout=20)
         finally:
             release.touch()
             if not armed.exists():
                 self.wait(status.exists)
-        self.assertEqual(listing.returncode, 0, listing.stdout + listing.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(armed.exists())
         self.assertTrue(renamed.exists())
         self.assertEqual(status.read_text().strip(), "0")
+        return result
+
+    @unittest.skipIf(LEGACY_STATE, "fix introduced by the native lifecycle model")
+    def test_rename_before_the_listing_reads_pane_folders_keeps_the_live_folder(self):
+        # A listing reads its pane snapshot under the state lock and asks for
+        # the panes' current folders after releasing it. A session renamed in
+        # between lists under the name of its snapshot, still with the live
+        # folder of its pane rather than its saved one (zerus-18u1).
+        old_name, new_name = self.start(), "claude/p/renamed"
+        listing = self.rename_during_folder_query(old_name, new_name, "ls", "--local", "--json")
         sessions = json.loads(listing.stdout)["sessions"]
         self.assertEqual([s["name"] for s in sessions], [old_name])
         self.assertEqual(sessions[0]["cwd_source"], "tmux")
         self.assertEqual(Path(sessions[0]["cwd"]).resolve(), self.project.resolve())
         after = self.rows()
         self.assertEqual([(row["name"], row["cwd_source"]) for row in after], [(new_name, "tmux")])
+
+    @unittest.skipIf(LEGACY_STATE, "fix introduced by the native lifecycle model")
+    def test_rename_before_an_inspection_reads_pane_folders_keeps_the_live_folder(self):
+        # An inspection releases the state lock before it asks for the panes'
+        # current folders, as a listing does (zerus-byyw).
+        old_name, new_name = self.start(), "claude/p/renamed"
+        inspected = json.loads(self.rename_during_folder_query(old_name, new_name, "inspect", old_name).stdout)
+        self.assertEqual((inspected["name"], inspected["tracked"]), (old_name, True))
+        self.assertEqual(inspected["cwd_source"], "tmux")
+        self.assertEqual(Path(inspected["cwd"]).resolve(), self.project.resolve())
+        after = json.loads(self.hgs("inspect", new_name))
+        self.assertEqual((after["name"], after["cwd_source"]), (new_name, "tmux"))
 
     def test_attached_terminal_title_changes_without_restarting_or_typing(self):
         old_name, new_name = "sh/p/before", "sh/p/after"
