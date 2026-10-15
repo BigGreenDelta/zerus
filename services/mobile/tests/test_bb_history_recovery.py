@@ -48,7 +48,11 @@ class HistoryTests(SessionCase):
         child = self.envelope("history", {"agent_id": "child"})
         answer = page(agent_id="child", parent_conversation_id=CONVERSATION, conversation_id=CONVERSATION + "/child")
         self.hgs.script(self.rules({"argv": HISTORY, "stdout": answer}))
-        self.assertEqual((await self.submit(child, process))["state"], "completed")
+        before = len(self.native_calls())
+        result = await self.submit(child, process)
+        self.assertEqual(result, {"state": "completed", "result": answered(answer, child), "error": None})
+        [call] = self.native_calls()[before:]
+        self.assertEqual((call["argv"], json.loads(call["stdin"])), (HISTORY, child["payload"]))
 
     async def test_a_page_of_anything_else_fails_closed(self):
         process = await self.launch()
