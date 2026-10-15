@@ -464,7 +464,11 @@ mod tests {
         let linked = temp.path().join("linked");
         fs::create_dir_all(&linked).unwrap();
         fs::write(linked.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
-        assert_eq!(git_root(&linked.join("src")), Some(fs::canonicalize(&repository).unwrap()));
+        // Compared canonically: Windows canonical paths carry a verbatim prefix.
+        assert_eq!(
+            git_root(&linked.join("src")).map(|root| fs::canonicalize(root).unwrap()),
+            Some(fs::canonicalize(&repository).unwrap())
+        );
         assert_eq!(git_root(&nested), Some(project.clone()));
         assert_eq!(user_status_line(&config, &linked, false), Ok(Some(user.clone())));
         write(&repository.join(".claude/settings.local.json"), &json!({"statusLine": {"command": "x"}}));
