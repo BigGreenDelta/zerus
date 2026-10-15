@@ -89,6 +89,15 @@ IMPLEMENTATION = os.environ.get("ZERUS_CONNECTOR_IMPLEMENTATION") or (
     "rust" if os.environ.get("ZERUS_CONNECTOR_COMMAND") else "python")
 
 
+# Settings a Rust build reads only with its non-default `test-hooks` feature,
+# which packages never enable: the default native timeout in seconds (Python's
+# is 45) and a factor that divides the connector's own retry spacing (30 s
+# between attempts under divergence b). Python ignores both, so a test that
+# needs one runs only against Rust.
+NATIVE_TIMEOUT_HOOK = "ZERUS_CONNECTOR_TEST_NATIVE_TIMEOUT"
+CLOCK_SCALE_HOOK = "ZERUS_CONNECTOR_TEST_CLOCK_SCALE"
+
+
 def ported_modules() -> set[str]:
     return set(json.loads((TESTS / "ported.json").read_text())["rust"])
 
@@ -369,6 +378,18 @@ class FakeRelay:
         delivery `mark` or later (`mark` is a length of `deliveries`)."""
         return next((index for identity, index in self.deliveries[mark:] if identity == request_id), None)
 
+    async def inject(self, delivered) -> str:
+        """Hand out `delivered` exactly as given, in its own batch, although no
+        relay would queue it (a non-canonical identity, a malformed envelope or
+        a non-object). Returns its key in `entries`: its request_id when that
+        is a new string, under which a result can then be uploaded."""
+        request_id = delivered.get("request_id") if isinstance(delivered, dict) else None
+        key = request_id if isinstance(request_id, str) and request_id not in self.entries else f"injected-{len(self.entries)}"
+        self.entries[key] = {"state": "queued", "delivered": delivered, "result": None}
+        self.pending.append(key)
+        await self.notify()
+        return key
+
     async def claimed(self, request: dict) -> None:
         """Register a submission an earlier connector process already claimed."""
         await self.queue(request, redeliver=True)
@@ -474,7 +495,8 @@ class FakeRelay:
     def claimable(self, one_hop: bool) -> str | None:
         for request_id in self.pending:
             entry = self.entries[request_id]
-            if entry["state"] == "queued" and (one_hop or "gateway_route" not in entry["delivered"]):
+            routed = isinstance(entry["delivered"], dict) and "gateway_route" in entry["delivered"]
+            if entry["state"] == "queued" and (one_hop or not routed):
                 return request_id
         return None
 
