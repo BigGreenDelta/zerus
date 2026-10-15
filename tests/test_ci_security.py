@@ -1061,9 +1061,14 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertNotRegex(text, r"actions/cache[@/]")
         sign = job(text, "sign")
         self.assertRegex(sign, r"(?m)^    environment: macos-signing$")
-        for secret in ("MACOS_DEVELOPER_ID_P12", "MACOS_DEVELOPER_ID_P12_PASSWORD", "APPLE_NOTARY_API_KEY_P8",
-                       "APPLE_NOTARY_API_KEY_ID", "APPLE_NOTARY_API_ISSUER_ID"):
+        apple_secrets = {"MACOS_DEVELOPER_ID_P12", "MACOS_DEVELOPER_ID_P12_PASSWORD", "APPLE_NOTARY_API_KEY_P8",
+                         "APPLE_NOTARY_API_KEY_ID", "APPLE_NOTARY_API_ISSUER_ID"}
+        declarations = text.split("    secrets:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(set(re.findall(r"(?m)^      (\w+):$", declarations)), apple_secrets)
+        for secret in apple_secrets:
             self.assertIn(f"secrets.{secret}", sign)
+            required = "false" if secret == "APPLE_NOTARY_API_ISSUER_ID" else "true"
+            self.assertIn(f"      {secret}:\n        required: {required}", declarations)
         self.assertIn("vars.MACOS_TEAM_ID", sign)
         self.assertIn('test "$WORKFLOW_REF" = refs/heads/main', sign)
         self.assertRegex(sign, r"if: always\(\)\n        run: bash scripts/ci/macos-keychain.sh delete")
@@ -1073,9 +1078,12 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertNotIn("environment: release", text)
         for name in ("release.yml", "nightly.yml"):
             workflow = (ROOT / ".github/workflows" / name).read_text()
-            self.assertNotIn("MACOS_DEVELOPER_ID", workflow, name)
-            self.assertNotIn("APPLE_NOTARY", workflow, name)
             self.assertNotIn("secrets: inherit", workflow, name)
+            macos = job(workflow, "macos")
+            forwarded = dict(re.findall(r"(?m)^      (\w+): \$\{\{ secrets\.(\w+) \}\}$", macos))
+            self.assertEqual(forwarded, {secret: secret for secret in apple_secrets}, name)
+            for secret in apple_secrets:
+                self.assertNotIn(f"secrets.{secret}", workflow.replace(macos, ""), name)
 
     def assemble_runs(self, workflow, verify, macos, enabled, requested=True):
         expression = field(job(workflow, "assemble"), "if")

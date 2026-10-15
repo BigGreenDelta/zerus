@@ -99,8 +99,13 @@ scripts/ci/macos-bundle.sh`) and review the module SBOMs before committing.
 `macos-cask.yml` is a reusable workflow with one input, `channel`. `release.yml`
 calls it with `stable` when `macos_cask=true` (the default; it then requires
 `run_macos=true`) and `MACOS_CASKS_ENABLED` is `true`; `nightly.yml` calls it with
-`nightly` whenever the variable is `true`. Neither caller passes secrets. It runs
-three jobs after full CI:
+`nightly` whenever the variable is `true`. Both callers explicitly forward only
+the five Apple secret names declared by the reusable workflow. GitHub requires
+this forwarding even for environment secrets; without it their values are empty.
+The values remain in the main-only `macos-signing` environment and are resolved
+only by the signing job. The callers never use `secrets: inherit`. See
+[GitHub's reusable workflow secret rules](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow).
+It runs three jobs after full CI:
 
 1. **macOS bundle** (`macos-15`, no secrets) selects the release version (the
    product version, or the nightly version computed exactly like
