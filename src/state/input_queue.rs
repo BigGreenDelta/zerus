@@ -129,13 +129,14 @@ mod tests {
         assert_ne!(snapshot(&record,&q)["id"],snapshot(&record,&parse("claude",&c.replace("first","changed")).unwrap())["id"]);
         let mut other=record.clone();other["run_id"]=json!("new");assert_ne!(snapshot(&record,&q)["id"],snapshot(&other,&q)["id"]);
     }
+    // Panel captured from the pinned Codex 0.160.1 and 0.162.0 (110x35).
+    const ORDINARY:&str="• Working (1s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ Queued follow-up one\n  ↳ Queued follow-up two\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n";
     #[test]
     fn codex_ordinary_follow_ups_stay_read_only() {
-        // Panels captured from the pinned Codex 0.160.1 and 0.162.0 (110x35). Ordinary
-        // (Tab) follow-ups offer only "edit last queued message", which pops the last one
-        // into the composer over any draft. Escape interrupts and leaves them all there
-        // as one unsent draft, so neither may stand in for a native "send now".
-        let ordinary="• Working (1s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ Queued follow-up one\n  ↳ Queued follow-up two\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n";
+        // Ordinary (Tab) follow-ups offer only "edit last queued message", which pops the
+        // last one into the composer over any draft. Escape interrupts and leaves them all
+        // there as one unsent draft, so neither may stand in for a native "send now".
+        let ordinary=ORDINARY;
         let q=parse("codex",ordinary).unwrap();
         assert!(q.keys.is_empty());assert!(q.text.contains("Queued follow-up one")&&q.text.contains("Queued follow-up two"));
         assert_eq!(q.hint,"Use Terminal to edit or submit these queued follow-ups");
@@ -162,5 +163,28 @@ mod tests {
         let steer=format!("{quoted}• Working (3s • esc to interrupt)\n\n• Messages to be submitted after next tool call\n  (press esc to interrupt and send immediately)\n  ↳ Steer three\n\n• Queued follow-up inputs\n  ↳ Queued follow-up one\n    shift+← edit last queued message\n\n\n› Ask Codex to do anything\n");
         let q=parse("codex",&steer).unwrap();
         assert_eq!(q.keys,vec!["Escape"]);assert!(q.text.starts_with("• Messages to be submitted after next tool call")&&q.text.contains("Queued follow-up one"));
+    }
+    #[test]
+    fn codex_stop_leaves_ordinary_follow_ups_as_an_unsent_draft() {
+        // Whole screens of the pinned Codex around its Escape (hgs Stop), with only
+        // ordinary follow-ups queued. They hold the panel above, which stays read-only;
+        // after Escape no queue is left to show or send: Codex put both follow-ups back
+        // into its input as one unsent draft, and its provider received neither.
+        let panel=parse("codex",ORDINARY).unwrap();
+        for (version,queued,stopped) in [
+            ("0.160.1",include_str!("../../tests/fixtures/codex-queued-follow-ups-0.160.1.txt"),
+                include_str!("../../tests/fixtures/codex-queued-follow-ups-escape-0.160.1.txt")),
+            ("0.162.0",include_str!("../../tests/fixtures/codex-queued-follow-ups.txt"),
+                include_str!("../../tests/fixtures/codex-queued-follow-ups-escape.txt"))] {
+            let queued=question_terminal::plain(queued).unwrap();
+            assert!(queued.contains(&format!("OpenAI Codex (v{version})")));
+            let q=parse("codex",&queued).unwrap();
+            assert_eq!(q.text,panel.text,"{version}");assert!(q.keys.is_empty(),"{version}");
+            assert_eq!(q.hint,"Use Terminal to edit or submit these queued follow-ups");
+            let stopped=question_terminal::plain(stopped).unwrap();
+            assert!(parse("codex",&stopped).is_none(),"{version}");
+            assert!(stopped.contains("■ Conversation interrupted"),"{version}");
+            assert!(stopped.contains("\n› Queued follow-up one\n  Queued follow-up two\n"),"{version}");
+        }
     }
 }

@@ -619,7 +619,12 @@ Claude shows it. Stopped before its first reply, Claude rewinds the turn and
 puts the prompt back into its own input instead; HGS then moves exactly that
 text from Terminal to the message field (Ctrl+Y in Terminal brings it back) and
 leaves any other input untouched. Supported DeepSeek hosts use native cancel.
-Native queue behavior still applies: Codex Escape may start a queued follow-up.
+Native queue behavior still applies. When Codex lists pending steers ("press esc
+to interrupt and send immediately"), Escape submits them at once and any queued
+follow-ups after that turn. Ordinary Codex follow-ups queued alone are not sent:
+Codex interrupts the turn and returns them to its input in Terminal as one
+unsent draft. Activity can send again once that input is empty, so submit, edit
+or clear the draft in Terminal first.
 Uncertain interruption is not repeated. Stop notices name the original session
 and computer even if you navigate away. If the turn has already ended or is
 waiting for input, no interruption is sent and no action is needed; Zerus refreshes
