@@ -131,7 +131,7 @@ stable and nightly DMGs come from GitHub Releases. Updates are installed manuall
 ## macOS (Homebrew)
 
 Apple Silicon Macs running macOS 14 or later can install the signed and notarized
-application and CLI from the Zerus tap. The first public cask is `zerus@nightly`;
+application and CLI from the Zerus tap as `zerus@nightly` or `zerus@dev`;
 the stable `zerus` cask will appear with the first signed stable release.
 
 ```sh
@@ -143,8 +143,8 @@ The tap supports three channels. `zerus` follows stable releases; `zerus@nightly
 the daily build from main that passed the full CI, published at the same time as
 the AUR nightly. `zerus@dev` follows successful main CI builds, with the same
 Apple signature and notarization. All install the same `Zerus.app`, so only one can be installed.
-Settings, agents and conversations are shared. Once both channels are published,
-switch between them with:
+Settings, agents and conversations are shared. Once Stable is also published,
+switch between Stable and Nightly with:
 
 ```sh
 brew uninstall --cask zerus && brew install --cask ufna/zerus/zerus@nightly
@@ -201,10 +201,10 @@ To uninstall, remove the per-user integration first:
 
 ```sh
 zerus-setup --remove
-brew uninstall --cask zerus@nightly   # use zerus for a stable installation
+brew uninstall --cask zerus@nightly   # use zerus@dev for Dev, or zerus for Stable
 ```
 
-`brew uninstall --zap --cask zerus` (or `zerus@nightly`) additionally removes the Zerus LaunchAgents,
+`brew uninstall --zap --cask zerus` (or `zerus@nightly` / `zerus@dev`) additionally removes the Zerus LaunchAgents,
 including ones created by a source installation, the logs and saved window state.
 `~/.config/hgs`, agent state and conversations are never removed.
 
