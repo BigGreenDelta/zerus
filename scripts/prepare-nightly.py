@@ -31,9 +31,7 @@ def main():
     version = nightly_version(product, count, commit, args.run_number)
     # Reads only the zip directory, build-info.json and the pinned ConPTY pair
     # (checked in memory); never extracts or runs it.
-    portable = windows_portable.inspect(args.windows_zip)
-    require(portable["source_commit"] == commit and portable["version"] == product,
-            "Windows portable bundle belongs to another commit/version.")
+    windows_portable.require_build(args.windows_zip, commit, product)
     args.output.mkdir(parents=True, exist_ok=True)
     require(not any(args.output.iterdir()), "Use an empty nightly output directory.")
     with tempfile.TemporaryDirectory(prefix="zerus-nightly-") as temporary:
