@@ -1,7 +1,16 @@
 """Native interrupt and terminal upload contracts on a private raw PTY."""
 import base64,json,subprocess,time,unittest,uuid
 import test_input as fixtures
+from pathlib import Path
 HGS=fixtures.HGS
+DRAFT=('terminal has a draft, dialog, or unrecognized prompt; '
+       'open Terminal and return to an empty agent prompt')
+RETURNED_FOLLOW_UPS="The queued follow-ups are back in Codex's input as an unsent draft. Submit or clear them in Terminal."
+
+def drawn(name,x,y):
+    """A pinned 110x35 screen from tests/fixtures, with the cursor at column x, row y."""
+    rows=(Path(__file__).resolve().parent/'fixtures'/name).read_text().split('\n')[:-1]
+    return '\x1b[2J\x1b[H'+'\r\n'.join(rows)+f'\x1b[{y+1};{x+1}H'
 
 class SessionActions(unittest.TestCase):
     setUp=fixtures.InputTransport.setUp
@@ -38,11 +47,7 @@ class SessionActions(unittest.TestCase):
         # ordinary (Tab) follow-ups queued. Escape interrupts the turn and returns both
         # to Codex's input as one unsent draft, then Codex reports Interrupt. Nothing in
         # the Stop path may submit them or report them as started or sent.
-        from pathlib import Path
         transport=fixtures.InputTransport
-        def drawn(name,x,y):
-            rows=(Path(__file__).resolve().parent/'fixtures'/name).read_text().split('\n')[:-1]
-            return '\x1b[2J\x1b[H'+'\r\n'.join(rows)+f'\x1b[{y+1};{x+1}H'
         self.tmux('resize-window','-t','='+self.name+':','-x','110','-y','35')
         for suffix in ('-0.160.1',''):
             with self.subTest(version=suffix or '0.162.0'):
@@ -68,15 +73,49 @@ class SessionActions(unittest.TestCase):
                 self.assertEqual((info['phase'],info['activity']),('interrupted','unknown'))
                 self.assertIsNone(info.get('input_queue'))
                 # Activity cannot send over the draft: it stays in Terminal until submitted,
-                # edited or cleared there.
+                # edited or cleared there, and Activity says it holds the follow-ups.
                 self.assertFalse(info['interrupted_message_can_send'])
-                self.assertEqual(info['interrupted_message_reason'],'terminal has a draft, dialog, or unrecognized prompt; '
-                                 'open Terminal and return to an empty agent prompt')
+                self.assertEqual(info['interrupted_message_reason'],RETURNED_FOLLOW_UPS)
                 self.assertIn('terminal has a draft',transport.send(self,transport.payload(self,text='next'),success=False))
                 # One Escape and nothing else: no Enter submitted the draft and no text was pasted.
                 self.assertEqual(self.received()[len(before):],b'\x1b')
                 self.assertIn('\n› Queued follow-up one\n  Queued follow-up two\n',self.tmux('capture-pane','-p','-t',self.pane))
                 (self.root/'on-escape').unlink()
+    def test_codex_stop_draft_reason_names_only_the_follow_ups_stop_returned(self):
+        # Stop notes the ordinary follow-ups of the pinned panel for its turn. Only while
+        # Codex reports that turn interrupted and its input holds exactly them does
+        # Activity name them; any other draft keeps the general reason.
+        transport=fixtures.InputTransport
+        self.tmux('resize-window','-t','='+self.name+':','-x','110','-y','35')
+        returned=drawn('codex-queued-follow-ups-escape.txt',22,31)
+        def stop(screen,cursor):
+            self.working('codex');self.screen(screen,cursor)
+            # Escape redraws the returned draft, then names the pane once it is drawn.
+            title='escape-'+uuid.uuid4().hex
+            (self.root/'on-escape').write_bytes((returned+'\x1b]2;'+title+'\x1b\\').encode())
+            before=self.received()
+            self.request('interrupt',dict(self.identity(),expected_turn_started=self.record['turn_started']))
+            self.wait_for(lambda:self.tmux('display-message','-p','-t',self.pane,'#{pane_title}').strip()==title)
+            self.assertEqual(self.received()[len(before):],b'\x1b')
+            (self.root/'on-escape').unlink()
+            transport.interrupted_turn(self)
+        def reason():
+            info=transport.inspect(self)
+            self.assertEqual(info['phase'],'interrupted');self.assertFalse(info['interrupted_message_can_send'])
+            return info['interrupted_message_reason']
+        stop(drawn('codex-queued-follow-ups.txt',2,31),'2:31')
+        self.assertEqual(reason(),RETURNED_FOLLOW_UPS)
+        # Edited in Terminal, the draft is no longer the follow-ups; restored, it is again.
+        self.screen(returned.replace('  Queued follow-up two','  Queued follow-up two, edited'),'22:31')
+        self.assertEqual(reason(),DRAFT)
+        self.screen(returned,'22:31');self.assertEqual(reason(),RETURNED_FOLLOW_UPS)
+        # Another turn interrupted without that note, such as one stopped in Terminal.
+        self.record['turn_started']+=1;self.write_record()
+        self.assertEqual(reason(),DRAFT)
+        # Stop with no queue shown forgets the earlier note, though the draft is the same text.
+        stop(returned,'22:31')
+        self.assertNotIn('codex_stop_follow_ups',json.loads(self.record_path.read_text()))
+        self.assertEqual(reason(),DRAFT)
     def test_claude_interrupt_is_recorded_once_claude_shows_it(self):
         # Claude emits no hook after Escape; its own transcript line confirms it.
         self.working('claude');self.record.update(active_tools=dict(tool=dict(name='Bash',detail='sleep 30')));self.write_record()

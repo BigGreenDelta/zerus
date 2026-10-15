@@ -624,7 +624,11 @@ to interrupt and send immediately"), Escape submits them at once and any queued
 follow-ups after that turn. Ordinary Codex follow-ups queued alone are not sent:
 Codex interrupts the turn and returns them to its input in Terminal as one
 unsent draft. Activity can send again once that input is empty, so submit, edit
-or clear the draft in Terminal first.
+or clear the draft in Terminal first. HGS notes the follow-ups the Codex panel
+lists when Stop sends Escape; while Codex reports that turn interrupted and its
+input holds exactly them, Activity says the queued follow-ups are back in Codex's
+input. An edited draft, any other draft and follow-ups Stop did not see listed
+keep the general notice to return Terminal to an empty prompt.
 Uncertain interruption is not repeated. Stop notices name the original session
 and computer even if you navigate away. If the turn has already ended or is
 waiting for input, no interruption is sent and no action is needed; Zerus refreshes

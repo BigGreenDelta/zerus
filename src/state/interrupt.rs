@@ -47,6 +47,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         let mut current=kimi_tui_choice::identity(&record)?;
         if !eligible(&current) || current["turn_started"]!=record["turn_started"] {return Err("The turn changed before interruption".into());}
         if current["agent"]=="claude" {seen=kimi_tui_choice::capture(&current).ok().map(|screen|interruptions(&screen));}
+        // Codex returns ordinary queued follow-ups to its input on Escape.
+        if current["agent"]=="codex" {input_queue::note_stop(&mut current);}
         compact_context::observe(&mut current,&json!({"hook_event_name":"Interrupt"}));
         write(&mut current)?;
         backend::current().send(string(&current,"pane"),&[backend::Key::Named("Escape")])
@@ -108,7 +110,7 @@ fn returnable(prompt:&str)->bool {
 }
 
 /// Wrapping changes only whitespace, so drafts compare without it.
-fn squash(text:&str)->String {text.chars().filter(|ch|!ch.is_whitespace()).collect()}
+pub(super) fn squash(text:&str)->String {text.chars().filter(|ch|!ch.is_whitespace()).collect()}
 
 /// The rows of Claude's input box, without the ❯ prompt and continuation indent:
 /// from the ❯ row under a full-width rule to the next rule.
@@ -120,7 +122,7 @@ fn claude_input(screen:&str)->Option<(usize,Vec<String>)> {
     Some((start,lines[start..end].iter().map(|row|row.chars().skip(2).collect::<String>().trim_end().to_owned()).collect()))
 }
 
-fn cursor(record:&Value)->Option<(usize,usize)> {
+pub(super) fn cursor(record:&Value)->Option<(usize,usize)> {
     let cursor=backend::current().pane_info(backend::Target::Pane(string(record,"pane")),
         &[backend::PaneField::CursorX,backend::PaneField::CursorY]).ok()?;
     let (x,y)=cursor.pair()?;
