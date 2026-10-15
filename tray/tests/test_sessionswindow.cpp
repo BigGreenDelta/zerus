@@ -224,6 +224,7 @@ private slots:
     void usageIndicatorSettingUpdatesFooter();
     void usageLimitBecomesToolbarChip();
     void dashboardAndMultiMachineNavigation();
+    void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void hiddenPagesRenderWhenShown();
     void pollsKeepUnchangedActivity();
     void multiSelectionKeepsConversationAndGroupMenu_data();
@@ -588,6 +589,34 @@ void TestSessionsWindow::questionReplyPreviewUsesCompletePrompt()
     QVERIFY(row->data(Qt::AccessibleTextRole).toString().contains(answer));
     QVERIFY(!row->data(Qt::AccessibleTextRole).toString().contains("send_user_message_question_reply"));
     QCOMPARE(session.activityDetail,session.prompt.left(240)+QChar(0x2026));
+}
+
+void TestSessionsWindow::machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters()
+{
+    auto state=fleet(); auto local=state.local();
+    auto archive=local.sessions[0]; archive.state="archived"; archive.archiveId="archive-one";
+    local.sessions.append(archive); state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    BoxState empty; empty.host="empty"; empty.ok=true; state.setPeer(empty,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(state); window.show();
+    auto *filter=window.findChild<MachineFilter *>(); auto *menu=filter->button()->menu();
+    menu->popup(window.mapToGlobal(QPoint(100,100))); QTRY_VERIFY(menu->isVisible());
+    const auto count=[&](const QString &host) {
+        for (auto *choice : menu->findChildren<QCheckBox *>("machineFilterChoice"))
+            if (choice->property("host")==host) return choice->property("sessionCount").toInt();
+        return -1;
+    };
+    QCOMPARE(count("@local"),4); QCOMPARE(count("mac"),1); QCOMPARE(count("empty"),0);
+    filter->setSelection({"@local"}); QCOMPARE(count("mac"),1); // Unselected machines retain their counts.
+    menu->hide();
+    window.findChild<DashboardPage *>()->filterRequested("@all","paused");
+    menu->popup(window.mapToGlobal(QPoint(100,100))); QCOMPARE(count("@local"),1); QCOMPARE(count("mac"),0);
+    menu->hide(); window.findChild<DashboardPage *>()->filterRequested("@all","archived");
+    menu->popup(window.mapToGlobal(QPoint(100,100))); QCOMPARE(count("@local"),1); QCOMPARE(count("mac"),0);
+    menu->hide(); window.findChild<DashboardPage *>()->filterRequested("@all","all");
+    window.findChild<QLineEdit *>("search")->setText("does-not-match-any-session");
+    menu->popup(window.mapToGlobal(QPoint(100,100))); QCOMPARE(count("@local"),4); QCOMPARE(count("mac"),1);
+    local.sessions.removeFirst(); state.setLocal(local,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QCOMPARE(count("@local"),3); QCOMPARE(count("mac"),1); QVERIFY(menu->isVisible()); menu->hide();
 }
 
 void TestSessionsWindow::dashboardAndMultiMachineNavigation()

@@ -34,6 +34,10 @@
 // таймер тикает), любая обычная работа. Порог в десятки секунд с запасом покрывает даже
 // очень тормозящий бокс.
 //
+// A main thread starved of CPU trips it too, whatever its stack shows. On macOS
+// check `launchctl print gui/<uid>/com.hgdev.hgs-tray` first: a LaunchAgent
+// without ProcessType Interactive runs as a daemon clamped below ordinary load.
+//
 // Windows has no steady clock that stops during sleep, so nowMs() reads the
 // unbiased interrupt time there. Nothing supervises the tray on Windows; main.cpp
 // registers it with Windows Error Reporting (RegisterApplicationRestart) instead,

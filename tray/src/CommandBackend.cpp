@@ -1,5 +1,6 @@
 #include "CommandBackend.h"
 
+#include "ChildProcess.h"
 #include "WindowsConsole.h"
 
 #include <QDir>
@@ -69,6 +70,8 @@ void CommandBackend::prepare(QProcess &process, QStringList argv)
     process.setProgram(argv.takeFirst());
     process.setArguments(argv);
     process.setWorkingDirectory(QDir::homePath());
+    // A terminal would hold whatever it inherits for as long as it stays open.
+    ChildProcess::inheritStdioOnly(process);
 #ifdef Q_OS_WIN
     // A template names a console program or a GUI one (wt.exe), which ignores
     // the new console.

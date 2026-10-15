@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "AttentionNotifier.h"
+#include "ChildProcess.h"
 #include "CommandBackend.h"
 #include "ConsoleHost.h"
 #include "FakeCli.h"
@@ -319,6 +320,11 @@ void TestWindowsDesktop::templateProgramGetsAConsoleWindow()
     QCOMPARE(process.program(), QString("powershell.exe"));
     QCOMPARE(process.arguments(), argv.mid(1));
     QCOMPARE(process.workingDirectory(), QDir::homePath());
+#ifdef Q_OS_UNIX
+    // Elsewhere the terminal inherits only stdio from the tray (ChildProcess.h).
+    QCOMPARE(process.unixProcessParameters().flags.testFlag(QProcess::UnixProcessFlag::CloseFileDescriptors),
+             ChildProcess::inheritsStdioOnly);
+#endif
 #ifdef Q_OS_WIN
     // What QProcess::startDetached hands the modifier in a GUI process, which has
     // no console: a hidden console and the tray's standard handles.

@@ -2494,23 +2494,24 @@ void SessionsWindow::rebuild()
     m_markAllReadAction->setText(unreadCount ? tr("Mark all as read (%1)").arg(unreadCount) : tr("Mark all as read"));
     m_markAllReadAction->setIcon(workspaceIcon("read-all", QColor(m_muted)));
     const QMap<QString, int> counts{{"all", total}, {"active", active}, {"attention", attention}, {"paused", saved}, {"archived", archived}};
+    QString countCaption;
     for (auto *button : m_filters) {
         const auto id = button->property("filter").toString(); button->setChecked(m_pages->currentIndex() == 0 && id == m_filter);
+        if (id == m_filter) countCaption = button->property("caption").toString();
         button->setText(QString::number(counts.value(id))); button->setProperty("count", counts.value(id));
         button->setToolTip(button->property("caption").toString() + QString(" / %1").arg(counts.value(id)));
         button->setIcon(workspaceIcon(id, QColor(id == "attention" && attention > 0 ? (m_dark ? "#f0c77b" : "#885400") : id == m_filter ? m_accent : m_muted)));
     }
     m_sessionsNav->setChecked(m_pages->currentIndex() == 0);
     m_machinesNav->setChecked(m_pages->currentIndex() == 2);
-    { const QSignalBlocker block(m_machineFilter); m_machineFilter->setSelection(m_hostFilters); m_machineFilter->setFleet(m_fleet); }
     m_searchResults->setFolderScope(m_folderFilterHost,m_folderFilterPath,m_folderFilterCheckout);
     m_searchResults->setHostsScope(m_fleet, m_filter, m_hostFilters, drafts);
     const QString query; // Text searches have their own result list and selection.
     QList<Entry> visible;
+    QMap<QString, int> machineCounts;
     for (const auto &e : m_entries) {
         const auto &s = e.session;
         if ((s.state == "archived") != (m_filter == "archived")) continue;
-        if (!m_hostFilters.isEmpty() && !m_hostFilters.contains(e.host.isEmpty() ? "@local" : e.host)) continue;
         if (m_filter == "attention" && !entryNeedsAttention(e)
             && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
         if (m_filter == "active" && !entryNeedsAttention(e) && !SessionPresentation::active(s, e.online, drafts.contains(e.key))
@@ -2518,8 +2519,13 @@ void SessionsWindow::rebuild()
         if (m_filter == "paused" && s.state == "running") continue;
         if (!(s.name + ' ' + e.machine + ' ' + s.prompt + ' ' + s.currentTool + ' ' + s.gitBranch + ' ' + s.gitWorktreeName + ' ' + s.activitySummary + ' ' + s.activityDetail).contains(query, Qt::CaseInsensitive)) continue;
         if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||!MachinePlatform::same(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd,m_folderFilterPath,MachinePlatform::of(m_fleet.local().metrics,e.host.isEmpty()))))continue;
+        const QString machine = e.host.isEmpty() ? QStringLiteral("@local") : e.host;
+        ++machineCounts[machine];
+        if (!m_hostFilters.isEmpty() && !m_hostFilters.contains(machine)) continue;
         visible.append(e);
     }
+    { const QSignalBlocker block(m_machineFilter); m_machineFilter->setSelection(m_hostFilters); m_machineFilter->setFleet(m_fleet);
+        m_machineFilter->setSessionCounts(machineCounts, countCaption); }
     struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch; };
     QList<Row> rows;
     const bool hasGroups = m_organization.groups().size() > 1;

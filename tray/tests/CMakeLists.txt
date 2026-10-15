@@ -433,6 +433,11 @@ target_link_libraries(test_messagecomposer PRIVATE Qt6::Test Qt6::Widgets hgs-ex
 zerus_add_test(messagecomposer test_messagecomposer)
 set_tests_properties(messagecomposer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_shortcuts test_shortcuts.cpp)
+target_include_directories(test_shortcuts PRIVATE ../src)
+target_link_libraries(test_shortcuts PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(shortcuts test_shortcuts)
+
 add_executable(test_composertoolbar test_composertoolbar.cpp)
 target_include_directories(test_composertoolbar PRIVATE ../src)
 target_link_libraries(test_composertoolbar PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)

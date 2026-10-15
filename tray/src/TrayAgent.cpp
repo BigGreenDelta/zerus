@@ -10,6 +10,7 @@
 
 #include <memory>
 
+#include "ChildProcess.h"
 #include "ClipboardBackend.h"
 #include "CommandBackend.h"
 #include "SessionsWindow.h"
@@ -274,6 +275,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     auto *discover = new QProcess(this);
     discover->setProgram(cfg.hgsPath.isEmpty() ? QStringLiteral("hgs") : cfg.hgsPath);
     discover->setArguments({QStringLiteral("ls"), QStringLiteral("--json")});
+    ChildProcess::inheritStdioOnly(*discover);
 
     // done — общий флаг между таймаутом, ошибкой запуска и finished(): каждый из трёх
     // путей завершения процесса отчитывается ровно один раз, тот же приём, что и
@@ -700,9 +702,9 @@ void TrayAgent::notify(const QString &title, const QString &body,
     //
     // startDetached, а не execute: ждать osascript на GUI-потоке нельзя (клик по
     // сессии уже открыл терминал, трей не должен подвисать).
-    if (QProcess::startDetached(QStringLiteral("osascript"),
-                                {QStringLiteral("-e"),
-                                 MacBackend::notificationScript(title, body)}))
+    if (ChildProcess::startDetached(QStringLiteral("osascript"),
+                                    {QStringLiteral("-e"),
+                                     MacBackend::notificationScript(title, body)}))
         return;
     // osascript не запустился -- пробуем штатный балун: он может не показаться, но это
     // всё же лучше, чем промолчать.
