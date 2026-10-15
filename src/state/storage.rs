@@ -211,14 +211,24 @@ pub(super) type Snapshot = BTreeMap<String, Vec<Pane>>;
 
 /// Each live session's panes as (pane, dead, run marker). No server means none.
 pub(super) fn live() -> Result<Snapshot> {
+    live_sessions().map(|(snapshot, _)| snapshot)
+}
+
+/// `live`, and from the same answer each live session's name by its immutable
+/// session ID (`$N`), which a rename keeps.
+pub(super) fn live_sessions() -> Result<(Snapshot, BTreeMap<String, String>)> {
     let mut result: Snapshot = BTreeMap::new();
+    let mut names = BTreeMap::new();
     for row in backend::current().panes()? {
+        if !row.session_id.is_empty() {
+            names.insert(row.session_id, row.session.clone());
+        }
         result
             .entry(row.session)
             .or_default()
             .push((row.pane, row.dead, row.run_marker));
     }
-    Ok(result)
+    Ok((result, names))
 }
 
 pub(super) fn matches(record: &Value, panes: Option<&Vec<Pane>>) -> bool {
