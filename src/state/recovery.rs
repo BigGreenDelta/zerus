@@ -1,7 +1,6 @@
 //! Host-owned recovery episodes with a replicated, versioned policy.
 //! A terminal continuation is explicitly different from retrying an API request.
 use super::*;
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(not(windows))]
@@ -771,18 +770,39 @@ fn recover_interrupted_jobs() -> Result<()> {
     }
     Ok(())
 }
+/// The installed service runs `hgs recovery worker` under this unit or label.
+const SERVICE: service_worker::Service = service_worker::Service {
+    unit: "hgs-recovery.service",
+    label: "com.hgdev.hgs-recovery",
+};
+/// Held by the worker that executes recovery.
+fn worker_lock() -> PathBuf {
+    root().join("recovery/worker.lock")
+}
+/// Held by the service's worker while it waits for the executor lock.
+fn standby_lock() -> PathBuf {
+    root().join("recovery/service.lock")
+}
 fn worker() -> Result<i32> {
     private_dir(&root().join("recovery"))?;
-    let file = lock_file(&root().join("recovery/worker.lock"))?;
-    if file.try_lock_exclusive().is_err() {
-        return Ok(0);
-    }
-    let _lock = crate::platform::FileLock::held(file);
-    recover_interrupted_jobs()?;
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let started = fs::metadata(&executable).and_then(|m| m.modified()).ok();
+    let replaced = || fs::metadata(&executable).and_then(|m| m.modified()).ok() != started;
+    // launchd and systemd start their worker again 10 s after it exits, so it
+    // waits for a worker a client started; that worker then gives way to it.
+    let Some(owner) = service_worker::acquire(
+        &worker_lock(),
+        &standby_lock(),
+        || SERVICE.is_current(),
+        replaced,
+        Duration::from_secs(1),
+    )?
+    else {
+        return Ok(0);
+    };
+    recover_interrupted_jobs()?;
     loop {
-        if fs::metadata(&executable).and_then(|m| m.modified()).ok() != started {
+        if replaced() || owner.yields() {
             return Ok(0);
         }
         if let Err(e) = tick() {
@@ -807,6 +827,11 @@ fn ensure_worker() -> Result<()> {
     #[cfg(target_os = "linux")]
     if home().join(".config/systemd/user/hgs-recovery.service").is_file()
         && crate::platform::silent("systemctl", &["--user", "start", "--no-block", "hgs-recovery.service"]) {
+        return Ok(());
+    }
+    // A running worker, or the service's worker waiting to take over, needs
+    // no detached one.
+    if crate::status::locked(&worker_lock()) || service_worker::waiting(&standby_lock()) {
         return Ok(());
     }
     // Detached from both SSH and GUI lifetime; service installation additionally
