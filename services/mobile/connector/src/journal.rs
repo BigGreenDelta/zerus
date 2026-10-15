@@ -42,9 +42,10 @@ pub const ADDED_COLUMNS: [(&str, &str); 5] = [
     ("delivered_at", "REAL"),
     ("response_expired", "INTEGER NOT NULL DEFAULT 0"),
 ];
-pub const INDEXES: [(&str, &str); 6] = [
+pub const INDEXES: [(&str, &str); 7] = [
     ("delivered_history", "CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)"),
     ("terminal_delivered_reads", "CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'"),
+    ("file_delivered_reads", "CREATE INDEX IF NOT EXISTS file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running'"),
     ("attachment_delivered_reads", "CREATE INDEX IF NOT EXISTS attachment_delivered_reads ON requests(delivered_at) WHERE operation='attachment_read' AND delivered=1 AND state!='running'"),
     ("journal_operation", "CREATE INDEX IF NOT EXISTS journal_operation ON requests(operation)"),
     ("delivered_reads", "CREATE INDEX IF NOT EXISTS delivered_reads ON requests(delivered_at) WHERE operation='inspect' AND delivered=1 AND state!='running'"),
@@ -52,7 +53,7 @@ pub const INDEXES: [(&str, &str); 6] = [
 ];
 
 // The Python connector's frozen predicates (operations.json `sql`).
-pub const READ_CLASS_SQL: &str = "('attachment_read','catalog','dirs','history','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
+pub const READ_CLASS_SQL: &str = "('attachment_read','catalog','dirs','file_read','history','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
 pub const READ_SQL: &str = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')";
 pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
@@ -244,6 +245,10 @@ impl Journal {
             )?;
         }
         // Delivered attachment chunks are never kept beyond the same short window.
+        tx.execute(
+            &format!("DELETE FROM requests WHERE operation='file_read' AND {delivered}"),
+            [short],
+        )?;
         tx.execute(
             &format!("DELETE FROM requests WHERE operation='attachment_read' AND {delivered}"),
             [short],
