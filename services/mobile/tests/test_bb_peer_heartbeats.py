@@ -18,10 +18,18 @@ THIRD_PEER = "bb-third-peer.example.invalid"
 SCREEN_TEXT = "BB-PEER-SCREEN-SENTINEL last terminal line"
 
 
-def padded(size: int) -> dict:
-    """A peer listing whose `hgs` output is exactly `size` bytes."""
-    base = len(json.dumps(peer_listing(padding=""))) + 1
-    return peer_listing(padding="x" * (size - base))
+def padded(size: int, *, withheld: bool = False) -> dict:
+    """A peer listing whose `hgs` output is exactly `size` bytes, padded in a
+    forwarded key or, `withheld`, in the screen text of an ended launch, which
+    the projection drops."""
+    def padding(text: str) -> dict:
+        if withheld:
+            return {"ended_launches": [{"launch_id": "00000000-0000-4000-8000-0000000000ee",
+                                        "name": "claude/example/failed", "code": 1, "output": text}]}
+        return {"padding": text}
+
+    base = len(json.dumps(peer_listing(**padding("")))) + 1
+    return peer_listing(**padding("x" * (size - base)))
 
 
 class PeerHeartbeatTests(GatewayCase):
@@ -52,17 +60,29 @@ class PeerHeartbeatTests(GatewayCase):
             self.assertNotIn(THIRD_PEER.encode(), beat.raw)
 
     async def test_oversized_peer_snapshots_are_withheld_from_their_route_only(self):
-        # Under the 1 MiB output bound but over 1 MiB once projected; and over the bound itself.
+        # Under the 1 MiB output bound but over 1 MiB once projected.
         large = Peer(via="bb-large-peer", machine=synthetic_machine(1), snapshot=padded(MAX_PEER_SNAPSHOT - 64))
-        huge = Peer(via="bb-huge-peer", machine=synthetic_machine(2), snapshot=padded(MAX_PEER_SNAPSHOT + 1))
-        fleet = self.use(Fleet(Peer(), large, huge))
+        # Output at and just over the bound, almost all of it withheld, so only
+        # the output bound itself (not the projected size) tells them apart.
+        edge = Peer(via="bb-edge-peer", machine=synthetic_machine(2),
+                    snapshot=padded(MAX_PEER_SNAPSHOT, withheld=True))
+        huge = Peer(via="bb-huge-peer", machine=synthetic_machine(3),
+                    snapshot=padded(MAX_PEER_SNAPSHOT + 1, withheld=True))
+        fleet = self.use(Fleet(Peer(), large, edge, huge))
         process = await self.launch()
         await self.manifest(fleet.advertised(), process)
-        await self.until(lambda: len(self.relay.peer_heartbeats(ROUTE)) >= 2 and all(
-            sum(bool(self.hgs.finished(call["pid"])) for call in self.through(machine=peer.machine, argv=["ls"])) >= 2
-            for peer in (large, huge)), 20, "two snapshots of every peer", process)
+
+        def snapshots(peer: Peer) -> int:
+            calls = self.through(machine=peer.machine, argv=["ls"])
+            return sum(bool(self.hgs.finished(call["pid"])) for call in calls)
+
+        published = (fleet.peers[0], edge)
+        await self.until(lambda: all(len(self.relay.peer_heartbeats(peer.route)) >= 2 for peer in published)
+                         and all(snapshots(peer) >= 2 for peer in (large, huge)), 20, "two snapshots of every peer",
+                         process)
         self.assertEqual([(peer.via, self.peer_attempts(peer.route)) for peer in (large, huge)],
                          [(peer.via, []) for peer in (large, huge)])
+        self.assertLess(len(self.relay.peer_heartbeats(edge.route)[-1].raw), 64 * 1024)
         body = await self.heartbeats_after(1, process)
         self.assertEqual(body["peers"], fleet.advertised())
         self.assertTrue(all(row["online"] for row in body["peers"]))

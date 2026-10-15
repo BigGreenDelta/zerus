@@ -27,14 +27,15 @@ class PeerRouteTests(GatewayCase):
                                           "online": False}])
         # A peer call that started before the change may still log its start.
         await self.heartbeats_after(1, process)
-        contacted, published = len(self.through(via=VIA)), len(self.relay.peer_heartbeats(ROUTE))
+        # Attempts, not accepted heartbeats: the relay refuses one for an offline route.
+        contacted, published = len(self.through(via=VIA)), len(self.peer_attempts(ROUTE))
         for request in (self.submission("inspect"), self.submission("send", text="never sent offline"),
                         self.scoped("catalog")):
             self.assertEqual(await self.submit(request, process, gateway_route=self.route(peer)), FAILED,
                              request["operation"])
         await self.heartbeats_after(2, process)
         self.assertEqual(len(self.through(via=VIA)), contacted)
-        self.assertEqual(len(self.relay.peer_heartbeats(ROUTE)), published)
+        self.assertEqual(len(self.peer_attempts(ROUTE)), published)
         # Reconnecting under the same verified identity restores the same route.
         peer.online = True
         self.rescript()

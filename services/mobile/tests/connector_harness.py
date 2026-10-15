@@ -284,8 +284,9 @@ class FakeRelay:
     also recorded in `violations`, which BlackBoxCase fails on. Requests are
     queued as phones submit them and handed out one per long poll in the
     relay's batch envelope; results follow the relay's claim rules. As the
-    relay does, it answers 404 to a peer heartbeat whose route is not in the
-    last heartbeat manifest it accepted.
+    relay does, it answers a peer heartbeat with 404 when its route is not in
+    the last heartbeat manifest it accepted, and with 409 when that route is
+    offline or names another machine.
     """
 
     def __init__(self, token: str | None = None):
@@ -453,8 +454,11 @@ class FakeRelay:
             problem = peer_heartbeat_problem(parts[3], exchange.body)
             if problem:
                 return self.refuse(exchange, 400, "invalid request", problem)
-            if parts[3] not in self.manifest:
+            route = self.manifest.get(parts[3])
+            if route is None:
                 return 404, {"error": "not found"}
+            if not route["online"] or route["machine_id"] != exchange.body["machine_id"]:
+                return 409, {"error": "request identity or route conflicts"}
             return 200, {"ok": True}
         if exchange.method == "POST" and len(parts) == 5 and parts[:3] == ["v1", "node", "requests"] and parts[4] == "result":
             return self.result(exchange, parts[3])

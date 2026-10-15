@@ -87,7 +87,8 @@ class FleetTests(GatewayCase):
             fleet.discovery = answer
             body = await self.rediscovered(process)
             self.assertEqual((body.get("machine_id"), body.get("peers")), (LOCAL, []), case)
-        fleet.discovery = {}
+        # It recovers with the next valid inventory, here exactly at the bound.
+        fleet.discovery = {"stdout_text": json.dumps(valid).ljust(128 * 1024)}
         self.rescript()
         await self.manifest(fleet.advertised(), process)
 

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import unittest
+import uuid
 
 from aiohttp import ClientSession
 
@@ -170,6 +171,30 @@ class HarnessTests(BlackBoxCase):
         self.assertEqual((await self.call("POST", path, canonical(invalid), typed))[0], 400)
         self.assertIn("invalid result receipt", self.relay.violations[0])
 
+    async def test_peer_heartbeats_follow_the_last_accepted_manifest(self):
+        typed = {"Content-Type": "application/json"}
+        gateway, peer, other, route, offline = (str(uuid.uuid4()) for _ in range(5))
+        snapshot = {"sessions": []}
+        rows = [{"route_id": route, "machine_id": peer, "name": "Peer", "online": True},
+                {"route_id": offline, "machine_id": other, "name": "Offline peer", "online": False}]
+
+        async def beat(route_id, machine_id):
+            body = canonical({"machine_id": machine_id, "snapshot": snapshot})
+            return (await self.call("POST", f"/v1/node/peers/{route_id}/heartbeat", body, typed))[0]
+
+        self.assertEqual(await beat(route, peer), 404)
+        extended = canonical({"snapshot": snapshot, "machine_id": gateway, "peers": rows})
+        self.assertEqual((await self.call("POST", "/v1/node/heartbeat", extended, typed))[0], 200)
+        statuses = [await beat(route, peer), await beat(route, other), await beat(offline, other)]
+        self.assertEqual(statuses, [200, 409, 409])
+        # A heartbeat without the gateway fields withdraws every route.
+        plain = canonical({"snapshot": snapshot})
+        self.assertEqual((await self.call("POST", "/v1/node/heartbeat", plain, typed))[0], 200)
+        self.assertEqual(await beat(route, peer), 404)
+        self.assertEqual([exchange.path for exchange in self.relay.peer_heartbeats()],
+                         [f"/v1/node/peers/{route}/heartbeat"])
+        self.assertEqual(self.relay.violations, [])
+
     async def test_queue_counts_and_refuses_like_the_relay(self):
         rng = random.Random(20261015)
         samples = [canonical(random_json(rng)).encode() for _ in range(300)]
@@ -222,6 +247,24 @@ class HarnessTests(BlackBoxCase):
         self.hgs.script([{"argv": ["once"], "times": 1, "stdout": {"ok": True}}])
         racing = await asyncio.gather(*(asyncio.to_thread(run, "once") for _ in range(8)))
         self.assertEqual(sorted(result.returncode for result in racing), [0] + [2] * 7)
+
+    async def test_scripted_hgs_matches_stdin_fields_by_json_value(self):
+        self.hgs.script([{"argv": ["swarm", "mobile-peer", "--json"], "stdin_fields": {"schema": 1, "argv": ["ls"]},
+                          "stdout": {"id": "{{stdin.payload.request_id}}", "first": "{{stdin.argv.0}}",
+                                     "missing": "{{stdin.payload.absent.deeper}}"}}])
+
+        def run(stdin: bytes):
+            return subprocess.run([str(self.hgs.bin / "hgs"), "swarm", "mobile-peer", "--json"], input=stdin,
+                                  capture_output=True, env={"PATH": "/usr/bin:/bin"}, timeout=10)
+
+        matched = await asyncio.to_thread(run, b'{"schema": 1, "argv": ["ls"], "payload": {"request_id": "r-1"}}')
+        self.assertEqual((matched.returncode, json.loads(matched.stdout)),
+                         (0, {"id": "r-1", "first": "ls", "missing": None}))
+        # `true` is not 1, a longer argv is not the listed one, and stdin must be an object holding every field.
+        for stdin in (b'{"schema": true, "argv": ["ls"]}', b'{"schema": 1, "argv": ["ls", "-a"]}',
+                      b'{"argv": ["ls"]}', b'[1, ["ls"]]', b""):
+            with self.subTest(stdin=stdin):
+                self.assertEqual((await asyncio.to_thread(run, stdin)).returncode, 2)
 
     def test_configurations_may_name_only_loopback_or_reserved_hosts(self):
         for changes in ({"server_url": "https://relay.zerus.dev"}, {"identity_url": "https://zerus.dev.guthub.dev"},

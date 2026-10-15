@@ -176,9 +176,10 @@ each online peer's own listing, help, accounts and session (matched on the
 envelope's `via`, target machine and inner argv through the scripted hgs's
 `stdin_fields`), and `swarm __mobile-peer-local --json` with the gateway's
 own guarded machine. Route IDs, `MAX_PEERS`, the 1 MiB peer snapshot bound,
-help markers and receipt texts come from the golden vectors. `FakeRelay`
-answers 404 to a peer heartbeat whose route is not in the last manifest it
-accepted, as the relay does. Only `test_bb_peer_transport` runs the built
+help markers and receipt texts come from the golden vectors. As the relay
+does, `FakeRelay` answers a peer heartbeat with 404 when its route is not in
+the last manifest it accepted, and with 409 when that route is offline or
+names another machine. Only `test_bb_peer_transport` runs the built
 `hgs` (`HGS_TEST_BIN`, `ZERUS_DIRECTORY_TEST_HGS` or `target/debug/hgs`; it
 fails in CI without one), behind a synthetic `ssh` that runs the peer's hgs
 locally, with stand-ins for tmux and the agent CLIs.
@@ -211,10 +212,13 @@ locally, with stand-ins for tmux and the agent CLIs.
 | `test_old_native_never_probes_dispatch_and_old_relay_falls_back` | `test_bb_fleet.test_native_without_the_peer_abi_is_never_asked_for_peers` | covered |
 | `test_mark_read_reaches_only_the_selected_machine` | `test_bb_peer_operations.test_mark_read_reaches_only_the_selected_machine` | covered |
 
-The vectors pin the receipts a black-box run cannot reach: "guarded native
-routing is unavailable" (`receipts.json`, `execute:gateway-route-unavailable`;
-the relay hands routed claims only to one-hop polls, which a connector makes
-only while it can route them) and the directory route mismatch below.
+The vectors pin two receipts these runs do not reach. "guarded native routing
+is unavailable" (`receipts.json`, `execute:gateway-route-unavailable`) needs a
+routed claim handed to a one-hop poll that was already waiting when gateway
+sharing was turned off: the relay hands routed claims only to one-hop polls,
+which a connector makes only while it can route them, and withdraws them at
+the next heartbeat without gateway support. The directory route mismatch is
+below.
 
 #### Peer cases in other modules
 
@@ -224,6 +228,7 @@ only while it can route them) and the directory route mismatch below.
 | `test_mobile_directory_create.PeerDirectoryCreate.test_foreign_computer_nested_route_and_unavailable_peer_fail_without_creation` | `test_bb_gateway.test_routes_outside_the_current_inventory_fail_before_native_work`, `test_bb_peer_routes.test_rebound_and_withdrawn_routes_fail_before_native_work`; a claim whose `computer_id` differs from its route: `projections.jsonl` (`directory-create-route-mismatch`), since no relay delivers `computer_id` | covered |
 | `test_mobile_directory_create.PeerDirectoryCreate.test_old_peer_capability_does_not_inherit_new_gateway_support` | `test_bb_peer_operations.test_folders_and_worktrees_are_created_only_on_the_selected_machine` | covered |
 | `test_mobile_directory_create.PeerDirectoryCreate.test_local_native_identity_reset_after_preflight_cannot_create` | `test_bb_gateway.test_native_guard_refusal_after_dispatch_is_uncertain_and_never_repeated` | covered |
+| `test_mobile_directory_create.RustDirectoryHttp.test_actual_http_peer_route_is_exact_and_withdrawal_preserves_uncertainty` | The relay's exact `gateway_route` and its withdrawal before delivery: real-relay end-to-end tests on PostgreSQL; the connector side of an exact peer route: `test_bb_peer_operations.test_folders_and_worktrees_are_created_only_on_the_selected_machine` | partial |
 | `test_mobile_worktrees.PeerWorktrees.test_worktree_create_keeps_selected_native_context_and_exact_guard` | `test_bb_peer_operations.test_folders_and_worktrees_are_created_only_on_the_selected_machine` | covered |
 | `test_mobile_worktrees.PeerWorktrees.test_rebound_peer_cannot_create_on_local_or_new_identity` | `test_bb_peer_routes.test_rebound_and_withdrawn_routes_fail_before_native_work` | covered |
 | `test_mobile_delivery.MobileDeliveryFixtureTests.test_only_the_gateway_advertises_and_its_snapshot_reports_the_value` | `test_bb_peer_operations.test_the_delivery_setting_belongs_to_the_gateway`; the listing's `preferences` reach the heartbeat as `test_bb_heartbeat` checks | covered |
