@@ -620,3 +620,8 @@ if(TARGET test_terminalview)
 endif()
 zerus_check_tests()
 zerus_test_environment()
+
+add_executable(test_keyboardsettings test_keyboardsettings.cpp)
+target_include_directories(test_keyboardsettings PRIVATE ../src)
+target_link_libraries(test_keyboardsettings PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(keyboardsettings test_keyboardsettings)
