@@ -303,7 +303,7 @@ impl Store {
                     continue;
                 }
                 let read = READS.contains(&s(&r, "operation"));
-                let attachment = ["attachment_read", "file_read"].contains(&s(&r,"operation"));
+                let attachment = ["attachment_read", "file_read"].contains(&s(&r, "operation"));
                 let remove = read
                     && (f(&r, "updated")
                         < at - match s(&r, "operation") {
