@@ -114,6 +114,26 @@ class EffortTransport(unittest.TestCase):
         self.assertEqual(observed['effort'],'high')
         self.assertEqual(self.received(),b'')
 
+    def test_inspection_exposes_native_priority_without_changing_current_settings(self):
+        catalog=self.root/'.codex/models_cache.json'
+        catalog.write_text(json.dumps({'models':[
+            {'slug':'gpt-6-astra','display_name':'Example current model','priority':8,
+             'supported_reasoning_levels':[{'effort':'xhigh'}]},
+            {'slug':'example-zeta','display_name':'Example Zeta','priority':1},
+            {'slug':'example-alpha','display_name':'Example Alpha','priority':1},
+            {'slug':'example-hidden','priority':0,'visibility':'hide'},
+            {'slug':'example-legacy'}]}))
+        before=catalog.read_bytes()
+        observed=self.inspect()
+        choices=observed['model_options']
+        self.assertEqual([row['id'] for row in choices],
+                         ['example-zeta','example-alpha','gpt-6-astra','example-legacy'])
+        self.assertEqual(choices[2]['label'],'Example current model')
+        self.assertEqual(choices[2]['effort_options'],['xhigh'])
+        self.assertEqual((observed['model'],observed['effort']),('gpt-6-astra','xhigh'))
+        self.assertEqual(catalog.read_bytes(),before)
+        self.assertEqual(self.received(),b'')
+
     def test_codex_actual_steps_confirmed_and_idempotent(self):
         p=self.payload('low');r=self.change(p)
         self.assertEqual(r['status'],'confirmed')

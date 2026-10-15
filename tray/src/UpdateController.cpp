@@ -25,6 +25,10 @@ const QStringList casks={"zerus","zerus@nightly"};
 int g_testCommandTimeoutMs=0; // 0: the 5 s deadline
 const char *stableVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z";
 const char *nightlyVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+\\.r[0-9]+\\.g[a-f0-9]{7}\\.n([0-9]{1,15})\\z";
+// The newest stable release published without the Windows portable zip; every
+// later stable release carries it, as nightly releases do. Stable publication
+// enforces this (LAST_STABLE_WITHOUT_WINDOWS in scripts/release_common.py).
+const char *lastStableWithoutWindows="0.42.2";
 bool matches(const QString &s,const char *pattern){return QRegularExpression(QString::fromLatin1(pattern)).match(s).hasMatch();}
 bool integer(const QJsonValue &v,qint64 low,qint64 high){double n=v.toDouble(-1);return v.isDouble()&&std::isfinite(n)&&std::floor(n)==n&&n>=low&&n<=high;}
 bool safe(const QString &s){return matches(s,"\\A[A-Za-z0-9][A-Za-z0-9._+-]{0,179}\\z")&&!s.contains("..");}
@@ -166,10 +170,13 @@ bool UpdateController::plainStableIsNewer(const QString &installed,const QString
     qsizetype installedEnd=0,releasedEnd=0;auto local=QVersionNumber::fromString(installed,&installedEnd);auto available=QVersionNumber::fromString(released,&releasedEnd);
     return installedEnd==installed.size()&&releasedEnd==released.size()&&local.segmentCount()==3&&available.segmentCount()==3&&QVersionNumber::compare(available,local)>0;
 }
+bool UpdateController::stableHasWindowsBuild(const QString &version){return plainStableIsNewer(QString::fromLatin1(lastStableWithoutWindows),version);}
 bool UpdateController::portableUpdateAvailable(const QString &appVersion,const DesktopUpdateFeed &feed){
-    // A nightly is <product>.r<count>.g<commit>.n<run>; the zip reports only its
-    // product version, so only a newer product version is known to be newer.
-    if(!feed.valid)return false;
+    // The zip reports only its product version, so only a newer product version is
+    // known to be newer. A nightly is <product>.r<count>.g<commit>.n<run>; a stable
+    // release must also carry a Windows zip. Dev builds never do.
+    if(!feed.valid||feed.buildNumber>0)return false;
+    if(matches(feed.version,stableVersion))return stableHasWindowsBuild(feed.version)&&plainStableIsNewer(appVersion,feed.version);
     auto nightly=QRegularExpression("\\A([0-9]+\\.[0-9]+\\.[0-9]+)\\.r[0-9]+\\.g[a-f0-9]{7}\\.n[0-9]+\\z").match(feed.version);
     return nightly.hasMatch()&&plainStableIsNewer(appVersion,nightly.captured(1));
 }
@@ -185,11 +192,16 @@ bool UpdateController::claimNotification(const QString &token){
 }
 QString UpdateController::comparisonMessage(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &appVersion,int comparison,bool compared){
     if(!feed.valid)return tr("No verified release catalog yet.");
-    // Windows Phase 1: a portable zip without an installer or self-update, and
-    // only nightly releases carry it.
+    // Windows Phase 1: a portable zip without an installer or self-update. Stable
+    // and nightly releases carry it; Dev builds do not.
     if(installation.kind=="portable"){
-        if(feed.buildNumber>0)return tr("Dev builds do not include a Windows build yet. Choose the nightly channel to hear about newer Windows builds.");
-        if(matches(feed.version,"\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))return tr("Stable releases do not include a Windows build yet. Choose the nightly channel to hear about newer Windows builds.");
+        if(feed.buildNumber>0)return tr("Dev builds do not include a Windows build yet. Choose the stable or nightly channel to hear about newer Windows builds.");
+        if(matches(feed.version,stableVersion)){
+            if(portableUpdateAvailable(appVersion,feed))return tr("Zerus %1 is available. Download its Windows zip from the release page.").arg(feed.version);
+            if(!stableHasWindowsBuild(feed.version)&&plainStableIsNewer(appVersion,feed.version))
+                return tr("Zerus %1 has no Windows build; stable releases after it carry one. Until then, choose the nightly channel to hear about newer Windows builds.").arg(feed.version);
+            return tr("Portable Windows build: there is no self-update, and no newer stable release is published.");
+        }
         return portableUpdateAvailable(appVersion,feed)?tr("Zerus nightly %1 is available. Download its Windows zip from the release page.").arg(feed.version)
                                                        :tr("Portable Windows build: there is no self-update, and nightly builds of the same version cannot be compared. The release page has the newest Windows zip.");
     }
@@ -337,7 +349,8 @@ void UpdateController::sourceInstallation(const QString &executable){
     for(int depth=0;!bundle&&depth<20;++depth){if(QFileInfo::exists(directory.filePath(".git"))){m_installation.kind="source";break;}if(!directory.cdUp())break;}
 #ifdef Q_OS_WIN
     // Windows builds ship as a portable zip; there is no package manager to ask.
-    // Only nightly releases carry the zip, so that channel is the default here.
+    // Nightly stays the default: the zip cannot tell whether it came from a stable
+    // or a nightly release, and only nightlies carried it before 0.42.3.
     if(m_installation.kind=="unknown"){
         m_installation.kind="portable";
         if(!QSettings().contains("updates/channel")){QSettings().setValue("updates/channel","nightly");m_feed={};m_notice.clear();m_comparison.clear();m_message="Updates have not been checked for this channel.";m_lastSuccess=0;m_cached=false;m_available=false;restoreCatalog();}
