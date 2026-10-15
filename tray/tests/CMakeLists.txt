@@ -615,3 +615,8 @@ if(TARGET test_terminalview)
 endif()
 zerus_check_tests()
 zerus_test_environment()
+
+add_executable(test_gotodialog test_gotodialog.cpp)
+target_include_directories(test_gotodialog PRIVATE ../src)
+target_link_libraries(test_gotodialog PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(gotodialog test_gotodialog)
