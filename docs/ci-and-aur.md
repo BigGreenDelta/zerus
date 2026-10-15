@@ -191,10 +191,10 @@ format is required by the existing verified agent input transport. Unknown input
 mode must keep rejecting delivery; upgrading the test toolchain preserves that
 guard. The package requires tmux 3.7+. A binary upgrade must not restart live
 servers; see the [installation requirements](installation.md#requirements).
-Release packaging covers **Arch x86_64** and, through the `zerus` and
-`zerus@nightly` Homebrew casks, **Apple Silicon macOS**; see
+Release packaging covers **Arch x86_64** and, through the `zerus`,
+`zerus@nightly` and `zerus@dev` Homebrew casks, **Apple Silicon macOS**; see
 [macOS distribution](macos-distribution.md). Ordinary macOS CI checks build/test
-compatibility with Homebrew Qt; only stable and nightly candidates build, sign and
+compatibility with Homebrew Qt; stable, nightly and successful main Dev candidates build, sign and
 notarize the bundle, and only once the repository variable `MACOS_CASKS_ENABLED`
 is `true`. Stable releases and nightlies add the Windows x86_64 portable zip
 described below (owner decision of 2026-10-14; 0.42.2 is the last stable release

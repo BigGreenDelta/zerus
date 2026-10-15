@@ -1,5 +1,6 @@
 """Developer ID signing must cover nested code inside-out and never release unnotarized bytes."""
 import importlib.util
+import contextlib
 import io
 import json
 import os
@@ -48,6 +49,23 @@ class Signing(unittest.TestCase):
 
     def relative(self, paths):
         return [str(path.relative_to(self.app.parent)) for path in paths]
+
+    def test_signing_entrypoint_accepts_dev_only_from_the_reviewed_source_base(self):
+        version=(ROOT/'VERSION').read_text().strip();base=(ROOT/'DEV_VERSION').read_text().strip()
+        args=['sign-macos.py','--app',str(self.app),'--identity','-','--team-id','ABCDE12345',
+              '--version',version,'--output',str(Path(self.temporary.name)/'signed')]
+        for release in [version,version+'.r812.gabcdef0.n41',base+'-dev.685']:
+            self.write('Contents/Info.plist',plistlib.dumps({'CFBundleShortVersionString':version,'ZerusReleaseVersion':release}))
+            with self.subTest(release=release),mock.patch.object(sys,'argv',args+['--release',release]), \
+                    mock.patch.object(sign,'signing_order',return_value=[]),mock.patch.object(sign.subprocess,'run') as execute, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                sign.main()
+                self.assertEqual(execute.call_args_list[0].args[0][0],'ditto')
+        for release in ['9.9.9-dev.685',base+'-dev.0',base+'-dev.0685',version+'.r812.gabcdef0.n41; command']:
+            with self.subTest(release=release),mock.patch.object(sys,'argv',args+['--release',release]), \
+                    mock.patch.object(sign.subprocess,'run') as execute,contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:sign.main()
+                self.assertEqual(error.exception.code,2);execute.assert_not_called()
 
     def test_signing_order_is_inside_out_and_complete(self):
         order = self.relative(sign.signing_order(self.app))

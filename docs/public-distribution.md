@@ -204,10 +204,9 @@ client upgrade is required: older Android clients retain their legacy v1 dev
 feed and cannot parse schema 2. Continue that legacy feed during the rollout;
 never repoint it to incompatible schema 2 data.
 
-The initial desktop dev candidate contains an Arch x86_64 package and source.
-macOS clients can discover source updates, but an installable signed macOS dev
-bundle is still dependent on the macOS distribution/signing work. This workflow
-does not claim that Linux binaries are macOS installers. Dev has no Windows build:
+Desktop Dev contains an Arch x86_64 package and source, plus signed Apple Silicon
+ZIP/DMG assets when Mac candidates are enabled. The optional Mac metadata keeps
+legacy desktop catalog parsing compatible. Dev has no Windows build:
 the Windows job gates Dev like every other suite, but its portable zip stays a
 GitHub asset of stable and nightly releases, and schema 2 has no artifact kind
 for it. A portable Windows build on the Dev channel says so, never reports a dev
