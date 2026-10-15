@@ -69,6 +69,8 @@ pub(super) fn finish(name: &str, run_id: &str, child_id: u32, status: ExitStatus
     }
     if clean {
         archive::save(&record)?;
+        drop(_guard);
+        super::worktree_lifecycle::after_archive(&record);
     }
     Ok(())
 }

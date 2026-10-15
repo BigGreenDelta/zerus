@@ -2360,6 +2360,66 @@ os.execvp("codex", ["codex", *sys.argv[1:]])
         self.assertEqual([row["name"] for row in self.rows()], [new_name])
         self.hgs("pause", new_name, rc=1)
 
+    @unittest.skipIf(LEGACY_STATE, "fix introduced by the native lifecycle model")
+    def test_session_renamed_between_terminal_queries_lists_once_under_its_new_name(self):
+        # A listing reads the sessions, then their panes. A session renamed in
+        # between keeps its terminal identity: it lists once, under its new
+        # name, as its later listings do.
+        old_name, new_name = self.start(), "claude/p/renamed"
+        plain_old, plain_new = "codex/p/untracked", "codex/p/manual"
+        self.t("new-session", "-d", "-s", plain_old, "sleep 60")
+        listed = self.root / "rename-after-listing"
+        tmux = f"{shlex.quote(TMUX)} -S {shlex.quote(self.socket)} -f /dev/null"
+        self.script("tmux", f'''#!/bin/sh
+{tmux} "$@"; status=$?
+if [ "$1" = list-sessions ] && rm {shlex.quote(str(listed))} 2>/dev/null; then
+    {shlex.quote(str(HGS))} rename {shlex.quote(old_name)} {shlex.quote(new_name)} >/dev/null || exit 99
+    {shlex.quote(str(HGS))} rename {shlex.quote(plain_old)} {shlex.quote(plain_new)} >/dev/null || exit 99
+fi
+exit $status
+''')
+        listed.touch()
+        sessions = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        self.assertFalse(listed.exists())
+        self.assertFalse(self.binding(old_name))
+        renamed = self.binding(new_name)
+        self.assertTrue(renamed.get("conversation_id"))
+        self.assertEqual(sorted(s["name"] for s in sessions), [new_name, plain_new])
+        after = {row["name"]: row for row in self.rows()}
+        keys = ("name", "cmd", "project", "tag", "attached", "clients", "created", "launch_id",
+                "state", "resumable", "tracked", "run_id", "conversation_id")
+        for session in sessions:
+            self.assertEqual({key: session.get(key) for key in keys},
+                             {key: after[session["name"]].get(key) for key in keys})
+        tracked = next(s for s in sessions if s["name"] == new_name)
+        self.assertEqual((tracked["tag"], tracked["run_id"], tracked["conversation_id"], tracked["resumable"]),
+                         ("renamed", renamed["run_id"], renamed["conversation_id"], True))
+        self.assertFalse(next(s for s in sessions if s["name"] == plain_new).get("conversation_id"))
+
+    @unittest.skipIf(LEGACY_STATE, "fix introduced by the native lifecycle model")
+    def test_session_renamed_to_a_name_freed_between_terminal_queries_lists_once(self):
+        # The listed session that ended must not list again under the name
+        # that the renamed one now holds.
+        ended, moved = "codex/p/first", "codex/p/second"
+        launches = {name: str(uuid.uuid4()) for name in (ended, moved)}
+        for name in (ended, moved):
+            self.t("new-session", "-d", "-s", name, "-e", "HGS_LAUNCH_ID=" + launches[name], "sleep 60")
+        self.assertEqual({row["name"]: row["launch_id"] for row in self.rows()}, launches)
+        listed = self.root / "reuse-after-listing"
+        tmux = f"{shlex.quote(TMUX)} -S {shlex.quote(self.socket)} -f /dev/null"
+        self.script("tmux", f'''#!/bin/sh
+{tmux} "$@"; status=$?
+if [ "$1" = list-sessions ] && rm {shlex.quote(str(listed))} 2>/dev/null; then
+    {tmux} kill-session -t {shlex.quote("=" + ended)} || exit 99
+    {shlex.quote(str(HGS))} rename {shlex.quote(moved)} {shlex.quote(ended)} >/dev/null || exit 99
+fi
+exit $status
+''')
+        listed.touch()
+        sessions = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
+        self.assertFalse(listed.exists())
+        self.assertEqual([(s["name"], s["launch_id"]) for s in sessions], [(ended, launches[moved])])
+
     def test_attached_terminal_title_changes_without_restarting_or_typing(self):
         old_name, new_name = "sh/p/before", "sh/p/after"
         self.t("new-session", "-d", "-s", old_name, "cat")

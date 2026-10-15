@@ -544,7 +544,7 @@ fn session_spec(
     replaces: Option<&str>,
 ) -> Result<backend::LaunchSpec> {
     let name = string(record, "name");
-    if !Path::new(string(record, "launch_dir")).is_dir() {
+    if !(Path::new(string(record, "launch_dir")).is_dir() || archive_id.is_some() && super::worktree_lifecycle::restorable(record)) {
         return Err(format!(
             "{name}: directory is missing: {}",
             string(record, "launch_dir")
@@ -602,6 +602,12 @@ fn print_resume(spec: &backend::LaunchSpec) {
 fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     let archived = archive::read_archive(name, id)?;
     recipes::verify_history(&archived, true)?;
+    if let Some(scope)=scope {scope.check(&archived)?;}
+    {
+        let _guard = lock(None)?;
+        if live()?.contains_key(name) || record_path(name).exists() { return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring")); }
+    }
+    if !dry { super::worktree_lifecycle::restore(&archived)?; }
     let run_id = uuid::Uuid::new_v4().to_string();
     let spec = resume_spec(&archived, &run_id, Some(id))?;
     let _guard = lock(None)?;

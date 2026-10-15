@@ -1,5 +1,5 @@
 //! Mirror Claude's native tool approval panels in Activity. A pending
-//! main-agent PermissionRequest stays visible while Claude shows a chooser. A
+//! main-agent or child PermissionRequest stays visible while Claude shows a chooser. A
 //! complete panel that matches the request exposes its native options verbatim;
 //! options reaching beyond this one request are marked for a second
 //! confirmation in the desktop. Zerus never chooses an option on its own. An
@@ -7,6 +7,8 @@
 use super::*;
 use sha2::{Digest,Sha256};
 use std::path::Path;
+mod children;
+pub(super) fn observe_children(record:&mut Value,event:&Value) {children::observe(record,event);}
 
 #[derive(Clone,Debug,PartialEq)]
 struct Panel { title:String, body:Vec<String>, question:String, labels:Vec<String>, selected:usize }
@@ -113,6 +115,11 @@ fn parse(screen:&str)->Option<Panel> {
     Some(Panel{title:title.into(),body,question:rows[question].into(),labels,selected})
 }
 
+fn active_phase(record:&Value)->bool {
+    ["working","tool","input","approval","unknown"].contains(&string(record,"phase"))
+        ||(record["phase"]=="idle"&&children::entries(record).next().is_some())
+}
+
 fn eligible(record:&Value)->bool {
     record["agent"]=="claude"&&record["phase"]=="approval"&&!pause_active(record)&&string(record,"error").is_empty()
 }
@@ -174,8 +181,43 @@ fn tool_call_id(record:&Value,tool:&str)->String {
 /// The card for the pending request, if Claude still shows a chooser. Without
 /// a terminal snapshot the request stays visible but cannot be answered here.
 fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
+    if record["agent"]!="claude"||pause_active(record)||!string(record,"error").is_empty()
+        ||!active_phase(record)
+        ||record.get("exited_at").is_some()||record.get("session_end").is_some() {return None;}
+    let panel=screen.and_then(parse);
+    // Include unsupported child tools in the ambiguity check: a matching
+    // filename alone must not let a parent approval consume a child's panel.
+    let matching:Vec<_>=children::entries(record).filter(|(_,entry)|
+        panel.as_ref().is_some_and(|p|matches(&entry["request"],p))).collect();
+    let main_matches=request(record).is_some_and(|r|panel.as_ref().is_some_and(|p|matches(r,p)));
+    if children::overflow(record)||matching.len()+usize::from(main_matches)>1 {
+        let (mut card,panel)=if let Some((id,entry))=matching.first() {
+            build_request(record,screen,&entry["request"],&entry["at"],id)?
+        } else if let Some(request)=request(record) {
+            build_request(record,screen,request,&record["pending_approval_at"],"")?
+        } else {return safety_card(record,screen?).map(|card|(card,panel));};
+        card["question_hash"]=json!(format!("ambiguous:{}",string(&card,"question_hash")));
+        card["question_id"]=json!(format!("claude-approval:{}",string(&card,"question_hash")));
+        card["can_answer"]=json!(false);card["approval_choices"]=json!(false);
+        card["answer_unavailable_reason"]=json!("The visible approval cannot be bound to one native request. Answer it in Terminal.");
+        return Some((card,panel));
+    }
+    if let [(id,entry)]=matching[..] {
+        // Only Bash currently proves the full child tool input. File names
+        // and hosts alone are insufficient to identify a child's operation.
+        if entry["request"]["tool_name"]=="Bash"&&panel.as_ref().is_some_and(|p|bash_title(&p.title)) {
+            return build_request(record,screen,&entry["request"],&entry["at"],id);
+        }
+        let (mut card,panel)=build_request(record,screen,&entry["request"],&entry["at"],id)?;
+        card["can_answer"]=json!(false);card["approval_choices"]=json!(false);
+        card["answer_unavailable_reason"]=json!("This child tool request needs review in Terminal.");
+        return Some((card,panel));
+    }
     if !eligible(record) {return None;}
-    let request=request(record)?;
+    build_request(record,screen,request(record)?,&record["pending_approval_at"],"")
+}
+
+fn build_request(record:&Value,screen:Option<&str>,request:&Value,at:&Value,child_request_id:&str)->Option<(Value,Option<Panel>)> {
     if screen.is_some_and(|screen|!visible(screen)) {return None;}
     let tool=string(request,"tool_name");
     let panel=screen.and_then(parse);
@@ -188,7 +230,7 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
     };
     let native=panel.as_ref().filter(|_|problem.is_empty());
     let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
-        record["process_start"],tool,request["tool_input"],native.map(|p|json!([p.title,identity_body(p),p.question,p.labels]))]).to_string()));
+        record["process_start"],tool,request["tool_input"],request["agent_id"],child_request_id,at,native.map(|p|json!([p.title,identity_body(p),p.question,p.labels]))]).to_string()));
     let (question,body,options)=match native {
         Some(panel) => {
             let content=panel.body.iter().map(|r|if rule(r,'╌'){""}else{r.as_str()}).collect::<Vec<_>>().join("\n");
@@ -204,12 +246,19 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
             (format!("Claude asks to use {tool}"),body,Vec::new())
         },
     };
-    let created=record["pending_approval_at"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
-    Some((json!({"question_id":format!("claude-approval:{hash}"),"question_hash":hash,"tool_call_id":tool_call_id(record,tool),
+    let created=at.as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
+    let tool_id=if child_request_id.is_empty(){tool_call_id(record,tool)}else{string(request,"tool_use_id").to_owned()};
+    Some((json!({"question_id":format!("claude-approval:{hash}"),"question_hash":hash,"tool_call_id":tool_id,"agent_id":request["agent_id"],"child_request_id":child_request_id,
         "run_id":record["run_id"],"conversation_id":record["conversation_id"],"source":"claude_tool_approval",
         "can_answer":native.is_some(),"answer_unavailable_reason":problem,"approval":true,"approval_choices":native.is_some(),
         "answer_transport":"claude_tui","created_at":created,
         "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":false,"options":options}]}),panel))
+}
+
+fn bash_title(title:&str)->bool {
+    title=="Bash command"||title.strip_prefix("Bash command · from the ").is_some_and(|origin|
+        origin.strip_suffix(" agent").is_some_and(|name|!name.trim().is_empty())
+        ||origin.strip_prefix('"').and_then(|s|s.strip_suffix("\" workflow")).is_some_and(|name|!name.trim().is_empty()))
 }
 
 /// Native Bash safety checks can be visible while hook state still says
@@ -223,7 +272,7 @@ fn safety_panel(screen:&str)->Option<Panel> {
         ||!rows[question+1..].iter().any(|r|r.starts_with("Esc to cancel · Tab to amend")) {return None;}
     let fence=rows[..question].iter().rposition(|r|rule(r,'╌')||rule(r,'─'))?;
     if !rows[fence+1..question].iter().any(|r|r.starts_with("│ ")&&!gutter(r).is_empty()) {return None;}
-    if let Some(panel)=parse(screen).filter(|p|p.title=="Bash command") {return Some(panel);}
+    if let Some(panel)=parse(screen).filter(|p|bash_title(&p.title)) {return Some(panel);}
     // The long native panel may have scrolled its title/command out of view.
     // Its known dangerous-rm diagnostic still needs attention, but cannot be
     // answered here without the complete hook-backed request and panel.
@@ -234,7 +283,7 @@ fn safety_panel(screen:&str)->Option<Panel> {
 }
 
 fn safety_card(record:&Value,screen:&str)->Option<Value> {
-    if record["agent"]!="claude"||!["working","tool","input","approval","unknown"].contains(&string(record,"phase"))
+    if record["agent"]!="claude"||!active_phase(record)
         ||pause_active(record)||!string(record,"error").is_empty()||string(record,"run_id").is_empty()
         ||string(record,"conversation_id").is_empty()||record.get("exited_at").is_some()||record.get("session_end").is_some() {return None;}
     let panel=safety_panel(screen)?;
@@ -325,8 +374,9 @@ fn terminal_choice(record:&Value,screen:&str)->Option<Value> {
     if record["agent"]!="claude"||!["input","approval"].contains(&string(record,"phase"))
         ||pause_active(record)||!string(record,"error").is_empty() {return None;}
     let (title,body,options)=bottom_choice(screen)?;
+    let identity=parse(screen).map(|p|json!([identity_body(&p),p.question])).unwrap_or_else(||json!(body));
     let hash=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
-        record["process_start"],title,body,options]).to_string()));
+        record["process_start"],title,identity,options]).to_string()));
     let created=record["attention_started"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
     let options:Vec<_>=options.iter().enumerate()
         .map(|(i,(label,description))|json!({"id":(i+1).to_string(),"label":label,"description":description})).collect();
@@ -371,12 +421,10 @@ fn acknowledged(screen:&str)->bool {!screen.trim().is_empty()&&!visible(screen)}
 
 pub(super) fn current(record:&Value)->Option<Value> {
     if record["agent"]!="claude"||pause_active(record)||!string(record,"error").is_empty()
-        ||!["working","tool","input","approval","unknown"].contains(&string(record,"phase")) {return None;}
+        ||!active_phase(record) {return None;}
     let screen=kimi_tui_choice::identity(record).and_then(|record|kimi_tui_choice::capture(&record)).ok();
-    if eligible(record)&&request(record).is_some() {
-        return build(record,screen.as_deref()).map(|(card,_)|card);
-    }
-    safety_card(record,screen.as_deref()?)
+    build(record,screen.as_deref()).map(|(card,_)|card)
+        .or_else(||safety_card(record,screen.as_deref()?))
 }
 pub(super) fn available(record:&Value,question:&Value)->Result<()> {
     let current=current(record).ok_or("The native approval is no longer visible. Open Terminal")?;
@@ -392,7 +440,18 @@ pub(super) fn answer(record:&Value,question:&Value,answers:&Value)->Result<()> {
         .filter(|n|(1..=panel.labels.len()).contains(n)).ok_or("Choose one of Claude's options")?-1;
     let navigation_settle=if safety_panel(&screen).is_some(){std::time::Duration::from_millis(250)}else{std::time::Duration::ZERO};
     kimi_tui_choice::answer_queued(record,question,chosen,panel.labels.len(),snapshot,acknowledged,navigation_settle)?;
-    let _ = settle(record,label(&panel.labels[chosen]).starts_with("No"));
+    if string(question,"child_request_id").is_empty() {
+        let _ = settle(record,label(&panel.labels[chosen]).starts_with("No"));
+    } else {
+        let _ = settle_child(record,string(question,"child_request_id"));
+    }
+    Ok(())
+}
+fn settle_child(original:&Value,id:&str)->Result<()> {
+    let _guard=lock(None)?;
+    if let Some(mut record)=read_run(string(original,"name"),string(original,"run_id"))? {
+        if children::settle(&mut record,original,id) {write(&mut record)?;}
+    }
     Ok(())
 }
 /// Claude sends no hook when an approval is answered: a denial ends its turn,
@@ -528,6 +587,87 @@ pub(super) fn reconcile(record:Value)->Value {
     fn card(record:&Value,screen:&str)->Value {build(record,Some(screen)).unwrap().0}
     fn options(card:&Value)->Vec<(String,String)> {
         card["questions"][0]["options"].as_array().unwrap().iter().map(|o|(string(o,"label").to_owned(),string(o,"scope").to_owned())).collect()
+    }
+
+    fn child(record:&mut Value,id:&str,command:&str) {
+        questions::observe(record,&json!({"hook_event_name":"PermissionRequest","agent_id":id,
+            "tool_name":"Bash","tool_input":{"command":command}}));
+    }
+    #[test] fn workflow_request_binds_only_one_exact_child_and_refreshes_identity() {
+        let mut r=json!({"agent":"claude","phase":"working","run_id":"run","conversation_id":"conversation"});
+        let command="T=$(pwd); test \"$T\" = /workspace/example && rm -f $T/*.jsonl $T/*.port";
+        let screen=SAFETY.replace("Bash command","Bash command · from the \"fixture-checks\" workflow");
+        child(&mut r,"child-a",command);
+        let q=card(&r,&screen);
+        assert_eq!(q["can_answer"],true);assert_eq!(q["agent_id"],"child-a");
+        assert!(!string(&q,"child_request_id").is_empty());assert_eq!(q["tool_call_id"],"");
+        assert_eq!(q["question_hash"],card(&r,&screen.replace("in 2:00,","in 1:59,"))["question_hash"]);
+        assert!(safety_card(&r,&screen).is_some());
+        r["phase"]=json!("idle");
+        assert_eq!(q["question_hash"],card(&r,&screen)["question_hash"]);
+        assert!(safety_card(&r,&screen).is_some());
+        child(&mut r,"child-b","printf other");
+        assert_eq!(q["question_hash"],card(&r,&screen)["question_hash"]);
+        child(&mut r,"child-c",command);
+        assert_eq!(card(&r,&screen)["can_answer"],false);
+        assert!(snapshot(&r,&screen).is_none());
+        questions::observe(&mut r,&json!({"hook_event_name":"SubagentStop","agent_id":"child-c"}));
+        assert_eq!(q["question_hash"],card(&r,&screen)["question_hash"]);
+        questions::observe(&mut r,&json!({"hook_event_name":"PostToolUse","agent_id":"child-a","tool_name":"Bash","tool_input":{"command":command}}));
+        child(&mut r,"child-a",command);
+        assert_ne!(q["question_hash"],card(&r,&screen)["question_hash"]);
+    }
+    #[test] fn child_completion_and_settlement_preserve_parent_and_siblings() {
+        let mut r=record("Bash",json!({"command":"parent"}));
+        let parent=r["pending_approval"].clone();let tools=r["active_tools"].clone();
+        child(&mut r,"child-a","printf hi > out.txt");child(&mut r,"child-b","other");
+        let q=card(&r,BASH);assert_eq!(q["can_answer"],true);
+        let saved=r.clone();
+        // A completion for another command of the same child cannot clear it.
+        questions::observe(&mut r,&json!({"hook_event_name":"PostToolUse","agent_id":"child-a","tool_name":"Bash","tool_input":{"command":"other"}}));
+        assert_eq!(q["question_hash"],card(&r,BASH)["question_hash"]);
+        assert!(children::settle(&mut r,&saved,string(&q,"child_request_id")));
+        assert!(!children::settle(&mut r,&saved,string(&q,"child_request_id")));
+        assert_eq!(r["pending_approval"],parent);assert_eq!(r["active_tools"],tools);assert_eq!(r["phase"],"approval");
+        assert_eq!(children::entries(&r).count(),1);
+        for kind in ["Stop","PostToolUse","UserPromptSubmit"] {
+            questions::observe(&mut r,&json!({"hook_event_name":kind}));
+            assert_eq!(children::entries(&r).count(),1);
+        }
+        questions::observe(&mut r,&json!({"hook_event_name":"SessionStart"}));
+        assert_eq!(children::entries(&r).count(),0);
+    }
+    #[test] fn duplicate_parent_child_requests_and_missing_proof_never_answer() {
+        let mut r=record("Bash",json!({"command":"printf hi > out.txt"}));
+        child(&mut r,"child-a","printf hi > out.txt");
+        assert_eq!(card(&r,BASH)["can_answer"],false);
+        r.as_object_mut().unwrap().remove("pending_approval");
+        r["phase"]=json!("working");
+        let clipped=BASH.split_once("Bash command\n").unwrap().1;
+        assert!(build(&r,Some(clipped)).is_none());assert!(build(&r,None).is_none());
+        assert!(build(&r,Some(&BASH.replace("printf hi > out.txt","printf changed"))).is_none());
+        for (key,value) in [("error",json!("error")),("session_end",json!({})),("exited_at",json!(1))] {
+            let mut invalid=r.clone();invalid[key]=value;assert!(build(&invalid,Some(BASH)).is_none());
+        }
+        r["child_approval_overflow"]=json!(true);
+        assert_eq!(card(&r,BASH)["can_answer"],false);
+        questions::observe(&mut r,&json!({"hook_event_name":"SessionEnd"}));
+        assert!(r.get("child_approval_overflow").is_none());
+    }
+    #[test] fn unsupported_child_tool_cannot_be_answered_as_the_parent() {
+        let mut r=record("Read",json!({"file_path":PATH}));
+        questions::observe(&mut r,&json!({"hook_event_name":"PermissionRequest","agent_id":"child",
+            "tool_name":"Read","tool_input":{"file_path":PATH}}));
+        assert_eq!(card(&r,OUTSIDE)["can_answer"],false);
+        r.as_object_mut().unwrap().remove("pending_approval");
+        assert_eq!(card(&r,OUTSIDE)["can_answer"],false);
+    }
+
+    #[test] fn generic_read_only_countdown_has_stable_identity() {
+        let r=json!({"agent":"claude","phase":"input"});
+        let q=terminal_choice(&r,SAFETY).unwrap();
+        assert_eq!(q["question_hash"],terminal_choice(&r,&SAFETY.replace("in 2:00,","in 1:59,")).unwrap()["question_hash"]);
+        assert_ne!(q["question_hash"],terminal_choice(&r,&SAFETY.replace("possibly-empty","possibly-wrong")).unwrap()["question_hash"]);
     }
 
     #[test] fn safety_gutter_matches_exact_command_and_preserves_the_warning() {
