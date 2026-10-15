@@ -365,7 +365,10 @@ live background commands or active subagents continue, intermediate replies rema
 unread in Activity but show no new-reply badge or reply-only attention count on
 desktop or Android. The pending reply becomes visible when work finishes; this
 never marks it as read. Explicit questions, approvals, errors and review reminders
-remain actionable. Routine replies from a turn the
+remain actionable. Optional Codex questions, which the agent continues without,
+are not attention: on the desktop they change neither the session's status nor
+the Needs attention filter, counters or badges. Listings report them separately
+as [`optional_questions`](#optional-questions-in-listings). Routine replies from a turn the
 agent scheduled itself (Kimi `CronCreate`) are not new replies while a recurring
 job remains: they appear in Activity without an unread mark, badge or banner. The
 reply after the last job ends, a one-shot reminder and any reply to the person's
@@ -2558,6 +2561,28 @@ host's mark for the current conversation:
 `{conversation_id, reply_id, attention_signature, at}`. A reply is unread while
 `reply_id` differs from `read.reply_id`; attention is unacknowledged while a
 non-null signature differs from `read.attention_signature`.
+
+<a id="optional-questions-in-listings"></a>
+Every session also has `optional_questions`, the questions Codex asked with
+`request_user_input_async` that still wait for the person while the agent
+continues without them: `{count, ids, latest_at}`. `count` is exact; `ids`
+holds the `question_id` of the newest 32, oldest first, and `latest_at` is when
+the newest was asked (seconds since the epoch, or `null` when not recorded).
+Without any it is `{"count": 0}`, as for saved, archived and non-Codex sessions.
+A question stops counting once its answer appears in the conversation, it is
+skipped, or its answer was submitted (**Submitted / Awaiting agent**); one asked
+in an earlier run of the same conversation counts until then. Only the main
+conversation is indexed: async questions of Codex native subagents are not
+counted. The value is `null` while the question index is incomplete or held by
+another process (as above) or cannot be read: unknown, never a count of 0, so a
+reader keeps the last value it had for the conversation. A listing from an
+older hgs has no `optional_questions`; peers forward theirs unchanged. Only
+identities leave the host, never question text, and no value depends on the
+time of the listing. Optional questions are not attention: they never change
+`phase`, and the count does not affect `attention_signature`, which keeps
+covering their identities as described above. Pending blocking requests of other
+providers stay in `phase` and `pending_question_count` is not used for these
+questions.
 
 Kimi sessions report `schedules: {count, recurring, next_at}` folded from the
 native cron journal: pending jobs the agent scheduled for itself, how many of them
