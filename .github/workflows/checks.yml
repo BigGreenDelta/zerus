@@ -152,6 +152,26 @@ jobs:
           cargo +1.85.0 fmt --check
           cargo +1.85.0 clippy --locked --all-targets -- -D warnings
           cargo +1.85.0 test --locked
+          # The connector links only the protocol library: it builds without the
+          # server stack, and no build may give serde_json insertion-ordered maps.
+          cargo +1.85.0 clippy --locked --no-default-features --lib --test codec -- -D warnings
+          cargo +1.85.0 build --locked --no-default-features --lib
+          cargo +1.85.0 test --locked --no-default-features --test codec
+          library="$(cargo +1.85.0 tree --locked --no-default-features --target all -e normal --prefix none)"
+          if grep -E '^(axum|clap|hyper|reqwest|ring|rustls|sqlx|tokio|tower)[ -]' <<<"$library"; then
+            echo "The protocol library depends on server crates" >&2
+            exit 1
+          fi
+          serde_features() {
+            features="$(cargo +1.85.0 tree --locked --target all -e features -i serde_json "$@")"
+            if ! grep -q 'serde_json feature "arbitrary_precision"' <<<"$features" \
+              || grep -q 'serde_json feature "preserve_order"' <<<"$features"; then
+              echo "serde_json needs arbitrary_precision and must not preserve_order $*" >&2
+              exit 1
+            fi
+          }
+          serde_features
+          serde_features --no-default-features
       - name: Real PostgreSQL cross-worker contract
         working-directory: services/mobile/relay
         env:

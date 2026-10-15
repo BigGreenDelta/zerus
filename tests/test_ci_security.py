@@ -489,6 +489,18 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("\n          ZERUS_RELAY_TEST_DSN: postgresql://postgres@127.0.0.1:"
                       "${{ job.services.postgres.ports['5432'] }}/zerus_test_relay\n", relay)
 
+    def test_relay_job_checks_the_protocol_library_alone(self):
+        relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
+        rust = next(step for step in steps(relay) if "name: Rust format, lint and local storage contracts" in step)
+        # The connector links the library without the server feature on Rust 1.85.
+        for command in ("clippy --locked --no-default-features --lib --test codec -- -D warnings",
+                        "build --locked --no-default-features --lib",
+                        "test --locked --no-default-features --test codec"):
+            self.assertIn(f"\n          cargo +1.85.0 {command}\n", rust)
+        self.assertIn('library="$(cargo +1.85.0 tree --locked --no-default-features --target all -e normal', rust)
+        self.assertIn("\n          serde_features\n          serde_features --no-default-features\n", rust)
+        self.assertIn("""grep -q 'serde_json feature "preserve_order"'""", rust)
+
     def test_arch_package_job_alone_produces_the_candidate_artifact(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         desktop, package = job(checks, "arch"), job(checks, "arch-package")

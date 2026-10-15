@@ -17,6 +17,19 @@ cargo +1.85.0 clippy --locked --all-targets -- -D warnings
 cargo +1.85.0 test --locked
 ```
 
+The server is the default `server` feature. Without it the library is only the
+API v1 codec (`json`), envelope validation (`protocol`) and `error`, with none
+of the HTTP, database or TLS crates, for the outbound connector:
+
+```sh
+cargo +1.85.0 clippy --locked --no-default-features --lib --test codec -- -D warnings
+cargo +1.85.0 test --locked --no-default-features --test codec
+```
+
+The image and the infra packager copy only `Cargo.toml`, `Cargo.lock`, `.cargo`
+and `src/**/*.rs|*.sql`, so the crate has no build script, declared test target
+or include from outside `src/` (`tests/test_source_relay_inputs.py`).
+
 The PostgreSQL contract is explicit, never silently treated as passed by a local
 SQLite run. Point `ZERUS_RELAY_TEST_DATABASE_URL` at a **disposable** PostgreSQL
 instance whose fixture role may create databases. The test creates and removes
@@ -82,6 +95,11 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   are decoded from borrowed raw JSON so the legal object key
   `$serde_json::private::Number` cannot be interpreted as serializer metadata.
   Legacy Python receipt tests cover this key as well as Unicode and large numbers.
+  The encoder sorts keys itself rather than trusting `Map` order, which
+  serde_json's `preserve_order` feature would change; CI rejects that feature.
+  `python_default_len` measures plain `json.dumps` output, as the connector's
+  size bounds do. `tests/codec.rs` compares both forms with CPython on 20,000
+  seeded values and documents the parse limits, including a claim batch's margin.
 - `store/requests.rs` owns queue admission, result reservations, committed claims,
   receipts, expiry and permanent mutation identity tombstones. A prepared
   submission owns one canonical payload plus small typed metadata; SQL work does
