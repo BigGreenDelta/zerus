@@ -130,7 +130,7 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
         store.saveReadState(ConversationReadState().head(target,"fixture-epoch",null,null,false)
             .viewport(target,"history:fixture-1",0))
         store.saveMessageState(MessageState(drafts=listOf(Draft(target,"Retained fixture draft"))))
-        val reads=AtomicInteger();val mutations=AtomicInteger();val mode=AtomicReference("complete")
+        val reads=AtomicInteger();val probes=AtomicInteger();val mutations=AtomicInteger();val mode=AtomicReference("complete")
         val gate=AtomicReference<CountDownLatch?>(null)
         val client=OkHttpClient.Builder().addInterceptor { chain ->
             check(chain.request().url.host=="relay.example.test")
@@ -142,11 +142,23 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
                     JSONObject(raw.toString())
                 }
                 "history" -> {
-                    reads.incrementAndGet()
+                    check(input.string("computer_id")==target.computerId && input.string("session")==target.session)
+                    check(payload.string("request_id")==input.string("request_id") &&
+                        payload.string("expected_run_id")==target.run && payload.string("expected_conversation_id")==target.conversation)
+                    check(payload.string("archive_id").isBlank() && payload.string("agent_id").isBlank())
+                    val limit=payload.getInt("limit");check(limit in setOf(1,100))
                     check(!payload.has("around_incoming_seq")) { "Explicit Latest reopened unread history" }
-                    gate.get()?.let { check(it.await(30,TimeUnit.SECONDS)) }
+                    // Catalog publication can independently probe the head. Only
+                    // full reads belong to the held Latest/duplicate assertion.
+                    if(limit==100) {
+                        reads.incrementAndGet()
+                        gate.get()?.let { check(it.await(30,TimeUnit.SECONDS)) }
+                    } else {
+                        probes.incrementAndGet()
+                        check(listOf("before","after","around","history_epoch").none(payload::has))
+                    }
                     val complete=mode.get()!="incomplete"
-                    val start=if(mode.get() in setOf("larger","reindexed")) 11 else 71
+                    val start=if(limit==1) 80 else if(mode.get() in setOf("larger","reindexed")) 11 else 71
                     val epoch=if(mode.get()=="reindexed") "fixture-rebuilt-epoch" else "fixture-epoch"
                     JSONObject().put("request_id",input.string("request_id")).put("name",target.session)
                         .put("run_id",target.run).put("conversation_id",target.conversation).put("history_epoch",epoch)
@@ -388,7 +400,7 @@ class ConversationNavigationSmokeInstrumentation : Instrumentation() {
             await("disabled Sessions Read all") { !button(unavailable).isEnabled }
             check(!button(unavailable).isEnabled)
             check(main { model.selected==null && !model.olderLoading && model.canReadAll(target) && !model.listReadAllCandidate(target) })
-            check(mutations.get()==0 && originalEvents.size==70)
+            check(mutations.get()==0 && originalEvents.size==70 && probes.get()>0)
         } finally {
             gate.getAndSet(null)?.countDown()
             main { model.back();activity.finish() }
