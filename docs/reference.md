@@ -1695,7 +1695,11 @@ executor lock. CLI operations are `hgs [@host] recovery get|set|sync|action`, wi
 JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.
 On Linux, client policy refreshes start the configured user service without
 restarting an active executor. A detached worker remains the fallback when no
-installed service or usable user manager is available.
+installed service or usable user manager is available; refreshes start none
+while a worker runs. The service's own worker (the job launchd or the unit
+systemd runs) never exits because another worker holds the executor lock, which
+would make the service manager start it again every 10 seconds: it waits for the
+lock, and a detached worker hands over to it between rounds.
 
 Open Zerus clients synchronize policy versions over HGS/SSH every 15 seconds;
 offline machines catch up later and executors keep their saved local policy.
@@ -1966,7 +1970,9 @@ service's GUI and opens the workspace there. It starts its own GUI only when
 the service stops or does not answer in time. A GUI that a launch started while
 the service was stopped keeps the socket, and a later service start then exits
 without a GUI of its own.
-The desktop version appears in the rail and Settings. **Settings → About** also
+The desktop version in the rail opens **About**; its tooltip shows the complete
+installed version, including the Dev build number or local source identity.
+**Settings → About** also
 shows the configured `hgs` CLI version, read when About opens; an unavailable or
 unrecognized response remains explicit instead of using a compiled-in value.
 Closing a workspace never owns agent process lifetime. Local machine settings,

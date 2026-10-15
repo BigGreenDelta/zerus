@@ -166,6 +166,25 @@ InstallationGuide UpdateController::installationGuide(const DesktopInstallation 
     else if(installation.arch)guide.instructions=tr("No supported update command is available for this installation. See the installation instructions.");
     return guide;
 }
+QString UpdateController::runningPlatform(){
+#if defined(Q_OS_MACOS)
+    return QStringLiteral("macos");
+#elif defined(Q_OS_WIN)
+    return QStringLiteral("windows");
+#elif defined(Q_OS_LINUX)
+    return QStringLiteral("linux");
+#else
+    return {};
+#endif
+}
+QUrl UpdateController::installationInstructionsUrl(const DesktopInstallation &installation,const QString &platform){
+    // README.md no longer has an Installation section; anchors are GitHub heading slugs.
+    QUrl url(QStringLiteral("https://github.com/ufna/zerus/blob/main/docs/installation.md"));
+    if(platform=="linux")url.setFragment(installation.arch?QStringLiteral("arch-linux"):QStringLiteral("local-installation"));
+    else if(platform=="macos")url.setFragment(QStringLiteral("macos-homebrew"));
+    else if(platform=="windows")url.setFragment(QStringLiteral("windows"));
+    return url;
+}
 bool UpdateController::plainStableIsNewer(const QString &installed,const QString &released){
     if(!matches(installed,"\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z")||!matches(released,"\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z"))return false;
     qsizetype installedEnd=0,releasedEnd=0;auto local=QVersionNumber::fromString(installed,&installedEnd);auto available=QVersionNumber::fromString(released,&releasedEnd);

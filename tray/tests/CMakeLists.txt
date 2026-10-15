@@ -546,6 +546,7 @@ set_tests_properties(markdownobjects PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 
 add_executable(test_updates test_updates.cpp)
 target_link_libraries(test_updates PRIVATE hgs-updates Qt6::Test)
+target_compile_definitions(test_updates PRIVATE ZERUS_INSTALLATION_GUIDE="${PROJECT_SOURCE_DIR}/../docs/installation.md")
 zerus_add_test(updates test_updates)
 set_tests_properties(updates PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 target_link_libraries(test_sessionswindow PRIVATE hgs-updates)

@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -290,5 +291,141 @@ class Recovery(unittest.TestCase):
         self.assertEqual(renamed['name'],self.name)
         for key in ('id','due_at','attempt','delays','identity'):self.assertEqual(renamed[key],original[key])
         self.assertEqual(self.received(),b'')
+
+
+@unittest.skipIf(sys.platform=='win32','the Windows session host supervises the worker')
+class WorkerOwnership(unittest.TestCase):
+    """launchd and systemd start the service's worker again 10 s after it exits, so
+    it waits for a worker a client started, and that worker gives way to it. These
+    workers are not the service's; the service's own waiting is pinned by the
+    state::service_worker unit tests."""
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory(prefix='hgs-recovery-worker-');self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);self.state=self.root/'state';(self.state/'recovery').mkdir(parents=True)
+        tools=self.root/'bin';tools.mkdir()
+        # No test here reaches a tmux server; never fall through to the user's.
+        (tools/'tmux').write_text('#!/bin/sh\nexit 1\n');(tools/'tmux').chmod(0o755)
+        self.env={k:v for k,v in os.environ.items() if not k.startswith(('HGS_','CLAUDE_','TMUX'))}
+        self.env.update(HOME=str(self.root),HGS_CONFIG_DIR=str(self.root/'config'),HGS_STATE_DIR=str(self.state),
+                        PATH=str(tools)+os.pathsep+os.environ['PATH'])
+        self.started=[];self.addCleanup(self.stop)
+
+    def stop(self):
+        for worker in self.started:
+            if worker.poll() is None:worker.terminate();worker.wait(timeout=10)
+        for pid in self.detached():
+            os.kill(pid,15)
+
+    def detached(self):
+        """Recovery workers of this fixture, as far as this platform shows them."""
+        found=[];proc=Path('/proc')
+        if not proc.is_dir():return found
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():continue
+            try:environ=(entry/'environ').read_bytes().split(b'\0');cmdline=(entry/'cmdline').read_bytes().split(b'\0')
+            except OSError:continue
+            if b'HGS_STATE_DIR='+bytes(self.state) in environ and cmdline[1:3]==[b'recovery',b'worker']:found.append(int(entry.name))
+        return found
+
+    def hold(self,name):
+        import fcntl
+        handle=open(self.state/'recovery'/name,'a');self.addCleanup(handle.close)
+        fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        return handle
+
+    def held(self,name):
+        import fcntl
+        path=self.state/'recovery'/name
+        if not path.exists():return False
+        with open(path) as handle:
+            try:fcntl.flock(handle,fcntl.LOCK_SH|fcntl.LOCK_NB)
+            except BlockingIOError:return True
+            fcntl.flock(handle,fcntl.LOCK_UN);return False
+
+    def worker(self):
+        worker=subprocess.Popen([str(fixtures.HGS),'recovery','worker'],env=self.env,stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
+        self.started.append(worker);return worker
+
+    def finished(self,worker):
+        try:_,errors=worker.communicate(timeout=15)
+        except subprocess.TimeoutExpired:self.fail('the worker kept running')
+        self.assertEqual(worker.returncode,0,errors)
+
+    def wait_for(self,check,seconds=15):
+        until=time.monotonic()+seconds
+        while not check():
+            if time.monotonic()>until:self.fail('condition not reached')
+            time.sleep(.05)
+
+    def test_worker_exits_while_another_worker_holds_the_lock(self):
+        self.hold('worker.lock')
+        self.finished(self.worker())
+        self.assertFalse((self.state/'recovery/heartbeat.json').exists())
+        self.assertFalse(self.held('service.lock'))
+
+    def test_worker_leaves_the_lock_to_a_waiting_service_worker(self):
+        self.hold('service.lock')
+        self.finished(self.worker())
+        self.assertFalse(self.held('worker.lock'))
+        self.assertFalse((self.state/'recovery/heartbeat.json').exists())
+
+    def test_worker_gives_way_once_the_service_worker_waits(self):
+        worker=self.worker()
+        self.wait_for(lambda:(self.state/'recovery/heartbeat.json').exists() and self.held('worker.lock'))
+        time.sleep(2.5);self.assertIsNone(worker.poll(),'a worker without a waiting service keeps running')
+        self.hold('service.lock')
+        self.finished(worker)
+        self.assertFalse(self.held('worker.lock'))
+
+    def children(self):
+        """This process's hgs children, exited ones included."""
+        found=set()
+        for entry in Path('/proc').iterdir():
+            if not entry.name.isdigit():continue
+            try:stat=(entry/'stat').read_text()
+            except OSError:continue
+            comm,fields=stat[stat.index('(')+1:stat.rindex(')')],stat[stat.rindex(')')+2:].split()
+            if comm=='hgs' and int(fields[1])==os.getpid():found.add(int(entry.name))
+        return found
+
+    def refresh(self):
+        """Runs `recovery get` and returns how many workers it started. A worker
+        started detached exits at once when it is not needed, so this process
+        adopts it as a subreaper and counts it even after it exited."""
+        import ctypes
+        prctl=ctypes.CDLL(None,use_errno=True).prctl
+        before=self.children()
+        self.assertEqual(prctl(36,1,0,0,0),0,'PR_SET_CHILD_SUBREAPER')
+        try:
+            result=subprocess.run([str(fixtures.HGS),'recovery','get'],env=self.env,text=True,capture_output=True,timeout=15)
+            spawned=self.children()-before
+        finally:
+            prctl(36,0,0,0,0)
+            for pid in self.children()-before:
+                try:os.kill(pid,15)
+                except ProcessLookupError:pass
+                os.waitpid(pid,0)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(json.loads(result.stdout)['policy']['enabled'])
+        return len(spawned)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'),'lists the fixture workers through /proc')
+    def test_policy_refresh_starts_no_worker_while_the_service_worker_waits(self):
+        (self.state/'recovery/policy.json').write_text(json.dumps(dict(version=3,revision=1,enabled=True,enabled_at=1)))
+        # Without a worker a refresh starts one, so the count below is observed.
+        self.assertEqual(self.refresh(),1)
+        self.wait_for(lambda:not self.held('worker.lock'))
+        held=self.hold('worker.lock')
+        self.assertEqual(self.refresh(),0,'a running worker needs no detached one')
+        held.close()
+        self.hold('service.lock')
+        self.assertEqual(self.refresh(),0)
+        result=subprocess.run([str(fixtures.HGS),'recovery','get'],env=self.env,text=True,capture_output=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(json.loads(result.stdout)['policy']['enabled'])
+        time.sleep(1.5)
+        self.assertEqual(self.detached(),[])
+        self.assertFalse(self.held('worker.lock'))
 
 if __name__=='__main__':unittest.main()

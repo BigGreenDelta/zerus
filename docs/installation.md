@@ -377,9 +377,12 @@ clicking it opens Updates. The tray menu also offers Updates, and fresh newer
 releases can show a system notification.
 
 **View release** opens the published release page. Expand **Show installation
-details** for package ownership, copyable Arch commands and installation
-instructions. These actions do not install an update automatically. A local
-build remains separate from an optional AUR installation.
+details** for package ownership and copyable Arch commands. There, **Installation
+instructions** opens this guide at the section for your system:
+[Arch Linux](#arch-linux) on Arch-based Linux, [local installation](#local-installation)
+on other Linux systems, [Homebrew](#macos-homebrew) on macOS and [Windows](#windows)
+on Windows. These actions do not install an update automatically. A local build
+remains separate from an optional AUR installation.
 
 ## Other machines
 
