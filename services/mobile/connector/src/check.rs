@@ -148,7 +148,7 @@ fn state_dir(directory: &Path, binding: &str) -> Value {
     );
     let journal = match journal_file {
         "absent" => json!({"status": "absent", "binding": "unbound"}),
-        "private" => journal(&directory.join(JOURNAL), binding),
+        "private" => journal(&directory.join(JOURNAL), binding, lock),
         _ => json!({"status": "refused"}),
     };
     ok &= journal["ok"] != false;
@@ -158,7 +158,7 @@ fn state_dir(directory: &Path, binding: &str) -> Value {
 }
 
 /// Reads the journal in one short read-only transaction.
-fn journal(path: &Path, binding: &str) -> Value {
+fn journal(path: &Path, binding: &str, lock: LockState) -> Value {
     let mut header = [0u8; 100];
     let read = std::fs::OpenOptions::new()
         .read(true)
@@ -181,19 +181,35 @@ fn journal(path: &Path, binding: &str) -> Value {
             return json!({"status": "unreadable", "error": "journal could not be read", "ok": false})
         }
     }
-    match read_journal(path) {
+    let code = |error: &rusqlite::Error| match error {
+        rusqlite::Error::SqliteFailure(failure, _) => Some((failure.code, failure.extended_code)),
+        _ => None,
+    };
+    // A writer that takes its reserved lock just after this reader looked for
+    // one can make its live rollback journal look hot for a moment. SQLite
+    // reports that to a read-only reader at once, so look again before
+    // calling a journal hot; a real one stays.
+    let mut outcome = read_journal(path);
+    for _ in 0..20 {
+        match &outcome {
+            Err(error)
+                if code(error).is_some_and(|(_, extended)| extended == READONLY_ROLLBACK) =>
+            {
+                std::thread::sleep(Duration::from_millis(25));
+                outcome = read_journal(path);
+            }
+            _ => break,
+        }
+    }
+    match outcome {
         Ok(contents) => contents.describe(binding),
         Err(error) => {
-            let code = match &error {
-                rusqlite::Error::SqliteFailure(failure, _) => {
-                    Some((failure.code, failure.extended_code))
-                }
-                _ => None,
-            };
-            match code {
-                Some((_, READONLY_ROLLBACK)) => json!({"status": "hot",
+            match code(&error) {
+                // A running connector rolls a hot journal back at its next read.
+                Some((_, READONLY_ROLLBACK)) if lock != LockState::Held => json!({"status": "hot",
                     "error": "a hot rollback journal awaits recovery on the next start", "ok": true}),
-                Some((ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked, _)) => {
+                Some((_, READONLY_ROLLBACK))
+                | Some((ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked, _)) => {
                     json!({"status": "busy",
                     "error": "journal stayed locked by a writer; run the check again", "ok": false})
                 }

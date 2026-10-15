@@ -67,8 +67,10 @@ configuration, inspects the state directory and its files with `lstat`, probes
 `connector.lock` with the shared lock `hgs status` uses (only when the file
 exists), and reads the journal in one short read-only transaction, never with
 `integrity_check` or `quick_check`. A hot rollback journal is reported, not
-recovered. The Python connector's 5 s busy timeout never expires because of a
-check, which holds its read lock for milliseconds.
+recovered; while a connector holds the lock, a journal that looks hot belongs
+to its write in progress, and the check reports `busy` instead. The Python
+connector's 5 s busy timeout never expires because of a check, which holds its
+read lock for milliseconds.
 
 The report covers the configuration (validity, the first refusal and every
 divergence finding below), the effective values, the state directory and

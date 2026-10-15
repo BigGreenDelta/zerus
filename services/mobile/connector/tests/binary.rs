@@ -456,4 +456,25 @@ fn check_reports_a_hot_journal_without_recovering_it() {
     );
     assert_eq!(report["state"]["journal"]["status"], "hot", "{report}");
     assert_eq!(code, 0);
+    // While a connector holds the lock, a journal that looks hot belongs to
+    // its live write: the check asks to be run again instead.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(state.join("connector.lock"))
+        .unwrap();
+    std::fs::set_permissions(
+        state.join("connector.lock"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    let (code, report) = check(&scratch, &config);
+    assert_eq!(
+        (code, report["state"]["journal"]["status"].as_str()),
+        (1, Some("busy")),
+        "{report}"
+    );
+    assert_eq!(report["state"]["lock"], "held");
 }
