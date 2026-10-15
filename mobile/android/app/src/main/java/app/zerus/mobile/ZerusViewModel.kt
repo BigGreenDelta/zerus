@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.referentialEqualityPolicy
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -100,7 +101,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     var connections by mutableStateOf<List<Connection>>(emptyList()); private set
     var machines by mutableStateOf<List<Machine>>(emptyList()); private set
-    var sessions by mutableStateOf<List<Session>>(emptyList()); private set
+    var sessions by mutableStateOf<List<Session>>(emptyList(),referentialEqualityPolicy()); private set
     private var accountsWriter:OrderedStatePersistence<List<AccountCatalog>>?=null
     var accountCatalogs by mutableStateOf<List<AccountCatalog>>(emptyList()); private set
     var accountsError by mutableStateOf(""); private set
@@ -222,14 +223,21 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             ?: HashMap<String,ConversationReadRecord>().also { map -> state.records.forEach { map.putIfAbsent(ConversationReadPolicies.key(it.target),it) } }.also { readIndex=state to it }
         return index[ConversationReadPolicies.key(target)]
     }
+    private var sessionIndex:Pair<List<Session>,Map<Target,Session>>?=null
+    private fun indexedSession(target:Target):Session? {
+        val rows=sessions
+        val index=sessionIndex?.takeIf { it.first===rows }?.second
+            ?: HashMap<Target,Session>().also { map -> rows.forEach { map.putIfAbsent(it.target,it) } }.also { sessionIndex=rows to it }
+        return index[target]
+    }
     fun loadedUnreadCount(target:Target):Int? {
-        val record=readState.record(target)
+        val record=indexedReadRecord(target)
         if(!readTrackingReady) return null
         if(record?.incomplete == true || readState.records.size >= 500 && record == null) return null
         return ConversationReadPolicies.lowerBound(record,loadedRows(target))
     }
     fun unreadCount(target:Target):Int? {
-        val record=readState.record(target) ?: return null
+        val record=indexedReadRecord(target) ?: return null
         if(!readTrackingReady || !record.headComplete || ConversationReadPolicies.key(target) !in currentHistoryHeads) return null
         return record.headIncoming?.let { (it-record.readThrough).coerceIn(0,Int.MAX_VALUE.toLong()).toInt() }
     }
@@ -381,17 +389,29 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     private fun watchHistoryHeads(priority:Target?=null) {
         if(historyHeadJob?.isActive==true || !readTrackingReady) return
-        val eligible=sessions.filter { row -> historyNetworkReason(row.target).isBlank() && SessionFilters.online(row,machines) && (priority==null || row.target==priority) }
-        val candidates=ReadAllHeadCandidates.candidates(eligible,readState).mapNotNull { row ->
-            val hint=ReadAllHeadCandidates.hint(row)
-            val key=ConversationReadPolicies.key(row.target)
-            if(historySnapshotHints[key]==hint && key in currentHistoryHeads) return@mapNotNull null
-            currentHistoryHeads-=key
-            row.target to hint
-        }
-        val chosen=historyHeadScheduler.choose(candidates.map { it.first },android.os.SystemClock.elapsedRealtime())
-        if(chosen.isEmpty()) return
         historyHeadJob=viewModelScope.launch {
+            val rows=sessions;val state=readState;val hosts=machines;val workspaces=connections
+            val relay=relayOperations;val native=machineOperations
+            val hints=historySnapshotHints.toMap();val heads=currentHistoryHeads
+            val candidates=withContext(Dispatchers.Default) {
+                val connected=workspaces.mapTo(hashSetOf()) { it.id }
+                val online=hosts.filter { it.online }.mapTo(hashSetOf()) { MachineKey(it.connectionId,it.id) }
+                val eligible=rows.filter { row ->
+                    val target=row.target;val host=MachineKey(target.connectionId,target.computerId)
+                    target.run.isNotBlank() && target.conversation.isNotBlank() && target.connectionId in connected && host in online &&
+                        "history" in relay[target.connectionId].orEmpty() && "history" in native[host].orEmpty() && (priority==null || target==priority)
+                }
+                ReadAllHeadCandidates.candidates(eligible,state).mapNotNull { row ->
+                    val hint=ReadAllHeadCandidates.hint(row)
+                    if(hints[ConversationReadPolicies.key(row.target)]==hint && ConversationReadPolicies.key(row.target) in heads) null else row.target to hint
+                }
+            }
+            if(rows!==sessions || state!==readState || hosts!==machines || workspaces!==connections || relay!==relayOperations || native!==machineOperations || heads!==currentHistoryHeads) return@launch
+            candidates.forEach { currentHistoryHeads-=ConversationReadPolicies.key(it.first) }
+            val chosen=historyHeadScheduler.choose(candidates.map { it.first },android.os.SystemClock.elapsedRealtime())
+            if(chosen.isEmpty()) return@launch
+            // Continue only when this pass selected work; an empty catalog must settle.
+            if(priority==null) coroutineContext[Job]?.invokeOnCompletion { cause -> if(cause==null) viewModelScope.launch { watchHistoryHeads() } }
             chosen.forEach { target ->
                 val result=runCatching {
                     val page=historyOnce(target,"","",1)
@@ -408,9 +428,6 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 historyHeadScheduler.result(target,android.os.SystemClock.elapsedRealtime(),result.isSuccess)
             }
         }
-        // Continue with the next stale chats now instead of two per catalog refresh.
-        // The scheduler spaces each chat, so this ends once every candidate was tried.
-        if(priority==null) historyHeadJob?.invokeOnCompletion { cause -> if(cause==null) viewModelScope.launch { watchHistoryHeads() } }
     }
     private fun restoreHistory(target:Target) {
         if(historyNetworkReason(target).isNotBlank() || olderLoading) return
@@ -422,10 +439,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             readPositionReady=false;loadHistory(target,"around",saved.cursor)
         } else if(historyWindows[target.key]==null) loadHistory(target,"")
     }
-    fun reviewLater(target:Target)=readState.record(target)?.reviewLater==true
+    fun reviewLater(target:Target)=indexedReadRecord(target)?.reviewLater==true
     fun captureReadAttention(target:Target):ReadAttentionEvidence {
-        val record=readState.record(target)
-        val raw=if(selected?.target==target) activity else sessions.find { it.target==target }?.raw
+        val record=indexedReadRecord(target)
+        val raw=if(selected?.target==target) activity else indexedSession(target)?.raw
         val fingerprint=HistoryHeadHints.readFingerprint(target,raw,record)
         val rows=loadedRows(target).orEmpty()
         return ReadAttentionEvidence(target,fingerprint,record?.epoch.orEmpty(),record?.headIncoming,
@@ -440,9 +457,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private fun readAllEvidence(target:Target):ReadAttentionEvidence? {
         if(!readTrackingReady || readWriter==null || demo || target.run.isBlank() || target.conversation.isBlank() ||
             connections.none { it.id==target.connectionId } ||
-            sessions.none { it.target==target } && (selected?.target!=target || activeFrame?.target!=target)) return null
+            indexedSession(target)==null && (selected?.target!=target || activeFrame?.target!=target)) return null
         val captured=captureReadAttention(target)
-        val row=sessions.find { it.target==target }
+        val row=indexedSession(target)
         val currentHint=row?.let(ReadAllHeadCandidates::hint)
         val observedHint=historySnapshotHints[ConversationReadPolicies.key(target)]
         val hintMatches=currentHint!=null && observedHint==currentHint
@@ -459,7 +476,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val record=indexedReadRecord(target)
         return ReadAllPolicies.changes(record,readAllEvidence(target),loadedRows(target).orEmpty(),record==null && readState.records.size>=500)
     }
-    fun listReadAllCandidate(target:Target):Boolean = sessions.find { it.target==target }?.let { row ->
+    fun listReadAllCandidate(target:Target):Boolean = indexedSession(target)?.let { row ->
         ReadAllPolicies.listCandidate(row,SessionFilters.online(row,machines),reviewLater(target))
     } == true
     /** Whether marking this one conversation would use only loaded replies rather than a fresh complete head. */
@@ -494,19 +511,21 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(evidence.target!=target || !readTrackingReady || captureReadAttention(target)!=evidence) { error="The displayed reply evidence changed. Review it again.";return }
         readWriter?.let { readState=it.edit { state -> state.review(target,true) } };refreshReadAttention();flushDrafts()
     }
+    private var readAttentionJob:Job?=null
     private fun refreshReadAttention() {
         // Retire the opening divider once this exact current head is read.
         // Keep its capture latched so a later reply cannot resurrect an old divider.
         selected?.target?.let { if(unreadCount(it)==0) { firstUnreadEventId="";unreadBoundaryCaptured=true } }
-        sessions=sessions.map { row ->
-            val later=reviewLater(row.target)
-            // A reply or request read on another device is read here too.
-            val unread=!SharedReadPolicies.replyRead(row) && (unreadCount(row.target) ?: loadedUnreadCount(row.target) ?: 0)>0
-            val acknowledged=SharedReadPolicies.attentionAcknowledged(row)
-            if(row.raw.optBoolean("mobile_review_later")==later && row.raw.optBoolean("mobile_unread_reply")==unread &&
-                row.raw.optBoolean("attention_acknowledged")==acknowledged) row
-            else row.copy(raw=JSONObject(row.raw.toString()).put("mobile_review_later",later).put("mobile_unread_reply",unread)
-                .put("attention_acknowledged",acknowledged))
+        readAttentionJob?.cancel()
+        val rows=sessions;val state=readState;val ready=readTrackingReady;val heads=currentHistoryHeads
+        // Retained windows/frames are bounded to twenty conversations. Copy references on main;
+        // workers never read the mutable access-ordered caches or the open conversation state.
+        val loaded=frames.values.associate { it.target to it.events }.toMutableMap()
+        historyWindows.values.forEach { loaded[it.target]=it.events }
+        selected?.target?.let { loaded[it]=conversationEvents }
+        readAttentionJob=viewModelScope.launch {
+            val prepared=withContext(Dispatchers.Default) { SessionReadAttention.prepare(rows,state,ready,heads,loaded) }
+            if(sessions===rows && readState===state && currentHistoryHeads===heads) sessions=prepared
         }
     }
     private class SharedReadRequest(val connection:Connection,val target:Target,val payload:JSONObject,val key:String)
@@ -1829,18 +1848,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                         } catch (e: CancellationException) { throw e }
                         catch (_: Exception) { /* Session discovery remains available if optional capability discovery fails. */ }
                     }
-                    val computerRecords = api.computers(connection).optJSONArray("computers")?.objects().orEmpty()
-                    newAccounts += withContext(Dispatchers.Default) { computerRecords.map { AccountSnapshots.parse(connection.id,it) } }
-                    val connectionSessions = mutableListOf<Session>()
-                    computerRecords.forEach { raw ->
-                        val capabilities = raw.optJSONObject("snapshot")?.optJSONObject("mobile_capabilities")
-                        newOperations[MachineKey(connection.id, raw.getString("id"))] = if (capabilities?.optInt("protocol_version") == 1)
-                            capabilities.optJSONArray("operations")?.let { value -> (0 until value.length()).map { value.optString(it) }.toSet() }.orEmpty() else emptySet()
-                        machineFeatures=machineFeatures + (MachineKey(connection.id,raw.getString("id")) to capabilities?.optJSONArray("features")?.let { value -> (0 until value.length()).map { value.optString(it) }.toSet() }.orEmpty())
-                        newMachines += MachineCatalog.parse(connection.id, raw)
-                        connectionSessions += NativeParser.sessions(connection, raw)
+                    val computers = api.computers(connection)
+                    val prepared = withContext(Dispatchers.Default) {
+                        SessionCatalogParser.parse(connection, computers.optJSONArray("computers")?.objects().orEmpty())
                     }
-                    val catalog = ProjectParser.parse(connection, computerRecords, connectionSessions)
+                    if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
+                    newAccounts += prepared.accounts; newMachines += prepared.machines
+                    newOperations += prepared.operations; machineFeatures = machineFeatures + prepared.features
+                    val catalog = prepared.projects
                     newSessions += catalog.sessions; newProjects += catalog.projects; warnings += catalog.unavailableComputers
                     successfulConnections += connection.id
                     if (catalogGate.owns(operation.id) && connections == originalConnections && catalogErrorOwner == connection.id) error = ""
@@ -1851,15 +1866,23 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
             val unavailable=originalConnections.map { it.id }.toSet() - successfulConnections
-            newSessions += sessions.filter { it.target.connectionId in unavailable }.map { old -> old.copy(raw=JSONObject(old.raw.toString()).put("last_known",true)) }
+            if(unavailable.isNotEmpty()) {
+                val retained=sessions
+                newSessions += withContext(Dispatchers.Default) {
+                    retained.filter { it.target.connectionId in unavailable }.map { old -> old.copy(raw=JSONObject(old.raw.toString()).put("last_known",true)) }
+                }
+                if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
+            }
             newMachines += machines.filter { it.connectionId in unavailable }.map { it.copy(online=false,lastKnown=true) }
             newProjects += projects.filter { it.key.connectionId in unavailable }
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
-            sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
+            androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
+                projects = newProjects; projectWarnings = warnings
+            }
             refreshReadAttention();adoptSharedReads()
             val index=withContext(Dispatchers.Default) { ConversationIndex.capture(newSessions,newMachines) }
             if(connections == originalConnections) editState { state -> state.copy(conversationIndex=index) }
-            projects = newProjects; projectWarnings = warnings
             watchHistoryHeads()
             selectedProject?.let { chosen -> selectedProject = projects.find { it.key == chosen.key } ?: chosen }
             sessionProjectScope?.let { chosen -> sessionProjectScope = projects.find { it.key == chosen.key } ?: chosen }

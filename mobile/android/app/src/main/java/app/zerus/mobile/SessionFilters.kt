@@ -81,12 +81,18 @@ object SessionFilters {
     fun draftedSessions(sessions: List<Session>, drafts: List<Draft>): Set<String> {
         val unsent = drafts.filter { it.questionId.isBlank() && it.detachedId.isBlank() && it.target.archiveId.isBlank() &&
             it.status !in listOf("submitting", "submitted", "recorded") && (it.text.isNotBlank() || it.attachments.isNotEmpty()) }
-        return sessions.filterNot(::archived).filter { session -> unsent.any { draft ->
-            if (draft.target.agentId.isBlank()) ContextPolicies.sameSession(draft.target, session.target)
-            else session.raw.string("subagent_source") != "hook_profiles" &&
-                draft.target.copy(conversation = draft.target.parentConversation, agentId = "", parentConversation = "") == session.target &&
-                session.raw.optJSONObject("subagents")?.optJSONObject(draft.target.agentId)?.optBoolean("group") == false
-        } }.mapTo(mutableSetOf()) { it.target.key }
+        if (unsent.isEmpty()) return emptySet()
+        val parents = unsent.filter { it.target.agentId.isBlank() }
+            .mapTo(hashSetOf()) { Triple(it.target.connectionId, it.target.computerId, it.target.session) }
+        val children = unsent.filter { it.target.agentId.isNotBlank() }.groupBy {
+            it.target.copy(conversation = it.target.parentConversation, agentId = "", parentConversation = "")
+        }
+        return sessions.filterNot(::archived).filter { session ->
+            session.target.agentId.isBlank() && Triple(session.target.connectionId, session.target.computerId, session.target.session) in parents ||
+                session.raw.string("subagent_source") != "hook_profiles" && children[session.target].orEmpty().any { draft ->
+                    session.raw.optJSONObject("subagents")?.optJSONObject(draft.target.agentId)?.optBoolean("group") == false
+                }
+        }.mapTo(mutableSetOf()) { it.target.key }
     }
     fun active(session: Session, online: Boolean, hasDraft: Boolean = false) =
         !archived(session) && (hasDraft || needsAttention(session, online) || working(session, online) || scheduled(session, online) ||
@@ -153,15 +159,23 @@ object SessionFilters {
         return roster?.keys()?.asSequence()?.flatMap { id -> sequenceOf(id, roster.optJSONObject(id)?.string("conversation_id").orEmpty()) }?.toList().orEmpty() +
             previews.flatMap { listOf(it.string("id", "agent_id"), it.string("conversation_id")) }
     }
-    fun counts(sessions: List<Session>, machines: List<Machine>, drafts: Set<String> = emptySet()): Map<SessionFilter, Int> = SessionFilter.entries.associateWith { filter ->
-        sessions.count { matches(it, filter, online(it, machines), it.target.key in drafts) }
+    fun counts(sessions: List<Session>, machines: List<Machine>, drafts: Set<String> = emptySet()): Map<SessionFilter, Int> {
+        val online = machines.filter { it.online }.mapTo(hashSetOf()) { MachineKey(it.connectionId, it.id) }
+        val counts = SessionFilter.entries.associateWith { 0 }.toMutableMap()
+        sessions.forEach { row ->
+            val isOnline = machineKey(row.target) in online
+            val hasDraft = row.target.key in drafts
+            SessionFilter.entries.forEach { filter -> if (matches(row, filter, isOnline, hasDraft)) counts[filter] = counts.getValue(filter) + 1 }
+        }
+        return counts
     }
     /** Chooser counts precede machine selection and text search, retaining project/state scope. */
     fun machineCounts(sessions: List<Session>, machines: List<Machine>, filter: SessionFilter,
         drafts: Set<String> = emptySet(), project: ProjectKey? = null): Map<MachineKey, Int> {
         val result = machines.associate { MachineKey(it.connectionId, it.id) to 0 }.toMutableMap()
+        val online = machines.filter { it.online }.mapTo(hashSetOf()) { MachineKey(it.connectionId, it.id) }
         for(session in sessions) if((project == null || session.projectKey == project) &&
-            matches(session, filter, online(session, machines), session.target.key in drafts)) {
+            matches(session, filter, machineKey(session.target) in online, session.target.key in drafts)) {
             val key = machineKey(session.target)
             result[key] = result.getOrDefault(key, 0) + 1
         }
@@ -169,9 +183,10 @@ object SessionFilters {
     }
     fun grouped(sessions: List<Session>, projects: List<ProjectSummary>): List<SessionGroup> {
         val grouped = sessions.groupBy { it.projectKey ?: ProjectKey(it.target.connectionId, "unassigned:${it.target.computerId}", "unassigned") }
-        val order = projects.map { it.key } + grouped.keys.filter { key -> projects.none { it.key == key } }
+        val catalog = projects.associateBy { it.key }
+        val order = projects.map { it.key } + grouped.keys.filter { key -> key !in catalog }
         return order.mapNotNull { key -> grouped[key]?.takeIf { it.isNotEmpty() }?.let { members ->
-            val project = projects.find { it.key == key }
+            val project = catalog[key]
             SessionGroup(key, project?.name ?: members.first().project.ifBlank { "Unassigned sessions" }, project?.color.orEmpty(),
                 if (members.all(::archived)) members.sortedByDescending { it.raw.optDouble("archived_at", 0.0) } else members)
         } }
