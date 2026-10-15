@@ -33,18 +33,21 @@ and `test_bb_peer_transport` also run a built `hgs`
 (`ZERUS_DIRECTORY_TEST_HGS`, `HGS_TEST_BIN` or `target/debug/hgs`); without
 one they skip, except with `CI=true`, where they fail.
 
-The 206 tests in 31 modules took 314 s and 320 s in two runs on a Linux
-workstation against the Python connector, with `target/debug/hgs` built
-(2026-10-15), and 320-324 s each in four concurrent runs, each in its own
-scratch directory; only the two Rust-only tests of `test_bb_native_limits`
-skipped. Each test starts its own connector processes, and the time goes to
-the connector's own clocks rather than to the machine: `test_bb_peer_routes`
-(33-38 s), `test_bb_fleet` (34-35 s), `test_bb_computer` (31 s, the 15 s
-project refresh), `test_bb_gateway` (30-31 s), `test_bb_gateway_downgrade`
-(26-28 s) and `test_bb_native_limits` (25 s) take 58% of a run; every other
-module takes 13 s or less. By slice, the base modules (42 tests) took 28-29 s,
-the session operations of H2 (58 tests) 56-60 s, the computer, read and media
-operations of H3 (74 tests) 72-74 s and the peers of H4 (32 tests) 158-162 s.
+The 211 tests in 32 modules took 320 s on a Linux workstation against the
+Python connector, with `target/debug/hgs` built (2026-10-15), and 327-332 s
+each in four concurrent runs confined to four CPUs, each in its own scratch
+directory. Seven skipped: the two Rust-only tests of `test_bb_native_limits`
+and the five of `test_bb_check`, since `--check` exists only in the Rust
+connector. Against the Rust connector, the ported modules and the harness
+self-tests (21 tests) take 5 s. Each test starts its own connector processes,
+and the time goes to the connector's own clocks rather than to the machine:
+`test_bb_peer_routes` (33-38 s), `test_bb_fleet` (34-35 s), `test_bb_computer`
+(31 s, the 15 s project refresh), `test_bb_gateway` (30-31 s),
+`test_bb_gateway_downgrade` (26-28 s) and `test_bb_native_limits` (25 s) take
+58% of a run; every other module takes 13 s or less. By slice, the base
+modules (42 tests besides `test_bb_check`) took 28-29 s, the session
+operations of H2 (58 tests) 56-60 s, the computer, read and media operations
+of H3 (74 tests) 72-74 s and the peers of H4 (32 tests) 158-162 s.
 
 ## Isolation
 
@@ -110,15 +113,25 @@ scripted `hgs` processes it started; no tmux server or agent is involved.
 
 ## Reviewed divergences
 
-`IMPLEMENTATION` selects the expected outcome where the connector README
-(added with the Rust connector) records a deliberate difference:
+`IMPLEMENTATION` selects the expected outcome where the design
+(`docs/superpowers/specs/2026-10-15-rust-mobile-connector-design.md`) records a
+deliberate difference; the connector README lists those the Rust build
+implements so far:
 
 | Divergence | Test | Python | Rust |
 |---|---|---|---|
 | b: a result the relay rejects | `test_bb_requests.test_rejected_result_blocks_later_claims_in_python`, `test_bb_native_limits.RefusedResultTests` | A 400, 413 or 422 upload refusal is retried before every poll, so it blocks every later claim. A native error beyond 4,096 code points, a non-string one, and a receipt within `MAX_RESULT` whose canonical form with its request_id exceeds 1 MiB are journaled as they are and refused that way. | The relay accepts the sanitised receipt: the error cut to 4,096 code points or a fixed text, an oversized receipt uncertain without its result. A stored result the relay keeps refusing is retired after three attempts, which needs the `test-hooks` clock scale (`CLOCK_SCALE_HOOK`). |
-| c: a peer `attachment_read` | `test_bb_peer_operations.test_peer_attachment_read_follows_divergence_c` | Fails with "connector could not record native outcome" before it asks the peer for the file. | Reads the file through the peer callback and serves the requested range. |
 | d: a relay that refuses the extended heartbeat | `test_bb_gateway_downgrade` | Keeps gateway sharing off until restart. | The same within these tests; the re-probe after 300 s is planned for C6 with the `test-hooks` clock scale (`CLOCK_SCALE_HOOK`). |
 | h (amended): SIGTERM | `test_bb_signals`, `test_bb_worktrees.test_sigterm_never_cuts_a_creation_short` | Dies at once (exit -15); the in-flight native call finishes on its own; restart journals the mutation uncertain. | Stops claiming, lets the in-flight call finish, journals its real outcome, exits 0. |
+
+Divergence c, a peer `attachment_read`, no longer differs. Python failed
+with "connector could not record native outcome" before it asked the peer,
+because the peer callback took no output bound; since main's cc42fff9 gave it
+one, Python reads the file through the peer and serves the requested range as
+Rust does, which
+`test_bb_peer_operations.test_peer_attachment_read_reads_the_file_through_the_peer`
+pins for both. The design, `vectors/README.md` and the `divergence_c` note of
+`vectors/receipts.json` still describe the old Python failure.
 
 Under h, neither may kill the native mutation child, and no request is
 claimed after the signal. SIGINT is not covered: Python's KeyboardInterrupt
@@ -312,6 +325,7 @@ The other `AttachmentRelayTests` are relay cases (R4).
 | `test_mobile_actions.py`, `test_mobile_attachments.py`, `test_mobile_child_send.py`, `test_mobile_context.py`, `test_mobile_controls.py`, `test_mobile_delivery.py`, `test_mobile_history_recovery.py`, `test_mobile_read.py`, `test_mobile_voice.py` | H2: mapped per test in the tables above |
 | `test_mobile_archives.py`, `test_mobile_terminal.py`, `test_mobile_history.py`, `test_mobile_attachment_read.py`, `test_mobile_launch.py`, `test_mobile_project_launch.py`, `test_mobile_projects.py`, `test_mobile_directory_create.py`, `test_mobile_worktrees.py`, `test_mobile_accounts.py`, `test_mobile_speech.py`, `test_mobile_speech_config.py` | H3: mapped per test under [Computer, read and media operations](#computer-read-and-media-operations-h3) |
 | `test_connector_peers.py`, `test_peer_end_to_end.py`, the peer classes of `test_mobile_directory_create.py` and `test_mobile_worktrees.py` | Mapped under [Peers and the one-hop gateway](#peers-and-the-one-hop-gateway) |
+| `test_computer_file_read.py` | `file_read` arrived on main after these suites: no black-box test yet; the existing-attachment half of its peer case: `test_bb_peer_operations.test_peer_attachment_read_reads_the_file_through_the_peer` |
 | `test_managed_relay.py` | P2 `identities.json` |
 | `test_end_to_end.py`, `test_presence_end_to_end.py` | Real-relay end-to-end tests on PostgreSQL |
 

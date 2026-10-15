@@ -10,7 +10,7 @@ import hashlib
 import unittest
 import uuid
 
-from connector_harness import CONVERSATION_ID, IMPLEMENTATION, RUN_ID, SESSION, session_row
+from connector_harness import CONVERSATION_ID, RUN_ID, SESSION, session_row
 from gateway_harness import (Fleet, GatewayCase, LOCAL, OTHER, PEER, PEER_CONVERSATION, PEER_RUN,
                              Peer, ROUTE, error, gateway_help, help_text, inspected, peer_listing)
 
@@ -189,7 +189,10 @@ class PeerOperationTests(GatewayCase):
         [call] = self.guarded_calls(["swarm", "preference"])
         self.assertEqual((call["envelope"]["argv"], call["envelope"]["payload"]), (preference, None))
 
-    async def test_peer_attachment_read_follows_divergence_c(self):
+    async def test_peer_attachment_read_reads_the_file_through_the_peer(self):
+        # Divergence c is retired: since the peer callback takes the output
+        # bound (main's cc42fff9), Python reads the file through the peer as
+        # Rust does, instead of failing before it asks the peer.
         message = str(uuid.uuid4())
         data = b"peer attachment bytes"
         argv = ["attachment", SESSION, "--request", message, "--index", "0", "--conversation", PEER_CONVERSATION]
@@ -201,12 +204,6 @@ class PeerOperationTests(GatewayCase):
         await self.gateway_ready(process)
         request = self.submission("attachment_read", message_id=message, index=0, offset=5, length=10)
         result = await self.submit(request, process, gateway_route=self.route())
-        if IMPLEMENTATION == "python":
-            # The peer callback takes no output bound, so Python fails with
-            # its generic text before it asks the peer for the file.
-            self.assertEqual(result, failed("connector could not record native outcome"))
-            self.assertEqual(self.through(argv=["attachment"]), [])
-            return
         self.assertEqual(result, completed({
             "request_id": request["request_id"], "name": SESSION, "run_id": PEER_RUN,
             "conversation_id": PEER_CONVERSATION, "message_id": message, "index": 0, "file_name": "note.txt",
