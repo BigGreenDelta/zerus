@@ -25,11 +25,26 @@ source tree with the interpreter running the tests, which needs `aiohttp`
 | `ZERUS_CONNECTOR_IMPLEMENTATION` | `python` or `rust`; defaults to `python` without a command and `rust` with one. Assertions on a reviewed divergence depend on it. |
 
 Outside Python mode only the modules listed under `rust` in `ported.json` run;
-the others skip. `test_bb_harness.py` checks the harness itself and always
-runs.
+the others skip. `test_bb_harness.py` and
+`test_bb_attachment_read.ScriptedAnswerTests` check the harness itself and
+always run. `test_bb_directories.NativeDirectoryTests`,
+`test_bb_speech.SpeechConfigurationTests.test_real_cli_manages_a_profile_without_inference`
+and `test_bb_peer_transport` also run a built `hgs`
+(`ZERUS_DIRECTORY_TEST_HGS`, `HGS_TEST_BIN` or `target/debug/hgs`); without
+one they skip, except with `CI=true`, where they fail.
 
-The 39 tests took 23-28 s on a Linux workstation against the Python
-connector (2026-10-15); each test starts its own connector processes.
+The 206 tests in 31 modules took 314 s and 320 s in two runs on a Linux
+workstation against the Python connector, with `target/debug/hgs` built
+(2026-10-15), and 320-324 s each in four concurrent runs, each in its own
+scratch directory; only the two Rust-only tests of `test_bb_native_limits`
+skipped. Each test starts its own connector processes, and the time goes to
+the connector's own clocks rather than to the machine: `test_bb_peer_routes`
+(33-38 s), `test_bb_fleet` (34-35 s), `test_bb_computer` (31 s, the 15 s
+project refresh), `test_bb_gateway` (30-31 s), `test_bb_gateway_downgrade`
+(26-28 s) and `test_bb_native_limits` (25 s) take 58% of a run; every other
+module takes 13 s or less. By slice, the base modules (42 tests) took 28-29 s,
+the session operations of H2 (58 tests) 56-60 s, the computer, read and media
+operations of H3 (74 tests) 72-74 s and the peers of H4 (32 tests) 158-162 s.
 
 ## Isolation
 
@@ -59,19 +74,35 @@ scripted `hgs` processes it started; no tmux server or agent is involved.
   `expires_at`), so a batch can exceed the limits its request met. Results
   follow the relay's claim rules (404 unknown, 409 not claimed or different,
   200 identical). `inject()` hands out a delivery no relay would queue (a
-  non-canonical identity, a malformed envelope or a non-object). `rule()`
-  programs status answers, optionally limited by count or a predicate on the
-  parsed body. All traffic is kept in `exchanges`.
+  non-canonical identity, a malformed envelope or a non-object), in its own
+  batch. As the relay does, it answers a peer heartbeat with 404 when its
+  route is not in the last heartbeat manifest it accepted (a heartbeat
+  without gateway fields withdraws every route) and with 409 when that route
+  is offline or names another machine. `rule()` programs status answers,
+  optionally limited by count or a predicate on the parsed body. All traffic
+  is kept in `exchanges`.
 - **`scripted_hgs.py`**: the `hgs` on the connector's PATH. It answers from
-  `script.json`, re-read on every call, by exact argv or prefix (optionally
-  only when stdin holds given JSON values, `stdin_fields`), with JSON, text or a
-  file's bytes (`fill` expands placeholders to megabytes, as the golden
-  vectors do), an exit status, a delay, `exec` (delegate to a real hgs) or
-  `kill_parent` (SIGKILL the connector after the native work, to model a
-  crash before journaling). It logs a `start` event (argv, stdin,
-  environment, open descriptors) and an `end` event per call.
-  `default_rules()` in the harness gives a minimal live computer with one
-  non-Codex session, so no background attention scan runs.
+  `script.json`, re-read on every call, by exact argv or prefix. A rule's
+  `stdin_fields` also requires stdin to be a JSON object whose listed fields
+  have exactly those JSON values, so `true` never matches `1`; the terminal,
+  speech and voice suites pick an answer by its `action` this way and the
+  gateway suites by a peer envelope's `via`, target machine and inner argv.
+  It answers with JSON (with `{{stdin.a.b}}` and `{{argv.N}}` templates, and
+  `fill` placeholders that expand to megabytes as the golden vectors do),
+  text or a file's bytes (`stdout_path`), an exit status, a delay, `exec`
+  (delegate to a real hgs) or `kill_parent` (SIGKILL the connector after the
+  native work, to model a crash before journaling). It logs a `start` event
+  (argv, stdin, environment, open descriptors) and an `end` event per call.
+  `ScriptedHgs` in the harness refuses a rule key the script does not read,
+  which would otherwise widen the rule. `default_rules()` gives a minimal
+  live computer with one non-Codex session, so no background attention scan
+  runs.
+- **Shared suite parts**, which take identities, help lines, receipt texts
+  and limits from the golden vectors: `session_harness.py` (the session
+  operations, `SessionCase`), `bb_operations.py` (computer, read and media
+  operations, `OperationCase`) and `gateway_harness.py` (a gateway's fleet).
+  `NATIVE_TIMEOUT_HOOK` and `CLOCK_SCALE_HOOK` in `connector_harness.py` name
+  the settings a Rust build reads only with its `test-hooks` feature.
 - **`Journal`** reads a journal read-only; **`stopped_journal`** writes one only
   while it holds the connector lock, so a running connector is never edited.
 
@@ -294,14 +325,12 @@ These modules take their expected texts from the golden vectors through
 `validation/*.jsonl` (each must fail with its recorded message and reach no
 native command), the `execute` runs of `projections.jsonl` (native argv,
 stdin and the stored receipt) and boundaries from `sizes.jsonl`. They run on
-the vectors' synthetic computer and add 84 tests, about 95 s against Python on
-a Linux workstation (2026-10-15); `test_bb_computer.py` takes about 30 s
-because it waits for the 15 s project refresh.
-`test_bb_attachment_read.ScriptedAnswerTests` checks the scripted answers these
-suites add and, like `test_bb_harness.py`, always runs. The real-CLI cases use
-`ZERUS_DIRECTORY_TEST_HGS`, `HGS_TEST_BIN` or `target/debug/hgs` through the
-scripted hgs's `exec` rule, so only `--help`, `dirs` and `speech` reach it;
-they fail rather than skip when `CI=true`. Python reports a refused worktree
+the vectors' synthetic computer: 74 tests in 10 modules, 72-74 s in the runs
+above, of which `test_bb_computer.py` takes 31 s because it waits for the 15 s
+project refresh. `test_bb_attachment_read.ScriptedAnswerTests` checks the
+scripted answers these suites add and, like `test_bb_harness.py`, always
+runs. The real-CLI cases reach the built hgs through the scripted hgs's
+`exec` rule, so only `--help`, `dirs` and `speech` reach it. Python reports a refused worktree
 catalog or creation receipt with its generic "connector could not record
 native outcome", which `test_bb_worktrees` pins.
 
@@ -431,8 +460,7 @@ Seven modules cover discovery, routes, claims, peer operations and peer
 heartbeats: `test_bb_fleet`, `test_bb_peer_routes`, `test_bb_gateway`,
 `test_bb_peer_operations`, `test_bb_peer_heartbeats`,
 `test_bb_gateway_downgrade` and `test_bb_peer_transport`. Their 32 tests took
-8-34 s per module and 156 s in all on a Linux workstation against the Python
-connector (2026-10-15).
+8-38 s per module and 158-162 s in all in the runs above.
 
 `gateway_harness.py` scripts a gateway's `hgs` as a fleet: `swarm mobile-peers
 --json` answers with a synthetic inventory, `swarm mobile-peer --json` with
