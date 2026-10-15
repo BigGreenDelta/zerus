@@ -19,6 +19,25 @@ pub(super) fn child_working(record: &Value, child: &Value) -> bool {
         || child["external"] == true || child["native_roster"] == true)
 }
 
+/// Whether the listing names this child. A Kimi hook names only a profile,
+/// so its entry stands for that profile's group; a native roster lists its own.
+pub(super) fn listed(record: &Value, child: &Value) -> bool {
+    string(record, "agent") != "kimi" || child["external"] == true
+        || (record["kimi_native_roster"] == true && child["native_roster"] == true)
+}
+
+/// Work that keeps a session from Ready beside its recorded activity: Kimi
+/// profile groups, which can outlast the main turn's Stop, open tools and
+/// working children. Idle-only actions such as pause, clear and compaction
+/// wait for all of it.
+pub(super) fn work_remains(record: &Value) -> bool {
+    grouped_active(record) > 0
+        || record["active_tools"].as_object().is_some_and(|tools| !tools.is_empty())
+        || record["subagents"].as_object().is_some_and(|children| {
+            children.values().any(|child| child_working(record, child))
+        })
+}
+
 /// Kimi external hooks expose a profile name, not the Swarm child's identity.
 /// Count observed tasks per profile without assigning a Stop to an invented ID.
 pub(super) fn observe(record: &mut Value, event: &Value) {
@@ -125,8 +144,7 @@ fn children(record: &Value) -> Value {
     let mut roster = serde_json::Map::new();
     if let Some(children) = children {
         for (id, child) in children {
-            if string(record, "agent") == "kimi" && child["external"] != true
-                && (!native_kimi || child["native_roster"] != true) {
+            if !listed(record, child) {
                 continue;
             }
             roster.insert(id.clone(), json!({"name":string(child,"name"),

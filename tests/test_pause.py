@@ -1474,6 +1474,17 @@ class ActivitySummary(Harness):
         self.assertEqual(group["label"], "code")
         self.assertEqual((group["active_count"], group["completed_count"], group["total_count"]), (3, 0, 3))
         self.send_event(name, "Stop", last_assistant_message="Waiting for all workers")
+
+        def context_actions(waiting):
+            # Clear and compaction wait for the profile groups, which the
+            # session lists by profile, not as one invented child.
+            info = json.loads(self.hgs("inspect", name))
+            self.assertEqual(info["activity"], "busy")
+            reason = "Wait until the agent reports Ready. Still working: " + waiting
+            for action in ("clear_context", "compact_context"):
+                self.assertFalse(info[action + "_supported"], action)
+                self.assertEqual(info[action + "_reason"], reason, action)
+        context_actions("3 \u201ccode\u201d subagents")
         for completed in (1, 2, 3):
             self.send_event(name, "SubagentStop", agent_name="code", response=f"Task {completed} complete")
             row = self.row(name)
@@ -1483,12 +1494,20 @@ class ActivitySummary(Harness):
                 self.assertEqual(row["activity"], "busy")
                 self.hgs("pause", name, rc=1)
                 self.t("has-session", "-t", "=" + name)
+                # The first profile Stop already records the session idle;
+                # only the remaining groups keep it Working.
+                self.assertEqual(self.binding(name)["activity"], "idle")
+                context_actions("1 \u201ccode\u201d subagent" if completed == 2 else "2 \u201ccode\u201d subagents")
             else:
                 self.assertEqual(row["subagent_previews"], [])
         self.assertEqual(self.binding(name)["activity"], "idle")
         inspected = json.loads(self.hgs("inspect", name))
         self.assertTrue(inspected["subagent_groups_complete"])
         self.assertEqual(inspected["subagent_groups"]["code"]["completed_count"], 3)
+        self.assertEqual(inspected["activity"], "idle")
+        for action in ("clear_context", "compact_context"):
+            self.assertTrue(inspected[action + "_supported"], action)
+            self.assertEqual(inspected[action + "_reason"], "", action)
         self.hgs("pause", name)
 
     def test_legacy_kimi_collapsed_profile_does_not_claim_one_unique_worker(self):
