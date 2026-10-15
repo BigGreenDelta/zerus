@@ -35,6 +35,10 @@ class PeerConnectorTests(unittest.IsolatedAsyncioTestCase):
         await self.connector.fleet.discover()
         self.peer = self.connector.fleet.contexts[self.identity]
         await self.peer.snapshot()
+        # Each first snapshot starts one background account usage refresh. Let
+        # them finish, so a test's native call log contains only its own calls.
+        await asyncio.gather(*(cache.task for cache in (self.connector.accounts, self.peer.accounts)
+                               if cache.task is not None))
 
     async def asyncTearDown(self):
         await self.connector.accounts.close()

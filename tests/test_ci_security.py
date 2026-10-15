@@ -490,6 +490,20 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertNotIn("ccache", text)
         self.assertNotIn("--nocheck", (ROOT / "scripts/build-arch-package.sh").read_text())
 
+    def test_relay_job_runs_every_mobile_service_module(self):
+        relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
+        python = '"$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests'
+        # One discover covers every module against Rust; only the speech suites
+        # repeat against the Python reference relay.
+        self.assertEqual(re.findall(rf"(?m)^          (.*){re.escape(python)}(.*)$", relay),
+                         [("", " -v"), ("env -u ZERUS_RELAY_BINARY ", " -p 'test_mobile_speech*.py' -v")])
+        for variable in ("ZERUS_RELAY_BINARY", "ZERUS_DIRECTORY_TEST_HGS"):
+            self.assertIn(f"\n          export {variable}=", relay)
+        # PostgreSQL modules skip without a DSN, so the job names its own database.
+        self.assertIn("\n          POSTGRES_DB: zerus_test_relay\n", relay)
+        self.assertIn("\n          ZERUS_RELAY_TEST_DSN: postgresql://postgres@127.0.0.1:"
+                      "${{ job.services.postgres.ports['5432'] }}/zerus_test_relay\n", relay)
+
     def test_arch_package_job_alone_produces_the_candidate_artifact(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         desktop, package = job(checks, "arch"), job(checks, "arch-package")

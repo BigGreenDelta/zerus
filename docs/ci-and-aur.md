@@ -28,6 +28,7 @@ can select a PR head or another exact revision.
 | --- | --- | --- |
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
 | Quick checks | Always | Privacy, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.85 unit tests |
+| Rust relay | Always | Rust 1.85 format, clippy and contracts, the real PostgreSQL cross-worker contract, every `services/mobile/tests` module against the Rust relay and a disposable PostgreSQL database, the speech suites against the Python reference relay, the deployment image and its 256 MiB envelope |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |

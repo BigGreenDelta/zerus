@@ -40,10 +40,14 @@ These replay the released Python HTTP assertions against a Rust process and
 exercise the actual Python connector with synthetic native subprocesses. They
 include persisted Python receipts, exact canonical hashes, Unicode, attachments,
 one-hop routing and cancellation. The full reference/connector suite remains
-`python -m unittest discover -s services/mobile/tests -v`. The reference Python
-HTTP module is retained as an independent compatibility oracle, not selected by
-the supported server CLI. `zerus-mobile` delegates administration/serving to
-`zerus-relay`; the offline `migrate-sqlite` utility remains Python.
+`python -m unittest discover -s services/mobile/tests -v`. Hosted CI runs it once
+with `ZERUS_RELAY_BINARY`, `ZERUS_DIRECTORY_TEST_HGS` naming the built `hgs` and
+`ZERUS_RELAY_TEST_DSN` naming a disposable loopback `zerus_test_*` PostgreSQL
+database, then repeats `-p 'test_mobile_speech*.py'` without `ZERUS_RELAY_BINARY`.
+The reference Python HTTP module is retained as an independent compatibility
+oracle, not selected by the supported server CLI. `zerus-mobile` delegates
+administration/serving to `zerus-relay`; the offline `migrate-sqlite` utility
+remains Python.
 
 ## Boundaries
 

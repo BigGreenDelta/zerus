@@ -498,7 +498,12 @@ class RelayResourceTests(unittest.IsolatedAsyncioTestCase):
                 except ValueError as error:
                     error.__traceback__ = None
                 del raw
-                await asyncio.sleep(0)
+                # The executor thread drops its work item just after resolving
+                # the future, possibly after this coroutine resumes. Cyclic GC
+                # stays disabled, so only a reference cycle outlasts the wait.
+                deadline = time.monotonic() + 2
+                while reference() is not None and time.monotonic() < deadline:
+                    await asyncio.sleep(0.001)
                 self.assertIsNone(reference(), "worker future retained malformed body")
         finally:
             gc.enable()

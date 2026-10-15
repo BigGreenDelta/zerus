@@ -360,14 +360,16 @@ class PostgresResourceTests(unittest.IsolatedAsyncioTestCase):
     async def test_shared_poll_expiry_recovery_and_idempotent_release(self):
         first, second = await self.open(), await self.open()
         workspace, node, _, _, _ = await self.identity(first)
+        # The lease must outlive its committed acquisition and the second
+        # worker's check; 10 ms could expire first on a loaded durable database.
         lease = await first.acquire_poll(
-            "nodes", node["node_id"], workspace, 0.01, 1, 1
+            "nodes", node["node_id"], workspace, 0.5, 1, 1
         )
         self.assertIsNotNone(lease)
         self.assertIsNone(
             await second.acquire_poll("nodes", node["node_id"], workspace, 1, 1, 1)
         )
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.6)
         replacement = await second.acquire_poll(
             "nodes", node["node_id"], workspace, 1, 1, 1
         )
