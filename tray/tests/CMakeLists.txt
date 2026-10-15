@@ -498,6 +498,23 @@ target_link_libraries(test_dashboard PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(dashboard test_dashboard)
 set_tests_properties(dashboard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_sessiongraphstore test_sessiongraphstore.cpp)
+target_include_directories(test_sessiongraphstore PRIVATE ../src)
+target_link_libraries(test_sessiongraphstore PRIVATE Qt6::Test Qt6::Core hgs-tray-ui)
+zerus_add_test(sessiongraphstore test_sessiongraphstore)
+
+add_executable(test_graphpage test_graphpage.cpp)
+target_include_directories(test_graphpage PRIVATE ../src)
+target_link_libraries(test_graphpage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(graphpage test_graphpage)
+set_tests_properties(graphpage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_graphcanvas test_graphcanvas.cpp)
+target_include_directories(test_graphcanvas PRIVATE ../src)
+target_link_libraries(test_graphcanvas PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(graphcanvas test_graphcanvas)
+set_tests_properties(graphcanvas PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_paintcache test_paintcache.cpp)
 target_include_directories(test_paintcache PRIVATE ../src)
 target_link_libraries(test_paintcache PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)

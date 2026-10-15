@@ -302,9 +302,12 @@ budget: 50 ms projection work / 2 MiB ordinary source input per slice; one bound
 oversize row follows the existing source-reader policy instead of silently
 skipping evidence. Benchmark and adjust these targets before implementation freeze.
 
-Proposed read-only API: `hgs graph snapshot --json` and
+Read-only API under implementation: `hgs graph snapshot --json` and
 `hgs graph changes --after <opaque-cursor> --json`, with bounded query scope and
-event detail pagination. These commands do not exist yet. Replies include schema,
+event detail pagination. The isolated implementation currently collects saved
+bindings and persisted native rosters; communication and archived history remain
+explicitly `not_indexed`. This is a data-layer milestone, not the first usable
+Graph release. Replies include schema,
 origin UUID/epoch, revision, nodes, relations, coverage, deletions, continuation
 and reset-required state. Limits are server-enforced; partial pages do not delete
 unseen nodes. Unsupported hosts return a capability result, never an empty-success
@@ -405,6 +408,22 @@ reviewed native contracts. Sessions can execute many work units; one workflow no
 cannot simply be a session card with a Play button. The observed graph must remain
 useful before any orchestration engine exists.
 
+## Current implementation milestone
+
+The isolated implementation contains a bounded saved-binding host projection,
+transactional snapshot/delta storage and native `GraphCanvas` / `GraphPage`
+presentation components. Canvas, list and inspector use the actual Sessions
+painter. Project regions, cross-project filter context, search, exact-target
+Open Activity signals, retained positions and a narrow overlay inspector have
+synthetic native coverage. Selection keeps Draft/unread badges and does not
+navigate or acknowledge messages.
+
+These components are not yet wired into the main navigation or a fleet refresh
+controller. Verified communication provenance, archive and full native-child
+coverage, disk-cache lifecycle, final platform/performance qualification and
+Android transport remain unfinished. This milestone is not a usable Graph release;
+the first-release boundary below is unchanged.
+
 ## Delivery boundaries and acceptance
 
 **First usable release:** main Graph destination, all-session inventory, project
@@ -436,5 +455,6 @@ Qualify at least these synthetic scenarios before product delivery:
 
 The interactive preview demonstrates proposed layout, scoped search, external
 neighbors, relation details, focus mode and cached refresh using synthetic data.
-It does not implement the index, native navigation, actual sends or a workflow
-engine. Product code, dependencies, live state and installed clients are unchanged.
+It does not implement native navigation, actual sends or a workflow engine.
+The host metadata projection is being implemented separately; the preview never
+reads it. Live state and installed clients are unchanged by prototype work.

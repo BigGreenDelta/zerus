@@ -20,6 +20,7 @@ inline QRect sessionCardRect(const QRect &row) { return row.adjusted(2, 4, -2, -
 // changes. The list's "expansion" runs from 0 (strip) to 1 (full cards), and
 // "expandedRowWidth" is the row width the cards grow into.
 namespace SessionStrip {
+inline QColor surface(bool dark) { return QColor(dark ? "#1c2229" : "#ffffff"); }
 // A strip tile is as wide as a card is tall, so every session gets a square.
 inline int cardSide(bool compact) { return (compact ? 94 : 104) - 10; }
 // The panel adds its margins, the list's padding and the card inset.
@@ -61,6 +62,15 @@ inline QStringList twoLines(const QString &text, const QFontMetrics &metrics, in
 class SessionDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
+    // Standalone graph cards need an opaque surface over connecting lines.
+    // Content, status/identity badges and selection remain the list renderer.
+    void paintStandalone(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const {
+        const bool dark = !option.widget || option.widget->property("hgsDark").toBool();
+        p->save(); p->setPen(QPen(QColor(dark ? "#29313a" : "#dfe5eb"), 1));
+        p->setBrush(SessionStrip::surface(dark));
+        p->drawRoundedRect(QRectF(sessionCardRect(option.rect)).adjusted(.5,.5,-.5,-.5),8,8);p->restore();
+        paint(p,option,index);
+    }
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
         // List rows are as wide as the view but never narrower than the hint.
         const int width = SessionStrip::expansion(option.widget) < 1 ? 1 : 280;
@@ -110,6 +120,12 @@ public:
             : s.state == "Not tracked" ? tr("Untracked") : s.state;
         s.additionalUnread = s.unread && (s.working || s.attention || s.draft);
         return s;
+    }
+    // Selecting a graph/list inspection row does not open its composer. Keep
+    // its draft badge until the ordinary Sessions editor actually owns it.
+    static CardStatus statusForView(const QStyleOptionViewItem &option, const QModelIndex &index) {
+        const bool opensEditor = !option.widget || !option.widget->property("selectionIsInspection").toBool();
+        return statusOf(index, opensEditor && option.state.testFlag(QStyle::State_Selected));
     }
     struct TitleLayout { QRect title, status, unread, provider; QString text, agent; };
     static TitleLayout titleLayout(const QStyleOptionViewItem &option, const QModelIndex &index, const CardStatus &status) {
@@ -175,7 +191,7 @@ public:
         if (index.data(SessionRoles::Header).toBool()) {
             for (const QRect &badge : headerAnimationBadges(option, index)) result += badge;
         } else {
-            const auto status = statusOf(index, option.state & QStyle::State_Selected);
+            const auto status = statusForView(option, index);
             if (status.kind != SessionStatusBadge::Working) return {};
             if (expansion >= 1) result += SessionStatusBadge::workingIndicatorRect(titleLayout(option, index, status).status);
             else {
@@ -197,7 +213,7 @@ public:
         QStyleOptionViewItem wide(option);
         const qreal expansion = SessionStrip::expansion(option.widget);
         if (expansion < 1) wide.rect.setWidth(qMax(option.rect.width(), option.widget ? option.widget->property("expandedRowWidth").toInt() : 0));
-        const auto title = titleLayout(wide, index, statusOf(index, option.state & QStyle::State_Selected));
+        const auto title = titleLayout(wide, index, statusForView(option, index));
         QRegion result(QRect(option.rect.x(), title.title.y(), option.rect.width(), 21));
         if (expansion < 1) {
             auto strip = stripLayout(option, index);
@@ -239,7 +255,7 @@ private:
             }
             p->restore();
         } else {
-            const auto status = statusOf(index, option.state & QStyle::State_Selected);
+            const auto status = statusForView(option, index);
             QRect badge = expansion == 1 ? titleLayout(option, index, status).status : stripLayout(option, index).status;
             if (expansion == 0 && !index.data(SessionRoles::ChildId).toString().isEmpty()) badge.moveTop(option.rect.center().y() - 10);
             p->save(); p->setClipRegion(clip, Qt::IntersectClip); p->setFont(option.font);
@@ -313,7 +329,7 @@ private:
         const bool expandable = index.data(SessionRoles::HasChildren).toBool();
         const QRect r = sessionCardRect(option.rect).adjusted(childRow ? 24 : 0, 0, 0, 0);
         const bool compact = option.widget && option.widget->property("compact").toBool();
-        const auto status = statusOf(index, option.state & QStyle::State_Selected);
+        const auto status = statusForView(option, index);
         const bool attention = status.attention, unread = status.unread, working = status.working, paused = status.paused;
         const QString state = status.state;
         p->setClipRect(option.rect, Qt::IntersectClip);
@@ -438,7 +454,7 @@ private:
         const qreal pulse = option.widget ? option.widget->property("workingPulse").toReal() : 0.0;
         QStyleOptionViewItem wide(option);
         wide.rect.setWidth(qMax(option.rect.width(), option.widget ? option.widget->property("expandedRowWidth").toInt() : 0));
-        const auto status = statusOf(index, option.state & QStyle::State_Selected);
+        const auto status = statusForView(option, index);
         const QRect r = sessionCardRect(option.rect);
         // A square tile with one centred block: status and provider icons, the
         // name on up to two lines, then the state. Insets keep it off the edge mark.
@@ -465,7 +481,7 @@ private:
         }
         // Every tile has its own surface in the strip; cards in the list do not.
         const bool selected = option.state & QStyle::State_Selected, hovered = option.state & QStyle::State_MouseOver;
-        const QColor surface(dark ? "#1c2229" : "#ffffff");
+        const QColor surface = SessionStrip::surface(dark);
         if (strip > 0) {
             p->save(); p->setOpacity(strip); p->setPen(Qt::NoPen); p->setBrush(surface);
             p->drawRoundedRect(QRectF(r), 8, 8); p->restore();

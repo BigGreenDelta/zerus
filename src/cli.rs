@@ -64,6 +64,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
        hgs [@host] recovery action --scoped-json exact waiting-job control
        hgs [@host] history <session> --json bounded exact public history
+       hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
        hgs [@host] terminal <session> --json scoped terminal screen/input
        hgs [@host] AGENT DIRECTORY --new -n TAG -d --launch-id UUID
        hgs [@host] session-action <session> --json scoped native lifecycle action
@@ -509,7 +510,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
-    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech") {
+    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "graph") {
         local_sessions()?;
     }
     // Only Unix has arms for these below; elsewhere they would reach the launch arm.
@@ -538,7 +539,8 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read"
-        | "attachment" | "file-read" | "recovery" | "voice" => {
+        | "attachment" | "file-read" | "recovery" | "voice" | "graph" => {
+            if command == "graph" && dry { return Err(Error::new(1,"Graph reads do not support --dry-run")); }
             if command == "dirs" && has(args, "--create") && dry {
                 return Err(Error::new(1, "folder creation does not support --dry-run"));
             }
@@ -847,7 +849,7 @@ fn remote(
             all
         }
         "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "graph" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),

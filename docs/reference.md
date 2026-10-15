@@ -2258,6 +2258,35 @@ and the v2 Dev catalogs have no Windows artifact.
 
 ## JSON and external clients
 
+### Relationship metadata (Graph implementation)
+
+`hgs [@host] graph snapshot --json` reads a derived, host-owned metadata index.
+This initial collector projects saved conversation/run identities, persisted child
+rosters and confirmed fork bindings. It reports communication and archive coverage
+as `not_indexed`; this command does not imply that the Graph workspace is shipped.
+The collector never reads prompt bodies or provider transcripts, launches an agent,
+sends input or changes read marks. Source bindings are unchanged.
+
+Each call advances at most 32 bindings, with a 2 MiB ordinary input budget and a
+50 ms cooperative work budget. One manifest may finish within a 16 MiB hard cap;
+directory inventory is capped at 10,000 source files. These are bounds, not a
+measured latency guarantee. Partial or capped inventory never removes unseen
+sources. A malformed source retains last-good facts and reports a coverage gap.
+The derived SQLite file is capped at 32 MiB; exhaustion fails visibly instead of
+deleting source history or quietly dropping evidence.
+
+Replies contain a native `machine_id`, index `epoch`, monotonic `revision`, typed
+`items`, `coverage`, `has_more` and an opaque `cursor`. Continue a snapshot with
+`snapshot --cursor CURSOR --json`; after its final page use
+`changes --after CURSOR --json`. The optional `--limit` is 1–200. Pages have a
+1 MiB metadata budget. A snapshot changed concurrently or a rebuilt index returns
+`reset_required`; retain the prior display until a complete replacement arrives.
+Changes carry explicit tombstones. A missing row on a partial page is not removal.
+Names and routes are labels; exact binding/run targets remain separate even when
+multiple bindings share one conversation. Conflicting observations remain explicit.
+
+### Existing session snapshots
+
 ```sh
 hgs ls --json --local
 hgs inspect codex/sample-project/review

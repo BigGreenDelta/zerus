@@ -54,6 +54,7 @@ mod resume_input;
 mod scan_cache;
 mod schedules;
 mod search;
+mod session_graph;
 mod storage;
 mod subagents;
 mod native_subagents;
@@ -630,6 +631,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "hook" {
         return hooks::hook();
     }
+    if command == "graph" { return session_graph::dispatch(args); }
     if command == "voice" { return voice::dispatch(args); }
     if command == "file-read" { return computer_files::dispatch(args); }
     if command == "attachment" {
