@@ -110,10 +110,10 @@ class NativeHarness(unittest.TestCase):
             raise RuntimeError(response.get('error', str(response)))
         return response['value']
 
-    def create(self):
+    def create(self, **native):
         sid = 'session-' + str(uuid.uuid4())
         name = 'dsh/test/' + str(uuid.uuid4())[:8]
-        self.rpc('create', {'sessionId': sid, 'cwd': str(self.workspace), 'title': name})
+        self.rpc('create', {'sessionId': sid, 'cwd': str(self.workspace), 'title': name, **native})
         binding = {'backend': 'dsh', 'name': name, 'conversation_id': sid, 'run_id': str(uuid.uuid4()),
                    'agent_home': str(self.home), 'cwd': str(self.workspace), 'created': time.time()}
         directory = self.state / 'dsh/bindings'; directory.mkdir(exist_ok=True)
@@ -870,6 +870,23 @@ class NativeHarness(unittest.TestCase):
         self.assertEqual(receipt['result_target'], {'name': target['name'], 'run_id': target['run_id'],
                                                     'conversation_id': target['conversation_id']})
         self.assertEqual(self.bindings()[source['name']], source)
+
+    def test_native_fork_keeps_the_source_permission_preset(self):
+        # The fork replays the source's permission events; Zerus applies none.
+        def preset(sid):
+            return self.rpc('inspect', {'sessionId': sid})['baseline']['values']['permissions']['currentValue']
+        provider = self.create()
+        bypass = self.create(permissionMode='bypass')
+        self.assertEqual(preset(bypass['conversation_id']), 'danger-full-access')
+        self.assertNotEqual(preset(provider['conversation_id']), 'danger-full-access')
+        for source in (provider, bypass):
+            self.cli('send', source, self.payload(source, text='FORK_PERMISSION_MARKER', attachments=[]))
+            self.wait(lambda: self.cli('inspect', source)['fork_supported'])
+            tag = 'perm-' + uuid.uuid4().hex[:8]
+            forked = self.hgs('fork', source['name'], '-n', tag, '-d')
+            self.assertEqual(forked.returncode, 0, forked.stderr)
+            fork = self.bindings()[source['name'].rsplit('/', 1)[0] + '/' + tag]
+            self.assertEqual(preset(fork['conversation_id']), preset(source['conversation_id']))
 
     def test_history_search_returns_exact_public_deepseek_messages(self):
         needle = 'NEEDLE' + uuid.uuid4().hex[:8]

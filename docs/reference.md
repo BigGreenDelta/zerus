@@ -1742,7 +1742,8 @@ systemd runs the host in an independent scope so GUI service restart cannot kill
 the engine.
 
 **Fork session…** uses the official Session Controller fork. It copies the
-latest completed turn into a new native session of the same profile and folder,
+conversation through its latest completed turn into a new native session of the
+same profile and folder (including its permission preset),
 named after the fork, and binds the exact session ID the engine returns; the
 source keeps its identity and history. The engine, not Zerus, holds the new live
 agent until its host next starts: Zerus sends its messages, while its questions,
