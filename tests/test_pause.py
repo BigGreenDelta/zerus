@@ -1186,6 +1186,63 @@ class ActivitySummary(Harness):
             self.assertEqual(info["history_scope"], "Native subagent history")
             self.assertTrue(any(e.get("detail") == "[Request interrupted by user]" for e in info["events"]))
 
+    def test_tool_use_interruption_settles_workflow_child_and_context_actions(self):
+        name = self.start()
+        self.send_event(name, "SubagentStart", agent_id="worker", agent_type="workflow-subagent")
+        self.send_event(name, "PostToolUse", agent_id="worker", tool_name="Bash")
+        self.send_event(name, "Stop", last_assistant_message="Parent result")
+        before = self.row(name)
+        self.counts(before, 1, 0, 1)
+        self.assertEqual(before["activity"], "busy")
+        busy = json.loads(self.hgs("inspect", name))
+        self.assertFalse(busy["clear_context_supported"])
+        self.assertFalse(busy["compact_context_supported"])
+        record = self.binding(name)
+        session = record["conversation_id"]
+        account = self.root / ".claude"
+        transcript = account / "projects" / "fixture" / (session + ".jsonl")
+        child = transcript.with_suffix("") / "subagents" / "workflows" / "wf-fixture" / "agent-worker.jsonl"
+        child.parent.mkdir(parents=True)
+        transcript.write_text("{}\n")
+        record.update(agent_home=str(account), transcript=str(transcript))
+        state = self.root / "state" / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+        state.write_text(json.dumps(record))
+        at = datetime.now(timezone.utc).isoformat()
+
+        def row(kind, row_id, parent, message, **extra):
+            return dict(parentUuid=parent, isSidechain=True, promptId="prompt-one", agentId="worker",
+                        type=kind, uuid=row_id, timestamp=at, userType="external", sessionId=session,
+                        version="2.1.296", message=message, **extra)
+        # Claude 2.1.296 writes the stopped call's error result, then the marker.
+        call = row("assistant", "native-call", "native-prompt",
+                   dict(role="assistant", stop_reason="tool_use",
+                        content=[dict(type="tool_use", id="toolu_call", name="Bash", input={})]))
+        rejected = row("user", "rejected-result", "native-call",
+                       dict(role="user", content=[dict(type="tool_result", tool_use_id="toolu_call", is_error=True,
+                                                       content="The user doesn't want to proceed with this tool use.")]),
+                       toolUseResult="User rejected tool use", toolDenialKind="user-rejected",
+                       sourceToolAssistantUUID="native-call")
+        marker = row("user", "interrupt-marker", "rejected-result",
+                     dict(role="user", content=[dict(type="text", text="[Request interrupted by user for tool use]")]))
+        # Without the stopped call's error result the marker settles nothing.
+        child.write_text(json.dumps(call) + "\n" + json.dumps(marker) + "\n")
+        unbound = self.row(name)
+        self.counts(unbound, 1, 0, 1)
+        self.assertEqual(unbound["activity"], "busy")
+        child.write_text("".join(json.dumps(r) + "\n" for r in (call, rejected, marker)))
+        after = self.row(name)
+        self.counts(after, 0, 1, 1)
+        self.assertEqual(after["activity"], "idle")
+        self.assertEqual(after["reply_id"], before["reply_id"])
+        info = json.loads(self.hgs("inspect", name, "--agent", "worker"))
+        self.assertEqual(info["state"], "finished")
+        self.assertEqual(info["tracking_evidence"]["kind"], "interrupt")
+        self.assertEqual(info["tracking_evidence"]["native_id"], "interrupt-marker")
+        idle = json.loads(self.hgs("inspect", name))
+        self.assertEqual(idle["reply_id"], before["reply_id"])
+        self.assertTrue(idle["clear_context_supported"])
+        self.assertTrue(idle["compact_context_supported"])
+
     def test_native_child_completion_and_resume_reconcile_missing_hooks(self):
         name = self.start()
         self.send_event(name, "SubagentStart", agent_id="worker", agent_type="workflow-subagent")
