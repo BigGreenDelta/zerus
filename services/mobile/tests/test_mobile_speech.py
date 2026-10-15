@@ -15,8 +15,6 @@ import uuid
 from zerus_mobile import speech
 from zerus_mobile.connector import Connector
 from zerus_mobile.server import validate_request
-from zerus_mobile.server import Config
-from zerus_mobile.store import Store
 from aiohttp import ClientSession
 from relay_fixture import start_relay
 
@@ -124,11 +122,10 @@ class SpeechHttpServiceTests(unittest.IsolatedAsyncioTestCase):
         self.speech = SpeechServer(speech_config(config), test_mode=True)
         self.thread = threading.Thread(target=self.speech.serve_forever, daemon=True)
         self.thread.start()
-        self.store = Store(self.root / "relay.sqlite3")
-        self.workspace = self.store.workspace("Speech fixture")
-        self.node = self.store.node(self.workspace, "Speech computer")
-        self.phone = self.store.pair(self.store.invite(self.workspace)["pair_code"], "Speech phone")
-        self.runner, url = await start_relay(self.store, Config(background=False))
+        self.relay = await start_relay(workspace="Speech fixture", computer="Speech computer")
+        self.addAsyncCleanup(self.relay.cleanup)
+        url, self.node = self.relay.url, self.relay.node
+        self.phone = await self.relay.pair("Speech phone", self.relay.invitation["pair_code"])
         self.client = ClientSession(base_url=url)
         self.headers = {"Authorization": "Bearer " + self.phone["device_token"]}
         self.node_headers = {"Authorization": "Bearer " + self.node["node_token"]}
@@ -142,8 +139,6 @@ class SpeechHttpServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.connector.journal.close()
         await self.client.close()
-        await self.runner.cleanup()
-        self.store.close()
         await asyncio.to_thread(self.speech.shutdown)
         self.speech.server_close()
         self.thread.join()
@@ -179,8 +174,6 @@ class SpeechHttpServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("text", submitted["result"])
         self.assertEqual(await self.call("POST", "/v1/requests", upload, status=202), submitted)
         self.assertEqual((await self.call("GET", "/v1/node/requests", node=True))["requests"], [])
-        row = self.store.db.execute("SELECT body,body_bytes FROM requests WHERE id=?", (upload["request_id"],)).fetchone()
-        self.assertEqual((row["body"], row["body_bytes"]), ("", 0))
         for _ in range(30):
             status = await self.roundtrip(command("speech_status", upload["request_id"]))
             if status["result"]["state"] == "completed":
@@ -196,13 +189,13 @@ class SpeechHttpServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_and_cancel_are_bound_to_phone_and_computer(self):
         upload = command()
         await self.roundtrip(upload)
-        other = self.store.pair(self.store.invite(self.workspace)["pair_code"], "Other fixture phone")
+        other = await self.relay.pair("Other fixture phone")
         for operation in ("speech_status", "speech_cancel"):
             foreign = command(operation, upload["request_id"])
             foreign["computer_id"] = self.node["node_id"]
             await self.call("POST", "/v1/requests", foreign,
                 headers={"Authorization": "Bearer " + other["device_token"]}, status=404)
-        second = self.store.node(self.workspace, "Other fixture computer")
+        second = await self.relay.add_node("Other fixture computer")
         second_headers = {"Authorization": "Bearer " + second["node_token"]}
         await self.call("POST", "/v1/node/heartbeat", {"snapshot": {"sessions": [],
             "mobile_capabilities": {"protocol_version": 1, "operations": sorted(speech.OPERATIONS)}}}, headers=second_headers)

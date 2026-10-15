@@ -13,9 +13,7 @@ import uuid
 from aiohttp import ClientSession
 
 from zerus_mobile.connector import Connector
-from zerus_mobile.server import Config
 from relay_fixture import start_relay
-from zerus_mobile.store import Store
 
 
 class EndToEndTests(unittest.IsolatedAsyncioTestCase):
@@ -24,11 +22,8 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             fixture = Path(__file__).with_name("fixture_hgs.py")
             fixture.chmod(0o755)
-            store = Store(root / "relay" / "state.sqlite3")
-            workspace = store.workspace("Integration")
-            node = store.node(workspace, "Fixture computer")
-            invitation = store.invite(workspace)
-            runner, url = await start_relay(store, Config(background=False))
+            relay = await start_relay(workspace="Integration", computer="Fixture computer")
+            url, node, invitation = relay.url, relay.node, relay.invitation
             connector = Connector({"server_url": url, "node_token": node["node_token"],
                 "hgs_path": str(fixture), "state_dir": str(root / "journal"), "poll_interval": 1},
                 allow_insecure_localhost=True)
@@ -138,8 +133,7 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
                     connector.journal.close()
-                    await runner.cleanup()
-                    store.close()
+                    await relay.cleanup()
 
 
 if __name__ == "__main__":
