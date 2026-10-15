@@ -418,10 +418,16 @@ Open Activity signals, retained positions and a narrow overlay inspector have
 synthetic native coverage. Selection keeps Draft/unread badges and does not
 navigate or acknowledge messages.
 
-These components are not yet wired into the main navigation or a fleet refresh
-controller. Verified communication provenance, archive and full native-child
-coverage, disk-cache lifecycle, final platform/performance qualification and
-Android transport remain unfinished. This milestone is not a usable Graph release;
+A separate controller now schedules one bounded configured-host read at a time,
+assembles pages off the UI thread, retains last-good metadata and writes a private
+atomic disk cache. Hidden views stop polling; removed routes discard stale replies
+and cached data. The CLI transport keeps request IDs and always includes `--json`,
+which old launch parsers reject before creating sessions.
+
+These components are not yet wired into the main navigation or fleet identity
+composition. Verified communication provenance, archive and full native-child
+coverage, final platform/performance qualification and Android transport remain
+unfinished. This milestone is not a usable Graph release;
 the first-release boundary below is unchanged.
 
 ## Delivery boundaries and acceptance

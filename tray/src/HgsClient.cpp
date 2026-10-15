@@ -433,6 +433,29 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
     return request;
 }
 
+quint64 HgsClient::requestGraph(const QString &host,bool changes,const QString &cursor)
+{
+    const auto request=++m_graphRequest;
+    if(cursor.size()>2048 || cursor.contains(QChar::Null) || host.contains(QChar::Null)) {
+        QTimer::singleShot(0,this,[this,request,host]{emit graphFailed(request,host,tr("Invalid graph request"));});
+        return request;
+    }
+    // --json is mandatory even on an old CLI: its generic launch parser rejects
+    // this option before resolving a folder or creating a session.
+    QStringList args{"graph",changes?"changes":"snapshot","--json","--limit","200"};
+    if(!cursor.isEmpty())args<< (changes?"--after":"--cursor") <<cursor;
+    if(!host.isEmpty())args.prepend('@'+host);
+    runHgs(m_hgs,args,host.isEmpty()?6000:15000,this,
+        [this,request,host](const QByteArray &bytes){
+            QJsonParseError error;
+            const auto document=bytes.size()<=1024*1024?QJsonDocument::fromJson(bytes,&error):QJsonDocument();
+            if(document.isNull()||!document.isObject()||error.error!=QJsonParseError::NoError)
+                emit graphFailed(request,host,tr("This computer returned an invalid graph response"));
+            else emit graphReady(request,host,document.object());
+        },[this,request,host](const QString &,const QString &error){emit graphFailed(request,host,error);});
+    return request;
+}
+
 quint64 HgsClient::requestSessionHost(const QString &action)
 {
     const quint64 request = ++m_sessionHostRequest;

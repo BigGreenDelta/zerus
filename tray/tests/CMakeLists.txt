@@ -498,6 +498,16 @@ target_link_libraries(test_dashboard PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(dashboard test_dashboard)
 set_tests_properties(dashboard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_graphtransport test_graphtransport.cpp)
+target_include_directories(test_graphtransport PRIVATE ../src)
+target_link_libraries(test_graphtransport PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+zerus_add_test(graphtransport test_graphtransport)
+
+add_executable(test_graphcontroller test_graphcontroller.cpp)
+target_include_directories(test_graphcontroller PRIVATE ../src)
+target_link_libraries(test_graphcontroller PRIVATE Qt6::Test Qt6::Core hgs-tray-ui)
+zerus_add_test(graphcontroller test_graphcontroller)
+
 add_executable(test_sessiongraphstore test_sessiongraphstore.cpp)
 target_include_directories(test_sessiongraphstore PRIVATE ../src)
 target_link_libraries(test_sessiongraphstore PRIVATE Qt6::Test Qt6::Core hgs-tray-ui)
