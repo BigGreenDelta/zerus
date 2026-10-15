@@ -7,7 +7,7 @@
 
 The capture runs offline and is deterministic: a fixed clock, synthetic tokens,
 reserved example domains, a scratch state directory, no network connection and
-no native process. The relay-oracle column of validation.jsonl is frozen data;
+no native process. The relay-oracle column of validation/*.jsonl is frozen data;
 only --refresh-oracle reads zerus_mobile.server. README.md describes each file.
 """
 from __future__ import annotations
@@ -124,6 +124,10 @@ def raised(error: BaseException) -> dict:
     return {"error": str(error), "raised": "ConnectorError" if isinstance(error, ConnectorError) else type(error).__name__}
 
 
+class CaptureError(Exception):
+    """The vectors cannot be produced from the current code and frozen data."""
+
+
 class Clock:
     """Replaces the time module inside zerus_mobile.connector only."""
 
@@ -152,6 +156,33 @@ def scratch():
 
 def connect_ro(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+
+
+class LogRecords(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@contextlib.contextmanager
+def connector_log(handler: logging.Handler):
+    """The connector logs only to handler, independent of logging state left by other tests."""
+    log = logging.getLogger("zerus.connector")
+    disabled, level, propagate = logging.root.manager.disable, log.level, log.propagate
+    log.addHandler(handler)
+    logging.disable(logging.NOTSET)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    try:
+        yield
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(level)
+        log.propagate = propagate
+        logging.disable(disabled)
 
 
 # ---------------------------------------------------------------------------
@@ -786,28 +817,18 @@ def main_vectors() -> list[dict]:
                 settings.append(options)
                 handler.setFormatter(logging.Formatter(options["format"]))
 
-            log = logging.getLogger("zerus.connector")
-            log.addHandler(handler)
-            disabled, level = logging.root.manager.disable, log.level
-            logging.disable(logging.NOTSET)  # Independent of logging state left by other tests.
-            log.setLevel(logging.INFO)
-            try:
-                with mock.patch.object(connector.asyncio, "run", run), \
-                        mock.patch.object(connector.logging, "basicConfig", basic_config), \
-                        mock.patch.object(sys, "argv", ["zerus-mobile-connector", *placeholders(argv, root)]), \
-                        contextlib.redirect_stderr(io.StringIO()), fixed_clock():
-                    uncaught = None
-                    try:
-                        connector.main()
-                        status = 0
-                    except SystemExit as exit:
-                        status = exit.code
-                    except Exception as error:  # The interpreter prints a traceback and exits 1.
-                        status, uncaught = 1, type(error).__name__
-            finally:
-                log.removeHandler(handler)
-                log.setLevel(level)
-                logging.disable(disabled)
+            with connector_log(handler), mock.patch.object(connector.asyncio, "run", run), \
+                    mock.patch.object(connector.logging, "basicConfig", basic_config), \
+                    mock.patch.object(sys, "argv", ["zerus-mobile-connector", *placeholders(argv, root)]), \
+                    contextlib.redirect_stderr(io.StringIO()), fixed_clock():
+                uncaught = None
+                try:
+                    connector.main()
+                    status = 0
+                except SystemExit as exit:
+                    status = exit.code
+                except Exception as error:  # The interpreter prints a traceback and exits 1.
+                    status, uncaught = 1, type(error).__name__
             row = {"id": name, "argv": argv, "config_text": text, "config_mode": mode,
                    "expect": {"exit": status, "ran": bool(ran), "log": stream.getvalue().splitlines(),
                               "logging": settings[0] if settings else None, "uncaught": uncaught}}
@@ -832,6 +853,53 @@ class HashProbe:
 
     def replay(self, request_id):
         return {"replayed": request_id}
+
+
+class PollStop(BaseException):
+    """Ends the real requests() loop once it has handled one relay poll."""
+
+
+class RelayPoll:
+    """A client whose every request answers 200 with one fixed relay body."""
+
+    def __init__(self, data: bytes):
+        self.status, self.content, self.data = 200, self, data
+
+    def request(self, method, url, **options):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def iter_chunked(self, size):
+        for start in range(0, len(self.data), size):
+            yield self.data[start:start + size]
+
+
+class PollProbe:
+    """Stands in for the connector while the real requests() loop parses and
+    dispatches one batch: the real http() reads the body, execute is injected."""
+
+    def __init__(self, execute):
+        self.server_url, self.token, self.execute = RELAY, TOKEN, execute
+        self.snapshot_ready = asyncio.Event()
+        self.snapshot_ready.set()
+        self.fleet = types.SimpleNamespace(probe_complete=True, supported=False, relay_supported=False,
+                                           local_id=None, available=False)
+        self.flushes, self.parsed = 0, False
+
+    async def http(self, client, method, path, body=None, **options):
+        batch = await Connector.http(self, client, method, path, body, **options)
+        self.parsed = True
+        return batch
+
+    async def flush(self, client):
+        self.flushes += 1
+        if self.flushes > 1:  # The flush after the batch: every request was handled.
+            raise PollStop
 
 
 def hash_cases() -> list[dict]:
@@ -950,40 +1018,49 @@ def raw_bytes(case: dict) -> bytes:
 def hash_vectors() -> dict[str, bytes]:
     rows = []
 
-    async def outcome(request) -> dict:
-        probe = HashProbe()
-        try:
-            await Connector.execute(probe, request)
-        except ConnectorError as error:
-            return {"rejected": "request", "error": str(error)}
-        claim = probe.claims[0]
-        canonical = json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        if hashlib.sha256(canonical.encode()).hexdigest() != claim["request_hash"]:
-            raise RuntimeError("canonical text does not reproduce request_hash")
-        result = {"request_hash": claim["request_hash"], "journal_operation": claim["operation"],
-                  "canonical_bytes": len(canonical.encode())}
-        if len(canonical) <= 2048:
-            result["canonical"] = canonical
-        return result
+    async def poll(case) -> dict:
+        """One relay poll through the real requests() loop; a lone request is
+        delivered as the only member of its batch."""
+        raw = raw_bytes(case)
+        outcomes = []
+
+        async def execute(request):
+            probe = HashProbe()
+            try:
+                await Connector.execute(probe, request)
+            except ConnectorError as error:
+                outcomes.append({"rejected": "request", "error": str(error)})
+                raise  # requests() logs it and continues with the next request.
+            claim = probe.claims[0]
+            canonical = json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            if hashlib.sha256(canonical.encode()).hexdigest() != claim["request_hash"]:
+                raise RuntimeError("canonical text does not reproduce request_hash")
+            result = {"request_hash": claim["request_hash"], "journal_operation": claim["operation"],
+                      "canonical_bytes": len(canonical.encode())}
+            if len(canonical) <= 2048:
+                result["canonical"] = canonical
+            outcomes.append(result)
+
+        async def stop(delay):  # The back-off after a failed poll.
+            raise PollStop
+
+        node, records = PollProbe(execute), LogRecords()
+        body = raw if case["envelope"] == "batch" else b'{"requests":[' + raw + b']}'
+        with connector_log(records), mock.patch.object(connector.asyncio, "sleep", stop), \
+                contextlib.suppress(PollStop):
+            await Connector.requests(node, RelayPoll(body))
+        failed = [message.removeprefix("Requests: ") for message in records.messages if message.startswith("Requests: ")]
+        if failed:
+            return {"rejected": "batch" if node.parsed else "parse", "error": failed[0]}
+        if case["envelope"] == "batch":
+            return {"requests": outcomes}
+        if len(outcomes) != 1:
+            raise CaptureError("%s: the requests() loop did not execute the request exactly once" % case["id"])
+        return outcomes[0]
 
     async def run():
         for case in hash_cases():
-            row = dict(case)
-            try:
-                value = json.loads(raw_bytes(case))
-            except ValueError:
-                row["expect"] = {"rejected": "parse", "error": "relay returned invalid JSON"}
-                rows.append(row)
-                continue
-            if case["envelope"] == "request":
-                row["expect"] = await outcome(value)
-            elif not isinstance(value, dict) or not isinstance(value.get("requests"), list):
-                row["expect"] = {"rejected": "batch", "error": "relay returned invalid request list"}
-            elif len(value["requests"]) > 100:
-                row["expect"] = {"rejected": "batch", "error": "relay request list exceeds size limit"}
-            else:
-                row["expect"] = {"requests": [await outcome(item) for item in value["requests"]]}
-            rows.append(row)
+            rows.append({**case, "expect": await poll(case)})
 
     asyncio.run(run())
     envelope = ("envelope-", "gateway-", "batch-", "relay-maximum")
@@ -1116,8 +1193,10 @@ def validation_cases() -> list[dict]:
          source="test_mobile_actions.LifecycleTransportTests.test_old_cli_and_invalid_payload_never_invoke_mutator")
     # inspect
     ids = {"expected_run_id": RUN, "expected_conversation_id": CONVERSATION}
-    controls = "test_mobile_controls.ControlsTransportTests.test_invalid_fields_tokens_or_extensions_never_spawn"
+    controls = "test_mobile_controls.CoreConnectorTests.test_invalid_fields_tokens_or_extensions_never_spawn"
     case("inspect/after", "inspect", {"after": 5, **ids})
+    case("inspect/after-one", "inspect", {"after": 1, **ids},
+         source="test_mobile_controls.CoreRelayTests.test_extension_caps_old_clients_and_read_retention")
     case("inspect/after-negative", "inspect", {"after": -1, **ids}, source=controls)
     case("inspect/after-bool", "inspect", {"after": True}, source=controls)
     case("inspect/after-without-identity", "inspect", {"after": 2}, source=controls)
@@ -1272,7 +1351,7 @@ def validation_cases() -> list[dict]:
     # catalog, directories, launch and worktrees
     launch_source = "test_mobile_launch.LaunchTransport.test_preflight_old_cli_invalid_fields_and_wrong_provider_do_not_launch"
     model_source = "test_mobile_launch.LaunchTransport.test_model_route_is_bounded_and_specific_to_native_opencode"
-    directory_source = "test_mobile_directory_create.DirectoryCreateConnector.test_invalid_wire_fields_paths_and_uuid_are_rejected_without_native"
+    directory_source = "test_mobile_directory_create.DirectoryCreate.test_invalid_wire_fields_paths_and_uuid_are_rejected_without_native"
     case("catalog/session", "catalog", session=SESSION)
     case("dirs/home", "dirs", {"request_id": ID, "path": "~"})
     case("dirs/relative", "dirs", {"request_id": ID, "path": "relative"})
@@ -1374,12 +1453,12 @@ def validation_file(case_id: str) -> str:
 
 
 def frozen_oracle(directory: Path) -> dict:
-    """The committed relay-oracle column, by case id."""
+    """The committed relay-oracle column: case id -> (submission text, decision)."""
     oracle = {}
     for path in sorted(directory.glob("validation/*.jsonl")):
         for row in map(json.loads, path.read_text().splitlines()):
             if row.get("kind") == "case" and "oracle" in row:
-                oracle[row["id"]] = row["oracle"]
+                oracle[row["id"]] = (compact(row["submission"]), row["oracle"])
     return oracle
 
 
@@ -1395,14 +1474,16 @@ def validation_vectors(oracle: dict | None) -> tuple[dict[str, bytes], set[str]]
             observed.add(case["connector"]["error"])
         if oracle is None:
             case["oracle"] = live_oracle(case["submission"])
-        elif case["id"] in oracle:
-            case["oracle"] = oracle[case["id"]]
+        elif oracle.get(case["id"], (None,))[0] == compact(case["submission"]):
+            # A decision is reused only for the exact submission it was computed from.
+            case["oracle"] = oracle[case["id"]][1]
         else:
             missing.append(case["id"])
         files.setdefault(validation_file(case["id"]), [header]).append(case)
     if missing:
-        raise SystemExit("validation cases without a frozen relay-oracle decision: " + ", ".join(missing)
-                         + "\nRun capture.py --refresh-oracle while zerus_mobile.server exists, or remove them.")
+        raise CaptureError("validation cases without a frozen relay-oracle decision for their submission: "
+                           + ", ".join(missing)
+                           + "\nRun capture.py --refresh-oracle while zerus_mobile.server exists, or remove them.")
     return {name: jsonl(rows) for name, rows in files.items()}, observed
 
 
@@ -1733,7 +1814,7 @@ def expectations(fixtures: dict[str, str]):
                   {"op": "claim", "request_id": rid_of("null-hash-send"), "operation": "send", "request_hash": HASH_A},
                   {"op": "claim", "request_id": rid_of("null-hash-send"), "operation": "send"},
                   {"op": "rows"}, {"op": "close"}]
-    legacy =[{"op": "schema"}, {"op": "rows"}, {"op": "open", "at": EPOCH, "binding": BINDING}, {"op": "schema"},
+    legacy = [{"op": "schema"}, {"op": "rows"}, {"op": "open", "at": EPOCH, "binding": BINDING}, {"op": "schema"},
               {"op": "rows"}, {"op": "pending"},
               {"op": "claim", "request_id": ident("legacy/read"), "operation": "inspect"},
               {"op": "claim", "request_id": ident("legacy/read"), "operation": "inspect", "request_hash": HASH_A},
@@ -2242,8 +2323,10 @@ def size_vectors(root: Path) -> bytes:
             message = None
         except ValueError as error:
             message = str(error)
+        receipt = connector_decision({"submission": {"request_id": ident("send"), "computer_id": COMPUTER, "operation": "send",
+                                                     "session": SESSION, "payload": expand(payload, fill)}})
         rows.append({"kind": "validator", "id": "send-text-" + label, "function": "attachments.validate_send", "value": payload,
-                     "fill": fill, "expect": {"error": message, "receipt_error": message and "invalid or oversized inline attachment/message"}})
+                     "fill": fill, "expect": {"error": message, "receipt_error": receipt.get("error")}})
     for label, extra in (("64KiB", 0), ("64KiB+1", 1)):
         payload = {"request_id": ident("t"), "expected_run_id": RUN, "expected_conversation_id": CONVERSATION,
                    "terminal_binding_id": "d" * 64, "text": "@fill", "enter": False}
@@ -2264,7 +2347,8 @@ def size_vectors(root: Path) -> bytes:
         except ValueError as error:
             message = str(error)
         rows.append({"kind": "validator", "id": "speech-audio-" + label, "function": "speech.validate", "value": payload,
-                     "fill": fill, "expect": {"error": message}})
+                     "fill": fill, "expect": {"error": message},
+                     "source": "test_mobile_speech.SpeechValidationTests.test_maximum_audio_has_bounded_valid_encoding"})
     return jsonl(rows)
 
 
@@ -2325,7 +2409,11 @@ def main() -> int:
     parser.add_argument("--refresh-oracle", action="store_true", help="recompute the relay-oracle column from zerus_mobile.server")
     args = parser.parse_args()
     oracle = None if args.refresh_oracle else frozen_oracle(HERE)
-    files = render(oracle)
+    try:
+        files = render(oracle)
+    except CaptureError as error:
+        print(error, file=sys.stderr)
+        return 1
     if args.check:
         problems = differences(files)
         for problem in problems:

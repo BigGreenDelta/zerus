@@ -23,7 +23,8 @@ the venv the relay CI job builds with `pip install ./services/mobile`.
   native process. Scratch paths appear as `$SCRATCH`, `$HOME` and `$CWD`.
 - Every value comes from running the real Python code: `Journal`,
   `Connector.validate`, `Connector.execute` and `Connector.snapshot` with a
-  scripted `_native`, `connector.main()`, and the pure projection functions.
+  scripted `_native`, one poll of `Connector.requests()` per request or batch
+  body, `connector.main()`, and the pure projection functions.
   The managed relay hostnames appear only where `managed_relay.py` names them.
 - A change in Python behaviour must show up as a reviewed diff of these files.
   A vector frozen on a Python bug encodes that bug; the deliberate Rust
@@ -32,9 +33,11 @@ the venv the relay CI job builds with `pip install ./services/mobile`.
 - The `oracle` column of `validation/*.jsonl` is frozen data. `--check` and
   `test_vectors.py` copy it from the committed files and never import
   `zerus_mobile.server`, so deleting the Python reference relay cannot break
-  them. While the reference relay exists, a test compares the frozen column
-  with it; afterwards that test skips. P3 adds a `relay` column computed by the
-  Rust relay.
+  them. A frozen decision is reused only for the exact submission it was
+  computed from; a new or changed case needs `--refresh-oracle`. While the
+  reference relay exists, a test compares the frozen column with it;
+  afterwards that test skips. P3 adds a `relay` column computed by the Rust
+  relay.
 - When the Python connector is deleted, these files stay as frozen data and the
   capture script goes with it; record the last commit that produced them here.
 
@@ -72,6 +75,10 @@ strict JSON reader can load it. JSONL files hold one record per line.
   `connector could not record native outcome` (divergence c changes it).
 - `stage: before_journal` means the connector rejects the request without a
   journal row or an upload ("Rejected relay request" in the log).
+- A row with `envelope: request` is polled as the only member of a relay
+  batch. `rejected: parse` means the poll body is not JSON Python accepts,
+  `rejected: batch` that the whole batch is refused, and `rejected: request`
+  that only that request is dropped, before any journal row.
 - An `OSError` is recorded by its errno only; its text names local paths. A
   JSON parse error, and a `TypeError` in the relay-oracle column, are recorded
   by type only, because their wording is Python's own.

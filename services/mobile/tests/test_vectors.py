@@ -97,6 +97,13 @@ class GoldenVectorTests(unittest.TestCase):
         self.assertEqual(valid, operations)
         self.assertEqual(envelopes, operations)
 
+    def test_a_changed_submission_never_reuses_its_frozen_oracle_decision(self):
+        frozen = self.capture.frozen_oracle(VECTORS)
+        case_id = sorted(frozen)[0]
+        frozen[case_id] = ("{}", frozen[case_id][1])
+        with self.assertRaisesRegex(self.capture.CaptureError, re.escape(case_id)):
+            self.capture.validation_vectors(frozen)
+
     def test_frozen_oracle_matches_the_reference_relay_while_it_exists(self):
         try:
             importlib.import_module("zerus_mobile.server")
