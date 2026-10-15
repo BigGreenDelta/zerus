@@ -23,6 +23,7 @@
 
 class SessionsWindow;
 class SwarmWorkerSupervisor;
+class AutomaticApprovals;
 
 // Склейка: таймеры -> HgsClient -> FleetState -> иконка и меню.
 // Ничего не вычисляет сам; вся логика состояния в FleetState, весь ввод-вывод в
@@ -83,6 +84,7 @@ private:
     AppConfig m_cfg;
     HgsClient m_client;
     FleetState m_state;
+    std::unique_ptr<AutomaticApprovals> m_automaticApprovals;
     ReadMarkSync m_readSync;
     IconFactory m_icons;
     // Терминал прячется за интерфейсом целиком: в TrayAgent нет ни строчки D-Bus, и

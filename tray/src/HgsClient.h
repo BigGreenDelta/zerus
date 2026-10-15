@@ -204,6 +204,7 @@ public:
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});
     quint64 downloadFile(const QString &host, const QString &path, const QString &destination);
     quint64 downloadFileToCache(const QString &host, const QString &path);
+    quint64 requestApprovalLog(const QString &operation, const QJsonObject &data = {});
     static constexpr qsizetype MaximumMessageBytes = 64 * 1024;
     static constexpr qsizetype MaximumAttachmentBytes = 10 * 1024 * 1024;
     static constexpr qsizetype MaximumAttachmentsBytes = 20 * 1024 * 1024;
@@ -222,7 +223,7 @@ public:
     quint64 requestInterrupt(const QString &host, const QString &name, const QString &run,
                              const QString &conversation, double turnStarted);
     quint64 requestAnswerQuestion(const QString &host, const QString &name,
-                                  const QJsonObject &question, const QJsonArray &answers);
+                                  const QJsonObject &question, const QJsonArray &answers, const QString &durableRequestId = {});
     // `hgs [@host] read <session> --json`: the host applies each field only while
     // it is current. A JSON answer, including not_found, is delivered.
     quint64 requestRead(const QString &host, const QString &name, const QJsonObject &payload);
@@ -262,6 +263,7 @@ signals:
     void fileDownloaded(quint64 request, const QString &destination);
     void fileDownloadFailed(quint64 request, const QString &error);
     void downloadCacheWarning(const QString &error);
+    void approvalLogFinished(quint64 request, const QString &operation, const QJsonObject &result, const QString &error);
     void attachmentFailed(quint64 request, const QString &detail);
     void nativeUiReady(quint64 request, const QJsonObject &connection);
     void nativeUiFailed(quint64 request, const QString &error);
@@ -366,6 +368,8 @@ private:
     quint64 m_searchRequest = 0;
     quint64 m_attachmentRequest = 0;
     quint64 m_fileDownloadRequest = 0;
+    quint64 m_approvalLogRequest = 0;
+    bool m_approvalLogSupported = false;
     quint64 m_effortRequest = 0;
     quint64 m_settingsRequest = 0;
     quint64 m_recoveryRequest = 0;

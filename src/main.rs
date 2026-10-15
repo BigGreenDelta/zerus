@@ -1,4 +1,5 @@
 mod accounts;
+mod approval_log;
 mod cli;
 mod config;
 mod download;
