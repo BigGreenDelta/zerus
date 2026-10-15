@@ -837,6 +837,13 @@ Unverified states fall back to Terminal with an explanation.
 A choice that the agent's status line already shows is confirmed without typing
 anything into Terminal.
 
+Codex model choices use the selected account's `models_cache.json` and sort by
+ascending signed 32-bit `priority`, preserving source order for ties, as in
+[Codex's native picker catalog](https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/models-manager/src/manager.rs#L170).
+Missing or invalid priorities follow ranked entries in their original order;
+a legacy catalog without priorities keeps its source order. This shared catalog
+order applies to both desktop and Android without changing the current model.
+
 Claude options are the models its `/model` picker lists, from the catalog Claude
 Code caches in the account's profile. Zerus selects the model and effort in that
 picker and applies them with its session-only choice (`s`). Its Enter, and a typed

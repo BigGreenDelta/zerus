@@ -647,7 +647,14 @@ fn catalog(record: &Value) -> Vec<ModelOption> {
     if string(record, "agent") == "codex" {
         let parsed = codex_models(record);
         if let Some(models) = parsed.as_ref().and_then(|v| v["models"].as_array()) {
-            for entry in models.iter().take(256) {
+            let mut entries: Vec<_> = models.iter().take(256).collect();
+            // Codex's ModelsManager stably sorts by its signed i32 priority.
+            // Incomplete legacy entries follow ranked models in source order.
+            entries.sort_by_key(|entry| {
+                let priority = entry["priority"].as_i64().and_then(|value| i32::try_from(value).ok());
+                (priority.is_none(), priority)
+            });
+            for entry in entries {
                 let id = string(entry, "slug");
                 if !safe_model(id)
                     || (!string(entry, "visibility").is_empty()
@@ -2359,6 +2366,54 @@ mod tests {
         fs::remove_file(&path).unwrap();
         assert!(options(&record, "m").is_empty());
         assert!(catalog(&record).is_empty());
+    }
+
+    #[test]
+    fn codex_catalog_uses_native_priority_with_stable_ties() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("models_cache.json");
+        let source = json!({"models":[
+            {"slug":"later","display_name":"Later model","priority":8,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]},
+            {"slug":"tie-zeta","priority":2},
+            {"slug":"first","priority":i32::MIN},
+            {"slug":"tie-alpha","priority":2},
+            {"slug":"zero","priority":0},
+            {"slug":"hidden","priority":i32::MIN,"visibility":"hide"},
+            {"slug":"-invalid","priority":i32::MIN},
+            {"slug":"last-ranked","priority":i32::MAX}
+        ]}).to_string();
+        fs::write(&path, &source).unwrap();
+        let models = catalog(&json!({"agent":"codex","agent_home":root.path()}));
+        assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            vec!["first", "zero", "tie-zeta", "tie-alpha", "later", "last-ranked"]);
+        assert_eq!(models[4].label, "Later model");
+        assert_eq!(models[4].efforts, vec!["low", "high"]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn codex_catalog_keeps_legacy_unranked_order_after_ranked_models() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("models_cache.json");
+        let mut entries = vec![
+            json!({"slug":"missing"}),
+            json!({"slug":"string","priority":"1"}),
+            json!({"slug":"fraction","priority":1.5}),
+            json!({"slug":"null","priority":null}),
+            json!({"slug":"too-large","priority":i64::from(i32::MAX) + 1}),
+            json!({"slug":"too-small","priority":i64::from(i32::MIN) - 1}),
+            json!({"slug":"boolean","priority":false}),
+        ];
+        let record = json!({"agent":"codex","agent_home":root.path()});
+        fs::write(&path, json!({"models":entries}).to_string()).unwrap();
+        let ids = |models: Vec<ModelOption>| models.into_iter().map(|model| model.id).collect::<Vec<_>>();
+        let legacy = vec!["missing", "string", "fraction", "null", "too-large", "too-small", "boolean"];
+        assert_eq!(ids(catalog(&record)), legacy);
+        entries.insert(2, json!({"slug":"positive","priority":3}));
+        entries.push(json!({"slug":"negative","priority":-1}));
+        fs::write(&path, json!({"models":entries}).to_string()).unwrap();
+        let expected = [vec!["negative", "positive"], legacy].concat();
+        assert_eq!(ids(catalog(&record)), expected);
     }
 
     #[test]

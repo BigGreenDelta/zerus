@@ -285,11 +285,12 @@ the form; Apply keeps the exact-session, pending-request and readiness checks.
 
 Model labels and order come from the shared `hgs` catalog, without Android
 sorting or invented recommendation/cost badges. Codex uses its native cached
-catalog's `display_name` (falling back to the ID), and Claude uses the account
-catalog's `name`. Both retain catalog array order. Kimi retains configuration
-order, and DeepSeek retains native group/model order. OpenCode currently uses
-provider/model ID order in the backend. Desktop consumes the same catalog,
-deduplicates model IDs and prepends the current model when absent.
+catalog's `display_name` (falling back to the ID) and stable ascending `priority`
+order; missing or invalid priorities follow ranked entries in source order.
+Claude uses the account catalog's `name` and retains its array order. Kimi
+retains configuration order, and DeepSeek retains native group/model order.
+OpenCode currently uses provider/model ID order in the backend. Desktop consumes
+the same catalog, deduplicates model IDs and prepends the current model when absent.
 
 Terminal uses a separate saved input buffer and a fresh exact native binding.
 Snapshots poll adaptively while visible; input sends literal text or fixed keys,
