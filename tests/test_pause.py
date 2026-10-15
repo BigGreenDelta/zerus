@@ -738,6 +738,131 @@ class Lifecycle(Harness):
         self.assertEqual(others(hooks), others(data["hooks"]))
         self.assertFalse((self.root / "settings-warning").exists())
 
+    def launched_settings(self):
+        """The flag settings of the newest agent start, or None."""
+        argv = json.loads((self.root / "argv.jsonl").read_text().splitlines()[-1])["argv"]
+        if "--settings" not in argv:
+            return None
+        self.assertEqual(argv.count("--settings"), 1, argv)
+        return json.loads(argv[argv.index("--settings") + 1])
+
+    def status_line(self, name, command, conversation=None, model="claude-opus-5-5", window=1000000):
+        """Run the status line `command` as Claude Code 2.1.296 runs it for this run: through
+        /bin/sh in the session folder with its environment and the JSON input on stdin."""
+        binding = self.binding(name)
+        payload = dict(session_id=conversation or binding["conversation_id"], transcript_path=binding["transcript"],
+                       cwd=str(self.project), model=dict(id=model, display_name="Fixture"),
+                       workspace=dict(current_dir=str(self.project), project_dir=str(self.project), added_dirs=[]),
+                       version="2.1.296", output_style=dict(name="default"),
+                       context_window=dict(total_input_tokens=100, total_output_tokens=8, context_window_size=window,
+                                           current_usage=dict(input_tokens=100, output_tokens=8,
+                                                              cache_creation_input_tokens=0, cache_read_input_tokens=0),
+                                           used_percentage=0, remaining_percentage=100))
+        env = dict(self.env, HGS_SESSION=name, HGS_RUN_ID=binding["run_id"], HGS_STATE_DIR=str(self.root / "state"),
+                   CLAUDE_PROJECT_DIR=str(self.project))
+        text = json.dumps(payload) + "\n"
+        result = subprocess.run(["/bin/sh", "-c", command], env=env, cwd=self.project, input=text,
+                                capture_output=True, text=True, timeout=20)
+        return result, text
+
+    def capacity(self, name):
+        context = json.loads(self.hgs("inspect", name))["session_usage"].get("context", {})
+        return {key: context.get(key) for key in ("limit", "limit_source", "limit_model")}
+
+    @unittest.skipIf(LEGACY_STATE, "Claude's status line telemetry requires the native CLI")
+    def test_claude_status_line_reports_capacity_and_keeps_the_users(self):
+        settings = self.root / ".claude/settings.json"
+        settings.parent.mkdir()
+        user = {"type": "command", "command": 'cat > "$HOME/user-input.json"; printf "user line"; exit "${STATUS:-0}"',
+                "padding": 1, "refreshInterval": 7}
+        settings.write_text(json.dumps({"statusLine": user, "theme": "dark"}))
+        name = self.start()
+        # The status line is registered for the run only: settings.json keeps the user's.
+        line = self.launched_settings()["statusLine"]
+        self.assertEqual({key: line.get(key) for key in ("type", "padding", "refreshInterval")},
+                         {"type": "command", "padding": 1, "refreshInterval": 7})
+        self.assertEqual(shlex.split(line["command"])[1:], ["__state", "statusline"])
+        self.assertEqual(json.loads(settings.read_text())["statusLine"], user)
+        self.assertNotIn("--settings", self.binding(name)["base"])
+        self.assertEqual(self.capacity(name), dict(limit=None, limit_source=None, limit_model=None))
+        # Claude's input reaches the user's status line unchanged; its output is what Claude shows.
+        result, text = self.status_line(name, line["command"])
+        self.assertEqual((result.returncode, result.stdout), (0, "user line"), result.stderr)
+        self.assertEqual((self.root / "user-input.json").read_text(), text)
+        self.assertEqual(self.capacity(name), dict(limit=1000000, limit_source="native_statusline",
+                                                   limit_model="claude-opus-5-5"))
+        self.env["STATUS"] = "3"
+        result, _ = self.status_line(name, line["command"])
+        self.assertEqual((result.returncode, result.stdout), (3, "user line"))
+        del self.env["STATUS"]
+        # After a model switch the sample is stale until the status line reports the new model.
+        binding = self.binding(name)
+        self.send_event(name, "PostModelSwitch", transcript_path=binding["transcript"], cwd=str(self.project),
+                        from_model="claude-opus-5-5", to_model="claude-haiku-5-5", requested_model="haiku",
+                        source="command", context_tokens=0)
+        self.assertEqual(self.capacity(name)["limit"], None)
+        self.status_line(name, line["command"], model="claude-haiku-5-5", window=200000)
+        self.assertEqual(self.capacity(name), dict(limit=200000, limit_source="native_statusline",
+                                                   limit_model="claude-haiku-5-5"))
+        # Another conversation's report never describes this one.
+        self.status_line(name, line["command"], conversation=str(uuid.uuid4()), model="claude-haiku-5-5")
+        self.assertEqual(self.capacity(name)["limit"], None)
+        # A new run starts without the previous run's sample, and its own status line restores it.
+        self.status_line(name, line["command"], model="claude-haiku-5-5", window=200000)
+        self.hgs("pause", name)
+        self.resume(name)
+        line = self.launched_settings()["statusLine"]
+        self.assertEqual(self.capacity(name)["limit"], None)
+        self.status_line(name, line["command"], model="claude-haiku-5-5", window=200000)
+        self.assertEqual(self.capacity(name)["limit"], 200000)
+        # The user's change applies at once; without a status line of theirs nothing is shown.
+        settings.write_text(json.dumps({**json.loads(settings.read_text()),
+                                        "statusLine": dict(user, command="printf changed")}))
+        self.assertEqual(self.status_line(name, line["command"])[0].stdout, "changed")
+        data = json.loads(settings.read_text())
+        del data["statusLine"]
+        settings.write_text(json.dumps(data))
+        result, _ = self.status_line(name, line["command"], window=400000)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertEqual(self.capacity(name)["limit"], None)  # Inspect still reports Haiku.
+        # Without one at launch, hgs's entry has only its command.
+        self.hgs("pause", name)
+        self.resume(name)
+        self.assertEqual(set(self.launched_settings()["statusLine"]), {"type", "command"})
+
+    @unittest.skipIf(LEGACY_STATE, "Claude's status line telemetry requires the native CLI")
+    def test_claude_status_line_is_not_registered_where_claude_would_differ(self):
+        # An older Claude Code: its status line input was not verified.
+        (self.root / "claude-version").write_text("2.1.295 (Claude Code)\n")
+        name = self.start()
+        self.assertIsNone(self.launched_settings())
+        self.hgs("pause", name)
+        (self.root / "claude-version").unlink()
+        self.resume(name)
+        self.assertIsNotNone(self.launched_settings())
+        # Settings the user passes themselves stay theirs.
+        own = self.start("claude", "own", "--", "--settings", '{"theme": "dark"}')
+        self.assertEqual(self.launched_settings(), {"theme": "dark"})
+        self.hgs("pause", own)
+        self.resume(own)
+        self.assertEqual(self.launched_settings(), {"theme": "dark"})
+        # A status line in the enclosing repository's local settings is resolved by
+        # ownership checks that hgs does not repeat.
+        (self.project / ".git").mkdir()
+        nested = self.project / "nested"
+        (nested / ".claude").mkdir(parents=True)
+        (self.project / ".claude").mkdir()
+        (self.project / ".claude/settings.local.json").write_text(json.dumps(
+            {"statusLine": {"type": "command", "command": "printf local"}}))
+        self.hgs("claude", str(nested), "-n", "nested", "-d")
+        self.wait(lambda: self.binding("claude/nested/nested").get("conversation_id"))
+        self.assertIsNone(self.launched_settings())
+        # A settings file Claude Code cannot read is left for it to report.
+        (self.project / ".claude/settings.local.json").write_text("{")
+        self.hgs("pause", name)
+        self.resume(name)
+        self.assertIsNone(self.launched_settings())
+
     def test_failed_resume_keeps_binding_and_no_fresh_fallback(self):
         name = self.start()
         sid = self.binding(name)["conversation_id"]
