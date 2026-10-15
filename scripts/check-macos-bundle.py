@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 
+from macos_stapler import run_stapler
+
 BUNDLE_ID = "com.hgdev.hgs-tray"
 MINIMUM_SYSTEM = "14.0"
 ALLOWED_LIBRARIES = ("@rpath/", "@executable_path/", "@loader_path/", "/System/Library/", "/usr/lib/")
@@ -207,7 +209,7 @@ def signature_findings(bundle, team):
     assess = subprocess.run(["spctl", "-a", "-t", "exec", "-vv", str(bundle)], capture_output=True, text=True)
     if assess.returncode or "source=Notarized Developer ID" not in assess.stderr:
         findings.append("Gatekeeper does not accept a notarized Developer ID bundle: " + assess.stderr.strip())
-    staple = subprocess.run(["xcrun", "stapler", "validate", str(bundle)], capture_output=True, text=True)
+    staple = run_stapler("validate", bundle)
     if staple.returncode:
         findings.append("notarization ticket is not stapled: " + (staple.stdout + staple.stderr).strip())
     return findings

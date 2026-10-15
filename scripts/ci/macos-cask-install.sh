@@ -27,7 +27,7 @@ read -r cask release team <<< "$metadata"
 asset="$signed/zerus-$release-macos-arm64.zip"
 image="$signed/zerus-$release-macos-arm64.dmg"
 codesign --verify --strict "$image"
-xcrun stapler validate "$image"
+python3 scripts/macos_stapler.py validate "$image"
 spctl --assess --type open --context context:primary-signature --verbose=2 "$image"
 dmg_mount="$(mktemp -d "${RUNNER_TEMP:?}/zerus-dmg-mount.XXXXXX")"
 trap 'hdiutil detach "$dmg_mount" >/dev/null 2>&1 || true; rmdir "$dmg_mount" 2>/dev/null || true' EXIT

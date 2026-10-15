@@ -16,7 +16,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
+
+from macos_stapler import run_stapler
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_ENTITLEMENTS = ROOT / "packaging/macos/Zerus.entitlements"
@@ -138,22 +139,14 @@ def notarize_upload(upload, key_file, key_id, issuer):
 
 
 def staple(path):
-    command = ["xcrun", "stapler", "staple", str(path)]
     # Apple can accept a submission while its CloudKit ticket endpoint drops
-    # the connection. Retry only that observed transport error, on the same
-    # signed bytes; all other failures and exhausted attempts remain fatal.
-    for delay in (5, 15, 30, 60, None):
-        result = subprocess.run(command, capture_output=True, text=True)
+    # the connection. Both ticket operations use the same bounded policy;
+    # permanent errors and exhausted retries remain fatal.
+    for action in ("staple", "validate"):
+        result = run_stapler(action, path)
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
-        if result.returncode == 0:
-            break
-        if (delay is None or result.returncode != 68 or
-                "NSURLErrorDomain Code=-1005" not in result.stdout + result.stderr):
-            result.check_returncode()
-        print(f"Apple ticket connection was lost; retrying stapler in {delay}s.", file=sys.stderr)
-        time.sleep(delay)
-    subprocess.run(["xcrun", "stapler", "validate", str(path)], check=True)
+        result.check_returncode()
 
 
 def notarize(app, key_file, key_id, issuer):

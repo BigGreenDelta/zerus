@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 def load(name, filename):
@@ -25,7 +26,6 @@ def load(name, filename):
 check = load("check_macos_bundle", "check-macos-bundle.py")
 package = load("package_macos", "package-macos.py")
 sign = load("sign_macos", "sign-macos.py")
-sys.path.insert(0, str(ROOT / "scripts"))
 import macos_release  # noqa: E402
 
 OTOOL = """Zerus.app/Contents/MacOS/hgs-tray:
@@ -78,6 +78,18 @@ Load command 20
 
 
 class BundleChecks(unittest.TestCase):
+    def test_exhausted_ticket_validation_is_a_bundle_failure(self):
+        responses = [subprocess.CompletedProcess([], 0, "", ""),
+                     subprocess.CompletedProcess([], 0, "", "TeamIdentifier=ABCDE12345\nflags=0x10000(runtime)"),
+                     subprocess.CompletedProcess([], 0, "", "source=Notarized Developer ID")]
+        with mock.patch.object(check.subprocess, "run", side_effect=responses), \
+                mock.patch.object(check, "run_stapler", return_value=subprocess.CompletedProcess(
+                    [], 68, "NSURLErrorDomain Code=-1005", "")) as validate:
+            findings = check.signature_findings(Path("/fixture/Zerus.app"), "ABCDE12345")
+        validate.assert_called_once_with("validate", Path("/fixture/Zerus.app"))
+        self.assertEqual(len(findings), 1)
+        self.assertIn("notarization ticket is not stapled", findings[0])
+
     @unittest.skipUnless(Path("/bin/bash").exists(), "requires Bash")
     def test_unattended_cask_execution_requires_prior_installed_gatekeeper_acceptance(self):
         script = (ROOT / "scripts/ci/macos-cask-install.sh").read_text()
