@@ -55,6 +55,8 @@ ExecStart={quote(binary)} voice worker
 Environment={quote('PATH=' + path)}
 Restart=always
 RestartSec=10
+# Kill only the worker itself, never tmux servers, agents or hosts it started.
+KillMode=process
 
 [Install]
 WantedBy=default.target

@@ -1063,14 +1063,24 @@ systemctl --user enable --now hgs-tray.service
 systemctl --user enable --now hgs-swarm.service hgs-recovery.service
 ```
 
-Packaged units and the current source installer template use `KillMode=process`.
-A GUI restart must preserve native agents, tmux servers and DeepSeek hosts. Older
-source-installed units
-may still use systemd's control-group default. Before restarting one, add a user
-drop-in with `[Service]` and `KillMode=process`, run `systemctl --user daemon-reload`
-and verify `systemctl --user show hgs-tray.service -p KillMode`. Package upgrades
-do not perform a restart. Review the old unit's kill policy before restarting an existing
-installation; never use a broad process kill or restart all native clients.
+`hgs-tray`, `hgs-recovery` and `hgs-swarm` use `KillMode=process`, both as
+packaged and as the source installers write them (`install.sh` also writes
+`hgs-voice`). A restart, or a worker exiting after an upgrade replaced `hgs`, then
+ends only the unit's main process: native agents, tmux servers and DeepSeek hosts
+that it started keep running. Under systemd's `control-group` default the same
+events kill them. Units installed by earlier releases, and a
+`zerus-mobile-connector.service` made from earlier
+[mobile setup](mobile-deployment.md#protect-running-agents) instructions, may still
+use that default. Before restarting or upgrading one, add a user drop-in with
+`[Service]` and `KillMode=process`, run `systemctl --user daemon-reload` and verify
+`systemctl --user show <unit> -p KillMode`. `install.sh` rewrites the worker units
+and reloads the user manager before it restarts them. Prefer `restart` to `stop`:
+tmux builds with systemd support put panes in `tmux-spawn-*.scope` units that are
+`PartOf=` the unit holding the tmux server, so stopping that unit ends those panes
+whatever its kill mode; `systemctl --user show <unit> -p ConsistsOf` lists them.
+Package upgrades do not perform a restart. Review the old unit's kill policy before
+restarting an existing installation; never use a broad process kill or restart all
+native clients.
 
 The swarm worker is the exception: it holds no agents. A current `hgs-swarm`
 exits when an upgrade replaces its executable and `Restart=always` starts the new
