@@ -1,0 +1,33 @@
+[package]
+name = "zerus-mobile-connector"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Outbound mobile connector for Zerus: relay API v1 client and native hgs bridge"
+
+[[bin]]
+name = "zerus-mobile-connector"
+path = "src/main.rs"
+
+# Test seams for the black-box suites. Packages never build this feature.
+[features]
+test-hooks = []
+
+[dependencies]
+# Only the protocol library: codec, envelope validation, operation sets and
+# limits, without the relay's HTTP server, database or TLS stack.
+zerus-relay = { path = "../relay", default-features = false }
+# The journal stays the SQLite file the Python connector writes; bundled like hgs.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Effective uid, flock(2) and O_NOFOLLOW through safe calls (no libc on Linux).
+rustix = { version = "1", features = ["fs", "process"] }
+# request_hash needs exact number spelling; the codec sorts keys itself.
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+
+[lints.rust]
+unsafe_code = "forbid"

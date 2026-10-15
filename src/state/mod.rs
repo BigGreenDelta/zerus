@@ -10,6 +10,7 @@ mod claude_question;
 mod claude_statusline;
 mod claude_subagents;
 mod attachments;
+mod computer_files;
 pub(crate) mod voice;
 mod interrupt;
 mod clear_context;
@@ -634,6 +635,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         return claude_statusline::run();
     }
     if command == "voice" { return voice::dispatch(args); }
+    if command == "file-read" { return computer_files::dispatch(args); }
     if command == "attachment" {
         return attachments::dispatch(args);
     }

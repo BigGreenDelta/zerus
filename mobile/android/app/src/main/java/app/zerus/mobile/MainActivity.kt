@@ -176,6 +176,7 @@ class MainActivity : ComponentActivity() {
     CompositionLocalProvider(LocalConversationObscuration provides obscuration) {
         ZerusAppContent(model,invitation,updateRequest,onInvitationUsed,onNotifications,onLive,onAttach)
         AttachmentViewerHost(model.attachments)
+        ComputerFileHost(model.computerFiles)
     }
 }
 
@@ -957,7 +958,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     }
                     item(key = "event:" + event.id) {
                     val provider = if (target.agentId.isNotBlank()) raw?.string("provider").orEmpty().ifBlank { session.agent } else session.agent
-                    ConversationMessage(event, provider, outgoing.find { it.requestId == event.outgoingId },
+                    ConversationMessage(target, event, provider, outgoing.find { it.requestId == event.outgoingId },
                         model, onReviewOutgoing)
                     }
                 }
@@ -1008,7 +1009,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         questionDisplay, ::updateQuestionDisplay, onReview)
 }
 
-@Composable private fun ConversationMessage(event: Event, agent: String, outgoing: OutgoingMessage?,
+@Composable private fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
     model: ZerusViewModel, onReview: (OutgoingMessage) -> Unit) {
     val own = QuestionReplyPresentation.isOwnRole(event.role)
     val parsedReply by produceState<Pair<String, List<PresentedQuestionReply>?>>(event.text to null, event.text, own) {
@@ -1037,7 +1038,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     } }
                 } else if (event.text.isNotBlank()) {
                     if(own) SelectionContainer { Text(event.text, style = conversationTextStyle()) }
-                    else ProvideTextStyle(conversationTextStyle()) { MarkdownText(event.text) }
+                    else ProvideTextStyle(conversationTextStyle()) {
+                        MarkdownText(event.text, fileScope = target.key) { reference ->
+                            model.computerFiles.show(target, reference, model.machines.find {
+                                it.connectionId == target.connectionId && it.id == target.computerId
+                            }?.name.orEmpty().ifBlank { "computer" })
+                        }
+                    }
                 }
                 if (event.voice == null) AttachmentRows(event.attachments, model.selected?.target, model)
                 if(event.detailTruncated) Text("Message text shortened",color = Amber,style = MaterialTheme.typography.labelSmall)

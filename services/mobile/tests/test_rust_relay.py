@@ -1,9 +1,15 @@
 """Released HTTP contracts replayed against the Rust process, when selected.
 
-The Python store is used only as the independent fixture/legacy data writer.
-The requests under test always cross the Rust server's real loopback socket.
+The Python store is used only as the independent fixture/legacy data writer, so
+these contracts still run the Rust relay on that SQLite file, while the connector
+HTTP suites use relay_fixture and PostgreSQL. The requests under test always
+cross the Rust server's real loopback socket.
 """
+import asyncio
+from dataclasses import asdict
+import json
 import os
+import socket
 import uuid
 from pathlib import Path
 import tempfile
@@ -13,7 +19,53 @@ from aiohttp import ClientSession
 from zerus_mobile.server import Config
 from zerus_mobile.store import Store
 import test_relay
-from relay_fixture import start_relay
+
+
+async def start_sqlite_relay(home, config):
+    """Serve the store at the relay's default SQLite path under a private HOME."""
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1', 0))
+        port = reservation.getsockname()[1]
+    configuration = home / 'relay.json'
+    configuration.write_text(json.dumps(asdict(config)))
+    configuration.chmod(0o600)
+    process = await asyncio.create_subprocess_exec(
+        str(Path(os.environ['ZERUS_RELAY_BINARY']).resolve()), '--config', str(configuration),
+        'serve', '--port', str(port), stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL, env={**os.environ, 'HOME': str(home)},
+    )
+    runner = RustRunner(process)
+    url = f'http://127.0.0.1:{port}'
+    try:
+        async with ClientSession() as client:
+            for _ in range(200):
+                if process.returncode is not None:
+                    raise RuntimeError('Rust relay exited during fixture startup')
+                try:
+                    async with client.get(url + '/readyz') as response:
+                        if response.status == 200:
+                            return runner, url
+                except OSError:
+                    pass
+                await asyncio.sleep(0.025)
+        raise RuntimeError('Rust relay fixture did not become ready')
+    except BaseException:
+        await runner.cleanup()
+        raise
+
+
+class RustRunner:
+    def __init__(self, process):
+        self.process = process
+
+    async def cleanup(self):
+        if self.process.returncode is None:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), 45)
+            except asyncio.TimeoutError:
+                self.process.kill()
+                await self.process.wait()
 
 
 class HttpClient:
@@ -37,7 +89,8 @@ class HttpClient:
 class RustHttpContracts(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.store = Store(Path(self.temp.name) / 'relay.sqlite3')
+        self.home = Path(self.temp.name)
+        self.store = Store(self.home / '.local/share/zerus-mobile/relay.sqlite3')
         self.workspace = self.store.workspace('Example')
         self.node = self.store.node(self.workspace, 'Example computer')
         self.phone = self.store.pair(self.store.invite(self.workspace)['pair_code'], 'Example phone')
@@ -59,7 +112,7 @@ class RustHttpContracts(unittest.IsolatedAsyncioTestCase):
         self.config = Config(background=False)
         if self._testMethodName == 'test_queue_limit_retention_tombstones':
             self.config.max_queue = 1
-        self.runner, url = await start_relay(self.store, self.config)
+        self.runner, url = await start_sqlite_relay(self.home, self.config)
         self.client = HttpClient(url)
 
     async def asyncTearDown(self):

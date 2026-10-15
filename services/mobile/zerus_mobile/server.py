@@ -4,6 +4,7 @@ Production HTTP runs in services/mobile/relay. The supported zerus-mobile CLI
 executes that Rust binary; this module remains an independent protocol oracle.
 """
 from __future__ import annotations
+from . import file_reads
 
 import asyncio
 from collections import OrderedDict, deque
@@ -271,7 +272,7 @@ async def computers(request):
     rows = await request.app[STORE].computers(device["workspace_id"], max_bytes=request.app[CONFIG].max_catalog_bytes)
     if rows is None:
         raise web.HTTPRequestEntityTooLarge(max_size=request.app[CONFIG].max_catalog_bytes, actual_size=request.app[CONFIG].max_catalog_bytes + 1)
-    result = {"computers": [{"id": row["id"], "name": row["name"], "online": row.get("available",True) and row["last_seen"] is not None and now - row["last_seen"] < request.app[CONFIG].online_timeout, "last_seen_at": row["last_seen"], "snapshot": await blocking(json.loads, row["snapshot"]) if row["snapshot"] else None, "machine_id":row.get("machine_id"),"aliases":row.get("aliases",[]),"via":row.get("via")} for row in rows]}
+    result = {"computers": [{"id": row["id"], "name": row["name"], "online": row.get("available",True) and row["last_seen"] is not None and now - row["last_seen"] < request.app[CONFIG].online_timeout, "last_seen_at": row["last_seen_at"], "snapshot": await blocking(json.loads, row["snapshot"]) if row["snapshot"] else None, "machine_id":row.get("machine_id"),"aliases":row.get("aliases",[]),"via":row.get("via")} for row in rows]}
     return await stream_json(request, result, budget=request.app[SPOOLS], maximum=1024 * 1024)
 
 
@@ -318,6 +319,9 @@ def validate_request(value):
         return
     if op == "history":
         validate_history(payload,request_id)
+        return
+    if op == "file_read":
+        file_reads.validate(payload, request_id)
         return
     if op == "attachment_read":
         validate_read(payload,request_id)

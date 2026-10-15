@@ -69,8 +69,8 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
     suspend fun computers(connection: Connection) = call(connection.url, connection.token, "/v1/computers")
     suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, "/v1/capabilities")
     suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String): JSONObject {
-        require(target.agentId.isBlank() || operation in setOf("inspect", "history", "send", "attachment_read")) { "This control belongs to the parent session." }
-        require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "process_output", "restore", "forget", "rename", "fork", "attachment_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
+        require(target.agentId.isBlank() || operation in setOf("inspect", "history", "send", "attachment_read", "file_read")) { "This control belongs to the parent session." }
+        require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
         return call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
             .put("computer_id", target.computerId).put("session", target.session).put("operation", operation).put("payload", payload)).also {
                 check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }

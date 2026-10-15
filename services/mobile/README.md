@@ -492,10 +492,11 @@ PYTHONPATH=services/mobile .deps/mobile-venv/bin/python \
 ```
 
 Run from the repository root with an environment containing the pinned package.
-For the Rust server, also run the contracts in [relay/README.md](relay/README.md),
-including the explicit real PostgreSQL test. Set `ZERUS_RELAY_BINARY` to its
-built executable to run the released HTTP assertions and both connector end-to-end
-scenarios against Rust.
+For the Rust server, also run the contracts in [relay/README.md](relay/README.md)
+on a disposable PostgreSQL server. Set `ZERUS_RELAY_BINARY` to its built
+executable to run the released HTTP assertions against Rust, and
+`ZERUS_RELAY_TEST_DATABASE_URL` to that server, with `tests/requirements.txt`
+installed, for the connector HTTP suites; without the URL those suites skip.
 Tests use temporary databases, synthetic sessions and loopback HTTP. No live
 agent, tmux server or provider credentials are required.
 

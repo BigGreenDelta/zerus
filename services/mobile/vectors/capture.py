@@ -37,7 +37,7 @@ HERE = Path(__file__).resolve().parent
 if __name__ == "__main__":
     sys.path.insert(0, str(HERE.parent))
 
-from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet,  # noqa: E402
+from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet, file_reads,  # noqa: E402
                           history, launch, managed_relay, projects, speech, speech_config, terminal,
                           voice, worktrees)
 from zerus_mobile.connector import Connector, ConnectorError, Journal  # noqa: E402
@@ -71,7 +71,7 @@ SEALED = {"key_id": "a" * 64, "algorithm": speech_config.ALGORITHM,
           "ephemeral_public_key": base64.b64encode(bytes(91)).decode(),
           "nonce": base64.b64encode(bytes(12)).decode(),
           "ciphertext": base64.b64encode(bytes(40)).decode()}
-CONNECTOR_MODULES = ("connector", "context", "attachments", "attachment_reads", "history", "launch",
+CONNECTOR_MODULES = ("connector", "context", "attachments", "attachment_reads", "file_reads", "history", "launch",
                      "worktrees", "speech", "speech_config", "voice", "recovery", "terminal", "fleet",
                      "projects", "accounts", "managed_relay")
 # AttachmentViewCache.failure() shows UPDATE_REQUIRED for a receipt error
@@ -200,6 +200,7 @@ HELP_LINES = (
     ("read", "hgs read <session> --json"),
     ("preference", "hgs swarm preference set mobile_delivery"),
     ("attachment_read", "hgs " + attachment_reads.HELP_MARKER),
+    ("file_read", "hgs " + file_reads.HELP_MARKER),
     ("speech", "hgs " + speech.HELP_MARKER),
     ("voice", "hgs " + voice.HELP_MARKER),
     ("speech_config", speech_config.HELP_MARKER),
@@ -401,6 +402,7 @@ def operation_tables(runs: dict) -> bytes:
         "help_markers": {"speech": speech.HELP_MARKER, "voice": voice.HELP_MARKER,
                          "speech_config": speech_config.HELP_MARKER,
                          "attachment_read": attachment_reads.HELP_MARKER,
+                         "file_read": file_reads.HELP_MARKER,
                          "directory_create": launch.DIRECTORY_CREATE_HELP},
         "capabilities": capability_map(runs),
     })
@@ -1095,6 +1097,7 @@ def valid_payloads() -> dict:
         "history": identity(limit=50), "recovery_action": identity(job_id=ident("job"), action="now"),
         "mark_read": {"run_id": RUN, "conversation_id": CONVERSATION, "reply_id": "7:100.5", "attention_signature": HASH_A},
         "attachment_read": identity(message_id=ident("message"), index=0, offset=0, length=1024),
+        "file_read": identity(path="/workspace/example/Сводная.xlsx", offset=0, length=1024),
         "voice_profiles": identity(), "voice_submit": identity(speech={"machine_id": MACHINE, "profile_id": "gigaam-ru"}, audio=AUDIO),
         "voice_status": identity(message_id=ident("voice-message")), "voice_cancel": identity(message_id=ident("voice-message")),
         "speech_profiles": {}, "speech_stats": {}, "speech_submit": {"request_id": ID, "profile_id": "gigaam-ru", "audio": AUDIO},
@@ -1294,6 +1297,16 @@ def validation_cases() -> list[dict]:
     case("mark_read/null-marks", "mark_read", change=put(reply_id=None, attention_signature=None))
     case("mark_read/missing-reply", "mark_read", change=drop("reply_id"))
     case("mark_read/unknown-session", "mark_read", session="codex/example/other")
+    # file_read
+    case("file_read/length-zero", "file_read", change=put(length=0))
+    case("file_read/missing-path", "file_read", change=drop("path"))
+    case("file_read/later-without-digest", "file_read", change=put(offset=1))
+    case("file_read/later-with-digest", "file_read", change=put(offset=1, sha256=HASH_A))
+    case("file_read/path-control", "file_read", change=put(path="/workspace/bad\nfile"))
+    case("file_read/path-c1-control", "file_read", change=put(path="/workspace/bad\u0085file"))
+    case("file_read/identity-byte-cap", "file_read", change=put(expected_run_id="界"*43))
+    case("file_read/archive", "file_read", change=put(archive_id=ARCHIVE))
+    case("file_read/agent-path", "file_read", change=put(agent_id="a/b"))
     # attachment_read
     case("attachment_read/length-zero", "attachment_read", change=put(length=0))
     case("attachment_read/beyond-file", "attachment_read", change=put(offset=10 * 1024 * 1024 - 1, length=2))
@@ -1438,7 +1451,7 @@ def live_oracle(submission: dict) -> dict:
 
 VALIDATION_FAMILIES = {
     "conversation": {"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop",
-                     "compact_context", "clear_context", "mark_read", "attachment_read"},
+                     "compact_context", "clear_context", "mark_read", "attachment_read", "file_read"},
     "control": set(context.LIFECYCLE_OPERATIONS | context.TERMINAL_OPERATIONS | {"history", "recovery_action"}),
     "speech": set(voice.OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS),
     "launch": set(context.LAUNCH_OPERATIONS | context.COMPUTER_OPERATIONS),
@@ -1894,7 +1907,7 @@ def session_request(operation, payload, name, *, session=SESSION, **extra):
 
 def capable(node: Connector) -> None:
     for flag in ("lifecycle", "terminal", "recovery", "history", "launch", "project_launch", "worktree", "directory_create",
-                 "read", "preference", "attachment_read", "speech", "speech_config", "voice"):
+                 "read", "preference", "attachment_read", "file_read", "speech", "speech_config", "voice"):
         setattr(node, flag + "_supported", True)
     node.sessions = {SESSION, DSH_SESSION}
     node.archives = {(SESSION, ARCHIVE)}
@@ -1965,6 +1978,8 @@ def execute_cases():
         ("directory-create-route-mismatch", session_request("directory_create", valid["directory_create"], "directory-route", session="",
                                                             computer_id=COMPUTER, gateway_route={"computer_id": ident("other")}), {}),
     ]
+    cases.append(("file-read-snapshot", session_request("file_read", valid["file_read"], "file-read-snapshot"),
+                  {("file-read", SESSION, "--json"): "$file:snapshot"}))
     return cases
 
 
@@ -1985,6 +2000,12 @@ def resolve_answer(answer, request):
     if answer == "$terminal:submitted":
         return {"request_id": request["request_id"], "name": SESSION, "run_id": RUN, "conversation_id": CONVERSATION,
                 "terminal_binding_id": payload["terminal_binding_id"], "status": "submitted"}
+    if answer == "$file:snapshot":
+        data=b"fixture spreadsheet"
+        path=payload["path"]
+        return {"request_id":request["request_id"],"name":SESSION,"run_id":RUN,"conversation_id":CONVERSATION,
+                "requested_path":path,"path":path,"file_name":path.rsplit("/",1)[-1],"mime":"application/octet-stream",
+                "bytes":len(data),"sha256":hashlib.sha256(data).hexdigest(),"data_base64":base64.b64encode(data).decode()}
     if answer == "$speech":
         return {"schema": 1, "job_id": request["request_id"], "state": "completed", "text": "private transcript"}
     return answer

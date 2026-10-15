@@ -290,6 +290,7 @@ private slots:
     void childTreeKeepsRoutineResultsQuiet();
     void completedSubagentsPreferenceKeepsOpenHistory();
     void inactiveSubagentsStayInInspectorAndOutOfSessionCounts();
+    void openCodeChildrenStayReadOnlyWithUnknownCounts();
     void sessionsRailResetsFiltersAndShowsAttention();
     void railButtonsIgnoreNativeLayoutMargins();
     void sessionRowsHaveNoHoverPopup();
@@ -5821,6 +5822,53 @@ void TestSessionsWindow::inactiveSubagentsStayInInspectorAndOutOfSessionCounts()
     session.subagentCountsComplete = false; save(); window.setFleet(state); client->inspectionReady({}, session.name, snapshot());
     QCOMPARE(list->item(0)->data(SessionRoles::Children).toString(), QString("0+"));
     QVERIFY(roster->toPlainText().contains("some states unknown"));
+}
+
+void TestSessionsWindow::openCodeChildrenStayReadOnlyWithUnknownCounts()
+{
+    // `hgs inspect` shape for an OpenCode parent: one classic child finished,
+    // and one whose turn end the API host has not observed.
+    FleetState state; auto box = fleet().local(); box.sessions = {box.sessions[1]};
+    auto &session = box.sessions[0]; session.name = "opencode/docs/review"; session.cmd = "opencode";
+    session.project = "docs"; session.tag = "review"; session.conversationId = "ses_parent"; session.runId = "run-one";
+    session.subagentSource = "opencode_native"; session.subagentCountsComplete = false;
+    session.subagentActiveCount = 0; session.subagentCompletedCount = 1; session.subagentTotalCount = 2;
+    session.subagents = {{"ses_done", QJsonObject{{"name", "Finished review (@general subagent)"}, {"state", "finished"}, {"detail", "Native child turn completed"}}},
+        {"ses_open", QJsonObject{{"name", "Open review (@general subagent)"}, {"state", "unknown"}, {"detail", "Turn end not recorded"}}}};
+    box.sessions = {session}; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    const QJsonObject details{{"tracked", true}, {"backend", "opencode"}, {"conversation_id", session.conversationId}, {"run_id", session.runId},
+        {"subagent_source", "opencode_native"}, {"subagents", session.subagents}, {"subagent_counts_complete", false},
+        {"subagent_active_count", 0}, {"subagent_completed_count", 1}, {"subagent_unknown_count", 1}, {"subagent_total_count", 2}};
+    const QJsonObject childDetails{{"name", session.name}, {"parent_conversation_id", session.conversationId}, {"agent_id", "ses_open"},
+        {"conversation_id", "ses_parent/ses_open"}, {"run_id", session.runId}, {"send_supported", false}, {"read_only", true},
+        {"history_scope", "Native OpenCode subagent history"}, {"phase", "unknown"},
+        {"events", QJsonArray{QJsonObject{{"seq", 1}, {"type", "UserPromptSubmit"}, {"detail", "Review the synthetic docs"}, {"at", 1700000000}}}}};
+    const auto fixtureScript = m_dir->filePath("hgs-opencode-children");
+    QVERIFY(FakeCli::replace(fixtureScript + ".parent", QJsonDocument(details).toJson(QJsonDocument::Compact)));
+    QVERIFY(FakeCli::replace(fixtureScript + ".child", QJsonDocument(childDetails).toJson(QJsonDocument::Compact)));
+    QFile fixture(fixtureScript); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write("#!/usr/bin/env python3\nimport sys\na=sys.argv[1:]\nif a and a[0].startswith('@'):a=a[1:]\n"
+        "if a[:1]==['inspect']:sys.stdout.write(open(__file__+('.child' if '--agent' in a else '.parent')).read())\n");
+    fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    SessionsWindow window(FakeCli::program(fixtureScript)); auto *client = window.findChild<HgsClient *>();
+    QSignalSpy parentInspected(client, &HgsClient::inspectionReady);
+    QSignalSpy childInspected(client, &HgsClient::subagentInspectionReady);
+    window.setFleet(state); window.show(); QTRY_VERIFY(!parentInspected.isEmpty());
+    auto *list = window.findChild<SessionList *>("sessionList"); auto *roster = window.findChild<QTextBrowser *>("subagents");
+    // No confirmed active child, and the unknown one keeps the uncertainty marker.
+    QCOMPARE(list->item(0)->data(SessionRoles::Children).toString(), QString("0+"));
+    QVERIFY(roster->toPlainText().contains("0 confirmed active / 2 observed; some states unknown"));
+    QVERIFY(roster->toPlainText().contains("Turn end not recorded"));
+    list->childrenToggled(list->item(0)->data(SessionRoles::Key).toString()); QCOMPARE(list->count(), 2);
+    QCOMPARE(list->item(1)->data(SessionRoles::ChildId).toString(), QString("ses_open"));
+    list->setCurrentRow(1); QTRY_VERIFY(!childInspected.isEmpty());
+    auto *childComposer = window.findChild<MessageComposer *>("subagentComposer");
+    QTRY_VERIFY(!childComposer->isInputVisible());
+    bool readOnly = false;
+    for (const auto *label : window.findChildren<QLabel *>())
+        readOnly |= label->text().startsWith("Native OpenCode subagent history") && label->text().contains("Read only.");
+    QVERIFY(readOnly);
+    QTRY_VERIFY(window.findChild<ActivityView *>("subagentActivity")->browser()->toPlainText().contains("Review the synthetic docs"));
 }
 
 namespace {

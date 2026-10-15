@@ -10,6 +10,7 @@ CREATE TABLE requests (
         );
 CREATE INDEX delivered_history ON requests(delivered,delivered_at);
 CREATE INDEX terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running';
+CREATE INDEX file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running';
 CREATE INDEX attachment_delivered_reads ON requests(delivered_at) WHERE operation='attachment_read' AND delivered=1 AND state!='running';
 CREATE INDEX journal_operation ON requests(operation);
 CREATE INDEX delivered_reads ON requests(delivered_at) WHERE operation='inspect' AND delivered=1 AND state!='running';

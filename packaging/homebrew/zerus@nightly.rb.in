@@ -5,12 +5,12 @@ cask "zerus@nightly" do
   url "https://github.com/ufna/zerus/releases/download/@RELEASE_TAG@/zerus-#{version}-macos-arm64.zip"
   name "Zerus Nightly"
   desc "Daily build of the ADE for working with a fleet of AI coding agents"
-  homepage "https://zerus.dev"
+  homepage "https://zerus.dev/"
 
   conflicts_with cask: "zerus"
   depends_on arch: :arm64
-  depends_on macos: ">= :sonoma"
   depends_on formula: "tmux"
+  depends_on macos: :sonoma
 
   app "Zerus.app"
   binary "#{appdir}/Zerus.app/Contents/MacOS/hgs"

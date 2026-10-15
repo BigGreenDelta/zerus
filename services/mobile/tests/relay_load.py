@@ -117,7 +117,7 @@ async def run_probe(kind="attachments", concurrency=2, memory_limit_mib=256,
         port = listener.getsockname()[1]
         listener.listen(128)
         command = [sys.executable, str(Path(__file__).resolve()), "--worker",
-                   "--database", str(database), "--socket-fd", str(listener.fileno()),
+                   "--store", str(database), "--socket-fd", str(listener.fileno()),
                    "--config", json.dumps(config or {})]
         with (root / "relay.log").open("wb") as log:
             process = subprocess.Popen(command, pass_fds=(listener.fileno(),),
@@ -242,7 +242,7 @@ def worker(args):
     from zerus_mobile.server import Config, create_app
     from zerus_mobile.store import Store
 
-    store = Store(Path(args.database))
+    store = Store(Path(args.store))
     app = create_app(store, Config(background=False, **json.loads(args.config)))
     try:
         web.run_app(app, sock=socket.socket(fileno=args.socket_fd), print=None, access_log=None,
@@ -259,7 +259,7 @@ def main():
     parser.add_argument("--memory-limit-mib", type=float, default=256)
     parser.add_argument("--config", default="{}", help="JSON Config overrides for the disposable relay")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--database", help=argparse.SUPPRESS)
+    parser.add_argument("--store", help=argparse.SUPPRESS)
     parser.add_argument("--socket-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:

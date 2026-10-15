@@ -32,6 +32,12 @@ jobs:
     uses: ./.github/workflows/macos-cask.yml
     with:
       channel: nightly
+    secrets:
+      MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+      MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+      APPLE_NOTARY_API_KEY_P8: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
+      APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
+      APPLE_NOTARY_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
   assemble:
     needs: [verify, macos]
     # A skipped cask is acceptable only while macOS casks are disabled.

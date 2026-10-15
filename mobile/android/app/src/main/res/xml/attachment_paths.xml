@@ -2,4 +2,5 @@
 <!-- Only the bounded attachment view cache; never drafts, credentials or other app files. -->
 <paths>
     <cache-path name="attachment_view" path="attachment-view/" />
+    <cache-path name="computer_file_view" path="computer-file-view/" />
 </paths>

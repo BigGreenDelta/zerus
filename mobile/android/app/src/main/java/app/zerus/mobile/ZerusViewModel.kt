@@ -576,6 +576,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         AttachmentIdentity.access(relayOperations[target.connectionId], machineOperations[MachineKey(target.connectionId, target.computerId)],
             machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.online)
     }
+    internal val computerFiles = ComputerFiles(application, api, viewModelScope,
+        { id -> connections.find { it.id == id } }) { target ->
+        ComputerFileProtocol.access(relayOperations[target.connectionId], machineOperations[MachineKey(target.connectionId, target.computerId)],
+            machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.online)
+    }
     private var importJob: Job? = null
     var selected by mutableStateOf<Session?>(null); private set
     var activity by mutableStateOf<JSONObject?>(null); private set
@@ -1782,6 +1787,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             historyFlights.entries.removeAll { it.value.first.connectionId==connection.id }
             runCatching { historyCache.purgeWorkspace(connection.id);pageCache.purgeWorkspace(connection.id) }
             attachments.clear()
+            computerFiles.clear()
             sessions = sessions.filterNot { it.target.connectionId == connection.id }
             projects = projects.filterNot { it.key.connectionId == connection.id }
             if (selectedProject?.key?.connectionId == connection.id) selectedProject = null
