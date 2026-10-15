@@ -1336,6 +1336,13 @@ Bright/Soft mode and appearance previews are local. **All machines** clears the
 restriction. A temporary connectivity error retains the last snapshot and makes
 unavailable controls explicit.
 
+The machine chooser shows each computer's session count, including zero, and an
+All machines total. Counts follow the current session state filter and folder
+scope before machine selection or text search; child rows and unconfirmed launch
+placeholders do not add sessions. An open chooser updates counts without replacing
+its checkboxes or changing the selection. Offline computers retain their last
+known session inventory; live-work filters still require current work evidence.
+
 <a id="accounts"></a>
 
 ### Accounts

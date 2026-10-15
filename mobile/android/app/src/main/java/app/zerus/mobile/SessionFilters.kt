@@ -156,6 +156,17 @@ object SessionFilters {
     fun counts(sessions: List<Session>, machines: List<Machine>, drafts: Set<String> = emptySet()): Map<SessionFilter, Int> = SessionFilter.entries.associateWith { filter ->
         sessions.count { matches(it, filter, online(it, machines), it.target.key in drafts) }
     }
+    /** Chooser counts precede machine selection and text search, retaining project/state scope. */
+    fun machineCounts(sessions: List<Session>, machines: List<Machine>, filter: SessionFilter,
+        drafts: Set<String> = emptySet(), project: ProjectKey? = null): Map<MachineKey, Int> {
+        val result = machines.associate { MachineKey(it.connectionId, it.id) to 0 }.toMutableMap()
+        for(session in sessions) if((project == null || session.projectKey == project) &&
+            matches(session, filter, online(session, machines), session.target.key in drafts)) {
+            val key = machineKey(session.target)
+            result[key] = result.getOrDefault(key, 0) + 1
+        }
+        return result
+    }
     fun grouped(sessions: List<Session>, projects: List<ProjectSummary>): List<SessionGroup> {
         val grouped = sessions.groupBy { it.projectKey ?: ProjectKey(it.target.connectionId, "unassigned:${it.target.computerId}", "unassigned") }
         val order = projects.map { it.key } + grouped.keys.filter { key -> projects.none { it.key == key } }
