@@ -1304,6 +1304,8 @@ fn fork_session(config: &Config, args: &[String], client: &str, mut dry: bool) -
         .map_err(|error| Error::new(1, error))?;
     if detached || dry {
         Ok(0)
+    } else if state::dsh::exists(&target) {
+        crate::native_ui::open(config, "", &target, false)
     } else {
         attach(config, &target, client, false)
     }

@@ -634,6 +634,9 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
     }
     value["account_id"] = json!("native-dsh");
     value["account_home"] = record["agent_home"].clone();
+    for key in ["fork_parent_id", "fork_source_name"] {
+        if record[key].is_string() { value[key] = record[key].clone(); }
+    }
     value["auth_required"] = json!(auth_required);
     value["account_status"] = inspected
         .get("accountStatus")
@@ -749,6 +752,117 @@ fn message_text(value: &Value) -> String {
 
 pub(super) fn process_rpc(record: &Value, method: &str, params: Value) -> Result<Value> { rpc(record,method,params) }
 
+/// A resident adapter advertises each native operation it implements. Older
+/// adapters stay running and keep the operation in Native UI.
+fn supports(ping: &Value, operation: &str) -> bool {
+    ping["nativeOperations"].as_array().is_some_and(|values| values.iter().any(|value| value == operation))
+}
+const OLDER_ADAPTER: &str = "The running DeepSeek host uses an older adapter; use Native UI until its next ordinary start";
+
+/// Valid DeepSeek bindings, read without contacting any host.
+pub(super) fn binding_records() -> Vec<Value> {
+    let Ok(files) = fs::read_dir(bindings()) else { return Vec::new(); };
+    files.flatten().take(5000).filter_map(|file| {
+        let record: Value = serde_json::from_slice(&fs::read(file.path()).ok()?).ok()?;
+        (record["backend"] == "dsh" && string(&record, "conversation_id").starts_with("session-")
+            && binding_path(string(&record, "name")) == file.path()).then_some(record)
+    }).collect()
+}
+
+fn fork_reason(record: &Value, ping: &Value, inspected: &Value) -> &'static str {
+    if ping["generation"] != inspected["generation"] {
+        "DeepSeek host changed; refresh before forking"
+    } else if !supports(ping, "fork") || inspected["forkSupported"] != true {
+        "The running DeepSeek host uses an older adapter; fork this session in Native UI"
+    } else if record["permissions_pending"] == true {
+        "Resume this DeepSeek session to finish permission setup before forking"
+    } else if inspected["forkReady"] != true {
+        "Wait for a completed reply before forking"
+    } else {
+        ""
+    }
+}
+
+/// Native fork through the resident adapter's official Session Controller.
+/// The new binding keeps the source's native profile and folder and records
+/// the exact identity the engine returned; the source binding never changes.
+/// The engine keeps the new live agent until its host next restarts.
+pub(super) fn fork(
+    name: &str,
+    tag: Option<&str>,
+    expected_run: Option<&str>,
+    expected_conversation: Option<&str>,
+    dry: bool,
+    scope: Option<&session_action::Scope>,
+) -> Result<String> {
+    let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
+    let record = binding(name)?;
+    if let Some(scope) = scope { scope.check(&record)?; }
+    if expected_run.is_some_and(|id| id != string(&record, "run_id"))
+        || expected_conversation.is_some_and(|id| id != string(&record, "conversation_id"))
+    {
+        return Err("source session changed; refresh before forking".into());
+    }
+    let mut occupied: std::collections::BTreeSet<String> = binding_records().iter()
+        .chain(records()?.iter()).chain(archive::records()?.iter())
+        .map(|record| string(record, "name").to_owned()).collect();
+    occupied.insert(name.to_owned());
+    let target = fork::choose_name(name, tag, &occupied)?;
+    if dry {
+        println!("Fork official dsh session {name} as {target}");
+        return Ok(target);
+    }
+    let ping = rpc(&record, "ping", json!({}))?;
+    if !supports(&ping, "fork") { return Err(OLDER_ADAPTER.into()); }
+    let inspected = rpc(&record, "inspect", json!({"sessionId":record["conversation_id"],"includeProcesses":false}))?;
+    let reason = fork_reason(&record, &ping, &inspected);
+    if !reason.is_empty() { return Err(reason.into()); }
+    // A fork whose reply was lost is retried under the same request ID, which
+    // the same host answers with the fork it already made.
+    let pending = root().join("dsh/forks").join(format!("{:x}.json", Sha256::digest(format!("{name}\n{target}").as_bytes())));
+    let mut request_id = uuid::Uuid::new_v4().to_string();
+    if let Ok(bytes) = fs::read(&pending) {
+        let previous: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if previous["source_conversation_id"] != record["conversation_id"] || previous["generation"] != ping["generation"] {
+            fs::remove_file(&pending).map_err(|e| e.to_string())?;
+            return Err(format!("An earlier fork of {name} as {target} was not confirmed before its DeepSeek host changed; check Native UI before forking again"));
+        }
+        request_id = string(&previous, "request_id").to_owned();
+    }
+    private_dir(pending.parent().unwrap())?;
+    atomic(&pending, &json!({"request_id":request_id,"source":name,"source_conversation_id":record["conversation_id"],
+        "target":target,"generation":ping["generation"],"at":now()}).to_string())?;
+    if let Some(scope) = scope { scope.changing(); }
+    let answer = match rpc(&record, "fork", json!({"sessionId":record["conversation_id"],"cwd":record["cwd"],
+        "generation":ping["generation"],"requestId":request_id,"title":target.rsplit('/').next()})) {
+        Ok(answer) => answer,
+        Err(error) if error.contains("delivery uncertain") => {
+            return Err(format!("{error}. Fork {name} as {target} again to adopt the native result"));
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&pending);
+            return Err(error);
+        }
+    };
+    let child = string(&answer, "sessionId");
+    if answer["requestId"] != request_id.as_str() || answer["sourceSessionId"] != record["conversation_id"]
+        || answer["generation"] != ping["generation"] || answer["cwd"] != record["cwd"]
+        || !child.starts_with("session-") || child == string(&record, "conversation_id")
+    {
+        return Err("DeepSeek fork acknowledgement did not match; check Native UI".into());
+    }
+    let run = uuid::Uuid::new_v4().to_string();
+    save(&json!({"backend":"dsh","name":target,"agent":"dsh","agent_home":record["agent_home"],"cwd":record["cwd"],
+        "conversation_id":child,"run_id":run,"created":now(),"launch_id":null,"paused":false,
+        "fork_parent_id":record["conversation_id"],"fork_source_name":name}))?;
+    let _ = fs::remove_file(&pending);
+    match scope {
+        Some(scope) => scope.result(&target, &run, child, None),
+        None => println!("hgs: forked {name} as {target}"),
+    }
+    Ok(target)
+}
+
 pub(super) fn processes(name: &str, output: Option<&str>, stop: Option<&str>, run: Option<&str>, conversation: Option<&str>, generation: Option<&str>) -> Result<i32> {
     let record=binding(name)?;
     if (output.is_some() || stop.is_some()) && (run!=Some(string(&record,"run_id")) || conversation!=Some(string(&record,"conversation_id"))) {
@@ -826,6 +940,15 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         "terminate":"Use Pause for this native DeepSeek session","restore":"Native DeepSeek has no archive lifecycle API",
         "pause":"Requires a supported resident adapter and its owned handle","resume":"Requires a supported resident adapter and a stopped session",
         "rename":"Requires the supported resident scoped adapter","forget":"Requires a supported resident adapter and its owned handle"});
+    let fork_reason = if agent_id.is_some() { "Fork the parent DeepSeek session" } else { fork_reason(&record, &ping, &inspected) };
+    result["fork_supported"] = json!(fork_reason.is_empty());
+    result["fork_reason"] = json!(fork_reason);
+    if fork_reason.is_empty() {
+        if let Some(actions) = result["allowed_actions"].as_array_mut() { actions.push(json!("fork")); }
+        result["action_reasons"].as_object_mut().unwrap().remove("fork");
+    } else {
+        result["action_reasons"]["fork"] = json!(fork_reason);
+    }
     result["pending_questions"] = json!(question_cards(&record, &inspected));
     result["native_questions"] = inspected["pendingQuestions"].clone();
     result["native_projections"] = inspected["baseline"]["values"].clone();
@@ -971,7 +1094,7 @@ fn checked_request(record: &Value) -> Result<Value> {
 /// Lifecycle remains confined to a supported resident host. Never start,
 /// dispose, reload or replace a host to implement a mobile scoped action.
 pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, scope: &session_action::Scope) -> Result<()> {
-    if !["pause","resume","rename","forget"].contains(&action) {return Err("This native DeepSeek adapter has no archive/fork lifecycle API".into());}
+    if !["pause","resume","rename","forget"].contains(&action) {return Err("This native DeepSeek adapter has no archive lifecycle API".into());}
     let _guard=lock(Some(&root().join("dsh/bindings.lock")))?;
     let mut record=binding(name)?;scope.check(&record)?;
     if let Some(new)=new_name {
@@ -1354,6 +1477,27 @@ mod provider_failure_tests {
         assert_eq!(native_events(&records).last().unwrap()["type"], "Stop");
         records[1]["event"]["data"]["reason"] = json!({"kind":"max-tokens"});
         assert_eq!(latest_failure(&records)["error_kind"], "context_limit");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod native_operation_tests {
+    use super::*;
+    #[test]
+    fn fork_needs_one_advertising_host_generation_and_a_completed_reply() {
+        let record = json!({"name":"dsh/test/session"});
+        let ping = json!({"generation":"host","nativeOperations":["fork","history-search","schedules"]});
+        let ready = json!({"generation":"host","forkSupported":true,"forkReady":true});
+        assert_eq!(fork_reason(&record, &ping, &ready), "");
+        assert!(fork_reason(&record, &json!({"generation":"host","sessionActions":true}), &ready).contains("older adapter"));
+        let mut other = ready.clone();
+        other["generation"] = json!("replacement");
+        assert!(fork_reason(&record, &ping, &other).contains("host changed"));
+        let mut empty = ready.clone();
+        empty["forkReady"] = json!(false);
+        assert_eq!(fork_reason(&record, &ping, &empty), "Wait for a completed reply before forking");
+        let pending = json!({"permissions_pending":true});
+        assert!(fork_reason(&pending, &ping, &ready).contains("permission setup"));
     }
 }
 

@@ -47,6 +47,7 @@ export function apply(ctx, config) {
   });
   const recovery = new Map(), recoveryReceipts = new Map();
   const compactions = new Map(), compactReceipts = new Set();
+  const forkReceipts = new Map(), forking = new Map();
   const compactionPublic = sessionId => compactions.get(sessionId)?.public ?? null;
   const recoveryPublic = sessionId => recovery.get(sessionId)?.public ?? null;
   async function recoveryEnabled() {
@@ -255,13 +256,58 @@ export function apply(ctx, config) {
       childMode: child?.mode, childSendSupported: !unstarted && child?.mode === 'continuable' && Boolean(parentLive), goal,
       pendingQuestions: publicQuestions(sessionId), selection, accountStatus: status, authRequired: needsSignIn(selection, status),
       live: Boolean(live), owned: owned.has(sessionId), nativeRecovery: recoveryPublic(sessionId), interruptSupported: typeof api.cancel === 'function',
-      compactSupported: Boolean(live && ctx.commands.find(live,'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'), compactRequest: agentId ? null : compactionPublic(sessionId) };
+      compactSupported: Boolean(live && ctx.commands.find(live,'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'), compactRequest: agentId ? null : compactionPublic(sessionId),
+      // Native fork copies the latest completed-turn prefix. An older page
+      // can hold it; the native operation remains the authoritative check.
+      forkSupported: !agentId && typeof api.fork === 'function',
+      forkReady: !agentId && (page.hasMore === true || page.records.some(row => row.event?.type === 'turn/end')) };
+  }
+  // The official fork remote creates a new session identity from the exact
+  // latest completed-turn prefix and leaves its live Agent with the native
+  // Session Controller. Receipts make an uncertain reply retryable.
+  async function fork(p) {
+    if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh before forking');
+    if (typeof p.requestId !== 'string' || !/^[0-9a-f-]{36}$/.test(p.requestId)) throw new Error('Invalid fork request ID');
+    const previous = forkReceipts.get(p.requestId) ?? await forking.get(p.requestId);
+    if (previous) {
+      if (previous.sourceSessionId !== p.sessionId) throw new Error('Fork request ID was already used for another session');
+      return previous;
+    }
+    if (typeof api.fork !== 'function') throw new Error('Native fork is unavailable');
+    const work = (async () => {
+      const source = await ctx.sessionQuery.observeSession(p.sessionId, { projectionMode: 'none' });
+      let cwd;
+      try {
+        if (source.header.origin === 'subagent') throw new Error('Fork the parent session; a child belongs to its parent');
+        if (typeof p.cwd !== 'string' || source.header.cwd !== p.cwd) throw new Error('Native session belongs to another folder');
+        cwd = source.header.cwd;
+      } finally { source[Symbol.dispose](); }
+      const { sessionId } = await api.fork({ sessionId: p.sessionId });
+      const created = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' });
+      try {
+        if (sessionId === p.sessionId || created.header.parentSession !== p.sessionId || created.header.cwd !== cwd
+            || created.header.origin === 'subagent')
+          throw new Error(`Native fork ${sessionId} does not match its source; inspect Native UI`);
+      } finally { created[Symbol.dispose](); }
+      const receipt = { requestId: p.requestId, sourceSessionId: p.sessionId, sessionId, cwd, generation,
+        live: Boolean(ctx.agents.get(sessionId)), owned: owned.has(sessionId) };
+      if (typeof p.title === 'string' && p.title) {
+        try { await api.rename({ sessionId, title: p.title }); }
+        catch (error) { receipt.titleError = String(error?.message ?? error); }
+      }
+      forkReceipts.set(p.requestId, receipt);
+      if (forkReceipts.size > 1000) forkReceipts.delete(forkReceipts.keys().next().value);
+      return receipt;
+    })().finally(() => forking.delete(p.requestId));
+    forking.set(p.requestId, work);
+    return work;
   }
   async function execute(request) {
     if (closing) throw new Error('Native host is stopping');
     const p = request.params ?? {};
     switch (request.method) {
-      case 'ping': return { protocol: 1, version: '0.2.0-rc.2', generation, accountPermissions: true, sessionActions: true };
+      case 'ping': return { protocol: 1, version: '0.2.0-rc.2', generation, accountPermissions: true, sessionActions: true,
+        nativeOperations: ['fork'] };
       case 'list': {
         const list = await api.list({}, new AbortController().signal);
         const status = await accountStatus();
@@ -274,6 +320,7 @@ export function apply(ctx, config) {
         }) };
       }
       case 'inspect': return inspect(p);
+      case 'fork': return fork(p);
       case 'job-output':
       case 'job-stop': {
         if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh Processes');

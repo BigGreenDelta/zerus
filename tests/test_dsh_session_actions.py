@@ -19,7 +19,7 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="hgs-scoped-dsh-", dir="/tmp")
         self.root = Path(self.temp.name)
         self.name = "dsh/example/session"
-        self.record = {"name": self.name, "backend": "dsh", "agent": "dsh", "run_id": "run", "conversation_id": "session-synthetic", "agent_home": str(self.root / "native")}
+        self.record = {"name": self.name, "backend": "dsh", "agent": "dsh", "run_id": "run", "conversation_id": "session-synthetic", "agent_home": str(self.root / "native"), "cwd": str(self.root)}
         self.binding = self.root / "state/dsh/bindings" / (hashlib.sha256(self.name.encode()).hexdigest() + ".json")
         self.binding.parent.mkdir(parents=True)
         self.binding.write_text(json.dumps(self.record))
@@ -28,6 +28,9 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.server = socket.socket(socket.AF_UNIX)
         self.server.bind(str(host / "host.sock")); self.server.listen(); self.server.settimeout(.05)
         self.supported = True
+        self.native = False
+        self.fork_reply = True
+        self.generation = "fixture-generation"
         self.status = "completed"
         self.answer_generation = "fixture-generation"
         self.calls = []
@@ -50,12 +53,27 @@ class DeepSeekScopedActions(unittest.TestCase):
                 request = json.loads(reader.readline())
                 self.calls.append(request)
                 method = request["method"]
+                params = request["params"]
                 if method == "ping":
-                    value = {"generation": "fixture-generation", "sessionActions": self.supported}
+                    value = {"generation": self.generation, "sessionActions": self.supported}
+                    if self.native:
+                        value["nativeOperations"] = ["fork", "history-search", "schedules"]
                 elif method == "inspect":
-                    value = {"generation": "fixture-generation", "lifecycleActions": ["pause", "resume", "rename", "forget"]}
+                    value = {"generation": self.generation, "lifecycleActions": ["pause", "resume", "rename", "forget"],
+                             "forkSupported": self.native, "forkReady": True}
                 elif method == "session-action":
-                    value = {"generation": self.answer_generation, "sessionId": "session-synthetic", "action": request["params"]["action"], "status": self.status, "error": "Synthetic refusal"}
+                    value = {"generation": self.answer_generation, "sessionId": "session-synthetic", "action": params["action"], "status": self.status, "error": "Synthetic refusal"}
+                elif method in ("fork", "search-history", "schedules") and not self.native:
+                    # An older resident adapter answers every newer request this way.
+                    client.sendall((json.dumps({"ok": False, "error": "Unsupported HGS native request"}) + "\n").encode())
+                    continue
+                elif method == "fork":
+                    if not self.fork_reply:
+                        # The native fork may exist, but its reply is lost.
+                        client.shutdown(socket.SHUT_RDWR)
+                        continue
+                    value = {"requestId": params["requestId"], "sourceSessionId": params["sessionId"], "sessionId": "session-forked",
+                             "cwd": params["cwd"], "generation": self.generation, "live": True, "owned": False}
                 else:
                     value = {}
                 client.sendall((json.dumps({"ok": True, "value": value}) + "\n").encode())
@@ -122,6 +140,52 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(json.loads(self.binding.read_text()), self.record)
         self.assertEqual(sorted(path.relative_to(self.root) for path in (self.root / "state").rglob("*")), state)
+
+    def hgs(self, *args, request=None):
+        return subprocess.run([str(HGS), *args], env=self.env, input=json.dumps(request) if request else None,
+                              capture_output=True, text=True, timeout=10)
+
+    def bindings(self):
+        return sorted(path.name for path in self.binding.parent.glob("*.json"))
+
+    def test_uncertain_fork_reply_is_adopted_by_the_same_request(self):
+        self.native = True
+        self.fork_reply = False
+        pending = self.root / "state/dsh/forks"
+        lost = self.hgs("fork", self.name, "-n", "copy", "-d")
+        self.assertNotEqual(lost.returncode, 0)
+        self.assertIn("delivery uncertain", lost.stderr)
+        self.assertEqual(len(list(pending.glob("*.json"))), 1)
+        self.assertNotIn("dsh/example/copy", [json.loads(p.read_text())["name"] for p in self.binding.parent.glob("*.json")])
+        self.fork_reply = True
+        adopted = self.hgs("fork", self.name, "-n", "copy", "-d")
+        self.assertEqual(adopted.returncode, 0, adopted.stderr)
+        forks = [call["params"] for call in self.calls if call["method"] == "fork"]
+        self.assertEqual(len(forks), 2)
+        self.assertEqual(forks[0]["requestId"], forks[1]["requestId"])
+        self.assertEqual((forks[1]["sessionId"], forks[1]["cwd"], forks[1]["title"]), ("session-synthetic", str(self.root), "copy"))
+        target = json.loads((self.binding.parent / (hashlib.sha256(b"dsh/example/copy").hexdigest() + ".json")).read_text())
+        self.assertEqual((target["conversation_id"], target["fork_parent_id"], target["agent_home"]), ("session-forked", "session-synthetic", self.record["agent_home"]))
+        self.assertNotEqual(target["run_id"], "run")
+        self.assertFalse(list(pending.glob("*.json")))
+        self.assertEqual(json.loads(self.binding.read_text()), self.record)
+
+    def test_unconfirmed_fork_from_a_replaced_host_is_not_replayed(self):
+        self.native = True
+        self.fork_reply = False
+        self.hgs("fork", self.name, "-n", "copy", "-d")
+        self.generation = "replacement-generation"
+        self.fork_reply = True
+        refused = self.hgs("fork", self.name, "-n", "copy", "-d")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("was not confirmed", refused.stderr)
+        self.assertEqual(len([call for call in self.calls if call["method"] == "fork"]), 1)
+        self.assertFalse(list((self.root / "state/dsh/forks").glob("*.json")))
+        retried = self.hgs("fork", self.name, "-n", "copy", "-d")
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        forks = [call["params"] for call in self.calls if call["method"] == "fork"]
+        self.assertNotEqual(forks[0]["requestId"], forks[1]["requestId"])
+        self.assertEqual(forks[1]["generation"], "replacement-generation")
 
 
 if __name__ == "__main__":

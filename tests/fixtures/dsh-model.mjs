@@ -185,7 +185,8 @@ export function apply(ctx,config) {
     async execute(_args,exec){return ctx.approval.request({agent:exec.agent,toolName:'hgs_test_approval',callId:exec.callId,reason:'Test an explicit native decision',signal:exec.signal});}
   }));
   ctx.on('agent/created',({agent,source})=>{
-    if (source !== 'startup') return;
+    // A native fork starts from its source's seeded history, goal included.
+    if (source !== 'startup' || ctx.goals.get(agent)) return;
     const created=ctx.goals.create(agent,{objective:'Test the native adapter',maxGoalRounds:8});
     ctx.goals.pause(agent,{id:created.id,revision:created.revision});
   });

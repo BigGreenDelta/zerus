@@ -800,6 +800,73 @@ class NativeHarness(unittest.TestCase):
             self.rpc('answer', {'sessionId':b['conversation_id'],'id':question['question_id'],
                                 'generation':data['host_generation'],'answers':[]})
 
+    def hgs(self, *args, request=None):
+        return subprocess.run([str(HGS), *args], input=json.dumps(request) if request is not None else None,
+                              env=self.env, cwd=REPO, text=True, capture_output=True, timeout=35)
+
+    def bindings(self):
+        return {b['name']: b for b in (json.loads(p.read_text()) for p in (self.state / 'dsh/bindings').glob('*.json'))}
+
+    def test_native_fork_binds_the_exact_new_session_and_keeps_the_source(self):
+        source = self.create()
+        tag = 'fork-' + uuid.uuid4().hex[:8]
+        # Native fork copies a completed turn; an empty conversation has none.
+        empty = self.cli('inspect', source)
+        self.assertFalse(empty['fork_supported'])
+        self.assertEqual(empty['fork_reason'], 'Wait for a completed reply before forking')
+        self.assertNotIn('fork', empty['allowed_actions'])
+        refused = self.hgs('fork', source['name'], '-n', tag, '-d')
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertNotIn(source['name'].rsplit('/', 1)[0] + '/' + tag, self.bindings())
+        self.cli('send', source, self.payload(source, text='FORK_SOURCE_MARKER', attachments=[]))
+        ready = self.wait(lambda: d if (d := self.cli('inspect', source))['fork_supported'] else None)
+        self.assertEqual(ready['fork_reason'], '')
+        self.assertIn('fork', ready['allowed_actions'])
+        stale = self.hgs('fork', source['name'], '-n', tag, '-d', '--expected-run-id', 'old-run')
+        self.assertNotEqual(stale.returncode, 0)
+        forked = self.hgs('fork', source['name'], '-n', tag, '-d', '--expected-run-id', source['run_id'],
+                          '--expected-conversation-id', source['conversation_id'])
+        self.assertEqual(forked.returncode, 0, forked.stderr)
+        name = source['name'].rsplit('/', 1)[0] + '/' + tag
+        self.assertEqual(forked.stdout.strip(), f"hgs: forked {source['name']} as {name}")
+        bindings = self.bindings()
+        fork = bindings[name]
+        self.assertEqual(bindings[source['name']], source)
+        self.assertTrue(fork['conversation_id'].startswith('session-'))
+        self.assertNotEqual(fork['conversation_id'], source['conversation_id'])
+        for key in ('agent_home', 'cwd'):
+            self.assertEqual(fork[key], source[key])
+        self.assertEqual((fork['fork_parent_id'], fork['fork_source_name']), (source['conversation_id'], source['name']))
+        self.assertFalse(list((self.state / 'dsh/forks').glob('*.json')))
+        row = next(r for r in self.rpc('list')['items'] if r['sessionId'] == fork['conversation_id'])
+        self.assertEqual(row['parentSessionId'], source['conversation_id'])
+        self.assertEqual(row['projections']['values']['title'], tag)
+        # The fork starts from the source's history and then diverges.
+        data = self.cli('inspect', fork)
+        self.assertEqual((data['name'], data['conversation_id'], data['run_id']), (name, fork['conversation_id'], fork['run_id']))
+        self.assertTrue(any(e['type'] == 'UserPromptSubmit' and e['detail'] == 'FORK_SOURCE_MARKER' for e in data['events']))
+        self.assertEqual(data['fork_parent_id'], source['conversation_id'])
+        # The native engine owns the forked live agent until its host restarts.
+        self.assertEqual(data['runtime_state'], 'live')
+        self.assertNotIn('pause', data['allowed_actions'])
+        self.cli('send', fork, self.payload(fork, text='FORK_ONLY_MARKER', attachments=[]))
+        self.wait(lambda: any(e['type'] == 'AgentMessage' and 'FORK_ONLY_MARKER' in e['detail'] for e in self.cli('inspect', fork)['events']))
+        self.assertFalse(any('FORK_ONLY_MARKER' in e['detail'] for e in self.cli('inspect', source)['events']))
+        duplicate = self.hgs('fork', source['name'], '-n', tag, '-d')
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertIn('already uses this name', duplicate.stderr)
+        # The scoped mobile action reports the exact new identity it created.
+        request = {'request_id': str(uuid.uuid4()), 'action': 'fork', 'expected_run_id': source['run_id'],
+                   'expected_conversation_id': source['conversation_id'], 'tag': tag + '-scoped'}
+        scoped = self.hgs('session-action', source['name'], '--json', request=request)
+        self.assertEqual(scoped.returncode, 0, scoped.stderr)
+        receipt = json.loads(scoped.stdout)
+        self.assertEqual(receipt['status'], 'completed', receipt)
+        target = self.bindings()[name + '-scoped']
+        self.assertEqual(receipt['result_target'], {'name': target['name'], 'run_id': target['run_id'],
+                                                    'conversation_id': target['conversation_id']})
+        self.assertEqual(self.bindings()[source['name']], source)
+
 
 if __name__ == '__main__':
     unittest.main()

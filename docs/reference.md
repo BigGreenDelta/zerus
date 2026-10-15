@@ -1155,7 +1155,8 @@ tracking evidence without changing reply/read identities or restarting agents.
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
-DeepSeek native fork remains in Native UI.
+DeepSeek uses the native fork of a supported resident host
+([DeepSeek](#deepseek)).
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
@@ -1739,12 +1740,24 @@ Closing Zerus leaves the host running; Forget retains native history. Linux user
 systemd runs the host in an independent scope so GUI service restart cannot kill
 the engine.
 
-Native fork, global DeepSeek history search, schedule management and account
-transfer are currently handled in Native UI. Native context reset awaits a
-supported Session Controller operation. Other harness versions need contract
-verification; updates never restart live hosts or agents automatically.
+**Fork session…** uses the official Session Controller fork. It copies the
+latest completed turn into a new native session of the same profile and folder,
+named after the fork, and binds the exact session ID the engine returns; the
+source keeps its identity and history. The engine, not Zerus, holds the new live
+agent until its host next starts: Zerus sends its messages, while its questions,
+approvals and Pause stay in Native UI until then. A fork needs a completed reply.
+If the reply is lost, forking again under the same name adopts the result from the
+same host; after a host change Zerus refuses to repeat it. A native failure after
+creation can leave an unbound session in Native UI.
+
+Global DeepSeek history search, schedule management and account transfer stay
+in Native UI. Native context reset awaits a supported Session Controller
+operation. Resident adapters advertise each operation; one started by an older
+Zerus keeps fork in Native UI until its next ordinary start. Other harness
+versions need contract verification; updates never restart live hosts or agents
+automatically.
 `python3 tests/test_dsh_native.py -v` exercises the official engine with a local
-keyless model, covering history, lifecycle, questions, settings and browser login.
+keyless model, covering history, lifecycle, questions, settings, fork and browser login.
 
 ## Automatic recovery
 
