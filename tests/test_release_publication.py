@@ -51,7 +51,7 @@ class PublicationTests(unittest.TestCase):
                      "aur_packages": list(common.PACKAGES),
                      "binary_dependencies": {name: "1.2.3" for name in common.BINARY_LIBRARIES}}
 
-    def candidate(self, macos=False, windows=False, name="candidate", **zip_options):
+    def candidate(self, macos=False, windows=False, name="candidate", dmg=False, **zip_options):
         directory = self.directory / name
         directory.mkdir()
         self.info.pop("windows_portable", None)
@@ -64,6 +64,11 @@ class PublicationTests(unittest.TestCase):
             self.info.update(macos={"asset": archive.name, "qt_version": "6.11.3", "team_id": "ABCDE12345",
                                     "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef",
                                     "minimum_system_version": "14.0"})
+            if dmg:
+                image = directory / macos_release.macos_dmg(VERSION)
+                image.write_bytes(b"notarized disk image")
+                self.info["macos"]["dmg"] = {"asset": image.name,
+                                             "notarization_id": "1123abcd-4567-89ef-0123-456789abcdef"}
             (directory / "homebrew").mkdir()
             (directory / "homebrew/zerus.rb").write_text(macos_release.render_cask(VERSION, common.sha256(archive)))
         for suffix in ("source", "arch-x86_64"):
@@ -138,6 +143,28 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "template"):
             common.validate_candidate(directory, VERSION)
 
+    def test_disk_image_is_sealed_and_cannot_change_after_validation(self):
+        directory = self.candidate(macos=True, dmg=True)
+        info, hashes = common.validate_candidate(directory, VERSION, COMMIT)
+        image = directory / info["macos"]["dmg"]["asset"]
+        self.assertEqual(hashes[image.name], common.sha256(image))
+        self.assertIn(info["macos"]["asset"], hashes)
+        image.write_bytes(b"changed disk image")
+        with self.assertRaisesRegex(ValueError, "Checksum mismatch"):
+            common.validate_candidate(directory, VERSION)
+
+    def test_disk_image_requires_exact_name_and_its_own_notarization(self):
+        directory = self.candidate(macos=True, dmg=True)
+        original = json.loads((directory / "release-info.json").read_text())
+        for image in (None, {}, {"asset": "foreign.dmg", "notarization_id": "1123abcd-4567-89ef-0123-456789abcdef"},
+                      {"asset": macos_release.macos_dmg(VERSION), "notarization_id": None}):
+            with self.subTest(image=image):
+                info = dict(original, macos=dict(original["macos"], dmg=image))
+                (directory / "release-info.json").write_text(json.dumps(info))
+                common.finish_candidate(directory)
+                with self.assertRaisesRegex(ValueError, "disk image provenance"):
+                    common.validate_candidate(directory, VERSION)
+
     def test_schema_two_requires_verified_macos_provenance(self):
         self.info["team_id"] = "unused"
         directory = self.candidate(macos=True)
@@ -167,6 +194,20 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(archive.read_bytes(), b"notarized application")
         self.assertEqual(info["macos"]["notarization_id"], "0123abcd-4567-89ef-0123-456789abcdef")
         macos_release.require_template_cask((output / "homebrew/zerus.rb").read_text(), VERSION, common.sha256(archive))
+
+    def test_signed_disk_image_is_copied_unchanged_and_cask_keeps_zip(self):
+        image = {"asset": macos_release.macos_dmg(VERSION),
+                 "notarization_id": "1123abcd-4567-89ef-0123-456789abcdef"}
+        source = self.signed_macos(dmg=image)
+        (source / image["asset"]).write_bytes(b"sealed disk image")
+        output = self.directory / "dist"
+        output.mkdir()
+        info = {"version": VERSION}
+        macos_release.add_macos(output, source, VERSION, info)
+        self.assertEqual((output / image["asset"]).read_bytes(), b"sealed disk image")
+        macos_release.require_template_cask((output / "homebrew/zerus.rb").read_text(), VERSION,
+                                           common.sha256(output / macos_release.macos_asset(VERSION)))
+        self.assertEqual(info["macos"]["dmg"], image)
 
     def test_signed_macos_artifact_must_be_exact(self):
         for changes in ({"asset": "zerus-0.37.0-macos-x86_64.zip"}, {"team_id": "bad"}, {"notarization_id": None}):
@@ -560,7 +601,7 @@ class PublicationTests(unittest.TestCase):
     def test_stable_notes_describe_the_windows_zip_and_retry_changes_nothing(self):
         for windows in (True, False):
             with self.subTest(windows=windows):
-                directory = self.candidate(windows=windows, name=f"notes-{windows}")
+                directory = self.candidate(windows=windows, macos=True, dmg=True, name=f"notes-{windows}")
                 info, sums = common.validate_candidate(directory, VERSION)
                 hashes = {**sums, "SHA256SUMS": common.sha256(directory / "SHA256SUMS")}
                 release = {"draft": True, "tag_name": "v" + VERSION, "target_commitish": COMMIT, "assets": []}
@@ -591,6 +632,9 @@ class PublicationTests(unittest.TestCase):
                     self.assertNotIn("--prerelease", commands[0])
                     self.assertEqual(f"`zerus-{VERSION}-windows-x86_64.zip`" in notes, windows)
                     self.assertEqual("hgs-tray.exe" in notes, windows)
+                    self.assertIn("brew install --cask ufna/zerus/zerus`", notes)
+                    self.assertIn(f"/releases/download/v{VERSION}/zerus-{VERSION}-macos-arm64.dmg", notes)
+                    self.assertIn("drag Zerus into Applications", notes)
                     uploaded = {Path(args[3]).name for args in commands if isinstance(args, tuple) and args[1] == "upload"}
                     self.assertEqual(uploaded, set(hashes))
                     self.assertIn(("release", "edit", "v" + VERSION, "--repo", common.REPOSITORY, "--draft=false", "--latest"), commands)

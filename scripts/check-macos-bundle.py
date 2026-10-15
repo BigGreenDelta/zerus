@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -172,8 +173,17 @@ def bundle_findings(bundle, version, release=None):
 
 
 def run_selftest(bundle):
-    with tempfile.TemporaryDirectory(prefix="zerus-bundle-home-") as home:
-        environment = {"HOME": home, "PATH": "/usr/bin:/bin", "TMPDIR": home}
+    tmux = shutil.which("tmux")
+    if not tmux:
+        return ["bundle self-tests require tmux (brew install tmux)"]
+    with tempfile.TemporaryDirectory(prefix="zerus-bundle-home-") as scratch:
+        # Expose only the external session dependency, not a developer's Qt,
+        # hgs, provider tools or configuration. Never inspect a live tmux socket.
+        binaries = Path(scratch) / "bin"
+        binaries.mkdir()
+        (binaries / "tmux").symlink_to(Path(tmux).resolve())
+        environment = {"HOME": scratch, "PATH": f"{binaries}:/usr/bin:/bin", "TMPDIR": scratch,
+                       "TMUX_TMPDIR": scratch}
         hgs = bundle / "Contents/MacOS/hgs"
         for command in ([str(hgs), "--version"], [str(bundle / "Contents/MacOS/hgs-tray"), "--version"],
                         [str(bundle / "Contents/MacOS/hgs-tray"), "--selftest"]):

@@ -1,11 +1,14 @@
 """Developer ID signing must cover nested code inside-out and never release unnotarized bytes."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import plistlib
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("sign_macos", ROOT / "scripts/sign-macos.py")
@@ -75,6 +78,55 @@ class Signing(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "notariz"):
             sign.release_archive(self.app, output, "0.38.0", None, "6.11.2", "ABCDE12345")
         self.assertFalse(output.exists())
+
+    def test_disk_image_requires_its_own_notarization_before_output_is_created(self):
+        output = Path(self.temporary.name) / "release"
+        image = Path(self.temporary.name) / "Zerus.dmg"
+        image.write_bytes(b"disk image")
+        with self.assertRaisesRegex(ValueError, "disk image"):
+            sign.release_archive(self.app, output, "0.38.0", "0123abcd-4567-89ef-0123-456789abcdef",
+                                 "6.11.2", "ABCDE12345", image)
+        self.assertFalse(output.exists())
+
+    def test_notary_failure_or_malformed_response_never_staples_the_disk_image(self):
+        identifier = "0123abcd-4567-89ef-0123-456789abcdef"
+        for code, response in ((0, []), (0, {"status": "Accepted", "id": None}),
+                               (0, {"status": "Invalid", "id": identifier}),
+                               (1, {"status": "Accepted", "id": identifier})):
+            with self.subTest(code=code, response=response), \
+                    mock.patch.object(sign, "create_disk_image"), \
+                    mock.patch.object(sign, "staple") as staple, \
+                    mock.patch.object(sign.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], code, json.dumps(response), "")):
+                with self.assertRaisesRegex(SystemExit, "not accepted"):
+                    sign.sign_disk_image(self.app, self.app.parent / "Zerus.dmg", "identity", None,
+                                         Path("/keys/AuthKey.p8"), "ABC123DEF4", None)
+                staple.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "disk images require macOS")
+    def test_readonly_disk_image_preserves_bundle_and_applications_link(self):
+        image = Path(self.temporary.name) / "Zerus.dmg"
+        sign.create_disk_image(self.app, image)
+        original = image.read_bytes()
+        with self.assertRaisesRegex(ValueError, "overwrite"):
+            sign.create_disk_image(self.app, image)
+        self.assertEqual(image.read_bytes(), original)
+        mount = Path(self.temporary.name) / "mount"
+        mount.mkdir()
+        subprocess.run(["hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", str(mount),
+                        str(image)], check=True, capture_output=True)
+        try:
+            self.assertTrue((mount / "Applications").is_symlink())
+            self.assertEqual(os.readlink(mount / "Applications"), "/Applications")
+            for source in self.app.rglob("*"):
+                target = mount / "Zerus.app" / source.relative_to(self.app)
+                if source.is_symlink():
+                    self.assertTrue(target.is_symlink())
+                    self.assertEqual(os.readlink(target), os.readlink(source))
+                elif source.is_file():
+                    self.assertEqual(target.read_bytes(), source.read_bytes())
+        finally:
+            subprocess.run(["hdiutil", "detach", str(mount)], check=True, capture_output=True)
 
     @unittest.skipUnless(sys.platform == "darwin", "ditto archives exist only on macOS")
     def test_release_archive_is_named_after_the_channel_release(self):

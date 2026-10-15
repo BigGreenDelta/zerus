@@ -29,6 +29,12 @@ Arch-only and publish as before.
 
 ## Bundle
 
+For direct installation, GitHub Releases also carries
+`zerus-VERSION-macos-arm64.dmg`. Open the image and drag `Zerus.app` to its
+`Applications` shortcut. The read-only image contains the same stapled app as
+the Homebrew ZIP; the image itself is separately signed, notarized and stapled.
+See [DMG installation](installation.md#macos-dmg) for CLI and local-session setup.
+
 `zerus-VERSION-macos-arm64.zip` contains one signed, notarized and stapled
 `Zerus.app`:
 
@@ -102,15 +108,22 @@ three jobs after full CI:
    `scripts/ci/macos-bundle.sh`. It builds the CLI and GUI with a macOS 14.0 target,
    runs every Qt suite against the bundled Qt, assembles the production bundle,
    runs the bundle checks and self-tests and uploads `Zerus-unsigned.zip`.
+   Bundle and installation runners install `tmux` explicitly. Self-tests use a
+   private home and existing private socket directory, with only tmux exposed
+   alongside system tools; they cannot inspect a developer's running sessions.
 2. **macOS signing and notarization** runs in the `macos-signing` environment.
    It compiles nothing and executes only scripts from the same main commit.
    `scripts/ci/macos-keychain.sh` creates a temporary keychain;
    `scripts/sign-macos.py` signs inside-out with the hardened runtime and a secure
-   timestamp, submits to the notary service, staples and writes `macos-info.json`.
+   timestamp, submits the app to the notary service and staples its ticket.
+   It then creates the DMG, signs and notarizes it separately, staples its ticket
+   and writes both release assets with `macos-info.json` only after both succeed.
    The job verifies the Team ID, Gatekeeper and the stapled ticket, then deletes the
    keychain and key files even on failure. A team API key passes its issuer ID; an
    individual API key leaves `APPLE_NOTARY_API_ISSUER_ID` empty.
-3. **macOS cask installation** (no secrets) renders the channel's cask, runs `brew style`,
+3. **macOS cask installation** (no secrets) checks the DMG signature and ticket,
+   mounts it read-only and verifies the contained app, self-tests and Applications
+   shortcut. It then renders the channel's cask, runs `brew style`,
    installs it from a local tap pointing at the candidate bytes, repeats the bundle
    checks on `/Applications/Zerus.app`, runs `zerus-setup` and `--remove` in a
    scratch home and uninstalls the cask.
@@ -120,14 +133,19 @@ Only entitlements with a concrete need are granted, and only to the application:
 because Terminal integration runs `osascript`, whose Apple Events TCC attributes
 to Zerus. Without Qt WebEngine there is no helper process that would need JIT.
 
-The Arch assembly job then adds the signed zip and the rendered cask through
+The Arch assembly job then adds the signed ZIP, DMG and rendered cask through
 `prepare-release.py --macos` (`homebrew/zerus.rb`) or `prepare-nightly.py --macos`
 (`homebrew/zerus@nightly.rb`). The candidate records release-info schema 2: every
 schema 1 field is unchanged, plus `macos` (asset, Qt version, Team ID, notarization
-ID, minimum macOS) and `homebrew_casks` (`["zerus"]` or `["zerus@nightly"]`).
-`SHA256SUMS` covers the zip, and validation requires the cask to equal its template
+ID, minimum macOS, and `dmg: {asset, notarization_id}`) and `homebrew_casks`
+(`["zerus"]` or `["zerus@nightly"]`). Older schema-2 releases without `dmg`
+remain valid; all new signed builds require both formats.
+`SHA256SUMS` covers both assets, and validation requires the cask to equal its template
 in `packaging/homebrew/` with only the version, digest and, for a nightly, the
 immutable `nightly-RUN_ID` tag substituted.
+The cask continues to download the ZIP. Deploy DMG-aware `update_feed.py` on
+the website mirror before publishing the first DMG candidate: both macOS files
+remain on GitHub and are excluded from the existing desktop catalog artifact kinds.
 
 When the variable is `true`, a skipped or failed cask fails the candidate: a stable
 release needs `-f macos_cask=false` to stay Arch-only, and a nightly that cannot
@@ -167,10 +185,14 @@ Configured on 2026-10-10:
   (`SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`, from
   `api.github.com/meta` and GitHub's published fingerprints).
 
-Still required from the Apple account holder (`zerus-6a2u.2`): a **Developer ID
-Application** certificate and an App Store Connect API key (team or individual)
-for notarization. Store them without passing values through chat; commands without
-`--body` or stdin prompt for the value:
+Provisioned and tested on 2026-10-15 (`zerus-6a2u.2`): a **Developer ID
+Application** certificate issued by the G2 intermediate and a Developer-role
+App Store Connect team API key for notarization. All five secrets below and
+`MACOS_TEAM_ID` are configured in the main-only `macos-signing` environment.
+Private encrypted exports and API key backups remain outside the repository.
+
+For rotation, store values from private files or prompts, never through chat or
+literal command arguments. Commands without `--body` or stdin prompt for the value:
 
 ```sh
 base64 -i DeveloperIDApplication.p12 | gh secret set MACOS_DEVELOPER_ID_P12 --env macos-signing --repo ufna/zerus
@@ -181,8 +203,9 @@ gh secret set APPLE_NOTARY_API_ISSUER_ID --env macos-signing --repo ufna/zerus  
 gh variable set MACOS_TEAM_ID --env macos-signing --repo ufna/zerus --body TEAMID
 ```
 
-Then redeploy the mirror's `update_feed.py`, enable both casks and start a manual
-nightly as the first signed build:
+For initial activation, verify that the deployed mirror's `update_feed.py`
+supports schema 2 and the macOS asset; redeploy it if needed. Then enable both
+casks and start a manual nightly as the first signed build:
 
 ```sh
 gh variable set MACOS_CASKS_ENABLED --repo ufna/zerus --body true
@@ -191,7 +214,61 @@ gh workflow run nightly.yml --ref main
 
 If signing or notarization fails, that nightly publishes nothing; fix the
 credentials and rerun, or unset the variable to return to Arch-only candidates. Rotate the certificate or
-API key by replacing the secrets and revoking the old credential.
+API key by testing its replacement before changing the secrets or revoking the
+old credential. Never revoke an unrelated team certificate.
+
+The original Developer ID intermediate expires on 2027-02-01. Xcode issued a
+certificate from that old chain during setup, so CI was switched to a
+portal-issued G2 replacement before any release. Its expiration is 2027-11-14.
+Check the leaf certificate's issuer and expiration during each rotation; select
+**G2 Sub-CA** when the portal offers a choice. See
+[Apple's replacement procedure](https://developer.apple.com/help/account/certificates/replace-developer-id-certificates/).
+
+### macOS privacy permissions after a signature change
+
+macOS attributes agent-launched Apple Events, Accessibility and screen capture
+to the containing `com.hgdev.hgs-tray` application, displayed as **Zerus**.
+An enabled Settings switch is not proof that the current binary is trusted.
+During qualification, the TCC log showed `SecStaticCodeCheckValidity -67050`:
+the stored requirement still matched an older ad-hoc build's code hash. Toggling
+the existing entry retained that stale requirement.
+
+After verifying this exact mismatch, reset only the affected service for this
+bundle, request access again through its public API, and let the user grant fresh
+consent in System Settings:
+
+```sh
+tccutil reset Accessibility com.hgdev.hgs-tray
+tccutil reset ScreenCapture com.hgdev.hgs-tray
+```
+
+These are separate services; run only the required reset. Confirm access with
+`AXIsProcessTrusted()` and `CGPreflightScreenCaptureAccess()` respectively.
+Retain a stable Developer ID designated requirement across updates. Do not reset
+all privacy permissions, grant consent on the user's behalf or restart native
+agents to repair GUI permissions.
+
+## Mac App Store
+
+Mac App Store publication is deferred by the owner as of 2026-10-15, tracked in
+`zerus-8reb`. The active scope is Homebrew and a downloadable signed macOS DMG
+in GitHub Releases. The Homebrew Developer ID signature and notarization do not qualify
+an app for the store. Apple requires App Sandbox, inherited sandbox constraints
+for embedded command-line helpers, and store-managed application updates. See
+[App Review Guidelines 2.4.5](https://developer.apple.com/app-store/review/guidelines/#hardware-compatibility)
+and [sandboxed command-line helpers](https://developer.apple.com/documentation/xcode/embedding-a-helper-tool-in-a-sandboxed-app).
+
+The current entitlements do not enable App Sandbox. Local provider executables,
+tmux, per-user services and shared state need an explicit sandbox-compatible
+design and isolated qualification before a store build can be submitted.
+Do not silently remove local functionality or change the Homebrew bundle to
+obtain a store build.
+
+Apple Distribution and Mac Installer Distribution certificates were issued on
+2026-10-15. Encrypted PKCS#12 exports were tested in a disposable keychain using
+a synthetic app and installer package; the code and package signatures verified.
+This establishes credential readiness only. Store-specific provisioning,
+product scope, metadata, an upload and App Review remain outstanding.
 
 ## Validation record
 
@@ -212,8 +289,29 @@ contracts passed; all 54 Qt suites passed against Homebrew Qt and, inside
 self-tests and carried that `ZerusReleaseVersion`, product version 0.42.0, macOS
 14.0 and `launchd_agent.py`. Pinned actionlint 1.7.12 reported no findings.
 
-Not yet verified, because they need the Developer ID credentials or a published
-release:
+On 2026-10-15, the G2 certificate and intermediate were imported from the encrypted
+PKCS#12 into a disposable keychain. A native probe passed hardened-runtime signing
+with Apple's timestamp, strict signature verification and execution. Apple's
+notary service accepted that signed probe using the team API key. The temporary
+keychain was removed and the original keychain search list retained.
+The deployed mirror already supported macOS schema-2 releases. Casks were enabled
+and [Nightly run 38767851278](https://github.com/ufna/zerus/actions/runs/38767851278)
+was started for the first full bundle qualification.
+That run passed full CI and built the bundle, but its final self-test could not
+find tmux in the restricted PATH. The workflow now installs that dependency,
+and the checker exposes it through a private bin directory with an isolated
+tmux socket directory. Fixture and real installed GUI/CLI checks verify this
+environment without modifying the installed application or live sessions.
+
+DMG qualification on 2026-10-15 used a synthetic native application and the
+production G2 credentials in a disposable keychain. Apple accepted separate app
+and DMG submissions; both tickets were stapled and validated. Gatekeeper accepted
+the signed image and the app mounted read-only inside it, and that app executed
+successfully. The drag-to-Applications link and nested framework links survived
+image creation. Publication contracts cover both channels, immutable DMG
+checksums, old ZIP-only releases, and exclusion from website mirror storage.
+
+Still requiring a signed Zerus candidate or a published release:
 
 - Notarization, Gatekeeper acceptance and launch under library validation with
   one Team ID (an ad-hoc signature cannot satisfy it by design).

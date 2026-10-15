@@ -62,7 +62,7 @@ class NightlyTests(unittest.TestCase):
                      "architecture": "x86_64", "distribution": "Arch Linux", "native_agents_bundled": False,
                      "binary_dependencies": {name: "1.2.3" for name in common.BINARY_LIBRARIES}}
 
-    def candidate(self, windows=False, name="candidate", macos=False, **zip_options):
+    def candidate(self, windows=False, name="candidate", macos=False, dmg=False, **zip_options):
         directory = self.directory / name
         directory.mkdir()
         version = self.info["version"]
@@ -73,7 +73,7 @@ class NightlyTests(unittest.TestCase):
         binary.write_bytes(b"verified binary")
         (directory / f"{nightly.PACKAGE}-{version}-1-x86_64.pkg.tar.zst").write_bytes(b"checked package")
         if macos:
-            macos_release.add_macos(directory, self.signed_macos(), version, self.info, "nightly")
+            macos_release.add_macos(directory, self.signed_macos(dmg=dmg), version, self.info, "nightly")
         (directory / "release-info.json").write_text(json.dumps(self.info))
         recipe = directory / "aur" / nightly.PACKAGE
         recipe.mkdir(parents=True)
@@ -90,12 +90,17 @@ class NightlyTests(unittest.TestCase):
         common.finish_candidate(directory, nightly.PACKAGES)
         return directory
 
-    def signed_macos(self, version=None):
+    def signed_macos(self, version=None, dmg=False):
         directory = self.directory / "macos-signed"
         directory.mkdir()
         asset = macos_release.macos_asset(version or self.info["version"])
         (directory / asset).write_bytes(b"notarized nightly application")
-        (directory / "macos-info.json").write_text(json.dumps(dict(MACOS, asset=asset)))
+        info = dict(MACOS, asset=asset)
+        if dmg:
+            image = macos_release.macos_dmg(version or self.info["version"])
+            (directory / image).write_bytes(b"notarized nightly disk image")
+            info["dmg"] = {"asset": image, "notarization_id": "1123abcd-4567-89ef-0123-456789abcdef"}
+        (directory / "macos-info.json").write_text(json.dumps(info))
         return directory
 
     def test_nightly_cask_follows_the_immutable_prerelease(self):
@@ -151,6 +156,16 @@ class NightlyTests(unittest.TestCase):
         (directory / "homebrew/zerus@nightly.rb").write_text(
             macos_release.render_cask(self.info["version"], "c" * 64, "nightly", TAG))
         with self.assertRaisesRegex(ValueError, "Unsealed"):
+            nightly.validate_nightly(directory)
+
+    def test_nightly_disk_image_is_sealed_beside_the_cask_zip(self):
+        directory = self.candidate(macos=True, dmg=True)
+        info, sums = nightly.validate_nightly(directory)
+        image = directory / info["macos"]["dmg"]["asset"]
+        self.assertEqual(sums[image.name], common.sha256(image))
+        self.assertIn(info["macos"]["asset"], sums)
+        image.unlink()
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
             nightly.validate_nightly(directory)
 
     def tap(self, files):
@@ -370,7 +385,7 @@ class NightlyTests(unittest.TestCase):
                 nightly.validate_nightly(directory)
 
     def test_nightly_notes_describe_the_windows_zip_and_stay_prerelease(self):
-        directory = self.candidate(windows=True)
+        directory = self.candidate(windows=True, macos=True, dmg=True)
         info, sums = nightly.validate_nightly(directory)
         hashes = {**sums, "SHA256SUMS": common.sha256(directory / "SHA256SUMS")}
         draft = {"draft": True, "target_commitish": COMMIT, "tag_name": "nightly-123",
@@ -396,6 +411,8 @@ class NightlyTests(unittest.TestCase):
         self.assertIn("--latest=false", create)
         self.assertIn(info["windows_portable"], commands[1])
         self.assertIn("hgs-tray.exe", commands[1])
+        self.assertIn("brew install --cask ufna/zerus/zerus@nightly`", commands[1])
+        self.assertIn(f"/releases/download/{TAG}/{info['macos']['dmg']['asset']}", commands[1])
 
     def test_nightly_never_becomes_latest_stable_and_retry_changes_nothing(self):
         for windows in (False, True):

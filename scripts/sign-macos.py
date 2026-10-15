@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -75,16 +76,39 @@ def codesign_command(path, identity, entitlements, keychain=None):
     return command + [str(path)]
 
 
-def release_archive(app, output, version, notarization_id, qt_version, team_id):
+def release_archive(app, output, version, notarization_id, qt_version, team_id,
+                    dmg=None, dmg_notarization_id=None):
     if not (isinstance(notarization_id, str) and UUID.fullmatch(notarization_id)):
         raise ValueError("Refusing to create a release archive without an accepted notarization.")
+    if dmg is not None or dmg_notarization_id is not None:
+        if not (isinstance(dmg_notarization_id, str) and UUID.fullmatch(dmg_notarization_id) and
+                dmg is not None and dmg.is_file() and not dmg.is_symlink()):
+            raise ValueError("Refusing to release a disk image without an accepted notarization.")
     output.mkdir(parents=True)
     asset = output / f"zerus-{version}-macos-arm64.zip"
     subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(asset)], check=True)
-    (output / "macos-info.json").write_text(json.dumps({
+    metadata = {
         "asset": asset.name, "qt_version": qt_version, "team_id": team_id,
-        "notarization_id": notarization_id, "minimum_system_version": MINIMUM_SYSTEM}, indent=2) + "\n")
+        "notarization_id": notarization_id, "minimum_system_version": MINIMUM_SYSTEM}
+    if dmg is not None:
+        name = f"zerus-{version}-macos-arm64.dmg"
+        shutil.copyfile(dmg, output / name)
+        metadata["dmg"] = {"asset": name, "notarization_id": dmg_notarization_id}
+    (output / "macos-info.json").write_text(json.dumps(metadata, indent=2) + "\n")
     return asset
+
+
+def create_disk_image(app, image):
+    """A read-only drag-to-Applications image, preserving the stapled app bytes."""
+    if image.exists() or image.is_symlink():
+        raise ValueError("Refusing to overwrite a disk image.")
+    with tempfile.TemporaryDirectory(prefix="zerus-dmg-") as temporary:
+        staging = Path(temporary) / "volume"
+        staging.mkdir()
+        subprocess.run(["ditto", str(app), str(staging / "Zerus.app")], check=True)
+        (staging / "Applications").symlink_to("/Applications")
+        subprocess.run(["hdiutil", "create", "-volname", "Zerus", "-fs", "HFS+", "-format", "UDZO",
+                        "-srcfolder", str(staging), str(image)], check=True)
 
 
 def notary_credentials(key_file, key_id, issuer):
@@ -92,25 +116,51 @@ def notary_credentials(key_file, key_id, issuer):
     return ["--key", str(key_file), "--key-id", key_id, *(["--issuer", issuer] if issuer else [])]
 
 
-def notarize(app, key_file, key_id, issuer):
-    with tempfile.TemporaryDirectory(prefix="zerus-notarize-") as temporary:
-        upload = Path(temporary) / "Zerus.zip"
-        subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(upload)], check=True)
-        credentials = notary_credentials(key_file, key_id, issuer)
-        result = subprocess.run(["xcrun", "notarytool", "submit", str(upload), *credentials, "--wait",
-                                 "--timeout", "2h", "--output-format", "json"], capture_output=True, text=True)
+def notarize_upload(upload, key_file, key_id, issuer):
+    credentials = notary_credentials(key_file, key_id, issuer)
+    result = subprocess.run(["xcrun", "notarytool", "submit", str(upload), *credentials, "--wait",
+                             "--timeout", "2h", "--output-format", "json"], capture_output=True, text=True)
     try:
         submission = json.loads(result.stdout)
     except ValueError:
         submission = {}
+    if not isinstance(submission, dict):
+        submission = {}
     identifier, status = submission.get("id", ""), submission.get("status")
-    if status != "Accepted" or not UUID.fullmatch(identifier):
-        if UUID.fullmatch(identifier):
+    valid_id = isinstance(identifier, str) and UUID.fullmatch(identifier)
+    if result.returncode or status != "Accepted" or not valid_id:
+        if valid_id:
             log = subprocess.run(["xcrun", "notarytool", "log", identifier, *credentials], capture_output=True, text=True)
             print(log.stdout, file=sys.stderr)
         raise SystemExit(f"Notarization was not accepted ({status}): {result.stderr.strip()}")
-    subprocess.run(["xcrun", "stapler", "staple", str(app)], check=True)
-    subprocess.run(["xcrun", "stapler", "validate", str(app)], check=True)
+    return identifier
+
+
+def staple(path):
+    subprocess.run(["xcrun", "stapler", "staple", str(path)], check=True)
+    subprocess.run(["xcrun", "stapler", "validate", str(path)], check=True)
+
+
+def notarize(app, key_file, key_id, issuer):
+    with tempfile.TemporaryDirectory(prefix="zerus-notarize-") as temporary:
+        upload = Path(temporary) / "Zerus.zip"
+        subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(upload)], check=True)
+        identifier = notarize_upload(upload, key_file, key_id, issuer)
+    staple(app)
+    return identifier
+
+
+def sign_disk_image(app, image, identity, keychain, key_file, key_id, issuer):
+    create_disk_image(app, image)
+    command = ["codesign", "--sign", identity, "--timestamp"]
+    if keychain:
+        command += ["--keychain", str(keychain)]
+    subprocess.run([*command, str(image)], check=True)
+    subprocess.run(["codesign", "--verify", "--strict", str(image)], check=True)
+    identifier = notarize_upload(image, key_file, key_id, issuer)
+    staple(image)
+    subprocess.run(["spctl", "--assess", "--type", "open", "--context", "context:primary-signature",
+                    "--verbose=2", str(image)], check=True)
     return identifier
 
 
@@ -155,8 +205,11 @@ def main():
         print(f"Signed {app} for local verification. No release archive was created.")
         return
     identifier = notarize(app, args.notary_key_file, args.notary_key_id, args.notary_issuer)
-    asset = release_archive(app, args.output, release, identifier, qt_version, args.team_id)
-    print(f"Notarized submission {identifier}; created {asset}.")
+    dmg = work / "Zerus.dmg"
+    dmg_identifier = sign_disk_image(app, dmg, args.identity, args.keychain, args.notary_key_file,
+                                    args.notary_key_id, args.notary_issuer)
+    asset = release_archive(app, args.output, release, identifier, qt_version, args.team_id, dmg, dmg_identifier)
+    print(f"Notarized app {identifier} and disk image {dmg_identifier}; created {asset} and its DMG.")
 
 
 if __name__ == "__main__":

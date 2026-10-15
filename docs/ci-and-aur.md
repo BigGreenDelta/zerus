@@ -331,6 +331,12 @@ python3 scripts/ci/tmux-census.py compare "$scratch/main.json" "$scratch/branch.
   --rules scripts/ci/tmux-census-rules.json
 ```
 
+Record both trees from the same kind of process: on Linux inside a user service
+manager unit, a `new-session` that may start the server is preceded by
+`list-sessions`, and without a server it reaches the shim through
+`systemd-run --scope` (see
+[Terminal, SSH and clipboard](reference.md#terminal-ssh-and-clipboard)).
+
 `record` puts private `tmux` and `ps` shims first on `PATH`. `ZERUS_TMUX_CENSUS`
 names the record directory, and `ZERUS_TMUX_CENSUS_TMUX` and `ZERUS_TMUX_CENSUS_PS`
 name the real programs, resolved before the shims were added. Each call writes one
@@ -1090,6 +1096,13 @@ whatever its kill mode; `systemctl --user show <unit> -p ConsistsOf` lists them.
 Package upgrades do not perform a restart. Review the old unit's kill policy before
 restarting an existing installation; never use a broad process kill or restart all
 native clients.
+
+`hgs` starts a new tmux server from any user unit in a transient scope of its own
+(see [Terminal, SSH and clipboard](reference.md#terminal-ssh-and-clipboard)), so
+the panes of that server are not part of `hgs-tray`, the mobile connector or a
+worker. A server that an earlier release started inside one of those units stays
+there until it exits, and so does one started where systemd could not make the
+scope: until then, restart that unit rather than stop it.
 
 The swarm worker is the exception: it holds no agents. A current `hgs-swarm`
 exits when an upgrade replaces its executable and `Restart=always` starts the new
