@@ -107,6 +107,7 @@ private:
     void saveOrganization();
     void savePendingLaunches();
     void placeLaunchedSessions();
+    bool takeEndedLaunch(const QString &launchId, QJsonObject *launch = nullptr);
     void createGroup(const QString &session = {});
     void showGroupMenu(const QString &group, const QPoint &position);
     void showWorkspaceSettings();
@@ -273,7 +274,8 @@ private:
     FleetState m_fleet;
     QList<Entry> m_entries;
     QJsonObject m_pendingLaunches;
-    QSet<QString> m_endedLaunches;
+    // Launches a listing reported ended, oldest first, with their launch intent.
+    QList<QPair<QString, QJsonObject>> m_endedLaunches;
     QHash<QString, Entry> m_terminating;
     QSet<QString> m_terminationFinished;
     QString m_terminationCommand;

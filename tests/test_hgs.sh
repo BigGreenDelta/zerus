@@ -33,6 +33,23 @@ t() {
   fi
   "$TM" "$@"
 }
+# Stop the suite's isolated servers with stop_server, not a bare kill-server. tmux answers
+# kill-server once the server has told its clients to leave, not once it is gone: until its
+# process ends, the old server still listens on the socket and drops each new client ("server
+# exited unexpectedly"). A new-session sent right after the kill then starts nothing -- under
+# load often enough to leave a test waiting for a pane that never ran. So wait for the process.
+stop_server() {   # $1 = t or t2, the guarded runner of the server to stop
+  local pid state _n=0
+  pid="$("$1" display-message -p '#{pid}' 2>/dev/null)"
+  "$1" kill-server 2>/dev/null
+  [ -n "$pid" ] || return 0
+  while [ "$_n" -lt 100 ]; do
+    state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')"
+    case "$state" in ''|Z*) return 0 ;; esac   # gone, or a zombie that holds no socket
+    sleep 0.1; _n=$((_n+1))
+  done
+  echo "note: tmux server $pid still running 10s after kill-server" >&2
+}
 mkdir -p "$tmp/cfg" "$tmp/proj/sample-project" "$tmp/proj/example.com" "$tmp/proj/withlauncher" "$tmp/tmux"
 printf '# comment\nsample-project=%s/proj/sample-project\nexample.com=%s/proj/example.com\n' "$tmp" "$tmp" > "$tmp/cfg/projects"
 echo "wl=$tmp/proj/withlauncher" >> "$tmp/cfg/projects"
@@ -211,7 +228,7 @@ sleep 30
 EOF
   run_pane() {   # leaves the pane's mode flags in $flags, the raw bytes in $tmp/pane.raw
     rm -f "$tmp/go" "$tmp/pane.rc" "$tmp/pane.raw"
-    t kill-server 2>/dev/null || true
+    stop_server t
     t new-session -d -s term -x 100 -y 30 "sh $tmp/pane.sh"
     t pipe-pane -t term -O "cat >> $tmp/pane.raw"
     touch "$tmp/go"
@@ -220,7 +237,7 @@ EOF
     # tmux 3.4 does not expose bracket_paste_flag. Keep a stable-width flag
     # projection there; the raw teardown below still verifies bracketed paste.
     flags="$(t display -p -t term '#{alternate_on}#{keypad_cursor_flag}#{mouse_any_flag}#{mouse_sgr_flag}#{?bracket_paste_flag,1,0}')"
-    t kill-server 2>/dev/null || true
+    stop_server t
   }
   esc="$(printf '\033')"
   run_pane
@@ -270,7 +287,7 @@ EOF
   run_pane2() {   # $1 = hgs arguments; runs them in the pane that stands in for the terminal
     rm -f "$tmp/go2" "$tmp/pane2.rc" "$tmp/pane2.raw"
     printf '%s\n' "$1" > "$tmp/args2"
-    t kill-server 2>/dev/null || true
+    stop_server t
     t new-session -d -s term2 -x 100 -y 30 "sh $tmp/pane2.sh"
     t pipe-pane -t term2 -O "cat >> $tmp/pane2.raw"
     touch "$tmp/go2"
@@ -281,7 +298,7 @@ EOF
   }
   flags2() { t display -p -t term2 '#{alternate_on}#{mouse_any_flag}#{mouse_sgr_flag}#{?bracket_paste_flag,1,0}'; }
 
-  t2 kill-server 2>/dev/null || true
+  stop_server t2
   run_pane2 "sh wl"
   srv=""
   for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; do
@@ -303,7 +320,7 @@ EOF
     fail=$((fail+1)); echo "FAIL server death: rc=$(cat "$tmp/pane2.rc" 2>/dev/null) flags $before -> $after"
     sed 's/^/     /' "$tmp/pane2.err" 2>/dev/null
   fi
-  t2 kill-server 2>/dev/null || true
+  stop_server t2
 
   # A client that fails while the server is alive never got the terminal: sending the teardown
   # now would jump the cursor to a stale saved position, so hgs must keep quiet.
@@ -316,8 +333,8 @@ EOF
     fail=$((fail+1)); echo "FAIL failed attach, server alive: rc=$(cat "$tmp/pane2.rc" 2>/dev/null)"
     cat -v "$tmp/pane2.raw" 2>/dev/null | sed 's/^/     /'
   fi
-  t2 kill-server 2>/dev/null || true
-  t kill-server 2>/dev/null || true
+  stop_server t2
+  stop_server t
   rm -f "$tmp/pane2.sh" "$tmp/args2"
 else
   echo "skip server-death tests (no tmux)"
@@ -429,7 +446,7 @@ export HGS_CONFIG_DIR="$_save_cfg"
 # in the two `IFS=` reads (leaving -F untouched) still returns rc=0 with sessions=[] -- only
 # real session/client rows expose it, so this needs actual tmux state, not a no-server run.
 if command -v tmux >/dev/null 2>&1 || [ -x /opt/homebrew/bin/tmux ]; then
-  t kill-server 2>/dev/null || true
+  stop_server t
   t new-session -d -s "claude/jsontest" -c "$tmp" "sleep 60"
   t new-session -d -s "codex/jsontest2/rev" -c "$tmp" "sleep 60"
   # A real (non-zero) `attached` can only be observed with an actual client -- a session that
@@ -476,7 +493,7 @@ assert s['clients'] == [], s
   kill "$ctlpid" 2>/dev/null; wait "$ctlpid" 2>/dev/null
   exec 8>&-
   rm -f "$ctlfifo"
-  t kill-server 2>/dev/null || true
+  stop_server t
 else
   echo "skip session-loop json tests (no tmux)"
 fi
@@ -546,7 +563,7 @@ if command -v tmux >/dev/null 2>&1 || [ -x /opt/homebrew/bin/tmux ]; then
   t kill-session -t "=sh/clienttest" 2>/dev/null
   check "tab: attach to an existing session too"    0 "^tab claude/zzz_front color=$" --dry-run claude zzz_front
   check "no session and not in map -> rc 1"          1 "unknown project .nope. and no session claude/nope" --dry-run claude nope
-  t kill-server 2>/dev/null
+  stop_server t
 else
   echo "skip existing-session tests (no tmux)"
 fi

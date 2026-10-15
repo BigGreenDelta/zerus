@@ -959,15 +959,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::nativeSessionLaunched, this, [this](const QString &id, bool ok, const QString &error) {
         // A listing can report the launch ended before its command returns; its
         // notice stays and nothing waits to open a session that never appears.
-        const bool ended = m_endedLaunches.remove(id);
         if (ok) {
-            if (!ended) { m_nativeLaunchToOpen=id; showNotice(tr("Session started. Loading activity…")); }
+            if (!takeEndedLaunch(id)) { m_nativeLaunchToOpen=id; showNotice(tr("Session started. Loading activity…")); }
         } else {
             newSessionLaunchFailed(id, error);
         }
         emit refreshRequested();
     });
-    connect(&m_client, &HgsClient::questionAnswered, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &receipt) {
+    connect(&m_client, &HgsClient::questionAnswered, this, [this](quint64 request, const QString &, const QString &name, const QJsonObject &receipt) {
         const auto pending = m_pendingAnswers.value(request);
         // Hook review and Codex's native installer continue in Terminal.
         const bool openTerminal = !pending.key.isEmpty() && pending.key == m_selectedKey
@@ -975,8 +974,22 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             && pending.questionHash == receipt.value("question_hash").toString()
             && m_details.value("run_id") == receipt.value("run_id")
             && receipt.value("open_terminal").toBool();
+        // After Update now, the receipt says whether Codex still runs its
+        // installer or has exited; older hosts omit it.
+        QString updateNotice;
+        if (!pending.key.isEmpty() && pending.questionId.startsWith("codex-update:")
+            && pending.questionHash == receipt.value("question_hash").toString()) {
+            const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &value) { return value.key == pending.key; });
+            const QString target = entry == m_entries.cend() ? name : tr("%1 (%2)").arg(entry->session.name, entry->machine);
+            const QString phase = receipt.value("codex_update").toString();
+            if (phase == "installing")
+                updateNotice = tr("Codex in %1 is installing its update in Terminal. Resume the session after Codex exits.").arg(target);
+            else if (phase == "exited")
+                updateNotice = tr("Codex in %1 exited after its update. Check the result in Terminal, then resume the session.").arg(target);
+        }
         finishQuestion(request, true);
         if (openTerminal) { m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession(); }
+        if (!updateNotice.isEmpty()) showNotice(updateNotice);
     });
     connect(&m_client, &HgsClient::questionAnswerFailed, this, [this](quint64 request, const QString &, const QString &, const QString &error, bool uncertain) {
         finishQuestion(request, false, error, uncertain);
@@ -2272,9 +2285,21 @@ void SessionsWindow::savePendingLaunches()
     QSettings settings; settings.setValue("workspace/pendingLaunches", QJsonDocument(m_pendingLaunches).toJson(QJsonDocument::Compact)); settings.sync();
 }
 
+bool SessionsWindow::takeEndedLaunch(const QString &launchId, QJsonObject *launch)
+{
+    const auto it = std::find_if(m_endedLaunches.begin(), m_endedLaunches.end(), [&](const auto &ended) { return ended.first == launchId; });
+    if (it == m_endedLaunches.end()) return false;
+    if (launch) *launch = it->second;
+    m_endedLaunches.erase(it); return true;
+}
+
 void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QString &error)
 {
-    const QString name = m_pendingLaunches.value(launchId).toObject().value("tag").toString();
+    // A listing that reported the launch ended already showed its reason and last
+    // lines. A hidden launch status showed nothing, so its failure still names it.
+    QJsonObject ended;
+    if (takeEndedLaunch(launchId, &ended) && ended.value("show_pending").toBool()) return;
+    const QString name = (ended.isEmpty() ? m_pendingLaunches.value(launchId).toObject() : ended).value("tag").toString();
     m_pendingLaunches.remove(launchId); savePendingLaunches();
     rebuild();
     showNotice(error.isEmpty() ? tr("Could not start session %1. Check the terminal.").arg(name)
@@ -2284,7 +2309,7 @@ void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QStri
 void SessionsWindow::placeLaunchedSessions()
 {
     bool changed = false;
-    QString ended;
+    QString ended, endedLaunch;
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     for (auto it = m_pendingLaunches.begin(); it != m_pendingLaunches.end();) {
         const auto launch = it.value().toObject();
@@ -2312,10 +2337,18 @@ void SessionsWindow::placeLaunchedSessions()
         const auto end = !consumed && box && box->ok ? box->endedLaunches.value(it.key()) : QJsonObject();
         if (!end.isEmpty() && std::none_of(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
                 return entry.host == host && entry.session.launchId == it.key(); })) {
-            consumed = true; m_endedLaunches.insert(it.key());
+            consumed = true; m_endedLaunches.append({it.key(), launch});
+            // Terminal launches and launches restored after a restart never
+            // report a result, so only the newest ended launches are kept.
+            constexpr qsizetype EndedLaunchLimit = 16;
+            if (m_endedLaunches.size() > EndedLaunchLimit) m_endedLaunches.removeFirst();
             if (m_nativeLaunchToOpen == it.key()) m_nativeLaunchToOpen.clear();
             // A hidden launch status stays hidden.
             if (launch.value("show_pending").toBool()) {
+                // Only the last ended notice shows. A launch whose notice it
+                // replaces showed nothing, so its later failure still names it.
+                for (auto &[id, shown] : m_endedLaunches) if (id == endedLaunch) shown["show_pending"] = false;
+                endedLaunch = it.key();
                 const QString name = launch.value("tag").toString(); const auto code = end.value("code");
                 ended = code.isDouble() ? tr("Session %1 ended before it appeared (exit code %2).").arg(name).arg(code.toInteger())
                     : tr("Session %1 ended before it appeared.").arg(name);

@@ -154,10 +154,16 @@ class InputTransport(unittest.TestCase):
 
     def screen(self, value, cursor):
         import signal
-        (self.root / "screen").write_bytes(value.encode())
+        # Successive screens often leave the cursor in the same cell, so the
+        # cursor alone can still be the previous screen's. The agent writes a
+        # new title after this screen and tmux applies output in order: once
+        # the pane has that title, the whole screen is drawn.
+        self.frames = getattr(self, "frames", 0) + 1
+        title = "input-test-screen-%d" % self.frames
+        (self.root / "screen").write_bytes(value.encode() + b"\x1b]2;" + title.encode() + b"\x1b\\")
         os.kill(self.record["pid"], signal.SIGUSR1)
         self.wait_for(lambda: self.tmux("display-message", "-p", "-t", self.pane,
-                                      "#{cursor_x}:#{cursor_y}").strip() == cursor)
+                                      "#{pane_title} #{cursor_x}:#{cursor_y}").strip() == title + " " + cursor)
 
     def fresh_unconfirmed(self):
         self.record.update(run_identity_version=1,
