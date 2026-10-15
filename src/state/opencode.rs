@@ -1273,8 +1273,9 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     }
     parent_view(name, &record, true)
 }
-// Delivery, answer and lifecycle checks need only the parent's own state.
-fn own_state(name: &str) -> Result<Value> {
+// Delivery, answer, interrupt and lifecycle checks need only the parent's
+// own state; they never wait for the bounded child roster.
+pub(crate) fn own_state(name: &str) -> Result<Value> {
     parent_view(name, &binding(name)?, false)
 }
 fn parent_view(name: &str, record: &Value, roster: bool) -> Result<Value> {
