@@ -1,6 +1,6 @@
 # Session and agent graph
 
-Date: 2026-10-15. Status: proposed product and technical design, not shipped.
+Date: 2026-10-15. Status: owner-approved implementation in progress, not shipped.
 Design task: zerus-4rkz. Source audit: `669101d2`.
 Interactive, synthetic preview: [Graph workspace](../../../design/session-graph/index.html).
 
@@ -99,10 +99,21 @@ unloaded groups have visible counts or `unknown`, with a path to expand them.
 
 ### Nodes
 
+Owner clarification, 2026-10-15: Graph must use the same visual language as the
+ordinary Sessions list. Status, provider and computer are the existing badges,
+not plain combined text or a new graph-specific set of colors and symbols.
+The native implementation must reuse `SessionStatusBadge`, `IdentityBadges`
+and `MachineAppearance`, including configured computer colors and vivid mode.
+Use the same title, branch icon, selection surface and attention priority as
+`SessionCardDelegate`; keep the machine and provider independently identifiable
+in the canvas, list and inspector. Canvas scale may change how much text fits,
+but must not change the meaning or styling of a status. The HTML preview mirrors
+these components; the shipped Qt view uses the actual shared paint functions.
+
 Use small readable cards, not anonymous dots. At normal zoom a card has:
 
 - session title, with the native provider icon;
-- existing state text and a small state marker;
+- the existing status badge, including its normal state icon and colors;
 - project and computer context, plus a distinct branch icon before branch text;
 - a compact child count or attention badge where relevant.
 
