@@ -1,6 +1,7 @@
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
 #include "WorktreeBatchCleanupDialog.h"
+#include "DownloadCache.h"
 #include "SessionFileDrop.h"
 #include "SessionCardDelegate.h"
 #include "SessionPanelDock.h"
@@ -602,6 +603,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             {"conversation_id",message.value("conversation_id")},{"submitted_at",message.value("created_at")},{"attachments",QJsonArray{message.value("audio")}}});
         if(key==m_selectedKey){reconcileMessages();renderDetails();m_activityView->jumpToLatest();inspect();}
     });
+    connect(&m_client, &HgsClient::downloadCacheWarning, this, [this](const QString &error) { showNotice(error, true); });
     auto openFileReference = [this](const QString &href) {
         const auto *entry = selected(); if (!entry) return;
         const auto target = SessionFileReference::parse(href); if (!target.valid()) return;
@@ -631,7 +633,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         auto *hint = new QLabel(local ? (path.isEmpty() ? tr("The session folder is unknown. Copy the path to locate this file.")
             : tr("Open with your default application, or copy the path."))
-            : tr("Download a copy from %1 to this computer, then open it with your default application.").arg(machine));
+            : tr("Download… lets you choose where to save. Download and open saves a copy in Downloads/Zerus Files and opens it with your default application."));
         hint->setObjectName("sessionFileHint");
         hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
         hint->setTextFormat(Qt::PlainText); hint->setWordWrap(true); layout->addWidget(hint);
@@ -657,7 +659,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             progress->setAccessibleName(tr("Downloading file from %1").arg(machine));
             progress->setRange(0, 0); progress->setTextVisible(false); progress->hide(); layout->insertWidget(layout->count() - 1, progress);
             auto *download = buttons->addButton(tr("Download…"), QDialogButtonBox::ActionRole); download->setObjectName("downloadSessionFile");
-            auto *open = buttons->addButton(tr("Download and open…"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
+            auto *open = buttons->addButton(tr("Download and open"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
+            open->setToolTip(tr("Save automatically to %1 and open the local copy.").arg(QDir::toNativeSeparators(DownloadCache::directory())));
             auto *savedOpen = buttons->addButton(tr("Open local copy"), QDialogButtonBox::ActionRole); savedOpen->setObjectName("openDownloadedSessionFile"); savedOpen->hide();
             const QString remotePath = path.isEmpty() && target.path.startsWith("~/") ? target.path : path;
             const bool downloadable = online && !remotePath.isEmpty();
@@ -666,15 +669,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             else if (remotePath.isEmpty()) hint->setText(tr("The session folder is unknown. Copy the path or use the SSH terminal to locate the file."));
             auto startDownload = [&, download, open, savedOpen, progress, remotePath](bool opening) {
                 if (pending) return;
-                const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-                QFileDialog save(&dialog, tr("Save local copy"), QDir(downloads.isEmpty() ? QDir::homePath() : downloads).filePath(QFileInfo(remotePath).fileName()));
-                save.setObjectName("sessionFileSaveDialog"); save.setAcceptMode(QFileDialog::AcceptSave); save.setFileMode(QFileDialog::AnyFile);
-                if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
-                const auto destination = save.selectedFiles().first();
+                QString destination = DownloadCache::directory();
+                if (!opening) {
+                    const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+                    QFileDialog save(&dialog, tr("Save local copy"), QDir(downloads.isEmpty() ? QDir::homePath() : downloads).filePath(QFileInfo(remotePath).fileName()));
+                    save.setObjectName("sessionFileSaveDialog"); save.setAcceptMode(QFileDialog::AcceptSave); save.setFileMode(QFileDialog::AnyFile);
+                    if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
+                    destination = save.selectedFiles().first();
+                }
                 download->setEnabled(false); open->setEnabled(false); savedOpen->hide();
                 progress->show(); hint->setText(tr("Downloading from %1 to %2…\nThe download continues if you close this dialog.").arg(machine, destination));
                 openAfterDownload = opening;
-                pending = m_client.downloadFile(host, remotePath, destination);
+                pending = opening ? m_client.downloadFileToCache(host, remotePath) : m_client.downloadFile(host, remotePath, destination);
                 auto *completion = new QObject(this);
                 const QPointer<QDialog> shownDialog(&dialog);
                 const auto request = pending;
@@ -1584,7 +1590,7 @@ void SessionsWindow::applyTheme()
         QListWidget#settingsSections::item { padding:11px 10px;margin-bottom:5px;border-radius:6px; }
         QListWidget#settingsSections::item:selected { background:%10;color:%5; }
         QListWidget#settingsSections::item:hover { background:%7; }
-        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QDialog#speechProfileEditor QScrollArea, QWidget#speechEditorContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
+        QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QWidget#downloadCacheSettings, QDialog#speechProfileEditor QScrollArea, QWidget#speechEditorContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
         QDialog#speechProfileEditor QScrollBar:vertical { background:%1; width:10px; margin:0; border:0; }
         QDialog#speechProfileEditor QScrollBar:horizontal { background:%1; height:10px; margin:0; border:0; }
         QDialog#speechProfileEditor QScrollBar::handle:vertical { background:%4; border-radius:4px; min-height:24px; }
@@ -1633,7 +1639,8 @@ void SessionsWindow::applyTheme()
         QTableWidget#swarmConflictChoices::item { padding:8px 10px; }
         QTreeWidget#worktreeCatalog::item, QTreeWidget#processList::item { padding:6px 4px; }
         QTableWidget#projectFolders::item { padding:0 10px; }
-        QSpinBox { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
+        QSpinBox, QDoubleSpinBox#downloadCacheSize { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
+        QDoubleSpinBox#downloadCacheSize:disabled { color:%6; background:%1; }
         QListWidget#machineProfiles, QListWidget#accountProfiles, QListWidget#speechProfiles, QListWidget#launchAccount { background:%3; color:%2; border:1px solid %4; border-radius:8px; }
         QListWidget#machineProfiles::item, QListWidget#speechProfiles::item { padding:14px 10px; border-bottom:1px solid %4; }
         QListWidget#accountProfiles::item { padding:6px 10px; border-bottom:1px solid %4; }

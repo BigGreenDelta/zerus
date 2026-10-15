@@ -1,4 +1,5 @@
 #include "HgsClient.h"
+#include "DownloadCache.h"
 #include "ChildProcess.h"
 #include "ProcessRunner.h"
 #include "LocalFile.h"
@@ -626,8 +627,27 @@ bool HgsClient::requestInspection(const QString &host, const QString &name, qint
 quint64 HgsClient::downloadFile(const QString &host, const QString &path, const QString &destination)
 {
     const auto id = ++m_fileDownloadRequest;
+    transferFile(id, host, path, destination);
+    return id;
+}
+
+quint64 HgsClient::downloadFileToCache(const QString &host, const QString &path)
+{
+    const auto id = ++m_fileDownloadRequest;
+    const auto root = DownloadCache::directory();
+    DownloadCache::async<DownloadCache::Prepared>(this, [root] { return DownloadCache::prepare(root); },
+        [this, id, host, path](const DownloadCache::Prepared &prepared) {
+            if (!prepared.error.isEmpty()) { emit fileDownloadFailed(id, prepared.error); return; }
+            transferFile(id, host, path, prepared.pending->path, prepared.pending);
+        });
+    return id;
+}
+
+void HgsClient::transferFile(quint64 id, const QString &host, const QString &path, const QString &destination,
+                             const std::shared_ptr<DownloadCache::Pending> &pending)
+{
     runHgs(m_hgs, {'@' + host, "download", "--path", path, "--output", destination}, 135000, this,
-        [this, id, host, path, destination](const QByteArray &out) {
+        [this, id, host, path, destination, pending](const QByteArray &out) {
             if (out.size() > 65536) { emit fileDownloadFailed(id, tr("Invalid file transfer response.")); return; }
             const auto object = QJsonDocument::fromJson(out).object();
             const QFileInfo saved(destination);
@@ -636,11 +656,41 @@ quint64 HgsClient::downloadFile(const QString &host, const QString &path, const 
                 || !LocalFile::readable(saved) || object.value("bytes").toDouble() != LocalFile::size(saved)) {
                 emit fileDownloadFailed(id, tr("The file transfer did not confirm the saved local file.")); return;
             }
-            emit fileDownloaded(id, destination);
-        }, [this, id](const QString &, const QString &error) {
+            if (!pending) { emit fileDownloaded(id, destination); return; }
+            DownloadCache::async<DownloadCache::Result>(this,
+                [pending, path] { return DownloadCache::publish(pending, path); },
+                [this, id](const DownloadCache::Result &result) {
+                    if (!result.error.isEmpty()) { emit fileDownloadFailed(id, result.error); return; }
+                    emit fileDownloaded(id, result.path);
+                    if (!result.warning.isEmpty()) emit downloadCacheWarning(result.warning);
+                    scheduleDownloadCacheTrim();
+                });
+        }, [this, id, pending](const QString &, const QString &error) {
             emit fileDownloadFailed(id, error.startsWith("hgs: ") ? error.mid(5) : error);
         });
-    return id;
+}
+
+void HgsClient::scheduleDownloadCacheTrim()
+{
+    if (!m_downloadCacheTimer) {
+        m_downloadCacheTimer = new QTimer(this); m_downloadCacheTimer->setSingleShot(true);
+        connect(m_downloadCacheTimer, &QTimer::timeout, this, &HgsClient::trimDownloadCache);
+    }
+    m_downloadCacheTimer->start(DownloadCache::OpeningGraceMs + 5000);
+    QTimer::singleShot(0, this, &HgsClient::trimDownloadCache);
+}
+
+void HgsClient::trimDownloadCache()
+{
+    const auto limit = DownloadCache::limitBytes();
+    if (!limit || m_downloadCacheTrimBusy) return;
+    m_downloadCacheTrimBusy = true;
+    const auto root = DownloadCache::directory();
+    DownloadCache::async<DownloadCache::Usage>(this, [root, limit] { return DownloadCache::trim(root, limit); },
+        [this](const DownloadCache::Usage &result) {
+            m_downloadCacheTrimBusy = false;
+            if (!result.error.isEmpty()) emit downloadCacheWarning(result.error);
+        });
 }
 
 quint64 HgsClient::requestAttachment(const QString &host, const QString &name, const QJsonObject &file,

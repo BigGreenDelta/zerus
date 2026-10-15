@@ -10,6 +10,10 @@
 #include <QSet>
 #include <QString>
 #include <QStringList>
+#include <memory>
+
+class QTimer;
+namespace DownloadCache { struct Pending; }
 
 struct SessionInfo {
     QJsonObject recovery;
@@ -199,6 +203,7 @@ public:
     quint64 requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});
     quint64 downloadFile(const QString &host, const QString &path, const QString &destination);
+    quint64 downloadFileToCache(const QString &host, const QString &path);
     static constexpr qsizetype MaximumMessageBytes = 64 * 1024;
     static constexpr qsizetype MaximumAttachmentBytes = 10 * 1024 * 1024;
     static constexpr qsizetype MaximumAttachmentsBytes = 20 * 1024 * 1024;
@@ -256,6 +261,7 @@ signals:
     void attachmentReady(quint64 request, const QJsonObject &file, const QByteArray &bytes);
     void fileDownloaded(quint64 request, const QString &destination);
     void fileDownloadFailed(quint64 request, const QString &error);
+    void downloadCacheWarning(const QString &error);
     void attachmentFailed(quint64 request, const QString &detail);
     void nativeUiReady(quint64 request, const QJsonObject &connection);
     void nativeUiFailed(quint64 request, const QString &error);
@@ -319,6 +325,12 @@ signals:
     void writeDone(const QString &op, bool ok, const QString &detail);
 
 private:
+    void transferFile(quint64 id, const QString &host, const QString &path, const QString &destination,
+                      const std::shared_ptr<DownloadCache::Pending> &pending = {});
+    void scheduleDownloadCacheTrim();
+    void trimDownloadCache();
+    QTimer *m_downloadCacheTimer = nullptr;
+    bool m_downloadCacheTrimBusy = false;
     void pumpGitStatus();
     QHash<QString, QJsonObject> m_gitStatusCache;
     QHash<QString, qint64> m_gitStatusRequestedAt;
