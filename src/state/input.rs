@@ -201,7 +201,16 @@ pub(super) fn attention_message_summary(record: &Value, output: &mut Value, live
             string(record, "conversation_id"),
             true,
         )
-        .and_then(|current| checked_terminal(&current, true))
+        .and_then(|current| {
+            checked_terminal(&current, true).map_err(|error| {
+                // Stop returns ordinary Codex follow-ups to its input as one draft.
+                if prefix == "interrupted" && error == DRAFT && input_queue::returned_by_stop(&current) {
+                    RETURNED_FOLLOW_UPS.into()
+                } else {
+                    error
+                }
+            })
+        })
     } else {
         Err("The agent is not running. Resume it before sending.".into())
     };
@@ -611,10 +620,40 @@ pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
             cursor_y,
             codex_footer_model(record),
         ) {
-            return Err("terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt".into());
+            return Err(DRAFT.into());
         }
     }
     Ok(())
+}
+
+const DRAFT: &str = "terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt";
+/// The send-block reason while Codex's input holds exactly the follow-ups Stop returned.
+const RETURNED_FOLLOW_UPS: &str =
+    "The queued follow-ups are back in Codex's input as an unsent draft. Submit or clear them in Terminal.";
+
+/// The whole draft in Codex's input: its `›` row and indented continuation rows,
+/// then a blank row before the model/folder status row of its footer in the last
+/// two screen rows. The cursor must be above that blank row; any other layout is unread.
+pub(super) fn codex_draft(record: &Value, screen: &str, cursor_y: usize) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    let model = codex_footer_model(record);
+    let footer = (lines.len().saturating_sub(2)..lines.len())
+        .find(|&index| codex_status_row(lines[index], model))?;
+    let (start, first) = lines[..footer]
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, row)| Some((index, row.strip_prefix('›')?)))?;
+    let rows = &lines[start + 1..footer];
+    if !(start..footer - 1).contains(&cursor_y)
+        || rows.last().is_none_or(|row| !row.is_empty())
+        || rows.iter().any(|row| !row.is_empty() && !row.starts_with("  "))
+    {
+        return None;
+    }
+    let first = first.strip_prefix(' ').unwrap_or(first);
+    let rows = rows.iter().map(|row| row.get(2..).unwrap_or(""));
+    Some(std::iter::once(first).chain(rows).collect::<Vec<_>>().join("\n").trim_end().to_owned())
 }
 
 pub(super) fn safe_filename(name: &str, index: usize) -> String {
