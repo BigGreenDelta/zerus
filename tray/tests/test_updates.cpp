@@ -1,4 +1,6 @@
 #include "UpdateController.h"
+#include "UpdatesWidget.h"
+#include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -15,6 +17,8 @@
 #include <QDateTime>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression>
+#include <QSet>
 #ifdef Q_OS_UNIX
 #include <fcntl.h>
 #include <unistd.h>
@@ -39,7 +43,36 @@ QList<int> descriptors(const QString &path){
     return open;
 }
 #endif
+// The anchors GitHub gives a Markdown file: each heading's text in lower case without
+// punctuation other than hyphens and underscores, spaces turned into hyphens and a
+// -1, -2 suffix on repeats, plus explicit <a id> anchors. Fenced code has none.
+QSet<QString> markdownAnchors(const QString &path){
+    QSet<QString> anchors;QFile file(path);if(!file.open(QIODevice::ReadOnly|QIODevice::Text))return anchors;
+    QHash<QString,int> seen;bool fenced=false;
+    const QRegularExpression heading("\\A#{1,6}\\s+(.+?)\\s*#*\\s*\\z"),explicitAnchor("<a\\s+(?:id|name)=\"([^\"]+)\""),punctuation("[^\\w\\- ]",QRegularExpression::UseUnicodePropertiesOption);
+    for(const auto &line:QString::fromUtf8(file.readAll()).split('\n')){
+        if(line.trimmed().startsWith("```")){fenced=!fenced;continue;}
+        if(fenced)continue;
+        for(auto found=explicitAnchor.globalMatch(line);found.hasNext();)anchors<<found.next().captured(1);
+        const auto match=heading.match(line);if(!match.hasMatch())continue;
+        QString slug=match.captured(1).toLower().remove(punctuation).replace(' ','-');
+        const int repeat=seen.value(slug);seen[slug]=repeat+1;
+        anchors<<(repeat?slug+"-"+QString::number(repeat):slug);
+    }
+    return anchors;
 }
+}
+
+// Stands in for the desktop browser: QDesktopServices hands web links here.
+class UrlRecorder final : public QObject {
+    Q_OBJECT
+public:
+    UrlRecorder(){for(const auto *scheme:{"https","http"})QDesktopServices::setUrlHandler(scheme,this,"record");}
+    ~UrlRecorder() override{for(const auto *scheme:{"https","http"})QDesktopServices::unsetUrlHandler(scheme);}
+    QList<QUrl> urls;
+public slots:
+    void record(const QUrl &url){urls<<url;}
+};
 
 class FixtureReply : public QNetworkReply {
     QByteArray bytes; qint64 position=0;
@@ -311,6 +344,56 @@ private slots:
         QCOMPARE(optional.command,QString("Optional AUR installation: yay -Syu zerus-ade-bin"));QCOMPARE(optional.copyName,QString("Copy optional installation command"));
         auto build=UpdateController::installationGuide({"source",{},{}},"stable");QVERIFY(build.command.isEmpty());QVERIFY(build.instructions.isEmpty());QVERIFY(build.ownership.contains("Git checkout"));
         auto portable=UpdateController::installationGuide({"portable",{},{}},"nightly");QVERIFY(portable.ownership.contains("Portable Windows build"));QVERIFY(portable.command.isEmpty());QVERIFY(portable.instructions.isEmpty());
+    }
+    void installationInstructionsOpenThePlatformSection(){
+        // README.md has no Installation section any more: the guide is docs/installation.md.
+        const QString guide="https://github.com/ufna/zerus/blob/main/docs/installation.md";
+        const DesktopInstallation package{"package","zerus-ade-bin","0.36.2-1",true,"paru"},source{"source",{},{}},cask{"homebrew-cask","zerus","0.37.0"},portable{"portable",{},{}};
+        auto archSource=source;archSource.arch=true;
+        QCOMPARE(UpdateController::installationInstructionsUrl(package,"linux"),QUrl(guide+"#arch-linux"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(archSource,"linux"),QUrl(guide+"#arch-linux"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(source,"linux"),QUrl(guide+"#local-installation"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(cask,"macos"),QUrl(guide+"#macos-homebrew"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(source,"macos"),QUrl(guide+"#macos-homebrew"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(portable,"windows"),QUrl(guide+"#windows"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(source,"windows"),QUrl(guide+"#windows"));
+        QCOMPARE(UpdateController::installationInstructionsUrl(source,"freebsd"),QUrl(guide));
+#if defined(Q_OS_MACOS)
+        QCOMPARE(UpdateController::runningPlatform(),QString("macos"));
+#elif defined(Q_OS_WIN)
+        QCOMPARE(UpdateController::runningPlatform(),QString("windows"));
+#elif defined(Q_OS_LINUX)
+        QCOMPARE(UpdateController::runningPlatform(),QString("linux"));
+#endif
+        QCOMPARE(UpdateController::installationInstructionsUrl(archSource),UpdateController::installationInstructionsUrl(archSource,UpdateController::runningPlatform()));
+        // Every section the button can open is a heading of the guide in this checkout.
+        const auto anchors=markdownAnchors(QStringLiteral(ZERUS_INSTALLATION_GUIDE));
+        QVERIFY2(anchors.contains("checking-for-updates"),ZERUS_INSTALLATION_GUIDE);
+        for(const char *platform:{"linux","macos","windows"})for(bool arch:{false,true}){
+            DesktopInstallation installation{"unknown",{},{}};installation.arch=arch;
+            const QString section=UpdateController::installationInstructionsUrl(installation,platform).fragment();
+            QVERIFY2(anchors.contains(section),qPrintable(QString("%1 opens the missing section #%2").arg(platform,section)));
+        }
+    }
+    void installationInstructionsButtonOpensThePlatformSection(){
+        QSettings().setValue("updates/automatic",false);
+        auto *controller=UpdateController::instance();
+        // The shared controller settles its ownership in this test, not in a later one.
+        QTRY_VERIFY_WITH_TIMEOUT(controller->installation().kind!="checking",15000);
+        UrlRecorder browser;UpdatesWidget widget;
+        auto *details=widget.findChild<QPushButton *>("updatesDetailsToggle");QVERIFY(details);details->click();
+        auto *instructions=widget.findChild<QPushButton *>("updatesInstructions");QVERIFY(instructions);
+        QCOMPARE(instructions->text(),QString("Installation instructions"));
+        instructions->click();
+        QUrl expected("https://github.com/ufna/zerus/blob/main/docs/installation.md");
+#if defined(Q_OS_MACOS)
+        expected.setFragment("macos-homebrew");
+#elif defined(Q_OS_WIN)
+        expected.setFragment("windows");
+#elif defined(Q_OS_LINUX)
+        expected.setFragment(controller->installation().arch?"arch-linux":"local-installation");
+#endif
+        QCOMPARE(browser.urls,QList<QUrl>{expected});
     }
     void nightlyBuildsCompareByBuildNumber(){
         QVERIFY(UpdateController::nightlyIsNewer("0.38.0.r812.gabcdef0.n41","0.38.0.r815.g1234567.n42"));
