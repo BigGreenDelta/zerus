@@ -41,15 +41,22 @@ public:
         auto *actions=new QHBoxLayout;saveButton=new QPushButton(tr("Save configuration"));saveButton->setObjectName("saveRelayConfiguration");actions->addWidget(saveButton);
         auto *reload=new QPushButton(tr("Reload configuration"));reload->setObjectName("reloadRelayConfiguration");actions->addWidget(reload);actions->addStretch();layout->addLayout(actions);
         notice=new QLabel;notice->setObjectName("relaySaveNotice");notice->setTextFormat(Qt::PlainText);notice->setWordWrap(true);layout->addWidget(notice);
-        auto *instructions=new QLabel(tr("Changes apply when the connector restarts. Native agents keep running. Restart only after pending connector requests and receipts have drained."));instructions->setWordWrap(true);layout->addWidget(instructions);
+        auto *instructions=new QLabel(tr("Changes apply when the connector restarts. Restart only after pending connector requests and receipts have drained."));instructions->setWordWrap(true);layout->addWidget(instructions);
 #ifdef Q_OS_LINUX
-        auto addCommand=[&](const QString &command,const QString &label){
-            auto *text=new QLabel(command);text->setTextFormat(Qt::PlainText);text->setTextInteractionFlags(Qt::TextSelectableByMouse);text->setWordWrap(true);layout->addWidget(text);
-            auto *copy=new QPushButton(label);layout->addWidget(copy,0,Qt::AlignLeft);
+        auto addCommand=[&](const QString &name,const QString &command,const QString &label){
+            auto *row=new QWidget;row->setObjectName(name);auto *rowLayout=new QVBoxLayout(row);rowLayout->setContentsMargins(0,0,0,0);
+            auto *text=new QLabel(command);text->setTextFormat(Qt::PlainText);text->setTextInteractionFlags(Qt::TextSelectableByMouse);text->setWordWrap(true);rowLayout->addWidget(text);
+            auto *copy=new QPushButton(label);rowLayout->addWidget(copy,0,Qt::AlignLeft);
             connect(copy,&QPushButton::clicked,this,[command]{QApplication::clipboard()->setText(command);});
+            layout->addWidget(row);return row;
         };
-        addCommand(QStringLiteral("systemctl --user start zerus-mobile-connector.service"),tr("Copy start command"));
-        addCommand(QStringLiteral("systemctl --user restart zerus-mobile-connector.service"),tr("Copy restart command"));
+        addCommand(QStringLiteral("connectorStartCommand"),QStringLiteral("systemctl --user start zerus-mobile-connector.service"),tr("Copy start command"));
+        killMode=new QLabel;killMode->setObjectName("connectorKillMode");killMode->setTextFormat(Qt::PlainText);killMode->setWordWrap(true);killMode->hide();layout->addWidget(killMode);
+        // The default control-group kill mode would also stop the tmux servers that
+        // phone launches start inside the service. Offer the restart only once the
+        // unit reports KillMode=process; until then offer the non-restarting drop-in.
+        protectCommand=addCommand(QStringLiteral("connectorProtectCommand"),QStringLiteral("mkdir -p ~/.config/systemd/user/zerus-mobile-connector.service.d && printf '[Service]\\nKillMode=process\\n' > ~/.config/systemd/user/zerus-mobile-connector.service.d/50-zerus-killmode.conf && systemctl --user daemon-reload"),tr("Copy protection command"));protectCommand->hide();
+        restartCommand=addCommand(QStringLiteral("connectorRestartCommand"),QStringLiteral("systemctl --user restart zerus-mobile-connector.service"),tr("Copy restart command"));restartCommand->hide();
 #endif
         auto *docs=new QLabel(tr("Connector setup is documented in docs/mobile-deployment.md in the Zerus source checkout."));docs->setWordWrap(true);layout->addWidget(docs);
         layout->addStretch();
@@ -71,7 +78,8 @@ public:
     }
 private:
     ConfigStore store;Snapshot loaded;bool loadedOk=false;
-    QLabel *configured,*status,*notice;
+    QLabel *configured,*status,*notice,*killMode=nullptr;
+    QWidget *protectCommand=nullptr,*restartCommand=nullptr;
     QLineEdit *url,*token,*directory;
     QPushButton *saveButton;
     QProcess *probe=nullptr;QByteArray probeOutput;
@@ -97,9 +105,18 @@ private:
         configured->setText(tr("Configured relay: %1").arg(loaded.object.value("server_url").toString()));
         notice->setText(tr("Configuration saved privately. Changes apply when the connector restarts. Service status does not verify relay connectivity or that this configuration is active."));
     }
+    void showKillMode(const QByteArray &mode,bool loaded){
+        if(!killMode)return;
+        const bool safe=loaded&&mode=="process";
+        killMode->setVisible(loaded);restartCommand->setVisible(safe);protectCommand->setVisible(loaded&&!safe);
+        static const QList<QByteArray> known{"control-group","mixed","none"};
+        killMode->setText(safe?tr("A restart stops only the connector process (KillMode=process). Native agents keep running.")
+            :tr("The service reports KillMode=%1, not process: restarting it can also stop agents launched from the phone. Protect them first. This command adds a drop-in and reloads the user service manager without restarting anything; then reload this panel.").arg(known.contains(mode)?QString::fromLatin1(mode):tr("unknown")));
+    }
     void probeService(){
 #ifdef Q_OS_LINUX
         if(probe)return;
+        showKillMode({},false);
         auto *p=new QProcess(this);probe=p;probeOutput.clear();
         auto *deadline=new QTimer(p);deadline->setSingleShot(true);
         connect(deadline,&QTimer::timeout,this,[this,p]{if(probe==p){status->setText(tr("Connector service: unknown (status check timed out)"));p->kill();}});
@@ -114,6 +131,7 @@ private:
             if(exit==QProcess::NormalExit&&output.size()<=16384){
                 QMap<QByteArray,QByteArray> values;
                 for(const auto &line:output.split('\n')){const auto at=line.indexOf('=');if(at>0)values.insert(line.left(at),line.mid(at+1));}
+                showKillMode(values.value("KillMode"),values.value("LoadState")=="loaded");
                 if(values.value("LoadState")=="not-found")status->setText(tr("Connector service: not installed. Follow the setup documentation."));
                 else if(values.value("LoadState")=="loaded"){
                     const auto active=values.value("ActiveState");
@@ -133,7 +151,7 @@ private:
         });
         connect(p,&QProcess::readyReadStandardError,p,[p]{p->readAllStandardError();});
         p->setProcessChannelMode(QProcess::SeparateChannels);ChildProcess::inheritStdioOnly(*p);
-        p->start(QStringLiteral("systemctl"),{QStringLiteral("--user"),QStringLiteral("show"),QStringLiteral("zerus-mobile-connector.service"),QStringLiteral("--property=LoadState,ActiveState,SubState"),QStringLiteral("--no-pager")});
+        p->start(QStringLiteral("systemctl"),{QStringLiteral("--user"),QStringLiteral("show"),QStringLiteral("zerus-mobile-connector.service"),QStringLiteral("--property=LoadState,ActiveState,SubState,KillMode"),QStringLiteral("--no-pager")});
         deadline->start(3000);
 #else
         status->setText(tr("Connector service: unknown (automatic status checks are available on Linux). Follow the setup documentation."));
