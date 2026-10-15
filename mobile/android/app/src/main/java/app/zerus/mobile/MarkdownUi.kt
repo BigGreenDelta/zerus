@@ -50,12 +50,13 @@ import androidx.compose.ui.unit.dp
 
 private val markdownDocuments by lazy { MarkdownDocumentCache() }
 private val markdownAnnotationDispatcher = Dispatchers.Default.limitedParallelism(2)
-private data class MarkdownPresentationKey(val source: String, val accent: Color, val codeBackground: Color)
+private data class MarkdownPresentationKey(val source: String, val accent: Color, val codeBackground: Color, val fileScope: String)
 private data class PreparedMarkdown(val document: MarkdownDocument,
     val annotations: Map<List<MarkdownInline>, AnnotatedString>)
 
 /** Selectable Markdown for ordinary disclosures. Receipts and approval payloads stay literal at the caller. */
-@Composable internal fun MarkdownText(text: String, modifier: Modifier = Modifier) {
+@Composable internal fun MarkdownText(text: String, modifier: Modifier = Modifier, fileScope: String = "",
+    onFileReference: ((ComputerFileReference) -> Unit)? = null) {
     val currentContext by rememberUpdatedState(LocalContext.current)
     // The listener reads the current context on activation, including after a context replacement.
     val openLink: (String) -> Unit = remember { { destination ->
@@ -71,14 +72,14 @@ private data class PreparedMarkdown(val document: MarkdownDocument,
         }
     } }
     val key = MarkdownPresentationKey(text, MaterialTheme.colorScheme.primary,
-        MaterialTheme.colorScheme.surfaceContainerHigh)
+        MaterialTheme.colorScheme.surfaceContainerHigh, if (onFileReference != null) fileScope else "")
     // Same-content/theme recomposition retains this result. Parse and annotation conversion both
     // stay off the UI thread; until ready, users can still read and select the full original text.
     val parsed by produceState<Pair<MarkdownPresentationKey, PreparedMarkdown>?>(null, key) {
         val result = try {
             val document = markdownDocuments.document(text)
             val annotations = withContext(markdownAnnotationDispatcher) {
-                prepareMarkdownAnnotations(document.blocks, key.accent, key.codeBackground, openLink)
+                prepareMarkdownAnnotations(document.blocks, key.accent, key.codeBackground, openLink, onFileReference)
             }
             PreparedMarkdown(document, annotations)
         } catch (cancelled: CancellationException) {
@@ -98,11 +99,11 @@ private data class PreparedMarkdown(val document: MarkdownDocument,
 }
 
 private fun prepareMarkdownAnnotations(blocks: List<MarkdownBlock>, accent: Color, codeBackground: Color,
-    openLink: (String) -> Unit): Map<List<MarkdownInline>, AnnotatedString> {
+    openLink: (String) -> Unit, onFileReference: ((ComputerFileReference) -> Unit)?): Map<List<MarkdownInline>, AnnotatedString> {
     // Identity lookup avoids rehashing the entire immutable inline tree during UI rendering.
     val annotations = IdentityHashMap<List<MarkdownInline>, AnnotatedString>()
     fun prepare(content: List<MarkdownInline>) {
-        annotations[content] = markdownAnnotatedString(content, accent, codeBackground, openLink)
+        annotations[content] = markdownAnnotatedString(content, accent, codeBackground, openLink, onFileReference)
     }
     fun visit(children: List<MarkdownBlock>) {
         children.forEach { block -> when (block) {
@@ -214,7 +215,7 @@ private fun prepareMarkdownAnnotations(blocks: List<MarkdownBlock>, accent: Colo
 }
 
 private fun markdownAnnotatedString(content: List<MarkdownInline>, accent: Color, codeBackground: Color,
-    openLink: (String) -> Unit): AnnotatedString = buildAnnotatedString {
+    openLink: (String) -> Unit, onFileReference: ((ComputerFileReference) -> Unit)?): AnnotatedString = buildAnnotatedString {
     fun AnnotatedString.Builder.appendInlines(inlines: List<MarkdownInline>) {
         inlines.forEach { inline -> when (inline) {
             is MarkdownInline.Text -> append(inline.text)
@@ -230,6 +231,12 @@ private fun markdownAnnotatedString(content: List<MarkdownInline>, accent: Color
                 withLink(LinkAnnotation.Clickable(inline.safeUrl,
                     styles = TextLinkStyles(style = SpanStyle(color = accent, textDecoration = TextDecoration.Underline)),
                     linkInteractionListener = LinkInteractionListener { openLink(inline.safeUrl) })) {
+                    appendInlines(inline.content)
+                }
+            } else if (inline.fileReference != null && onFileReference != null) {
+                withLink(LinkAnnotation.Clickable("computer-file:${inline.destination}",
+                    styles = TextLinkStyles(style = SpanStyle(color = accent, textDecoration = TextDecoration.Underline)),
+                    linkInteractionListener = LinkInteractionListener { onFileReference(inline.fileReference) })) {
                     appendInlines(inline.content)
                 }
             } else {

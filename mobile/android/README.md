@@ -115,9 +115,13 @@ verifies the conversation. History cache failures do not prevent live reads.
 Agent messages and ordinary questions render Markdown with headings, emphasis,
 lists, quotes, links, tables, strikethrough, static tasks and code blocks. Code and
 wide tables scroll horizontally inside the message. Approval commands and native
-answers stay literal. Only tapped HTTP(S) links open a browser; local file links
-stay visible text, HTML stays literal and images do not download. Parsing and
-render preparation use bounded background work and an exact-content memory cache;
+answers stay literal. Tapped HTTP(S) links open a browser; file links in agent
+messages show the original computer/path and explicit Open or Save actions.
+Documents are downloaded through the selected gateway, verified before use and
+opened with an Android read grant or saved through the system document picker.
+The limit is 10 MiB per nonempty regular file. A changed file or unavailable
+computer requires an explicit retry. HTML stays literal and images do not download.
+Parsing and render preparation use bounded background work and an exact-content memory cache;
 over-limit or malformed content falls back to its complete original text.
 
 Draft edits update the editor immediately and save through an ordered background

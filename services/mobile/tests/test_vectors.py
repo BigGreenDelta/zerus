@@ -87,7 +87,7 @@ class GoldenVectorTests(unittest.TestCase):
     def test_operation_tables_have_the_reviewed_sizes(self):
         counts = json.loads(self.files["operations.json"])["counts"]
         self.assertEqual((counts["OPERATIONS"], counts["READ_OPERATIONS"], counts["MUTATIONS"], counts["CONTEXT_KEYS"]),
-                         (45, 16, 29, 23))
+                         (46, 17, 29, 23))
 
     def test_every_operation_has_a_valid_case_and_an_envelope(self):
         operations = set(json.loads(self.files["operations.json"])["sets"]["OPERATIONS"])

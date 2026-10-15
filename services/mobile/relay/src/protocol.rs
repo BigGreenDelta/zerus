@@ -21,6 +21,7 @@ pub const READS: &[&str] = &[
     "worktrees",
     "mark_read",
     "attachment_read",
+    "file_read",
     "speech_profiles",
     "speech_stats",
     "speech_status",
@@ -78,6 +79,7 @@ pub const OPERATIONS: &[&str] = &[
     "answer",
     "archive",
     "attachment_read",
+    "file_read",
     "catalog",
     "clear_context",
     "compact_context",
@@ -392,6 +394,14 @@ pub fn request(v: &Value) -> Result<()> {
             "fork" => &["tag", "archive_id"],
             "restore" | "forget" => &["archive_id"],
             "terminal_input" => &["terminal_binding_id", "text", "enter", "key"],
+            "file_read" => &[
+                "path",
+                "offset",
+                "length",
+                "sha256",
+                "archive_id",
+                "agent_id",
+            ],
             "attachment_read" => &[
                 "message_id",
                 "index",
@@ -413,6 +423,7 @@ pub fn request(v: &Value) -> Result<()> {
                 "recovery_action",
                 "send_now",
                 "attachment_read",
+                "file_read",
                 "voice_submit",
                 "voice_status",
                 "voice_cancel",
@@ -509,6 +520,7 @@ pub fn request(v: &Value) -> Result<()> {
             }
             "terminal_input" => terminal(p)?,
             "attachment_read" => attachment_read(p)?,
+            "file_read" => file_read(p)?,
             _ => {}
         }
         if p.get("archive_id").is_some() {
@@ -719,6 +731,40 @@ fn bounded_id(v: &Value) -> Result<()> {
     let s = text(v, 128, false)?;
     if s.len() > 128 || s.trim() != s {
         return Err(Error::BAD);
+    }
+    Ok(())
+}
+/// An explicit path on the original conversation computer, transferred in
+/// bounded ranges of the same digest. Separate from sent receipt attachments.
+fn file_read(p: &Value) -> Result<()> {
+    for (key, maximum) in [
+        ("expected_run_id", 128),
+        ("expected_conversation_id", 256),
+        ("path", 8192),
+        ("agent_id", 160),
+    ] {
+        if key != "agent_id" || p.get(key).is_some() {
+            let value = text(&p[key], maximum, false)?;
+            if value.len() > maximum || value.chars().any(char::is_control) {
+                return Err(Error::BAD);
+            }
+        }
+    }
+    let offset = p["offset"].as_u64().ok_or(Error::BAD)?;
+    let length = p["length"].as_u64().ok_or(Error::BAD)?;
+    if offset >= ATTACHMENT_FILE_MAX
+        || !(1..=ATTACHMENT_CHUNK_MAX).contains(&length)
+        || offset + length > ATTACHMENT_FILE_MAX
+    {
+        return Err(Error::BAD);
+    }
+    if let Some(digest) = p.get("sha256") {
+        hex(digest)?;
+    } else if offset != 0 {
+        return Err(Error::BAD);
+    }
+    if let Some(id) = p.get("agent_id") {
+        agent(id)?;
     }
     Ok(())
 }

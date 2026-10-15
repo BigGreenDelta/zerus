@@ -432,7 +432,7 @@ fn validate(request: &LocalRequest) -> Result<()> {
             read_mark(&request.payload)?;
         }
         "history" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
-        | "interrupt" | "clear-context" | "compact-context" | "effort" => {
+        | "interrupt" | "clear-context" | "compact-context" | "effort" | "file-read" => {
             ensure!(
                 rest.len() == 2 && session(&rest[0]) && rest[1] == "--json",
                 "native operation requires scoped JSON"
@@ -1230,6 +1230,7 @@ mod tests {
             "clear-context",
             "compact-context",
             "effort",
+            "file-read",
         ] {
             assert!(
                 validate(&request(&[op, "codex/project", "--json"], Some(scope()))).is_ok(),

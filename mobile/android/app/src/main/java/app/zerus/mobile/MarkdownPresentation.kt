@@ -50,7 +50,8 @@ internal sealed interface MarkdownInline {
     data class Text(val text: String) : MarkdownInline
     data class Styled(val style: MarkdownStyle, val content: List<MarkdownInline>) : MarkdownInline
     data class Code(val text: String) : MarkdownInline
-    data class Link(val content: List<MarkdownInline>, val destination: String, val safeUrl: String?) : MarkdownInline
+    data class Link(val content: List<MarkdownInline>, val destination: String, val safeUrl: String?,
+        val fileReference: ComputerFileReference? = null) : MarkdownInline
     data class Image(val alt: String) : MarkdownInline
     data object Break : MarkdownInline
 }
@@ -210,7 +211,8 @@ internal class MarkdownParser(
             is StrongEmphasis -> MarkdownInline.Styled(MarkdownStyle.Strong, inlines(node))
             is Emphasis -> MarkdownInline.Styled(MarkdownStyle.Emphasis, inlines(node))
             is Strikethrough -> MarkdownInline.Styled(MarkdownStyle.Strike, inlines(node))
-            is Link -> MarkdownInline.Link(inlines(node), node.destination, safeMarkdownUrl(node.destination))
+            is Link -> MarkdownInline.Link(inlines(node), node.destination, safeMarkdownUrl(node.destination),
+                ComputerFileReference.parse(node.destination))
             is Image -> MarkdownInline.Image(imageAlt(node))
             is SoftLineBreak -> MarkdownInline.Text(" ")
             is HardLineBreak -> MarkdownInline.Break

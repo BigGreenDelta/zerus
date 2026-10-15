@@ -4,6 +4,7 @@ Production HTTP runs in services/mobile/relay. The supported zerus-mobile CLI
 executes that Rust binary; this module remains an independent protocol oracle.
 """
 from __future__ import annotations
+from . import file_reads
 
 import asyncio
 from collections import OrderedDict, deque
@@ -318,6 +319,9 @@ def validate_request(value):
         return
     if op == "history":
         validate_history(payload,request_id)
+        return
+    if op == "file_read":
+        file_reads.validate(payload, request_id)
         return
     if op == "attachment_read":
         validate_read(payload,request_id)

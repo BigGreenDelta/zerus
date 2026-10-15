@@ -290,6 +290,7 @@ impl Store {
             // Attachment bytes are carried, never kept: a result leaves shortly
             // after the phone read it, or after a short TTL if it never does.
             // The partial `attachment_history` index holds only these rows.
+            rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation='file_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated,id LIMIT ?",args![at-ATTACHMENT_RESULT_TTL,at-ATTACHMENT_READ_GRACE,batch]).await?);
             rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated,id LIMIT ?",args![at-ATTACHMENT_RESULT_TTL,at-ATTACHMENT_READ_GRACE,batch]).await?);
             rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation IN ('speech_submit','voice_submit','speech_profile_upsert','speech_profile_remove','speech_profile_test') AND body!='' AND state IN ('completed','failed','uncertain') ORDER BY updated,id LIMIT ?",args![batch]).await?);
             rows.sort_by(|a, b| s(a, "id").cmp(s(b, "id")));
@@ -302,7 +303,7 @@ impl Store {
                     continue;
                 }
                 let read = READS.contains(&s(&r, "operation"));
-                let attachment = r["operation"] == "attachment_read";
+                let attachment = ["attachment_read", "file_read"].contains(&s(&r,"operation"));
                 let remove = read
                     && (f(&r, "updated")
                         < at - match s(&r, "operation") {
@@ -314,7 +315,7 @@ impl Store {
                             | "speech_status"
                             | "voice_profiles"
                             | "voice_status" => 120.0,
-                            "attachment_read" => ATTACHMENT_RESULT_TTL,
+                            "attachment_read" | "file_read" => ATTACHMENT_RESULT_TTL,
                             _ => self.db.cfg.retention.min(3600) as f64,
                         }
                         || (attachment

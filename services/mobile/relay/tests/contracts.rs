@@ -3014,3 +3014,55 @@ async fn mobile_delivery_is_computer_scoped_and_capability_gated() {
     }
     f.close().await;
 }
+
+async fn computer_file_read_contract(f: Fixture, second: Option<&Store>) {
+    let worker=second.unwrap_or(&f.store);
+    assert!(protocol::READS.contains(&"file_read"));
+    assert!(!protocol::READ_SQL.contains("file_read"));
+    let id=Uuid::new_v4().to_string();
+    let command=json!({"request_id":id,"computer_id":f.node.id,"operation":"file_read","session":"codex/example/tag",
+        "payload":{"request_id":id,"expected_run_id":"run","expected_conversation_id":"conversation",
+            "path":"/workspace/example/Сводная итог.xlsx","offset":0,"length":524288}});
+    protocol::request(&command).unwrap();
+    assert_eq!(f.submit(&command).await.unwrap_err().0.as_u16(),409);
+    f.beat(&json!({"sessions":[],"mobile_capabilities":{"protocol_version":1,"operations":["file_read"],"features":[]}})).await;
+    for (field,value) in [("path",json!("")),("path",json!("/bad\nfile")),("path",json!("界".repeat(2731))),
+        ("offset",json!(1)),("offset",json!(true)),("length",json!(0)),("length",json!(524289)),
+        ("sha256",json!("a")),("archive_id",json!("00000000-0000-0000-0000-000000000000")),("agent_id",json!("../child"))] {
+        let mut bad=command.clone();bad["payload"][field]=value;
+        assert!(protocol::request(&bad).is_err(),"accepted {field}");
+    }
+    let mut later=command.clone();later["payload"]["offset"]=json!(3);later["payload"]["sha256"]=json!("a".repeat(64));
+    protocol::request(&later).unwrap();
+    f.submit(&command).await.unwrap();worker.claim(&f.node,false).await.unwrap().unwrap();
+    let result=json!({"state":"completed","result":{"file_name":"Сводная итог.xlsx","data_base64":"AABQ"},"error":null});
+    worker.result(&f.node,&id,&result,Some(&canonical(&result["result"]).unwrap())).await.unwrap();
+    f.store.receipt(&f.phone,&id).await.unwrap();f.check_accounting().await;
+    worker.maintain(false).await.unwrap();assert_eq!(f.count("requests WHERE operation='file_read'").await,1);
+    f.store.db.exec("UPDATE requests SET result_read=? WHERE id=?",args![now()-6.,&id]).await.unwrap();
+    worker.maintain(false).await.unwrap();assert_eq!(f.count("requests WHERE operation='file_read'").await,0);
+    f.check_accounting().await;f.close().await;
+}
+
+#[tokio::test]
+async fn computer_file_read_is_scoped_gated_and_short_lived() {
+    computer_file_read_contract(Fixture::new().await,None).await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly"]
+async fn postgres_cross_worker_computer_file_read_is_scoped_gated_and_short_lived() {
+    use sqlx::Connection;
+    let base=std::env::var("ZERUS_RELAY_TEST_DATABASE_URL").expect("isolated PostgreSQL required");
+    let mut admin=sqlx::PgConnection::connect(&base).await.unwrap();
+    let name=format!("relay_file_test_{}",Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {name}")).execute(&mut admin).await.unwrap();
+    let mut url=url::Url::parse(&base).unwrap();url.set_path(&name);
+    let cfg=Config{database_url:Some(url.to_string()),background:false,..Config::default()};
+    let f=Fixture::config(cfg.clone()).await;
+    let second=Store::new(Db::open(std::path::Path::new("unused"),Arc::new(cfg)).await.unwrap());
+    computer_file_read_contract(f,Some(&second)).await;
+    second.db.close().await;
+    sqlx::query(&format!("DROP DATABASE {name}")).execute(&mut admin).await.unwrap();
+    admin.close().await.unwrap();
+}
