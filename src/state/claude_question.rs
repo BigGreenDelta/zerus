@@ -609,14 +609,20 @@ fn focus_other<T: Transport>(io: &mut T, card: &Value, index: usize) -> Result<(
 /// same non-empty Other editor, and return the editor text of that frame.
 /// Every later key is checked against the screen read here: a frame captured
 /// before Claude redraws would report Claude's own redraw as a changed
-/// terminal, or let a reduction be measured from a stale draft.
+/// terminal, or let a reduction be measured from a stale draft. A caret move
+/// changes at most the whitespace Claude shows around the caret and at wraps,
+/// so the frame must show the same draft otherwise: text typed meanwhile never
+/// becomes the screen the next key is checked against.
 fn confirm_caret<T: Transport>(
     io: &mut T,
     card: &Value,
     index: usize,
+    draft: &str,
     moved: impl Fn(Caret) -> bool,
     left: &str,
 ) -> Result<String> {
+    let visible = |text: &str| text.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+    let draft = visible(draft);
     let count = card["questions"][index]["options"]
         .as_array()
         .unwrap()
@@ -637,11 +643,17 @@ fn confirm_caret<T: Transport>(
         if current != index || focused != count {
             return Err(left.into());
         }
-        if caret.is_some_and(&moved) {
+        let changed = visible(&other) != draft;
+        if !changed && caret.is_some_and(&moved) {
             return Ok(other);
         }
         if Instant::now() >= deadline {
-            return Err("Claude did not confirm moving the Other caret; inspect Terminal".into());
+            return Err(if changed {
+                "Claude's Other draft changed while moving its caret; inspect Terminal"
+            } else {
+                "Claude did not confirm moving the Other caret; inspect Terminal"
+            }
+            .into());
         }
         io.pause();
     }
@@ -689,7 +701,7 @@ fn clear_other_within<T: Transport>(io: &mut T, card: &Value, index: usize, wind
             Some(caret) if caret.line_end => other,
             Some(_) => {
                 io.key("C-e")?;
-                confirm_caret(io, card, index, |caret| caret.line_end, "Claude left the Other editor")?
+                confirm_caret(io, card, index, &other, |caret| caret.line_end, "Claude left the Other editor")?
             }
             None => {
                 return Err("Claude's Other caret is not visible; clear the draft in Terminal".into())
@@ -736,6 +748,7 @@ fn clear_other_within<T: Transport>(io: &mut T, card: &Value, index: usize, wind
                         io,
                         card,
                         index,
+                        &other,
                         |moved| Some(moved) != caret,
                         "Claude left the Other editor during newline traversal",
                     )?;
@@ -1650,6 +1663,13 @@ mod tests {
             // C-u acts from the caret: never send it before Claude shows C-e.
             (inside.clone(), vec![], vec!["C-e"], false),
             (inside.clone(), vec![("C-e", away)], vec!["C-e"], false),
+            // A caret move never makes text typed meanwhile the new baseline.
+            (
+                inside.clone(),
+                vec![("C-e", other_screen("draftX\x1b[7m \x1b[0m")), ("C-u", styled_empty())],
+                vec!["C-e"],
+                false,
+            ),
             // Without a visible caret no clearing key has a provable effect.
             (other_screen("draft"), vec![], vec![], false),
         ] {
