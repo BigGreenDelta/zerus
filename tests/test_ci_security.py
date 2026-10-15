@@ -532,6 +532,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("        working-directory: services/mobile/connector\n", rust)
         self.assertIn("""grep -q 'serde_json feature "preserve_order"'""", rust)
         self.assertIn("(axum|sqlx|reqwest|openssl-sys|native-tls)", rust)
+        # The plain build, the last one in this step, carries no test seam.
+        self.assertIn("\n          if grep -q ZERUS_CONNECTOR_TEST_ target/debug/zerus-mobile-connector; then\n", rust)
+        self.assertLess(rust.index("\n          cargo +1.85.0 build --locked\n"), rust.index("grep -q ZERUS_CONNECTOR_TEST_"))
         tests = next(step for step in steps(connector) if "name: Vector, binary and handoff tests" in step)
         for variable in ("ZERUS_CONNECTOR_TEST_PYTHON", "ZERUS_CONNECTOR_TEST_HGS"):
             self.assertIn(f"\n          {variable}: ", tests)
@@ -542,6 +545,11 @@ class WorkflowSecurityTests(unittest.TestCase):
                          [("", " -p 'test_bb_*.py' -v"), ("", " -p 'test_bb_*.py' -v")])
         self.assertIn('ZERUS_CONNECTOR_COMMAND="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/'
                       'zerus-mobile-connector" \\\n', black_box)
+        # cargo test rebuilt the binary without the test hooks the Rust run needs.
+        hooks = "\n          (cd services/mobile/connector && cargo +1.85.0 build --locked --features test-hooks)\n"
+        self.assertIn(hooks, black_box)
+        self.assertLess(black_box.index(python), black_box.index(hooks))
+        self.assertLess(black_box.index(hooks), black_box.index("ZERUS_CONNECTOR_COMMAND="))
         ported = json.loads((ROOT / "services/mobile/tests/ported.json").read_text())["rust"]
         self.assertEqual(ported, sorted(set(ported)))
         for module in ported:
