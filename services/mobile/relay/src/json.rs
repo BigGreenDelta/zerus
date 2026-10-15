@@ -1,6 +1,8 @@
 //! API v1 identity uses Python json.dumps(sort_keys=True, separators=(',', ':'),
-//! ensure_ascii=True). Changing whitespace, escaping or float spelling reopens
-//! duplicate requests. The codec is bounded before building an object tree.
+//! ensure_ascii=True). Changing whitespace, escaping, key order or float
+//! spelling reopens duplicate requests. The codec is bounded before building an
+//! object tree, and sorts keys itself: serde_json's `preserve_order` feature,
+//! which any crate in a build can enable, makes `Map` keep insertion order.
 use crate::error::{Error, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -9,6 +11,17 @@ pub fn digest(s: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(s.as_ref()))
 }
 
+/// Parses untrusted JSON after a lexical scan that bounds it without building
+/// any tree. `depth_limit` bounds container nesting (`[]` is depth 1), and
+/// `value_limit` bounds the containers, strings (object keys included) and
+/// scalars, so `{"a":[1,true]}` counts 5. Whitespace never counts. Exceeding
+/// either limit fails with [`Error::LARGE`], malformed input with [`Error::BAD`].
+///
+/// Relay configuration admits requests within `max_json_depth` and
+/// `max_json_values`, at most 32 and 50,000, and the relay re-reads stored JSON
+/// at those maxima. A claim batch, `{"requests":[request]}` with the request's
+/// `gateway_route` and `expires_at`, nests a request two levels deeper and adds
+/// fewer than 64 values, so parse a whole batch with at least those margins.
 pub fn parse(raw: &[u8], depth_limit: usize, value_limit: usize) -> Result<Value> {
     let mut depth = 0usize;
     let mut values = 0usize;
@@ -97,43 +110,86 @@ pub fn canonical(value: &Value) -> Result<String> {
     encode(value, &mut out)?;
     String::from_utf8(out).map_err(|_| Error::BAD)
 }
+/// Separators and escaping of one Python `json.dumps` form.
+#[derive(Clone, Copy)]
+struct Style {
+    item: &'static [u8],
+    key: &'static [u8],
+    ascii: bool,
+}
+const CANONICAL: Style = Style {
+    item: b",",
+    key: b":",
+    ascii: true,
+};
+/// Writes the API v1 identity form described in the module documentation.
 pub fn encode(v: &Value, w: &mut impl Write) -> Result<()> {
+    write(v, w, CANONICAL)
+}
+/// Python's plain `json.dumps(value, ensure_ascii=...)`, separated by `", "` and
+/// `": "`, which the connector uses to measure native input and results. Keys
+/// are sorted where Python keeps dict order, so only the length is Python's. A
+/// number beyond the double range fails, where Python would write `Infinity`.
+pub fn python_default_encode(v: &Value, ensure_ascii: bool, w: &mut impl Write) -> Result<()> {
+    let style = Style {
+        item: b", ",
+        key: b": ",
+        ascii: ensure_ascii,
+    };
+    write(v, w, style)
+}
+/// `len(json.dumps(value, ensure_ascii=...).encode())`, in UTF-8 bytes, which
+/// equal Python's character count only when `ensure_ascii` is set.
+pub fn python_default_len(v: &Value, ensure_ascii: bool) -> Result<usize> {
+    let mut w = LimitWriter {
+        inner: std::io::sink(),
+        remaining: usize::MAX,
+    };
+    python_default_encode(v, ensure_ascii, &mut w)?;
+    Ok(usize::MAX - w.remaining)
+}
+fn write(v: &Value, w: &mut impl Write, style: Style) -> Result<()> {
     match v {
         Value::Null => w.write_all(b"null")?,
         Value::Bool(b) => w.write_all(if *b { b"true" } else { b"false" })?,
         Value::Number(n) => w.write_all(number(&n.to_string())?.as_bytes())?,
-        Value::String(s) => string(s, w)?,
+        Value::String(s) => string(s, w, style.ascii)?,
         Value::Array(a) => {
             w.write_all(b"[")?;
             for (i, x) in a.iter().enumerate() {
                 if i > 0 {
-                    w.write_all(b",")?;
+                    w.write_all(style.item)?;
                 }
-                encode(x, w)?;
+                write(x, w, style)?;
             }
             w.write_all(b"]")?;
         }
         Value::Object(o) => {
+            // Python orders keys by code point, which is the byte order of UTF-8.
+            let mut entries: Vec<_> = o.iter().collect();
+            entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
             w.write_all(b"{")?;
-            for (i, (k, x)) in o.iter().enumerate() {
+            for (i, (k, x)) in entries.into_iter().enumerate() {
                 if i > 0 {
-                    w.write_all(b",")?;
+                    w.write_all(style.item)?;
                 }
-                string(k, w)?;
-                w.write_all(b":")?;
-                encode(x, w)?;
+                string(k, w, style.ascii)?;
+                w.write_all(style.key)?;
+                write(x, w, style)?;
             }
             w.write_all(b"}")?;
         }
     }
     Ok(())
 }
-fn string(s: &str, w: &mut impl Write) -> Result<()> {
+fn string(s: &str, w: &mut impl Write, ascii: bool) -> Result<()> {
     w.write_all(b"\"")?;
     // Copy long ASCII/base64 runs in one write; do not allocate escaped copies.
+    // Without ASCII escaping, Python escapes only the quote, the backslash and
+    // C0 controls: DEL and all non-ASCII characters are written as they are.
     let mut start = 0;
     for (i, c) in s.char_indices() {
-        if (' '..='~').contains(&c) && c != '"' && c != '\\' {
+        if c >= ' ' && (c <= '~' || !ascii) && c != '"' && c != '\\' {
             continue;
         }
         w.write_all(&s.as_bytes()[start..i])?;
