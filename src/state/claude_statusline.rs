@@ -168,13 +168,23 @@ fn managed_settings() -> bool {
         .any(|name| fs::symlink_metadata(folder.join(name)).is_ok())
 }
 
-/// Whether `argv` already chooses Claude Code's flag settings or settings
-/// sources: then hgs adds no settings of its own.
+/// The options of Claude Code 2.1.296 that choose its flag settings, its
+/// settings sources, the folder of its project and local settings
+/// (`--project-config-root`) or policy settings (`--managed-settings`).
+const SETTINGS_OPTIONS: &[&str] = &[
+    "--settings",
+    "--setting-sources",
+    "--project-config-root",
+    "--managed-settings",
+];
+
+/// Whether `argv` already chooses which settings Claude Code reads: then hgs
+/// adds no settings of its own.
 fn chooses_settings(argv: &[String]) -> bool {
     let end = argv.iter().position(|arg| arg == "--").unwrap_or(argv.len());
     argv[..end].iter().any(|arg| {
         let key = arg.split('=').next().unwrap_or(arg);
-        key == "--settings" || key == "--setting-sources"
+        SETTINGS_OPTIONS.contains(&key)
     })
 }
 
@@ -465,7 +475,8 @@ mod tests {
         add_settings(&mut argv, "{}");
         assert_eq!(argv, ["claude", "--model", "opus", "--settings", "{}", "--", "--settings"]);
         assert!(chooses_settings(&argv));
-        for flag in ["--settings=/tmp/x.json", "--setting-sources", "--setting-sources=user"] {
+        for flag in ["--settings=/tmp/x.json", "--setting-sources", "--setting-sources=user", "--project-config-root",
+            "--project-config-root=/srv/project", "--managed-settings"] {
             assert!(chooses_settings(&["claude".to_owned(), flag.to_owned()]));
         }
         let mut empty = Vec::new();
