@@ -1,10 +1,12 @@
 """The macOS bundle must reference only itself and the system, for Apple Silicon only."""
 import ast
 import importlib.util
+import json
 import os
 from pathlib import Path
 import plistlib
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -76,6 +78,36 @@ Load command 20
 
 
 class BundleChecks(unittest.TestCase):
+    @unittest.skipUnless(Path("/bin/bash").exists(), "requires Bash")
+    def test_cask_metadata_is_validated_by_the_system_bash_before_installation(self):
+        script = ROOT / "scripts/ci/macos-cask-install.sh"
+        # Execute the real pre-installation section, including its quoted
+        # Python heredoc, with Apple's Bash 3.2 on macOS and Bash on Linux.
+        preflight = script.read_text().split('\nasset="$signed/', 1)[0]
+        preflight += '\nprintf "%s\\n" "$cask" "$release" "$team"\n'
+        with tempfile.TemporaryDirectory(prefix="zerus-cask-metadata-") as temporary:
+            directory = Path(temporary)
+            metadata = directory / "macos-info.json"
+            for channel, release, cask in (("stable", "0.42.2", "zerus"),
+                    ("nightly", "0.42.2.r812.gabcdef0.n41", "zerus@nightly")):
+                info = {"asset": f"zerus-{release}-macos-arm64.zip", "qt_version": "6.11.2",
+                        "team_id": "ABCDE12345", "minimum_system_version": "14.0",
+                        "notarization_id": "0123abcd-4567-89ef-0123-456789abcdef",
+                        "dmg": {"asset": f"zerus-{release}-macos-arm64.dmg",
+                                "notarization_id": "1123abcd-4567-89ef-0123-456789abcdef"}}
+                metadata.write_text(json.dumps(info))
+                command = ["/bin/bash", "-c", preflight, str(script), str(directory), channel]
+                with self.subTest(channel=channel):
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), [cask, release, "ABCDE12345"])
+                for invalid in ({**info, "team_id": "invalid"},
+                                {key: value for key, value in info.items() if key != "dmg"}):
+                    metadata.write_text(json.dumps(invalid))
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "", "invalid metadata must stop before installation")
+
     def test_selftest_exposes_tmux_with_an_isolated_home_and_socket_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -9,7 +9,9 @@ signed="$(cd "${1:?signed artifact directory}" && pwd)"
 channel="${2:-stable}"
 tag="${3:-}"
 version="$(cat VERSION)"
-read -r cask release team < <(python3 - "$signed/macos-info.json" "$channel" <<'PY'
+# Bash 3.2 can brace-expand a quoted heredoc inside process substitution.
+# A command substitution also propagates metadata-validation failure to set -e.
+metadata="$(python3 - "$signed/macos-info.json" "$channel" <<'PY'
 import json, re, sys
 sys.path.insert(0, "scripts")
 from macos_release import cask_for, validate_macos_info
@@ -20,7 +22,8 @@ if "dmg" not in info:
     raise SystemExit("The signed candidate must include its notarized disk image.")
 print(cask_for(sys.argv[2]), release, info["team_id"])
 PY
-)
+)"
+read -r cask release team <<< "$metadata"
 asset="$signed/zerus-$release-macos-arm64.zip"
 image="$signed/zerus-$release-macos-arm64.dmg"
 codesign --verify --strict "$image"
