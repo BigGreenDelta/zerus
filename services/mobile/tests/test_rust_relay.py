@@ -198,7 +198,8 @@ class RustHttpContracts(unittest.IsolatedAsyncioTestCase):
     async def test_expiry_and_restart_keep_claims(self):
         queued, claimed = self.command(), self.command('send')
         await self.call('POST', '/v1/requests', claimed, expected=202)
-        await self.call('GET', '/v1/node/requests', node=True)
+        delivered = (await self.call('GET', '/v1/node/requests', node=True))['requests']
+        self.assertEqual([command['request_id'] for command in delivered], [claimed['request_id']])
         await self.call('POST', '/v1/requests', queued, expected=202)
         await self.restart()
         # A PostgreSQL worker never retires a claim at startup; it keeps its deadline.
@@ -318,7 +319,9 @@ class RustHttpContracts(unittest.IsolatedAsyncioTestCase):
     async def test_long_poll_rechecks_revocation(self):
         started = time.monotonic()
         task = asyncio.create_task(self.client.get('/v1/node/requests?wait=10', headers=self.headers(node=True)))
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.25)
+        # Still waiting: an answer before the revocation would prove nothing.
+        self.assertFalse(task.done())
         await self.relay.revoke('node', self.node['node_id'])
         response = await task
         self.assertEqual(response.status, 401)
