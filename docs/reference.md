@@ -1686,8 +1686,9 @@ On Linux, client policy refreshes start the configured user service without
 restarting an active executor. A detached worker remains the fallback when no
 installed service or usable user manager is available; refreshes start none
 while a worker runs. The service's own worker (the job's process as launchd
-reports it, or the unit's main process as systemd reports it, never another
-process in the unit's control group) never exits because another worker holds
+reports it, or the unit's main process as systemd reports it, not another
+process in the unit's control group; only when systemd cannot answer does the
+control group decide) never exits because another worker holds
 the executor lock, which would make the service manager start it again every 10
 seconds: it waits for the lock, and a detached worker hands over to it between
 rounds.
