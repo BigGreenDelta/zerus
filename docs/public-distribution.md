@@ -198,9 +198,9 @@ macOS clients can discover source updates, but an installable signed macOS dev
 bundle is still dependent on the macOS distribution/signing work. This workflow
 does not claim that Linux binaries are macOS installers. Dev has no Windows build:
 the Windows job gates Dev like every other suite, but its portable zip stays a
-nightly-only GitHub asset, and schema 2 has no artifact kind for it. A portable
-Windows build on the Dev channel says so, never reports a dev build as an update
-and offers no dev download. Stable Android may remain unpublished initially;
+GitHub asset of stable and nightly releases, and schema 2 has no artifact kind
+for it. A portable Windows build on the Dev channel says so, never reports a dev
+build as an update and offers no dev download. Stable Android may remain unpublished initially;
 selecting it reports an unavailable catalog without changing the installed app.
 Public deployment, key provisioning and bootstrap publication are separate from
 local source validation.
@@ -312,14 +312,19 @@ The pull publisher consumes current main's sealed `release-info.json`,
 workflow version provenance. It resolves each tag to its real source commit and
 never substitutes GitHub's generic `/latest` endpoint for independent channels.
 
-Nightly releases can also carry the Windows portable zip,
+Stable and nightly releases can also carry the Windows portable zip,
 `zerus-<version>-windows-x86_64.zip`, named as `windows_portable` in
 `release-info.json` and sealed in `SHA256SUMS`. It is a GitHub-only asset: the
 mirror checks its exact name and GitHub digest but neither downloads nor serves
 it, and the v1 desktop feed does not list it, because deployed GUIs reject unknown
-artifact kinds. A zip in a stable release fails closed. Deploy the updated
-`update_feed.py` before the first nightly that carries a zip; older mirror code
-rejects the new asset family and stops updating the nightly catalog.
+artifact kinds. The feed of a release with the zip is therefore the same as
+without it, and releases sealed before it (stable 0.42.2 and earlier, older
+nightlies) stay valid. An undeclared or differently named zip fails closed.
+Deploy the updated `update_feed.py` before the first release of a channel that
+carries a zip: older mirror code accepts it only in nightlies and fails the whole
+`desktop/stable` job on a stable release with one, keeping the previous stable
+catalog and, in a job that also runs `--dev-platform desktop`, the previous
+desktop Dev catalog.
 
 AUR versions are read from the published recipe archive, including epoch and
 package release. In particular `zerus-git` is a VCS recipe, not an invented copy
@@ -366,10 +371,13 @@ the cask matching the selected channel, or the uninstall-and-install command tha
 switches casks; a `zerus@nightly` installation starts on the nightly channel.
 Nightlies compare by Nightly run number. Zerus offers **Restart to finish update**
 once the bundle's `ZerusReleaseVersion` differs from the one the GUI started with.
-The Windows portable build has no installer or self-update: it follows the nightly
-channel by default and links newer nightlies to their GitHub release page. On
-Stable or Dev it reports that the channel has no Windows build and never reports
-an update. Updates never stop agents, tmux or resident adapters.
+The Windows portable build has no installer or self-update: it starts on the
+nightly channel (the zip cannot tell a stable from a nightly release), and links a
+newer stable release or nightly to its GitHub release page. Stable 0.42.2 and
+earlier have no Windows build: they are never reported as an update, and the
+message points to the nightly channel. On Dev it reports that the channel has no
+Windows build and never reports an update. Updates never stop agents, tmux or
+resident adapters.
 
 ## Desktop mobile-connection settings
 
@@ -413,7 +421,7 @@ needed on the website.
 
 Stable releases and nightly prereleases from candidate schema 2 also carry the
 notarized `zerus-<version>-macos-arm64.zip` of the `zerus` or `zerus@nightly`
-Homebrew cask. Like the Windows nightly zip it stays on GitHub, where Homebrew
+Homebrew cask. Like the Windows zip it stays on GitHub, where Homebrew
 downloads it: the mirror checks its sealed name and GitHub digest but neither
 stores it (it never deletes and has a fixed disk budget) nor lists it in catalog
 artifacts, which existing desktop clients would reject as an unknown kind.

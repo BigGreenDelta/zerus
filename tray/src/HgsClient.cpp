@@ -1056,11 +1056,34 @@ QJsonObject HgsClient::worktreeReview(const QString &host,const QString &commonD
     const auto age=QDateTime::currentSecsSinceEpoch()-qint64(data.value("sampled_at").toDouble());
     return age>=0&&age<300?data:QJsonObject();
 }
-quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch)
+quint64 HgsClient::inspectWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &file,int offset)
+{
+    const auto request=++m_worktreeRequest;
+    QStringList args{"worktrees","inspect","--path",path,"--common-dir",commonDir,"--json"};
+    if(!file.isEmpty())args<<"--file"<<file;
+    if(offset>0)args<<"--offset"<<QString::number(offset);
+    if(!host.isEmpty())args.prepend('@'+host);
+    runHgs(m_hgs,args,host.isEmpty()?30000:45000,this,[this,request,host,path,commonDir,file,offset](const QByteArray &out){
+        const auto data=out.size()<=4*1024*1024?QJsonDocument::fromJson(out).object():QJsonObject();
+        if(data["state"]!="ok"||data["path"]!=path||data["common_dir"]!=commonDir
+           ||(!file.isEmpty()&&data["file"].toObject()["path"]!=file)
+           || (offset>0&&data["file"].toObject()["offset"].toInt(-1)!=offset)){
+            emit worktreeInspectionFinished(request,host,path,file,{},tr("Worktree inspection could not be verified. Refresh and try again."));return;
+        }
+        emit worktreeInspectionFinished(request,host,path,file,data,{});
+    },[this,request,host,path,file](const QString &,const QString &error){
+        const auto message=error.contains("usage: hgs worktrees")?tr("Update Zerus on this computer to inspect worktree changes."):error;
+        emit worktreeInspectionFinished(request,host,path,file,{},message);
+    });
+    return request;
+}
+
+quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch,const QString &ignoredFingerprint)
 {
     const auto request=++m_worktreeRequest;const auto token=QUuid::createUuid().toString(QUuid::WithoutBraces);
     QStringList args{"worktrees","remove","--path",path,"--common-dir",commonDir,"--fingerprint",fingerprint,"--request-id",token,"--json"};
     if(deleteBranch)args<<"--delete-branch";if(!host.isEmpty())args.prepend('@'+host);
+    if(!ignoredFingerprint.isEmpty())args<<"--ignored-fingerprint"<<ignoredFingerprint;
     const auto forget=[this,host,commonDir]{
         // Removal changes the repository whatever the outcome; never trust old verdicts.
         m_worktreeReviews.remove(host+'\n'+commonDir);

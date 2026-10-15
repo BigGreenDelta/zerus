@@ -225,8 +225,9 @@ def build_feed(release,info,files,sums,package_versions,commit):
             expected.add(f'{package}-{actual}-x86_64.pkg.tar.zst')
         if channel=='stable':expected.add(f'zerus-{version}-source.tar.gz')
         portable=info.get('windows_portable')
-        if channel=='nightly' and portable is not None:
-            # Linked from GitHub only; deployed GUIs reject unknown feed artifact kinds.
+        if portable is not None:
+            # Stable and nightly releases may carry it. Linked from GitHub only;
+            # deployed GUIs reject unknown feed artifact kinds.
             require(portable==windows_portable(version),'Unexpected Windows portable asset');expected.add(portable)
         macos=info.get('macos')
         if macos is not None:
@@ -310,7 +311,7 @@ def validate_and_fetch(client,release,directory,expected_platform,expected_chann
     require(isinstance(info,dict),'Invalid sealed release metadata')
     if info.get('platform','desktop')!=expected_platform or info.get('channel','stable')!=expected_channel:
         raise ChannelMismatch('Selected release belongs to another channel')
-    portable=info.get('windows_portable') if expected_platform=='desktop' and expected_channel=='nightly' else None
+    portable=info.get('windows_portable') if expected_platform=='desktop' and expected_channel in {'stable','nightly'} else None
     macos=info.get('macos') if expected_platform=='desktop' else None
     cask=macos.get('asset') if isinstance(macos,dict) else None
     for name,digest in sums.items():

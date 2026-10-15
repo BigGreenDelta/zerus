@@ -158,6 +158,9 @@ struct Program {
     ended: AtomicBool,
     /// Like a program that handles CTRL_CLOSE_EVENT by exiting.
     exit_on_hang_up: AtomicBool,
+    /// What the console renders as it closes: output the program wrote before
+    /// it exited that reaches the host only with the pseudoconsole's last frame.
+    closing: Mutex<Vec<u8>>,
     /// Processes in the session's job besides the root.
     members: Mutex<Vec<u32>>,
 }
@@ -239,6 +242,10 @@ impl Console for FakeConsole {
         }
         if self.0.exit_on_hang_up.load(Ordering::SeqCst) {
             self.0.exit(0xC000_013A);
+        }
+        let closing = std::mem::take(&mut *lock(&self.0.closing));
+        if !closing.is_empty() {
+            self.0.write(&closing);
         }
         // The console's output ends when it is closed.
         self.0.output.close();
@@ -347,6 +354,7 @@ impl Launcher for FakeLauncher {
             hung_up: AtomicBool::new(false),
             ended: AtomicBool::new(false),
             exit_on_hang_up: AtomicBool::new(true),
+            closing: Mutex::new(Vec::new()),
             members: Mutex::new(Vec::new()),
         });
         if let Some((_, said)) = failure {
@@ -1655,6 +1663,76 @@ fn a_launch_reports_how_its_session_ended_with_its_last_lines() {
             ..running
         })
     );
+}
+
+#[test]
+fn an_ended_session_completes_its_launch_report_before_it_leaves_the_listing() {
+    let (host, launcher) = new_host();
+    let folder = tempfile::tempdir().unwrap();
+    host.complete_launch_reports_in(folder.path().to_owned());
+    let mut client = connect(&host);
+    let report = |launch: &str| folder.path().join(format!("{launch}.end.json"));
+    let read = |launch: &str| std::fs::read_to_string(report(launch)).unwrap();
+    let draining = |launch: &str, name: &str| {
+        let text = serde_json::json!({"launch_id": launch, "name": name, "code": 1,
+                                      "output": "half", "ended_at": 1.5, "draining": true});
+        std::fs::write(report(launch), format!("{text}\n")).unwrap();
+    };
+    let launches = [
+        "0b6f4c9e-3c1d-4b8f-9a35-6f2e2d6f6a10",
+        "4400baad-7d90-480a-8451-5f3e456e2ae9",
+        "92812fe9-eed8-477c-921a-ef3949434722",
+    ];
+    for (index, launch) in launches.iter().enumerate() {
+        let name = format!("claude/p/{index}");
+        client.call::<Created>(create(launch, &name)).unwrap();
+        launcher.program(index).write(b"half\r\n");
+        eventually("the output", || {
+            capture(&mut client, pane(&name)).starts_with("half")
+        });
+    }
+    // The supervisor of the first read its screen before the last lines it and
+    // its agent wrote had reached the host, and left its report draining.
+    draining(launches[0], "claude/p/0");
+    *lock(&launcher.program(0).closing) = b"whole\r\nhgs: cannot start\r\n".to_vec();
+    launcher.program(0).exit(1);
+    eventually("the end", || {
+        client.call::<Listed>(Op::List).unwrap().sessions.len() == 2
+    });
+    // Once a listing misses the session, its report holds the drained lines,
+    // as `launch_status` does.
+    assert_eq!(
+        read(launches[0]),
+        format!(
+            "{{\"code\":1,\"ended_at\":1.5,\"launch_id\":\"{}\",\"name\":\"claude/p/0\",\
+             \"output\":\"half\\nwhole\\nhgs: cannot start\"}}\n",
+            launches[0]
+        )
+    );
+    assert_eq!(
+        launch_status(&mut client, launches[0]).unwrap().output,
+        "half\nwhole\nhgs: cannot start"
+    );
+
+    // A complete report (a run that ended after its startup time, a
+    // supervisor of an earlier version) stays as it was; a session whose
+    // supervisor left none gets none.
+    let complete = format!(
+        "{{\"code\":1,\"ended_at\":1.5,\"launch_id\":\"{}\",\"name\":\"claude/p/1\",\
+         \"output\":\"half\"}}\n",
+        launches[1]
+    );
+    std::fs::write(report(launches[1]), &complete).unwrap();
+    for index in [1, 2] {
+        *lock(&launcher.program(index).closing) = b"whole\r\n".to_vec();
+        launcher.program(index).exit(1);
+    }
+    eventually("the ends", || {
+        client.call::<Listed>(Op::List).unwrap().sessions.is_empty()
+    });
+    assert_eq!(read(launches[1]), complete);
+    assert!(!report(launches[2]).exists());
+    assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 2);
 }
 
 #[test]

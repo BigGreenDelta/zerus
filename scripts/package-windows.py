@@ -212,7 +212,7 @@ def main():
         partial.unlink(missing_ok=True)
         try:
             write_zip(stage, partial, source_time())
-            # The same layout and manifest checks the nightly publisher repeats.
+            # The same layout and manifest checks the release publishers repeat.
             inspect(partial)
         except BaseException:
             partial.unlink(missing_ok=True)
