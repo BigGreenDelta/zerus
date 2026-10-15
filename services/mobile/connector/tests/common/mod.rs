@@ -6,7 +6,10 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use zerus_mobile_connector::journal::Journal;
 
 /// Every clock in the vectors is relative to this instant.
 pub const EPOCH: f64 = 1_760_000_000.0;
@@ -27,6 +30,40 @@ pub fn records(name: &str) -> Vec<Value> {
         .lines()
         .map(|line| zerus_relay::json::parse(line.as_bytes(), 64, 1_000_000).unwrap())
         .collect()
+}
+
+/// A child that another test thread forks holds a copy of every descriptor,
+/// a journal's lock included, until it executes its program. Spawning, and
+/// closing a journal, only under this lock makes a closed journal free at once
+/// for the next process.
+static SPAWN: Mutex<()> = Mutex::new(());
+
+fn spawn_gate() -> MutexGuard<'static, ()> {
+    SPAWN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `command.spawn()`, which returns once the child runs its own program.
+pub fn spawn(command: &mut Command) -> Child {
+    let _gate = spawn_gate();
+    command.spawn().unwrap()
+}
+
+/// `command.output()` with stdin closed, spawned under the gate.
+pub fn captured(command: &mut Command) -> Output {
+    spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .wait_with_output()
+    .unwrap()
+}
+
+/// Closes a journal while no child is being spawned, releasing its lock.
+pub fn close(journal: Journal) {
+    let _gate = spawn_gate();
+    journal.close();
 }
 
 /// The vectors were captured with umask 022. Every test that compares modes

@@ -23,17 +23,17 @@ fn startup_line() -> String {
 /// that gets past validation is stopped after 10 s, so this never depends on
 /// what the runtime does next.
 fn connector(scratch: &Scratch, args: &[String]) -> (Option<i32>, String, String) {
-    let mut child = Command::new(BINARY)
-        .args(args)
-        .env_clear()
-        .env("HOME", scratch.path("home"))
-        .env("PATH", "/usr/bin:/bin")
-        .current_dir(scratch.path("cwd"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spawn(
+        Command::new(BINARY)
+            .args(args)
+            .env_clear()
+            .env("HOME", scratch.path("home"))
+            .env("PATH", "/usr/bin:/bin")
+            .current_dir(scratch.path("cwd"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -201,7 +201,7 @@ fn run_mode_refuses_unsafe_state_without_repair() {
         (code, stderr.trim_end()),
         (Some(1), startup_line().as_str())
     );
-    held.close();
+    close(held);
 }
 
 /// Python checks only the state directory and its files for symlinks, so a
@@ -444,7 +444,7 @@ fn check_refuses_a_foreign_binding_and_sees_a_held_lock() {
         (Some("matches"), Some("current"))
     );
     assert_eq!(journal_report["rows"]["running"], 1);
-    journal.close();
+    close(journal);
     let (_, report) = check(&scratch, &config);
     assert_eq!(report["state"]["lock"], "free");
 }

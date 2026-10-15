@@ -88,11 +88,11 @@ fn start_python(
     interpreter: &Path,
     args: &[&str],
 ) -> (Child, BufReader<std::process::ChildStdout>) {
-    let mut child = python(interpreter, args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spawn(
+        python(interpreter, args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped()),
+    );
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
@@ -111,14 +111,14 @@ fn check(scratch: &Scratch, state: &Path) -> Value {
         json!({"server_url": RELAY, "node_token": TOKEN, "state_dir": state.display().to_string()});
     std::fs::write(&path, config.to_string()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let output = Command::new(BINARY)
-        .args(["--check", "--json", "--config"])
-        .arg(&path)
-        .env_clear()
-        .env("HOME", &scratch.root)
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .unwrap();
+    let output = captured(
+        Command::new(BINARY)
+            .args(["--check", "--json", "--config"])
+            .arg(&path)
+            .env_clear()
+            .env("HOME", &scratch.root)
+            .env("PATH", "/usr/bin:/bin"),
+    );
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -137,9 +137,7 @@ fn python_refuses_a_journal_rust_holds() {
     let state = scratch.path("state");
     let directory = state.display().to_string();
     let held = Journal::open(&state, &binding(), zerus_mobile_connector::now()).unwrap();
-    let output = python(&interpreter, &["open", &directory, &binding()])
-        .output()
-        .unwrap();
+    let output = captured(&mut python(&interpreter, &["open", &directory, &binding()]));
     assert_eq!(
         (
             output.status.code(),
@@ -149,10 +147,8 @@ fn python_refuses_a_journal_rust_holds() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    held.close();
-    let output = python(&interpreter, &["open", &directory, &binding()])
-        .output()
-        .unwrap();
+    close(held);
+    let output = captured(&mut python(&interpreter, &["open", &directory, &binding()]));
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -222,15 +218,13 @@ fn rust_written_journals_reopen_under_python_unchanged() {
                 journal.delivered(&request_id, now).unwrap();
             }
         }
-        journal.close();
+        close(journal);
         let path = state.join(JOURNAL);
         let (schema_before, rows_before) = (schema(&path), rows(&path));
-        let output = python(
+        let output = captured(&mut python(
             &interpreter,
             &["open", &state.display().to_string(), &binding()],
-        )
-        .output()
-        .unwrap();
+        ));
         assert_eq!(
             output.status.code(),
             Some(0),
@@ -304,19 +298,18 @@ fn hgs_status_reports_running_while_rust_holds_the_lock() {
     )
     .unwrap();
     let status = || -> Value {
-        let output = Command::new(&hgs)
-            .args(["status", "--local", "--json"])
-            .env_clear()
-            .env("HOME", &home)
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .env("HGS_CONFIG_DIR", &config)
-            .env("HGS_STATE_DIR", &hgs_state)
-            .env("HGS_SELF", "local")
-            .env("HGS_PEERS", "")
-            .env("HGS_TAB", "0")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
+        let output = captured(
+            Command::new(&hgs)
+                .args(["status", "--local", "--json"])
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("HGS_CONFIG_DIR", &config)
+                .env("HGS_STATE_DIR", &hgs_state)
+                .env("HGS_SELF", "local")
+                .env("HGS_PEERS", "")
+                .env("HGS_TAB", "0"),
+        );
         assert!(
             output.status.success(),
             "{}",
@@ -327,6 +320,6 @@ fn hgs_status_reports_running_while_rust_holds_the_lock() {
     };
     let journal = Journal::open(&state, &binding(), zerus_mobile_connector::now()).unwrap();
     assert_eq!(status(), "running");
-    journal.close();
+    close(journal);
     assert_eq!(status(), "stopped");
 }
