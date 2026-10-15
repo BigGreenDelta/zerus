@@ -6,6 +6,18 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub(super) fn pane_cwds() -> BTreeMap<String, String> {
+    cwds(None)
+}
+
+/// `pane_cwds` under the names that an earlier pane snapshot gave each session
+/// ID (`$N`) in `names`. A rename keeps the ID, so a session renamed since that
+/// snapshot keeps its folder under the name the snapshot listed, and one that
+/// started since has none (zerus-18u1).
+pub(super) fn snapshot_cwds(names: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    cwds(Some(names))
+}
+
+fn cwds(names: Option<&BTreeMap<String, String>>) -> BTreeMap<String, String> {
     let Ok(panes) = backend::current().pane_paths() else {
         return BTreeMap::new();
     };
@@ -14,12 +26,22 @@ pub(super) fn pane_cwds() -> BTreeMap<String, String> {
         if !valid_path(&pane.path) {
             continue;
         }
+        // A pane without an ID goes by its name, as in the snapshot.
+        let session = match names {
+            Some(names) if !pane.session_id.is_empty() => {
+                let Some(name) = names.get(&pane.session_id) else {
+                    continue;
+                };
+                name.clone()
+            }
+            _ => pane.session,
+        };
         let priority = u8::from(pane.active_window) * 2 + u8::from(pane.active_pane);
         if rows
-            .get(&pane.session)
+            .get(&session)
             .is_none_or(|(score, _)| priority > *score)
         {
-            rows.insert(pane.session, (priority, pane.path));
+            rows.insert(session, (priority, pane.path));
         }
     }
     rows.into_iter()
