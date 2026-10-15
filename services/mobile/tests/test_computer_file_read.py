@@ -1,6 +1,9 @@
 """Read-only explicit file links; no owner files, relay or agents are used."""
 import base64
 import hashlib
+import json
+import os
+from pathlib import Path
 import tempfile
 import time
 import unittest
@@ -114,3 +117,78 @@ class ConnectorRead(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.connector, 'native') as call:
             self.assertEqual((await self.execute(payload()))['state'], 'failed')
             call.assert_not_called()
+
+
+@unittest.skipUnless(os.environ.get('ZERUS_RELAY_BINARY') and os.environ.get('ZERUS_DIRECTORY_TEST_HGS'),
+                     'Explicit isolated Rust relay and native CLI targets required')
+class NativeFileHttp(unittest.IsolatedAsyncioTestCase):
+    """Exercise the full byte limit through the real HTTP/connector/CLI boundary."""
+    async def asyncSetUp(self):
+        import test_rust_relay as fixture
+        self.fixture = fixture
+        await fixture.RustHttpContracts.asyncSetUp(self)
+
+    async def asyncTearDown(self):
+        await self.fixture.RustHttpContracts.asyncTearDown(self)
+
+    def headers(self, node=False):
+        return self.fixture.RustHttpContracts.headers(self, node)
+
+    async def call(self, *args, **kwargs):
+        return await self.fixture.RustHttpContracts.call(self, *args, **kwargs)
+
+    async def test_ten_mib_original_snapshot_and_changed_evicted_copy(self):
+        with tempfile.TemporaryDirectory(prefix='zerus-file-http-') as directory:
+            root = Path(directory).resolve()
+            state = root / 'state'; state.mkdir()
+            document = root / 'Сводная итог.xlsx'
+            data = bytes(range(256)) * (MAX_FILE_BYTES // 256)
+            document.write_bytes(data)
+            (state / (hashlib.sha256(SESSION.encode()).hexdigest() + '.json')).write_text(json.dumps(
+                dict(version=1, name=SESSION, agent='codex', run_id='run', conversation_id='conversation',
+                     cwd=str(root), subagents={})))
+            environment = {k: v for k, v in os.environ.items() if not k.startswith(('HGS_', 'OPENCODE_'))}
+            environment.update(HOME=str(root), HGS_STATE_DIR=str(state), HGS_CONFIG_DIR=str(root / 'config'))
+            connector = Connector(dict(server_url='https://relay.example.invalid', node_token='fixture',
+                state_dir=str(root / 'journal'), hgs_path=str(Path(os.environ['ZERUS_DIRECTORY_TEST_HGS']).resolve())))
+            connector.sessions = {SESSION}; connector.snapshot_seen_at = time.monotonic()
+            try:
+                with patch.dict(os.environ, environment, clear=True):
+                    await connector.probe_capabilities()
+                    self.assertTrue(connector.file_read_supported)
+                    await self.call('POST', '/v1/node/heartbeat', {'snapshot': {'sessions': [],
+                        'mobile_capabilities': {'protocol_version': 1, 'operations': ['file_read']}}}, node=True)
+
+                    async def read_range(offset, digest=None):
+                        value = payload(path=str(document), offset=offset)
+                        if digest is not None: value['sha256'] = digest
+                        request = dict(request_id=value['request_id'], computer_id=self.node['node_id'],
+                                       operation='file_read', session=SESSION, payload=value)
+                        await self.call('POST', '/v1/requests', request, expected=202)
+                        claims = (await self.call('GET', '/v1/node/requests', node=True))['requests']
+                        self.assertEqual(len(claims), 1)
+                        result = await connector.execute(claims[0])
+                        await self.call('POST', '/v1/node/requests/' + value['request_id'] + '/result', result, node=True)
+                        return await self.call('GET', '/v1/requests/' + value['request_id'])
+
+                    received = bytearray()
+                    digest = None
+                    with patch.object(connector, '_native', wraps=connector._native) as native:
+                        while len(received) < len(data):
+                            receipt = await read_range(len(received), digest)
+                            self.assertEqual(receipt['state'], 'completed', receipt)
+                            result = receipt['result']
+                            self.assertEqual(result['requested_path'], str(document))
+                            self.assertEqual(result['bytes'], MAX_FILE_BYTES)
+                            digest = result['sha256']
+                            received.extend(base64.b64decode(result['data_base64'], validate=True))
+                            document.write_bytes(b'changed after first snapshot')
+                        self.assertEqual(native.await_count, 1)
+                    self.assertEqual(received, data)
+                    self.assertEqual(digest, hashlib.sha256(data).hexdigest())
+                    connector.file_reads = file_reads.attachment_reads.AttachmentReads()
+                    self.assertEqual((await read_range(MAX_READ_BYTES, digest))['state'], 'failed')
+            finally:
+                await connector.accounts.close()
+                await connector.fleet.close()
+                connector.journal.close()
