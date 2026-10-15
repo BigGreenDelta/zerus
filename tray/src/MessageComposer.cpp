@@ -4,10 +4,12 @@
 #include "ContentScale.h"
 #include "ExternalFile.h"
 #include "LocalFile.h"
+#include "Shortcuts.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
 #include "StatusMessage.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QBuffer>
 #include <QComboBox>
@@ -43,6 +45,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <functional>
+#include <utility>
 
 namespace {
 constexpr qsizetype MaxTextBytes = HgsClient::MaximumMessageBytes;
@@ -105,6 +108,8 @@ public:
     std::function<QString()> suggestion;
     std::function<void(const QString &)> attachFile;
     std::function<void(const QImage &)> attachImage;
+    // An input method is composing text; its keys are not commands.
+    bool composing() const { return m_composing; }
 protected:
     bool canInsertFromMimeData(const QMimeData *source) const override {
         return !isReadOnly() && (source->hasImage() || source->hasUrls() || QPlainTextEdit::canInsertFromMimeData(source));
@@ -288,6 +293,16 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         if (!image.save(&buffer, "PNG")) { showError(tr("Could not read the pasted image.")); return; }
         addAttachment(QStringLiteral("pasted-image.png"), QStringLiteral("image/png"), data);
     };
+    // Composer-scope commands: Ctrl+Enter sends like Enter; setPushEnabled adds
+    // Send and push now. Their chords follow ShortcutRegistry.
+    m_sendAction = new QAction(Shortcuts::title(*Shortcuts::command("message.send")), edit); m_sendAction->setObjectName("shortcut:message.send");
+    m_pushAction = new QAction(Shortcuts::title(*Shortcuts::command("message.push")), edit); m_pushAction->setObjectName("shortcut:message.push");
+    for (auto *action : {m_sendAction, m_pushAction}) action->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    connect(m_sendAction, &QAction::triggered, this, [this, edit] { if (!edit->composing()) send(); });
+    connect(m_pushAction, &QAction::triggered, this, [this, edit] { if (!edit->composing()) push(); });
+    edit->addAction(m_sendAction);
+    connect(&ShortcutRegistry::instance(), &ShortcutRegistry::changed, this, &MessageComposer::applyShortcuts);
+    applyShortcuts();
     connect(m_attach, &QPushButton::clicked, this, &MessageComposer::attachFiles);
     connect(m_send, &QPushButton::clicked, this, &MessageComposer::send);
     connect(m_retry, &QPushButton::clicked, this, [this]() {
@@ -609,7 +624,34 @@ void MessageComposer::send()
     if (m_suggestions.contains(m_key)) {
         m_dismissedSuggestions.insert(m_key, m_suggestions.take(m_key).at); updatePlaceholder();
     }
+    if (std::exchange(m_pushing, false)) emit pushRequested(m_key);
     emit sendRequested(m_key, draft.text, draft.attachments);
+}
+
+// Send and push now: the typed message goes the ordinary way and the window
+// pushes it once the agent queues it. With nothing typed (a message on its way
+// leaves the field empty), the window sends the existing queue now.
+void MessageComposer::push()
+{
+    if (m_key.isEmpty()) return;
+    const auto draft = m_drafts.value(m_key);
+    if (draft.sending || (draft.text.trimmed().isEmpty() && draft.attachments.isEmpty())) { emit sendNowRequested(m_key); return; }
+    m_pushing = true; send(); m_pushing = false;
+}
+
+void MessageComposer::setPushEnabled(bool enabled)
+{
+    if (m_pushEnabled == enabled) return;
+    m_pushEnabled = enabled;
+    if (enabled) m_editor->addAction(m_pushAction); else m_editor->removeAction(m_pushAction);
+    applyShortcuts();
+}
+
+void MessageComposer::applyShortcuts()
+{
+    const auto &registry = ShortcutRegistry::instance();
+    m_sendAction->setShortcuts(registry.keys("message.send"));
+    m_pushAction->setShortcuts(m_pushEnabled ? registry.keys("message.push") : QList<QKeySequence>());
 }
 
 void MessageComposer::attachFiles()

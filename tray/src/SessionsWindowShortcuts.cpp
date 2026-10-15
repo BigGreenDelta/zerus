@@ -88,6 +88,17 @@ private:
     QWidget *m_window;
     QHash<QString, QAction *> m_actions;
 };
+
+// A native queue holds a message when it shows the message start: its first 24
+// non-space characters, with whitespace normalized on both sides, since the
+// agent's terminal wraps and indents queued text.
+bool queueHolds(const QString &queue, const QString &message)
+{
+    const QString text = message.simplified();
+    qsizetype end = 0;
+    for (int count = 0; end < text.size() && count < 24; ++end) if (!text[end].isSpace()) ++count;
+    return end > 0 && queue.simplified().contains(text.left(end));
+}
 }
 
 void SessionsWindow::setupShortcuts()
@@ -107,6 +118,9 @@ void SessionsWindow::setupShortcuts()
     qApp->installEventFilter(new ClaimedKeys(this, m_shortcutActions));
     connect(&ShortcutRegistry::instance(), &ShortcutRegistry::changed, this, &SessionsWindow::applyShortcuts);
     applyShortcuts();
+    // Inspections stop when another session is selected; the push still ends.
+    m_pushTimer.setInterval(1000);
+    connect(&m_pushTimer, &QTimer::timeout, this, &SessionsWindow::checkPush);
 }
 
 void SessionsWindow::applyShortcuts()
@@ -184,6 +198,61 @@ bool SessionsWindow::sendQueuedNow(const QString &queueId)
     m_queueSendRequest = m_client.requestQueueSendNow(entry->host, entry->session.name, m_details["run_id"].toString(), m_details["conversation_id"].toString(), id);
     renderDetails();
     return true;
+}
+
+// The message field emits pushRequested right before it sends the message;
+// deliverMessage records the request that carries it.
+void SessionsWindow::armPush(const QString &key)
+{
+    if (key != m_selectedKey) return;
+    m_push = PendingPush{key, m_details["run_id"].toString(), m_details["conversation_id"].toString(), m_composer->editor()->toPlainText()};
+    m_push->deadline.setRemainingTime(m_pushTimeout);
+    m_pushTimer.start();
+}
+
+void SessionsWindow::pushSendFinished(quint64 request, bool ok, bool uncertain)
+{
+    if (!m_push || !request || m_push->request != request) return;
+    if (!ok || uncertain) endPush(tr("The message was not pushed: sending did not complete"), true);
+    else m_push->confirmed = true;
+}
+
+// Called with each accepted inspection of the selected session. A push never
+// resends text: it only sends the queue snapshot that holds its message.
+void SessionsWindow::pushInspected(const QString &key, const QJsonObject &details)
+{
+    if (!m_push || m_push->key != key) return;
+    const QString conversation = details["conversation_id"].toString();
+    // A first message may give the run its conversation.
+    if (details["run_id"].toString() != m_push->run || (!m_push->conversation.isEmpty() && conversation != m_push->conversation)) {
+        endPush(tr("The message was not pushed: the session changed"), true); return;
+    }
+    m_push->conversation = conversation;
+    const auto queue = details["input_queue"].toObject();
+    if (m_push->confirmed && queue["can_send_now"].toBool() && queueHolds(queue["text"].toString(), m_push->text)) {
+        endPush(); sendQueuedNow(queue["id"].toString()); return;
+    }
+    checkPush();
+}
+
+void SessionsWindow::checkPush()
+{
+    if (!m_push) { m_pushTimer.stop(); return; }
+    if (m_push->deadline.hasExpired()) {
+        // The agent may already have taken the message.
+        if (m_push->confirmed) endPush(tr("The message was sent without push: it did not appear in the agent's queue"));
+        else endPush(tr("The message was not pushed: sending did not complete"), true);
+        return;
+    }
+    // The send ended before reaching the agent: refused, or a dialog was cancelled.
+    if (!m_push->request && !QApplication::activeModalWidget() && !m_composer->isSending(m_push->key) && !m_composer->isWaitingToSend(m_push->key))
+        endPush(tr("The message was not pushed: sending did not complete"), true);
+}
+
+void SessionsWindow::endPush(const QString &notice, bool error)
+{
+    m_push.reset(); m_pushTimer.stop();
+    if (!notice.isEmpty()) showNotice(notice, error);
 }
 
 // Next and Previous move in the visible list (search results while shown) and

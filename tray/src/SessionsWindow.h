@@ -11,8 +11,10 @@ class SwarmController;
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QTimer>
+#include <QDeadlineTimer>
 #include <QElapsedTimer>
 #include <QWidget>
+#include <optional>
 #include "FleetState.h"
 #include "HgsClient.h"
 #include "SessionOrganization.h"
@@ -73,11 +75,13 @@ public:
     void setPollingHosts(const QSet<QString> &hosts);
     static QString status(const SessionInfo &session, bool reachable = true);
     // Tests only, so suites need not wait out fixed delays: information notices
-    // (5 s), compaction polls (2.5 s), and the details poll tick (500 ms) with
-    // its Activity interval (2.5 s). The application keeps the defaults.
+    // (5 s), compaction polls (2.5 s), the details poll tick (500 ms) with its
+    // Activity interval (2.5 s), and the wait of Send and push now (20 s, which
+    // also restarts an armed push's wait). The application keeps the defaults.
     void setNoticeDurationForTests(int ms) { m_noticeMs = ms; }
     void setCompactPollIntervalForTests(int ms) { m_compactTimer.setInterval(ms); }
     void setDetailsPollForTests(int tickMs, int activityMs) { m_timer.setInterval(tickMs); m_activityPollMs = activityMs; }
+    void setPushTimeoutForTests(int ms) { m_pushTimeout = ms; if (m_push) m_push->deadline.setRemainingTime(ms); }
 
 signals:
     void replyViewed(const QString &host, const QString &name, const QString &conversation, const QString &reply);
@@ -297,6 +301,17 @@ private:
     QWidget *viewFocusTarget() const;
     QHash<QString, QAction *> m_shortcutActions;
     ShortcutRouter *m_shortcutRouter = nullptr;
+    // Send and push now (message.push): after its send is confirmed, the first
+    // snapshot of this session's native queue that holds the message is sent now.
+    struct PendingPush { QString key, run, conversation, text; quint64 request = 0; bool confirmed = false; QDeadlineTimer deadline; };
+    std::optional<PendingPush> m_push;
+    QTimer m_pushTimer;
+    int m_pushTimeout = 20000;
+    void armPush(const QString &key);
+    void pushSendFinished(quint64 request, bool ok, bool uncertain);
+    void pushInspected(const QString &key, const QJsonObject &details);
+    void checkPush();
+    void endPush(const QString &notice = {}, bool error = false);
 
     IdentityBadge *m_providerBadge, *m_machineBadge;
     HgsClient m_client;

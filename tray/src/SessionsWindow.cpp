@@ -1039,6 +1039,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(m_question, &QuestionCard::draftRestored, this, [this] { renderDetails(); });
     connect(m_composer, &MessageComposer::sendRequested, this, [this](const QString &key,const QString &text,const QList<MessageAttachment> &files){sendMessage(key,text,files);});
+    // Send and push now: only this field's messages enter the session's native queue.
+    m_composer->setPushEnabled(true);
+    connect(m_composer, &MessageComposer::pushRequested, this, &SessionsWindow::armPush);
+    connect(m_composer, &MessageComposer::sendNowRequested, this, [this] { sendQueuedNow(); });
     // An unsent draft becomes the row's status (see SessionDelegate::statusOf).
     const auto draftChanged = [this](const QString &key) {
         for (int row = 0; row < m_sessions->count(); ++row) {
@@ -2995,7 +2999,7 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
         // The conversation changed under this terminal. Fetch its initial window;
         // a cursor from the previous conversation must never skip the new history.
         m_events = data.value("events").toArray(); m_cursor = 0; m_details = data; m_processPollAge.invalidate();
-        reconcileMessages(); renderDetails(); inspect(); return;
+        reconcileMessages(); renderDetails(); pushInspected(entry->key, m_details); inspect(); return;
     }
     const auto previousRoster = childRoster(*entry);
     const auto inspected=SessionPresentation::inspected(entry->session,data);
@@ -3021,6 +3025,7 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     }
     while (m_events.size() > 500) m_events.removeFirst();
     m_cursor = data.value("cursor").toInteger(); reconcileMessages(); renderDetails(); applyPendingModelSettings();
+    pushInspected(entry->key, m_details);
     if (statusChanged || previousRoster != childRoster(*entry)) rebuild();
 }
 
@@ -3999,6 +4004,7 @@ void SessionsWindow::deliverMessage(const QString &key, const QString &host, con
                 }
                 const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId);
                 m_pendingMessages.insert(request, {key, runId, conversationId});
+                if (m_push && m_push->key == key && !m_push->request && m_push->text == text) m_push->request = request;
                 auto &messages = m_localMessages[key];
                 for(int i=messages.size();i-- >0;) {
                     const auto previous=messages[i].toObject();
@@ -4025,6 +4031,7 @@ void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &
     const auto pending = m_pendingMessages.take(request);
     const QString detail = uncertain ? tr("Delivery is not confirmed. Check Terminal before retrying. %1").arg(error) : error;
     m_composer->deliveryFinished(pending.key, ok, detail, uncertain);
+    pushSendFinished(request, ok, uncertain);
     auto &messages = m_localMessages[pending.key];
     for (qsizetype i = 0; i < messages.size(); ++i) {
         auto message = messages.at(i).toObject();

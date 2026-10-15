@@ -1,7 +1,9 @@
 #include "MessageComposer.h"
 #include "AttachmentViewer.h"
 #include "ComposerToolbar.h"
+#include "Shortcuts.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QClipboard>
@@ -80,6 +82,28 @@ struct Window {
 };
 QLabel *status(MessageComposer &composer) { return composer.findChild<QLabel *>("messageStatus"); }
 
+// As in the main window: commands win over the field, Cut keeps a selection.
+struct RoutedWindow : Window {
+    ShortcutRouter router{&widget};
+    explicit RoutedWindow(const QString &key) : Window(key) { qApp->installEventFilter(&router); }
+    ~RoutedWindow() { qApp->removeEventFilter(&router); }
+};
+
+// Presses a command's first chord sequence on the platform input path: the
+// window's QWindow first, then its focus widget, as with a real keyboard.
+void pressCommand(QWidget &window, const QString &id)
+{
+    const auto sequence = ShortcutRegistry::instance().keys(id).value(0);
+    QVERIFY2(!sequence.isEmpty(), qPrintable(id));
+    for (int i = 0; i < sequence.count(); ++i) QTest::keyClick(window.windowHandle(), sequence[i].key(), sequence[i].keyboardModifiers());
+}
+
+bool hasAction(const QWidget *widget, const QString &name)
+{
+    for (const auto *action : widget->actions()) if (action->objectName() == name) return true;
+    return false;
+}
+
 // Exercise the editor's MIME insertion path without reading or overwriting the
 // user's real clipboard. A drop forwards the same QMimeData into that path.
 void drop(QPlainTextEdit *editor, const QMimeData &mime)
@@ -140,6 +164,11 @@ private slots:
     void stalledDurabilityFailureKeepsTextAndAttachments();
     void isolatesDraftsAcrossSessions();
     void enterSendsShiftEnterAddsLine();
+    void ctrlEnterSendsLikeEnter();
+    void pushWithTextEmitsPushThenSend();
+    void pushWithEmptyFieldRequestsSendNow();
+    void pushIsOffForSubagentComposer();
+    void ctrlXWithSelectionStillCuts();
     void sendingKeepsEditorFocus_data();
     void sendingKeepsEditorFocus();
     void deliveryDoesNotStealDeliberatelyMovedFocus();
@@ -924,6 +953,96 @@ void TestMessageComposer::enterSendsShiftEnterAddsLine()
     QCOMPARE(submissions.size(), 1); QCOMPARE(submissions.last().text, "First line\nSecond line");
     // The owner confirms/locks delivery; emitting a request never drops a draft.
     QCOMPARE(editor->toPlainText(), "First line\nSecond line");
+}
+
+void TestMessageComposer::ctrlEnterSendsLikeEnter()
+{
+    Window window("arch/keys"); QList<Submission> submissions; observe(*window.composer, submissions);
+    window.widget.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window.widget));
+    auto *editor = window.composer->editor(); editor->setPlainText("Send with the chord"); editor->setFocus(); QTRY_VERIFY(editor->hasFocus());
+    auto *action = window.composer->findChild<QAction *>("shortcut:message.send"); QVERIFY(action);
+    QVERIFY(editor->actions().contains(action)); QCOMPARE(action->shortcutContext(), Qt::WidgetWithChildrenShortcut);
+    QCOMPARE(action->shortcuts(), ShortcutRegistry::instance().keys("message.send"));
+    pressCommand(window.widget, "message.send");
+    QCOMPARE(submissions.size(), 1); QCOMPARE(submissions[0].text, QString("Send with the chord"));
+    QCOMPARE(editor->toPlainText(), QString("Send with the chord"));
+    // A rebound chord applies at once.
+    const auto reset = qScopeGuard([] { ShortcutRegistry::instance().reset("message.send"); });
+    ShortcutRegistry::instance().setKeys("message.send", {QKeySequence(Qt::Key_F9)});
+    QTest::keyClick(window.widget.windowHandle(), Qt::Key_F9);
+    QCOMPARE(submissions.size(), 2);
+    // While an input method composes, the chord does not send.
+    QInputMethodEvent preedit(QString::fromUtf8("に"), {}); QApplication::sendEvent(editor, &preedit);
+    QTest::keyClick(window.widget.windowHandle(), Qt::Key_F9);
+    QCOMPARE(submissions.size(), 2);
+}
+
+void TestMessageComposer::pushWithTextEmitsPushThenSend()
+{
+    RoutedWindow window("arch/push"); auto *composer = window.composer; composer->setPushEnabled(true);
+    QStringList order;
+    connect(composer, &MessageComposer::pushRequested, composer, [&](const QString &key) { order << "push:" + key; });
+    connect(composer, &MessageComposer::sendRequested, composer, [&](const QString &key, const QString &text) { order << "send:" + key + ":" + text; });
+    connect(composer, &MessageComposer::sendNowRequested, composer, [&](const QString &key) { order << "now:" + key; });
+    window.widget.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window.widget));
+    auto *editor = composer->editor(); editor->setPlainText("Push this message"); editor->setFocus(); QTRY_VERIFY(editor->hasFocus());
+    pressCommand(window.widget, "message.push");
+    QCOMPARE(order, (QStringList{"push:arch/push", "send:arch/push:Push this message"}));
+    QCOMPARE(editor->toPlainText(), QString("Push this message"));
+    // A send that cannot start leaves no push behind for the next ordinary send.
+    order.clear(); composer->setAvailability(false, "Agent needs approval; use the terminal.");
+    pressCommand(window.widget, "message.push"); QCOMPARE(order, QStringList());
+    composer->setAvailability(true); QTest::keyClick(window.widget.windowHandle(), Qt::Key_Return);
+    QCOMPARE(order, QStringList{"send:arch/push:Push this message"});
+}
+
+void TestMessageComposer::pushWithEmptyFieldRequestsSendNow()
+{
+    RoutedWindow window("arch/queue"); auto *composer = window.composer; composer->setPushEnabled(true);
+    QSignalSpy now(composer, &MessageComposer::sendNowRequested), pushed(composer, &MessageComposer::pushRequested);
+    QList<Submission> sent; observe(*composer, sent);
+    window.widget.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window.widget));
+    auto *editor = composer->editor(); editor->setFocus(); QTRY_VERIFY(editor->hasFocus());
+    pressCommand(window.widget, "message.push");
+    QCOMPARE(now.size(), 1); QCOMPARE(now[0][0].toString(), QString("arch/queue")); QCOMPARE(pushed.size(), 0); QCOMPARE(sent.size(), 0);
+    editor->setPlainText(" \n "); // Whitespace is no message.
+    pressCommand(window.widget, "message.push");
+    QCOMPARE(now.size(), 2); QCOMPARE(pushed.size(), 0); QCOMPARE(sent.size(), 0);
+    // An attachment is a message to push.
+    editor->clear(); QVERIFY(composer->addAttachment("notes.txt", "text/plain", "notes"));
+    pressCommand(window.widget, "message.push");
+    QCOMPARE(now.size(), 2); QCOMPARE(pushed.size(), 1); QCOMPARE(sent.size(), 1); QCOMPARE(sent[0].attachments.size(), 1);
+}
+
+void TestMessageComposer::pushIsOffForSubagentComposer()
+{
+    RoutedWindow window("arch/subagent"); auto *composer = window.composer;
+    QSignalSpy now(composer, &MessageComposer::sendNowRequested), pushed(composer, &MessageComposer::pushRequested);
+    QSignalSpy sent(composer, &MessageComposer::sendRequested);
+    window.widget.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window.widget));
+    auto *editor = composer->editor(); editor->setPlainText("A subagent message"); editor->setFocus(); QTRY_VERIFY(editor->hasFocus());
+    QVERIFY(!hasAction(editor, "shortcut:message.push"));
+    pressCommand(window.widget, "message.push");
+    QCOMPARE(now.size(), 0); QCOMPARE(pushed.size(), 0); QCOMPARE(sent.size(), 0);
+    composer->setPushEnabled(true); QVERIFY(hasAction(editor, "shortcut:message.push"));
+    composer->setPushEnabled(false); QVERIFY(!hasAction(editor, "shortcut:message.push"));
+    editor->clear(); pressCommand(window.widget, "message.push");
+    QCOMPARE(now.size(), 0); QCOMPARE(pushed.size(), 0); QCOMPARE(sent.size(), 0);
+}
+
+void TestMessageComposer::ctrlXWithSelectionStillCuts()
+{
+    if (Shortcuts::currentPlatform() == Shortcuts::Platform::MacOS) QSKIP("Control-X is no editing key on macOS.");
+    RoutedWindow window("arch/cut"); auto *composer = window.composer; composer->setPushEnabled(true);
+    QSignalSpy now(composer, &MessageComposer::sendNowRequested), pushed(composer, &MessageComposer::pushRequested);
+    QSignalSpy sent(composer, &MessageComposer::sendRequested);
+    window.widget.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window.widget));
+    auto *editor = composer->editor(); editor->setPlainText("Cut this"); editor->setFocus(); QTRY_VERIFY(editor->hasFocus());
+    editor->selectAll();
+    QTest::keyClick(window.widget.windowHandle(), Qt::Key_X, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QString()); QCOMPARE(QApplication::clipboard()->text(), QString("Cut this"));
+    QTest::keyClick(window.widget.windowHandle(), Qt::Key_S, Qt::ControlModifier);
+    QCOMPARE(now.size(), 0); QCOMPARE(pushed.size(), 0); QCOMPARE(sent.size(), 0);
 }
 
 void TestMessageComposer::sendingKeepsEditorFocus_data()
