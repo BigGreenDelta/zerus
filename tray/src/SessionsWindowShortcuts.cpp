@@ -7,6 +7,7 @@
 #include "MachinesPage.h"
 #include "MessageComposer.h"
 #include "SessionList.h"
+#include "SessionPresentation.h"
 #include "SessionSearch.h"
 #include "SettingsPage.h"
 #include "Shortcuts.h"
@@ -109,19 +110,29 @@ MessageStart messageStart(const QString &message)
     return {};
 }
 
-// A queue holds a message when its start begins a line or word of the queue text
-// ("test" inside "latest" does not), and a whole short text also ends one there.
+// A queue holds a message when one of its items begins with the message start,
+// and a whole short text also ends a word there ("test" does not match
+// "testing"). An item is a row that begins with an agent's marker (Claude's and
+// Kimi's ❯, Codex's ↳) with the indented rows that continue it, as the terminal
+// wraps it. Header rows such as Codex's "• Messages to be submitted after next
+// tool call (press esc to interrupt and send immediately)" are never items.
 bool queueHolds(const QString &queue, const QString &message)
 {
     const auto start = messageStart(message);
     if (start.text.isEmpty()) return false;
-    const QString shown = queue.simplified();
-    // Queue rows begin with the agent's own markers, such as Claude's ❯ and Codex's ↳.
-    const auto boundary = [&shown](qsizetype at) {
-        return at < 0 || at >= shown.size() || shown[at].isSpace() || QStringView(u"❯↳›•>").contains(shown[at]);
-    };
-    for (qsizetype at = shown.indexOf(start.text); at >= 0; at = shown.indexOf(start.text, at + 1))
-        if (boundary(at - 1) && (!start.whole || boundary(at + start.text.size()))) return true;
+    QStringList items; bool continued = false;
+    for (const auto &row : queue.split('\n')) {
+        const QString text = row.trimmed();
+        if (text.isEmpty()) continue;
+        if (QStringView(u"❯↳›").contains(text.front())) { items.append(text.mid(1)); continued = true; }
+        else if (continued && row.front().isSpace() && text.front() != u'•') items.last() += ' ' + text;
+        else continued = false;
+    }
+    for (const auto &item : items) {
+        const QString shown = item.simplified();
+        if (shown.startsWith(start.text) && (!start.whole || shown.size() == start.text.size() || shown[start.text.size()].isSpace()))
+            return true;
+    }
     return false;
 }
 }
@@ -143,7 +154,7 @@ void SessionsWindow::setupShortcuts()
     qApp->installEventFilter(new ClaimedKeys(this, m_shortcutActions));
     connect(&ShortcutRegistry::instance(), &ShortcutRegistry::changed, this, &SessionsWindow::applyShortcuts);
     applyShortcuts();
-    // Inspections stop when another session is selected; the push still ends.
+    // Checked every second, so a push ends at its deadline also without inspections.
     m_pushTimer.setInterval(1000);
     connect(&m_pushTimer, &QTimer::timeout, this, &SessionsWindow::checkPush);
 }
@@ -185,7 +196,7 @@ void SessionsWindow::runShortcut(const QString &id)
     else if (id == "session.nextAttention") stepSession(1, true);
     else if (id == "session.previousAttention") stepSession(-1, true);
     else if (id == "session.new") showNewSession({}, {}, selectedHostTarget());
-    else if (id == "session.rename") { if (selected()) renameSession(); }
+    else if (id == "session.rename") { if (selected() && m_pages->currentIndex() == 0) renameSession(); }
     else if (id == "session.search") { showSessionList(); m_search->setFocus(); m_search->selectAll(); }
     else if (id == "view.refresh") { emit refreshRequested(); inspect(); m_machinesPage->reload(); }
     else if (id == "tab.next") stepTab(1);
@@ -230,6 +241,7 @@ bool SessionsWindow::sendQueuedNow(const QString &queueId)
 void SessionsWindow::armPush(const QString &key, const QString &text)
 {
     if (key != m_selectedKey) return;
+    if (m_push) endPush(tr("The earlier push was replaced by a new one"));
     m_push = PendingPush{key, {}, {}, text};
     m_push->deadline.setRemainingTime(m_pushTimeout);
     m_pushTimer.start();
@@ -262,7 +274,21 @@ void SessionsWindow::pushInspected(const QString &key, const QJsonObject &detail
     checkPush(); // A snapshot after the deadline never sends the queue.
     if (!m_push || !m_push->confirmed) return;
     const auto queue = details["input_queue"].toObject();
-    if (queue["can_send_now"].toBool() && queueHolds(queue["text"].toString(), m_push->text)) { endPush(); sendQueuedNow(queue["id"].toString()); }
+    if (!queue["can_send_now"].toBool() || !queueHolds(queue["text"].toString(), m_push->text)) return;
+    // Another send-now request is running: a later snapshot decides.
+    if (m_queueSendRequest) return;
+    endPush(); sendQueuedNow(queue["id"].toString());
+}
+
+// A push belongs to the session it was armed in, and only the selected session
+// is inspected: selecting another one ends the push at once.
+void SessionsWindow::pushSelectionChanged(const QString &key)
+{
+    if (!m_push || m_push->key == key) return;
+    const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [this](const Entry &e) { return e.key == m_push->key; });
+    const QString title = entry != m_entries.cend() ? SessionPresentation::displayTitle(entry->session) : m_push->key.section('\n', 1, 1);
+    endPush(key.isEmpty() ? tr("The message to %1 was not pushed: its session is no longer selected").arg(title)
+                          : tr("The message to %1 was not pushed: another session was selected").arg(title));
 }
 
 void SessionsWindow::checkPush()
@@ -270,14 +296,18 @@ void SessionsWindow::checkPush()
     if (!m_push) { m_pushTimer.stop(); return; }
     // The send is still on its way: in transport, behind a dialog, or waiting for
     // the session to start or compact.
+    const bool waiting = m_composer->isWaitingToSend(m_push->key);
     const bool sending = m_push->request ? m_pendingMessages.contains(m_push->request)
-        : QApplication::activeModalWidget() || m_composer->isSending(m_push->key) || m_composer->isWaitingToSend(m_push->key);
+        : QApplication::activeModalWidget() || m_composer->isSending(m_push->key) || waiting;
     // It ended before reaching the agent: refused, or a dialog was cancelled.
     if (!m_push->confirmed && !sending) endPush(tr("The message was not pushed: sending did not complete"), true);
     else if (!m_push->deadline.hasExpired()) return;
-    // Neither notice is an error: the message itself was or will be sent.
+    // No notice is an error: the message itself was, will be or may still be sent.
     else if (m_push->confirmed) endPush(tr("The message was sent without push: the agent did not offer to send it now within 20 seconds"));
-    else endPush(tr("The message will be sent without push: it was not delivered within 20 seconds"));
+    // In transport, or sent by itself once the session has started or compacted.
+    else if (m_push->request || waiting) endPush(tr("The message will be sent without push: it was not delivered within 20 seconds"));
+    // Still behind a dialog such as the cold cache warning: nothing was sent yet.
+    else endPush(tr("The message was not pushed: it was not sent within 20 seconds"));
 }
 
 void SessionsWindow::endPush(const QString &notice, bool error)
@@ -287,14 +317,14 @@ void SessionsWindow::endPush(const QString &notice, bool error)
 }
 
 // Next and Previous move in the visible list (search results while shown) and
-// stop at its ends. Attention navigation searches the session list in list
-// order, wraps, and opens a collapsed project to select its session.
+// stop at its ends. Attention navigation searches the same list in list order
+// and wraps; in the session list it opens a collapsed project to select its session.
 void SessionsWindow::stepSession(int direction, bool attention)
 {
+    if (m_pages->currentIndex() != 0) showSessionList();
+    auto *results = m_listStack->currentIndex() == 1 ? m_searchResults->findChild<QListWidget *>("searchResults") : nullptr;
     if (!attention) {
-        if (m_pages->currentIndex() != 0) showSessionList();
-        auto *list = m_listStack->currentIndex() == 1 ? m_searchResults->findChild<QListWidget *>("searchResults") : static_cast<QListWidget *>(m_sessions);
-        if (!list) return;
+        auto *list = results ? results : static_cast<QListWidget *>(m_sessions);
         int row = list->currentRow(); if (row < 0) row = direction > 0 ? -1 : list->count();
         for (row += direction; row >= 0 && row < list->count(); row += direction) {
             auto *item = list->item(row);
@@ -303,16 +333,31 @@ void SessionsWindow::stepSession(int direction, bool attention)
         }
         return;
     }
-    if (m_pages->currentIndex() != 0) showSessionList();
+    // As the attention badge counts: never an archived session.
+    const auto needsAttention = [this](const QString &key) {
+        const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&key](const Entry &e) { return e.key == key; });
+        return entry != m_entries.cend() && entry->session.state != "archived" && entryNeedsAttention(*entry);
+    };
+    if (results) {
+        // A session can have several result rows: its other rows are no next session.
+        const int count = results->count(), current = results->currentRow();
+        const QString currentKey = SessionSearch::sessionKey(results->item(current));
+        const int start = current < 0 ? (direction > 0 ? -1 : count) : current;
+        for (int step = 1; step <= count; ++step) {
+            const int row = ((start + direction * step) % count + count) % count;
+            const QString key = SessionSearch::sessionKey(results->item(row));
+            if ((step < count && key == currentKey) || !needsAttention(key)) continue;
+            results->setCurrentRow(row); results->scrollToItem(results->item(row)); return;
+        }
+        showNotice(tr("No sessions need attention")); return;
+    }
     const int count = m_sessions->count();
     int start = m_sessions->currentRow(); if (start < 0) start = direction > 0 ? -1 : count;
     for (int step = 1; step <= count; ++step) {
         const auto *item = m_sessions->item(((start + direction * step) % count + count) % count);
         if (!sessionRow(item)) continue;
         const QString key = item->data(SessionRoles::Key).toString();
-        const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&key](const Entry &e) { return e.key == key; });
-        // As the attention badge counts: never an archived session.
-        if (entry == m_entries.cend() || entry->session.state == "archived" || !entryNeedsAttention(*entry)) continue;
+        if (!needsAttention(key)) continue;
         revealSession(key); // May rebuild the list.
         for (int row = 0; row < m_sessions->count(); ++row)
             if (sessionRow(m_sessions->item(row)) && m_sessions->item(row)->data(SessionRoles::Key).toString() == key) {

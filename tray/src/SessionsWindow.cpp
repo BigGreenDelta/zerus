@@ -425,6 +425,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             if (found == m_entries.cend() || (!run.isEmpty() && found->session.runId != run)) {
                 showNotice(tr("This session changed. Search again to see its current history."), true); return;
             }
+            pushSelectionChanged(key);
             // The search list owns selection while it is shown, including archive
             // hits. Keep the regular list's selection in sync for normal navigation.
             m_selectedKey.clear();
@@ -2871,6 +2872,7 @@ void SessionsWindow::selectSession()
     const QString child = item ? item->data(SessionRoles::ChildId).toString() : QString();
     const QString key = item ? item->data(child.isEmpty() ? KeyRole : SessionRoles::ParentKey).toString() : QString();
     if (key != m_selectedKey) {
+        pushSelectionChanged(key);
         m_readCandidate.clear(); m_readSelectionKey.clear();
         m_selectedKey = key; m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear();
         rememberRecentSession(key);

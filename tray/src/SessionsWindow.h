@@ -311,6 +311,8 @@ private:
     void armPush(const QString &key, const QString &text);
     void pushSendFinished(quint64 request, bool ok, bool uncertain);
     void pushInspected(const QString &key, const QJsonObject &details);
+    // Before another session (or none) becomes the selected one.
+    void pushSelectionChanged(const QString &key);
     void checkPush();
     void endPush(const QString &notice = {}, bool error = false);
 
