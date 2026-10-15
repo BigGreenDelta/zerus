@@ -237,7 +237,9 @@ fn rust_written_journals_reopen_under_python_unchanged() {
 }
 
 /// Python's 5 s busy timeout would surface as an OperationalError that
-/// stops its connector; `--check` holds its read lock far shorter.
+/// stops its connector; `--check` holds its read lock far shorter. Against
+/// this tight-loop writer a slow runner may see the journal `busy`, which
+/// `--check` reports truthfully; the contract is that the writer never fails.
 #[test]
 fn check_never_makes_a_writing_python_journal_fail() {
     let Some(interpreter) = required("ZERUS_CONNECTOR_TEST_PYTHON") else {
@@ -255,16 +257,19 @@ fn check_never_makes_a_writing_python_journal_fail() {
             &stop.display().to_string(),
         ],
     );
-    for _ in 0..25 {
-        let report = check(&scratch, &state);
-        assert_eq!(report["state"]["lock"], "held", "{report}");
-        assert_eq!(report["state"]["journal"]["status"], "readable", "{report}");
-    }
+    // Stop the writer before asserting, so a failed check never removes the
+    // scratch directory under a running writer.
+    let reports: Vec<Value> = (0..25).map(|_| check(&scratch, &state)).collect();
     std::fs::write(&stop, "").unwrap();
     assert!(
         child.wait().unwrap().success(),
         "the writing Python journal failed"
     );
+    for report in &reports {
+        assert_eq!(report["state"]["lock"], "held", "{report}");
+        let status = &report["state"]["journal"]["status"];
+        assert!(status == "readable" || status == "busy", "{report}");
+    }
     let mut written = String::new();
     stdout.read_line(&mut written).unwrap();
     assert!(written.trim().parse::<u64>().unwrap() > 0);
