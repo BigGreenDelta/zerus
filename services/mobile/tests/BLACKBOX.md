@@ -58,16 +58,20 @@ scripted `hgs` processes it started; no tmux server or agent is involved.
   (`{"requests": [...]}` without `computer_id`, plus `gateway_route` and
   `expires_at`), so a batch can exceed the limits its request met. Results
   follow the relay's claim rules (404 unknown, 409 not claimed or different,
-  200 identical). `rule()` programs status answers, optionally limited by
-  count or a predicate on the parsed body. All traffic is kept in
-  `exchanges`.
+  200 identical). `inject()` hands out a delivery no relay would queue (a
+  non-canonical identity, a malformed envelope or a non-object). `rule()`
+  programs status answers, optionally limited by count or a predicate on the
+  parsed body. All traffic is kept in `exchanges`.
 - **`scripted_hgs.py`**: the `hgs` on the connector's PATH. It answers from
-  `script.json`, re-read on every call, by exact argv or prefix, with JSON or
-  text, an exit status, a delay, or `kill_parent` (SIGKILL the connector after
-  the native work, to model a crash before journaling). It logs a `start`
-  event (argv, stdin, environment, open descriptors) and an `end` event per
-  call. `default_rules()` in the harness gives a minimal live computer with
-  one non-Codex session, so no background attention scan runs.
+  `script.json`, re-read on every call, by exact argv or prefix (optionally
+  only when stdin holds given fields, `stdin_has`), with JSON, text or a
+  file's bytes (`fill` expands placeholders to megabytes, as the golden
+  vectors do), an exit status, a delay, `exec` (delegate to a real hgs) or
+  `kill_parent` (SIGKILL the connector after the native work, to model a
+  crash before journaling). It logs a `start` event (argv, stdin,
+  environment, open descriptors) and an `end` event per call.
+  `default_rules()` in the harness gives a minimal live computer with one
+  non-Codex session, so no background attention scan runs.
 - **`Journal`** reads a journal read-only; **`stopped_journal`** writes one only
   while it holds the connector lock, so a running connector is never edited.
 
@@ -79,7 +83,7 @@ scripted `hgs` processes it started; no tmux server or agent is involved.
 | Divergence | Test | Python | Rust |
 |---|---|---|---|
 | b: a result the relay rejects | `test_bb_requests.test_rejected_result_blocks_later_claims_in_python`, `test_bb_native_limits.RefusedResultTests` | A 400, 413 or 422 upload refusal is retried before every poll, so it blocks every later claim. A native error beyond 4,096 code points, a non-string one, and a receipt within `MAX_RESULT` whose canonical form with its request_id exceeds 1 MiB are journaled as they are and refused that way. | The relay accepts the sanitised receipt: the error cut to 4,096 code points or a fixed text, an oversized receipt uncertain without its result. A stored result the relay keeps refusing is retired after three attempts, which needs the `test-hooks` clock scale (`CLOCK_SCALE_HOOK`). |
-| h (amended): SIGTERM | `test_bb_signals` | Dies at once (exit -15); the in-flight native call finishes on its own; restart journals the mutation uncertain. | Stops claiming, lets the in-flight call finish, journals its real outcome, exits 0. |
+| h (amended): SIGTERM | `test_bb_signals`, `test_bb_worktrees.test_sigterm_never_cuts_a_creation_short` | Dies at once (exit -15); the in-flight native call finishes on its own; restart journals the mutation uncertain. | Stops claiming, lets the in-flight call finish, journals its real outcome, exits 0. |
 
 Under h, neither may kill the native mutation child, and no request is
 claimed after the signal. SIGINT is not covered: Python's KeyboardInterrupt
@@ -125,7 +129,7 @@ planned where named), **planned** (slice or vector named).
 | `test_result_conflict_is_retired_and_does_not_block_subsequent_commands` | `test_bb_requests.test_result_conflict_is_retired_without_blocking_later_requests` | covered |
 | `test_result_too_large_is_failed_read_or_uncertain_write` | `test_bb_native_limits.test_a_result_fits_only_within_the_relay_limit` | covered |
 | `test_journal_refuses_config_switch_and_unsafe_files_without_chmod` | `test_bb_journal.test_other_credentials_never_take_over_a_journal`, `test_unsafe_state_directory_is_refused_without_repair`, `test_unsafe_journal_files_are_refused_without_repair` | covered |
-| `test_attention_round_robin_budget_and_exact_identity_cache` | H3 | planned |
+| `test_attention_round_robin_budget_and_exact_identity_cache` | `test_bb_computer.AttentionTests.test_two_live_codex_sessions_are_inspected_per_heartbeat` | covered |
 | `test_https_and_explicit_loopback_only_http` | `test_bb_startup.test_invalid_configuration_is_refused_before_any_state_or_network`, `test_loopback_http_requires_its_explicit_development_flag`; the full matrix: P2 `config.jsonl` | covered |
 
 The poison pill of divergence b is pinned for Python by
@@ -160,13 +164,13 @@ Rust, since its retry spacing needs the `test-hooks` clock scale.
 
 ### `test_mobile_attachments.py` (inline attachments of a send)
 
-The other `AttachmentRelayTests` are relay cases.
+The other `AttachmentRelayTests` are relay cases (R4).
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
-| `AttachmentValidationTests.test_paths_urls_controls_and_unknown_fields_are_rejected` | `test_bb_send.test_attachments_and_text_beyond_the_limits_never_reach_native` | covered |
-| `AttachmentValidationTests.test_native_file_and_total_limits_and_utf8_text` | `test_bb_send.test_attachments_at_the_native_limits_reach_native_unchanged`, `test_attachments_and_text_beyond_the_limits_never_reach_native` | covered |
-| `AttachmentRelayTests.test_connector_accepts_large_request_response_independently` | `test_bb_send.test_attachments_at_the_native_limits_reach_native_unchanged` (a request above 26 MiB), `test_attachments_and_text_beyond_the_limits_never_reach_native` | covered |
+| `AttachmentValidationTests.test_paths_urls_controls_and_unknown_fields_are_rejected` | `test_bb_send.test_attachments_and_text_beyond_the_limits_never_reach_native`, `test_bb_attachment_read.InlineAttachmentTests.test_invalid_files_never_reach_native`; the attachment vectors of `validation/conversation.jsonl` in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` | covered |
+| `AttachmentValidationTests.test_native_file_and_total_limits_and_utf8_text` | `test_bb_send.test_attachments_at_the_native_limits_reach_native_unchanged`, `test_attachments_and_text_beyond_the_limits_never_reach_native`, `test_bb_attachment_read.InlineAttachmentTests.test_message_text_is_bounded_beside_files` | covered |
+| `AttachmentRelayTests.test_connector_accepts_large_request_response_independently` | `test_bb_send.test_attachments_at_the_native_limits_reach_native_unchanged` (a request above 26 MiB), `test_attachments_and_text_beyond_the_limits_never_reach_native`, `test_bb_attachment_read.InlineAttachmentTests.test_files_above_the_result_limit_reach_native_stdin_unchanged` | covered |
 
 ### `test_mobile_child_send.py` (`ChildSendTests`)
 
@@ -229,12 +233,12 @@ The other `AttachmentRelayTests` are relay cases.
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
-| `test_history_is_read_only_scoped_and_old_nodes_deny` | `test_bb_history_recovery.test_hgs_without_the_history_abi_runs_nothing`; the fields: the `history/*` vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` | covered |
-| `test_fixture_pages_over_500_and_wrong_cursor_scope_rejected` | cursors pass unchanged: `test_bb_history_recovery.test_history_reads_pass_their_scoped_payload_unchanged`, `test_a_cursor_read_is_never_repeated_for_indexing`; paging is `fixture_hgs.py` behaviour | covered |
-| `test_wrong_history_ack_and_archive_match_fail_closed` | `test_bb_history_recovery.test_a_page_of_anything_else_fails_closed` | covered |
+| `test_history_is_read_only_scoped_and_old_nodes_deny` | `test_bb_history_recovery.test_hgs_without_the_history_abi_runs_nothing`, `test_bb_history_pages.test_without_the_history_abi_nothing_runs`; the fields: the `history/*` vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing`; the read class: `test_bb_read_classes` | covered |
+| `test_fixture_pages_over_500_and_wrong_cursor_scope_rejected` | cursors pass unchanged: `test_bb_history_recovery.test_history_reads_pass_their_scoped_payload_unchanged`, `test_a_cursor_read_is_never_repeated_for_indexing`, `test_bb_history_pages.test_page_has_fixed_argv_and_exact_stdin`; paging is `fixture_hgs.py` behaviour | covered |
+| `test_wrong_history_ack_and_archive_match_fail_closed` | `test_bb_history_recovery.test_a_page_of_anything_else_fails_closed`, `test_bb_history_pages.test_mismatched_page_fails_closed` | covered |
 | `test_recovery_five_field_identity_and_duplicate_no_repeat` | `test_bb_history_recovery.test_recovery_action_checks_the_waiting_job_then_acts_once`, `test_a_changed_job_or_a_mismatched_acknowledgement_never_repeats` | covered |
-| `test_head_locally_advances_bounded_index_and_partial_stops` | `test_bb_history_recovery.test_a_head_read_follows_local_indexing_while_it_progresses`; the 2 s budget: `test_bb_native_limits.test_a_read_out_of_its_budget_fails_and_its_child_is_killed` | covered |
-| `test_history_cursor_reads_are_not_repeated_for_indexing` | `test_bb_history_recovery.test_a_cursor_read_is_never_repeated_for_indexing` | covered |
+| `test_head_locally_advances_bounded_index_and_partial_stops` | `test_bb_history_recovery.test_a_head_read_follows_local_indexing_while_it_progresses`, `test_bb_history_pages.test_indexing_head_is_reread_until_it_stops_progressing`; the 2 s budget: `test_bb_native_limits.test_a_read_out_of_its_budget_fails_and_its_child_is_killed` | covered |
+| `test_history_cursor_reads_are_not_repeated_for_indexing` | `test_bb_history_recovery.test_a_cursor_read_is_never_repeated_for_indexing`, `test_bb_history_pages.test_indexing_head_is_reread_until_it_stops_progressing` | covered |
 | `test_native_recovery_uncertain_preserved` | `test_bb_history_recovery.test_recovery_action_checks_the_waiting_job_then_acts_once` | covered |
 
 ### `test_mobile_read.py`
@@ -256,25 +260,159 @@ The other `AttachmentRelayTests` are relay cases.
 
 ### `test_mobile_voice.py`
 
-`VoiceValidationTests` call the relay's `validate_request`; the connector's own checks run through the voice vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing`.
+`VoiceValidationTests` call the relay's `validate_request`; the connector's own checks run through the voice vectors of `validation/speech.jsonl`.
 
 | In-process test | Black-box coverage | Status |
 |---|---|---|
-| `VoiceConnectorTests.test_acceptance_is_scoped_durable_and_duplicate_never_reinvokes_native` | `test_bb_controls.test_voice_operations_reach_native_with_their_action_once` | covered |
-| `VoiceConnectorTests.test_wrong_conversation_ack_is_uncertain_and_not_replayed` | `test_bb_controls.test_a_mismatched_voice_acknowledgement_never_repeats` | covered |
-| `VoiceConnectorTests.test_old_host_rejects_without_native_and_status_read_is_short_lived` | `test_bb_controls.test_hgs_without_the_voice_abi_advertises_and_runs_nothing`, `test_a_delivered_status_read_is_kept_only_two_minutes` | covered |
+| `VoiceValidationTests.test_operations_keep_session_and_exact_native_identity` | the voice vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` and `test_bb_speech.SpeechJobTests.test_vector_rejections_never_reach_native` | covered |
+| `VoiceValidationTests.test_routes_are_machine_identities_not_caller_aliases` | same | covered |
+| `VoiceConnectorTests.test_acceptance_is_scoped_durable_and_duplicate_never_reinvokes_native` | `test_bb_controls.test_voice_operations_reach_native_with_their_action_once`, `test_bb_speech.VoiceTests.test_message_is_accepted_once_for_its_conversation` | covered |
+| `VoiceConnectorTests.test_wrong_conversation_ack_is_uncertain_and_not_replayed` | `test_bb_controls.test_a_mismatched_voice_acknowledgement_never_repeats`, `test_bb_speech.VoiceTests.test_unconfirmed_message_is_uncertain_and_never_replays` | covered |
+| `VoiceConnectorTests.test_old_host_rejects_without_native_and_status_read_is_short_lived` | `test_bb_controls.test_hgs_without_the_voice_abi_advertises_and_runs_nothing`, `test_a_delivered_status_read_is_kept_only_two_minutes`, `test_bb_speech.VoiceTests.test_status_and_profiles_are_reads`, `test_bb_read_classes` | covered |
 
 ### Other modules with connector cases
 
-| Module | Planned coverage |
+| Module | Coverage |
 |---|---|
-| `test_mobile_archives.py`, `test_mobile_terminal.py`, `test_mobile_history.py` | H3; the H2 session-operation modules have their tables above |
-| `test_mobile_attachments.py`, `test_mobile_attachment_read.py`, `test_mobile_launch.py`, `test_mobile_project_launch.py`, `test_mobile_projects.py`, `test_mobile_directory_create.py`, `test_mobile_worktrees.py`, `test_mobile_accounts.py`, `test_mobile_speech.py`, `test_mobile_speech_config.py` | H3, computer, read and media operations |
+| `test_mobile_actions.py`, `test_mobile_attachments.py`, `test_mobile_child_send.py`, `test_mobile_context.py`, `test_mobile_controls.py`, `test_mobile_delivery.py`, `test_mobile_history_recovery.py`, `test_mobile_read.py`, `test_mobile_voice.py` | H2: mapped per test in the tables above |
+| `test_mobile_archives.py`, `test_mobile_terminal.py`, `test_mobile_history.py`, `test_mobile_attachment_read.py`, `test_mobile_launch.py`, `test_mobile_project_launch.py`, `test_mobile_projects.py`, `test_mobile_directory_create.py`, `test_mobile_worktrees.py`, `test_mobile_accounts.py`, `test_mobile_speech.py`, `test_mobile_speech_config.py` | H3: mapped per test under [Computer, read and media operations](#computer-read-and-media-operations-h3) |
 | `test_connector_peers.py`, `test_peer_end_to_end.py`, the peer classes of `test_mobile_directory_create.py` and `test_mobile_worktrees.py` | H4, peers and the one-hop gateway |
 | `test_managed_relay.py` | P2 `identities.json` |
 | `test_end_to_end.py`, `test_presence_end_to_end.py` | Real-relay end-to-end tests on PostgreSQL |
 
-Connector halves inside relay classes (for example
+Connector halves inside relay classes have rows in the tables of their
+modules (for example
 `AttachmentRelayTests.test_connector_accepts_large_request_response_independently`
-and `TerminalRetention`) need rows here before the Python reference relay is
-deleted.
+and `TerminalRetention`); the rest of those classes are relay cases.
+
+### Computer, read and media operations (H3)
+
+These modules take their expected texts from the golden vectors through
+`bb_operations.py`: help markers from `operations.json`, rejections from
+`validation/*.jsonl` (each must fail with its recorded message and reach no
+native command), the `execute` runs of `projections.jsonl` (native argv,
+stdin and the stored receipt) and boundaries from `sizes.jsonl`. They run on
+the vectors' synthetic computer and add 84 tests, about 95 s against Python on
+a Linux workstation (2026-10-15); `test_bb_computer.py` takes about 30 s
+because it waits for the 15 s project refresh.
+`test_bb_attachment_read.ScriptedAnswerTests` checks the scripted answers these
+suites add and, like `test_bb_harness.py`, always runs. The real-CLI cases use
+`ZERUS_DIRECTORY_TEST_HGS`, `HGS_TEST_BIN` or `target/debug/hgs` through the
+scripted hgs's `exec` rule, so only `--help`, `dirs` and `speech` reach it;
+they fail rather than skip when `CI=true`. Python reports a refused worktree
+catalog or creation receipt with its generic "connector could not record
+native outcome", which `test_bb_worktrees` pins.
+
+`test_mobile_attachments.py`, `test_mobile_history_recovery.py` and
+`test_mobile_voice.py` are mapped in their own tables above, together with
+the tests of these suites that cover them.
+
+| In-process test | Black-box coverage | Status |
+|---|---|---|
+| `test_mobile_terminal.TerminalTransport.test_fixed_raw_dispatch_and_duplicate_never_repeat` | `test_bb_terminal.test_input_runs_once_after_a_fresh_preflight`, `test_vector_screens_and_input_reach_fixed_native_argv` | covered |
+| `test_mobile_terminal.TerminalTransport.test_expired_wrong_binding_and_old_cli_fail_before_handoff` | `test_bb_terminal.test_input_fails_closed_before_handoff`, `test_without_the_terminal_abi_nothing_runs` | covered |
+| `test_mobile_terminal.TerminalTransport.test_ambiguous_native_ack_never_replays` | `test_bb_terminal.test_unconfirmed_input_is_uncertain_and_never_replays` | covered |
+| `test_mobile_terminal.TerminalTransport.test_payload_is_literal_bounded_and_rejects_hidden_control` | `test_bb_terminal.test_literal_text_is_bounded_and_rejects_hidden_controls`, `test_every_allowlisted_key_and_no_other` | covered |
+| `test_mobile_terminal.TerminalFixture.test_real_fixture_subprocess_roundtrip_does_not_execute_text` | `test_bb_terminal.test_input_runs_once_after_a_fresh_preflight` (shell syntax stays literal stdin) | covered |
+| `test_mobile_terminal.TerminalRateBudget.test_four_frames_per_second_receipts_and_node_uplink_for_two_minutes` | Relay only: R4 | planned |
+| `test_mobile_terminal.TerminalRetention.test_sustained_reads_and_abandoned_results_expire_without_mutation_eviction` | Journal half: `test_bb_terminal.test_screens_leave_the_journal_after_two_minutes_and_inputs_stay`, `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay`; 5,100 sustained reads against the read cap: P2 `journal/caps.sql` in a Rust unit test (C1); relay half: R4 | partial |
+| `test_mobile_history.HistoryTests.test_large_unicode_history_keeps_full_question_identity_and_newest_user` | `test_bb_history_pages.test_large_inspection_loses_only_whole_oldest_rows_and_says_so` | covered |
+| `test_mobile_history.HistoryTests.test_mandatory_metadata_too_large_fails_without_cropping` | `test_bb_history_pages.test_oversized_disclosures_fail_without_cropping` | covered |
+| `test_mobile_history.HistoryTests.test_small_results_unchanged_and_no_event_is_partially_cropped` | `test_bb_history_pages.test_small_inspection_is_unchanged`, `test_vector_inspections_keep_their_recorded_rows` | covered |
+| `test_mobile_history.HistoryConnectorTests.test_connector_read_returns_bounded_history_or_clear_metadata_failure` | the same two inspection tests | covered |
+| `test_mobile_attachment_read.ReadValidationTests.test_exact_receipt_position_and_bounded_range` | `test_bb_attachment_read.AttachmentReadTests.test_invalid_positions_and_fields_never_reach_native`, `test_foreign_identities_and_answers_are_refused` (with the `conversation.jsonl` cases) | covered |
+| `test_mobile_attachment_read.ReadValidationTests.test_operation_is_a_short_lived_read_outside_the_indexed_read_text` | `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay`; the `READ_SQL` text: `operations.json` | covered |
+| `test_mobile_attachment_read.ReadValidationTests.test_memory_cache_is_bounded_least_recent_and_expires` | `test_bb_attachment_read.AttachmentReadTests.test_verified_files_are_kept_least_recently_used_up_to_three`, `test_the_cache_budget_is_bytes_not_files`; the 120 s expiry needs an injected clock: Rust unit test (C4) | partial |
+| `test_mobile_attachment_read.ConnectorReadTests.test_ranges_return_exact_bytes_digest_and_reuse_one_native_read` | `test_bb_attachment_read.AttachmentReadTests.test_ranges_return_exact_bytes_from_one_native_read`, `test_vector_reads`, `test_native_output_is_capped_at_one_encoded_file` | covered |
+| `test_mobile_attachment_read.ConnectorReadTests.test_archived_and_child_identity_reach_native_flags` | `test_bb_attachment_read.AttachmentReadTests.test_archived_and_child_reads_name_their_flags` | covered |
+| `test_mobile_attachment_read.ConnectorReadTests.test_foreign_session_identity_and_answers_are_refused` | `test_bb_attachment_read.AttachmentReadTests.test_foreign_identities_and_answers_are_refused` | covered |
+| `test_mobile_attachment_read.ConnectorReadTests.test_unsupported_native_is_not_advertised_or_executed` | `test_bb_attachment_read.AttachmentReadTests.test_without_the_attachment_abi_nothing_runs` | covered |
+| `test_mobile_attachment_read.ConnectorReadTests.test_delivered_chunks_leave_the_journal_like_terminal_snapshots` | `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay` | covered |
+| `test_mobile_speech.SpeechValidationTests.test_all_computer_operations_have_exact_shapes` | `test_bb_speech.SpeechJobTests.test_vector_rejections_never_reach_native` | covered |
+| `test_mobile_speech.SpeechValidationTests.test_invalid_audio_identity_and_extra_fields_are_rejected` | the same | covered |
+| `test_mobile_speech.SpeechValidationTests.test_maximum_audio_has_bounded_valid_encoding` | `test_bb_speech.SpeechJobTests.test_recordings_are_bounded_to_two_minutes` | covered |
+| `test_mobile_speech.SpeechConnectorTests.test_submit_returns_job_without_waiting_for_inference_and_never_replays` | `test_bb_speech.SpeechJobTests.test_submit_returns_its_job_once`, `test_vector_submit_keeps_no_transcript` | covered |
+| `test_mobile_speech.SpeechConnectorTests.test_mismatched_job_is_uncertain_and_old_cli_never_runs_speech` | `test_bb_speech.SpeechJobTests.test_unconfirmed_jobs_are_uncertain_and_never_replay`, `SpeechConfigurationTests.test_speech_and_its_configuration_are_separate_capabilities` | covered |
+| `test_mobile_speech.SpeechConnectorTests.test_status_is_exact_and_read_receipts_are_pruned` | `test_bb_speech.SpeechJobTests.test_reads_and_cancellation`, `test_bb_read_classes` | covered |
+| `test_mobile_speech.SpeechHttpServiceTests.test_maximum_recording_crosses_http_cli_socket_once_and_is_erased` | Connector half: `test_bb_speech.SpeechJobTests.test_recordings_are_bounded_to_two_minutes`; relay, CLI and speech service: R2 end to end | partial |
+| `test_mobile_speech.SpeechHttpServiceTests.test_status_and_cancel_are_bound_to_phone_and_computer` | Relay only: R4 | planned |
+| `test_mobile_speech_config.SpeechConfigValidationTests.test_voice_routes_preserve_optional_exact_profile_revision` | `test_bb_speech.SpeechJobTests.test_vector_rejections_never_reach_native` | covered |
+| `test_mobile_speech_config.SpeechConfigValidationTests.test_all_operations_are_computer_scoped_and_exact` | the same | covered |
+| `test_mobile_speech_config.SpeechConfigValidationTests.test_plaintext_credentials_and_unbounded_envelopes_are_rejected` | the same | covered |
+| `test_mobile_speech_config.SpeechConfigValidationTests.test_receipts_reject_unexpected_content_and_wrong_identity` | `test_bb_speech.SpeechConfigurationTests.test_unexpected_native_content_never_becomes_a_receipt`, `test_reads_are_allowlisted_and_bound_to_the_computer` | covered |
+| `test_mobile_speech_config.SpeechConfigConnectorTests.test_capability_is_independent_and_request_is_not_replayed` | `test_bb_speech.SpeechConfigurationTests.test_sealed_change_runs_once_and_keeps_only_its_receipt`, `test_speech_and_its_configuration_are_separate_capabilities` | covered |
+| `test_mobile_speech_config.SpeechConfigConnectorTests.test_malformed_result_never_persists_a_key_or_replays` | `test_bb_speech.SpeechConfigurationTests.test_unexpected_native_content_never_becomes_a_receipt` | covered |
+| `test_mobile_speech_config.SpeechConfigConnectorTests.test_redacted_management_reads_expire` | `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay` | covered |
+| `test_mobile_speech_config.SpeechConfigConnectorTests.test_transport_stderr_does_not_enter_durable_receipts` | `test_bb_speech.SpeechConfigurationTests.test_unexpected_native_content_never_becomes_a_receipt` | covered |
+| `test_mobile_speech_config.SpeechConfigHttpTests.test_sealed_mutation_is_erased_and_keeps_no_replay_receipt` | Relay only: R4 | planned |
+| `test_mobile_speech_config.SpeechConfigHttpTests.test_status_is_owned_by_original_phone_and_computer` | Relay only: R4 | planned |
+| `test_mobile_speech_config.SpeechConfigHttpTests.test_real_cli_management_roundtrip_without_inference_runtime` | Connector and CLI: `test_bb_speech.SpeechConfigurationTests.test_real_cli_manages_a_profile_without_inference`; relay half: R2 | covered |
+| `test_mobile_launch.LaunchTransport.test_exact_marker_required_and_duplicate_cannot_launch_again` | `test_bb_launch.LaunchTests.test_launch_runs_once_and_returns_its_exact_target`, `test_without_the_launch_abi_nothing_runs` | covered |
+| `test_mobile_launch.LaunchTransport.test_preflight_old_cli_invalid_fields_and_wrong_provider_do_not_launch` | `test_bb_launch.LaunchTests.test_failed_preflights_never_launch`, `test_without_the_launch_abi_nothing_runs` | covered |
+| `test_mobile_launch.LaunchTransport.test_native_handoff_failure_is_uncertain_and_never_replayed` | `test_bb_launch.LaunchTests.test_an_unconfirmed_launch_is_uncertain_and_never_repeats` (also the 5 s verification) | covered |
+| `test_mobile_launch.LaunchTransport.test_opencode_exact_offered_model_reaches_fixed_native_launch_once` | `test_bb_launch.LaunchTests.test_opencode_models_must_still_be_offered` | covered |
+| `test_mobile_launch.LaunchTransport.test_changed_or_other_account_model_blocks_before_directory_or_launch` | the same | covered |
+| `test_mobile_launch.LaunchTransport.test_opencode_default_model_does_not_require_or_inject_a_model` | the same | covered |
+| `test_mobile_launch.LaunchTransport.test_model_route_is_bounded_and_specific_to_native_opencode` | `test_bb_launch.LaunchTests.test_failed_preflights_never_launch` (`launch/model-*` vectors) | covered |
+| `test_mobile_launch.LaunchTransport.test_fixture_catalog_launch_then_inspect_and_send_new_exact_target` | `test_bb_launch.LaunchTests.test_launch_runs_once_and_returns_its_exact_target`; inspecting and messaging the new target before the next listing has no black-box test yet (a renamed target: `test_bb_actions.test_a_renamed_target_can_be_inspected_before_the_next_heartbeat`) | partial |
+| `test_mobile_launch.CatalogPrivacy.test_inherited_opencode_configuration_cannot_retarget_connector_calls` | `test_bb_requests.test_mutation_gets_exact_stdin_and_no_calling_agent_identity` (the OpenCode variables are context keys) | covered |
+| `test_mobile_launch.CatalogPrivacy.test_cached_limits_are_projected_without_native_errors_or_credentials` | `test_bb_launch.LaunchTests.test_vector_catalog_projection` | covered |
+| `test_mobile_launch.CatalogPrivacy.test_only_selected_public_fields_are_forwarded` | `test_bb_launch.LaunchTests.test_vector_catalog_projection`, `ProjectLaunchTests.test_catalog_lists_accessible_projects_with_local_folders` | covered |
+| `test_mobile_launch.CatalogPrivacy.test_opencode_models_project_only_bounded_ids_labels_and_provider` | `test_bb_launch.LaunchTests.test_vector_catalog_projection`; the bounds: `projections.jsonl` `model-options` in a Rust unit test (C5) | partial |
+| `test_mobile_launch.CatalogPrivacy.test_model_catalog_cannot_exceed_public_byte_bound` | Rust unit test (C5) | planned |
+| `test_mobile_project_launch.ProjectLaunchTests.test_successful_placement_and_exact_uuid_retry_do_not_launch_twice` | `test_bb_launch.ProjectLaunchTests.test_assignment_follows_a_confirmed_launch_once` | covered |
+| `test_mobile_project_launch.ProjectLaunchTests.test_created_target_retained_after_assignment_failure_uncertainty_or_wrong_ack` | `test_bb_launch.ProjectLaunchTests.test_failed_assignment_keeps_the_created_session` | covered |
+| `test_mobile_project_launch.ProjectLaunchTests.test_missing_old_cli_or_changed_project_rejects_before_creation` | `test_bb_launch.ProjectLaunchTests.test_without_the_assignment_abi_a_project_launch_never_starts`, `test_saved_and_related_folders_are_checked_natively` | covered |
+| `test_mobile_project_launch.ProjectLaunchTests.test_symlink_saved_folder_uses_fresh_directory_equivalence` | `test_bb_launch.ProjectLaunchTests.test_saved_and_related_folders_are_checked_natively` | covered |
+| `test_mobile_project_launch.ProjectCatalogTests.test_exact_profiles_default_and_cached_email_survive_without_paths_or_secrets` | `test_bb_launch.LaunchTests.test_vector_catalog_projection`; profiles with one label: Rust unit test (C5) | partial |
+| `test_mobile_project_launch.ProjectCatalogTests.test_project_catalog_has_only_local_folders_and_accessible_groups` | `test_bb_launch.ProjectLaunchTests.test_catalog_lists_accessible_projects_with_local_folders` | covered |
+| `test_mobile_project_launch.ProjectCatalogTests.test_project_fields_and_existing_folder_intent_are_validated_before_mutation` | `test_bb_launch.LaunchTests.test_failed_preflights_never_launch` (`launch/project-*` vectors); identifier bounds: Rust unit test (C5) | partial |
+| `test_mobile_projects.NativeProjectsTests.test_all_groups_local_folders_and_exact_memberships_only` | `test_bb_computer.ProjectTests.test_projects_carry_local_folders_and_exact_memberships` | covered |
+| `test_mobile_projects.NativeProjectsTests.test_uninitialized_catalog_is_stable_unavailable_without_alias_invention` | `test_bb_computer.ProjectTests.test_an_uninitialized_catalog_is_a_stable_local_fallback` | covered |
+| `test_mobile_projects.ProjectCacheTests.test_cache_reuses_fifteen_seconds_and_keeps_stale_memberships` | `test_bb_computer.ProjectTests.test_projects_are_read_every_fifteen_seconds_and_kept_when_a_read_fails` | covered |
+| `test_mobile_accounts.ProjectionTests.test_native_opencode_account_and_models_keep_configuration_private` | `test_bb_computer.AccountTests.test_account_view_carries_only_public_fields` | covered |
+| `test_mobile_accounts.ProjectionTests.test_only_allowlisted_fields_leave_native_projection` | `test_bb_computer.AccountTests.test_usage_is_refreshed_in_the_background_one_account_at_a_time` | covered |
+| `test_mobile_accounts.ProjectionTests.test_invalid_numbers_resets_sources_and_auth_status_are_not_coerced` | `projections.jsonl` `usage-hostile` in a Rust unit test (C5) | planned |
+| `test_mobile_accounts.ProjectionTests.test_catalog_bound_identity_and_duplicate_validation` | `test_bb_computer.AccountTests.test_an_unavailable_catalog_is_reported_without_native_text`; the identity rules: `account-cache-refuses-unknown-provider` in a Rust unit test (C5) | partial |
+| `test_mobile_accounts.ProjectionTests.test_malformed_nested_values_and_huge_numbers_are_safe` | `projections.jsonl` `usage-hostile` in a Rust unit test (C5) | planned |
+| `test_mobile_accounts.ProjectionTests.test_actual_ascii_expanded_catalog_bytes_are_bounded` | Rust unit test (C5) | planned |
+| `test_mobile_accounts.CacheTests.test_refresh_is_single_flight_nonblocking_and_preserves_native_age` | `test_bb_computer.AccountTests.test_usage_is_refreshed_in_the_background_one_account_at_a_time`; staleness after 300 s needs an injected clock: Rust unit test (C5) | partial |
+| `test_mobile_accounts.CacheTests.test_credential_change_and_removal_discard_old_usage_and_late_result` | Needs the 30 s catalog clock: Rust unit test (C5) | planned |
+| `test_mobile_accounts.CacheTests.test_fair_rotation_refresh_interval_and_missing_provider` | Rotation: `test_bb_computer.AccountTests.test_usage_is_refreshed_in_the_background_one_account_at_a_time`; the 300 s interval: Rust unit test (C5) | partial |
+| `test_mobile_accounts.CacheTests.test_dsh_missing_auth_revision_signout_invalidates_usage` | Needs the 30 s catalog clock: Rust unit test (C5) | planned |
+| `test_mobile_accounts.CacheTests.test_failures_retain_stale_values_without_errors_and_shutdown_cancels` | `test_bb_computer.AccountTests.test_usage_is_refreshed_in_the_background_one_account_at_a_time`, `test_an_unavailable_catalog_is_reported_without_native_text`; the cancellation on shutdown: Rust unit test (C5) | partial |
+| `test_mobile_accounts.CacheTests.test_connector_snapshot_exposes_capability_without_waiting_for_provider` | `test_bb_computer.AccountTests.test_usage_is_refreshed_in_the_background_one_account_at_a_time`, `test_account_view_carries_only_public_fields` | covered |
+| `test_mobile_accounts.CacheTests.test_shutdown_reaps_only_the_owned_account_inspection_child` | Rust unit test (C5); a Python SIGTERM leaves the child running | planned |
+| `test_mobile_directory_create.DirectoryCreate.test_fixed_literal_argv_and_exact_parent_receipt_replay_once` | `test_bb_directories.DirectoryTests.test_creation_runs_once_and_returns_only_the_exact_receipt` | covered |
+| `test_mobile_directory_create.DirectoryCreate.test_missing_capability_fails_before_native_or_parent_read` | `test_bb_directories.DirectoryTests.test_capability_is_separate_from_launch` | covered |
+| `test_mobile_directory_create.DirectoryCreate.test_invalid_wire_fields_paths_and_uuid_are_rejected_without_native` | `test_bb_directories.DirectoryTests.test_an_unconfirmed_parent_never_dispatches_creation` (`directory_create/*` vectors); a non-canonical request UUID cannot be queued: `validation/envelope.jsonl` | covered |
+| `test_mobile_directory_create.DirectoryCreate.test_parent_failure_or_malformed_parent_does_not_dispatch_mutation` | `test_bb_directories.DirectoryTests.test_an_unconfirmed_parent_never_dispatches_creation` | covered |
+| `test_mobile_directory_create.DirectoryCreate.test_unconfirmed_native_outcome_is_uncertain_and_duplicate_never_retries` | `test_bb_directories.DirectoryTests.test_an_unconfirmed_creation_is_uncertain_and_never_retried`; a mutation out of its budget: `test_bb_native_limits.test_a_mutation_out_of_its_budget_is_uncertain_and_never_retried` (the delivery setting), not a creation | partial |
+| `test_mobile_directory_create.DirectoryCreate.test_cancellation_after_dispatch_is_uncertain_without_replay` | Process level: `test_bb_directories.DirectoryTests.test_a_crash_after_creation_never_creates_again`; task cancellation: Rust unit test (C5) | partial |
+| `test_mobile_directory_create.DirectoryCreate.test_duplicate_during_native_flight_preserves_one_admission` | Rust unit test (C5): requests run one at a time, so no relay redelivers during the flight | planned |
+| `test_mobile_directory_create.DirectoryCreate.test_restart_recovers_inflight_as_mutation_and_retains_identity_after_prune` | `test_bb_directories.DirectoryTests.test_a_crash_after_creation_never_creates_again` | covered |
+| `test_mobile_directory_create.DirectoryCreate.test_help_discovery_is_additive_independent_and_downgrade_safe` | `test_bb_directories.DirectoryTests.test_capability_is_separate_from_launch` | covered |
+| `test_mobile_directory_create.DirectoryCreate.test_catalog_reports_selected_target_creation_support` | `test_bb_directories.DirectoryTests.test_capability_is_separate_from_launch`, `test_bb_launch.LaunchTests.test_vector_catalog_projection` | covered |
+| `test_mobile_directory_create.NativeDirectoryCreate.test_real_native_symlink_parent_literal_folder_and_durable_duplicate` | `test_bb_directories.NativeDirectoryTests.test_real_cli_creates_one_literal_folder_through_a_link` | covered |
+| `test_mobile_directory_create.RustDirectoryHttp` (3 tests) | Real-relay end to end on PostgreSQL (R2); the peer route: H4 | planned |
+| `test_mobile_worktrees.Worktrees.test_confirmed_canonical_destination_and_duplicate_do_not_create_again` | `test_bb_worktrees.test_creation_runs_once_after_fresh_evidence` | covered |
+| `test_mobile_worktrees.Worktrees.test_foreign_result_is_uncertain_and_never_replayed` | `test_bb_worktrees.test_an_unconfirmed_creation_is_uncertain_and_never_repeats` | covered |
+| `test_mobile_worktrees.Worktrees.test_changed_repository_fails_before_mutation` | `test_bb_worktrees.test_changed_repository_fails_before_creation` | covered |
+| `test_mobile_worktrees.Worktrees.test_legacy_local_downgrade_uses_old_safe_namespace` | `test_bb_worktrees.test_vector_catalog_uses_the_state_namespace`, `test_creation_runs_once_after_fresh_evidence` | covered |
+| `test_mobile_worktrees.Worktrees.test_nested_independent_repository_and_ordinary_subdir_not_members` | `test_bb_launch.ProjectLaunchTests.test_saved_and_related_folders_are_checked_natively`; nested and stale catalogs: Rust unit test (C5) | partial |
+| `test_mobile_worktrees.Worktrees.test_strict_fields_and_result_identity` | `test_bb_worktrees.test_catalog_is_projected_or_refused`, `test_an_unconfirmed_creation_is_uncertain_and_never_repeats` | covered |
+| `test_mobile_worktrees.Worktrees.test_repeated_cancellation_drains_only_owned_bounded_create` | Process level: `test_bb_worktrees.test_sigterm_never_cuts_a_creation_short`; repeated task cancellation: Rust unit test (C5) | partial |
+| `test_mobile_worktrees.Worktrees.test_cancel_while_spawn_returns_retains_one_owned_process` | Rust unit test (C5) | planned |
+| `test_mobile_worktrees.Worktrees.test_related_project_uses_exact_anchor_without_adding_folder` | `test_bb_launch.ProjectLaunchTests.test_saved_and_related_folders_are_checked_natively` | covered |
+| `test_mobile_worktrees.WorktreeRestart.test_restart_of_claimed_creation_never_calls_native_again` | `test_bb_worktrees.test_sigterm_never_cuts_a_creation_short` (Python restarts it uncertain without native) | covered |
+| `test_mobile_worktrees.PeerWorktrees` (2 tests) | H4 | planned |
+| `test_mobile_archives.ArchiveConnectorTests.test_live_and_archive_same_name_use_distinct_native_arguments` | `test_bb_archives.test_a_live_session_and_its_archive_use_distinct_native_arguments` | covered |
+| `test_mobile_archives.ArchiveConnectorTests.test_invalid_unknown_and_wrong_name_archives_never_spawn` | `test_bb_archives.test_invalid_unknown_and_renamed_archives_never_spawn` | covered |
+| `test_mobile_archives.ArchiveConnectorTests.test_archived_only_name_has_no_legacy_or_mutation_fallback` | `test_bb_archives.test_an_archived_name_has_no_live_or_mutation_fallback` | covered |
+| `test_mobile_archives.ArchiveConnectorTests.test_native_missing_or_wrong_archive_identity_fails_without_fallback` | `test_bb_archives.test_answers_for_another_target_fail_without_fallback` | covered |
+| `test_mobile_archives.ArchiveConnectorTests.test_expired_archive_snapshot_is_not_used_to_spawn_native_inspection` | `validation/conversation.jsonl` `inspect/archive-stale` (46 s old snapshot) in a Rust unit test with an injected clock (C4); black-box it needs a 45 s wait | planned |
+| `test_mobile_archives.ArchiveConnectorTests.test_archive_and_live_same_name_have_distinct_project_assignments` | `test_bb_archives.test_a_live_session_and_its_archive_belong_to_their_own_projects` | covered |
+| `test_mobile_archives.ArchiveConnectorTests.test_archive_id_without_state_still_requires_exact_archive_selection` | `test_bb_archives.test_an_archive_id_without_state_is_still_an_archive` | covered |
+| `test_mobile_archives.ArchiveConnectorTests.test_ordinary_inspect_rejects_raced_archive_or_different_name_response` | `test_bb_archives.test_answers_for_another_target_fail_without_fallback` | covered |
+| `test_mobile_archives.ArchiveRelayTests` (2 tests) | Relay only: R4 | planned |
+| `test_mobile_archives.ArchiveFixtureTests.test_optional_synthetic_states_and_archive_pass_through` | `test_bb_archives.test_a_live_session_and_its_archive_use_distinct_native_arguments` | covered |
