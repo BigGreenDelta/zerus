@@ -227,11 +227,16 @@ pub async fn gateway(
         }
         t.exec("INSERT INTO computer_routes(gateway_id,route_id,computer_id,machine_id,local,active,online,guarded,name) VALUES(?,?,?,?,0,1,?,?,?) ON CONFLICT(gateway_id,route_id) DO UPDATE SET online=excluded.online,guarded=excluded.guarded,name=excluded.name",args![n,&peer["route_id"],&target,&peer["machine_id"],&peer["online"],guarded,&peer["name"]]).await?;
         if peer["online"] != true {
-            t.exec("UPDATE computer_routes SET snapshot=NULL,snapshot_hash=NULL,last_seen=NULL WHERE gateway_id=? AND route_id=?",args![n,&peer["route_id"]]).await?;
+            // Keep last_seen: it remains the last accepted peer heartbeat for
+            // display. Clearing the snapshot withdraws freshness evidence.
+            t.exec("UPDATE computer_routes SET snapshot=NULL,snapshot_hash=NULL WHERE gateway_id=? AND route_id=?",args![n,&peer["route_id"]]).await?;
         }
     }
     Ok(())
 }
+/// `last_seen` is freshness evidence: a peer route's time counts only while it
+/// stores a snapshot accepted since the gateway last marked it online.
+/// `last_seen_at` is the display time, which an offline peer route retains.
 pub fn available(r: &Value) -> bool {
     if i(r, "gateway_revoked") != 0 || i(r, "revoked") != 0 || i(r, "active") == 0 {
         return false;
@@ -247,7 +252,7 @@ pub fn available(r: &Value) -> bool {
         && now() - f(r, "last_seen") < 45.0
 }
 async fn candidates(t: &mut Tx, w: &str, c: Option<&str>) -> Result<Vec<Value>> {
-    let select="SELECT c.id,c.name,c.exposed,c.revoked,r.gateway_id,r.route_id,r.machine_id,r.local,r.active,r.online,r.guarded,CASE WHEN r.local=1 THEN n.last_seen ELSE r.last_seen END AS last_seen,n.last_seen AS gateway_seen,n.revoked AS gateway_revoked,n.name AS gateway_name,COALESCE(BYTES(CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS_BYTES),0) AS snapshot_bytes FROM computers c JOIN computer_routes r ON r.computer_id=c.id JOIN nodes n ON n.id=r.gateway_id WHERE c.workspace_id=? AND c.revoked=0 AND n.revoked=0 AND r.active=1";
+    let select="SELECT c.id,c.name,c.exposed,c.revoked,r.gateway_id,r.route_id,r.machine_id,r.local,r.active,r.online,r.guarded,CASE WHEN r.local=1 THEN n.last_seen WHEN r.snapshot_hash IS NOT NULL THEN r.last_seen END AS last_seen,CASE WHEN r.local=1 THEN n.last_seen ELSE r.last_seen END AS last_seen_at,n.last_seen AS gateway_seen,n.revoked AS gateway_revoked,n.name AS gateway_name,COALESCE(BYTES(CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS_BYTES),0) AS snapshot_bytes FROM computers c JOIN computer_routes r ON r.computer_id=c.id JOIN nodes n ON n.id=r.gateway_id WHERE c.workspace_id=? AND c.revoked=0 AND n.revoked=0 AND r.active=1";
     if let Some(c) = c {
         t.all(&format!("{select} AND c.id=?"), args![w, c]).await
     } else {
@@ -390,7 +395,7 @@ pub async fn catalog(t: &mut Tx, w: &str, maximum: usize, online_timeout: u64) -
         } else {
             Value::Null
         };
-        result.push(json!({"id":r["id"],"name":r["name"],"online":available(r)&&!r["last_seen"].is_null()&&now()-f(r,"last_seen")<online_timeout as f64,"last_seen_at":r["last_seen"],"snapshot":parsed,"machine_id":r["machine_id"],"aliases":aliases_by_computer.remove(s(r,"id")).unwrap_or_default(),"via":if i(r,"local")!=0{Value::Null}else{json!({"gateway_id":r["gateway_id"],"gateway_name":r["gateway_name"]})}}));
+        result.push(json!({"id":r["id"],"name":r["name"],"online":available(r)&&!r["last_seen"].is_null()&&now()-f(r,"last_seen")<online_timeout as f64,"last_seen_at":r["last_seen_at"],"snapshot":parsed,"machine_id":r["machine_id"],"aliases":aliases_by_computer.remove(s(r,"id")).unwrap_or_default(),"via":if i(r,"local")!=0{Value::Null}else{json!({"gateway_id":r["gateway_id"],"gateway_name":r["gateway_name"]})}}));
     }
     let unexposed: Vec<_> = selected
         .iter()
