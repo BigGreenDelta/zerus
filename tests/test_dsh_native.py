@@ -564,7 +564,9 @@ class NativeHarness(unittest.TestCase):
             return next((r for r in self.rpc('list')['items']
                          if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
         try:
-            child=self.wait(child_row)['sessionId']
+            # The list can show the child before its Agent is live; a send to it
+            # then needs a resume rather than reaching the subagent refusal.
+            child=self.wait(lambda: r if (r:=child_row()) and r.get('agentAvailable') else None)['sessionId']
             with self.assertRaisesRegex(RuntimeError,'^Use the parent to manage a subagent$'):
                 self.rpc('send',{'sessionId':child,'requestId':str(uuid.uuid4()),'mode':'steer',
                                  'content':[{'type':'text','text':'Direct child send'}]})
