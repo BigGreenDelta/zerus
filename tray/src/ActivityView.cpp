@@ -1291,6 +1291,19 @@ void ActivityView::setColumnWidth(int width)
     updateColumnActions();
 }
 
+namespace {
+QString queueSendTooltip(const QString &hint, const QString &chord)
+{
+    return chord.isEmpty() ? hint : hint.isEmpty() ? chord : hint + " (" + chord + ")";
+}
+}
+
+void ActivityView::setQueueSendNowShortcut(const QString &chord)
+{
+    m_queueShortcut = chord;
+    m_queueSend->setToolTip(queueSendTooltip(m_details["input_queue"].toObject()["hint"].toString(), chord));
+}
+
 int ActivityView::scrollBarReserve() const
 {
     // As QAbstractScrollArea lays it out: a shown scroll bar takes its extent,
@@ -1671,7 +1684,7 @@ void ActivityView::render(bool contentUpdate)
     m_queueText->setToolTip(queue["text"].toString());
     m_queueSend->setEnabled(queue["can_send_now"].toBool() && !details["queue_sending"].toBool());
     m_queueSend->setText(details["queue_sending"].toBool() ? tr("Sending…") : tr("Send now"));
-    m_queueSend->setToolTip(queue["hint"].toString());
+    m_queueSend->setToolTip(queueSendTooltip(queue["hint"].toString(), m_queueShortcut));
     // Live state is separate from journal HTML: its animation and polls must
     // not rebuild the transcript or disturb a text selection.
     m_compaction->setVisible(m_tracked && !searching && details.value("phase") == "compacting"

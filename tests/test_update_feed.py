@@ -121,6 +121,36 @@ class MirrorTest(unittest.TestCase):
                 self.client=FakeGitHub();self.add_macos(asset,declared)
                 with tempfile.TemporaryDirectory() as stage:
                     with self.assertRaises(ValueError):feed.validate_and_fetch(self.client,self.client.release,Path(stage),'desktop','stable')
+    def test_signed_disk_images_stay_on_github_for_both_channels(self):
+        for nightly in (False,True):
+            with self.subTest(nightly=nightly):
+                self.client=FakeGitHub(nightly=nightly);version=self.client.info['version']
+                self.add_macos(f'zerus-{version}-macos-arm64.zip',cask='zerus@nightly' if nightly else 'zerus')
+                image=f'zerus-{version}-macos-arm64.dmg'
+                self.client.info['macos']['dmg']={'asset':image,'notarization_id':'1123abcd-4567-89ef-0123-456789abcdef'}
+                self.client.payload[image]=b'notarized disk image';self.client.seal()
+                channel='nightly' if nightly else 'stable'
+                with tempfile.TemporaryDirectory() as stage:
+                    result,files=feed.validate_and_fetch(self.client,self.client.release,Path(stage),'desktop',channel)
+                    self.assertNotIn(image,files)
+                    self.assertNotIn(image,self.client.calls)
+                    self.assertNotIn(image,[row['name'] for row in result['artifacts']])
+                row=next(row for row in self.client.release['assets'] if row['name']==image)
+                row['digest']='sha256:'+'f'*64
+                with tempfile.TemporaryDirectory() as stage:
+                    with self.assertRaisesRegex(ValueError,'digest mismatch'):
+                        feed.validate_and_fetch(self.client,self.client.release,Path(stage),'desktop',channel)
+    def test_disk_image_metadata_cannot_admit_undeclared_or_foreign_assets(self):
+        image='zerus-0.37.0-macos-arm64.dmg'
+        for metadata in (None,{}, {'asset':'foreign.dmg','notarization_id':'1123abcd-4567-89ef-0123-456789abcdef'},
+                         {'asset':image,'notarization_id':None}):
+            with self.subTest(metadata=metadata):
+                self.client=FakeGitHub();self.add_macos()
+                if metadata is not None:self.client.info['macos']['dmg']=metadata
+                self.client.payload[image]=b'disk image';self.client.seal()
+                with tempfile.TemporaryDirectory() as stage:
+                    with self.assertRaises(ValueError):
+                        feed.validate_and_fetch(self.client,self.client.release,Path(stage),'desktop','stable')
     def test_modified_asset_hardfails_and_retains_feed(self):
         self.root.mkdir();self.run_mirror();path=self.root/'updates/v1/desktop/stable.json';before=path.read_bytes()
         asset=self.root/'downloads/v0.37.0/zerus-0.37.0-1-x86_64.pkg.tar.zst';asset.write_bytes(b'broken')

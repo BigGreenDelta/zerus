@@ -19,6 +19,8 @@ public:
     void setTheme(bool dark);
     void setFolderScope(const QString &host,const QString &path,bool checkout);
     bool active() const { return !m_query.isEmpty(); }
+    // The workspace key of a result row's session (with its archive id for an archive).
+    static QString sessionKey(const QListWidgetItem *item);
 signals:
     void resultActivated(const QString &host, const QString &name, const QString &archive,
                          const QString &run, const QJsonObject &event, const QString &query);
