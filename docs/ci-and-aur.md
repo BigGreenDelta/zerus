@@ -744,7 +744,10 @@ which Codex prints in full in its header, answers a first message from the local
 provider; idle polls must not treat that header above the history as a reset,
 and a later clear must still be confirmed. A separate fixture caches a newer
 version for the startup update picker and verifies its Activity identity,
-**Skip** and **Skip until next version**; it never selects **Update now**.
+**Skip** and **Skip until next version**. It selects **Update now** only after
+checking that a fake `npm`, first on Codex's own `PATH` and with a private npm
+prefix, stands in for the installer; the announced command must deliver the
+choice while that fake still runs, and no input may reach it.
 Nested real `codex exec --ephemeral`
 reviews verify separate child Activity under Claude and Codex parents, preserved
 parent identity/model/history and the child's recorded result without a rollout.

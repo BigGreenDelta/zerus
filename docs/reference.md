@@ -807,10 +807,16 @@ For Codex hooks, **Review hooks** opens the native browser in Terminal;
 Review input with an uncertain result is never retried automatically.
 Codex's **Update available** picker shows both versions and the exact update
 command. **Update now** switches to Terminal while Codex runs that command; Codex
-then exits and the session needs an explicit resume. **Skip** and **Skip until
-next version** continue startup, and Codex records the dismissal itself. Only
-reviewed npm, Bun, Vite+, pnpm, Homebrew and standalone Unix commands are
-recognized; other or clipped commands stay in Terminal.
+then exits and the session needs an explicit resume. Codex leaves the picker and
+input mode at once and prints `Updating Codex via` with the command before running
+it. That announcement for the exact command, or Codex exiting, confirms the choice
+within 15 seconds, however long the installer takes. Zerus does not wait for the
+installer: the `hgs answer` receipt's `codex_update` is `installing` while Codex
+runs it, or `exited`. Without either confirmation, delivery stays uncertain and
+Enter is never sent again. **Skip** and **Skip until next version** continue
+startup, and Codex records the dismissal itself. Only reviewed npm, Bun, Vite+,
+pnpm, Homebrew and standalone Unix commands are recognized; other or clipped
+commands stay in Terminal.
 After a resume, Codex asks **Resume paused goal?** when the conversation's goal
 is paused, stalled or limited by usage. Activity shows the goal from Codex's goal
 database once the centered dialog over the transcript shows the same goal and

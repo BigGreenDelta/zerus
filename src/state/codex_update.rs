@@ -3,7 +3,9 @@
 //! now leaves the TUI, runs that native command in the pane and exits Codex; the
 //! session then needs an explicit resume. Skip choices keep Codex's own records.
 use super::*;
+use kimi_tui_choice::Handoff;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 const TITLE: &str = "Update available";
 const HINT: &str = "enter continue · esc skip";
@@ -19,6 +21,14 @@ const COMMANDS: [&str; 6] = [
     "sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh'",
 ];
 const IDS: [&str; 3] = ["update_now", "skip", "skip_version"];
+// After Update now, Codex 0.160.1 and 0.162.0 leave raw mode and clear the
+// picker at once, print this announcement within half a second, then run the
+// command in the pane and exit when it ends.
+const STARTED: &str = "Updating Codex via";
+// How long Codex may take to announce the command or exit after Update now.
+// The installer itself can take minutes and continues in Terminal; the bound
+// keeps `hgs answer` well inside the desktop's 30 s answer timeout.
+const INSTALLER_START: Duration = Duration::from_secs(15);
 const SKIPS: [&str; 2] = ["Skip", "Skip until next version"];
 
 struct Panel {
@@ -34,6 +44,17 @@ fn compact(text: &str) -> String {
 
 fn update_label(command: &str) -> String {
     format!("Update now (runs `{command}`)")
+}
+
+// Codex's own announcement of exactly this command, starting a row below the
+// closed picker. Narrow panes wrap it, possibly inside a word.
+fn installing(screen: &str, command: &str) -> bool {
+    let rows: Vec<_> = screen.lines().map(str::trim).collect();
+    let announcement = compact(&format!("{STARTED} `{command}`..."));
+    !screen.contains(HINT)
+        && (0..rows.len()).any(|i| {
+            rows[i].starts_with("Updating") && compact(&rows[i..].join(" ")).starts_with(&announcement)
+        })
 }
 
 fn parse(screen: &str) -> Option<Panel> {
@@ -144,18 +165,24 @@ pub(super) fn available(record: &Value, question: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Result<()> {
+/// Update now reports whether Codex was `installing` or had already `exited`.
+pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Result<Option<&'static str>> {
     let choice = answers[0]["selected_option_ids"][0].as_str().unwrap_or("");
     let chosen = IDS.iter().position(|id| *id == choice).ok_or("Choose whether to update Codex")?;
+    if chosen == 0 {
+        // The card's hash pins its command. A quick installer failure may end
+        // the pinned process before the pane is read.
+        let label = &question["questions"][0]["options"][0]["label"];
+        let command = *COMMANDS.iter().find(|command| *label == update_label(command))
+            .ok_or("Codex's update request changed; refresh Activity")?;
+        let started = |screen: &str| installing(screen, command);
+        let handoff = kimi_tui_choice::answer_handoff(record, question, chosen, IDS.len(), snapshot, &started, INSTALLER_START)?;
+        return Ok(Some(if handoff == Handoff::Running { "installing" } else { "exited" }));
+    }
     // Codex adds its own "Update available" notice to the main view after a
     // skip, so only the picker's hint marks the panel as still open.
-    let acknowledged: fn(&str) -> bool = if chosen == 0 {
-        |screen| !screen.contains(HINT) && compact(screen).contains("UpdatingCodexvia`")
-    } else {
-        |screen| !screen.trim().is_empty() && !screen.contains(HINT)
-    };
-    // A quick installer failure may end the pinned process before the pane is read.
-    kimi_tui_choice::answer(record, question, chosen, IDS.len(), snapshot, acknowledged, chosen == 0)
+    let acknowledged: fn(&str) -> bool = |screen| !screen.trim().is_empty() && !screen.contains(HINT);
+    kimi_tui_choice::answer(record, question, chosen, IDS.len(), snapshot, acknowledged, false).map(|()| None)
 }
 
 #[cfg(test)]
@@ -183,6 +210,24 @@ mod tests {
             SCREEN.replace("  2. Skip\n", ""), format!("Agent said:\n{SCREEN}"), format!("{SCREEN}\n› composer"),
             "  Update available · 0.0.0\n  → 9.9.9\n  Release notes:\n  https://github.com/openai/codex/releases/latest\n↑\n› 3. Skip until next version\n\n  enter continue · esc skip".into()] {
             assert!(parse(&invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn installer_announcement_names_the_exact_command() {
+        let started = |command: &str| format!("WARNING: launcher notice\n\nUpdating Codex via `{command}`...\nadded 1 package in 3s\n");
+        for command in COMMANDS {
+            assert!(installing(&started(command), command), "{command}");
+        }
+        // A 28-column pane wraps the announcement inside a word.
+        let line = format!("Updating Codex via `{STANDALONE}`...");
+        let narrow: Vec<String> = line.chars().collect::<Vec<_>>().chunks(28).map(|row| row.iter().collect()).collect();
+        assert!(installing(&narrow.join("\n"), STANDALONE));
+        for (screen, command) in [(started(COMMANDS[0]), COMMANDS[4]), (started("npm install -g @openai/codex-beta"), COMMANDS[0]),
+            (format!("{}\n  {HINT}", started(COMMANDS[0])), COMMANDS[0]), (started(COMMANDS[0]).replace("`...", "`"), COMMANDS[0]),
+            (format!("Agent said: Updating Codex via `{}`...", COMMANDS[0]), COMMANDS[0]), (SCREEN.into(), STANDALONE),
+            ("✨ Update available! 0.160.0 -> 0.160.1\nReady for your first message".into(), COMMANDS[0]), (String::new(), COMMANDS[0])] {
+            assert!(!installing(&screen, command), "{screen}");
         }
     }
 
