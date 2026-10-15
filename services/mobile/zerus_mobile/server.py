@@ -18,7 +18,7 @@ import uuid
 from aiohttp import web
 
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_read, validate_send
-from . import speech, speech_config, voice
+from . import archives, speech, speech_config, voice
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import COMPUTER_OPERATIONS, validate_mobile_delivery, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
@@ -286,9 +286,8 @@ def validate_request(value):
     if not isinstance(op, str) or op not in OPERATIONS or not isinstance(payload, dict):
         raise web.HTTPBadRequest()
     if op == "archive_list":
-        from .archives import validate
         if value["session"] != "": raise ValueError("archive browsing uses no session target")
-        validate(payload)
+        archives.validate(payload)
         return
     if op in LAUNCH_OPERATIONS:
         if value["session"] != "": raise ValueError("catalog/launch use no existing session target")

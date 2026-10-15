@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from zerus_mobile import file_reads, speech, speech_config, voice
+from zerus_mobile import archives, file_reads, speech, speech_config, voice
 from zerus_mobile.attachments import validate_read, validate_send
 from zerus_mobile.context import (COMPUTER_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS,
                                   validate_context, validate_core, validate_inspect, validate_lifecycle,
@@ -70,10 +70,14 @@ def validate_request(value):
     if str(uuid.UUID(request_id)) != request_id:
         raise HTTPBadRequest()
     text(value["computer_id"], 36)
-    text(value["session"], 1024, empty=value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
+    text(value["session"], 1024, empty=value["operation"] == "archive_list" or value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
     op, payload = value["operation"], value["payload"]
     if not isinstance(op, str) or op not in OPERATIONS or not isinstance(payload, dict):
         raise HTTPBadRequest()
+    if op == "archive_list":
+        if value["session"] != "": raise ValueError("archive browsing uses no session target")
+        archives.validate(payload)
+        return
     if op in LAUNCH_OPERATIONS:
         if value["session"] != "": raise ValueError("catalog/launch use no existing session target")
         validate_launch(op,payload,request_id)
