@@ -43,6 +43,7 @@ class SessionPanelDock;
 class QHBoxLayout;
 class MachinesPage;
 class MachineFilter;
+class ProjectFilter;
 class DashboardPage;
 class AccountsPage;
 class GoToDialog;
@@ -337,7 +338,7 @@ private:
     bool m_folderFilterCheckout=false;
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
-    QSet<QString> m_hostFilters;
+    QSet<QString> m_hostFilters, m_projectFilters;
     QString selectedHostTarget() const;
     void updateDashboard();
     QJsonObject m_details;
@@ -382,6 +383,7 @@ private:
     QStackedWidget *m_listStack;
     MachinesPage *m_machinesPage;
     MachineFilter *m_machineFilter;
+    ProjectFilter *m_projectFilter;
     DashboardPage *m_dashboard;
     AccountsPage *m_accountsPage;
     SessionOrganization m_organization;
