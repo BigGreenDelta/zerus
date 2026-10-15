@@ -2,7 +2,8 @@
 //! never interpolated shell commands (the SSH peer and tmux pane are explicit exceptions).
 //!
 //! Operating-system specific parts live in `unix` and `windows`. On Windows hgs is a
-//! control console for remote machines until local sessions run there (`local_sessions`).
+//! control console for remote machines until the user enables local sessions there
+//! (`local_sessions`).
 use crate::config::Config;
 use std::{
     env,
@@ -23,10 +24,11 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
-/// What a local session command reports where `local_sessions()` is false; it
-/// exits with code 2.
-pub const LOCAL_SESSIONS_UNSUPPORTED: &str =
-    "Local sessions are not supported on Windows yet; choose a remote machine.";
+/// What a local session command reports where `local_sessions()` is false: a
+/// Windows computer whose local sessions are not enabled (spec D2). It exits with
+/// code 2.
+pub const LOCAL_SESSIONS_UNSUPPORTED: &str = "Local sessions are not enabled on this computer; \
+     enable them on the Machines page or run hgs session-host install, or choose a remote machine.";
 
 pub fn capture(program: &str, args: &[&str]) -> Option<String> {
     let out = output(Command::new(program).args(args).stderr(Stdio::null())).ok()?;
@@ -470,6 +472,14 @@ pub fn restore_terminal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_control_console_says_how_to_enable_local_sessions_in_one_line() {
+        let message = LOCAL_SESSIONS_UNSUPPORTED;
+        assert!(!message.contains('\n'));
+        assert!(message.starts_with("Local sessions are not enabled on this computer; "));
+        assert!(message.contains("the Machines page or run hgs session-host install"));
+    }
 
     #[test]
     fn remote_commands_keep_posix_quoting_for_windows_paths() {

@@ -13,7 +13,7 @@
   <a href="#features">Features</a> &nbsp; | &nbsp;
   <a href="#your-fleet-from-your-phone">Android</a> &nbsp; | &nbsp;
   <a href="docs/reference.md">Reference</a><br />
-  <sub>Linux and macOS &nbsp; | &nbsp; Android &nbsp; | &nbsp; Windows (preview) &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
+  <sub>Linux and macOS &nbsp; | &nbsp; Android &nbsp; | &nbsp; Windows &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
 </p>
 
 <p align="center">
@@ -219,11 +219,12 @@ Apple Silicon app will be distributed through the
 [Homebrew tap](docs/installation.md#macos-homebrew) once the first signed build
 is published.
 
-**Windows** has a preview: nightly releases include a portable x86_64
+**Windows**: nightly releases include a portable x86_64
 [control console](docs/installation.md#windows) that manages agents on your
-Linux and macOS machines over SSH. Agents do not run on Windows itself yet; a
-native session host on ConPTY, without WSL, is the next phase. Stable and Dev
-releases have no Windows build. Contributions that follow the plan are welcome.
+Linux and macOS machines over SSH. With local sessions enabled on its Machines
+page, it also runs agents on the Windows computer itself, in a native session
+host on ConPTY without WSL. Stable releases after 0.42.2 include it too; Dev
+builds have none. Contributions that follow the plan are welcome.
 
 [Windows support plan](docs/superpowers/specs/2026-10-10-windows-support-design.md)
 
