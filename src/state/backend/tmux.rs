@@ -215,7 +215,7 @@ impl TerminalBackend for Tmux {
             &[
                 "list-sessions",
                 "-F",
-                "#{session_name}\t#{session_attached}\t#{session_created}\t#{HGS_LAUNCH_ID}",
+                "#{session_name}\t#{session_attached}\t#{session_created}\t#{session_id}\t#{HGS_LAUNCH_ID}",
             ],
         )
         .unwrap_or_default();
@@ -236,6 +236,7 @@ impl TerminalBackend for Tmux {
                     name: fields.next().unwrap_or_default().into(),
                     attached: fields.next().unwrap_or("0").parse::<u64>().unwrap_or(0),
                     created: fields.next().unwrap_or("0").parse::<u64>().unwrap_or(0),
+                    id: fields.next().unwrap_or_default().into(),
                     launch_id: fields.next().unwrap_or_default().into(),
                 }
             })
@@ -264,19 +265,20 @@ impl TerminalBackend for Tmux {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name}\t#{pane_id}\t#{pane_dead}\t#{@hgs_run}",
+                "#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_dead}\t#{@hgs_run}",
             ]),
             false,
         )?;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| {
-                let fields: Vec<&str> = line.splitn(4, '\t').collect();
-                (fields.len() == 4).then(|| PaneRow {
+                let fields: Vec<&str> = line.splitn(5, '\t').collect();
+                (fields.len() == 5).then(|| PaneRow {
                     session: fields[0].into(),
-                    pane: fields[1].into(),
-                    dead: fields[2].into(),
-                    run_marker: fields[3].into(),
+                    session_id: fields[1].into(),
+                    pane: fields[2].into(),
+                    dead: fields[3].into(),
+                    run_marker: fields[4].into(),
                 })
             })
             .collect())
@@ -584,7 +586,7 @@ impl TerminalBackend for Tmux {
     }
     fn describe(&self, operation: &DryRun) -> String {
         match operation {
-            DryRun::ListJson => "tmux list-clients -F \"#{client_session}\\t#{client_tty}\"\ntmux list-sessions -F \"#{session_name}\\t#{session_attached}\\t#{session_created}\\t#{HGS_LAUNCH_ID}\"".into(),
+            DryRun::ListJson => "tmux list-clients -F \"#{client_session}\\t#{client_tty}\"\ntmux list-sessions -F \"#{session_name}\\t#{session_attached}\\t#{session_created}\\t#{session_id}\\t#{HGS_LAUNCH_ID}\"".into(),
             DryRun::List => "tmux list-sessions".into(),
             DryRun::Attach { session, client } => format!(
                 "tmux set-environment -t ={session} HGS_CLIENT {client}\ntmux -u attach-session -t ={session}"

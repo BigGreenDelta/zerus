@@ -964,7 +964,13 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
     {
         raw["local_host"] = crate::host::admin::local_host(&config.state);
     }
-    let mut merged = state::merge_snapshot(raw).map_err(|e| Error::new(1, e))?;
+    // A session renamed before merge_listing reads the panes keeps its ID.
+    let ids = listing
+        .sessions
+        .iter()
+        .map(|row| (row.name.clone(), row.id.clone()))
+        .collect();
+    let mut merged = state::merge_listing(raw, &ids).map_err(|e| Error::new(1, e))?;
     let ended = launches.ended(merged["sessions"].as_array().map_or(&[], Vec::as_slice));
     if !ended.is_empty() {
         merged["ended_launches"] = json!(ended);

@@ -103,6 +103,8 @@ pub(crate) struct ClientRow {
 /// A listed session. Counts that cannot be read are 0.
 pub(crate) struct SessionRow {
     pub name: String,
+    /// Its immutable session ID, `$N`, which a rename keeps.
+    pub id: String,
     pub attached: u64,
     pub created: u64,
     pub launch_id: String,
@@ -118,6 +120,8 @@ pub(crate) struct Listing {
 /// `run_marker` is the run ID its supervisor set ("" when untracked).
 pub(crate) struct PaneRow {
     pub session: String,
+    /// The session's immutable ID, `$N`.
+    pub session_id: String,
     pub pane: String,
     pub dead: String,
     pub run_marker: String,
@@ -491,16 +495,17 @@ mod tests {
     struct Fake;
     impl TerminalBackend for Fake {
         fn panes(&self) -> Result<Vec<PaneRow>> {
-            let row = |session: &str, pane: &str, dead: &str, run: &str| PaneRow {
+            let row = |session: &str, id: &str, pane: &str, dead: &str, run: &str| PaneRow {
                 session: session.into(),
+                session_id: id.into(),
                 pane: pane.into(),
                 dead: dead.into(),
                 run_marker: run.into(),
             };
             Ok(vec![
-                row("claude/p/a", "%1", "0", "run-a"),
-                row("codex/p/b", "%2", "0", "run-b"),
-                row("codex/p/b", "%3", "1", ""),
+                row("claude/p/a", "$1", "%1", "0", "run-a"),
+                row("codex/p/b", "$2", "%2", "0", "run-b"),
+                row("codex/p/b", "$2", "%3", "1", ""),
             ])
         }
         fn pane_paths(&self) -> Result<Vec<PanePath>> {
@@ -529,6 +534,16 @@ mod tests {
             let record = json!({"pane": "%2", "run_id": "run-b"});
             assert!(!storage::matches(&record, snapshot.get("codex/p/b")));
             assert_eq!(workspace::pane_cwds()["codex/p/b"], "/active");
+            // The same answer names each live session by its immutable ID.
+            let (sessions, names) = storage::live_sessions().unwrap();
+            assert_eq!(sessions.len(), snapshot.len());
+            assert_eq!(
+                names.into_iter().collect::<Vec<_>>(),
+                [
+                    ("$1".into(), "claude/p/a".into()),
+                    ("$2".into(), "codex/p/b".into())
+                ]
+            );
         });
         struct Empty;
         impl TerminalBackend for Empty {}
