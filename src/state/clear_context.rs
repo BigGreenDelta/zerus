@@ -197,7 +197,9 @@ pub(super) fn unavailable(record: &Value, live: bool) -> Option<String> {
     if string(record,"conversation_id").is_empty() { return Some("Wait for a confirmed conversation".into()); }
     if let Some(reason) = blocked(record) { return Some(reason); }
     if !string(record,"expected_id").is_empty() { return Some("The agent has not confirmed the resumed conversation yet".into()); }
-    if record["activity"]=="idle" && record["phase"]=="idle" { return None; }
+    // Kimi profile groups can outlast the main turn's Stop, which records the
+    // session idle; like the listing, wait for them and other remaining work.
+    if record["activity"]=="idle" && record["phase"]=="idle" && !telemetry::work_remains(record) { return None; }
     Some(match string(record,"phase") {
         "compacting" => "Wait for compaction to finish".into(),
         "input" => "Wait until the agent's question is answered".into(),
@@ -212,6 +214,7 @@ pub(super) fn unavailable(record: &Value, live: bool) -> Option<String> {
 /// The work recorded as running, at most three items and a count of the rest.
 /// The main agent counts only while its own turn runs: an interrupted or
 /// failed turn has ended, and its state awaits the agent's next report.
+/// Children are named as the listing names them, Kimi profiles by group.
 fn working(record: &Value, main_turn: bool) -> String {
     let mut items = Vec::new();
     if main_turn && record["main_done"] != true {
@@ -230,7 +233,7 @@ fn working(record: &Value, main_turn: bool) -> String {
         });
     }
     let mut children: Vec<_> = record["subagents"].as_object().into_iter().flatten()
-        .filter(|(_, child)| telemetry::child_working(record, child)).collect();
+        .filter(|(_, child)| telemetry::child_working(record, child) && telemetry::listed(record, child)).collect();
     children.sort_by(|(a_id,a),(b_id,b)| b["updated"].as_f64().unwrap_or(0.0)
         .total_cmp(&a["updated"].as_f64().unwrap_or(0.0)).then_with(|| a_id.cmp(b_id)));
     for (id, child) in children {
@@ -503,6 +506,40 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         kimi["kimi_native_roster"]=json!(true);
         kimi["subagents"]=json!({"hook":{"name":"coder","state":"working"},"native":{"name":"agent-1","state":"working","native_roster":true}});
         check(&kimi,true,Some("Wait until the agent reports Ready. Still working: subagent “agent-1”"));
+        // The main turn's Stop can leave the saved activity idle while the
+        // listing still shows work: Kimi profile groups, open tools or working
+        // children keep both actions unavailable.
+        let groups_waiting="Wait until the agent reports Ready. Still working: 2 “coder” subagents, 1 “reviewer” subagent";
+        let mut groups=changed("agent",json!("kimi"));
+        groups["subagent_groups"]=json!({"coder":{"active_count":2},"reviewer":{"active_count":1},"idle":{"active_count":0}});
+        check(&groups,true,Some(groups_waiting));
+        check(&groups,false,Some("The agent is not running"));
+        // A Kimi hook names only a profile: its entry stands for that group,
+        // which the listing counts instead of one invented child.
+        groups["subagents"]=json!({"coder":{"name":"coder","state":"working"},"reviewer":{"name":"reviewer","state":"finished"}});
+        check(&groups,true,Some(groups_waiting));
+        let mut working_groups=groups.clone();working_groups["activity"]=json!("busy");working_groups["phase"]=json!("working");
+        check(&working_groups,true,Some(groups_waiting));
+        // An external child is listed beside the profile groups.
+        groups["subagents"]["helper"]=json!({"name":"helper","state":"working","external":true,"updated":1.0});
+        check(&groups,true,Some("Wait until the agent reports Ready. Still working: subagent “helper”, \
+            2 “coder” subagents, 1 “reviewer” subagent"));
+        // A native roster replaces the profile counts with its own children.
+        groups["subagents"]=json!({});groups["kimi_native_roster"]=json!(true);
+        check(&groups,true,None);
+        groups["subagent_groups"]["coder"]["active_count"]=json!(0);groups["subagent_groups"]["reviewer"]["active_count"]=json!(0);
+        groups.as_object_mut().unwrap().remove("kimi_native_roster");
+        check(&groups,true,None);
+        let mut tool=idle.clone();tool["active_tools"]=json!({"a":{"name":"Bash","started":1.0}});
+        check(&tool,true,Some("Wait until the agent reports Ready"));
+        let mut children=idle.clone();
+        children["subagents"]=json!({"worker":{"name":"Explore","state":"working","current_tool":"Grep"}});
+        check(&children,true,Some("Wait until the agent reports Ready. Still working: subagent “Explore” running Grep"));
+        // Finished and unknown children are no current work.
+        for state in ["finished","unknown"] {
+            children["subagents"]["worker"]["state"]=json!(state);
+            check(&children,true,None);
+        }
     }
     #[test] fn clear_hooks_require_a_changed_conversation_and_keep_the_observed_time() {
         let original=json!({"run_id":"run","conversation_id":"old"});

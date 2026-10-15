@@ -929,9 +929,12 @@ Native clear/compact operations are capability-gated and require exact identity.
 When they are unavailable, `hgs inspect` reports why in `clear_context_reason` and
 `compact_context_reason`, empty while the action is available. A busy session names
 what keeps it from Ready: the main agent's turn and tools, and each working subagent
-with its current tool, up to three, then a count. The desktop shows the reason as
-the tooltip of the disabled **Clear context**, **Clear session** and
-**Compact and continue** actions, and as a line in the cold-cache confirmation.
+with its current tool, up to three, then a count. The actions follow the status the
+session list shows, so Kimi profile groups still working after the main turn ended
+keep them unavailable and are named by profile, such as `2 “code” subagents`.
+The desktop shows the reason as the tooltip of the disabled **Clear context**,
+**Clear session** and **Compact and continue** actions, and as a line in the
+cold-cache confirmation.
 Hosts from before these fields leave the actions disabled without a reason.
 **Clear session** requires confirmation naming the session and host, preserves
 unsent drafts and rechecks identity. While Claude shows an approval, question or
