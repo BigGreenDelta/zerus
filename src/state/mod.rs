@@ -445,7 +445,10 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         }
     }
 
-    workspace::enrich(sessions, &workspace::pane_cwds());
+    // The pane folders are read after the lock is released, when a session may
+    // have been renamed since `snapshot`. They go by the session IDs, which a
+    // rename keeps, to the names that `snapshot` listed (zerus-18u1).
+    workspace::enrich(sessions, &workspace::snapshot_cwds(&names));
     Ok(box_value)
 }
 

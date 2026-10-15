@@ -687,6 +687,7 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
             .into_iter()
             .map(|pane| PanePath {
                 session: pane.session,
+                session_id: pane.session_id,
                 active_window: true,
                 active_pane: true,
                 path: pane.current_path,
@@ -1333,6 +1334,7 @@ mod tests {
             .map(|path| {
                 (
                     path.session,
+                    path.session_id,
                     path.active_window,
                     path.active_pane,
                     path.path,
@@ -1341,7 +1343,13 @@ mod tests {
             .collect();
         assert_eq!(
             paths[1],
-            ("fake_agent/p/b".into(), true, true, r"C:\work\p".into())
+            (
+                "fake_agent/p/b".into(),
+                "$2".into(),
+                true,
+                true,
+                r"C:\work\p".into()
+            )
         );
         assert_eq!(
             backend.attached_counts().unwrap(),

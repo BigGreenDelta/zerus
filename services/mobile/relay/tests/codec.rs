@@ -133,6 +133,51 @@ fn parse_limits_count_containers_strings_and_scalars() {
     }
 }
 
+/// The Python reference relay parsed bodies as `json.loads` does, without its
+/// NaN and Infinity; `ORACLE.md` lists the one difference, lone surrogates.
+#[test]
+fn bodies_parse_as_python_json_loads_does() {
+    // The identity forms are CPython's, from json.loads and then json.dumps.
+    for (raw, identity) in [
+        (r#"{"key":1,"key":2}"#, r#"{"key":2}"#),
+        (
+            r#"{"n":18446744073709551617}"#,
+            r#"{"n":18446744073709551617}"#,
+        ),
+        (r#""\ud83d\ude00""#, r#""\ud83d\ude00""#),
+        (r#""\\u0800""#, r#""\\u0800""#),
+        ("1.25e-10", "1.25e-10"),
+        ("-0", "0"),
+        ("[]", "[]"),
+        ("{}", "{}"),
+    ] {
+        assert_eq!(canonical(&value(raw)).unwrap(), identity, "{raw}");
+    }
+    let lines = format!(r#"{{"text":"{}"}}"#, r"a\n".repeat(32768));
+    assert_eq!(value(&lines)["text"], "a\n".repeat(32768));
+    let slashes = format!(r#""{}""#, r"\/".repeat(40000));
+    assert_eq!(value(&slashes), "/".repeat(40000));
+    for raw in [
+        "[1,]",
+        r#"{"x":1,}"#,
+        r#"{"x" 1}"#,
+        "\"raw\ncontrol\"",
+        "01",
+        "1.",
+        "NaN",
+        "Infinity",
+        r#""\x""#,
+        r#""\uZZZZ""#,
+        "[] true",
+    ] {
+        assert_eq!(rejected(raw.as_bytes(), 32, 50000).0, Error::BAD.0, "{raw}");
+    }
+    // json.loads keeps a lone UTF-16 surrogate, which a Rust string cannot hold.
+    for raw in [r#""\ud800""#, r#"["\ude00"]"#, r#"{"x":"\ud83d"}"#] {
+        assert_eq!(rejected(raw.as_bytes(), 32, 50000).0, Error::BAD.0, "{raw}");
+    }
+}
+
 #[test]
 fn a_request_at_the_relay_maximum_needs_the_batch_margins() {
     // A request at the relay's maxima: depth 32 and exactly 50,000 values.
