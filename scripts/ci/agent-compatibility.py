@@ -47,11 +47,12 @@ AGENTS = {
         tarball='https://registry.npmjs.org/@anthropic-ai/claude-code-{target}/-/claude-code-{target}-{version}.tgz',
         metadata='https://registry.npmjs.org/@anthropic-ai/claude-code-{target}/{version}', published='{version}',
         members={'linux-x64': 'package/claude', 'darwin-arm64': 'package/claude', WINDOWS: 'package/claude.exe'},
-        coverage='input, questions, approvals, trust, resume, clear, compaction and session-only model settings',
+        coverage='input, questions, approvals, trust, resume, clear, compaction, session-only model settings and '
+                 'status line context capacity',
         timeout=900,
         suites=['test_claude_input_native', 'test_claude_questions_native', 'test_claude_approval_native', 'test_claude_safety_native',
                 'test_claude_trust_native', 'test_claude_resume_native', 'test_clear_context_native.NativeClearContext',
-                'test_compact_context_native', 'test_claude_settings_native'],
+                'test_compact_context_native', 'test_claude_settings_native', 'test_claude_statusline_native'],
         windows=dict(suites=['test_windows_native_agents.NativeWindowsClaude'], timeout=1200, coverage=HOST_COVERAGE)),
 }
 # Suite inputs taken from the caller; every other HGS_ variable is dropped.
