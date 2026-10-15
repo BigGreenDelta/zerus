@@ -199,8 +199,19 @@ pub(super) fn unavailable(record: &Value, live: bool) -> Option<String> {
     if !string(record,"expected_id").is_empty() { return Some("The agent has not confirmed the resumed conversation yet".into()); }
     // Kimi profile groups can outlast the main turn's Stop, which records the
     // session idle; like the listing, wait for them and other remaining work.
-    if record["activity"]=="idle" && record["phase"]=="idle" && !telemetry::work_remains(record) { return None; }
-    Some(match string(record,"phase") {
+    if telemetry::settled(record) { return None; }
+    Some(waiting(record, string(record,"phase")))
+}
+/// `unavailable` as an inspection reports it. A native chooser recognized
+/// only in the terminal, such as Kimi's context choice, leaves the saved
+/// activity idle; the summary shows it as a question or an approval, and
+/// dispatch refuses it (`input::checked_ready`), so both actions wait for it.
+pub(super) fn unavailable_shown(record: &Value, live: bool, shown: &Value) -> Option<String> {
+    let phase = string(shown,"phase");
+    unavailable(record, live).or_else(|| ["input","approval"].contains(&phase).then(|| waiting(record, phase)))
+}
+fn waiting(record: &Value, phase: &str) -> String {
+    match phase {
         "compacting" => "Wait for compaction to finish".into(),
         "input" => "Wait until the agent's question is answered".into(),
         "approval" => "Wait until the agent's approval request is answered".into(),
@@ -209,7 +220,7 @@ pub(super) fn unavailable(record: &Value, live: bool) -> Option<String> {
             if work.is_empty() { "Wait until the agent reports Ready".into() }
             else { format!("Wait until the agent reports Ready. Still working: {work}") }
         }
-    })
+    }
 }
 /// The work recorded as running, at most three items and a count of the rest.
 /// The main agent counts only while its own turn runs: an interrupted or
@@ -540,6 +551,33 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             children["subagents"]["worker"]["state"]=json!(state);
             check(&children,true,None);
         }
+    }
+    #[test] fn context_actions_agree_with_dispatch_on_the_ready_state_the_listing_reports() {
+        // Inspect offers clear and compaction exactly when dispatch accepts
+        // the session (input::checked_ready), whatever a replaced hook says.
+        assert_eq!(unavailable(&telemetry::stale_hook_child(),true),None);
+        for (case,record) in telemetry::remaining_work() {
+            assert!(unavailable(&record,true).is_some_and(|reason| reason.starts_with("Wait ")),"{case}");
+        }
+    }
+    #[test] fn terminal_choosers_keep_inspected_context_actions_waiting() {
+        // The summary shows a terminal-only chooser over an idle saved record;
+        // dispatch refuses it, so inspect reports both actions unavailable.
+        let idle=json!({"agent":"kimi","run_id":"run","conversation_id":"conversation","activity":"idle","phase":"idle",
+            "main_done":true,"active_tools":{},"subagents":{}});
+        let shown=|phase:&str| json!({"activity":if phase=="idle" {"idle"} else {"busy"},"phase":phase});
+        assert_eq!(unavailable_shown(&idle,true,&shown("input")).as_deref(),Some("Wait until the agent's question is answered"));
+        assert_eq!(unavailable_shown(&idle,true,&shown("approval")).as_deref(),
+            Some("Wait until the agent's approval request is answered"));
+        assert_eq!(unavailable_shown(&idle,true,&shown("idle")),None);
+        // A provider failure shown over an idle saved record keeps both
+        // actions, as dispatch does.
+        assert_eq!(unavailable_shown(&idle,true,&json!({"activity":"attention","phase":"error"})),None);
+        // Earlier reasons keep their precedence.
+        assert_eq!(unavailable_shown(&idle,false,&shown("input")).as_deref(),Some("The agent is not running"));
+        let mut working=idle.clone();working["active_tools"]=json!({"a":{"name":"Bash","started":1.0}});
+        working["activity"]=json!("busy");working["phase"]=json!("tool");working["main_done"]=json!(false);
+        assert_eq!(unavailable_shown(&working,true,&shown("approval")),unavailable(&working,true));
     }
     #[test] fn clear_hooks_require_a_changed_conversation_and_keep_the_observed_time() {
         let original=json!({"run_id":"run","conversation_id":"old"});

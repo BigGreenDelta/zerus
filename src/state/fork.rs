@@ -14,18 +14,7 @@ fn unavailable(record: &Value, live_pane: bool) -> Option<&'static str> {
     {
         return Some("Wait for a confirmed conversation before forking");
     }
-    if live_pane
-        && (string(record, "activity") != "idle"
-            || string(record, "phase") != "idle"
-            || telemetry::grouped_active(record) > 0
-            || pause_active(record)
-            || record["active_tools"]
-                .as_object()
-                .is_some_and(|v| !v.is_empty())
-            || record["subagents"]
-                .as_object()
-                .is_some_and(|v| v.values().any(|v| string(v, "state") == "working")))
-    {
+    if live_pane && (!telemetry::settled(record) || pause_active(record)) {
         return Some("Wait for Ready before forking the saved context");
     }
     if record["base"].as_array().is_none() {
@@ -300,6 +289,18 @@ pub(super) fn start_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_forks_wait_for_the_ready_state_the_listing_reports() {
+        let mut stale = telemetry::stale_hook_child();
+        stale["base"] = json!(["kimi"]);
+        assert_eq!(unavailable(&stale, true), None);
+        for (case, mut record) in telemetry::remaining_work() {
+            record["base"] = json!(["kimi"]);
+            assert_eq!(unavailable(&record, true), Some("Wait for Ready before forking the saved context"), "{case}");
+            // A stopped session forks its saved context.
+            assert_eq!(unavailable(&record, false), None, "{case}");
+        }
+    }
     #[test]
     fn forks_use_exact_parent_and_preserve_safe_launch_options() {
         let record = |agent, base| json!({"agent":agent,"base":base,"conversation_id":"parent"});

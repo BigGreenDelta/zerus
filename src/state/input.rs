@@ -174,14 +174,25 @@ pub(super) fn checked_resumed(name: &str, run_id: &str, conversation_id: &str) -
 pub(super) fn checked_settings(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
     if !conversation_id.is_empty() { return checked_ready(name, run_id, conversation_id); }
     let record = checked_input(name, run_id, conversation_id, true)?;
-    if !first_message_candidate(&record)
-        || telemetry::grouped_active(&record) > 0
-        || record["active_tools"].as_object().is_some_and(|tools| !tools.is_empty())
-        || record["subagents"].as_object().is_some_and(|children| children.values().any(|child| string(child, "state") == "working"))
-    {
+    if !first_message_ready(&record) {
         return Err("The new session is not ready for model settings; refresh or open Terminal".into());
     }
     Ok(record)
+}
+
+/// A new session waiting at its first prompt with no work remaining, as the
+/// listing reports it; its settings may change before the first message.
+pub(super) fn first_message_ready(record: &Value) -> bool {
+    first_message_candidate(record) && !telemetry::work_remains(record)
+}
+
+/// Settings changes, clear and compaction require an entirely idle session:
+/// Ready as the listing reports it, which also gates forks.
+fn idle_only(record: &Value) -> Result<()> {
+    if telemetry::settled(record) {
+        return Ok(());
+    }
+    Err("agent is busy or waiting for approval; wait for Ready or use Terminal".into())
 }
 
 /// Failed and interrupted turns may already accept another message at the native
@@ -293,21 +304,8 @@ fn checked_input(
     }
     // Text can be submitted to a working agent's native composer. The terminal
     // checks below still require an empty recognized prompt, never a dialog.
-    // Settings changes continue to require an entirely idle session.
-    if !allow_working
-        && (string(&record, "activity") != "idle"
-            || string(&record, "phase") != "idle"
-            || telemetry::grouped_active(&record) > 0
-            || record["active_tools"]
-                .as_object()
-                .is_some_and(|tools| !tools.is_empty())
-            || record["subagents"].as_object().is_some_and(|children| {
-                children
-                    .values()
-                    .any(|child| string(child, "state") == "working")
-            }))
-    {
-        return Err("agent is busy or waiting for approval; wait for Ready or use Terminal".into());
+    if !allow_working {
+        idle_only(&record)?;
     }
     if record["input_pending_at"]
         .as_f64()
@@ -847,6 +845,27 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_only_dispatch_and_new_session_settings_follow_the_listing() {
+        // Clear, compaction and settings dispatch accept the Ready session the
+        // listing reports, though a replaced Kimi hook entry still says working.
+        let first = |record: &Value| {
+            let mut record = record.clone();
+            record["conversation_id"] = json!("");
+            record["last_event_at"] = json!(0);
+            record["run_identity_version"] = json!(1);
+            record["supervisor"] = json!({});
+            record
+        };
+        let stale = telemetry::stale_hook_child();
+        assert!(idle_only(&stale).is_ok());
+        assert!(first_message_candidate(&first(&stale)) && first_message_ready(&first(&stale)));
+        for (case, record) in telemetry::remaining_work() {
+            assert_eq!(idle_only(&record).unwrap_err(),
+                "agent is busy or waiting for approval; wait for Ready or use Terminal", "{case}");
+            assert!(!first_message_ready(&first(&record)), "{case}");
+        }
+    }
     #[test]
     fn a_paste_shows_by_its_end_through_wrapping_or_as_a_placeholder() {
         let envelope = "<send_user_message_question_reply>\n[{\"answer\":\"Two\",\"question\":\"Which option?\"}]\n</send_user_message_question_reply>";

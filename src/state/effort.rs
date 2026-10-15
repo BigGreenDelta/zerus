@@ -765,16 +765,10 @@ fn settings_reason(record: &Value, models: &[ModelOption]) -> &'static str {
     ""
 }
 
+/// Settings apply now while the session is Ready as the listing reports it, or
+/// while a new session waits at its first prompt; otherwise they wait for Ready.
 fn ready(record: &Value) -> bool {
-    ((string(record, "activity") == "idle" && string(record, "phase") == "idle")
-        || input::first_message_candidate(record))
-        && telemetry::grouped_active(record) == 0
-        && record["active_tools"]
-            .as_object()
-            .is_none_or(|v| v.is_empty())
-        && !record["subagents"]
-            .as_object()
-            .is_some_and(|v| v.values().any(|c| string(c, "state") == "working"))
+    telemetry::settled(record) || input::first_message_ready(record)
 }
 
 /// Claude's PostModelSwitch: the exact model the session runs from now on,
@@ -849,6 +843,23 @@ fn settings(record: &Value, live_pane: bool) -> Settings {
 /// cost before Apply and then confirms only that built-in notice.
 const CLAUDE_NOTICE: &str = "In a conversation that already has replies, Claude re-reads the full history on the next message after a model or effort change. That response is slower and uses more tokens.";
 
+/// Why `hgs effort` is unavailable, or "". It dispatches through
+/// `input::checked_settings`, so it waits for Ready as the listing reports it,
+/// including Kimi profile groups that outlast the main turn's Stop.
+fn effort_reason(record: &Value, known: bool, running: bool) -> &'static str {
+    if !["codex", "kimi", "claude"].contains(&string(record, "agent")) {
+        "Use the provider's Terminal to change effort"
+    } else if !known {
+        "Waiting for the provider's model and effort settings"
+    } else if !running {
+        "Resume the session to change effort"
+    } else if !telemetry::settled(record) {
+        "Wait for Ready to change effort"
+    } else {
+        ""
+    }
+}
+
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     let value = settings(record, live_pane);
     let mut choices = options(record, &value.model);
@@ -856,17 +867,11 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     if string(record, "agent") == "codex" {
         choices.retain(|value| value != "ultra");
     }
-    let reason = if !["codex", "kimi", "claude"].contains(&string(record, "agent")) {
-        "Use the provider's Terminal to change effort"
-    } else if value.effort.is_empty() || choices.is_empty() {
-        "Waiting for the provider's model and effort settings"
-    } else if !live_pane || !process_alive(record) {
-        "Resume the session to change effort"
-    } else if string(record, "phase") != "idle" || string(record, "activity") != "idle" {
-        "Wait for Ready to change effort"
-    } else {
-        ""
-    };
+    let reason = effort_reason(
+        record,
+        !value.effort.is_empty() && !choices.is_empty(),
+        live_pane && process_alive(record),
+    );
     let models = catalog(record);
     let settings_reason = settings_reason(record, &models);
     let when = if !live_pane || !process_alive(record) {
@@ -2227,6 +2232,31 @@ pub(super) fn resume_argv(record: &Value, mut args: Vec<String>) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settings_apply_now_when_the_listing_reports_ready() {
+        assert!(ready(&telemetry::stale_hook_child()));
+        for (case, record) in telemetry::remaining_work() {
+            assert!(!ready(&record), "{case}");
+        }
+    }
+    #[test]
+    fn effort_changes_are_offered_when_dispatch_accepts_them() {
+        // `hgs effort` dispatches through input::checked_settings, which
+        // requires the listing's Ready; a Kimi profile group still working
+        // after the main Stop leaves the saved activity idle.
+        assert_eq!(effort_reason(&telemetry::stale_hook_child(), true, true), "");
+        for (case, record) in telemetry::remaining_work() {
+            assert_eq!(effort_reason(&record, true, true), "Wait for Ready to change effort", "{case}");
+        }
+        let mut kimi = telemetry::stale_hook_child();
+        kimi.as_object_mut().unwrap().remove("kimi_native_roster");
+        kimi["subagents"]["coder"]["state"] = json!("finished");
+        assert_eq!(effort_reason(&kimi, true, true), "Wait for Ready to change effort");
+        assert_eq!(effort_reason(&kimi, true, false), "Resume the session to change effort");
+        assert_eq!(effort_reason(&kimi, false, true), "Waiting for the provider's model and effort settings");
+        kimi["agent"] = json!("opencode");
+        assert_eq!(effort_reason(&kimi, true, true), "Use the provider's Terminal to change effort");
+    }
     #[test]
     fn provider_settings_ignore_text_and_thinking_content() {
         assert_eq!(
