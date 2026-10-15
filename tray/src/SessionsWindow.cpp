@@ -1068,10 +1068,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::settingsFinished, this, [this](quint64 request, bool ok, const QJsonObject &receipt, const QString &error) {
         if (request != m_settingsRequest) return;
         m_settingsRequest = 0;
+        // Dispatch schedules an automatic apply when the session left Ready
+        // after the idle listing, as for a chooser that appeared meanwhile. It
+        // stays queued for one more attempt after the next Ready transition;
+        // a failure, a refusal and an applied change end automatic attempts.
+        const bool scheduledAgain = ok && receipt.value("status") == "scheduled" && m_settingsAutomatic;
+        if (scheduledAgain) m_scheduledSettings[m_settingsKey] = {m_settingsIdentity};
+        else m_scheduledSettings.remove(m_settingsKey);
         if (ok && receipt.value("status") == "scheduled" && !m_settingsAutomatic) {
             m_queuedSettings[m_settingsKey] = {m_settingsHost, m_settingsName, m_settingsRun, m_settingsConversation,
                 receipt.value("model").toString(), receipt.value("effort").toString(), receipt.value("pending_settings_id").toString(receipt.value("request_id").toString())};
-        } else m_queuedSettings.remove(m_settingsKey);
+        } else if (!scheduledAgain) m_queuedSettings.remove(m_settingsKey);
+        m_settingsIdentity.clear();
         if (m_selectedKey == m_settingsKey && m_details.value("run_id").toString() == m_settingsRun
             && m_details.value("conversation_id").toString() == m_settingsConversation && ok) {
             const bool scheduled = receipt.value("status") == "scheduled";
@@ -3484,49 +3492,97 @@ void SessionsWindow::changeModelSettings(const QString &key, const QString &mode
     renderDetails();
 }
 
+QByteArray SessionsWindow::settingsIdentity(const QString &key, const PendingSettings &pending)
+{
+    return QJsonDocument(QJsonArray{key, pending.run, pending.conversation, pending.id, pending.model, pending.effort}).toJson(QJsonDocument::Compact);
+}
+
+// The listing's row for a queued change's run and conversation; null without a
+// current listing or after either changed.
+const SessionInfo *SessionsWindow::listedSettingsSession(const PendingSettings &pending) const
+{
+    const auto *box = pending.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(pending.host);
+    if (!box || !box->ok || (pending.host.isEmpty() && !m_connectionError.isEmpty())) return nullptr;
+    for (const auto &session : box->sessions)
+        if (session.name == pending.name && session.runId == pending.run
+            && (session.conversationId.isEmpty() || session.conversationId == pending.conversation)) return &session;
+    return nullptr;
+}
+
+static bool listedReady(const SessionInfo &session)
+{
+    return session.state == "running" && session.phase == "idle" && session.activity == "idle" && session.processState == "running";
+}
+
+// Each pending change gets one automatic attempt. One that dispatch scheduled
+// gets one more per Ready transition: after the session left Ready, once the
+// listing and, for the selected session, inspect both show it Ready again.
+// Never turn a failed native change into a polling loop.
+bool SessionsWindow::settingsAttemptAllowed(const QString &key, const PendingSettings &pending, const QByteArray &identity) const
+{
+    if (!m_settingsAttempts.contains(identity)) return true;
+    const auto scheduled = m_scheduledSettings.constFind(key);
+    if (scheduled == m_scheduledSettings.cend() || scheduled->identity != identity || !scheduled->rearmed) return false;
+    const auto *session = listedSettingsSession(pending);
+    if (!session || !listedReady(*session)) return false;
+    return key != m_selectedKey || (m_details.value("run_id").toString() == pending.run
+        && m_details.value("conversation_id").toString() == pending.conversation && m_details.value("settings_apply_when") == "now");
+}
+
+void SessionsWindow::requestAutomaticSettings(const QString &key, const PendingSettings &pending, const QByteArray &identity)
+{
+    m_settingsKey = key; m_settingsHost = pending.host; m_settingsName = pending.name;
+    m_settingsRun = pending.run; m_settingsConversation = pending.conversation; m_settingsAutomatic = true;
+    m_settingsAttempts.insert(identity); m_settingsIdentity = identity; m_scheduledSettings.remove(key);
+    m_settingsRequest = m_client.requestSettings(pending.host, pending.name, pending.model, pending.effort, pending.run, pending.conversation, pending.id);
+    renderDetails();
+}
+
 void SessionsWindow::applyPendingModelSettings()
 {
     const auto *entry = selected();
     if (!entry) return;
     const QString model = m_details.value("pending_model").toString(), effort = m_details.value("pending_effort").toString();
-    if (model.isEmpty() && effort.isEmpty()) { m_queuedSettings.remove(entry->key); return; }
+    if (model.isEmpty() && effort.isEmpty()) { m_queuedSettings.remove(entry->key); m_scheduledSettings.remove(entry->key); return; }
     const QString pendingId = m_details.value("pending_settings_id").toString();
     if (pendingId.isEmpty()) return;
-    m_queuedSettings[entry->key] = {entry->host, entry->session.name, m_details.value("run_id").toString(),
+    const QString key = entry->key;
+    const PendingSettings pending{entry->host, entry->session.name, m_details.value("run_id").toString(),
         m_details.value("conversation_id").toString(), model, effort, pendingId};
-    if (!modelSettingsBlockReason(*entry).isEmpty() || m_details.value("settings_apply_when") != "now") return;
-    const auto identity = QJsonDocument(QJsonArray{entry->key, m_details.value("run_id"), m_details.value("conversation_id"),
-        pendingId, model, effort}).toJson(QJsonDocument::Compact);
-    if (m_settingsAttempts.contains(identity)) return;
-    m_settingsKey = entry->key; m_settingsRun = m_details.value("run_id").toString();
-    m_settingsConversation = m_details.value("conversation_id").toString();
-    m_settingsHost = entry->host; m_settingsName = entry->session.name; m_settingsAutomatic = true;
-    m_settingsAttempts.insert(identity); // Never turn a failed native change into a polling loop.
-    m_settingsRequest = m_client.requestSettings(entry->host, entry->session.name, model, effort, m_settingsRun, m_settingsConversation, pendingId);
-    renderDetails();
+    m_queuedSettings[key] = pending;
+    const auto identity = settingsIdentity(key, pending);
+    if (m_details.value("settings_apply_when") != "now") {
+        // Inspect shows the session not Ready, as while a chooser waits.
+        const auto scheduled = m_scheduledSettings.find(key);
+        if (scheduled != m_scheduledSettings.end() && scheduled->identity == identity) scheduled->rearmed = true;
+        return;
+    }
+    if (modelSettingsBlockReason(*entry).isEmpty() && settingsAttemptAllowed(key, pending, identity))
+        requestAutomaticSettings(key, pending, identity);
 }
 
 void SessionsWindow::applyQueuedModelSettings()
 {
+    // The listing shows whether a session whose automatic apply was scheduled
+    // left Ready. A change dropped or replaced meanwhile needs no other attempt.
+    for (auto it = m_scheduledSettings.begin(); it != m_scheduledSettings.end();) {
+        const auto queued = m_queuedSettings.constFind(it.key());
+        if (queued == m_queuedSettings.cend() || settingsIdentity(it.key(), *queued) != it->identity) { it = m_scheduledSettings.erase(it); continue; }
+        if (const auto *session = listedSettingsSession(*queued); session && !listedReady(*session)) it->rearmed = true;
+        ++it;
+    }
     if (m_settingsRequest || m_pending || !m_renameKey.isEmpty() || !m_forkKey.isEmpty()) return;
-    for (auto it = m_queuedSettings.begin(); it != m_queuedSettings.end(); ++it) {
-        const auto pending = it.value();
-        if (pending.id.isEmpty() || m_terminating.contains(it.key())) continue;
-        const auto *box = pending.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(pending.host);
-        if (!box || !box->ok || (pending.host.isEmpty() && !m_connectionError.isEmpty()) || m_composer->isSending(it.key())) continue;
+    for (auto it = m_queuedSettings.cbegin(); it != m_queuedSettings.cend(); ++it) {
+        const QString key = it.key(); const auto pending = it.value();
+        if (pending.id.isEmpty() || m_terminating.contains(key) || m_composer->isSending(key)) continue;
         bool answering = false;
-        for (const auto &answer : m_pendingAnswers) answering |= answer.key == it.key();
+        for (const auto &answer : m_pendingAnswers) answering |= answer.key == key;
         if (answering) continue;
-        const auto session = std::find_if(box->sessions.cbegin(), box->sessions.cend(), [&](const SessionInfo &s) { return s.name == pending.name && s.runId == pending.run; });
-        if (session == box->sessions.cend() || session->state != "running" || session->phase != "idle"
-            || session->activity != "idle" || session->processState != "running") continue;
-        const auto identity = QJsonDocument(QJsonArray{it.key(), pending.run, pending.conversation, pending.id, pending.model, pending.effort}).toJson(QJsonDocument::Compact);
-        if (m_settingsAttempts.contains(identity)) continue;
-        m_settingsAttempts.insert(identity);
-        m_settingsKey = it.key(); m_settingsHost = pending.host; m_settingsName = pending.name;
-        m_settingsRun = pending.run; m_settingsConversation = pending.conversation; m_settingsAutomatic = true;
-        m_settingsRequest = m_client.requestSettings(pending.host, pending.name, pending.model, pending.effort, pending.run, pending.conversation, pending.id);
-        renderDetails(); return;
+        const auto *session = listedSettingsSession(pending);
+        if (!session || !listedReady(*session)) continue;
+        const auto identity = settingsIdentity(key, pending);
+        if (!settingsAttemptAllowed(key, pending, identity)) continue;
+        requestAutomaticSettings(key, pending, identity); return;
     }
 }
 
