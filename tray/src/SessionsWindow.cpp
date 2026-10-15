@@ -1,5 +1,7 @@
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "GraphWorkspace.h"
+#include <QStandardPaths>
 #include "WorktreeBatchCleanupDialog.h"
 #include "DownloadCache.h"
 #include "SessionFileDrop.h"
@@ -306,11 +308,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     create->setFixedSize(42,44);create->setIconSize(QSize(24,24));side->addWidget(create);
     connect(create, &QPushButton::clicked, this, [this]() { showNewSession({}, {}, selectedHostTarget()); });
     m_sessionsNav = iconButton("sessions", tr("Sessions"), "railButton"); m_sessionsNav->setCheckable(true); m_sessionsNav->setChecked(true);
+    m_graphNav = iconButton("graph", tr("Graph"), "railButton"); m_graphNav->setCheckable(true);
+    connect(m_graphNav, &QPushButton::clicked, this, [this] { m_pages->setCurrentWidget(m_graph); });
     m_projectsNav = iconButton("projects", tr("Projects"), "railButton"); m_projectsNav->setCheckable(true);
     m_machinesNav = iconButton("machines", tr("Machines and connection status"), "railButton"); m_machinesNav->setCheckable(true);
     m_accountsNav = iconButton("accounts", tr("Agent accounts"), "railButton"); m_accountsNav->setCheckable(true);
     connect(m_accountsNav, &QPushButton::clicked, this, [this] { m_pages->setCurrentIndex(4); m_accountsNav->setChecked(true); });
-    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
+    for (auto *button : {m_sessionsNav, m_graphNav, m_projectsNav, m_machinesNav, m_accountsNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
     m_attentionBadge = new QLabel(m_sessionsNav); m_attentionBadge->setObjectName("railAttentionBadge");
     m_attentionBadge->setAlignment(Qt::AlignCenter); m_attentionBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_attentionBadge->setGeometry(24, 3, 17, 16); m_attentionBadge->hide();
@@ -1285,6 +1289,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_accountsPage = new AccountsPage(hgsPath,nullptr,m_usageStore); m_pages->addWidget(m_accountsPage);
     m_settingsPage=new SettingsPage(hgsPath);m_pages->addWidget(m_settingsPage);
+    m_graph = new GraphWorkspace(hgsPath, QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/session-graph.json", this);
+    m_pages->addWidget(m_graph);
+    connect(m_graph, &GraphWorkspace::openRequested, this, &SessionsWindow::openGraphTarget);
     connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);});
     m_settingsPage->pollingChanged=[this]{
         const bool enabled=ProcessSettings::enabled();
@@ -1326,6 +1333,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_machinesPage,&MachinesPage::appearanceChanged,this,[this] { m_machineFilter->refreshColors(); m_accountsPage->refreshAppearance(); rebuild(); updateDashboard(); });
     connect(m_pages,&QStackedWidget::currentChanged,this,[this](int index) {
         m_sessionsNav->setChecked(index==0); m_projectsNav->setChecked(index==1); m_machinesNav->setChecked(index==2); m_brand->setChecked(index==3); m_accountsNav->setChecked(index==4); m_settingsNav->setChecked(index==5);
+        m_graphNav->setChecked(m_pages->currentWidget()==m_graph);
+        if (m_graphNav->isChecked()) updateGraph();
         renderAccountUsage();if(index==3)updateDashboardAccounts(true);updateInspectorMinimum();
         if (index == 3 && m_dashboardStale) updateDashboard();
         // Callers that show Sessions rebuild right away; this covers any other switch.
@@ -1722,6 +1731,7 @@ void SessionsWindow::applyTheme()
         m_attentionCount > 0, QSettings().value("workspace/reduceMotion", false).toBool());
     m_sessions->setProperty("hgsDark", m_dark);
     m_sessions->setActivityAnimationEnabled(QSettings().value("workspace/animateActivity", true).toBool());
+    m_graph->setTheme(m_dark);
     m_projectsPage->setTheme(m_dark); m_accountsPage->setTheme(m_dark); m_machinesPage->setTheme(m_dark); m_providerBadge->setTheme(m_dark); m_machineBadge->setTheme(m_dark);
     m_accountUsage->setTheme(m_dark);
     m_usageWarning->setStyleSheet(QString("QLabel{color:%1;}").arg(m_dark?"#ffabab":"#a42330"));
@@ -2525,6 +2535,89 @@ bool SessionsWindow::entryHasDraft(const Entry &entry) const
             && m_subagentComposer->hasDraft(entry.machine + '\n' + entry.session.name + '\n' + conversation + '\n' + it.key())) return true;
     return false;
 }
+QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
+{
+    QMap<int, QVariant> roles;
+    const auto &s = e.session;
+    const bool includeCompleted = QSettings().value("workspace/showCompletedSubagents", false).toBool();
+    const bool terminating=isTerminating(e);
+    const QString rowStatus=terminating?tr("Terminating…"):status(s,e.online);
+    const QString desc = terminating?tr("Waiting for the session to stop"):currentAction(s, e.online).simplified();
+    roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
+    roles.insert(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
+    roles.insert(TitleRole, sessionLabel(s)); roles.insert(AgentRole, s.cmd);
+    QString meta = SessionPresentation::checkoutLine(s);
+    roles.insert(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
+    if (s.state == "archived" && s.archivedAt > 0) {
+        if (!meta.isEmpty()) meta += QStringLiteral(" / ");
+        meta += QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM HH:mm");
+    }
+    roles.insert(MetaRole, meta); roles.insert(StatusRole, rowStatus); roles.insert(DetailRole, desc);
+    const auto gitPath = SessionPresentation::gitStatusPath(s);
+    const auto git = SessionPresentation::gitStatus(s, m_client.gitStatusSnapshot(e.host, gitPath), e.online);
+    roles.insert(SessionRoles::GitHost, e.host); roles.insert(SessionRoles::GitPath, gitPath);
+    roles.insert(SessionRoles::GitStatus, git);
+    roles.insert(Qt::AccessibleDescriptionRole, GitStatusBadge::tooltip(git));
+    roles.insert(SessionRoles::Attention, !terminating && (s.reviewLater || (e.online && !s.attentionAcknowledged && (s.needsAction() || childNeedsAction(e)))));
+    roles.insert(SessionRoles::ReviewLater, s.reviewLater);
+    roles.insert(SessionRoles::Failure, s.phase=="error");
+    roles.insert(SessionRoles::Draft, m_composer->hasDraft(e.key));
+    roles.insert(SessionRoles::Unread, !terminating && s.visibleUnreadReply(e.online));
+    roles.insert(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
+    roles.insert(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
+    roles.insert(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
+    roles.insert(SessionRoles::MachineName, e.machine);
+    roles.insert(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
+    roles.insert(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); roles.insert(ChildrenRole, childCount(s, false, e.online, includeCompleted));
+    if (const auto *group = m_organization.group(m_organization.groupFor(e.identity))) {
+        roles.insert(SessionRoles::ProjectColor, QColor(group->color));
+        roles.insert(SessionRoles::ProjectVivid, group->vivid);
+    }
+    return roles;
+}
+
+void SessionsWindow::updateGraph()
+{
+    QSet<QString> routes;
+    if (m_fleet.local().localSessions) routes.insert({});
+    for (const auto &host : m_fleet.peerNames()) routes.insert(host);
+    m_graph->setRoutes(routes);
+    if (!m_graph->isVisible()) return;
+    QList<GraphProjection::Binding> bindings;
+    int omitted = 0;
+    for (const auto &entry : m_entries) {
+        const auto &s = entry.session;
+        if (s.runId.isEmpty()) continue;
+        if (bindings.size() >= GraphWorkspace::MaximumBindings) { ++omitted; continue; }
+        const auto groupId = m_organization.groupFor(entry.identity);
+        const auto *group = m_organization.group(groupId);
+        bindings.append({entry.host, s.name, s.runId, s.conversationId, s.cmd, s.archiveId, {},
+            groupId, group ? group->name : QString(), sessionCardRoles(entry), entry.online});
+    }
+    m_graph->setContext(routes, bindings, omitted);
+}
+
+void SessionsWindow::openGraphTarget(const QString &host, const QString &name, const QString &run,
+    const QString &conversation, const QString &archive, const QString &agent)
+{
+    // A graph selection only inspects metadata. Explicit Open must still match
+    // today's exact binding; a reused name must never open a replacement run.
+    const Entry *match = nullptr;
+    for (const auto &entry : m_entries) {
+        const auto &s = entry.session;
+        if (entry.host != host || s.name != name || s.runId != run || s.conversationId != conversation
+            || s.archiveId != archive || !entry.online || run.isEmpty()) continue;
+        if (match) { match = nullptr; break; }
+        match = &entry;
+    }
+    if (!match || !agent.isEmpty()) {
+        m_graph->page()->setFreshness(tr("This session changed. Refresh Graph before opening it."));
+        return;
+    }
+    m_detailTabs->setCurrentIndex(0);
+    openRelatedSession(host, name, archive);
+}
+
 void SessionsWindow::rebuild()
 {
     if (m_sessions->dragging()) return;
@@ -2560,6 +2653,7 @@ void SessionsWindow::rebuild()
     for (auto &entry : m_entries) entry.identity = m_organization.observe(entry.machine, entry.session.name, entry.session.runId, entry.session.archiveId);
     placeLaunchedSessions();
     saveOrganization();
+    updateGraph();
     // Entries, attention and the organization above stay current for other pages.
     // A hidden Sessions list and its details render once, when the page is shown.
     if (m_pages->currentIndex() != 0 && m_forkKey.isEmpty() && m_restoreKey.isEmpty() && m_renameKey.isEmpty()) {
@@ -2771,36 +2865,11 @@ void SessionsWindow::rebuild()
         if (!row.hidden && firstVisible < 0) firstVisible = i;
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled);
         item->setData(SessionRoles::Identity, e.identity);
-        const bool terminating=isTerminating(e);
-        const QString rowStatus=terminating?tr("Terminating…"):status(s,e.online);
-        const QString desc = terminating?tr("Waiting for the session to stop"):currentAction(s, e.online).simplified();
-        item->setData(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
-        item->setData(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
-        item->setData(TitleRole, sessionLabel(s)); item->setData(AgentRole, s.cmd);
-        QString meta = SessionPresentation::checkoutLine(s);
-        item->setData(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
-        if (s.state == "archived" && s.archivedAt > 0) {
-            if (!meta.isEmpty()) meta += QStringLiteral(" / ");
-            meta += QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM HH:mm");
-        }
-        item->setData(MetaRole, meta); item->setData(StatusRole, rowStatus); item->setData(DetailRole, desc);
-        const auto gitPath = SessionPresentation::gitStatusPath(s);
-        const auto git = SessionPresentation::gitStatus(s, m_client.gitStatusSnapshot(e.host, gitPath), e.online);
-        item->setData(SessionRoles::GitHost, e.host); item->setData(SessionRoles::GitPath, gitPath);
-        item->setData(SessionRoles::GitStatus, git);
-        item->setData(Qt::AccessibleDescriptionRole, GitStatusBadge::tooltip(git));
+        const auto roles = sessionCardRoles(e);
+        for (auto role = roles.cbegin(); role != roles.cend(); ++role) item->setData(role.key(), role.value());
+        const auto rowStatus = roles.value(StatusRole).toString(), desc = roles.value(DetailRole).toString();
+        const auto meta = roles.value(MetaRole).toString(), gitPath = roles.value(SessionRoles::GitPath).toString();
         if (e.online && !gitPath.isEmpty()) m_client.requestGitStatus(e.host, gitPath);
-        item->setData(SessionRoles::Attention, !terminating && (s.reviewLater || (e.online && !s.attentionAcknowledged && (s.needsAction() || childNeedsAction(e)))));
-        item->setData(SessionRoles::ReviewLater, s.reviewLater);
-        item->setData(SessionRoles::Failure, s.phase=="error");
-        item->setData(SessionRoles::Draft, m_composer->hasDraft(e.key));
-        item->setData(SessionRoles::Unread, !terminating && s.visibleUnreadReply(e.online));
-        item->setData(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
-        item->setData(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
-        item->setData(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
-        item->setData(SessionRoles::MachineName, e.machine);
-        item->setData(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
-        item->setData(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); item->setData(ChildrenRole, childCount(s, false, e.online, includeCompleted));
         QStringList accessibleFields{s.name, e.machine + QStringLiteral(" / ") + s.cmd + QStringLiteral(" / ") + rowStatus, meta};
         if (item->data(SessionRoles::Working).toBool() && item->data(SessionRoles::WorkingSince).toDouble() > 0)
             accessibleFields << tr("%1 since %2").arg(SessionPresentation::backgroundIdle(s) ? tr("Background") : s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));

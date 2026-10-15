@@ -56,6 +56,7 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
+#include "GraphWorkspace.h"
 #include "ProcessView.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
@@ -240,6 +241,7 @@ private slots:
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void projectFilterCombinesScopesCountsAndNavigation();
     void projectHeaderOffersFocusAndAdditiveFilter();
+    void graphNavigationKeepsSharedCardsAndRejectsReusedRun();
     void hiddenPagesRenderWhenShown();
     void pollsKeepUnchangedActivity();
     void multiSelectionKeepsConversationAndGroupMenu_data();
@@ -739,6 +741,76 @@ void TestSessionsWindow::machineChooserCountsFollowStateScopeWithoutMachineOrTex
     menu->popup(window.mapToGlobal(QPoint(100,100))); QCOMPARE(count("@local"),4); QCOMPARE(count("mac"),1);
     local.sessions.removeFirst(); state.setLocal(local,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(count("@local"),3); QCOMPARE(count("mac"),1); QVERIFY(menu->isVisible()); menu->hide();
+}
+
+void TestSessionsWindow::graphNavigationKeepsSharedCardsAndRejectsReusedRun()
+{
+    FleetState state; auto local = fleet().local();
+    auto &session = local.sessions[0]; session.runId = "graph-run"; session.conversationId = "conversation-one";
+    session.gitBranch = "feat/graph"; session.cwd = "/work/project";
+    state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    const QString node = "node:" + QString(64, 'a'), binding = "binding:" + QString(64, 'b');
+    const QString machine = "11111111-1111-4111-8111-111111111111";
+    QJsonObject page{{"schema",1},{"machine_id",machine},
+        {"epoch","22222222-2222-4222-8222-222222222222"},{"revision",2},{"cursor","end"},
+        {"has_more",false},{"reset_required",false},{"coverage",QJsonObject{{"bindings_complete",true}}},
+        {"items",QJsonArray{
+            QJsonObject{{"id",node},{"revision",1},{"deleted",false},{"item",QJsonObject{{"kind","node"},{"value",QJsonObject{
+                {"endpoint",QJsonObject{{"machine",machine},{"provider",session.cmd},{"namespace","default"},
+                    {"conversation",session.conversationId},{"provisional_run",""}}}}}}}},
+            QJsonObject{{"id",binding},{"revision",2},{"deleted",false},{"item",QJsonObject{{"kind","binding"},{"value",QJsonObject{
+                {"node",node},{"name",session.name},{"run_id",session.runId},{"conversation_id",session.conversationId},{"provider",session.cmd}}}}}}
+        }}};
+    QMap<QString,QJsonObject> sorted;
+    for (const auto &row : page["items"].toArray()) sorted[row.toObject()["id"].toString()]=row.toObject();
+    QJsonArray ordered; for (const auto &row : sorted) ordered.append(row); page["items"]=ordered;
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const auto fixture = m_dir->filePath("graph-navigation");
+    const QByteArray answer = "elif c=='graph':\n open(__file__+'.calls','a').write(json.dumps(sys.argv[1:])+'\\n')\n print(" +
+        FakeCli::pythonString(QString::fromUtf8(QJsonDocument(page).toJson(QJsonDocument::Compact))) + ")\n";
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window);
+    window.setFleet(state); window.resize(1100,760); window.show(); window.showSession({},session.name);
+    auto *list = window.findChild<SessionList *>("sessionList");
+    QVERIFY(list->currentItem());
+    auto *composer=window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+    setComposerText(composer,"Keep my graph draft");
+    QTRY_VERIFY(list->currentItem()->data(SessionRoles::Draft).toBool());
+    QMap<int,QVariant> roles;
+    for (const int role : {SessionRoles::Title,SessionRoles::Agent,SessionRoles::Host,SessionRoles::Status,
+            SessionRoles::Meta,SessionRoles::MetaIcon,SessionRoles::MachineColor,SessionRoles::Working,
+            SessionRoles::Unread,SessionRoles::Scheduled,SessionRoles::Draft}) roles[role]=list->currentItem()->data(role);
+    QVERIFY(!QFile::exists(fixture+".calls"));
+    auto *graph = window.findChild<GraphWorkspace *>(); QVERIFY(graph);
+    QPushButton *nav = nullptr;
+    for (auto *button : window.findChildren<QPushButton *>("railButton"))
+        if (button->property("glyph")=="graph") nav=button;
+    QVERIFY(nav); nav->click(); QTRY_VERIFY(graph->isVisible());
+    QTRY_COMPARE_WITH_TIMEOUT(graph->page()->canvas()->nodeCount(),1,10000);
+    auto *model = graph->page()->canvas()->nodeModel();
+    for (auto it=roles.cbegin();it!=roles.cend();++it) QCOMPARE(model->index(0,0).data(it.key()),it.value());
+    QSignalSpy read(&window,&SessionsWindow::replyViewed);
+    graph->page()->canvas()->selectNode(node); QCoreApplication::processEvents(); QCOMPARE(read.size(),0);
+    if (qEnvironmentVariableIsSet("ZERUS_GRAPH_WORKSPACE_PREVIEW")) {
+        QTest::qWait(100);
+        QVERIFY(window.grab().save(qEnvironmentVariable("ZERUS_GRAPH_WORKSPACE_PREVIEW")+"-current.png"));
+    }
+    QVERIFY(graph->isVisible());
+    graph->openRequested({},session.name,"stale-run",session.conversationId,{},{});
+    QVERIFY(graph->isVisible());
+    auto *open = graph->findChild<QPushButton *>("graphOpenActivity"); QVERIFY(open);
+    QTRY_VERIFY(open->isEnabled()); QTest::mouseClick(open,Qt::LeftButton);
+    QTRY_VERIFY(!graph->isVisible()); QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(),'\n'+session.name);
+    QCOMPARE(composer->editor()->toPlainText(),QString("Keep my graph draft"));
+    nav->click(); QTRY_VERIFY(graph->isVisible());
+    local.sessions[0].runId="replacement"; state.setLocal(local,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    graph->openRequested({},session.name,"graph-run",session.conversationId,{},{});
+    QVERIFY(graph->isVisible()); // Exact same name and conversation are not enough.
+    if (qEnvironmentVariableIsSet("ZERUS_GRAPH_WORKSPACE_PREVIEW")) {
+        graph->page()->focusNode(node);
+        QTest::qWait(100);
+        QVERIFY(window.grab().save(qEnvironmentVariable("ZERUS_GRAPH_WORKSPACE_PREVIEW")));
+    }
 }
 
 void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()

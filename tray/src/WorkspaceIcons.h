@@ -38,6 +38,10 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "dsh") {
             QPainterPath whale;whale.moveTo(3,10);whale.cubicTo(5,5,15,4,18,10);whale.lineTo(23,7);whale.lineTo(22,13);
             whale.lineTo(18,13);whale.cubicTo(15,22,3,19,3,10);p.drawPath(whale);p.drawPoint(8,10);
+        } else if (name == "graph") {
+            p.drawLine(7, 7, 17, 12); p.drawLine(7, 17, 17, 12); p.drawLine(7, 7, 7, 17);
+            p.setBrush(color); p.drawEllipse(QPointF(6, 6), 2.5, 2.5);
+            p.drawEllipse(QPointF(6, 18), 2.5, 2.5); p.drawEllipse(QPointF(18, 12), 2.5, 2.5);
         } else if (name == "sessions" || name == "all") {
             p.drawRoundedRect(QRectF(4, 4, 16, 7), 2, 2); p.drawRoundedRect(QRectF(4, 14, 16, 6), 2, 2);
             p.drawPoint(QPointF(8, 7.5)); p.drawLine(QPointF(12, 7.5), QPointF(16, 7.5));

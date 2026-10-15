@@ -460,7 +460,13 @@ explicit action choices and conflicting project assignments remain visible.
 Unverified message claims cannot become communication edges. Canvas limits expose
 omitted records and prefer current bindings over unrelated recorded history.
 
-These components are not yet wired into the main navigation and fleet updates.
+The private desktop branch now wires these components into main navigation and
+fleet updates. It uses the exact same card-role builder as Sessions, assembles
+projections on a worker and starts reads only while Graph is visible. Open Activity
+revalidates the current route/name/run/conversation/archive; selecting a node alone
+does not navigate or mark a message read. The current view retains at most 2000
+card bindings and reports omitted bindings explicitly. This integration is not
+yet part of an installed release.
 Verified communication provenance, archive and full native-child
 coverage, final platform/performance qualification and Android transport remain
 unfinished. This milestone is not a usable Graph release;

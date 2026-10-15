@@ -29,6 +29,7 @@ class QTextBrowser;
 class QStackedWidget;
 class QSplitter;
 class QMenu;
+class GraphWorkspace;
 class ProjectsDialog;
 class WorktreePanel;
 class ActivityView;
@@ -128,6 +129,10 @@ private:
     void updateSessionLoading();
     void updateSessionFeedback();
     void rebuild();
+    QMap<int, QVariant> sessionCardRoles(const Entry &entry) const;
+    void updateGraph();
+    void openGraphTarget(const QString &host, const QString &name, const QString &run,
+                         const QString &conversation, const QString &archive, const QString &agent);
     void selectSession();
     void inspect();
     // The DeepSeek native UI: its tab when the embedded plugin is available,
@@ -475,6 +480,8 @@ private:
     QStackedWidget *m_detailStack;
     QSplitter *m_splitter;
     QStackedWidget *m_pages;
+    GraphWorkspace *m_graph;
+    QPushButton *m_graphNav;
     SettingsPage *m_settingsPage;
     QPushButton *m_settingsNav;
     QPushButton *m_windowPin = nullptr;
