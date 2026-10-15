@@ -29,7 +29,7 @@ from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
 from . import speech, speech_config, voice
-from . import attachment_reads, file_reads
+from . import attachment_reads, file_reads, archives
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import ATTACHMENT_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
@@ -179,6 +179,7 @@ class Journal:
                                 (state, json.dumps(response), now, request_id))
         self.db.execute("CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'")
+        self.db.execute("CREATE INDEX IF NOT EXISTS archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS attachment_delivered_reads ON requests(delivered_at) WHERE operation='attachment_read' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS journal_operation ON requests(operation)")
@@ -194,6 +195,7 @@ class Journal:
             self.db.execute(f"DELETE FROM requests WHERE operation IN {speech.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {voice.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             # Delivered attachment chunks are never kept beyond the same short window.
+            self.db.execute("DELETE FROM requests WHERE operation='archive_list' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 3600,))
             self.db.execute("DELETE FROM requests WHERE operation='file_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute("DELETE FROM requests WHERE operation='attachment_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 3600,))
@@ -309,6 +311,12 @@ class Connector:
         self.read_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
+        self.archive_supported = False
+        self.paged_archives = {}
+        self.archive_preview = []
+        self.archive_preview_revision = None
+        self.archive_preview_next = 0.0
+        self.archive_preview_meta = {"schema":1,"available":False,"loaded":0,"total":None,"partial":False}
         self.file_read_supported = False
         self.speech_supported = False
         self.speech_config_supported = False
@@ -460,9 +468,27 @@ class Connector:
                         await cleanup
 
     async def snapshot(self) -> dict:
-        snapshot = await self.native(["ls", "--json", "--local"])
+        await self.probe_capabilities()
+        snapshot = await self.native(["ls", "--json", "--local"] + (["--no-archives"] if self.archive_supported else []))
         if not isinstance(snapshot, dict) or not isinstance(snapshot.get("sessions"), list):
             raise ConnectorError("native snapshot has invalid format")
+        snapshot["mobile_archive"]={"schema":1,"available":False,"loaded":0,"total":None,"partial":False}
+        if self.archive_supported:
+            revision=snapshot.get("archive_revision")
+            current=time.monotonic()
+            if isinstance(revision,str) and (revision!=self.archive_preview_revision or current>=self.archive_preview_next):
+                # Invalidate old membership before a failed refresh can make it fresh.
+                self.archive_preview=[]
+                self.archive_preview_meta={"schema":1,"available":False,"loaded":0,"total":None,"partial":False}
+                try:
+                    value=await self.native(["archives","--json"],{},timeout=5)
+                    self.archive_preview,self.archive_preview_meta=archives.preview(value)
+                except (ConnectorError,ValueError):
+                    self.archive_preview_meta["error"]="Archive preview is unavailable; refresh Archive on an updated client"
+                self.archive_preview_revision=revision
+                self.archive_preview_next=current+(300 if self.archive_preview_meta["available"] else 15)
+            snapshot["sessions"].extend(self.archive_preview)
+            snapshot["mobile_archive"]=self.archive_preview_meta
         snapshot.pop("peers", None)  # Native SSH aliases and peer-of-peer inventory stay local.
         # Ended launches carry the last screen lines of failed starts for the
         # desktop's placeholders; terminal text never leaves this computer.
@@ -485,9 +511,14 @@ class Connector:
         self.snapshot_seen_at = time.monotonic()
         self.snapshot_ready.set()
         await asyncio.gather(self.enrich_attention(snapshot), self.enrich_projects(snapshot))
+        if self.archive_supported:
+            # Archive membership is applied to explicit pages; thousands of IDs
+            # do not belong in every live-session heartbeat.
+            groups=snapshot.get("mobile_projects",{})
+            snapshot["mobile_projects"]={**groups,"projects":[{k:v for k,v in p.items() if k!="archives"} for p in groups.get("projects",[]) if isinstance(p,dict)]}
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.worktree_supported else worktrees.OPERATIONS)) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
+        operations = (OPERATIONS - (set() if self.archive_supported else {"archive_list"})) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -499,6 +530,7 @@ class Connector:
         if time.monotonic() < self.capabilities_next_poll:
             return
         self.capabilities_next_poll = time.monotonic() + 300
+        self.archive_supported = False
         self.lifecycle_supported = False
         self.terminal_supported = False
         self.recovery_supported = False
@@ -530,6 +562,7 @@ class Connector:
             self.read_supported = isinstance(help_text, str) and "read <session> --json" in help_text
             self.preference_supported = isinstance(help_text,str) and "swarm preference set mobile_delivery" in help_text
             self.attachment_read_supported = isinstance(help_text, str) and attachment_reads.HELP_MARKER in help_text
+            self.archive_supported = isinstance(help_text,str) and archives.HELP_MARKER in help_text
             self.file_read_supported = isinstance(help_text, str) and file_reads.HELP_MARKER in help_text
             self.speech_supported = isinstance(help_text, str) and speech.HELP_MARKER in help_text
             self.voice_supported = isinstance(help_text, str) and voice.HELP_MARKER in help_text
@@ -619,6 +652,11 @@ class Connector:
         operation, session = request.get("operation"), request.get("session")
         if not isinstance(operation, str) or operation not in OPERATIONS:
             raise ConnectorError("unsupported operation")
+        if operation == "archive_list":
+            if session != "": raise ConnectorError("archive browsing uses no session target")
+            try: archives.validate(request.get("payload"))
+            except ValueError as error: raise ConnectorError(str(error)) from None
+            return operation,session,request["payload"]
         if operation in LAUNCH_OPERATIONS:
             if session != "": raise ConnectorError("catalog/launch use no existing session target")
             try: validate_launch(operation,request.get("payload"),request["request_id"])
@@ -661,9 +699,9 @@ class Connector:
                 raise ConnectorError(str(error)) from None
             if "archive_id" in payload:
                 archive_id = checked_uuid(payload["archive_id"])
-                if time.monotonic() - self.snapshot_seen_at > ARCHIVE_SNAPSHOT_TTL:
-                    raise ConnectorError("archive snapshot is stale; refresh before inspection")
-                if (session, archive_id) not in self.archives:
+                if not Connector.archive_allowed(self, session, archive_id) and not getattr(self,"archive_supported",False):
+                    if time.monotonic()-self.snapshot_seen_at>ARCHIVE_SNAPSHOT_TTL:
+                        raise ConnectorError("archive snapshot is stale; refresh before inspection")
                     raise ConnectorError("archive must match an exact local snapshot entry")
                 return operation, session, payload
             if session not in self.sessions:
@@ -675,7 +713,7 @@ class Connector:
             raise ConnectorError("archived targets support inspection only")
         if archived_output:
             archive_id = checked_uuid(payload["archive_id"])
-            if time.monotonic() - self.snapshot_seen_at > ARCHIVE_SNAPSHOT_TTL or (session, archive_id) not in self.archives:
+            if not Connector.archive_allowed(self, session, archive_id) and not getattr(self,"archive_supported",False):
                 raise ConnectorError("archive must match a fresh exact local snapshot entry")
         elif session not in self.sessions:
             raise ConnectorError("session must match an exact nonarchived snapshot entry")
@@ -729,6 +767,32 @@ class Connector:
         except (TypeError, ValueError):
             raise ConnectorError("invalid native payload") from None
         return operation, session, payload
+
+    def archive_allowed(self, session, archive_id):
+        current=time.monotonic()
+        if current-self.snapshot_seen_at<=ARCHIVE_SNAPSHOT_TTL and (session,archive_id) in self.archives:
+            return True
+        return current-getattr(self,"paged_archives",{}).get((session,archive_id),-float("inf")) <= 3600
+
+    async def archive_preflight(self, session, payload):
+        archive_id=payload["archive_id"]
+        if self.archive_allowed(session,archive_id):return
+        # A bounded recent window cannot contain every phone's retained target.
+        # Native JSON, not an arbitrary client identity, authorizes recovery.
+        detail=await self.native(["archives","lookup","--json"],{"name":session,"archive_id":archive_id},timeout=5)
+        if (not isinstance(detail,dict) or type(detail.get("version")) is not int or detail["version"]!=1
+                or detail.get("name")!=session or detail.get("archive_id")!=archive_id
+                or any(key in payload and detail.get(field)!=payload[key] for key,field in
+                       (("expected_run_id","run_id"),("expected_conversation_id","conversation_id")))):
+            raise ConnectorError("fresh native archive identity did not match")
+        self.remember_archives([(session,archive_id)])
+
+    def remember_archives(self, targets):
+        current=time.monotonic()
+        self.paged_archives={key:at for key,at in self.paged_archives.items() if current-at<=3600}
+        for key in targets:self.paged_archives[key]=current
+        if len(self.paged_archives)>2000:
+            self.paged_archives=dict(sorted(self.paged_archives.items(),key=lambda item:item[1],reverse=True)[:2000])
 
     async def context_preflight(self, operation, session, payload):
         """Read fresh native state before attempting a context mutation.
@@ -865,6 +929,8 @@ class Connector:
         mutation_started = False
         try:
             operation, session, payload = await asyncio.to_thread(self.validate, request)
+            if isinstance(payload,dict) and "archive_id" in payload and getattr(self,"archive_supported",False):
+                await self.archive_preflight(session,payload)
             if operation in {*CONTEXT_COMMANDS, "settings", "send_now"} or (operation == "send" and payload.get("expected_compaction_id")):
                 await self.context_preflight(operation, session, payload)
             if operation == "send" and "agent_id" in payload:
@@ -908,6 +974,8 @@ class Connector:
                 raise ConnectorError("native computer file read ABI is unavailable")
             if operation == "attachment_read" and not self.attachment_read_supported:
                 raise ConnectorError("native attachment read ABI is unavailable")
+            if operation == "archive_list" and not self.archive_supported:
+                raise ConnectorError("Update the computer CLI to browse archive pages")
             if operation == "directory_create":
                 from pathlib import PurePosixPath
                 parent_result = await self.native(["dirs", str(PurePosixPath(payload["path"]).parent)], timeout=5)
@@ -988,6 +1056,15 @@ class Connector:
                     except (ConnectorError, ValueError):
                         pass
                 result["request_id"] = request_id
+            elif operation == "archive_list":
+                try: result=archives.page(await self.native(["archives","--json"],payload,timeout=30),payload)
+                except ValueError as error: raise ConnectorError(str(error)) from None
+                groups=self.project_cache or unavailable_projects(self.project_fallback_id)
+                apply_memberships(result,groups)
+                used={row.get("mobile_project_id") for row in result["sessions"]}
+                result["mobile_projects"]={k:v for k,v in groups.items() if k!="projects"}
+                result["mobile_projects"]["projects"]=[{k:v for k,v in p.items() if k in {"id","name","color"}} for p in groups.get("projects",[]) if p.get("id") in used]
+                result["request_id"]=request_id
             elif operation == "dirs":
                 result = await self.native(["dirs", payload["path"]], timeout=5)
                 if not isinstance(result, dict) or not isinstance(result.get("path"), str) or not isinstance(result.get("directories"), list):
@@ -1014,7 +1091,7 @@ class Connector:
                 target = None
                 until = time.monotonic()+5
                 while time.monotonic() < until:
-                    snapshot = await self.native(["ls", "--json", "--local"], timeout=3)
+                    snapshot = await self.native(["ls", "--json", "--local"] + (["--no-archives"] if self.archive_supported else []), timeout=3)
                     matches = [row for row in snapshot.get("sessions", []) if isinstance(row, dict) and row.get("launch_id") == request_id and not is_archived(row)] if isinstance(snapshot, dict) else []
                     if len(matches) == 1 and all(isinstance(matches[0].get(key), str) and matches[0][key] for key in ("name", "run_id")) and (matches[0].get("conversation_id") is None or isinstance(matches[0]["conversation_id"],str)):
                         row = matches[0]
@@ -1220,6 +1297,12 @@ class Connector:
                         "result": result, "error": result.get("error") if (operation in LIFECYCLE_OPERATIONS or operation in {"terminal_input","recovery_action"}) and result["status"] in {"failed", "uncertain"} else None}
             if len(json.dumps(response).encode()) > MAX_RESULT:
                 raise ConnectorError("native result exceeds relay size limit")
+            if isinstance(payload,dict) and "archive_id" in payload and response["state"]=="completed":
+                key=(session,payload["archive_id"])
+                if operation in {"restore","forget"}: self.paged_archives.pop(key,None)
+                elif operation in READ_OPERATIONS and key in self.paged_archives: self.paged_archives[key]=time.monotonic()
+            if operation=="archive_list":
+                self.remember_archives((row["name"],row["archive_id"]) for row in result["sessions"])
         except ConnectorError as error:
             response = {"state": "uncertain" if mutation_started else "failed",
                         "result": None, "error": str(error)}

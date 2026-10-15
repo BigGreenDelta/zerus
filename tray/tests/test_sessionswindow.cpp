@@ -81,6 +81,7 @@
 #include "SessionOrganization.h"
 #include "MachineFilter.h"
 #include "ProjectFilter.h"
+#include "SessionSearch.h"
 #include "DashboardPage.h"
 #include "AccountUsage.h"
 #include "WorktreePanel.h"
@@ -239,6 +240,7 @@ private slots:
     void dashboardAndMultiMachineNavigation();
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void projectFilterCombinesScopesCountsAndNavigation();
+    void pagedArchiveSearchJoinsExactProjectBeforeFiltering();
     void projectHeaderOffersFocusAndAdditiveFilter();
     void hiddenPagesRenderWhenShown();
     void pollsKeepUnchangedActivity();
@@ -739,6 +741,39 @@ void TestSessionsWindow::machineChooserCountsFollowStateScopeWithoutMachineOrTex
     menu->popup(window.mapToGlobal(QPoint(100,100))); QCOMPARE(count("@local"),4); QCOMPARE(count("mac"),1);
     local.sessions.removeFirst(); state.setLocal(local,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(count("@local"),3); QCOMPARE(count("mac"),1); QVERIFY(menu->isVisible()); menu->hide();
+}
+
+void TestSessionsWindow::pagedArchiveSearchJoinsExactProjectBeforeFiltering()
+{
+    const QString name="codex/hgs/dashboard", a="10000000-0000-4000-8000-000000000001",b="10000000-0000-4000-8000-000000000002";
+    SessionOrganization org;const auto first=org.createGroup("Focus"),second=org.createGroup("Other");
+    org.moveSession(org.observe("arch",name,"archive-run",a),first);org.moveSession(org.observe("arch",name,"archive-run",b),second);
+    QSettings().setValue("workspace/organization",QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    QTemporaryDir fixture;const auto cli=fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(cli,R"PY(#!/usr/bin/env python3
+import json,sys
+args=sys.argv[1:]
+remote=bool(args and args[0].startswith('@'))
+if remote:args=args[1:]
+if args[0]=='search':
+ rows=[]
+ if not remote:
+  for n in (1,2):
+   ident='10000000-0000-4000-8000-00000000000'+str(n)
+   session={'name':'codex/hgs/dashboard','cmd':'codex','run_id':'archive-run','conversation_id':'archived-conversation','state':'archived','archive_id':ident,'archived_at':n,'tracked':True,'resumable':True}
+   rows.append(dict(name=session['name'],run_id=session['run_id'],conversation_id=session['conversation_id'],archive_id=ident,session=session,message_id='message'+str(n),at=n,role='assistant',snippet='Needle archived '+str(n),event={'detail':'Needle archived '+str(n)}))
+ print(json.dumps({'query':'needle','results':rows,'truncated':False}))
+elif args[0]=='inspect':print(json.dumps({'name':args[1],'run_id':'archive-run','conversation_id':'archived-conversation','archive_id':args[args.index('--archive')+1] if '--archive' in args else '', 'tracked':True,'state':'archived','events':[],'cursor':0}))
+else:print('{}')
+)PY"));
+    auto state=fleet();auto local=state.local();local.archivePaging=true;local.sessions[0].runId="live-run";local.sessions[0].prompt.clear();state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(cli));keepDetailsPollsOut(window);window.setFleet(state);window.resize(1100,760);window.show();
+    auto *projects=window.findChild<ProjectFilter *>();QVERIFY(projects);projects->setSelection({first});
+    auto *query=window.findChild<QLineEdit*>("search");auto *results=window.findChild<QListWidget*>("searchResults");QVERIFY(query&&results);query->setText("needle");
+    QTRY_COMPARE(results->count(),1);QVERIFY(SessionSearch::sessionKey(results->item(0)).endsWith(a));
+    for(auto *filter:window.findChildren<QPushButton*>("sessionFilter"))if(filter->property("filter")=="archived"){QCOMPARE(filter->property("count").toInt(),1);QVERIFY(filter->text().startsWith("1"));}
+    projects->setSelection({second});QTRY_COMPARE(results->count(),1);QVERIFY(SessionSearch::sessionKey(results->item(0)).endsWith(b));
+    projects->setSelection({});QTRY_COMPARE(results->count(),2);
 }
 
 void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
@@ -2912,7 +2947,7 @@ void TestSessionsWindow::peerNamedDifferentlyListsSessionsUnderItsAlias()
     QTemporaryDir fixture; QVERIFY(fixture.isValid());
     const auto peerCli = fixture.filePath("hgs");
     QVERIFY(FakeCli::install(peerCli, "#!/usr/bin/env python3\nimport sys\n"
-        "if sys.argv[1:]!=['@winpeer','ls','--json']:print('unexpected call',file=sys.stderr);sys.exit(1)\n"
+        "if sys.argv[1:]!=['@winpeer','ls','--json','--no-archives']:print('unexpected call',file=sys.stderr);sys.exit(1)\n"
         "print('{\"host\":\"zpeer\",\"ok\":true,\"projects\":{},\"sessions\":[{\"name\":\"codex/win/build\",\"cmd\":\"codex\","
         "\"project\":\"win\",\"tag\":\"build\",\"state\":\"running\",\"activity\":\"idle\"}]}')\n"));
     HgsClient client(FakeCli::program(peerCli)); QList<BoxState> answers;

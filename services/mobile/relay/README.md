@@ -459,3 +459,25 @@ Historical Python measurements are in `docs/relay-architecture.md`. This Rust
 migration does not certify the 10,000-computer/50,000-phone planning target.
 Measure sustained metadata/heartbeat rates, notification fanout, PostgreSQL WAL,
 autovacuum, storage and pool saturation before changing deployment limits.
+
+### Archive date pages
+
+`archive_list` is an additive capability-gated, sessionless read. Payload fields
+are `from`, `until` (exclusive Unix seconds, 0–253402300800), `limit` (1–50),
+`cursor` (at most 1024 base64url characters), and literal `query` (256 printable
+characters). The connector invokes only `hgs archives --json`; the native CLI
+validates the cursor, range and catalog again. Native desktop/connector polls omit archived session rows; an upgraded phone
+requests pages only inside Archive. To retain older Android clients, the
+connector attaches a cached recent compatibility window (at most 50 rows and
+128 KiB) plus explicit `mobile_archive` loaded/total/partial metadata. Native
+`archive_revision` invalidates it on an atomic archive-directory change, and it
+expires after five minutes. Upgraded clients ignore this window when the relay
+and node advertise page support. Native identity checks remain authoritative.
+
+The operation has a separate `archive_history` index and one-hour read retention;
+the established `read_history_v3` predicate and durable mutation identities stay
+unchanged. Apply the additive index to both PostgreSQL workers during the normal
+coordinated runtime replacement (fresh backup and isolated restore qualification).
+Update the native CLI and connector before enabling the relay capability, then
+update clients; an older relay/CLI is reported as unavailable, not an empty page.
+No native agent or phone read-mark migration is needed.

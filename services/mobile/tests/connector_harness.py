@@ -193,6 +193,7 @@ def default_rules(listing_value: dict | None = None, help_text: str = HELP_TEXT)
     return [
         {"argv": ["--help"], "stdout_text": help_text},
         {"argv": ["ls", "--json", "--local"], "stdout": listing() if listing_value is None else listing_value},
+        {"argv": ["ls", "--json", "--local", "--no-archives"], "stdout": listing() if listing_value is None else listing_value},
         {"argv": ["swarm", "get"], "stdout": {"schema": 1, "initialized": False, "organization": {"projects": []}}},
         {"argv": ["account", "ls"], "stdout": {"profiles": []}},
         {"argv": ["inspect", SESSION], "stdout": inspection()},

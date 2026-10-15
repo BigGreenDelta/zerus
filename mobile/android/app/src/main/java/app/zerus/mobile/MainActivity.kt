@@ -525,7 +525,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
 }
 
-@Composable private fun SessionsScreen(model: ZerusViewModel, onPair: () -> Unit) {
+@Composable internal fun SessionsScreen(model: ZerusViewModel, onPair: () -> Unit) {
     val project = model.sessionProjectScope
     if (model.connections.isEmpty() && !model.demo) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -540,14 +540,17 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             TextButton(onClick = { model.preview() }, modifier = Modifier.fillMaxWidth()) { Text("Try demo") }
         } }; return
     }
+    DisposableEffect(model) { onDispose { model.archive.pause() } }
+    LaunchedEffect(model.sessionFilter,model.sessionQuery,model.selectedMachines,model.archiveSupportedMachines.map { MachineKey(it.connectionId,it.id) }) { model.configureArchive() }
     val scoped = SessionFilters.scoped(model.sessions, model.machines, model.selectedMachines, model.sessionQuery, project?.key)
     val drafts = SessionFilters.draftedSessions(model.sessions, model.drafts)
     val counts = SessionFilters.counts(scoped, model.machines, drafts)
     val machineCounts = SessionFilters.machineCounts(model.sessions, model.machines, model.sessionFilter, drafts, project?.key)
     val visible = scoped.filter { SessionFilters.matches(it, model.sessionFilter, SessionFilters.online(it, model.machines), it.target.key in drafts) }
-    val groups = SessionFilters.grouped(visible, model.projects)
+    val dated = if(model.sessionFilter==SessionFilter.Archive) visible.filter { val at=it.raw.optDouble("archived_at",0.0); at>=model.archive.range.from && at<model.archive.range.until } else visible
+    val groups = SessionFilters.grouped(dated, model.projects)
     val readAllTargets = scoped.map { it.target }.filter(model::listReadAllCandidate)
-    val canReadAll = !model.demo && readAllTargets.any(model::canReadAll)
+    val canReadAll = model.sessionFilter!=SessionFilter.Archive && !model.demo && readAllTargets.any(model::canReadAll)
     val context = LocalContext.current
     var sessionActions by remember { mutableStateOf<Session?>(null) }
     val listState = rememberLazyListState(model.sessionListIndex, model.sessionListOffset)
@@ -562,8 +565,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Column {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(project?.name ?: "Sessions", Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-                TextButton(onClick = {
+                Text(project?.name ?: if(model.sessionFilter==SessionFilter.Archive) "Archive" else "Sessions", Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+                if(model.sessionFilter!=SessionFilter.Archive) TextButton(onClick = {
                     val capturedTargets = readAllTargets.toList()
                     val result = model.markAllRead(capturedTargets,visibleRepliesOnly = true)
                     Toast.makeText(context, ConversationLoadPresentation.readAllOutcome(result.marked, result.skipped, result.partial), Toast.LENGTH_LONG).show()
@@ -575,17 +578,21 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }) { Text("Read all") }
             }
         } }
-        item { OutlinedTextField(model.sessionQuery, { model.changeSessionQuery(it) }, Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text("Search sessions and IDs") },
+        item { OutlinedTextField(model.sessionQuery, { model.changeSessionQuery(it) }, Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text(if(model.sessionFilter==SessionFilter.Archive) "Search archive names and IDs" else "Search sessions and IDs") },
             leadingIcon = { Icon(Icons.Default.Search, "Search sessions") }, shape = RoundedCornerShape(14.dp)) }
         item { Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             SessionFilter.entries.forEach { filter ->
                 val selected = model.sessionFilter == filter
+                val count = if(filter==SessionFilter.Archive && !model.demo && model.archiveSupportedMachines.isNotEmpty()) {
+                    if(!model.archive.totalsKnown && counts.getValue(filter)==0) "…"
+                    else counts.getValue(filter).toString() + if(!model.archive.totalsKnown || model.archive.hasMore) "+" else ""
+                } else counts.getValue(filter).toString()
                 val accent = if (filter == SessionFilter.Attention && counts.getValue(filter) > 0) Amber else if (selected) Mint else Muted
                 OutlinedButton(onClick = { model.chooseSessionFilter(filter) }, modifier = Modifier.height(48.dp).widthIn(min = 56.dp).semantics {
-                    contentDescription = "${filter.caption}, ${counts.getValue(filter)} sessions${if (selected) ", selected" else ""}"
+                    contentDescription = "${filter.caption}, $count sessions${if (selected) ", selected" else ""}"
                 }, contentPadding = PaddingValues(horizontal = 9.dp), shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(containerColor = if (selected) Color(0xFF243136) else Color.Transparent, contentColor = accent)) {
-                    Icon(DesktopIcons.forName(filter.id), null, Modifier.size(20.dp)); Spacer(Modifier.width(5.dp)); Text(counts.getValue(filter).toString(), style = MaterialTheme.typography.labelMedium)
+                    Icon(DesktopIcons.forName(filter.id), null, Modifier.size(20.dp)); Spacer(Modifier.width(5.dp)); Text(count, style = MaterialTheme.typography.labelMedium)
                 }
             }
             OutlinedButton(onClick = { machineDialog = true }, modifier = Modifier.height(48.dp).widthIn(min = 56.dp).semantics { contentDescription = "Filter machines" },
@@ -594,7 +601,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 Text(if (model.selectedMachines.isEmpty()) model.machines.size.toString() else model.selectedMachines.size.toString(), style = MaterialTheme.typography.labelMedium)
             }
         } }
-        item { Text("${model.sessionFilter.caption} (${visible.size})" + if (model.selectedMachines.isEmpty()) "" else " on selected machines", color = Muted, style = MaterialTheme.typography.bodyMedium) }
+        if(model.sessionFilter==SessionFilter.Archive) item { ArchiveFiltersUi(model.archive,model.archiveMachines.associate { MachineKey(it.connectionId,it.id) to it.name },model.archiveMachines.filter { it !in model.archiveSupportedMachines }.map { it.name },dated.size) }
+        item { Text("${model.sessionFilter.caption} (${dated.size})" + if (model.selectedMachines.isEmpty()) "" else " on selected machines", color = Muted, style = MaterialTheme.typography.bodyMedium) }
         if (model.demo) item { Text("Preview data. Pair a workspace to interact with real sessions.", color = Amber, style = MaterialTheme.typography.bodySmall) }
         groups.forEach { group ->
             val accent = runCatching { Color(android.graphics.Color.parseColor(group.color)) }.getOrDefault(Mint)
@@ -644,7 +652,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             }
         }
-        if (visible.isEmpty()) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
+        if (dated.isEmpty() && !(model.sessionFilter==SessionFilter.Archive && model.archive.loading)) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else if(model.sessionFilter==SessionFilter.Archive && model.archive.hasMore) "No loaded sessions match. Load more or narrow the date range." else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
+        if(model.sessionFilter==SessionFilter.Archive && model.archive.hasMore) item { OutlinedButton(onClick={model.archive.loadMore()},enabled=!model.archive.loading && model.archive.range.valid,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(if(model.archive.loading) "Loading…" else if(model.archive.errors.isEmpty()) "Load more archived sessions" else "Retry archive loading") } }
     }
     sessionActions?.let { SessionActionsSheet(model, it) { sessionActions = null } }
     if (machineDialog) ZerusAlertDialog(onDismissRequest = { machineDialog = false }, title = { Text("Filter machines") },

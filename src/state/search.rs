@@ -125,6 +125,11 @@ impl Search {
             "conversation_id":record["conversation_id"],
             "archive_id":record.get("archive_id").cloned().unwrap_or(json!("")),
             "agent":record["agent"],"cwd":record["cwd"],"at":at,"role":role,
+            "session": if string(record,"archive_id").is_empty(){Value::Null}else{json!({
+                "name":record["name"],"cmd":record["agent"],"project":string(record,"name").split('/').nth(1),
+                "tag":string(record,"name").splitn(3,'/').nth(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],
+                "archive_id":record["archive_id"],"archived_at":record["archived_at"],"state":"archived","tracked":true,
+                "resumable":!string(record,"conversation_id").is_empty(),"cwd":record["cwd"]})},
             "source":event["source"],"message_id":id,"seq":event.get("seq").cloned().unwrap_or(json!(0)),
             "content":content,"content_truncated":content_truncated,"snippet":snippet,"event":event});
         self.results.push(result);

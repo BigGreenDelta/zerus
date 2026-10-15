@@ -287,6 +287,7 @@ impl Store {
             ] {
                 rows.extend(t.all(&format!("SELECT id,workspace_id FROM requests WHERE {predicate} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![threshold,batch]).await?);
             }
+            rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation='archive_list' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?",args![at-3600.0,batch]).await?);
             // Attachment bytes are carried, never kept: a result leaves shortly
             // after the phone read it, or after a short TTL if it never does.
             // The partial `attachment_history` index holds only these rows.

@@ -14,13 +14,13 @@ from connector_harness import BlackBoxCase, ROOT, default_rules, listing, sessio
 
 LISTING_KEYS = {
     "host": "forwarded", "ok": "forwarded", "hgs_version": "forwarded", "projects": "forwarded",
-    "sessions": "forwarded", "metrics": "forwarded", "preferences": "forwarded",
+    "archive_revision": "forwarded", "archive_paging": "forwarded", "sessions": "forwarded", "metrics": "forwarded", "preferences": "forwarded",
     "local_sessions": "forwarded", "local_host": "forwarded",
     "peers": "withheld",            # SSH aliases and the peer-of-peer inventory stay local.
     "ended_launches": "withheld",   # The last screen lines of failed starts.
     "desktop_presence": "beside",   # The heartbeat's `presence`, outside the snapshot.
 }
-CONNECTOR_KEYS = {"mobile_accounts", "mobile_projects", "mobile_capabilities"}
+CONNECTOR_KEYS = {"mobile_archive", "mobile_accounts", "mobile_projects", "mobile_capabilities"}
 FORWARDED = {key for key, use in LISTING_KEYS.items() if use == "forwarded"} | CONNECTOR_KEYS
 PEER_ALIAS = "bb-private-peer-alias"
 SCREEN_TEXT = "BB-SCREEN-SENTINEL last terminal line"
@@ -29,7 +29,7 @@ PRESENCE = {"idle_seconds": 4.0, "locked": False, "locked_seconds": None}
 
 def hgs_listing_keys(source: str) -> set[str]:
     """Top-level keys that src/cli.rs local_json can put in a listing."""
-    start = source.index("pub(crate) fn local_json(")
+    start = source.index("fn local_json_archives(")
     body = source[start:source.index("\nfn ", start)]
     keys = set()
     for literal in re.findall(r"let mut raw = json!\(\{(.*?)\}\);", body):
@@ -40,7 +40,7 @@ def hgs_listing_keys(source: str) -> set[str]:
 class HeartbeatPrivacyTests(BlackBoxCase):
     def full_listing(self) -> dict:
         busy = session_row(process_work={"count": 1, "started_at": 100.0, "command": "build --wait", "sampled_at": 200.0})
-        return listing(sessions=[busy], peers=[PEER_ALIAS + ".example.invalid"], local_sessions=True,
+        return listing(archive_revision="0"*64,archive_paging=True,sessions=[busy], peers=[PEER_ALIAS + ".example.invalid"], local_sessions=True,
                        local_host={"state": "running"}, desktop_presence=PRESENCE,
                        ended_launches=[{"launch_id": str(uuid.uuid4()), "name": "claude/example/failed",
                                         "code": 1, "output": SCREEN_TEXT}])

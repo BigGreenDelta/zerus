@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QJsonObject>
+#include <QHash>
 #include <QList>
 #include <QStringList>
 #include <QSet>
@@ -49,6 +50,8 @@ private:
     QString transferFolder(const QString &project, const QString &folder, const QString &destination, bool copy);
     QList<Group> m_groups;
     QJsonObject m_runs;
+    QJsonObject m_runGroups;
+    QHash<QString,QString> m_currentRun;
     QStringList m_imported;
     QString m_default;
     QSet<QString> m_unassigned;

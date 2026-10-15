@@ -23,6 +23,7 @@ public:
     // The workspace key of a result row's session (with its archive id for an archive).
     static QString sessionKey(const QListWidgetItem *item);
 signals:
+    void archiveSessionsReady(const QString &host, const QJsonArray &rows);
     void resultActivated(const QString &host, const QString &name, const QString &archive,
                          const QString &run, const QJsonObject &event, const QString &query);
 protected:

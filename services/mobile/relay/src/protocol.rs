@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub const MIB: usize = 1024 * 1024;
 pub const REQUEST_MAX: usize = 29 * MIB;
 pub const READS: &[&str] = &[
+    "archive_list",
     "speech_config",
     "speech_config_status",
     "inspect",
@@ -67,6 +68,7 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "archive_list",
     "speech_config",
     "speech_profile_upsert",
     "speech_profile_remove",
@@ -293,9 +295,17 @@ pub fn request(v: &Value) -> Result<()> {
     text(
         &v["session"],
         1024,
-        LAUNCH.contains(&op) || COMPUTER.contains(&op) || SPEECH.contains(&op),
+        op=="archive_list" || LAUNCH.contains(&op) || COMPUTER.contains(&op) || SPEECH.contains(&op),
     )?;
-    if LAUNCH.contains(&op) {
+    if op=="archive_list" {
+        if v["session"]!="" { return Err(Error::BAD); }
+        fields(p,&[],&["from","until","limit","cursor","query"])?;
+        let number=|key:&str,default:u64|->Result<u64>{match p.get(key){None=>Ok(default),Some(v)=>v.as_u64().ok_or(Error::BAD)}};
+        let start=number("from",0)?;let end=number("until",253402300800)?;let limit=number("limit",50)?;
+        if start>=end || end>253402300800 || !(1..=50).contains(&limit) {return Err(Error::BAD);}
+        if let Some(c)=p.get("cursor"){if !text(c,1024,true)?.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-".contains(&b)){return Err(Error::BAD);}}
+        if let Some(q)=p.get("query"){if text(q,256,true)?.chars().any(char::is_control){return Err(Error::BAD);}}
+    } else if LAUNCH.contains(&op) {
         if v["session"] != "" {
             return Err(Error::BAD);
         }

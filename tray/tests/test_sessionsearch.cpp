@@ -17,6 +17,7 @@ class TestSessionSearch : public QObject {
 private slots:
     void init();
     void resultsKeepArchivesRunsAndRemoteIdentities();
+    void explicitArchiveHitWorksWithoutEagerArchiveRows();
     void activeScopeIncludesChildRequestsAndOfflineReminders();
     void activeScopeIncludesDraftsAndRefreshesMembership();
     void staleQueriesCannotReplaceCurrentResults();
@@ -68,6 +69,18 @@ print(json.dumps({'query':query,'results':value.get('results',[]),'truncated':Fa
         hit("codex/docs/live", "wrong-run", "stale-message", "Needle from wrong run")});
     configure("mac", "needle", {hit("kimi/remote", "remote-run", "remote-message", "Needle remote body")});
 }
+void TestSessionSearch::explicitArchiveHitWorksWithoutEagerArchiveRows(){
+    auto state=fleet();auto box=state.local();box.archivePaging=true;
+    box.sessions.removeIf([](const SessionInfo&s){return s.state=="archived";});state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    auto result=hit("codex/docs/archived","run-archive","message-archive","Needle in old archive","10000000-0000-4000-8000-000000000001");
+    result["session"]=QJsonObject{{"name","codex/docs/archived"},{"run_id","run-archive"},{"conversation_id","conversation-archive"},{"cmd","codex"},{"state","archived"},{"archive_id","10000000-0000-4000-8000-000000000001"},{"archived_at",100},{"tracked",true},{"resumable",true}};
+    configure({},"needle",QJsonArray{result});
+    SessionSearch search(FakeCli::program(script()));QSignalSpy archives(&search,&SessionSearch::archiveSessionsReady);
+    search.setScope(state,"all",{});search.setQuery("needle");
+    QTRY_VERIFY(!archives.isEmpty());QTRY_VERIFY(status(search)->text().contains("2 messages"));
+    bool found=false;for(int i=0;i<list(search)->count();++i)found|=list(search)->item(i)->data(Qt::AccessibleTextRole).toString().contains("Needle in old archive");QVERIFY(found);
+}
+
 void TestSessionSearch::configure(const QString &host, const QString &query, const QJsonArray &results, int delayMs, const QString &error)
 {
     m_replies[host + '\n' + query] = QJsonObject{{"results", results}, {"delay", delayMs}, {"error", error}};

@@ -332,7 +332,16 @@ void TestWorkspace::durableIdentityAndMissingSessions()
     QCOMPARE(reloaded.group(group)->sessions, QStringList({renamed, mac}));
     // Archive occurrences remain distinct even with identical names and run IDs.
     const auto archive = reloaded.observe("arch", "codex/project/release", "run-2", "archive-1");
-    QVERIFY(archive != renamed); QCOMPARE(reloaded.groupFor(archive), QString("ungrouped"));
+    QVERIFY(archive != renamed); QCOMPARE(reloaded.groupFor(archive), group);
+    // A later run reuses the same label and moves projects before its old
+    // archive is fetched. The old run keeps the group captured at observation.
+    const auto other=reloaded.createGroup("Other");
+    const auto reused=reloaded.observe("arch","codex/project/release","run-3");
+    reloaded.moveSession(reused,other);
+    const auto late=reloaded.observe("arch","codex/project/review","run-1","archive-old");
+    QCOMPARE(reloaded.groupFor(late),group);
+    const auto newest=reloaded.observe("arch","codex/project/release","run-3","archive-new");
+    QCOMPARE(reloaded.groupFor(newest),other);
     QCOMPARE(reloaded.observe("arch", "codex/project/renamed-archive", "run-2", "archive-1"), archive);
     QCOMPARE(SessionOrganization(reloaded.toJson()).toJson(), reloaded.toJson());
 }

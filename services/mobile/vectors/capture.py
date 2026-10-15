@@ -39,7 +39,7 @@ HERE = Path(__file__).resolve().parent
 if __name__ == "__main__":
     sys.path[:0] = [str(HERE.parent), str(HERE.parent / "tests")]
 
-from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet, file_reads,  # noqa: E402
+from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet, file_reads, archives,  # noqa: E402
                           history, launch, managed_relay, projects, speech, speech_config, terminal,
                           voice, worktrees)
 from zerus_mobile.connector import Connector, ConnectorError, Journal  # noqa: E402
@@ -73,7 +73,7 @@ SEALED = {"key_id": "a" * 64, "algorithm": speech_config.ALGORITHM,
           "ephemeral_public_key": base64.b64encode(bytes(91)).decode(),
           "nonce": base64.b64encode(bytes(12)).decode(),
           "ciphertext": base64.b64encode(bytes(40)).decode()}
-CONNECTOR_MODULES = ("connector", "context", "attachments", "attachment_reads", "file_reads", "history", "launch",
+CONNECTOR_MODULES = ("connector", "context", "attachments", "attachment_reads", "file_reads", "archives", "history", "launch",
                      "worktrees", "speech", "speech_config", "voice", "recovery", "terminal", "fleet",
                      "projects", "accounts", "managed_relay")
 # AttachmentViewCache.failure() shows UPDATE_REQUIRED for a receipt error
@@ -203,6 +203,7 @@ HELP_LINES = (
     ("preference", "hgs swarm preference set mobile_delivery"),
     ("attachment_read", "hgs " + attachment_reads.HELP_MARKER),
     ("file_read", "hgs " + file_reads.HELP_MARKER),
+    ("archive_list", "hgs " + archives.HELP_MARKER),
     ("speech", "hgs " + speech.HELP_MARKER),
     ("voice", "hgs " + voice.HELP_MARKER),
     ("speech_config", speech_config.HELP_MARKER),
@@ -307,7 +308,8 @@ def help_text(skip=()) -> str:
 
 
 def snapshot_native(help_answer) -> Native:
-    return Native({("ls", "--json", "--local"): LISTING, ("swarm", "get"): SWARM, ("account", "ls"): ACCOUNTS,
+    return Native({("ls", "--json", "--local"): LISTING, ("ls", "--json", "--local", "--no-archives"): {**LISTING,"archive_revision":"0"*64,"archive_paging":True,"sessions":[r for r in LISTING["sessions"] if r.get("state")!="archived"]}, ("swarm", "get"): SWARM, ("account", "ls"): ACCOUNTS,
+                   ("archives","--json"): {"version":1,"sessions":[],"next_cursor":"","total":0,"from":0,"until":253402300800,"query":""},
                    ("inspect", SESSION): inspection(), ("--help",): help_answer})
 
 
@@ -405,6 +407,7 @@ def operation_tables(runs: dict) -> bytes:
                          "speech_config": speech_config.HELP_MARKER,
                          "attachment_read": attachment_reads.HELP_MARKER,
                          "file_read": file_reads.HELP_MARKER,
+                         "archive_list": archives.HELP_MARKER,
                          "directory_create": launch.DIRECTORY_CREATE_HELP},
         "capabilities": capability_map(runs),
     })
@@ -1099,6 +1102,7 @@ def valid_payloads() -> dict:
         "history": identity(limit=50), "recovery_action": identity(job_id=ident("job"), action="now"),
         "mark_read": {"run_id": RUN, "conversation_id": CONVERSATION, "reply_id": "7:100.5", "attention_signature": HASH_A},
         "attachment_read": identity(message_id=ident("message"), index=0, offset=0, length=1024),
+        "archive_list": {"from":0,"until":253402300800,"limit":50,"cursor":"","query":""},
         "file_read": identity(path="/workspace/example/Сводная.xlsx", offset=0, length=1024),
         "voice_profiles": identity(), "voice_submit": identity(speech={"machine_id": MACHINE, "profile_id": "gigaam-ru"}, audio=AUDIO),
         "voice_status": identity(message_id=ident("voice-message")), "voice_cancel": identity(message_id=ident("voice-message")),
@@ -1119,7 +1123,7 @@ def valid_payloads() -> dict:
     }
 
 
-SESSIONLESS = context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
+SESSIONLESS = {"archive_list"} | context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
 
 
 def substitute(value, request_id):
@@ -1304,6 +1308,10 @@ def validation_cases() -> list[dict]:
     case("mark_read/null-marks", "mark_read", change=put(reply_id=None, attention_signature=None))
     case("mark_read/missing-reply", "mark_read", change=drop("reply_id"))
     case("mark_read/unknown-session", "mark_read", session="codex/example/other")
+    case("archive_list/nonempty-session", "archive_list", session=SESSION)
+    case("archive_list/too-large", "archive_list", change=put(limit=51))
+    case("archive_list/invalid-range", "archive_list", change=put(**{"from":10,"until":10}))
+    case("archive_list/extra", "archive_list", change=put(offset=1000))
     # file_read
     case("file_read/length-zero", "file_read", change=put(length=0))
     case("file_read/missing-path", "file_read", change=drop("path"))

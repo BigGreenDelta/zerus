@@ -88,6 +88,7 @@ struct SessionInfo {
 };
 
 struct BoxState {
+    bool archivePaging = false;
     QJsonObject metrics;
     // A peer's box is keyed by the alias it was polled under (a name in this
     // computer's "peers"), whatever that machine calls itself.
@@ -229,6 +230,9 @@ public:
     quint64 requestRead(const QString &host, const QString &name, const QJsonObject &payload);
 
     // Чистые функции разбора: тестируются без запуска процессов.
+    void cancelArchivePages();
+    quint64 requestArchivePage(const QString &host, const QJsonObject &query);
+    static QList<SessionInfo> parseSessions(const QJsonArray &rows);
     static BoxState parseBox(const QByteArray &json, QString *error);
     static QList<BoxState> parseFleet(const QByteArray &json, QString *error);
     static QList<ProjectInfo> parseProjects(const QByteArray &json, QString *error);
@@ -254,6 +258,7 @@ public:
     void projectRemove(const QString &name, const QString &host = {});
 
 signals:
+    void archivePageReady(quint64 request, const QString &host, const QJsonObject &data, const QString &error);
     void versionReady(const QString &version); // Empty when unavailable or unrecognized.
     void sessionReferenceReady(const QString &uri);
     void sessionReferenceFailed(const QString &reason);
@@ -327,6 +332,8 @@ signals:
     void writeDone(const QString &op, bool ok, const QString &detail);
 
 private:
+    quint64 m_archiveRequest = 0;
+    QHash<QString,QObject *> m_archiveJobs;
     void transferFile(quint64 id, const QString &host, const QString &path, const QString &destination,
                       const std::shared_ptr<DownloadCache::Pending> &pending = {});
     void scheduleDownloadCacheTrim();

@@ -248,6 +248,68 @@ and removes an archive binding only after the native agent confirms the expected
 conversation. Failed restore keeps it. **Forget archive** preserves native history;
 `resume --all` excludes archives.
 
+### Browse Archive by date
+
+Desktop and Android filter **Archived date**, the time a conversation moved into
+Archive, independently of its creation or last message. Choose All dates, Today,
+7/30 calendar days, or an inclusive From/Through range. Days use the viewing
+device's local time zone, including daylight-saving changes. The most recently
+archived instances appear first. **Refresh** starts a fresh view; **Load more**
+requests the next page, at most 50 rows per selected online computer. Loaded/total
+status distinguishes an empty archive from a partly loaded one. The Archive
+badge counts loaded rows in the current project/machine scope, with `+` when
+more remain; the date panel reports the whole queried computer/date total. An unavailable
+computer keeps its own error and retry state; changing dates, search or machines
+discards responses belonging to the previous view.
+
+Upgraded desktop and connector polls use `hgs ls --json --local --no-archives`.
+For older Android clients, the connector attaches a cached recent window of at
+most 50 archived rows/128 KiB and explicit `mobile_archive` loaded/total/partial
+metadata. It refreshes that window only when the native directory revision
+changes or five minutes expire. Native identity checks and the existing fresh
+snapshot gate remain in force for that window. Updated Android ignores this
+compatibility window when page operations are supported; an old relay can still
+show it while the system updates. Full Archive browsing needs the updated client.
+The legacy `ls --json` default remains compatible. The native, read-only ABI is:
+
+```sh
+printf '%s' '{"from":0,"until":253402300800,"limit":50,"cursor":"","query":""}' | hgs archives --json
+```
+
+`from` is inclusive and `until` exclusive Unix seconds (integers, nonnegative);
+`limit` is 1–50. All fields are optional. `query` is literal case-insensitive
+archive metadata search (names, IDs, provider, folder and title), at most 256
+characters; this is distinct from the desktop's global public-message search.
+The result contains `version:1`, `sessions`, `total`, `next_cursor` and the echoed
+range/query. Pass the opaque cursor with the same range/query to continue.
+Ordering uses `(archived_at, archive_id)` descending, avoiding offset duplicates
+when an earlier page changes. Newer completions appear after Refresh. Deleted or
+restored instances disappear; all actions still recheck exact native identity.
+Cursors belong to one computer/catalog and cannot be reused after rebuilding it.
+
+A rebuildable `archive-catalog-v1.sqlite3` indexes metadata beside the durable
+state. Archive JSON files remain authoritative. Its first use indexes existing
+records; unchanged polls/pages reuse it, and atomic archive writes, rename,
+restore or forget update the directory generation. Only requested rows open
+conversation summaries, outside the state writer lock. Browsing never starts an
+agent or changes read marks. New archive pages use the additive mobile
+`archive_list` capability; older computers retain their previously loaded archive
+view and need an updated CLI/connector/relay for paging. Archive IDs are admitted
+from validated pages for one hour (bounded to 2,000 recently paged instances),
+while native inspection and lifecycle actions still verify name/archive/run.
+An already-open older archive also survives a connector restart or cache expiry:
+`hgs archives lookup --json` accepts only `name` and `archive_id`, reads that one
+authoritative record without scanning the catalog or transcript, and returns its
+name/archive/run/conversation identity. The connector verifies this response and
+any requested run/conversation before admitting an uncached target. Failed or
+mismatched lookups grant no admission; lifecycle operations keep their native
+fresh checks. This internal read ABI adds no relay mutation or phone operation.
+
+Desktop bulk removal is explicitly **Remove loaded archived sessions** when
+paging is enabled. Its confirmation names/counts those loaded instances in the
+current date/machine scope; unloaded entries are kept. Local user grouping follows
+the exact observed run even when its reusable session label later changes owner.
+
 ## Project wrappers
 
 An executable `run_COMMAND.sh` in the project folder runs inside the tmux session.

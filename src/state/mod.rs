@@ -3,6 +3,7 @@
 //! Version-one manifests and journal rows deliberately remain compatible with
 //! the original helper: an upgrade must never orphan a saved conversation.
 mod archive;
+pub(crate) mod archive_catalog;
 mod claude_trust;
 mod claude_permission;
 mod claude_resume;
@@ -303,7 +304,11 @@ pub fn merge_snapshot(box_value: Value) -> Result<Value> {
 
 /// `merge_snapshot` of a listing; `ids` holds each listed session's immutable
 /// ID (`$N`) by its listed name.
-pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Result<Value> {
+pub fn merge_listing(box_value: Value, ids: &BTreeMap<String, String>) -> Result<Value> {
+    merge_listing_archives(box_value, ids, true)
+}
+
+pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, String>, include_archives: bool) -> Result<Value> {
     local_sessions()?;
     // A rename renames the terminal session and moves its binding under the
     // state lock. Read the panes and the saved records under it as well, so a
@@ -315,7 +320,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
     let ((snapshot, names), (archived, bindings)) = if root().exists() {
         let _guard = lock(None)?;
         let (snapshot, names) = live_sessions()?;
-        let saved = archive::reconcile_locked(&snapshot)?;
+        let saved = if include_archives { archive::reconcile_locked(&snapshot)? } else { (Vec::new(), archive::reconcile_active_locked(&snapshot)?) };
         ((snapshot, names), saved)
     } else {
         (live_sessions()?, Default::default())

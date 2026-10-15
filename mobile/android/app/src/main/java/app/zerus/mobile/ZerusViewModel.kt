@@ -100,7 +100,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     var connections by mutableStateOf<List<Connection>>(emptyList()); private set
     var machines by mutableStateOf<List<Machine>>(emptyList()); private set
-    var sessions by mutableStateOf<List<Session>>(emptyList()); private set
+    private var catalogSessions by mutableStateOf<List<Session>>(emptyList())
+    var sessions: List<Session>
+        get() = (catalogSessions.filterNot { row -> SessionFilters.archived(row) &&
+            "archive_list" in machineOperations[SessionFilters.machineKey(row.target)].orEmpty() && "archive_list" in relayOperations[row.target.connectionId].orEmpty() } + archive.rows).distinctBy { it.target.key }
+        private set(value) { catalogSessions=value }
+    val archive by lazy { ArchivePaging(viewModelScope,reset={resetSessionScroll()},load=::loadArchivePage) }
     private var accountsWriter:OrderedStatePersistence<List<AccountCatalog>>?=null
     var accountCatalogs by mutableStateOf<List<AccountCatalog>>(emptyList()); private set
     var accountsError by mutableStateOf(""); private set
@@ -120,6 +125,23 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var unscopedScroll = 0 to 0
     private var unscopedFilter = SessionFilter.All
     private var unscopedQuery = ""
+    val archiveMachines get() = machines.filter { (selectedMachines.isEmpty() || MachineKey(it.connectionId,it.id) in selectedMachines) }
+    val archiveSupportedMachines get() = archiveMachines.filter { it.online && "archive_list" in machineOperations[MachineKey(it.connectionId,it.id)].orEmpty() && "archive_list" in relayOperations[it.connectionId].orEmpty() }
+    fun configureArchive() { archive.configure(archiveSupportedMachines.map { MachineKey(it.connectionId,it.id) }.toSet(),sessionQuery.trim(),sessionFilter==SessionFilter.Archive && !demo) }
+    private suspend fun loadArchivePage(key:MachineKey,query:JSONObject):ArchivePage {
+        val connection=connections.find { it.id==key.connectionId } ?: error("Workspace disconnected")
+        val id=UUID.randomUUID().toString()
+        val initial=api.call(connection.url,connection.token,"/v1/requests",JSONObject().put("request_id",id).put("computer_id",key.computerId).put("session","").put("operation","archive_list").put("payload",query))
+        check(initial.string("request_id")==id){"Gateway returned another archive receipt"}
+        val receipt=api.await(connection,initial,150,200)
+        check(receipt.string("request_id")==id && receipt.string("state")=="completed"){receipt.string("error").ifBlank{"Archive page is not available. Refresh to retry."}}
+        val result=receipt.getJSONObject("result")
+        check(result.string("request_id")==id && result.optInt("version")==1 && result.optLong("from")==query.getLong("from") && result.optLong("until")==query.getLong("until") && result.string("query")==query.string("query")){"Computer returned another archive query"}
+        val machine=JSONObject().put("id",key.computerId).put("name",machines.find{it.id==key.computerId&&it.connectionId==key.connectionId}?.name.orEmpty()).put("snapshot",result)
+        val rows=NativeParser.sessions(connection,machine)
+        check(rows.size==result.getJSONArray("sessions").length() && rows.all { SessionFilters.archived(it) && archive.range.let { r -> it.raw.optDouble("archived_at",-1.0)>=r.from && it.raw.optDouble("archived_at",-1.0)<r.until } }){"Invalid archived session identity"}
+        return ArchivePage(ProjectParser.parse(connection,listOf(machine),rows).sessions,result.getString("next_cursor"),result.getInt("total"))
+    }
     fun chooseSessionFilter(value: SessionFilter) { sessionFilter = value; resetSessionScroll() }
     fun changeSessionQuery(value: String) { sessionQuery = value; resetSessionScroll() }
     fun toggleMachine(key: MachineKey) { selectedMachines = if (key in selectedMachines) selectedMachines - key else selectedMachines + key; resetSessionScroll() }
@@ -498,7 +520,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         // Retire the opening divider once this exact current head is read.
         // Keep its capture latched so a later reply cannot resurrect an old divider.
         selected?.target?.let { if(unreadCount(it)==0) { firstUnreadEventId="";unreadBoundaryCaptured=true } }
-        sessions=sessions.map { row ->
+        catalogSessions=catalogSessions.map { row ->
             val later=reviewLater(row.target)
             // A reply or request read on another device is read here too.
             val unread=!SharedReadPolicies.replyRead(row) && (unreadCount(row.target) ?: loadedUnreadCount(row.target) ?: 0)>0
@@ -629,7 +651,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 updateMessageState(persistence!!.state.value)
                 syncOutgoing()
                 val indexed=messageState.conversationIndex.filter { row -> connections.any { it.id == row.target.connectionId } }
-                sessions=indexed.map(IndexedConversation::session)
+                catalogSessions=indexed.map(IndexedConversation::session)
                 refreshReadAttention()
                 machines=indexed.distinctBy { MachineKey(it.target.connectionId,it.target.computerId) }.map { MachineNames.apply(Machine(it.target.connectionId,it.target.computerId,it.computerName,false,lastKnown=true),messageState.machineAliases) }
                 storageReady = true
@@ -1571,6 +1593,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     private suspend fun settleSessionAction(action: SessionAction,receipt: JSONObject) {
         val result = SessionActionPolicies.result(action,receipt)
+        if(result.status=="applied" && action.operation in setOf("archive","terminate","restore","forget","rename"))archive.refresh()
         durable({ state -> state.sessionActions.find { it.requestId == action.requestId }?.let { current ->
             if(current.status in listOf("sending","uncertain")) {
                 var next=state.action(result)
@@ -1750,10 +1773,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             ProjectFolder("demo-build-main", "zerus", "/workspace/build/zerus", "demo-build", previewMachines.getValue("demo-build"))
         ), previewMachines)
         projects = listOf(project,ProjectSummary(ProjectKey("demo","demo","empty-preview"),"Empty preview project","#8DA9E8",emptyList(),emptyMap()))
-        sessions = Demo.sessions.map { it.copy(projectKey = project.key) }
+        catalogSessions = Demo.sessions.map { it.copy(projectKey = project.key) }
         machines = previewMachines.map { (id,name) -> Machine("demo",id,name,true) }
     }
-    fun stopPreview() { demo = false; back(); selectedProject = null; sessions = emptyList(); projects = emptyList(); machines = emptyList(); refresh() }
+    fun stopPreview() { demo = false; back(); selectedProject = null; catalogSessions = emptyList(); archive.configure(emptySet(),"",false); projects = emptyList(); machines = emptyList(); refresh() }
     fun pair(url: String, code: String, onDone: () -> Unit) = viewModelScope.launch {
         if (!storageReady || busy) return@launch
         busy = true
@@ -1788,7 +1811,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { historyCache.purgeWorkspace(connection.id);pageCache.purgeWorkspace(connection.id) }
             attachments.clear()
             computerFiles.clear()
-            sessions = sessions.filterNot { it.target.connectionId == connection.id }
+            catalogSessions = catalogSessions.filterNot { it.target.connectionId == connection.id }
             projects = projects.filterNot { it.key.connectionId == connection.id }
             if (selectedProject?.key?.connectionId == connection.id) selectedProject = null
             if (sessionProjectScope?.key?.connectionId == connection.id) clearSessionScope()
@@ -1855,7 +1878,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             newMachines += machines.filter { it.connectionId in unavailable }.map { it.copy(online=false,lastKnown=true) }
             newProjects += projects.filter { it.key.connectionId in unavailable }
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
-            sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
+            catalogSessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
             refreshReadAttention();adoptSharedReads()
             val index=withContext(Dispatchers.Default) { ConversationIndex.capture(newSessions,newMachines) }
             if(connections == originalConnections) editState { state -> state.copy(conversationIndex=index) }

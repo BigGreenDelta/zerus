@@ -126,7 +126,7 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
         return [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
 
     async def test_fixed_argv_and_exact_stdin_for_all_allowlisted_operations(self):
-        self.assertEqual(self.calls()[0]["argv"], ["ls", "--json", "--local"])
+        self.assertEqual([call["argv"] for call in self.calls()[:2]], [["--help"], ["ls", "--json", "--local"]])
         for operation in ("inspect", "send", "answer", "interrupt"):
             request = self.request(operation)
             response = await self.connector.execute(request)
