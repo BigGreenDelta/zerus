@@ -348,6 +348,28 @@ private slots:
         plist("0.38.0.r815.g1234567.n42");controller.refreshBundleState();QVERIFY(controller.restartRequired());QVERIFY(changed.count()>0);
 #endif
     }
+    void restartHelperIsDetachedWithOnlyStdio(){
+#ifndef Q_OS_UNIX
+        QSKIP("The restart helper reopens a macOS bundle");
+#else
+        if(!ChildProcess::inheritsStdioOnly)QSKIP("This Qt cannot close inherited descriptors");
+        // In place of /bin/sh, record what the helper gets instead of reopening a bundle.
+        QTemporaryDir dir;QVERIFY(dir.isValid());const QString shell=dir.path()+"/sh",bundle=dir.path()+"/Zerus.app";
+        tool(shell,"#!/bin/sh\nout=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$out/arguments\"\necho \"$PPID\" > \"$out/parent\"\nls /dev/fd > \"$out/fds.part\" && mv \"$out/fds.part\" \"$out/fds\"\n");
+        // The GUI may be quitting while ProcessRunner creates a request's pipe; the helper
+        // then waits for it to exit and must not keep that request's input open meanwhile.
+        const CreatingPipe creating;QVERIFY(creating.valid());const qint64 pid=QCoreApplication::applicationPid();
+        QVERIFY(UpdateController::startRestartHelper(bundle,pid,shell));
+        QTRY_VERIFY(QFileInfo::exists(dir.path()+"/fds"));
+        QFile arguments(dir.path()+"/arguments");QVERIFY(arguments.open(QIODevice::ReadOnly));
+        QCOMPARE(QString::fromUtf8(arguments.readAll()).split('\n',Qt::SkipEmptyParts),QStringList({"-c","while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open -a \"$2\" --args --sessions","zerus-restart",QString::number(pid),bundle}));
+        // Detached: not a child of this process, so it outlives it.
+        QFile parent(dir.path()+"/parent");QVERIFY(parent.open(QIODevice::ReadOnly));const qint64 parentPid=parent.readAll().trimmed().toLongLong();
+        QVERIFY(parentPid>0);QVERIFY(parentPid!=pid);
+        const auto open=descriptors(dir.path()+"/fds");const auto shown=QDebug::toString(open).toLatin1();
+        QVERIFY2(open.contains(1),shown.constData());for(int fd:creating.ends)QVERIFY2(!open.contains(fd),shown.constData());
+#endif
+    }
     void canonicalOwnershipAsync(){
 #ifdef Q_OS_LINUX
         QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);qputenv("ZERUS_TEST_LOG",(dir.path()+"/args.json").toUtf8());
