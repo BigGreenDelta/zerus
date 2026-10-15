@@ -148,6 +148,12 @@ bool SessionList::viewportEvent(QEvent *event)
         const auto *help = static_cast<QHelpEvent *>(event);
         const auto *row = itemAt(help->pos());
         if (row) {
+            const auto question = SessionDelegate::optionalQuestionRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool());
+            if (question.contains(help->pos())) {
+                const auto text = OptionalQuestionBadge::tooltip(row->data(SessionRoles::OptionalQuestions).toInt());
+                QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), question);
+                return true;
+            }
             const auto rect = SessionDelegate::gitStatusRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool());
             if (rect.contains(help->pos())) {
                 const auto text = GitStatusBadge::tooltip(row->data(SessionRoles::GitStatus).toJsonObject());
@@ -173,6 +179,8 @@ bool SessionList::viewportEvent(QEvent *event)
             if (!place.isEmpty()) lines << place.join(QStringLiteral(" · "));
             const auto git = GitStatusBadge::tooltip(row->data(SessionRoles::GitStatus).toJsonObject());
             if (!git.isEmpty()) lines << Qt::convertFromPlainText(git);
+            const int optional = row->data(SessionRoles::OptionalQuestions).toInt();
+            if (optional > 0) lines << SessionPresentation::optionalQuestionsLabel(optional).toHtmlEscaped();
             QToolTip::showText(help->globalPos(), lines.join(QStringLiteral("<br>")), viewport(), visualItemRect(row));
             return true;
         }

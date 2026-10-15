@@ -65,6 +65,15 @@ struct SessionInfo {
     QString processState, conversationState, runtimeState;
     double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0;
     int subagentCount = 0;
+    // Pending optional Codex questions ("optional_questions"): the exact count,
+    // the IDs the host lists (the newest ones) and the newest question's time.
+    // -1 means unknown: null while the host's question index is incomplete, or
+    // a malformed value. optionalQuestionsReported is false for hosts whose hgs
+    // predates the field; they never show a count. These never mean attention.
+    int optionalQuestions = -1;
+    QStringList optionalQuestionIds;
+    double optionalQuestionsLatestAt = 0;
+    bool optionalQuestionsReported = false;
     bool replyInProgress() const {
         return state == QLatin1String("running") && processState != QLatin1String("exited")
             && activity != QLatin1String("unknown") && !(conversationState == QLatin1String("ended") && activity != QLatin1String("idle"))

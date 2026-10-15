@@ -25,6 +25,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <utility>
@@ -121,6 +122,22 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     if (!s.conversationId.isEmpty() && read.value("conversation_id").toString() == s.conversationId) {
         s.readReplyId = read.value("reply_id").toString();
         s.readAttentionSignature = read.value("attention_signature").toString();
+    }
+    // Strict types: anything but a whole non-negative count is unknown, never 0.
+    s.optionalQuestionsReported = obj.contains(QStringLiteral("optional_questions"));
+    const auto optional = obj.value(QStringLiteral("optional_questions"));
+    if (optional.isObject()) {
+        const auto summary = optional.toObject();
+        const auto count = summary.value(QStringLiteral("count"));
+        const double value = count.isDouble() ? count.toDouble() : -1;
+        if (value >= 0 && value <= 1e9 && value == std::floor(value)) {
+            s.optionalQuestions = int(value);
+            for (const auto &id : summary.value(QStringLiteral("ids")).toArray())
+                if (id.isString() && !id.toString().isEmpty() && !s.optionalQuestionIds.contains(id.toString()))
+                    s.optionalQuestionIds << id.toString();
+            const auto latest = summary.value(QStringLiteral("latest_at"));
+            s.optionalQuestionsLatestAt = latest.isDouble() && latest.toDouble() > 0 ? latest.toDouble() : 0;
+        }
     }
     s.state = obj.value(QStringLiteral("state")).toString(QStringLiteral("running"));
     s.archiveId = s.state == QLatin1String("archived") ? obj.value(QStringLiteral("archive_id")).toString() : QString();

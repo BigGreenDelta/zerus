@@ -25,6 +25,8 @@
     {"name":"background-finished","raw":{"activity":"idle","phase":"idle","process_work":{"count":0}},"online":true,"draft":false,"matches":["all"]},
     {"name":"background-unknown","raw":{"activity":"idle","phase":"idle","process_work":{"count":null}},"online":true,"draft":false,"matches":["all"]},
     {"name":"background-offline","raw":{"activity":"idle","phase":"idle","process_work":{"count":1}},"online":false,"draft":false,"matches":["all"]},
-    {"name":"scheduled-input", "raw":{"activity":"idle","phase":"input","schedules":{"count":2,"recurring":1,"next_at":1791744000}}, "online":true, "draft":false, "matches":["all","attention","active"]}
+    {"name":"scheduled-input", "raw":{"activity":"idle","phase":"input","schedules":{"count":2,"recurring":1,"next_at":1791744000}}, "online":true, "draft":false, "matches":["all","attention","active"]},
+    {"name":"optional-working", "raw":{"activity":"busy","phase":"tool","optional_questions":{"count":1,"ids":["codex-async:c:0"],"latest_at":1760000000}}, "online":true, "draft":false, "matches":["all","active"]},
+    {"name":"optional-idle", "raw":{"activity":"idle","phase":"idle","optional_questions":{"count":1,"ids":["codex-async:c:0"],"latest_at":1760000000}}, "online":true, "draft":false, "matches":["all"]}
   ]
 }
