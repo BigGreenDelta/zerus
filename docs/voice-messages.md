@@ -77,10 +77,11 @@ never interpreted as server-side routes.
 An installed per-user service runs `hgs voice worker`: `hgs-voice.service` on
 Linux, `com.hgdev.hgs-voice` on macOS. On Linux a submission starts that
 service; otherwise it starts a detached worker, unless a worker already runs or
-the service's worker waits to take over. The service's own worker never exits
-because another worker holds the worker lock, which would make the service
-manager start it again every 10 seconds: it waits for the lock, and a detached
-worker hands over to it between rounds.
+the service's worker waits to take over. The service's own worker (the process
+launchd or systemd reports for the job or unit) never exits because another
+worker holds the worker lock, which would make the service manager start it
+again every 10 seconds: it waits for the lock, and a detached worker hands over
+to it between rounds.
 
 The workflow states are `queued`, `transcribing`, `ready`, `waiting_agent`,
 `delivering`, `submitted`, `failed`, `cancelled` and `uncertain`. The same message

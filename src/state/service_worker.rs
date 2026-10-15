@@ -127,6 +127,38 @@ fn systemd_unit(cgroup: &str) -> Option<&str> {
     })
 }
 
+/// The unit's main process ID from `systemctl show --property=MainPID`: 0 when
+/// the unit has none.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn systemd_main_pid(show: &str) -> Option<u32> {
+    show.lines()
+        .find_map(|line| line.strip_prefix("MainPID=")?.trim().parse().ok())
+}
+
+/// The main process ID that `command`, a `systemctl show`, reports, or `None`
+/// when it cannot tell within a few seconds.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn main_pid(command: &mut std::process::Command) -> Option<u32> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    match crate::platform::run_bounded(command, [1 << 16, 1 << 16], deadline, &|| false) {
+        Ok((status, out, _)) if status.success() => {
+            systemd_main_pid(&String::from_utf8_lossy(&out))
+        }
+        _ => None,
+    }
+}
+
+/// Whether process `pid` in control group `cgroup` is the worker of `unit`.
+/// systemd keeps every process a unit starts in its control group, with its
+/// environment (INVOCATION_ID too), so a worker started detached from inside
+/// the unit is there as well: only the unit's main process is its worker.
+/// `main` asks systemd for it, and only for a process in the unit's group;
+/// when systemd cannot tell, the control group decides.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn unit_worker(cgroup: &str, unit: &str, pid: u32, main: impl FnOnce() -> Option<u32>) -> bool {
+    systemd_unit(cgroup) == Some(unit) && main().is_none_or(|main| main == pid)
+}
+
 /// The job's own process ID from `launchctl print`, one level inside its
 /// braces, as the desktop's single-instance check reads it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -151,11 +183,21 @@ fn launchd_pid(description: &str) -> Option<u32> {
     pid
 }
 
-/// systemd keeps a unit's processes in its control group.
+/// systemd reports the unit's main process; a worker started detached from
+/// inside the unit shares its control group.
 #[cfg(target_os = "linux")]
 fn current(service: &Service) -> bool {
-    std::fs::read_to_string("/proc/self/cgroup")
-        .is_ok_and(|cgroup| systemd_unit(&cgroup) == Some(service.unit))
+    let Ok(cgroup) = std::fs::read_to_string("/proc/self/cgroup") else {
+        return false;
+    };
+    unit_worker(&cgroup, service.unit, std::process::id(), || {
+        main_pid(std::process::Command::new("systemctl").args([
+            "--user",
+            "show",
+            "--property=MainPID",
+            service.unit,
+        ]))
+    })
 }
 /// launchd reports the job's process; a worker a client started detached has
 /// the same parent and may have inherited the job's environment.
@@ -207,6 +249,68 @@ mod tests {
         assert_eq!(systemd_unit("4:cpu,cpuacct:/hgs-recovery.service\n"), None);
         assert_eq!(systemd_unit("0::/\n"), None);
         assert_eq!(systemd_unit(""), None);
+    }
+
+    #[test]
+    fn systemd_main_pid_reads_the_property() {
+        assert_eq!(systemd_main_pid("MainPID=4242\n"), Some(4242));
+        assert_eq!(
+            systemd_main_pid("Id=hgs-voice.service\nMainPID=7\n"),
+            Some(7)
+        );
+        // The unit has no main process: the answer is still known.
+        assert_eq!(systemd_main_pid("MainPID=0\n"), Some(0));
+        assert_eq!(systemd_main_pid("MainPID=\n"), None);
+        assert_eq!(systemd_main_pid("MainPID=x\n"), None);
+        assert_eq!(systemd_main_pid("ExecMainPID=7\n"), None);
+        assert_eq!(systemd_main_pid(""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn main_pid_is_unknown_unless_the_command_reports_it() {
+        use std::process::Command;
+        let sh = |script: &str| {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            command
+        };
+        assert_eq!(main_pid(&mut sh("printf 'MainPID=42\\n'")), Some(42));
+        assert_eq!(main_pid(&mut sh("printf 'MainPID=42\\n'; exit 1")), None);
+        assert_eq!(main_pid(&mut sh("echo unrelated")), None);
+        assert_eq!(main_pid(&mut Command::new("/nonexistent/systemctl")), None);
+    }
+
+    #[test]
+    fn only_the_units_main_process_is_its_worker() {
+        let manager = format!("/user.slice/user-1000.slice/user{}1000.service", '@');
+        let unit = format!("0::{manager}/app.slice/hgs-voice.service\n");
+        let unit = unit.as_str();
+        // The service's worker: its own process is the unit's main one.
+        assert!(unit_worker(unit, "hgs-voice.service", 4242, || Some(4242)));
+        // A worker that a process inside the unit started detached shares its
+        // control group, not its main process.
+        assert!(!unit_worker(unit, "hgs-voice.service", 4343, || Some(4242)));
+        // Left in the group after the main process exited.
+        assert!(!unit_worker(unit, "hgs-voice.service", 4343, || Some(0)));
+        // systemd cannot tell: the control group decides.
+        assert!(unit_worker(unit, "hgs-voice.service", 4343, || None));
+        // Another unit, or a login session: systemd is not asked.
+        let not_asked = || -> Option<u32> { panic!("not asked") };
+        assert!(!unit_worker(unit, "hgs-recovery.service", 4242, not_asked));
+        let ssh = "0::/user.slice/user-1000.slice/session-4.scope\n";
+        assert!(!unit_worker(ssh, "hgs-voice.service", 4242, not_asked));
+        assert!(!unit_worker("", "hgs-voice.service", 4242, not_asked));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_test_process_is_no_service_worker() {
+        let service = Service {
+            unit: "hgs-service-worker-test.service",
+            label: "com.example.hgs-service-worker-test",
+        };
+        assert!(!service.is_current());
     }
 
     #[test]
