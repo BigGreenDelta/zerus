@@ -857,6 +857,26 @@ class Lifecycle(Harness):
         self.hgs("claude", str(nested), "-n", "nested", "-d")
         self.wait(lambda: self.binding("claude/nested/nested").get("conversation_id"))
         self.assertIsNone(self.launched_settings())
+        # In a linked worktree Claude reads the local settings of its repository.
+        repository, linked = self.root / "repository", self.root / "linked"
+        git = ["git", "-c", "user.name=HGS fixture", "-c", "user.email=hgs@example.invalid", "-c", "commit.gpgSign=false",
+               "-c", "core.hooksPath=" + os.devnull]
+        env = {key: value for key, value in self.env.items() if not key.startswith("GIT_")}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+        for args in (["init", "-q", "-b", "main", str(repository)],
+                     ["-C", str(repository), "commit", "-q", "--allow-empty", "-m", "Fixture"],
+                     ["-C", str(repository), "worktree", "add", "-q", "-b", "linked", str(linked)]):
+            subprocess.run(git + args, env=env, check=True, capture_output=True, timeout=20)
+        (repository / ".claude").mkdir()
+        (repository / ".claude/settings.local.json").write_text(json.dumps(
+            {"statusLine": {"type": "command", "command": "printf repository"}}))
+        self.hgs("claude", str(linked), "-n", "linked", "-d")
+        self.wait(lambda: self.binding("claude/linked/linked").get("conversation_id"))
+        self.assertIsNone(self.launched_settings())
+        (repository / ".claude/settings.local.json").write_text(json.dumps({"theme": "dark"}))
+        self.hgs("claude", str(linked), "-n", "registered", "-d")
+        self.wait(lambda: self.binding("claude/linked/registered").get("conversation_id"))
+        self.assertIsNotNone(self.launched_settings())
         # A settings file Claude Code cannot read is left for it to report.
         (self.project / ".claude/settings.local.json").write_text("{")
         self.hgs("pause", name)

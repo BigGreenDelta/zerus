@@ -186,8 +186,9 @@ or unreadable version, when the launch passes `--settings` or `--setting-sources
 when managed settings exist (`/etc/claude-code` or
 `/Library/Application Support/ClaudeCode`, or `CLAUDE_CODE_MANAGED_SETTINGS_PATH`),
 when a settings file cannot be read or its status line is not a command, and when
-local settings of an enclosing repository's root set one, which Claude chooses by
-ownership checks.
+the session folder lies below another repository root (an enclosing repository, or
+the repository of a linked worktree such as a generated one) and the local settings
+of that root or of the folder set one: Claude reads one of the two by ownership checks.
 
 Tracked Codex needs `--no-daemon`; the integration has been verified with 0.160.0,
 while 0.155.1 lacks that required flag.

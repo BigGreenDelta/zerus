@@ -159,6 +159,31 @@ class NativeClaudeStatusLine(test_pause.Harness):
         self.wait_until(lambda: self.capacity(cleared, self.inspect()['model']), "the resumed run's window")
         self.assertEqual(json.loads(self.settings.read_text())['statusLine'], self.user_line)
 
+    def test_linked_worktree_keeps_the_status_line_of_its_repository(self):
+        """Claude 2.1.296 reads a linked worktree's local settings from its repository, by
+        ownership checks hgs does not repeat; a status line there stays Claude's own."""
+        git = ['git', '-c', 'user.name=HGS fixture', '-c', 'user.email=hgs@example.invalid', '-c', 'commit.gpgSign=false',
+               '-c', 'core.hooksPath=' + os.devnull]
+        env = {key: value for key, value in self.env.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT='0')
+        linked = self.root / 'linked'
+        for args in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'Fixture'],
+                     ['worktree', 'add', '-q', '-b', 'linked', str(linked)]):
+            subprocess.run(git + ['-C', str(self.project), *args], env=env, check=True, capture_output=True, timeout=20)
+        (self.project / '.claude').mkdir()
+        (self.project / '.claude/settings.local.json').write_text(json.dumps(
+            {'statusLine': {'type': 'command', 'command': 'printf "Repository status line"'}}))
+        config = json.loads((self.root / '.claude.json').read_text())
+        config['projects'][str(linked)] = config['projects'][str(self.project)]
+        (self.root / '.claude.json').write_text(json.dumps(config))
+        self.name = 'claude/linked/status'
+        self.hgs('claude', str(linked), '-n', 'status', '-d')
+        self.wait_until(lambda: self.binding(self.name).get('conversation_id'), 'the native SessionStart')
+        self.wait_until(lambda: 'Repository status line' in self.screen(), "the repository's status line")
+        self.assertNotIn('Fixture status line', self.screen())
+        self.assertIsNone(self.inspect()['session_usage'].get('context', {}).get('limit'))
+        self.assertFalse((self.root / 'state/context-telemetry').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

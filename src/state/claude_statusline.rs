@@ -67,12 +67,31 @@ fn settings_file(path: &Path) -> std::result::Result<Option<Value>, ()> {
     value.is_object().then_some(Some(value)).ok_or(())
 }
 
-/// The folder whose `.git` (a folder, or a worktree's file) holds `folder`.
+/// The repository root that Claude Code may keep the local settings of
+/// `folder` in: the nearest folder with a `.git` entry or, for a linked
+/// worktree, the repository that its `commondir` names, as Claude 2.1.296
+/// canonicalizes it. The worktree is not the root then.
 fn git_root(folder: &Path) -> Option<PathBuf> {
-    folder
+    let nearest = folder
         .ancestors()
-        .find(|path| path.join(".git").exists())
-        .map(Path::to_path_buf)
+        .find(|path| path.join(".git").exists())?;
+    Some(worktree_repository(nearest).unwrap_or_else(|| nearest.to_owned()))
+}
+
+/// The repository of the linked worktree `root`, whose `.git` file names
+/// its folder below the repository's `worktrees`. Read leniently: a root found
+/// where Claude would keep the worktree only makes hgs leave the status line
+/// to Claude.
+fn worktree_repository(root: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(root.join(".git")).ok()?;
+    let gitdir = root.join(text.trim().strip_prefix("gitdir:")?.trim());
+    let common = fs::read_to_string(gitdir.join("commondir")).ok()?;
+    let common = crate::platform::canonical(gitdir.join(common.trim())).ok()?;
+    if common.file_name()? == ".git" {
+        common.parent().map(Path::to_path_buf)
+    } else {
+        Some(common)
+    }
 }
 
 /// The status line that the user, project and local settings of `project`
@@ -81,32 +100,38 @@ fn git_root(folder: &Path) -> Option<PathBuf> {
 /// `.claude/settings.json` and `.claude/settings.local.json` in `project`,
 /// each later file's fields over the earlier ones. `Ok(None)` when none sets
 /// one. An error when a file cannot be read, a status line is not a command,
-/// or local settings would come from the enclosing repository's root, whose
-/// choice depends on ownership checks hgs does not repeat.
+/// or local settings set one while the folder lies below another repository
+/// root (an enclosing repository, or the repository of a linked worktree):
+/// Claude then reads local settings either at that root or in the folder, by
+/// ownership checks that hgs does not repeat.
 fn user_status_line(
     config: &Path,
     project: &Path,
     cowork: bool,
 ) -> std::result::Result<Option<Value>, ()> {
+    // Claude Code keeps local settings in the folder when the repository's
+    // root is the folder itself or the home folder.
+    let real = |path: &Path| crate::platform::canonical(path).unwrap_or_else(|_| path.to_owned());
+    let root = git_root(project)
+        .filter(|root| real(root) != real(project) && real(root) != real(&home()));
     let user = config.join(if cowork { "cowork_settings.json" } else { "settings.json" });
     let claude = project.join(".claude");
+    let local = claude.join("settings.local.json");
     let mut merged: Option<serde_json::Map<String, Value>> = None;
-    for path in [user, claude.join("settings.json"), claude.join("settings.local.json")] {
+    for path in [user, claude.join("settings.json"), local.clone()] {
         let Some(settings) = settings_file(&path)? else {
             continue;
         };
         let Some(line) = settings.get("statusLine") else {
             continue;
         };
+        if root.is_some() && path == local {
+            return Err(());
+        }
         let line = line.as_object().ok_or(())?;
         merged.get_or_insert_with(Default::default).extend(line.clone());
     }
-    // Claude Code keeps local settings in the folder when the repository's
-    // root is the folder itself or the home folder.
-    let real = |path: &Path| crate::platform::canonical(path).unwrap_or_else(|_| path.to_owned());
-    if let Some(root) = git_root(project)
-        .filter(|root| real(root) != real(project) && real(root) != real(&home()))
-    {
+    if let Some(root) = root {
         let local = settings_file(&root.join(".claude/settings.local.json"))?;
         if local.is_some_and(|settings| settings.get("statusLine").is_some()) {
             return Err(());
@@ -414,6 +439,23 @@ mod tests {
         assert_eq!(user_status_line(&config, &nested, false), Ok(Some(user.clone())));
         write(&project.join(".claude/settings.local.json"), &json!({"statusLine": {"command": "x"}}));
         assert_eq!(user_status_line(&config, &nested, false), Err(()));
+        // Nor the folder's own, which Claude reads instead when those checks fail.
+        fs::remove_file(project.join(".claude/settings.local.json")).unwrap();
+        write(&nested.join(".claude/settings.local.json"), &json!({"statusLine": {"command": "x"}}));
+        assert_eq!(user_status_line(&config, &nested, false), Err(()));
+        // A linked worktree's root is its repository, wherever the worktree lies.
+        let repository = temp.path().join("repository");
+        let admin = repository.join(".git/worktrees/linked");
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let linked = temp.path().join("linked");
+        fs::create_dir_all(&linked).unwrap();
+        fs::write(linked.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        assert_eq!(git_root(&linked.join("src")), Some(fs::canonicalize(&repository).unwrap()));
+        assert_eq!(git_root(&nested), Some(project.clone()));
+        assert_eq!(user_status_line(&config, &linked, false), Ok(Some(user.clone())));
+        write(&repository.join(".claude/settings.local.json"), &json!({"statusLine": {"command": "x"}}));
+        assert_eq!(user_status_line(&config, &linked, false), Err(()));
     }
 
     #[test]

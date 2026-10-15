@@ -304,7 +304,8 @@ loopback API of `tests/model_api_fixture.py`. Claude 2.1.296 coverage requires t
 user's own status line on screen and its `settings.json` unchanged, and the window
 from Claude's status line input in `hgs inspect` for the exact run, conversation and
 model: before the first reply, after a reply, after a session-only model change, a
-compaction and a clear, and in a resumed run.
+compaction and a clear, and in a resumed run. In a linked worktree whose repository's
+local settings set a status line, Claude keeps that status line and no window is reported.
 
 ### Unix tmux census
 
