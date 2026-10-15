@@ -208,6 +208,7 @@ private slots:
     // Chords a test rebinds end with it.
     void cleanup() { ShortcutRegistry::instance().resetAll(); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
+    void savedDraftsGoToTheirSession_data();
     void savedDraftsGoToTheirSession();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
@@ -600,8 +601,16 @@ void TestSessionsWindow::workspaceRestoresDraftAcrossRestartAndSessionRemoval()
     restored.findChild<QPushButton *>("savedDrafts")->click();
 }
 
+void TestSessionsWindow::savedDraftsGoToTheirSession_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QString("dark");
+    QTest::newRow("light") << QString("light");
+}
+
 void TestSessionsWindow::savedDraftsGoToTheirSession()
 {
+    QFETCH(QString, theme); QSettings().setValue("workspace/theme", theme);
     auto state = fleet(); auto box = state.local();
     box.sessions[1].conversationId = "conversation-one"; box.sessions[1].subagentSource = "hooks";
     box.sessions[1].subagents = {{"worker", QJsonObject{{"name", "Worker"}, {"state", "working"}}}};
@@ -619,9 +628,25 @@ void TestSessionsWindow::savedDraftsGoToTheirSession()
         QTimer::singleShot(0, &window, [&, key, available] {
             auto *dialog = window.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
             auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 3);
+            for (int i = 0; i < list->count(); ++i) {
+                const auto *item = list->item(i);
+                QVERIFY(!item->text().section('\n', 0, 0).trimmed().isEmpty());
+                QVERIFY(list->visualItemRect(item).height() >= 2 * list->fontMetrics().height());
+            }
+            list->setFocus(); list->setCurrentRow(0);
+            QTest::keyClick(list, Qt::Key_Down); QCOMPARE(list->currentRow(), 1);
+            QTest::keyClick(list, Qt::Key_Up); QCOMPARE(list->currentRow(), 0);
             for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(Qt::UserRole).toString() == key) list->setCurrentRow(i);
             QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), key);
             auto *open = dialog->findChild<QPushButton *>("openSavedDraftSession"); QCOMPARE(open->isEnabled(), available);
+            const auto preview = qEnvironmentVariable("HGS_SAVED_DRAFTS_PREVIEW");
+            if (key == ended && !preview.isEmpty()) {
+                QTRY_COMPARE(dialog->findChild<QPlainTextEdit *>("savedDraftPreview")->toPlainText(), QString("From an ended session"));
+                QDir().mkpath(preview); QTest::qWait(50);
+                QVERIFY(dialog->grab().save(preview + "/drafts-" + theme + ".png"));
+                dialog->resize(620, 460); QTest::qWait(50);
+                QVERIFY(dialog->grab().save(preview + "/drafts-narrow-" + theme + ".png"));
+            }
             if (available) open->click(); else dialog->reject();
         });
         window.findChild<QPushButton *>("savedDrafts")->click();

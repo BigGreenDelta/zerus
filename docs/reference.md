@@ -710,6 +710,8 @@ recently edited drafts first; each row names the draft's session and computer
 (and whether it is a subagent message, question answer or voice message), with
 its time and first line. **Go to session** opens the session that owns the
 selected draft, or its subagent, while that session is in the session list.
+Rows have visible outlines and spacing in both desktop themes; hovering and
+selection use the workspace colors. The preview follows the same theme.
 Copying keeps the dialog open; restoring never sends anything and replacing an
 existing draft requires confirmation. A source draft remains available after
 copying it to another session.

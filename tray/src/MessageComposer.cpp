@@ -907,13 +907,15 @@ void MessageComposer::updateControls()
 
 void MessageComposer::showSavedDrafts()
 {
-    QDialog dialog(this); dialog.setObjectName("savedDraftsDialog"); dialog.setWindowTitle(tr("Saved drafts")); dialog.resize(720, 440);
-    auto *layout = new QVBoxLayout(&dialog);
+    QDialog dialog(this); dialog.setObjectName("savedDraftsDialog"); dialog.setWindowTitle(tr("Saved drafts")); dialog.resize(720, 520);
+    auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
     auto *hint = new QLabel(tr("Drafts stay on this desktop, including those from ended or unavailable sessions. Restoring never sends a message."));
     hint->setWordWrap(true); layout->addWidget(hint);
     auto *list = new QListWidget; list->setObjectName("savedDraftList"); layout->addWidget(list, 1);
     // Each row has two lines: the session, then the time and first line.
-    list->setAlternatingRowColors(true); list->setSpacing(2);
+    list->setSpacing(3); list->setMouseTracking(true);
+    list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     const auto populate = [this, list](const QHash<QString, ComposerDraftSummary> &index) {
         auto summaries = index;
         // Unsaved edits here are newer than their stored copy.
