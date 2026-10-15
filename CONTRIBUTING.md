@@ -110,8 +110,12 @@ The ordinary `kwinwindowlayer` test runs on a private D-Bus session with a fake
 compositor and never controls the user's desktop.
 
 For the Rust mobile relay, run `cargo +1.85.0 test --locked` inside
-`services/mobile/relay`. The Docker image uses that Rust binary. For the
-connector and reference compatibility fixtures, install `services/mobile` and
+`services/mobile/relay`. The Docker image uses that Rust binary. For the Rust
+mobile connector, run `cargo +1.85.0 test --locked` inside
+`services/mobile/connector`; [its README](services/mobile/connector/README.md)
+names the variables its Python and `hgs` handoff tests need and how the
+black-box suites run against its binary. For the Python connector and reference
+compatibility fixtures, install `services/mobile` and
 `services/mobile/tests/requirements.txt` in a Python 3.11+ virtual environment
 and run `python -m unittest discover -s services/mobile/tests -v`.
 The relay storage contracts and the connector HTTP suites need PostgreSQL:
