@@ -137,6 +137,12 @@ It runs three jobs after full CI:
    installs it from a local tap pointing at the candidate bytes, repeats the bundle
    checks on `/Applications/Zerus.app`, runs `zerus-setup` and `--remove` in a
    scratch home and uninstalls the cask.
+   After validating the image and mounted app with Gatekeeper and their stapled
+   tickets, CI installs the cask with Homebrew's default quarantine and assesses
+   the installed copy again before execution. Only after it passes does CI clear
+   that disposable copy's download attribute, so the normal first-open
+   confirmation cannot block unattended self-tests. Public install commands,
+   casks and release archives retain their normal quarantine behavior.
 
 Only entitlements with a concrete need are granted, and only to the application:
 `com.apple.security.automation.apple-events` with `NSAppleEventsUsageDescription`

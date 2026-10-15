@@ -60,6 +60,12 @@ sed -e "s|^  url \".*\"$|  url \"file://$asset\"|" "artifacts/homebrew/$cask.rb"
 grep -q "^  url \"file://$asset\"$" "$tap/Casks/$cask.rb"
 brew install --cask "zerus-ci/candidate/$cask"
 app=/Applications/Zerus.app
+# Assess the installed, quarantined app before any execution or attribute change.
+python3 scripts/check-macos-bundle.py "$app" --version "$version" --release "$release" --team-id "$team"
+# Hosted tests cannot answer the normal first-open confirmation. Clear only this
+# verified disposable installation's download attribute for unattended execution.
+# Public casks and release archives retain their normal quarantine behavior.
+xattr -dr com.apple.quarantine "$app"
 python3 scripts/check-macos-bundle.py "$app" --version "$version" --release "$release" --team-id "$team" --selftest
 home="${RUNNER_TEMP:?}/zerus-home"
 mkdir -p "$home"

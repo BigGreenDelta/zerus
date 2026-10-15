@@ -79,6 +79,40 @@ Load command 20
 
 class BundleChecks(unittest.TestCase):
     @unittest.skipUnless(Path("/bin/bash").exists(), "requires Bash")
+    def test_unattended_cask_execution_requires_prior_installed_gatekeeper_acceptance(self):
+        script = (ROOT / "scripts/ci/macos-cask-install.sh").read_text()
+        segment = script.split("app=/Applications/Zerus.app\n", 1)[1].split('\nhome="', 1)[0]
+        with tempfile.TemporaryDirectory(prefix="zerus-cask-gate-") as temporary:
+            directory = Path(temporary)
+            log = directory / "calls.jsonl"
+            for name in ("python3", "xattr"):
+                stub = directory / name
+                stub.write_text(f"#!{sys.executable}\n" + '''import json, os, pathlib, sys
+with open(os.environ["ZERUS_CASK_TEST_LOG"], "a") as log:
+    log.write(json.dumps([pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]) + "\\n")
+if pathlib.Path(sys.argv[0]).name == "python3" and os.environ["ZERUS_CASK_TEST_REJECT"] == "1":
+    sys.exit(7)
+''')
+                stub.chmod(0o755)
+            for rejected in (False, True):
+                with self.subTest(rejected=rejected):
+                    log.write_text("")
+                    env = dict(os.environ, PATH=f"{directory}:/usr/bin:/bin",
+                               ZERUS_CASK_TEST_LOG=str(log), ZERUS_CASK_TEST_REJECT=str(int(rejected)))
+                    command = 'set -euo pipefail\napp="$1"\nversion=0.42.2\nrelease=0.42.2\nteam=ABCDE12345\n' + segment
+                    result = subprocess.run(["/bin/bash", "-c", command, "cask-gate", str(directory / "Zerus.app")],
+                                            env=env, capture_output=True, text=True)
+                    calls = [json.loads(line) for line in log.read_text().splitlines()]
+                    self.assertEqual(result.returncode, 7 if rejected else 0, result.stderr)
+                    self.assertEqual([call[0] for call in calls], ["python3"] if rejected else
+                                     ["python3", "xattr", "python3"])
+                    self.assertIn("--team-id", calls[0])
+                    self.assertNotIn("--selftest", calls[0])
+                    if not rejected:
+                        self.assertEqual(calls[1], ["xattr", "-dr", "com.apple.quarantine", str(directory / "Zerus.app")])
+                        self.assertIn("--selftest", calls[2])
+
+    @unittest.skipUnless(Path("/bin/bash").exists(), "requires Bash")
     def test_cask_metadata_is_validated_by_the_system_bash_before_installation(self):
         script = ROOT / "scripts/ci/macos-cask-install.sh"
         # Execute the real pre-installation section, including its quoted
