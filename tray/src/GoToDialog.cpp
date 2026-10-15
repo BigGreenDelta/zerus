@@ -7,6 +7,7 @@
 #include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <limits>
 
 namespace {
 constexpr int kMaxRows = 12;
@@ -67,25 +68,35 @@ int score(const QString &query, const QString &text)
     if (query.isEmpty()) return 0;
     const QString q = query.toLower();
     const QString t = text.toLower();
-    int total = 0;
-    int pos = 0;
-    int previous = -1;
+    // Best alignment: best[j] = top score with the current query char at text index j.
+    constexpr int kNone = std::numeric_limits<int>::min();
+    QList<int> best(t.size(), kNone);
     for (int i = 0; i < q.size(); ++i) {
-        const int found = t.indexOf(q.at(i), pos);
-        if (found < 0) return -1;
-        int points = 10;
-        if (i == 0 && found == 0) points += 100;
-        if (wordStart(t, found)) points += 20;
-        if (previous >= 0) {
-            const int gap = found - previous - 1;
-            if (gap == 0) points += 10;
-            else points -= std::min(gap, 8);
+        QList<int> next(t.size(), kNone);
+        bool any = false;
+        for (int j = 0; j < t.size(); ++j) {
+            if (t.at(j) != q.at(i)) continue;
+            int points = 10;
+            if (i == 0 && j == 0) points += 100;
+            if (wordStart(t, j)) points += 20;
+            int base = kNone;
+            if (i == 0) {
+                base = 0;
+            } else {
+                for (int k = 0; k < j; ++k) {
+                    if (best[k] == kNone) continue;
+                    const int gap = j - k - 1;
+                    base = std::max(base, best[k] + (gap == 0 ? 10 : -std::min(gap, 8)));
+                }
+            }
+            if (base == kNone) continue;
+            next[j] = base + points;
+            any = true;
         }
-        total += points;
-        previous = found;
-        pos = found + 1;
+        if (!any) return -1;
+        best = next;
     }
-    return total;
+    return *std::max_element(best.begin(), best.end());
 }
 
 QList<GoToItem> rank(const QList<GoToItem> &items, const QString &query)

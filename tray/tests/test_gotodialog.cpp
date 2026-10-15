@@ -39,6 +39,7 @@ private slots:
     void scoreRanksTitleStartFirst();
     void scoreMatchesSubsequences();
     void emptyQueryScoresZero();
+    void scorePrefersWordStarts();
     void commandFilter();
     void emptyQueryUsesRecency();
     void tiesFollowKindThenInputOrder();
@@ -59,6 +60,13 @@ void TestGoToDialog::scoreMatchesSubsequences()
     QVERIFY(GoTo::score("ZRS", "zerus") >= 0);
     QVERIFY(GoTo::score("xyz", "Zerus") < 0);
     QVERIFY(GoTo::score("zz", "Zerus") < 0);
+}
+
+void TestGoToDialog::scorePrefersWordStarts()
+{
+    // "ns" must align to the word starts of "New session", not the "s" inside "New".
+    QVERIFY(GoTo::score("ns", "New session") > GoTo::score("ns", "Newsletter session x"));
+    QCOMPARE(GoTo::score("ns", "New session"), 2 * 10 + 2 * 20 + 100 - 3);
 }
 
 void TestGoToDialog::emptyQueryScoresZero()
