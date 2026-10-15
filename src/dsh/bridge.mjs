@@ -48,6 +48,26 @@ export function apply(ctx, config) {
   const recovery = new Map(), recoveryReceipts = new Map();
   const compactions = new Map(), compactReceipts = new Set();
   const forkReceipts = new Map(), forking = new Map();
+  // Optional official Schedule bundle. Absent means unknown, never "no tasks".
+  const scheduleService = () => ctx.get('schedule');
+  const recurringKinds = new Set(['every', 'daily', 'weekly', 'cron']);
+  async function scheduleSummaries() {
+    const schedule = scheduleService();
+    if (typeof schedule?.catalog !== 'function') return null;
+    try {
+      const summaries = new Map();
+      for (const entry of await schedule.catalog()) {
+        if (entry.status !== 'active') continue;
+        const summary = summaries.get(entry.sessionId) ?? { count: 0, recurring: 0, nextAt: null };
+        const at = Date.parse(entry.scheduledAt) / 1000;
+        summary.count += 1;
+        if (recurringKinds.has(entry.kind)) summary.recurring += 1;
+        if (Number.isFinite(at) && (summary.nextAt === null || at < summary.nextAt)) summary.nextAt = at;
+        summaries.set(entry.sessionId, summary);
+      }
+      return summaries;
+    } catch { return null; }
+  }
   const compactionPublic = sessionId => compactions.get(sessionId)?.public ?? null;
   const recoveryPublic = sessionId => recovery.get(sessionId)?.public ?? null;
   async function recoveryEnabled() {
@@ -350,26 +370,55 @@ export function apply(ctx, config) {
     }
     return { generation, sessions };
   }
+  // Official Schedule tasks bound to one exact session. Reads, deletion and
+  // edits never activate it; update is the native compare-and-set.
+  async function schedules(p) {
+    const schedule = scheduleService();
+    if (typeof p.sessionId !== 'string' || !p.sessionId) throw new Error('Choose a native session');
+    if (!schedule) return { available: false, generation };
+    if (p.action === 'list') {
+      const items = (await schedule.catalog()).filter(entry => entry.sessionId === p.sessionId);
+      return { available: true, generation, items };
+    }
+    if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh schedules');
+    if (typeof p.id !== 'string' || !p.id) throw new Error('Choose a scheduled task');
+    const exact = { sessionId: p.sessionId, id: p.id };
+    switch (p.action) {
+      case 'history': return { available: true, generation, result: await schedule.history({ ...exact, limit: p.limit,
+        ...(p.before === undefined ? {} : { before: p.before }) }) };
+      case 'delete': return { available: true, generation, result: await schedule.delete(exact) };
+      case 'update': {
+        if (!p.expected || typeof p.expected !== 'object') throw new Error('Expected task record is required');
+        const request = { ...exact, expected: p.expected };
+        for (const key of ['title', 'prompt', 'change']) if (p[key] !== undefined) request[key] = p[key];
+        return { available: true, generation, result: await schedule.update(request) };
+      }
+      default: throw new Error('Unsupported schedule action');
+    }
+  }
   async function execute(request) {
     if (closing) throw new Error('Native host is stopping');
     const p = request.params ?? {};
     switch (request.method) {
       case 'ping': return { protocol: 1, version: '0.2.0-rc.2', generation, accountPermissions: true, sessionActions: true,
-        nativeOperations: ['fork', 'history-search'] };
+        nativeOperations: ['fork', 'history-search', 'schedules'], schedule: Boolean(scheduleService()) };
       case 'list': {
         const list = await api.list({}, new AbortController().signal);
         const status = await accountStatus();
+        const scheduled = await scheduleSummaries();
         return { ...list, generation, items: list.items.map(row => {
           const agent = ctx.agents.get(row.sessionId);
           const selection = agent ? selectionOf(agent, row.projections?.values) : null;
           return { ...row, selection, accountStatus: status, authRequired: needsSignIn(selection, status),
             goal: agent ? ctx.goals.get(agent) ?? null : row.projections?.values.goal ?? null,
-            pendingQuestions: publicQuestions(row.sessionId), nativeRecovery: recoveryPublic(row.sessionId) };
+            pendingQuestions: publicQuestions(row.sessionId), nativeRecovery: recoveryPublic(row.sessionId),
+            ...(scheduled ? { schedules: scheduled.get(row.sessionId) ?? { count: 0, recurring: 0, nextAt: null } } : {}) };
         }) };
       }
       case 'inspect': return inspect(p);
       case 'fork': return fork(p);
       case 'search-history': return searchHistory(p);
+      case 'schedules': return schedules(p);
       case 'job-output':
       case 'job-stop': {
         if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh Processes');

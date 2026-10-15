@@ -1757,15 +1757,30 @@ index. Results contain the person's and the agent's text only; injected context
 and reasoning are excluded. Searching never starts, resumes or reloads a host; a
 stopped host or an older adapter reports that history as unavailable.
 
-Schedule management and account transfer stay in Native UI. Native context
-reset awaits a supported Session Controller operation. Resident adapters
-advertise each operation; one started by an older Zerus keeps fork in Native UI
-and its history unavailable to search until its next ordinary start. Other
-harness versions need contract verification; updates never restart live hosts
-or agents automatically.
+The official optional Schedule bundle (**Automation tasks** in Native UI
+Plugins; shipped profiles leave it off) is listed and managed per exact session:
+
+```sh
+hgs schedules dsh/project/work            # tasks of this session as JSON
+echo '{"request_id":"UUID","expected_run_id":"RUN","expected_conversation_id":"session-ID",
+  "expected_generation":"GENERATION","action":"update","id":"schedule-ID",
+  "expected":{...record from the list...},"title":"New name"}' | hgs schedules dsh/project/work --json
+```
+
+`action` is `delete`, `update` (the native compare-and-set; `title`, `prompt`
+and the native `change` timing object) or `history` (`limit` 1-100, optional
+`before`). Results keep native codes such as `schedule_conflict` and
+`schedule_not_found`. None of these activate the session. Without the bundle the
+command refuses and listings omit `schedules`.
+
+Account transfer stays in Native UI. Native context reset awaits a supported
+Session Controller operation. Resident adapters advertise each operation; one
+started by an older Zerus keeps fork and schedules in Native UI and its history
+unavailable to search until its next ordinary start. Other harness versions need
+contract verification; updates never restart live hosts or agents automatically.
 `python3 tests/test_dsh_native.py -v` exercises the official engine with a local
-keyless model, covering history, lifecycle, questions, settings, fork, search
-and browser login.
+keyless model, covering history, lifecycle, questions, settings, fork, search,
+schedules and browser login.
 
 ## Automatic recovery
 
@@ -2391,7 +2406,10 @@ is `null` while the journal cannot be read. While `schedules.recurring` is
 positive, turns opened by those jobs without a prompt from the person do not
 advance `reply_id`; a prompt queued into such a turn makes its reply the person's.
 `reply_scheduled` is true when the reported reply ended a scheduled turn, which
-happens once no recurring job remains or while the count is unknown. Other
+happens once no recurring job remains or while the count is unknown. DeepSeek
+sessions report the same `schedules` object from the active tasks of the native
+Schedule catalog while that optional bundle is loaded, with the earliest stored
+target as `next_at`; delivered reminders remain ordinary replies. Other
 providers report false and omit `schedules`.
 
 ```sh

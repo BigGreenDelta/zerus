@@ -63,6 +63,10 @@ class NativeHarness(unittest.TestCase):
                 {'id': 'hgs-native-dsh', 'name': str(bridge), 'config': {'socket': cls.sock, 'recoveryPolicy': str(cls.state / 'recovery/policy.json')}},
             ]},
         ]
+        if getattr(cls, 'SCHEDULE_BUNDLE', False):
+            # The rows of the official optional bundle; shipped profiles omit them.
+            patch[-1]['insert'] += [{'id': 'time-context', 'name': '@deepseek-ai/dsh-time-context'},
+                                    {'id': 'schedule', 'name': '@deepseek-ai/dsh-schedule'}]
         overlay = cls.root / 'patch.json'
         overlay.write_text(json.dumps(patch))
         # hgs ls and the recovery worker also list tmux sessions. An existing
@@ -891,6 +895,62 @@ class NativeHarness(unittest.TestCase):
         injected = json.loads(self.hgs('search', '--query', 'Current runtime context').stdout)
         self.assertFalse([h for h in injected['results'] if h['agent'] == 'dsh'])
 
+    def test_schedules_refuse_without_the_native_bundle(self):
+        b = self.create()
+        self.assertFalse(self.rpc('ping')['schedule'])
+        result = self.hgs('schedules', b['name'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Native Schedule is not enabled', result.stderr)
+        rows = json.loads(self.hgs('ls', '--local', '--json').stdout)['sessions']
+        self.assertNotIn('schedules', next(r for r in rows if r['name'] == b['name']))
+
+
+@unittest.skipUnless(DSH and HGS.exists(), 'official dsh and built hgs required')
+class NativeSchedules(unittest.TestCase):
+    """The official optional Schedule bundle, managed per exact session."""
+    SCHEDULE_BUNDLE = True
+    setUpClass = NativeHarness.__dict__['setUpClass']
+    tearDownClass = NativeHarness.__dict__['tearDownClass']
+    rpc = NativeHarness.__dict__['rpc']
+    create = NativeHarness.create
+    cli = NativeHarness.cli
+    payload = NativeHarness.payload
+    wait = NativeHarness.wait
+    hgs = NativeHarness.hgs
+
+    def test_schedule_list_edit_and_delete_are_bound_to_one_session(self):
+        b, other = self.create(), self.create()
+        self.cli('send', b, self.payload(b, text='SCHEDULE_FIXTURE', attachments=[]))
+        listed = self.wait(lambda: d if (d := json.loads(self.hgs('schedules', b['name']).stdout))['items'] else None)
+        self.assertEqual((listed['name'], listed['run_id'], listed['conversation_id']), (b['name'], b['run_id'], b['conversation_id']))
+        [item] = listed['items']
+        self.assertEqual((item['title'], item['kind'], item['status'], item['recurring']), ('Fixture check', 'every', 'active', True))
+        self.assertGreater(item['scheduled_at'], time.time())
+        self.assertEqual(json.loads(self.hgs('schedules', other['name']).stdout)['items'], [])
+        row = self.wait(lambda: next((r for r in json.loads(self.hgs('ls', '--local', '--json').stdout)['sessions']
+                                      if r['name'] == b['name'] and r.get('schedules', {}).get('count')), None))
+        self.assertEqual(row['schedules'], {'count': 1, 'recurring': 1, 'next_at': item['scheduled_at']})
+        def change(binding, **fields):
+            fields = {'expected_generation': listed['generation'], 'id': item['id'], **fields}
+            return self.hgs('schedules', binding['name'], '--json', request=self.payload(binding, **fields))
+        stale = change(b, action='update', title='Old host', expected_generation='old-generation')
+        self.assertNotEqual(stale.returncode, 0)
+        renamed = change(b, action='update', title='Renamed check', expected=item['record'])
+        self.assertEqual(renamed.returncode, 0, renamed.stderr)
+        self.assertTrue(json.loads(renamed.stdout)['result']['updated'])
+        conflict = json.loads(change(b, action='update', title='Conflict', expected=item['record']).stdout)
+        self.assertEqual(conflict['result']['code'], 'schedule_conflict')
+        history = json.loads(change(b, action='history', limit=10).stdout)['result']
+        self.assertEqual(history['records'], [])
+        # Another session cannot reach this task through its own identity.
+        foreign = json.loads(change(other, action='delete').stdout)['result']
+        self.assertEqual((foreign['deleted'], foreign['code']), (False, 'schedule_not_found'))
+        self.assertEqual([i['title'] for i in json.loads(self.hgs('schedules', b['name']).stdout)['items']], ['Renamed check'])
+        deleted = json.loads(change(b, action='delete').stdout)['result']
+        self.assertTrue(deleted['deleted'])
+        self.assertEqual(json.loads(self.hgs('schedules', b['name']).stdout)['items'], [])
+        self.wait(lambda: next(r for r in json.loads(self.hgs('ls', '--local', '--json').stdout)['sessions']
+                               if r['name'] == b['name'])['schedules']['count'] == 0)
 
 
 if __name__ == '__main__':

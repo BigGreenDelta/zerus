@@ -148,6 +148,23 @@ class DeepSeekScopedActions(unittest.TestCase):
     def bindings(self):
         return sorted(path.name for path in self.binding.parent.glob("*.json"))
 
+    def test_older_adapter_keeps_fork_search_and_schedules_in_native_ui(self):
+        before = self.bindings()
+        fork = self.hgs("fork", self.name, "-n", "copy", "-d")
+        self.assertNotEqual(fork.returncode, 0)
+        self.assertIn("older adapter", fork.stderr)
+        _, scoped = self.run_action("fork", tag="copy")
+        self.assertEqual(scoped["status"], "failed")
+        schedules = self.hgs("schedules", self.name)
+        self.assertNotEqual(schedules.returncode, 0)
+        self.assertIn("older adapter", schedules.stderr)
+        search = self.hgs("search", "--query", "anything")
+        self.assertEqual(search.returncode, 0, search.stderr)
+        self.assertEqual((json.loads(search.stdout)["results"], json.loads(search.stdout)["unavailable_sessions"]), ([], 1))
+        self.assertEqual([call["method"] for call in self.calls], ["ping", "ping", "ping", "search-history"])
+        self.assertEqual(self.bindings(), before)
+        self.assertEqual(json.loads(self.binding.read_text()), self.record)
+
     def test_uncertain_fork_reply_is_adopted_by_the_same_request(self):
         self.native = True
         self.fork_reply = False

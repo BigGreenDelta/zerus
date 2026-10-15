@@ -637,6 +637,11 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
     for key in ["fork_parent_id", "fork_source_name"] {
         if record[key].is_string() { value[key] = record[key].clone(); }
     }
+    // Present only while the official Schedule bundle is loaded.
+    if row["schedules"].is_object() {
+        value["schedules"] = json!({"count":row["schedules"]["count"],"recurring":row["schedules"]["recurring"],
+            "next_at":row["schedules"]["nextAt"]});
+    }
     value["auth_required"] = json!(auth_required);
     value["account_status"] = inspected
         .get("accountStatus")
@@ -886,6 +891,54 @@ pub(super) fn history_search(records: &[&Value], query: &str, per_session: usize
         }
     }
     found
+}
+
+fn schedule_item(entry: &Value) -> Value {
+    let mut record = entry.clone();
+    if let Some(fields) = record.as_object_mut() {
+        for key in ["sessionId", "status", "lastDelivery"] { fields.remove(key); }
+    }
+    let next = chrono::DateTime::parse_from_rfc3339(string(entry, "scheduledAt")).map(|at| at.timestamp_millis() as f64 / 1000.0).ok();
+    let recurring = ["every", "daily", "weekly", "cron"].contains(&string(entry, "kind"));
+    let delivery = entry.get("lastDelivery").cloned().unwrap_or(Value::Null);
+    json!({"id":entry["id"],"title":entry["title"],"prompt":entry["prompt"],"kind":entry["kind"],"status":entry["status"],
+        "recurring":recurring,"scheduled_at":next,"last_delivery":delivery,"record":record})
+}
+
+/// Official DeepSeek Schedule tasks of one exact session: list them, or with
+/// `--json` delete, edit (native compare-and-set) or read delivery history.
+fn schedules(name: &str, record: &Value, args: &[String]) -> Result<Value> {
+    if record["permissions_pending"] == true && args.iter().any(|arg| arg == "--json") {
+        return Err("Resume this DeepSeek session to finish permission setup before managing its schedules".into());
+    }
+    let ping = rpc(record, "ping", json!({}))?;
+    if !supports(&ping, "schedules") { return Err(OLDER_ADAPTER.into()); }
+    let identity = json!({"name":name,"run_id":record["run_id"],"conversation_id":record["conversation_id"]});
+    let unavailable = "Native Schedule is not enabled for this DeepSeek profile; enable Automation tasks in Native UI Plugins";
+    if !args.iter().any(|arg| arg == "--json") {
+        let listed = rpc(record, "schedules", json!({"sessionId":record["conversation_id"],"action":"list"}))?;
+        if listed["available"] != true { return Err(unavailable.into()); }
+        let mut output = identity;
+        output["generation"] = listed["generation"].clone();
+        output["items"] = json!(listed["items"].as_array().into_iter().flatten().map(schedule_item).collect::<Vec<_>>());
+        return Ok(output);
+    }
+    let request = checked_request(record)?;
+    let action = string(&request, "action");
+    if !["delete", "update", "history"].contains(&action) { return Err("Choose delete, update or history".into()); }
+    if request["expected_generation"] != ping["generation"] { return Err("DeepSeek host changed; refresh schedules".into()); }
+    let mut params = json!({"sessionId":record["conversation_id"],"action":action,"generation":ping["generation"],"id":request["id"]});
+    for (from, to) in [("expected", "expected"), ("title", "title"), ("prompt", "prompt"), ("change", "change"), ("limit", "limit"), ("before", "before")] {
+        if !request[from].is_null() { params[to] = request[from].clone(); }
+    }
+    let answer = rpc(record, "schedules", params)?;
+    if answer["available"] != true { return Err(unavailable.into()); }
+    if answer["generation"] != ping["generation"] { return Err("DeepSeek host changed during the schedule change".into()); }
+    let mut output = identity;
+    output["request_id"] = request["request_id"].clone();
+    output["action"] = json!(action);
+    output["result"] = answer["result"].clone();
+    Ok(output)
 }
 
 pub(super) fn processes(name: &str, output: Option<&str>, stop: Option<&str>, run: Option<&str>, conversation: Option<&str>, generation: Option<&str>) -> Result<i32> {
@@ -1157,7 +1210,7 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
 
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose a DeepSeek session")?;
-    let _guard = if !["inspect", "exists"].contains(&command) {
+    let _guard = if !["inspect", "exists", "schedules"].contains(&command) {
         Some(lock(Some(&root().join("dsh/bindings.lock")))?)
     } else {
         None
@@ -1431,6 +1484,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
         }
         "exists" => return Ok(0),
+        "schedules" => println!("{}", schedules(name, &record, &args[1..])?),
         _ => {
             return Err(format!(
                 "{command} is not supported for native DeepSeek sessions yet"
@@ -1523,6 +1577,17 @@ mod native_operation_tests {
         assert_eq!(fork_reason(&record, &ping, &empty), "Wait for a completed reply before forking");
         let pending = json!({"permissions_pending":true});
         assert!(fork_reason(&pending, &ping, &ready).contains("permission setup"));
+    }
+    #[test]
+    fn schedule_items_keep_the_exact_native_record_for_compare_and_set() {
+        let entry = json!({"id":"schedule-1","kind":"cron","title":"Deploy","prompt":"Check","expression":"0 9 * * 1-5",
+            "timeZone":"UTC","scheduledAt":"2026-10-16T09:00:00.000Z","sessionId":"session-a","status":"active",
+            "lastDelivery":{"messageId":"m"}});
+        let item = schedule_item(&entry);
+        assert_eq!(item["record"], json!({"id":"schedule-1","kind":"cron","title":"Deploy","prompt":"Check",
+            "expression":"0 9 * * 1-5","timeZone":"UTC","scheduledAt":"2026-10-16T09:00:00.000Z"}));
+        assert_eq!((item["recurring"].as_bool(), item["scheduled_at"].as_f64()), (Some(true), Some(1792141200.0)));
+        assert_eq!(item["last_delivery"]["messageId"], "m");
     }
 }
 
