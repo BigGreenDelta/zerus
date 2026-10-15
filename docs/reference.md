@@ -1955,7 +1955,9 @@ service's GUI and opens the workspace there. It starts its own GUI only when
 the service stops or does not answer in time. A GUI that a launch started while
 the service was stopped keeps the socket, and a later service start then exits
 without a GUI of its own.
-The desktop version appears in the rail and Settings. **Settings → About** also
+The desktop version in the rail opens **About**; its tooltip shows the complete
+installed version, including the Dev build number or local source identity.
+**Settings → About** also
 shows the configured `hgs` CLI version, read when About opens; an unavailable or
 unrecognized response remains explicit instead of using a compiled-in value.
 Closing a workspace never owns agent process lifetime. Local machine settings,

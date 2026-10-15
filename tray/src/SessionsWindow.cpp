@@ -327,7 +327,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     windowPin->setFixedSize(42, 44); windowPin->setIconSize(QSize(24,24)); side->addWidget(windowPin);
     auto *settingsButton = m_settingsNav = iconButton("settings", tr("Settings"), "workspaceSettings"); settingsButton->setCheckable(true); settingsButton->setFixedSize(42, 44); settingsButton->setIconSize(QSize(24,24)); side->addWidget(settingsButton);
     connect(settingsButton, &QPushButton::clicked, this, &SessionsWindow::showWorkspaceSettings);
-    auto *versionLabel = label(version, "appVersion"); versionLabel->setAlignment(Qt::AlignCenter); side->addWidget(versionLabel);
+    auto *versionButton = new QPushButton(UpdateController::buildInfo()["versionName"].toString().section('-', 0, 0));
+    versionButton->setObjectName("appVersion"); versionButton->setFixedSize(42, 24);
+    versionButton->setCursor(Qt::PointingHandCursor); versionButton->setAutoDefault(false);
+    versionButton->setAccessibleName(tr("About Zerus"));
+    versionButton->setToolTip(tr("Zerus %1\nOpen About").arg(UpdateController::installedVersion()));
+    versionButton->setAccessibleDescription(versionButton->toolTip()); side->addWidget(versionButton);
+    connect(versionButton, &QPushButton::clicked, this, [this] { showWorkspaceSettings(); m_settingsPage->openAbout(); });
     // The stylesheet paints each rail button's full rect. macOS layout margins
     // (4 px above, 8 px below a push button) would let neighbours overlap.
     for (int i = 0; i < side->count(); ++i)
@@ -1555,7 +1561,9 @@ void SessionsWindow::applyTheme()
         QLabel { color:%2; background:transparent; }
         QWidget#sidebar { background:%3; border-right:1px solid %4; }
         QLabel#brand { font-size:32px; font-weight:700; letter-spacing:-2px; color:%5; }
-        QLabel#appVersion { font-size:9px; color:%6; }
+        QPushButton#appVersion { font-size:9px; color:%6; background:transparent; border:1px solid transparent; border-radius:5px; padding:0; min-height:22px; }
+        QPushButton#appVersion:hover { color:%2; background:%7; }
+        QPushButton#appVersion:focus[keyboardFocus="true"] { border-color:%5; }
         QLabel#eyebrow { font-size:10px; font-weight:600; letter-spacing:1px; color:%6; }
         QLabel#heading { font-size:16px; font-weight:600; }
         QLabel#detailTitle { font-size:16px; font-weight:600; }
