@@ -326,6 +326,11 @@ class NativeHarness(unittest.TestCase):
         self.assertFalse(any(e['type']=='AgentMessage' and 'INTERRUPT_WAIT_FIXTURE' in e['detail'] for e in done['events']))
 
     def test_approval_requires_an_explicit_native_decision(self):
+        def journal(operation, payload):
+            result = subprocess.run([str(HGS), 'approval-log', operation], input=json.dumps(payload),
+                                    env=self.env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
         for option,outcome in [('allow','allowed-once'),('deny','rejected')]:
             b=self.create();self.cli('send',b,self.payload(b,text='APPROVAL',attachments=[]))
             data=self.wait(lambda: d if (d:=self.cli('inspect',b))['pending_questions'] else None)
@@ -336,7 +341,14 @@ class NativeHarness(unittest.TestCase):
             self.assertFalse(any(r.get('event',{}).get('type')=='approval/decided' for r in raw['page']['records']))
             answer=self.payload(b,question_id=question['question_id'],expected_question_hash=question['question_hash'],
                 answers=[{'question_id':'decision','selected_option_ids':[option],'text':''}])
+            if option == 'allow':
+                reservation = journal('begin', dict(host='desktop-a', session=b['name'], provider='dsh', question=question))
+                self.assertTrue(reservation['eligible']); self.assertTrue(reservation['fresh'])
+                self.assertEqual(reservation['answers'], answer['answers'])
+                answer['request_id'] = reservation['request_id']
             self.cli('answer',b,answer)
+            if option == 'allow':
+                journal('finish', dict(id=reservation['id'], request_id=reservation['request_id'], status='approved'))
             def decided():
                 raw=self.rpc('inspect',{'sessionId':b['conversation_id']})
                 return next((r['event']['data']['outcome'] for r in raw['page']['records'] if r.get('event',{}).get('type')=='approval/decided'),None)

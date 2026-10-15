@@ -197,6 +197,8 @@ private slots:
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
     void updatesEntryOpensExactSettingsPage();
     void fileCacheSettingsNavigation();
+    void automaticApprovalSettingsNavigation_data();
+    void automaticApprovalSettingsNavigation();
     void mobileConnectionSettingsOfferTheSharedDeliveryChoice();
     void controlOnlyComputerOffersOnlyRemoteMachines();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
@@ -209,6 +211,7 @@ private slots:
     // Chords a test rebinds end with it.
     void cleanup() { ShortcutRegistry::instance().resetAll(); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
+    void savedDraftsGoToTheirSession_data();
     void savedDraftsGoToTheirSession();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
@@ -603,8 +606,16 @@ void TestSessionsWindow::workspaceRestoresDraftAcrossRestartAndSessionRemoval()
     restored.findChild<QPushButton *>("savedDrafts")->click();
 }
 
+void TestSessionsWindow::savedDraftsGoToTheirSession_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QString("dark");
+    QTest::newRow("light") << QString("light");
+}
+
 void TestSessionsWindow::savedDraftsGoToTheirSession()
 {
+    QFETCH(QString, theme); QSettings().setValue("workspace/theme", theme);
     auto state = fleet(); auto box = state.local();
     box.sessions[1].conversationId = "conversation-one"; box.sessions[1].subagentSource = "hooks";
     box.sessions[1].subagents = {{"worker", QJsonObject{{"name", "Worker"}, {"state", "working"}}}};
@@ -622,9 +633,25 @@ void TestSessionsWindow::savedDraftsGoToTheirSession()
         QTimer::singleShot(0, &window, [&, key, available] {
             auto *dialog = window.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
             auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 3);
+            for (int i = 0; i < list->count(); ++i) {
+                const auto *item = list->item(i);
+                QVERIFY(!item->text().section('\n', 0, 0).trimmed().isEmpty());
+                QVERIFY(list->visualItemRect(item).height() >= 2 * list->fontMetrics().height());
+            }
+            list->setFocus(); list->setCurrentRow(0);
+            QTest::keyClick(list, Qt::Key_Down); QCOMPARE(list->currentRow(), 1);
+            QTest::keyClick(list, Qt::Key_Up); QCOMPARE(list->currentRow(), 0);
             for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(Qt::UserRole).toString() == key) list->setCurrentRow(i);
             QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), key);
             auto *open = dialog->findChild<QPushButton *>("openSavedDraftSession"); QCOMPARE(open->isEnabled(), available);
+            const auto preview = qEnvironmentVariable("HGS_SAVED_DRAFTS_PREVIEW");
+            if (key == ended && !preview.isEmpty()) {
+                QTRY_COMPARE(dialog->findChild<QPlainTextEdit *>("savedDraftPreview")->toPlainText(), QString("From an ended session"));
+                QDir().mkpath(preview); QTest::qWait(50);
+                QVERIFY(dialog->grab().save(preview + "/drafts-" + theme + ".png"));
+                dialog->resize(620, 460); QTest::qWait(50);
+                QVERIFY(dialog->grab().save(preview + "/drafts-narrow-" + theme + ".png"));
+            }
             if (available) open->click(); else dialog->reject();
         });
         window.findChild<QPushButton *>("savedDrafts")->click();
@@ -8827,6 +8854,35 @@ void TestSessionsWindow::fileCacheSettingsNavigation(){
         files->findChild<QLineEdit *>("downloadCacheFolder")->setText("/Users/example/Downloads/Zerus Files");
         window.resize(1180, 820); QTest::qWait(80);
         QVERIFY(window.grab().save(qEnvironmentVariable("HGS_TEST_DOWNLOAD_SETTINGS_PREVIEW")));
+    }
+}
+
+void TestSessionsWindow::automaticApprovalSettingsNavigation_data(){
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QString("dark"); QTest::newRow("light") << QString("light");
+}
+
+void TestSessionsWindow::automaticApprovalSettingsNavigation(){
+    QFETCH(QString,theme); QSettings().setValue("workspace/theme",theme);
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray journal = R"PY(elif c=='--help':print('hgs approval-log begin|finish|list|detail')
+elif c=='approval-log':
+ p=json.load(sys.stdin)
+ if a[1]=='list':print(json.dumps(dict(entries=[dict(id=i,at=1792075200000+i*1000,host='desktop-a',session='claude/sample/review',prompt='Run this tool?',status=('unknown' if i==5 else 'approved')) for i in range(5,0,-1)],next=None,previous=None)))
+ elif a[1]=='detail':print(json.dumps(dict(id=p['id'],status='unknown',question=dict(questions=[dict(id='approval',question='Run this tool?',body='printf fixture',options=[dict(id='yes',label='Yes')])]),answers=[dict(question_id='approval',selected_option_ids=['yes'])],detail='Delivery was not confirmed. Check Activity or Terminal.')))
+)PY";
+    const auto path=m_dir->filePath("approval-settings-"+theme);
+    QVERIFY(FakeCli::install(path,original.readAll().replace("if False:pass\n","if False:pass\n"+journal)));
+    SessionsWindow window(FakeCli::program(path)); window.setFleet(fleet()); window.resize(1280,900); window.show(); window.showUpdates();
+    auto *sections=window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    QCOMPARE(sections->item(7)->text(),QString("Automatic approvals")); sections->setCurrentRow(7);
+    auto *page=window.findChild<AutomaticApprovalSettings *>("automaticApprovalSettings"); QVERIFY(page); QVERIFY(page->isVisible());
+    QVERIFY(!page->findChild<QCheckBox *>("automaticApprovalsEnabled")->isChecked());
+    auto *table=page->findChild<QTableWidget *>("approvalJournal"); QTRY_COMPARE(table->rowCount(),5);
+    table->setCurrentCell(0,0); auto *detail=page->findChild<QPlainTextEdit *>("approvalJournalDetail");
+    QTRY_VERIFY(detail->toPlainText().contains("printf fixture")); QVERIFY(detail->toPlainText().contains("Selected answer: Yes"));
+    if (qEnvironmentVariableIsSet("HGS_AUTOMATIC_APPROVALS_PREVIEW")) {
+        QTest::qWait(80); QVERIFY(window.grab().save(qEnvironmentVariable("HGS_AUTOMATIC_APPROVALS_PREVIEW")+"-"+theme+".png"));
     }
 }
 

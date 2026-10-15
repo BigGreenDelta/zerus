@@ -719,12 +719,50 @@ checkpoint or resurrect a confirmed sent message. Attachment snapshots remain
 immutable. Save failures remain visible and block sending until persistence
 succeeds.
 
+**Settings → Automatic approvals** provides a separate dangerous opt-in, off by
+default. Enabling it explicitly allows reachable sessions to run tools without
+individual review, including destructive commands and paid usage. It works
+while this Zerus process is running, including with its window hidden, and does
+not change another desktop's preference or the agents' permanent permissions.
+Resuming after an expired cache may process the full conversation again. While
+enabled, the normal peer polling interval is capped at five seconds so remote
+permission prompts need not wait for the ordinary minute-long refresh.
+Only verified, answerable one-time Claude, native OpenCode and native DeepSeek
+tool permissions qualify. Ordinary questions, startup trust, incomplete panels and
+persistent permission changes remain manual. Existing native identity and
+delivery guards still apply.
+
+The same Settings page contains this computer's private approval journal, naming
+the computer, session, time, question, selected answer and confirmed outcome.
+Each attempt is durably reserved before native input. Failed, cancelled and
+unconfirmed attempts remain visible; an unconfirmed delivery is never retried
+automatically, including after a restart. If the journal cannot be saved,
+automatic approvals pause without sending new answers. Turning the option off
+stops new approvals; requests already sent may still finish.
+
+The journal stores full questions only in the private local
+`approval-audit/journal.sqlite3` below the existing `HGS_STATE_DIR`. It is not
+part of P2P settings sync. Pages contain at most 50 summaries; exact computer and
+session filters use indexes, and Older/Newer navigation uses stable record-ID
+cursors rather than offsets or complete-table counts. Full question text loads
+only for the selected entry. Background discovery scans at most 512 sessions per
+tick, admits at most two concurrent targets and bounds its cooldown cache to
+4096 entries, independent of total session or journal counts.
+
+`hgs approval-log begin|finish|list|detail` is the local desktop journal API
+(JSON stdin). `begin` selects only a supported one-time grant and returns a
+durable request UUID; an existing reservation never permits another delivery.
+`list` supports exact `host`/`session` filters and `before` or `after` record IDs.
+`detail` reads one entry. The command itself never sends native input.
+
 **Saved drafts** below the session list lets you preview, copy or restore drafts
 from ended or missing sessions into the current session. It lists the most
 recently edited drafts first; each row names the draft's session and computer
 (and whether it is a subagent message, question answer or voice message), with
 its time and first line. **Go to session** opens the session that owns the
 selected draft, or its subagent, while that session is in the session list.
+Rows have visible outlines and spacing in both desktop themes; hovering and
+selection use the workspace colors. The preview follows the same theme.
 Copying keeps the dialog open; restoring never sends anything and replacing an
 existing draft requires confirmation. A source draft remains available after
 copying it to another session.
