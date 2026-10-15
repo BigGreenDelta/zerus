@@ -170,12 +170,14 @@ fn managed_settings() -> bool {
 
 /// The options of Claude Code 2.1.296 that choose its flag settings, its
 /// settings sources, the folder of its project and local settings
-/// (`--project-config-root`) or policy settings (`--managed-settings`).
+/// (`--project-config-root`, or a new worktree with `--worktree`) or policy
+/// settings (`--managed-settings`).
 const SETTINGS_OPTIONS: &[&str] = &[
     "--settings",
     "--setting-sources",
     "--project-config-root",
     "--managed-settings",
+    "--worktree",
 ];
 
 /// Whether `argv` already chooses which settings Claude Code reads: then hgs
@@ -184,7 +186,8 @@ fn chooses_settings(argv: &[String]) -> bool {
     let end = argv.iter().position(|arg| arg == "--").unwrap_or(argv.len());
     argv[..end].iter().any(|arg| {
         let key = arg.split('=').next().unwrap_or(arg);
-        SETTINGS_OPTIONS.contains(&key)
+        // `-w`, Claude's short `--worktree`, may carry its name attached.
+        SETTINGS_OPTIONS.contains(&key) || arg.starts_with("-w")
     })
 }
 
@@ -476,7 +479,7 @@ mod tests {
         assert_eq!(argv, ["claude", "--model", "opus", "--settings", "{}", "--", "--settings"]);
         assert!(chooses_settings(&argv));
         for flag in ["--settings=/tmp/x.json", "--setting-sources", "--setting-sources=user", "--project-config-root",
-            "--project-config-root=/srv/project", "--managed-settings"] {
+            "--project-config-root=/srv/project", "--managed-settings", "--worktree", "--worktree=name", "-w", "-wname"] {
             assert!(chooses_settings(&["claude".to_owned(), flag.to_owned()]));
         }
         let mut empty = Vec::new();

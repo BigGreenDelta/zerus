@@ -846,8 +846,9 @@ class Lifecycle(Harness):
         self.hgs("pause", own)
         self.resume(own)
         self.assertEqual(self.launched_settings(), {"theme": "dark"})
-        # So does a folder of project settings or policy settings the launch chooses.
-        for tag, option in (("root", "--project-config-root=" + str(self.root)), ("policy", "--managed-settings")):
+        # So does a folder of project settings, a new worktree or policy settings the launch chooses.
+        for tag, option in (("root", "--project-config-root=" + str(self.root)), ("policy", "--managed-settings"),
+                            ("worktree", "-w")):
             self.start("claude", tag, "--", option, "{}")
             self.assertIsNone(self.launched_settings())
         # A status line in the enclosing repository's local settings is resolved by

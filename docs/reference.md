@@ -183,7 +183,8 @@ copied at launch. Without a user status line nothing is printed; Claude 2.1.296
 then keeps one empty row below the prompt. Claude keeps its own status line, and
 the session reports no window, on Windows, through a project launcher, with an older
 or unreadable version, when the launch passes `--settings`, `--setting-sources`,
-`--project-config-root` or `--managed-settings`, when managed settings exist (`/etc/claude-code` or
+`--project-config-root`, `--managed-settings` or `--worktree` (`-w`), when managed
+settings exist (`/etc/claude-code` or
 `/Library/Application Support/ClaudeCode`, or `CLAUDE_CODE_MANAGED_SETTINGS_PATH`),
 when a settings file cannot be read or its status line is not a command, and when
 the session folder lies below another repository root (an enclosing repository, or
