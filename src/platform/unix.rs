@@ -1359,6 +1359,23 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
     Ok(0)
 }
 
+/// Write the script `text` to `path` for a test to run at once. The system
+/// will not execute a file that is open for writing (ETXTBSY), and a child that
+/// another test thread starts while this process writes one keeps that
+/// descriptor until it execs itself, so a shell writes the script: no
+/// descriptor of this process ever has it open for writing.
+#[cfg(test)]
+pub(crate) fn write_script(path: &Path, text: &str) {
+    let status = Command::new("/bin/sh")
+        .args(["-c", r#"printf %s "$1" > "$0""#])
+        .arg(path)
+        .arg(text)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cannot write {}", path.display());
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
