@@ -46,6 +46,7 @@ private slots:
     void enterEmitsHighlightedItem();
     void arrowKeysMoveHighlight();
     void escapeHidesWithoutEmitting();
+    void closeKeysHideThePopup();
     void clickActivates();
 };
 
@@ -76,11 +77,15 @@ void TestGoToDialog::emptyQueryScoresZero()
 
 void TestGoToDialog::commandFilter()
 {
+    // Sections are commands too.
     const QList<GoToItem> items{item(GoToItem::Session, "s", "Refresh logs"),
+                                item(GoToItem::Project, "p", "Settings rework"),
                                 item(GoToItem::Command, "view.refresh", "Refresh"),
+                                item(GoToItem::Section, "go.settings", "Settings"),
                                 item(GoToItem::Command, "session.new", "New session")};
     QCOMPARE(ids(GoTo::rank(items, ">ref")), QStringList{"view.refresh"});
-    QCOMPARE(ids(GoTo::rank(items, ">")), (QStringList{"view.refresh", "session.new"}));
+    QCOMPARE(ids(GoTo::rank(items, ">")), (QStringList{"view.refresh", "go.settings", "session.new"}));
+    QCOMPARE(ids(GoTo::rank(items, ">sett")), QStringList{"go.settings"});
     QCOMPARE(ids(GoTo::rank(items, "ref")), (QStringList{"s", "view.refresh"}));
 }
 
@@ -151,6 +156,39 @@ void TestGoToDialog::escapeHidesWithoutEmitting()
     QVERIFY(d->isVisible());
     QTest::keyClick(d->findChild<QLineEdit *>("goToQuery"), Qt::Key_Escape);
     QVERIFY(!d->isVisible());
+    QCOMPARE(spy.count(), 0);
+}
+
+void TestGoToDialog::closeKeysHideThePopup()
+{
+    QWidget parent;
+    auto *d = makeDialog(parent, {item(GoToItem::Session, "a", "A")});
+    qRegisterMetaType<GoToItem>();
+    QSignalSpy spy(d, &GoToDialog::activated);
+    auto *query = d->findChild<QLineEdit *>("goToQuery");
+    // Without close keys, Ctrl+K is no command of the popup.
+    d->popup();
+    QTest::keyClick(query, Qt::Key_K, Qt::ControlModifier);
+    QVERIFY(d->isVisible());
+    // The chords of Go to close it, a two-key sequence on its second key.
+    d->setCloseKeys({QKeySequence::fromString("Ctrl+J", QKeySequence::PortableText),
+                     QKeySequence::fromString("Ctrl+G, Ctrl+K", QKeySequence::PortableText)});
+    d->popup();
+    QTest::keyClick(query, Qt::Key_K, Qt::ControlModifier);
+    QVERIFY(d->isVisible());
+    QTest::keyClick(query, Qt::Key_J, Qt::ControlModifier);
+    QVERIFY(!d->isVisible());
+    d->popup();
+    QTest::keyClick(query, Qt::Key_G, Qt::ControlModifier);
+    QVERIFY(d->isVisible());
+    QTest::keyClick(query, Qt::Key_K, Qt::ControlModifier);
+    QVERIFY(!d->isVisible());
+    // A key that breaks the sequence is typed as usual.
+    d->popup();
+    QTest::keyClick(query, Qt::Key_G, Qt::ControlModifier);
+    QTest::keyClick(query, Qt::Key_A);
+    QVERIFY(d->isVisible());
+    QCOMPARE(query->text(), QString("a"));
     QCOMPARE(spy.count(), 0);
 }
 

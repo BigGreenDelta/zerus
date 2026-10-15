@@ -1,4 +1,5 @@
 #include "GoToDialog.h"
+#include "Shortcuts.h"
 #include <QApplication>
 #include <QKeyEvent>
 #include <QLineEdit>
@@ -13,6 +14,12 @@ namespace {
 constexpr int kMaxRows = 12;
 constexpr int kPageStep = 10;
 constexpr int kRowHeight = 30;
+
+bool modifierOnly(int key)
+{
+    return key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt || key == Qt::Key_Meta
+        || key == Qt::Key_AltGr || key == Qt::Key_unknown || key == 0;
+}
 
 bool wordStart(const QString &text, int index)
 {
@@ -109,7 +116,7 @@ QList<GoToItem> rank(const QList<GoToItem> &items, const QString &query)
     QList<Entry> entries;
     for (int i = 0; i < items.size(); ++i) {
         const GoToItem &it = items.at(i);
-        if (commandsOnly && it.kind != GoToItem::Command) continue;
+        if (commandsOnly && it.kind != GoToItem::Command && it.kind != GoToItem::Section) continue;
         const int s = score(q, it.title + QLatin1Char(' ') + it.detail);
         if (s < 0) continue;
         entries.append({it, s, i});
@@ -170,6 +177,7 @@ GoToDialog::GoToDialog(std::function<QList<GoToItem>()> provider, QWidget *paren
 void GoToDialog::popup()
 {
     m_items = m_provider ? m_provider() : QList<GoToItem>();
+    m_typed.clear();
     m_query->blockSignals(true);
     m_query->clear();
     m_query->blockSignals(false);
@@ -227,6 +235,19 @@ bool GoToDialog::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_query && event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
+        // A close chord closes on its last key; the keys before it are held back.
+        if (!m_closeKeys.isEmpty() && !modifierOnly(key->key())) {
+            auto typed = m_typed; typed.append(Shortcuts::combination(key)); m_typed.clear();
+            const QKeySequence attempt = typed.size() == 1 ? QKeySequence(typed[0]) : typed.size() == 2 ? QKeySequence(typed[0], typed[1])
+                : typed.size() == 3 ? QKeySequence(typed[0], typed[1], typed[2]) : QKeySequence(typed[0], typed[1], typed[2], typed[3]);
+            bool partial = false;
+            for (const auto &sequence : m_closeKeys) {
+                const auto match = attempt.matches(sequence); // Partial: attempt begins sequence.
+                if (match == QKeySequence::ExactMatch) { hide(); return true; }
+                partial |= match == QKeySequence::PartialMatch;
+            }
+            if (partial && typed.size() < 4) { m_typed = typed; return true; }
+        }
         switch (key->key()) {
         case Qt::Key_Up: moveCurrent(-1); return true;
         case Qt::Key_Down: moveCurrent(1); return true;
@@ -235,9 +256,6 @@ bool GoToDialog::eventFilter(QObject *watched, QEvent *event)
         case Qt::Key_Return:
         case Qt::Key_Enter: activateCurrent(); return true;
         case Qt::Key_Escape: hide(); return true;
-        case Qt::Key_K:
-            if (key->modifiers() & Qt::ControlModifier) { hide(); return true; }
-            break;
         default: break;
         }
     }

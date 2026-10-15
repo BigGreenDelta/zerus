@@ -4,6 +4,7 @@
 #include "AccountsPage.h"
 #include "GoToDialog.h"
 #include "MachinesPage.h"
+#include "ProjectsDialog.h"
 #include "SessionList.h"
 #include "SessionPresentation.h"
 #include "SettingsPage.h"
@@ -13,6 +14,8 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <algorithm>
+#include <limits>
 
 namespace {
 constexpr int RecentSessions = 20;
@@ -33,9 +36,22 @@ QList<GoToItem> SessionsWindow::goToItems() const
 {
     QList<GoToItem> items;
     const auto &registry = ShortcutRegistry::instance();
+    // Sessions follow the session list; those it does not show come after them.
+    QHash<QString, int> listed;
+    for (int row = 0; row < m_sessions->count(); ++row) {
+        const auto *item = m_sessions->item(row);
+        if (item->data(SessionRoles::Header).toBool() || !item->data(SessionRoles::ChildId).toString().isEmpty()) continue;
+        const QString key = item->data(SessionRoles::Key).toString();
+        if (!key.isEmpty() && !listed.contains(key)) listed.insert(key, row);
+    }
+    QList<const Entry *> sessions;
+    for (const auto &entry : m_entries) if (entry.session.state != "archived") sessions.append(&entry);
+    std::stable_sort(sessions.begin(), sessions.end(), [&listed](const Entry *a, const Entry *b) {
+        return listed.value(a->key, std::numeric_limits<int>::max()) < listed.value(b->key, std::numeric_limits<int>::max());
+    });
     QHash<QString, int> groupSessions;
-    for (const auto &entry : m_entries) {
-        if (entry.session.state == "archived") continue;
+    for (const auto *session : sessions) {
+        const auto &entry = *session;
         const auto *group = m_organization.group(m_organization.groupFor(entry.identity));
         if (group) ++groupSessions[group->id];
         QStringList detail;
@@ -91,6 +107,8 @@ void SessionsWindow::openGoTo()
         m_goTo = new GoToDialog([this] { return goToItems(); }, this);
         connect(m_goTo, &GoToDialog::activated, this, &SessionsWindow::activateGoTo);
     }
+    // Go to's own chords close the popup again.
+    m_goTo->setCloseKeys(ShortcutRegistry::instance().keys(QStringLiteral("go.anywhere")));
     m_goTo->popup();
 }
 
@@ -123,7 +141,7 @@ void SessionsWindow::activateGoTo(const GoToItem &item)
         if (!first)
             for (const auto &entry : m_entries)
                 if (entry.session.state != "archived" && m_organization.groupFor(entry.identity) == item.id) { first = &entry; break; }
-        if (!first) { showProjects(selectedHostTarget()); return; }
+        if (!first) { showProjects(selectedHostTarget()); m_projectsPage->selectProject(item.id); return; }
         GoToItem session; session.kind = GoToItem::Session; session.id = first->key;
         activateGoTo(session);
         return;

@@ -1,5 +1,6 @@
 #pragma once
 #include <QFrame>
+#include <QKeySequence>
 #include <QList>
 #include <QMetaType>
 #include <QString>
@@ -26,7 +27,8 @@ namespace GoTo {
 // Case-insensitive subsequence match of query over text. < 0 means no match; an
 // empty query scores 0.
 int score(const QString &query, const QString &text);
-// Filters and orders items for a query. A leading '>' limits the list to commands.
+// Filters and orders items for a query. A leading '>' limits the list to
+// sections and commands.
 QList<GoToItem> rank(const QList<GoToItem> &items, const QString &query);
 }
 
@@ -38,6 +40,8 @@ public:
     explicit GoToDialog(std::function<QList<GoToItem>()> provider, QWidget *parent);
     // Fetches the items, clears the query and shows the popup at the top center of the parent.
     void popup();
+    // Chords that close the popup again, such as those of Go to itself.
+    void setCloseKeys(const QList<QKeySequence> &keys) { m_closeKeys = keys; m_typed.clear(); }
 signals:
     void activated(const GoToItem &item);
 protected:
@@ -52,4 +56,6 @@ private:
     QList<GoToItem> m_items;
     QLineEdit *m_query = nullptr;
     QListWidget *m_results = nullptr;
+    QList<QKeySequence> m_closeKeys;
+    QList<QKeyCombination> m_typed; // the start of a close sequence
 };
