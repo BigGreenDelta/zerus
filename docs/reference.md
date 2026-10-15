@@ -1754,8 +1754,10 @@ creation can leave an unbound session in Native UI.
 Content search covers bound DeepSeek sessions through the native store's
 literal, case-insensitive event scan, which works without the optional full-text
 index. Results contain the person's and the agent's text only; injected context
-and reasoning are excluded. Searching never starts, resumes or reloads a host; a
-stopped host or an older adapter reports that history as unavailable.
+and reasoning are excluded. Searching never starts, resumes or reloads a host.
+Hosts are asked at once, each scanning for at most 5 seconds; a stopped host, an
+older adapter or a host that does not answer within 7 seconds reports that
+history as unavailable.
 
 The official optional Schedule bundle (**Automation tasks** in Native UI
 Plugins; shipped profiles leave it off) is listed and managed per exact session:
