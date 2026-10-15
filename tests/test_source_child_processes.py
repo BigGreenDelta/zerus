@@ -146,6 +146,12 @@ class ProcessObjectTest(unittest.TestCase):
             ("QProcess *Launcher::make()\n{\n    return new QProcess(this);\n}\n", f"{NAME}:3: {unnamed}"),
             ("class Tool : public QProcess\n{\n};\n", f"{NAME}:1: a QProcess subclass starts children this check "
                                                     "cannot follow (tray/src/ChildProcess.h)."),
+            ("struct Tool : QProcess\n{\n};\n", f"{NAME}:1: a QProcess subclass starts children this check "
+                                              "cannot follow (tray/src/ChildProcess.h)."),
+            ("class Tool final : public QObject,\n                   ::QProcess\n{\n};\n",
+             f"{NAME}:2: a QProcess subclass starts children this check cannot follow (tray/src/ChildProcess.h)."),
+            (function("auto *child = new (std::nothrow) ::QProcess;", "child->start();"),
+             f"{NAME}:5: " + UNCONFIGURED.format("child")),
             ("using Child = QProcess;\n" + function("auto *child = new Child(this);", "child->start();"),
              f"{NAME}:6: " + UNCONFIGURED.format("child")),
             (function("QProcess first, second;", "ChildProcess::inheritStdioOnly(first);", "second.start(m_tool, {});"),

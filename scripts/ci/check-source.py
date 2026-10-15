@@ -122,7 +122,7 @@ def creations(code, kind):
             re.finditer(rf"(?<![\w:<.])(?<!->)(?:{kind})\s+([A-Za-z_]\w*)\s*(?=[;({{\[])", code)
             if not re.search(r"\btypedef\s*\Z", code[max(0, match.start() - 20):match.start()])]
     # new, make_unique, QSharedPointer::create or a temporary such as QProcess().startDetached(program, arguments).
-    for match in re.finditer(rf"\bnew\s+(?:{kind})\b|(?:\bstd\s*::\s*)?\bmake_(?:unique|shared)\s*<\s*(?:{kind})\s*>"
+    for match in re.finditer(rf"\bnew\b\s*(?:\([^()]*\)\s*)?(?:::\s*)?(?:{kind})\b|(?:\bstd\s*::\s*)?\bmake_(?:unique|shared)\s*<\s*(?:{kind})\s*>"
                              rf"|\bQSharedPointer\s*<\s*(?:{kind})\s*>\s*::\s*create\b"
                              rf"|(?<![\w:<.])(?<!->)(?P<temporary>{kind})\s*(?=[({{])", code):
         before = code[max(code.rfind(c, 0, match.start()) for c in ";{}") + 1:match.start()]
@@ -170,8 +170,10 @@ def child_process_findings(files):
         for match in re.finditer(rf"\b(?:{kind})\s*::\s*(startDetached|startCommand|start|execute)\b", code):
             found.append((match.start(), f"QProcess::{match[1]}() bypasses ChildProcess::inheritStdioOnly(); use "
                                          "ChildProcess::startDetached() or a QProcess passed to inheritStdioOnly()"))
-        for match in re.finditer(rf"\b(?:public|protected|private)\s+(?:virtual\s+)?(?:{kind})\b(?!\s*::)", code):
-            found.append((match.start(), "a QProcess subclass starts children this check cannot follow"))
+        # A base clause, with or without an access specifier (struct Runner : QProcess).
+        for match in re.finditer(rf"\b(?:class|struct)\b[^;{{}}()<>]*:(?!:)[^;{{}}]*?(?<![\w:<])(?:::\s*)?"
+                                 rf"(?P<base>{kind})\b(?!\s*::)", code):
+            found.append((match.start("base"), "a QProcess subclass starts children this check cannot follow"))
         # The static startDetached(program, ...) and execute() also compile on an object, which they ignore.
         for match in re.finditer(r"(?:\.|->)\s*startDetached\s*\(", code):
             spans = [code[slice(*span)].strip() for span in arguments(code, match.end() - 1)]
