@@ -168,6 +168,14 @@ project groups; empty groups are hidden in Sessions. Filter, query, collapsed
 groups, and list position survive opening a conversation and background polling.
 Provider badges match the desktop identity motifs.
 
+The computer chooser shows a count beside every machine, including zero, and
+an All machines total. These chooser counts use the current session state filter
+and project before machine selection or text search, so choosing one computer
+keeps the other computers' counts visible. Counts update while the chooser is
+open, retain separate workspace/computer identities and count each parent session
+once. The chooser names its current state filter and states that counts precede
+search; offline inventory and local drafts follow the normal filter rules.
+
 An open conversation shows desktop-style labels 4 dp below its name: its owning
 computer first, then status, so status caption changes keep the machine anchored.
 Machine names and colours match session cards, including phone-local names,

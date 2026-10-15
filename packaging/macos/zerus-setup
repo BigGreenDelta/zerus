@@ -83,6 +83,13 @@ def install_tray(app, hgs, setup):
     stage = path.with_name("." + path.name + ".new")
     stage.write_bytes(payload)
     os.replace(stage, path)
+    target = f"gui/{os.getuid()}/{LABELS['tray']}"
+    if subprocess.run(["launchctl", "print", target], capture_output=True).returncode == 0:
+        # A loaded label keeps its old definition, and bootstrap refuses it.
+        print("The updated Zerus LaunchAgent applies at your next login. To apply it now, quit "
+              f"Zerus from its menu, then: launchctl bootout {target} && "
+              f"launchctl bootstrap gui/{os.getuid()} '{path}'")
+        return
     print("Zerus starts at your next login. To start it now: "
           f"launchctl bootstrap gui/{os.getuid()} '{path}'")
 

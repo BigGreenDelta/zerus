@@ -1,4 +1,5 @@
 #include "KonsoleBackend.h"
+#include "ChildProcess.h"
 
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
@@ -8,7 +9,6 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
-#include <QProcess>
 #include <QThread>
 #include <QXmlStreamReader>
 
@@ -293,7 +293,7 @@ bool KonsoleBackend::open(const QString &command, QString *error)
     m_advisory.clear();
 
     auto launchWindow = [&]() -> bool {
-        if (!QProcess::startDetached(QStringLiteral("konsole"), launchArgs(command), QDir::homePath())) {
+        if (!ChildProcess::startDetached(QStringLiteral("konsole"), launchArgs(command), QDir::homePath())) {
             *error = QStringLiteral("cannot start konsole (not in PATH?)");
             return false;
         }

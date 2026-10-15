@@ -179,8 +179,11 @@ public:
     // stay cached for five minutes for the Clean up reminder; removal repeats every
     // check there, never forces and is never retried automatically.
     quint64 reviewWorktrees(const QString &host, const QString &path, const QString &worktree = {});
-    quint64 inspectWorktree(const QString &host, const QString &path, const QString &commonDir, const QString &file = {}, int offset = 0);
-    QJsonObject worktreeReview(const QString &host, const QString &commonDir) const;
+    quint64 inspectWorktree(const QString &host, const QString &path, const QString &commonDir, const QString &file = {}, int offset = 0, bool refresh = false);
+    // Browsing may retain a review for an hour; cleanup callers keep the default five-minute limit.
+    void invalidateWorktreeInspection(const QString &host, const QString &path, const QString &commonDir);
+    void invalidateWorktreeCache(const QString &host, const QString &commonDir);
+    QJsonObject worktreeReview(const QString &host, const QString &commonDir, int maxAgeSeconds = 300) const;
     quint64 removeWorktree(const QString &host, const QString &path, const QString &commonDir,
                            const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {});
     quint64 requestDirectories(const QString &host, const QString &path, bool hidden = false);
@@ -294,6 +297,7 @@ signals:
     void projectsReady(const QList<ProjectInfo> &projects);
     void projectsForHostReady(const QString &host, const QList<ProjectInfo> &projects);
     void projectsFailed(const QString &host, const QString &detail);
+    void worktreeCacheInvalidated(const QString &host, const QString &commonDir);
     void worktreesReady(quint64 request, const QString &host, const QString &path, const QJsonObject &data);
     void worktreesFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
     void gitStatusChanged(const QString &host, const QString &path);
@@ -342,6 +346,9 @@ private:
     QHash<QString, QList<QPair<quint64, QString>>> m_worktreesInFlight;
     QHash<QString, QList<quint64>> m_reviewsInFlight;
     QHash<QString, QJsonObject> m_worktreeReviews;
+    QHash<QString, QJsonObject> m_worktreeInspections;
+    QHash<QString, QList<quint64>> m_worktreeInspectionsInFlight;
+    QHash<QString, quint64> m_worktreeCacheGenerations;
     quint64 m_nativeUiRequest = 0;
     quint64 m_searchRequest = 0;
     quint64 m_attachmentRequest = 0;

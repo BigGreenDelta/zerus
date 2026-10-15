@@ -1,6 +1,8 @@
 #include <QtTest>
 #include <QCheckBox>
 #include <QMenu>
+#include <QLabel>
+#include <QDir>
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -52,6 +54,29 @@ private slots:
         }
         QVERIFY(found); MachineAppearance::resetColor("arch"); QCOMPARE(MachineAppearance::color("arch"),before);
     }
+    void sessionCountsStayVisibleAndUpdateWithoutReplacingChoices() {
+        QWidget page; auto *layout=new QVBoxLayout(&page); auto *filter=new MachineFilter;
+        layout->addWidget(filter->button()); layout->addWidget(filter);
+        FleetState fleet; BoxState local; local.host="mac"; local.ok=true; fleet.setLocal(local,0);
+        for (const auto &host : {"mac", "empty"}) { BoxState peer; peer.host=host; peer.ok=true; fleet.setPeer(peer,0); }
+        filter->setFleet(fleet); filter->setSessionCounts({{"@local",12},{"mac",3}}, "Active");
+        page.resize(320,300); page.show();
+        auto *menu=filter->button()->menu(); menu->popup(page.mapToGlobal(QPoint(0,30))); QTRY_VERIFY(menu->isVisible());
+        QMap<QString,QCheckBox *> choices;
+        for (auto *choice : menu->findChildren<QCheckBox *>("machineFilterChoice")) choices[choice->property("host").toString()]=choice;
+        QCOMPARE(choices.size(),3); QCOMPARE(choices["@local"]->text(),QString("mac (this machine) (12)"));
+        QCOMPARE(choices["mac"]->text(),QString("mac (3)")); QCOMPARE(choices["empty"]->text(),QString("empty (0)"));
+        auto *all=menu->findChild<QPushButton *>("allMachineFilters"); QCOMPARE(all->text(),QString("All machines (15)"));
+        QCOMPARE(menu->findChild<QLabel *>("machineFilterCountScope")->text(),QString("Active before search"));
+        QSignalSpy changed(filter,&MachineFilter::selectionChanged); choices["mac"]->click(); QCOMPARE(changed.size(),1);
+        QCOMPARE(choices["@local"]->property("sessionCount").toInt(),12); QVERIFY(menu->isVisible());
+        filter->setSessionCounts({{"@local",2},{"mac",4}}, "Archive");
+        QCOMPARE(changed.size(),1); QCOMPARE(all->text(),QString("All machines (6)"));
+        QVERIFY(choices["mac"]->isChecked()); QCOMPARE(choices["mac"]->text(),QString("mac (4)"));
+        QVERIFY(choices["mac"]->accessibleName().contains("4 sessions"));
+        const auto current=menu->findChildren<QCheckBox *>("machineFilterChoice"); QVERIFY(current.contains(choices["mac"]));
+        QCOMPARE(choices["empty"]->property("sessionCount").toInt(),0); menu->close();
+    }
     void controlOnlyComputerIsNoFilterChoice() {
         QWidget page; auto *layout=new QVBoxLayout(&page); auto *filter=new MachineFilter;
         layout->addWidget(filter->button()); layout->addWidget(filter); layout->addStretch();
@@ -76,6 +101,7 @@ private slots:
         FleetState fleet; BoxState local; local.host="mac"; local.ok=true; fleet.setLocal(local,0);
         BoxState peer; peer.host="arch"; peer.ok=true; fleet.setPeer(peer,0);
         filter->setFleet(fleet); filter->setTheme(dark); page.resize(300,250); page.show();
+        filter->setSessionCounts({{"@local",12},{"arch",4}}, "Active");
         auto *menu=filter->button()->menu(); menu->popup(page.mapToGlobal(QPoint(0,30))); QTRY_VERIFY(menu->isVisible());
         auto *all=menu->findChild<QPushButton *>("allMachineFilters"); QVERIFY(all);
         const auto choices=menu->findChildren<QCheckBox *>("machineFilterChoice"); QCOMPARE(choices.size(),2);
@@ -102,6 +128,8 @@ private slots:
             const QRectF painted(changed.x()/dpr,changed.y()/dpr,changed.width()/dpr,changed.height()/dpr);
             QVERIFY2(QRectF(indicator).adjusted(-1,-1,1,1).contains(painted),"Painted checkbox escapes its indicator rectangle");
         }
+        const auto preview=qEnvironmentVariable("ZERUS_MACHINE_FILTER_PREVIEW");
+        if (!preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(menu->grab().save(preview+(dark ? "/desktop-dark.png" : "/desktop-light.png"))); }
         menu->close();
     }
 private:

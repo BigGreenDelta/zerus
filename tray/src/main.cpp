@@ -28,6 +28,7 @@
 #include "MacAppVisibility.h"
 #include "MessageBoxIcons.h"
 #include "speech/SpeechRecorder.h"
+#include <pthread/qos.h>
 #endif
 
 #include <cstdio>
@@ -249,6 +250,14 @@ int main(int argc, char *argv[])
     // Qt WebEngine can only start from the optional native UI plugin, loaded
     // long after this point, when the attribute was set before QApplication.
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+#ifdef Q_OS_MACOS
+    // LaunchServices gives an app's main thread this QoS; the LaunchAgent does not.
+    // It keeps the GUI ahead of builds and agent tools at default QoS. It is effective
+    // only with ProcessType Interactive (com.hgdev.hgs-tray.plist): a daemon job stays
+    // clamped below default priority whatever it asks. Threads started later get the
+    // default QoS, not this one.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     QApplication app(argc, argv);
 #ifdef Q_OS_WIN
     // One hgs.exe for every operation: bundled next to hgs-tray.exe, else PATH;

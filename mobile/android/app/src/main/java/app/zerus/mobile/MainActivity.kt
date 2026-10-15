@@ -540,8 +540,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         } }; return
     }
     val scoped = SessionFilters.scoped(model.sessions, model.machines, model.selectedMachines, model.sessionQuery, project?.key)
-    val drafts = SessionFilters.draftedSessions(scoped, model.drafts)
+    val drafts = SessionFilters.draftedSessions(model.sessions, model.drafts)
     val counts = SessionFilters.counts(scoped, model.machines, drafts)
+    val machineCounts = SessionFilters.machineCounts(model.sessions, model.machines, model.sessionFilter, drafts, project?.key)
     val visible = scoped.filter { SessionFilters.matches(it, model.sessionFilter, SessionFilters.online(it, model.machines), it.target.key in drafts) }
     val groups = SessionFilters.grouped(visible, model.projects)
     val readAllTargets = scoped.map { it.target }.filter(model::listReadAllCandidate)
@@ -647,12 +648,17 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     sessionActions?.let { SessionActionsSheet(model, it) { sessionActions = null } }
     if (machineDialog) ZerusAlertDialog(onDismissRequest = { machineDialog = false }, title = { Text("Filter machines") },
         text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { model.allMachines() }) { Text("All machines") }
+            Text("${model.sessionFilter.caption} before search", color = Muted, style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = { model.allMachines() }) { Text("All machines (${machineCounts.values.sum()})") }
             model.machines.forEach { machine ->
                 val key = MachineKey(machine.connectionId, machine.id)
-                Surface(onClick = { model.toggleMachine(key) }, color = Color.Transparent) { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                val count = machineCounts.getOrDefault(key, 0)
+                Surface(onClick = { model.toggleMachine(key) }, color = Color.Transparent, modifier = Modifier.semantics {
+                    contentDescription = "${machine.name}, $count sessions"
+                }) { Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(key in model.selectedMachines, null)
-                    Column { MachineLabel(machine.name,colorHex = model.machineColor(key)); if (model.connections.size > 1) Text(model.connections.find { it.id == machine.connectionId }?.displayName.orEmpty(), color = Muted, style = MaterialTheme.typography.labelSmall) }
+                    Column(Modifier.weight(1f)) { MachineLabel(machine.name,colorHex = model.machineColor(key)); if (model.connections.size > 1) Text(model.connections.find { it.id == machine.connectionId }?.displayName.orEmpty(), color = Muted, style = MaterialTheme.typography.labelSmall) }
+                    Text(count.toString(), color = Muted, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(start = 12.dp, end = 8.dp))
                 } }
             }
             Text("An empty selection shows all machines.", color = Muted, style = MaterialTheme.typography.bodySmall)

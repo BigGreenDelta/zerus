@@ -1,4 +1,5 @@
 #include "SwarmWorkerSupervisor.h"
+#include "ChildProcess.h"
 
 #include <QDebug>
 
@@ -110,6 +111,7 @@ void SwarmWorkerSupervisor::launch()
     process->setArguments({QStringLiteral("swarm"), QStringLiteral("worker")});
     process->setStandardInputFile(QProcess::nullDevice());
     process->setStandardOutputFile(QProcess::nullDevice());
+    ChildProcess::inheritStdioOnly(*process);
     connect(process, &QProcess::readyReadStandardError, this, [this, process] {
         m_errors += process->readAllStandardError();
         if (m_errors.size() > ErrorTail) m_errors = m_errors.right(ErrorTail);

@@ -1,4 +1,5 @@
 #include "ProcessRunner.h"
+#include "ChildProcess.h"
 
 #include <QCoreApplication>
 #include <QHash>
@@ -317,6 +318,11 @@ private:
         // No child modifier runs here, so Linux may use vfork and skip copying
         // the page tables of the large GUI process.
         process->setUnixProcessParameters(QProcess::UnixProcessFlag::UseVFork);
+#endif
+#ifndef Q_OS_MACOS
+        // As with posix_spawn on macOS, whatever else the GUI has open stays
+        // out, such as a PTY forkpty() has just made on the GUI thread.
+        ChildProcess::inheritStdioOnly(*process);
 #endif
         if (request.input) onStarted(process, [process, input = std::move(*request.input)]() mutable {
             if (!input.isEmpty()) process->write(input);

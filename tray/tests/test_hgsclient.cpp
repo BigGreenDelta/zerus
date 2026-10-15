@@ -9,6 +9,11 @@
 #include <QThread>
 #include <atomic>
 #include <memory>
+#ifndef Q_OS_WIN
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+#include "ChildProcess.h"
 #include "FakeCli.h"
 #include "FleetState.h"
 #include "HgsClient.h"
@@ -76,6 +81,7 @@ private slots:
     void gitStatusReadsAreSharedAndScopedToMachineAndFolder();
     void pollsLaunchOffTheGuiThreadAndReportOnIt();
     void destroyedClientKillsItsPolls();
+    void directChildrenSkipPipesTheRunnerIsCreating();
 };
 
 void TestHgsClient::downloadsRequireExactSavedFileReceipts()
@@ -166,6 +172,36 @@ void TestHgsClient::destroyedClientKillsItsPolls()
     QVERIFY(!FakeCli::processAlive(pid));
     QTest::qWait(100);
     QCOMPARE(reports, 0);
+}
+
+void TestHgsClient::directChildrenSkipPipesTheRunnerIsCreating()
+{
+#ifdef Q_OS_WIN
+    QSKIP("Unix descriptors only");
+#else
+    if (!ChildProcess::inheritsStdioOnly) QSKIP("This Qt cannot close inherited descriptors");
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto program = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(program, "#!/bin/sh\nls /dev/fd\n"));
+    // On macOS the runner's worker makes a request's pipes with pipe() and marks
+    // them close-on-exec only afterwards. Machine setup starts on the GUI thread
+    // in between, through the configuration every direct hgs child shares.
+    // High numbers keep the pipe apart from the descriptor the listing opens.
+    int made[2] = {-1, -1}, creating[2] = {-1, -1}; QCOMPARE(::pipe(made), 0);
+    for (int i = 0; i < 2; ++i) { creating[i] = ::fcntl(made[i], F_DUPFD, 64); ::close(made[i]); }
+    HgsClient client(FakeCli::program(program)); QString output;
+    connect(&client, &HgsClient::machineSetupOutput, this, [&output](const QString &text) { output += text; });
+    QSignalSpy finished(&client, &HgsClient::machineSetupFinished);
+    client.setupMachine("mac");
+    QTRY_COMPARE(finished.size(), 1);
+    for (int fd : creating) if (fd >= 0) ::close(fd);
+    QVERIFY(creating[0] >= 64 && creating[1] >= 64);
+    QVERIFY2(finished[0][0].toBool(), qPrintable(finished[0][1].toString()));
+    const auto open = output.simplified().split(' ');
+    QVERIFY2(open.contains("0") && open.contains("1"), qPrintable(output));
+    // The setup child would otherwise hold that request's input open until it ends.
+    for (int fd : creating) QVERIFY2(!open.contains(QString::number(fd)), qPrintable(output));
+#endif
 }
 
 void TestHgsClient::gitStatusReadsAreSharedAndScopedToMachineAndFolder()

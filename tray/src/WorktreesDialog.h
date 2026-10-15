@@ -40,6 +40,7 @@ private:
     Source *selectedSource();
     QJsonObject selectedRow() const;
     QJsonObject reviewedRow(const Source &source, const QJsonObject &row) const;
+    bool freshProof(const Source &source, const QJsonObject &row) const;
     QString state(const Source &source, const QJsonObject &row) const;
     QStringList sessions(const Source &source, const QJsonObject &row) const;
     bool canClean(const Source &source) const;
@@ -61,6 +62,7 @@ private:
     QMap<QString, QString> m_reviewErrors;
     QSet<QString> m_reviewAttempted;
     QMap<QString, QString> m_checked;
+    qint64 m_autoRefreshAt = 0;
     quint64 m_generation = 0, m_reviewRequest = 0, m_reviewGeneration = 0;
     QString m_reviewKey, m_reviewWorktree;
     bool m_changed = false;
