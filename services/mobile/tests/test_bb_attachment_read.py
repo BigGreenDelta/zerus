@@ -12,8 +12,8 @@ import subprocess
 import unittest
 import uuid
 
-from bb_operations import (ARCHIVE, CONVERSATION, OPERATIONS, RECEIPTS, RUN, SESSION, OperationCase, help_text,
-                           listing, validation_cases)
+from bb_operations import (ARCHIVE, ARCHIVES, CONVERSATION, OPERATIONS, RECEIPTS, RUN, SESSION, OperationCase,
+                           help_text, listing, size_vector, validation_cases)
 from connector_harness import MIB, BlackBoxCase, canonical, default_rules
 
 MESSAGE = "00000000-0000-4000-8000-000000000001"
@@ -114,6 +114,25 @@ class InlineAttachmentTests(OperationCase, BlackBoxCase):
                 self.assertEqual(self.since(mark, "send"), [])
         await self.assert_rejections(process, [case for case in validation_cases("conversation", {"send"})
                                                if "attachment" in case["id"]], [["send"]])
+
+    async def test_message_text_is_bounded_beside_files(self):
+        process = await self.launch()
+        for identity in ("send-text-64KiB", "send-text-64KiB+1"):  # 64 KiB of UTF-8, then one byte more.
+            with self.subTest(identity):
+                payload, expect = size_vector(identity)
+                mark = self.mark()
+                result = await self.submit(self.operation("send", text=payload["text"]), process)
+                if expect["error"] is None:
+                    self.assertEqual(result["state"], "completed", result)
+                else:
+                    self.assertEqual(result, {"state": "failed", "result": None, "error": expect["receipt_error"]})
+                self.assertEqual(len(self.since(mark, "send")), 0 if expect["error"] else 1)
+        # A file needs no text.
+        request = self.send(("note.txt", b"x"), text="")
+        request["payload"]["attachments"][0]["reference"] = "[Image #1]"
+        mark = self.mark()
+        self.assertEqual((await self.submit(request, process))["state"], "completed")
+        self.assertEqual(json.loads(self.since(mark, "send")[0]["stdin"]), request["payload"])
 
 
 class AttachmentReadTests(OperationCase, BlackBoxCase):
@@ -219,6 +238,37 @@ class AttachmentReadTests(OperationCase, BlackBoxCase):
         self.assertEqual(self.work(mark), [])
         await self.assert_rejections(process, validation_cases("conversation", {"attachment_read"}), [["attachment"]])
 
+    async def test_invalid_positions_and_fields_never_reach_native(self):
+        process = await self.launch()
+        fields, position = "invalid attachment read fields", "invalid attachment position or range"
+        message = "invalid attachment message identity"
+        nil = "00000000-0000-0000-0000-000000000000"
+        self.assertIn((SESSION, nil), ARCHIVES)  # The snapshot lists it, so only the payload check refuses it.
+        mark = self.mark()
+        for name, change, error in (  # A None value removes the field.
+                ("path", {"path": "/private/file.png"}, fields),
+                ("message path", {"message_id": "../../etc/passwd"}, message),
+                ("message option", {"message_id": "--archive"}, message),
+                ("index 8", {"index": 8}, position), ("index -1", {"index": -1}, position),
+                ("index float", {"index": 0.0}, position),
+                ("offset at 10 MiB", {"offset": MAX_FILE}, position), ("negative offset", {"offset": -1}, position),
+                ("long range", {"length": CHUNK + 1}, position),
+                ("range past 10 MiB", {"offset": MAX_FILE - 10, "length": 11}, position),
+                ("empty conversation", {"expected_conversation_id": ""}, "invalid bounded native identity"),
+                ("empty run", {"expected_run_id": ""}, "expected_run_id is required"),
+                ("nil archive", {"archive_id": nil}, "invalid archive identity"),
+                ("no message", {"message_id": None}, fields), ("no length", {"length": None}, fields),
+                ("other request", {"request_id": str(uuid.uuid4())}, "payload request_id must match request identity")):
+            with self.subTest(name):
+                request = self.read()
+                for key, value in change.items():
+                    if value is None:
+                        del request["payload"][key]
+                    else:
+                        request["payload"][key] = value
+                self.assertEqual(await self.submit(request, process), {"state": "failed", "result": None, "error": error})
+        self.assertEqual(self.work(mark), [])
+
     async def test_native_output_is_capped_at_one_encoded_file(self):
         process = await self.launch()
         for extra, error in ((0, None), (1, "native output exceeds size limit")):
@@ -249,6 +299,20 @@ class AttachmentReadTests(OperationCase, BlackBoxCase):
         reads = [call["argv"] for call in self.since(mark, "attachment")]
         self.assertEqual([reads.count(attachment_argv(messages[name])) for name in "ABCD"], [2, 2, 1, 1])
         self.assertEqual(reads.count(child), 1)
+
+    async def test_the_cache_budget_is_bytes_not_files(self):
+        # Three 10 MiB files fill the 30 MiB budget; five small files all stay.
+        messages = [str(uuid.UUID(int=index + 1)) for index in range(5)]
+        for index, message in enumerate(messages):
+            self.serve(bytes([index + 1]) * 7, message)
+        process = await self.launch()
+        mark = self.mark()
+        for _ in range(2):
+            for message in messages:
+                response = await self.submit(self.read(0, 1, message), process)
+                self.assertEqual(response["state"], "completed", response)
+        self.assertEqual([call["argv"] for call in self.work(mark)],
+                         [argv for message in messages for argv in (IDENTITY, attachment_argv(message))])
 
     async def test_without_the_attachment_abi_nothing_runs(self):
         self.hgs.script([{"argv": IDENTITY, "stdout": detail()}] + default_rules(listing()))

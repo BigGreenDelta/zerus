@@ -168,9 +168,11 @@ These modules take their expected texts from the golden vectors through
 `validation/*.jsonl` (each must fail with its recorded message and reach no
 native command), the `execute` runs of `projections.jsonl` (native argv,
 stdin and the stored receipt) and boundaries from `sizes.jsonl`. They run on
-the vectors' synthetic computer and add 81 tests, about 90 s against Python on
+the vectors' synthetic computer and add 84 tests, about 95 s against Python on
 a Linux workstation (2026-10-15); `test_bb_computer.py` takes about 30 s
-because it waits for the 15 s project refresh. The real-CLI cases use
+because it waits for the 15 s project refresh.
+`test_bb_attachment_read.ScriptedAnswerTests` checks the scripted answers these
+suites add and, like `test_bb_harness.py`, always runs. The real-CLI cases use
 `ZERUS_DIRECTORY_TEST_HGS`, `HGS_TEST_BIN` or `target/debug/hgs` through the
 scripted hgs's `exec` rule, so only `--help`, `dirs` and `speech` reach it;
 they fail rather than skip when `CI=true`. Python reports a refused worktree
@@ -203,14 +205,14 @@ the recovery actions.
 | `test_mobile_history_recovery.HistoryRecovery.test_recovery_five_field_identity_and_duplicate_no_repeat` | H2 (recovery actions) | planned |
 | `test_mobile_history_recovery.HistoryRecovery.test_native_recovery_uncertain_preserved` | H2 (recovery actions) | planned |
 | `test_mobile_attachments.AttachmentValidationTests.test_paths_urls_controls_and_unknown_fields_are_rejected` | `test_bb_attachment_read.InlineAttachmentTests.test_invalid_files_never_reach_native`; the remaining shapes: `validation/conversation.jsonl` in a Rust unit test (C3) | partial |
-| `test_mobile_attachments.AttachmentValidationTests.test_native_file_and_total_limits_and_utf8_text` | `test_bb_attachment_read.InlineAttachmentTests` (20 MiB accepted, 20 MiB + 1 and 10 MiB + 1 refused); the text limit: `sizes.jsonl` `send-text-64KiB` | covered |
+| `test_mobile_attachments.AttachmentValidationTests.test_native_file_and_total_limits_and_utf8_text` | `test_bb_attachment_read.InlineAttachmentTests` (20 MiB accepted, 20 MiB + 1 and 10 MiB + 1 refused), `test_message_text_is_bounded_beside_files` (`sizes.jsonl` `send-text-64KiB`, empty text beside a file) | covered |
 | `test_mobile_attachments.AttachmentRelayTests.test_larger_than_one_mebibyte_upload_and_node_delivery` | Relay only: R4 | planned |
 | `test_mobile_attachments.AttachmentRelayTests.test_ordinary_endpoint_cap_invalid_metadata_and_capabilities` | Relay only: R4 | planned |
 | `test_mobile_attachments.AttachmentRelayTests.test_retained_completed_bodies_budget_and_reserved_control_allowance` | Relay only: R4 | planned |
 | `test_mobile_attachments.AttachmentRelayTests.test_connector_accepts_large_request_response_independently` | `test_bb_attachment_read.InlineAttachmentTests.test_files_above_the_result_limit_reach_native_stdin_unchanged`, `test_invalid_files_never_reach_native` | covered |
-| `test_mobile_attachment_read.ReadValidationTests.test_exact_receipt_position_and_bounded_range` | `test_bb_attachment_read.AttachmentReadTests.test_foreign_identities_and_answers_are_refused` (with the `conversation.jsonl` cases) | covered |
+| `test_mobile_attachment_read.ReadValidationTests.test_exact_receipt_position_and_bounded_range` | `test_bb_attachment_read.AttachmentReadTests.test_invalid_positions_and_fields_never_reach_native`, `test_foreign_identities_and_answers_are_refused` (with the `conversation.jsonl` cases) | covered |
 | `test_mobile_attachment_read.ReadValidationTests.test_operation_is_a_short_lived_read_outside_the_indexed_read_text` | `test_bb_read_classes.test_reads_leave_the_journal_by_class_and_mutations_stay`; the `READ_SQL` text: `operations.json` | covered |
-| `test_mobile_attachment_read.ReadValidationTests.test_memory_cache_is_bounded_least_recent_and_expires` | `test_bb_attachment_read.AttachmentReadTests.test_verified_files_are_kept_least_recently_used_up_to_three`; the 120 s expiry needs an injected clock: Rust unit test (C4) | partial |
+| `test_mobile_attachment_read.ReadValidationTests.test_memory_cache_is_bounded_least_recent_and_expires` | `test_bb_attachment_read.AttachmentReadTests.test_verified_files_are_kept_least_recently_used_up_to_three`, `test_the_cache_budget_is_bytes_not_files`; the 120 s expiry needs an injected clock: Rust unit test (C4) | partial |
 | `test_mobile_attachment_read.ConnectorReadTests.test_ranges_return_exact_bytes_digest_and_reuse_one_native_read` | `test_bb_attachment_read.AttachmentReadTests.test_ranges_return_exact_bytes_from_one_native_read`, `test_vector_reads`, `test_native_output_is_capped_at_one_encoded_file` | covered |
 | `test_mobile_attachment_read.ConnectorReadTests.test_archived_and_child_identity_reach_native_flags` | `test_bb_attachment_read.AttachmentReadTests.test_archived_and_child_reads_name_their_flags` | covered |
 | `test_mobile_attachment_read.ConnectorReadTests.test_foreign_session_identity_and_answers_are_refused` | `test_bb_attachment_read.AttachmentReadTests.test_foreign_identities_and_answers_are_refused` | covered |

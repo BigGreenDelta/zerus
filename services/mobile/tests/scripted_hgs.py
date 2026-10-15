@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """A scripted stand-in for `hgs` that black-box connector tests put on PATH.
 
-It never runs hgs, tmux or an agent. Every call re-reads `script.json` from the
-directory named by ZERUS_SCRIPTED_HGS_DIR, answers with the first matching rule
-and appends `start` and `end` events to `calls.jsonl` there.
+It never runs tmux or an agent, and runs a real hgs only for an `exec` rule.
+Every call re-reads `script.json` from the directory named by
+ZERUS_SCRIPTED_HGS_DIR, answers with the first matching rule and appends
+`start` and `end` events to `calls.jsonl` there.
 
 A rule matches with `argv` (exact) or `prefix` (leading arguments), and with
 `stdin_has` only when stdin is a JSON object holding those fields and values;

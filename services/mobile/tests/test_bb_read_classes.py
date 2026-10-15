@@ -138,7 +138,10 @@ class ReadClassTests(OperationCase, BlackBoxCase):
                 self.assertEqual(await self.submit(request, second, redeliver=True,
                                                    expires_at=deadlines[request["request_id"]]),
                                  results[request["request_id"]])
-        self.assertEqual(self.work(mark), [], "a retained read executed again")
+        # A catalog reads accounts and projects, which the heartbeat read only
+        # just now and next reads 15 s later; count them as work here.
+        self.assertEqual(self.work(mark, keep=[["account", "ls"], ["swarm", "get"]]), [],
+                         "a retained read executed again")
         await self.delivered(second, *[request for request in requests if request["operation"] in HOUR])
         second.stop()
 
