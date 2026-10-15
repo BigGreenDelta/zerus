@@ -121,9 +121,13 @@ def creations(code, kind):
     made = [(match.start(), match.end(), [match[1]]) for match in
             re.finditer(rf"(?<![\w:<.])(?<!->)(?:{kind})\s+([A-Za-z_]\w*)\s*(?=[;({{\[])", code)
             if not re.search(r"\btypedef\s*\Z", code[max(0, match.start() - 20):match.start()])]
+    # new, make_unique, QSharedPointer::create or a temporary such as QProcess().startDetached(program, arguments).
     for match in re.finditer(rf"\bnew\s+(?:{kind})\b|(?:\bstd\s*::\s*)?\bmake_(?:unique|shared)\s*<\s*(?:{kind})\s*>"
-                             rf"|\bQSharedPointer\s*<\s*(?:{kind})\s*>\s*::\s*create\b", code):
+                             rf"|\bQSharedPointer\s*<\s*(?:{kind})\s*>\s*::\s*create\b"
+                             rf"|(?<![\w:<.])(?<!->)(?P<temporary>{kind})\s*(?=[({{])", code):
         before = code[max(code.rfind(c, 0, match.start()) for c in ";{}") + 1:match.start()]
+        if match["temporary"] and re.search(r"(?:\b(?:public|protected|private|virtual)|[:,])\s*\Z", before):
+            continue  # A base class or its constructor, which the subclass rule reports.
         # p = new QProcess, p.reset(new QProcess), unique_ptr<QProcess> p(new ...) or a member initializer.
         if assigned := re.search(rf"(?<!\w)((?:{VARIABLE}\s*=\s*)+)\Z", before):
             names = [plain(part) for part in assigned[1].split("=") if part.strip()]
@@ -168,6 +172,12 @@ def child_process_findings(files):
                                          "ChildProcess::startDetached() or a QProcess passed to inheritStdioOnly()"))
         for match in re.finditer(rf"\b(?:public|protected|private)\s+(?:virtual\s+)?(?:{kind})\b(?!\s*::)", code):
             found.append((match.start(), "a QProcess subclass starts children this check cannot follow"))
+        # The static startDetached(program, ...) and execute() also compile on an object, which they ignore.
+        for match in re.finditer(r"(?:\.|->)\s*startDetached\s*\(", code):
+            spans = [code[slice(*span)].strip() for span in arguments(code, match.end() - 1)]
+            if len(spans) > 1 or spans[0] not in {"", "nullptr"} and not spans[0].startswith("&"):
+                found.append((match.start(), "startDetached() with a program is the static QProcess::startDetached(), which "
+                                             "bypasses ChildProcess::inheritStdioOnly(); use ChildProcess::startDetached()"))
         made = creations(code, kind)
         for index, (start, end, names) in enumerate(made):
             if not names:
@@ -181,6 +191,10 @@ def child_process_findings(files):
                 stem = name.rsplit(".", 1)[0]
                 at = [0 for other, text in files.items() if other != name and CHILD_PROCESS_SOURCES.fullmatch(other)
                       and other.rsplit(".", 1)[0] == stem and configured(code_only(text), names, helpers, 0, len(text))]
+            if executed := re.compile(rf"(?<![\w.])(?<!->)(?:this\s*->\s*)?(?:{variables(names)})\s*(?:\.|->)\s*execute\s*\(") \
+                    .search(code, end, limit):
+                found.append((executed.start(), "QProcess::execute() bypasses ChildProcess::inheritStdioOnly(), also on an object; "
+                                                "use a QProcess passed to inheritStdioOnly() and waitForFinished()"))
             started = re.compile(rf"(?<![\w.])(?<!->)(?:this\s*->\s*)?({variables(names)})\s*(\.|->)\s*"
                                  rf"(startDetached|startCommand|start|open)\s*\(").search(code, end, limit)
             if not at:

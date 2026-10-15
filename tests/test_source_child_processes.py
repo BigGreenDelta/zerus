@@ -39,6 +39,26 @@ class StaticStartTest(unittest.TestCase):
                         f"{name}:5: QProcess::{method}() bypasses ChildProcess::inheritStdioOnly(); use "
                         "ChildProcess::startDetached() or a QProcess passed to inheritStdioOnly() (tray/src/ChildProcess.h)."])
 
+    def test_static_starts_through_an_object_or_a_temporary_fail(self):
+        static = ("startDetached() with a program is the static QProcess::startDetached(), which bypasses "
+                  "ChildProcess::inheritStdioOnly(); use ChildProcess::startDetached() (tray/src/ChildProcess.h).")
+        unnamed = ("assign the new QProcess to a variable and pass it to ChildProcess::inheritStdioOnly() "
+                   "(tray/src/ChildProcess.h).")
+        configured = ("auto *process = new QProcess(this);", "ChildProcess::inheritStdioOnly(*process);")
+        for lines, expected in (
+            ((*configured, "process->startDetached(m_tool, {});"), [f"{NAME}:7: {static}"]),
+            ((*configured, "process->startDetached(m_tool);"), [f"{NAME}:7: {static}"]),
+            ((*configured, "return process->execute(m_tool, {});"),
+             [f"{NAME}:7: QProcess::execute() bypasses ChildProcess::inheritStdioOnly(), also on an object; use a "
+              "QProcess passed to inheritStdioOnly() and waitForFinished() (tray/src/ChildProcess.h)."]),
+            (("QProcess().startDetached(m_tool, {});",), [f"{NAME}:5: {unnamed}", f"{NAME}:5: {static}"]),
+            (("QProcess{}.execute(m_tool);",), [f"{NAME}:5: {unnamed}"]),
+            (("QProcess process = QProcess();", "process.start(m_tool, {});"), [f"{NAME}:5: " + UNCONFIGURED.format("process")]),
+            ((*configured, "qint64 pid = 0;", "process->startDetached(&pid);", "process->startDetached(nullptr);"), []),
+        ):
+            with self.subTest(lines=lines):
+                self.assertEqual(findings(function(*lines)), expected)
+
     def test_exempt_files_and_other_sources_may_start_children(self):
         text = function("QProcess::startDetached(m_terminal, m_arguments);", "QProcess process;", "process.startDetached();")
         for name in (*check.CHILD_PROCESS_EXEMPT, "tray/tests/test_launcher.cpp", "tray/src/notes.md", "src/launcher.cpp"):
