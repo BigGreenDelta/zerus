@@ -208,6 +208,7 @@ private slots:
     // Chords a test rebinds end with it.
     void cleanup() { ShortcutRegistry::instance().resetAll(); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
+    void savedDraftsGoToTheirSession();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
     void emptyProjectsSettingPreservesArchiveAndProjects();
@@ -597,6 +598,43 @@ void TestSessionsWindow::workspaceRestoresDraftAcrossRestartAndSessionRemoval()
         QVERIFY(!dialog->findChild<QPushButton *>("restoreSavedDraft")->isEnabled()); dialog->reject();
     });
     restored.findChild<QPushButton *>("savedDrafts")->click();
+}
+
+void TestSessionsWindow::savedDraftsGoToTheirSession()
+{
+    auto state = fleet(); auto box = state.local();
+    box.sessions[1].conversationId = "conversation-one"; box.sessions[1].subagentSource = "hooks";
+    box.sessions[1].subagents = {{"worker", QJsonObject{{"name", "Worker"}, {"state", "working"}}}};
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    const QString remote = "mac\nclaude/infra/review", child = "arch\nkimi/docs/research\nconversation-one\nworker", ended = "mac\nclaude/infra/ended";
+    ComposerDraftStore store;
+    for (const auto &[key, text] : {std::pair{remote, QString("Check the plan first")}, std::pair{child, QString("Ask the worker")},
+                                    std::pair{ended, QString("From an ended session")}}) {
+        ComposerDraft draft; draft.text = text; QVERIFY(store.save(key, draft));
+    }
+    SessionsWindow window(program()); window.setFleet(state); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+    auto *childComposer = window.findChild<MessageComposer *>("subagentComposer"); QVERIFY(childComposer);
+    const auto choose = [&](const QString &key, bool available) {
+        QTimer::singleShot(0, &window, [&, key, available] {
+            auto *dialog = window.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
+            auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 3);
+            for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(Qt::UserRole).toString() == key) list->setCurrentRow(i);
+            QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), key);
+            auto *open = dialog->findChild<QPushButton *>("openSavedDraftSession"); QCOMPARE(open->isEnabled(), available);
+            if (available) open->click(); else dialog->reject();
+        });
+        window.findChild<QPushButton *>("savedDrafts")->click();
+    };
+    choose(ended, false); QCOMPARE(composer->sessionKey(), QString("\ncodex/hgs/dashboard"));
+    choose(remote, true); QCOMPARE(composer->sessionKey(), remote);
+    QTRY_COMPARE(composer->editor()->toPlainText(), QString("Check the plan first"));
+    // A subagent key names this computer; Go to opens the subagent in its session.
+    choose(child, true); QCOMPARE(composer->sessionKey(), QString("\nkimi/docs/research"));
+    QCOMPARE(childComposer->sessionKey(), child); QTRY_COMPARE(childComposer->editor()->toPlainText(), QString("Ask the worker"));
+    QCOMPARE(window.findChild<SessionList *>("sessionList")->currentItem()->data(SessionRoles::ChildId).toString(), QString("worker"));
+    choose(remote, true); QCOMPARE(composer->sessionKey(), remote);
+    QVERIFY(window.findChild<SessionList *>("sessionList")->currentItem()->data(SessionRoles::ChildId).toString().isEmpty());
 }
 
 void TestSessionsWindow::workingCardsKeepTurnClockAcrossUpdates()

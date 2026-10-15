@@ -25,6 +25,7 @@
 #include <QKeySequence>
 #include <QInputMethodEvent>
 #include <QLabel>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QListWidget>
 #include <QMessageBox>
@@ -151,6 +152,7 @@ private slots:
     void deliveryPersistence();
     void storageFailureKeepsDraftAndBlocksDispatch();
     void endedSessionDraftCanBeRecovered();
+    void savedDraftsNameAndOpenTheirSession();
     void draftReplacementRequiresConfirmation();
     void renameCollisionKeepsBothDrafts();
     void typingDoesNotRewriteAttachmentSnapshots();
@@ -367,13 +369,68 @@ void TestMessageComposer::endedSessionDraftCanBeRecovered()
     QVERIFY(ComposerDraftStore().keys().contains("lost\nended"));
 }
 
+void TestMessageComposer::savedDraftsNameAndOpenTheirSession()
+{
+    ComposerDraftStore store;
+    const auto save = [&](const QString &key, const QString &text, bool voice = false) {
+        ComposerDraft draft; draft.text = text;
+        if (voice) draft.attachments.append({"voice.wav", "audio/wav", QByteArray(64, 'v'), {}});
+        QVERIFY(store.save(key, draft));
+    };
+    const QString remote = "mac\nclaude/infra/review", local = "\ncodex/hgs/dashboard", child = "arch\ncodex/hgs/dashboard\nconversation-one\nworker";
+    const auto question = "question\n" + QString::fromUtf8(QJsonDocument(QJsonArray{remote, "question-one", "hash"}).toJson(QJsonDocument::Compact))
+        + "\nrun-one\nconversation-one";
+    save(local, "Local plan\nSecond line stays out of the list");
+    save(remote, "  \n  Review   the deployment  ");
+    save(child, "Ask the worker"); save(question, "Answer the question");
+    save("voice-message-draft\n" + remote, {}, true); save("legacy", "Kept under an old key");
+    // Newest first: the remote draft becomes the oldest.
+    QFile manifest(ComposerDraftStore::directory() + '/' + QCryptographicHash::hash(remote.toUtf8(), QCryptographicHash::Sha256).toHex() + "/draft.json");
+    QVERIFY(manifest.open(QIODevice::ReadWrite));
+    QVERIFY(manifest.setFileTime(QDateTime::currentDateTime().addDays(-1), QFileDevice::FileModificationTime)); manifest.close();
+
+    MessageComposer composer; setSessionReady(composer, "arch\nother");
+    composer.canOpenDraftSession = [&](const QString &key) { return key == remote || key == child || key == "legacy"; };
+    QSignalSpy requested(&composer, &MessageComposer::draftSessionRequested);
+    QTimer::singleShot(0, &composer, [&] {
+        auto *dialog = composer.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
+        auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 6);
+        auto *open = dialog->findChild<QPushButton *>("openSavedDraftSession"); QVERIFY(open);
+        QHash<QString, QString> rows; QStringList order;
+        for (int i = 0; i < list->count(); ++i) {
+            const auto key = list->item(i)->data(Qt::UserRole).toString(); order << key; rows.insert(key, list->item(i)->text());
+        }
+        // Stored drafts have an empty label; each row still names its session.
+        QCOMPARE(rows.value(local).section(QChar::LineFeed, 0, 0), QString("codex/hgs/dashboard · this computer"));
+        QVERIFY(rows.value(local).endsWith(" · Local plan"));
+        QCOMPARE(rows.value(remote).section(QChar::LineFeed, 0, 0), QString("claude/infra/review · mac"));
+        QVERIFY(rows.value(remote).endsWith(" · Review the deployment"));
+        QCOMPARE(rows.value(child).section(QChar::LineFeed, 0, 0), QString("codex/hgs/dashboard · arch · subagent"));
+        QCOMPARE(rows.value(question).section(QChar::LineFeed, 0, 0), QString("claude/infra/review · mac · question answer"));
+        QCOMPARE(rows.value("voice-message-draft\n" + remote).section(QChar::LineFeed, 0, 0), QString("claude/infra/review · mac · voice message"));
+        QVERIFY(rows.value("voice-message-draft\n" + remote).endsWith(" · 1 attachment(s)"));
+        QCOMPARE(rows.value("legacy").section(QChar::LineFeed, 0, 0), QString("legacy"));
+        QCOMPARE(order.last(), remote);
+        // An unknown key has no session to open, whatever the window says.
+        list->setCurrentRow(order.indexOf("legacy")); QVERIFY(!open->isEnabled());
+        list->setCurrentRow(order.indexOf(local)); QVERIFY(!open->isEnabled()); QVERIFY(!open->toolTip().isEmpty());
+        list->setCurrentRow(order.indexOf(child)); QVERIFY(open->isEnabled()); QVERIFY(requested.isEmpty());
+        open->click(); QVERIFY(!dialog->isVisible()); QVERIFY(requested.isEmpty());
+    });
+    composer.showSavedDrafts();
+    QCOMPARE(requested.size(), 1); QCOMPARE(requested[0][0].toString(), child);
+    QCOMPARE(composer.sessionKey(), QString("arch\nother")); QVERIFY(composer.editor()->toPlainText().isEmpty());
+}
+
 void TestMessageComposer::draftReplacementRequiresConfirmation()
 {
     MessageComposer composer; setSessionReady(composer, "arch\nsource"); composer.editor()->setPlainText("Saved source");
     setSessionReady(composer, "mac\ntarget"); composer.editor()->setPlainText("Current draft");
     QTimer::singleShot(0, &composer, [&] {
         auto *dialog = composer.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
-        auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_VERIFY(list->count() > 0); list->setCurrentRow(0);
+        auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 2);
+        for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(Qt::UserRole).toString() == "arch\nsource") list->setCurrentRow(i);
+        QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), QString("arch\nsource"));
         dialog->findChild<QPushButton *>("copySavedDraft")->click(); QVERIFY(dialog->isVisible());
         QTimer::singleShot(0, &composer, [&] {
             auto *confirm = composer.findChild<QMessageBox *>("replaceDraftConfirm"); QVERIFY(confirm);

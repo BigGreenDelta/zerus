@@ -221,17 +221,51 @@ QStringList ComposerDraftStore::keys() const
     flushWrites(); auto result = indexDirect().keys(); result.sort(); return result;
 }
 
-QHash<QString, QString> ComposerDraftStore::indexDirect() const
+QHash<QString, ComposerDraftSummary> ComposerDraftStore::indexDirect() const
 {
-    QHash<QString, QString> result;
+    QHash<QString, ComposerDraftSummary> result;
     for (const auto &name : QDir(root()).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         QFile file(root() + '/' + name + "/draft.json");
         if (!file.open(QIODevice::ReadOnly)) continue;
         const auto object = QJsonDocument::fromJson(file.readAll()).object();
         const auto key = object.value("key").toString();
-        if (object.value("version").toInt() == 1 && name == hash(key.toUtf8())
-            && (!object.value("text").toString().trimmed().isEmpty() || !object.value("attachments").toArray().isEmpty()))
-            result.insert(key, object.value("label").toString(QString(key).replace('\n', " / ")));
+        const auto text = object.value("text").toString();
+        const auto attachments = object.value("attachments").toArray();
+        if (object.value("version").toInt() != 1 || name != hash(key.toUtf8()) || (text.trimmed().isEmpty() && attachments.isEmpty()))
+            continue;
+        ComposerDraftSummary summary;
+        summary.label = object.value("label").toString();
+        summary.modified = file.fileTime(QFileDevice::FileModificationTime);
+        summary.attachments = attachments.size();
+        for (const auto &line : text.split('\n')) if (!line.trimmed().isEmpty()) { summary.preview = line.simplified().left(200); break; }
+        result.insert(key, summary);
+    }
+    return result;
+}
+
+ComposerDraftOwner ComposerDraftStore::owner(const QString &key)
+{
+    static const QString Voice = QStringLiteral("voice-message-draft\n"), Question = QStringLiteral("question\n");
+    if (key.startsWith(Voice)) {
+        auto result = owner(key.mid(Voice.size()));
+        if (result.kind == ComposerDraftOwner::Kind::Message) { result.kind = ComposerDraftOwner::Kind::Voice; return result; }
+    }
+    if (key.startsWith(Question)) {
+        // A question identity is a compact JSON array, so it holds no line break.
+        const auto identity = QJsonDocument::fromJson(key.mid(Question.size()).section('\n', 0, 0).toUtf8()).array();
+        auto result = owner(identity.at(0).toString());
+        if (result.kind != ComposerDraftOwner::Kind::Unknown) { result.kind = ComposerDraftOwner::Kind::Question; return result; }
+    }
+    const auto parts = key.split('\n');
+    ComposerDraftOwner result;
+    if (parts.size() < 2 || parts.size() > 4 || parts[1].isEmpty()) return result;
+    result.machine = parts[0]; result.session = parts[1];
+    if (parts.size() == 4) {
+        result.kind = ComposerDraftOwner::Kind::Subagent; result.conversation = parts[2]; result.subagent = parts[3];
+        if (result.subagent.isEmpty()) return {};
+    } else {
+        result.kind = ComposerDraftOwner::Kind::Message;
+        if (parts.size() == 3) result.archive = parts[2];
     }
     return result;
 }
@@ -254,7 +288,7 @@ void ComposerDraftStore::loadAsync(const QString &key, QObject *owner, std::func
     });
 }
 
-void ComposerDraftStore::indexAsync(QObject *owner, std::function<void(const QHash<QString, QString> &)> done) const
+void ComposerDraftStore::indexAsync(QObject *owner, std::function<void(const QHash<QString, ComposerDraftSummary> &)> done) const
 {
     const auto store = *this; const QPointer<QObject> guard(owner); auto *queue = DraftWrites::instance();
     queue->read([store, guard, done = std::move(done), queue] {

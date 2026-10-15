@@ -120,6 +120,9 @@ private:
     void showGroupMenu(const QString &group, const QPoint &position);
     void showWorkspaceSettings();
     void revealSession(const QString &key);
+    // The listed session a saved draft belongs to, or null.
+    const Entry *draftOwner(const QString &draftKey) const;
+    void openDraftSession(const QString &draftKey);
     void updateHeaderText();
     void updateSessionLoading();
     void updateSessionFeedback();

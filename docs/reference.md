@@ -678,9 +678,14 @@ immutable. Save failures remain visible and block sending until persistence
 succeeds.
 
 **Saved drafts** below the session list lets you preview, copy or restore drafts
-from ended or missing sessions into the current session. Copying keeps the dialog
-open; restoring never sends anything and replacing an existing draft requires
-confirmation. A source draft remains available after copying it to another session.
+from ended or missing sessions into the current session. It lists the most
+recently edited drafts first; each row names the draft's session and computer
+(and whether it is a subagent message, question answer or voice message), with
+its time and first line. **Go to session** opens the session that owns the
+selected draft, or its subagent, while that session is in the session list.
+Copying keeps the dialog open; restoring never sends anything and replacing an
+existing draft requires confirmation. A source draft remains available after
+copying it to another session.
 Confirmed sends clear the outgoing draft; failures retain it. After an interrupted
 or uncertain send, check Activity or Terminal before explicitly allowing another
 send. Saving failures are shown in the editor and retried locally; sending starts
