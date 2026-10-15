@@ -148,6 +148,23 @@ class AccountTests(ComputerCase):
                           two["usage"]["stale"]), ({"email": "user@example.test"}, 800, False, True))
         self.assert_private_fields_withheld()
 
+    async def test_a_reset_time_that_is_not_an_ascii_timestamp_is_dropped(self):
+        # Provider text is untrusted: a multi-byte reset time is dropped as
+        # Python's pattern drops it, and the heartbeat carries on.
+        windows = [{"id": "primary", "used_percent": 10, "resets_at": "\u20ac\u20ac\u20ac\u20ac-01-01T00:00:00Z"},
+                   {"id": "weekly", "used_percent": 20, "resets_at": "2025-10-09T12:00:00Z"}]
+        status = {"status": "ok", "checked_at": time.time(), "windows": windows}
+        self.hgs.script([{"argv": ["account", "ls"],
+                          "stdout": {"profiles": [profile(installed=False, account_status=status)]}}]
+                        + default_rules(listing()))
+        process = await self.launch()
+        await self.until(lambda: len(self.relay.heartbeats()) >= 2, what="two heartbeats", process=process)
+        [account] = self.accounts()[-1]["accounts"]
+        self.assertEqual(account["usage"]["windows"], [
+            {"id": "primary", "used_percent": 10},
+            {"id": "weekly", "used_percent": 20, "resets_at": "2025-10-09T12:00:00Z"}])
+        self.assertIsNone(process.returncode)
+
     async def test_an_unavailable_catalog_is_reported_without_native_text(self):
         self.hgs.script([{"argv": ["account", "ls"], "exit": 1, "stderr": "private-error\n"}] + default_rules(listing()))
         process = await self.launch()

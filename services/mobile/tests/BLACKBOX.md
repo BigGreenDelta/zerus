@@ -39,8 +39,11 @@ each in four concurrent runs confined to four CPUs, each in its own scratch
 directory. Seven skipped: the two Rust-only tests of `test_bb_native_limits`
 and the five of `test_bb_check`, since `--check` exists only in the Rust
 connector. Against the Rust connector, the ported modules and the harness
-self-tests (21 tests) take 5 s. Each test starts its own connector processes,
-and the time goes to the connector's own clocks rather than to the machine:
+self-tests (63 tests) took 90 s on a Linux workstation (2026-10-15), mostly
+`test_bb_runtime` (47 s) and `test_bb_computer` (32 s); `test_bb_runtime`
+adds three Rust-only tests that Python mode skips. Each test starts its own
+connector processes, and the time goes to the connector's own clocks rather
+than to the machine:
 `test_bb_peer_routes` (33-38 s), `test_bb_fleet` (34-35 s), `test_bb_computer`
 (31 s, the 15 s project refresh), `test_bb_gateway` (30-31 s),
 `test_bb_gateway_downgrade` (26-28 s) and `test_bb_native_limits` (25 s) take
@@ -120,9 +123,11 @@ implements so far:
 
 | Divergence | Test | Python | Rust |
 |---|---|---|---|
-| b: a result the relay rejects | `test_bb_requests.test_rejected_result_blocks_later_claims_in_python`, `test_bb_native_limits.RefusedResultTests` | A 400, 413 or 422 upload refusal is retried before every poll, so it blocks every later claim. A native error beyond 4,096 code points, a non-string one, and a receipt within `MAX_RESULT` whose canonical form with its request_id exceeds 1 MiB are journaled as they are and refused that way. | The relay accepts the sanitised receipt: the error cut to 4,096 code points or a fixed text, an oversized receipt uncertain without its result. A stored result the relay keeps refusing is retired after three attempts, which needs the `test-hooks` clock scale (`CLOCK_SCALE_HOOK`). |
+| a: claims before the first capability probe | `test_bb_runtime.DivergenceTests.test_claims_wait_for_the_first_capability_probe` | Claims as soon as its listing is ready, so an optional read such as `mark_read` fails as unavailable, and polls with `wait=1`. | Waits for the first probe, at most 3 s; a failed probe keeps the previous flags (a Rust unit test). |
+| b: a result the relay rejects | `test_bb_requests.test_rejected_result_blocks_later_claims_in_python`, `test_bb_native_limits.RefusedResultTests`, `test_bb_runtime.DivergenceTests` | A 400, 413 or 422 upload refusal is retried before every poll, so it blocks every later claim. A native error beyond 4,096 code points, a non-string one, and a receipt within `MAX_RESULT` whose canonical form with its request_id exceeds 1 MiB are journaled as they are and refused that way. | The relay accepts the sanitised receipt: the error cut to 4,096 code points or a fixed text, an oversized receipt uncertain without its result. A stored result the relay keeps refusing is retired after three attempts, which needs the `test-hooks` clock scale (`CLOCK_SCALE_HOOK`). |
 | d: a relay that refuses the extended heartbeat | `test_bb_gateway_downgrade` | Keeps gateway sharing off until restart. | The same within these tests; the re-probe after 300 s is planned for C6 with the `test-hooks` clock scale (`CLOCK_SCALE_HOOK`). |
-| h (amended): SIGTERM | `test_bb_signals`, `test_bb_worktrees.test_sigterm_never_cuts_a_creation_short` | Dies at once (exit -15); the in-flight native call finishes on its own; restart journals the mutation uncertain. | Stops claiming, lets the in-flight call finish, journals its real outcome, exits 0. |
+| g: a stored row the relay cannot accept | `test_bb_runtime.DivergenceTests.test_a_stored_row_the_relay_cannot_accept_uploads_a_substitute` | Re-encodes a stored NaN, which the relay refuses, so the row blocks every later claim. | Uploads a fixed substitute, failed for a read and uncertain for a mutation; the row stays as stored. |
+| h (amended): SIGTERM | `test_bb_signals`, `test_bb_worktrees.test_sigterm_never_cuts_a_creation_short`, `test_bb_runtime.StopTests` | Dies at once (exit -15); the in-flight native call finishes on its own; restart journals the mutation uncertain. | Stops claiming, lets the in-flight call finish, journals its real outcome, exits 0. |
 
 Divergence c, a peer `attachment_read`, no longer differs. Python failed
 with "connector could not record native outcome" before it asked the peer,
@@ -134,9 +139,11 @@ pins for both. The design, `vectors/README.md` and the `divergence_c` note of
 `vectors/receipts.json` still describe the old Python failure.
 
 Under h, neither may kill the native mutation child, and no request is
-claimed after the signal. SIGINT is not covered: Python's KeyboardInterrupt
-cancels the request and SIGKILLs the hgs child, which amended divergence h
-does not address.
+claimed after the signal. For a mutation SIGINT is not covered: Python's
+KeyboardInterrupt cancels the request and SIGKILLs the hgs child, which
+amended divergence h does not address. The design's runtime section stops
+the Rust connector on SIGINT as on SIGTERM, which
+`test_bb_runtime.StopTests.test_sigint_stops_like_sigterm` pins with a read.
 
 ## Heartbeat key review
 
