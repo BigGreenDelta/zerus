@@ -77,11 +77,17 @@ const CODEC_DIFFERENCES: &[(&str, &str)] = &[
 /// The Python connector itself accepts DEL in a send's `expected_run_id` and
 /// never reads `computer_id`, which the relay removes before a claim.
 const ORACLE_DIFFERENCES: &[(&str, &str)] = &[
-    ("session/delete", "the relay refuses DEL in session"),
-    ("computer-id/delete", "the relay refuses DEL in computer_id"),
+    (
+        "session/delete",
+        "the relay refuses DEL in session (zerus-3rqx.6)",
+    ),
+    (
+        "computer-id/delete",
+        "the relay refuses DEL in computer_id (zerus-3rqx.6)",
+    ),
     (
         "payload/run-delete",
-        "the relay refuses DEL in expected_run_id",
+        "the relay refuses DEL in expected_run_id (zerus-3rqx.6)",
     ),
 ];
 
