@@ -62,7 +62,7 @@ jobs:
             echo "run_macos=$RUN_MACOS"
             echo "run_windows=$RUN_WINDOWS"
           } >> "$GITHUB_OUTPUT"
-          printf '### CI coverage\n\nCommit: %s\n\nQuick checks, Android unit tests and lint: always\n\nFull Linux CLI: %s\n\nArch desktop/package: %s\n\nmacOS CLI/desktop: %s\n\nWindows client/desktop/portable zip and real agents: %s\n' \
+          printf '### CI coverage\n\nCommit: %s\n\nQuick checks, Android unit tests and lint: always\n\nFull Linux CLI: %s\n\nArch desktop/package: %s\n\nmacOS CLI/desktop and iOS: %s\n\nWindows client/desktop/portable zip and real agents: %s\n' \
             "$commit" "$RUN_LINUX" "$RUN_ARCH" "$RUN_MACOS" "$RUN_WINDOWS" >> "$GITHUB_STEP_SUMMARY"
 
   quick:
@@ -371,6 +371,38 @@ jobs:
             "$RUNNER_TEMP/connector-venv/bin/python" -m unittest -v test_bb_harness test_bb_startup test_bb_journal \
             test_bb_requests test_bb_restart test_bb_retention test_bb_heartbeat test_bb_runtime test_bb_send \
             test_bb_signals test_bb_handoff
+
+  # The iOS client with the other macOS suites: ZerusKit unit tests on the host and
+  # an unsigned simulator build of the app. No signing identity reaches this job.
+  ios:
+    name: iOS core tests and simulator build
+    needs: source
+    if: needs.source.outputs.run_macos == 'true'
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - name: Select Xcode 26 or later
+        run: |
+          set -euo pipefail
+          xcode=$(ls -d /Applications/Xcode_*.app | sed -n 's#^/Applications/Xcode_\([0-9][0-9.]*\)\.app$#\1 &#p' | sort -V | tail -n 1 | cut -d' ' -f2)
+          sudo xcode-select -s "${xcode:-/Applications/Xcode.app}"
+          xcodebuild -version
+          major=$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')
+          if [ "${major:-0}" -lt 26 ]; then echo "::error::The iOS client needs Xcode 26 or later."; exit 1; fi
+      - name: ZerusKit tests
+        working-directory: mobile/ios/ZerusKit
+        run: swift test
+      - name: Simulator build
+        run: |
+          xcodebuild -project mobile/ios/Zerus.xcodeproj -scheme Zerus -configuration Release \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/ios-derived-data" \
+            CODE_SIGNING_ALLOWED=NO ZERUS_SOURCE_REVISION="${SOURCE_COMMIT:0:12}" build
 
   # Every run, PRs included, tests and lints the Firebase variant that the signed
   # Dev build ships. A synthetic configuration with placeholder values stands in
@@ -1035,7 +1067,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, relay, connector, connector-macos, android, cli, arch, arch-package, mac-desktop, windows-desktop, windows-host]
+    needs: [source, quick, relay, connector, connector-macos, ios, android, cli, arch, arch-package, mac-desktop, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1060,6 +1092,7 @@ jobs:
               'arch-package': json.loads(os.environ['RUN_ARCH']),
               'mac-desktop': json.loads(os.environ['RUN_MACOS']),
               'connector-macos': json.loads(os.environ['RUN_MACOS']),
+              'ios': json.loads(os.environ['RUN_MACOS']),
               'windows-desktop': json.loads(os.environ['RUN_WINDOWS']),
               'windows-host': json.loads(os.environ['RUN_WINDOWS']),
           }

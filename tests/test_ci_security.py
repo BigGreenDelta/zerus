@@ -391,14 +391,14 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
-        self.assertIn("needs: [source, quick, relay, connector, connector-macos, android, cli, arch, arch-package, "
+        self.assertIn("needs: [source, quick, relay, connector, connector-macos, ios, android, cli, arch, arch-package, "
                       "mac-desktop, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         base = {"source": "success", "quick": "success", "relay": "success", "connector": "success",
                 "android": "success", "cli": "success", "arch": "success", "arch-package": "success",
-                "mac-desktop": "success", "connector-macos": "success"}
+                "mac-desktop": "success", "connector-macos": "success", "ios": "success"}
         # Both Windows jobs are selected together, and each must pass on its own.
         windows = ("windows-desktop", "windows-host")
         for name in windows:
@@ -608,7 +608,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        names = ("source", "quick", "relay", "connector", "connector-macos", "android", "cli", "arch", "arch-package",
+        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "cli", "arch", "arch-package",
                  "mac-desktop", "windows-desktop", "windows-host")
         for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
                                                  ("true", "skipped", False), ("false", "skipped", True),
@@ -616,10 +616,48 @@ class WorkflowSecurityTests(unittest.TestCase):
             results = dict.fromkeys(names, "success")
             if run_macos == "false":
                 results["mac-desktop"] = "skipped"
+                results["ios"] = "skipped"
             results["connector-macos"] = smoke_result
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
                            "RUN_CLI": "true", "RUN_ARCH": "true", "RUN_MACOS": run_macos, "RUN_WINDOWS": "true"}
             with self.subTest(run_macos=run_macos, result=smoke_result), patch.dict(os.environ, environment):
+                if success:
+                    exec(code, {})
+                else:
+                    with self.assertRaises(SystemExit):
+                        exec(code, {})
+
+    def test_ios_job_is_a_selected_credential_free_macos_suite(self):
+        checks = (ROOT / ".github/workflows/checks.yml").read_text()
+        ios = job(checks, "ios")
+        self.assertEqual(field(ios, "runs-on"), "macos-15")
+        self.assertEqual(field(ios, "if"), "needs.source.outputs.run_macos == 'true'")
+        self.assertRegex(field(ios, "timeout-minutes"), r"^\d+$")
+        for text in ("secrets", "vars.", "environment:", "permissions", "github.token", "continue-on-error", "cache",
+                     "allowProvisioningUpdates", "DEVELOPMENT_TEAM"):
+            with self.subTest(forbidden=text):
+                self.assertNotIn(text, ios)
+        self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", ios), ["actions/checkout"])
+        self.assertIn("persist-credentials: false", ios)
+        self.assertIn("swift test", ios)
+        self.assertIn("CODE_SIGNING_ALLOWED=NO", ios)
+        self.assertIn("'ios': json.loads(os.environ['RUN_MACOS']),", job(checks, "gate"))
+        gate = job(checks, "gate")
+        script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
+        code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
+        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "cli", "arch", "arch-package",
+                 "mac-desktop", "windows-desktop", "windows-host")
+        for run_macos, ios_result, success in [("true", "success", True), ("true", "failure", False),
+                                               ("true", "skipped", False), ("true", "cancelled", False),
+                                               ("false", "skipped", True), ("false", "success", False)]:
+            results = dict.fromkeys(names, "success")
+            if run_macos == "false":
+                results["mac-desktop"] = "skipped"
+                results["connector-macos"] = "skipped"
+            results["ios"] = ios_result
+            environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
+                           "RUN_CLI": "true", "RUN_ARCH": "true", "RUN_MACOS": run_macos, "RUN_WINDOWS": "true"}
+            with self.subTest(run_macos=run_macos, result=ios_result), patch.dict(os.environ, environment):
                 if success:
                     exec(code, {})
                 else:

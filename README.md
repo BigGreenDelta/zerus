@@ -137,7 +137,8 @@ The **Android app** brings your projects and agents to your phone:
 
 Pair your phone with a computer to reach it and its directly connected Zerus peers
 through a **self-hostable HTTPS relay**. Notifications use Firebase Cloud Messaging,
-with a foreground live connection for phones without it. **iOS is planned.**
+with a foreground live connection for phones without it. A native **iOS app** with
+the same features is in development ([mobile/ios](mobile/ios/README.md)).
 
 [Download the Android APK](https://zerus.dev/#download) |
 [Connect your phone](docs/mobile-deployment.md#pair-the-phone) |
