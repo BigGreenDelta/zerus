@@ -1,6 +1,8 @@
 #include "AttentionTracker.h"
+#include "SessionPresentation.h"
 
 #include <QGuiApplication>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QUuid>
 
@@ -16,6 +18,10 @@ QString concise(QString value, int limit)
         if (value[i].category() == QChar::Other_Control) value[i] = ' ';
     return value.size() > limit ? value.left(limit - 1) + QChar(0x2026) : value;
 }
+// Question IDs already seen per conversation, including answered ones: a
+// transient empty listing, a resume or a connector restart must not announce
+// the same question again.
+constexpr qsizetype SeenQuestions = 64;
 }
 
 AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &box, qint64 now)
@@ -99,6 +105,65 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
                 false, s.attentionAcknowledged);
         }
     }
+    // Optional questions belong to conversations, like replies. Every listed row
+    // keeps its conversation's seen IDs, so a stop and resume stays quiet; only a
+    // running one can have pending questions.
+    struct Optional { const SessionInfo *session = nullptr; QStringList ids; bool unknown = false; };
+    QMap<QString, Optional> optional;
+    const auto live = [](const SessionInfo &s) { return s.state == "running" && s.processState != "exited"; };
+    for (const auto &s : box.sessions) {
+        if (s.conversationId.isEmpty() || !s.optionalQuestionsReported) continue;
+        auto &entry = optional["question:" + s.cmd + ':' + s.conversationId];
+        if (!entry.session || (live(s) && !live(*entry.session))) entry.session = &s;
+        if (live(s) && s.optionalQuestions < 0) entry.unknown = true;
+        if (SessionPresentation::optionalQuestionCount(s) > 0)
+            for (const auto &id : s.optionalQuestionIds) if (!entry.ids.contains(id)) entry.ids << id;
+    }
+    QList<AttentionNotice> questions;
+    for (auto it = optional.begin(); it != optional.end(); ++it) {
+        const auto old = previous.value(it.key()).toObject();
+        const auto &s = *it->session;
+        if (it->unknown) {
+            // An unreadable index is not an answer: keep the banner and IDs.
+            if (!old.isEmpty()) current[it.key()] = old;
+            continue;
+        }
+        QStringList seen, fresh;
+        QSet<QString> known;
+        for (const auto &id : old.value("seen").toArray()) {
+            known.insert(id.toString());
+            if (!it->ids.contains(id.toString())) seen << id.toString();
+        }
+        for (const auto &id : it->ids) if (!known.contains(id)) fresh << id;
+        seen = seen.mid(qMax<qsizetype>(0, seen.size() + it->ids.size() - SeenQuestions)) + it->ids;
+        QJsonObject entry{{"seen", QJsonArray::fromStringList(seen)}};
+        // Marking the session read here or on another device acknowledges its
+        // questions; turning banners off withdraws them.
+        if (!it->ids.isEmpty() && m_optionalQuestions && !s.attentionAcknowledged) {
+            const auto token = old.value("token").toString();
+            const auto retry = old.value("retry_at").toInteger();
+            // A request that needs action announces itself; while Zerus has focus
+            // new questions are only recorded, as foreground edges are.
+            if ((!fresh.isEmpty() || (!token.isEmpty() && retry && retry <= now)) && !applicationFocused && !s.needsAction()) {
+                QJsonObject target{{"host", host}, {"name", s.name}, {"run", s.runId}, {"created", s.created},
+                    {"notice", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                    {"question", fresh.isEmpty() ? it->ids.last() : fresh.last()}, {"conversation", s.conversationId}, {"agent", s.cmd}};
+                entry["token"] = QString::fromLatin1(QJsonDocument(target).toJson(QJsonDocument::Compact)
+                    .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+                const int count = qMax<int>(s.optionalQuestions, it->ids.size());
+                questions.append({entry.value("token").toString(), QObject::tr("Zerus — Optional question"),
+                    concise(s.name, 120) + " / " + concise(host.isEmpty() ? box.host : host, 40) + '\n'
+                    + (count == 1 ? QObject::tr("Optional question waiting") : QObject::tr("%1 optional questions waiting").arg(count))});
+            } else if (!token.isEmpty()) {
+                entry["token"] = token;
+                if (retry) entry["retry_at"] = retry;
+            }
+        }
+        current[it.key()] = entry;
+    }
+    // Posted first, so on Windows a blocking request from the same poll stays
+    // the message whose click is handled.
+    changes.raised = questions + changes.raised;
     for (auto it = previous.begin(); it != previous.end(); ++it) {
         const QString token = it.value().toObject().value("token").toString();
         if (!token.isEmpty() && current.value(it.key()).toObject().value("token").toString() != token)
@@ -135,7 +200,7 @@ QJsonObject AttentionTracker::target(const QString &token)
 bool AttentionTracker::matches(const QJsonObject &target, const SessionInfo &s)
 {
     if (target.isEmpty() || s.state == "archived") return false;
-    if (!target.value("reply").toString().isEmpty())
+    if (!target.value("reply").toString().isEmpty() || !target.value("question").toString().isEmpty())
         return target.value("conversation").toString() == s.conversationId && target.value("agent").toString() == s.cmd;
     const auto run = target.value("run").toString();
     return run.isEmpty() ? target.value("name").toString() == s.name && target.value("created").toInteger() == s.created
