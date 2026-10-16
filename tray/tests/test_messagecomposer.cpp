@@ -46,6 +46,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <atomic>
+#include <memory>
+#include <optional>
 #include <thread>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -130,11 +132,13 @@ void setSessionReady(MessageComposer &composer, const QString &key)
 }
 bool setSendingReady(MessageComposer &composer, const QString &key, bool preserve = false)
 {
-    bool finished = false, okay = false;
-    composer.prepareSendingAsync(key, preserve, [&](bool result) { okay = result; finished = true; });
+    // Shared, so a result that arrives after the wait never writes into a returned frame.
+    const auto result = std::make_shared<std::optional<bool>>();
+    composer.prepareSendingAsync(key, preserve, [result](bool okay) { *result = okay; });
+    // The durable draft write can stall for seconds on a loaded Windows runner.
     QElapsedTimer clock; clock.start();
-    while (!finished && clock.elapsed() < 3000) QTest::qWait(1);
-    return finished && okay;
+    while (!result->has_value() && clock.elapsed() < 20000) QTest::qWait(1);
+    return result->value_or(false);
 }
 }
 

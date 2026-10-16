@@ -36,7 +36,7 @@ test -L "$dmg_mount/Applications"
 test "$(readlink "$dmg_mount/Applications")" = /Applications
 test -d "$dmg_mount/Zerus.app"
 test ! -L "$dmg_mount/Zerus.app"
-python3 scripts/check-macos-bundle.py "$dmg_mount/Zerus.app" --version "$version" --release "$release" --team-id "$team" --selftest
+python3 scripts/check-macos-bundle.py "$dmg_mount/Zerus.app" --version "$version" --release "$release" --team-id "$team" --selftest --source-commit "$(git rev-parse HEAD)"
 hdiutil detach "$dmg_mount"
 rmdir "$dmg_mount"
 trap - EXIT
@@ -66,7 +66,7 @@ python3 scripts/check-macos-bundle.py "$app" --version "$version" --release "$re
 # verified disposable installation's download attribute for unattended execution.
 # Public casks and release archives retain their normal quarantine behavior.
 xattr -dr com.apple.quarantine "$app"
-python3 scripts/check-macos-bundle.py "$app" --version "$version" --release "$release" --team-id "$team" --selftest
+python3 scripts/check-macos-bundle.py "$app" --version "$version" --release "$release" --team-id "$team" --selftest --source-commit "$(git rev-parse HEAD)"
 home="${RUNNER_TEMP:?}/zerus-home"
 mkdir -p "$home"
 HOME="$home" "$(brew --prefix)/bin/zerus-setup"

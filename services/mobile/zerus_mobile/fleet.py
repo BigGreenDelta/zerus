@@ -104,7 +104,7 @@ class Fleet:
                                 "argv": argv, "payload": payload}
                     return await self.connector._native(["swarm", "mobile-peer", "--json"], envelope,
                         timeout=budget, json_output=json_output, failure_json=failure_json,
-                        max_output_bytes=MAX_PEER_SNAPSHOT if argv == ["ls", "--json", "--local"] else max_output_bytes)
+                        max_output_bytes=MAX_PEER_SNAPSHOT if argv in (["ls", "--json", "--local"], ["ls", "--json", "--local", "--no-archives"]) else max_output_bytes)
             try:
                 return await asyncio.wait_for(invoke(), budget)
             except asyncio.TimeoutError:

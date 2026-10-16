@@ -45,6 +45,7 @@ pub struct Submission {
     after: bool,
     agent: bool,
     attachments: bool,
+    video: bool,
     speech_job: Option<String>,
     speech_config_operation: Option<String>,
 }
@@ -59,6 +60,7 @@ impl Submission {
             operation: s(&body, "operation").into(),
             after: body["payload"].get("after").is_some(),
             agent: body["payload"].get("agent_id").is_some(),
+            video: body["operation"] == "voice_submit" && body["payload"].get("video").is_some(),
             attachments: body["payload"]["attachments"]
                 .as_array()
                 .is_some_and(|v| !v.is_empty()),
@@ -160,6 +162,9 @@ impl Store {
             }
         }
         if op == "send" && b.agent && !protocol::supports(&snapshot, "send_agent", "features") {
+            return Err(Error::CONFLICT);
+        }
+        if b.video && !protocol::supports(&snapshot, "voice_video", "features") {
             return Err(Error::CONFLICT);
         }
         if op == "terminal_input"

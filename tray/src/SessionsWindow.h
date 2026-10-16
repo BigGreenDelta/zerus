@@ -4,6 +4,7 @@ namespace SessionUsage {class ContextButton;}
 namespace CacheStatus {class Chip;}
 namespace RecoveryUi {class Panel;}
 namespace ActivityWidth {class ColumnLayout;}
+class ArchiveBrowser;
 class ToolbarChip;
 class SettingsPage;
 class SwarmController;
@@ -109,6 +110,8 @@ protected:
     void changeEvent(QEvent *event) override;
 
 private:
+    ArchiveBrowser *m_archiveBrowser = nullptr;
+    QMap<QString,QList<SessionInfo>> m_archiveSearchRows;
     struct Entry { QString host, machine, key, identity; SessionInfo session; bool online; };
     void applyTheme();
     void updateWindowPinAppearance();

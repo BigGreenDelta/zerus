@@ -112,6 +112,7 @@ class Store:
         """)
         self.db.execute("DROP INDEX IF EXISTS read_history_v2")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_history_v2 ON requests(updated) WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain')")
+        self.db.execute("CREATE INDEX IF NOT EXISTS archive_history ON requests(updated,id) WHERE operation='archive_list' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS file_history ON requests(updated,id) WHERE operation='file_read' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS attachment_history ON requests(updated,id) WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_expiry ON requests(expires_at) WHERE state='queued' AND expires_at IS NOT NULL")
@@ -229,6 +230,7 @@ class Store:
             self.db.execute(f"UPDATE requests SET state='failed',error='terminal input expired before delivery',result_bytes=length('terminal input expired before delivery'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='queued' AND expires_at<=? ORDER BY expires_at LIMIT {batch_size})", (now,now))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
             # Attachment bytes are carried, never kept beyond a short read window.
+            self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='archive_list' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT {batch_size})", (now-3600,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='file_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated LIMIT {batch_size})", (now - ATTACHMENT_RESULT_TTL, now - ATTACHMENT_READ_GRACE))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain') AND (updated<? OR result_read<?) ORDER BY updated LIMIT {batch_size})", (now - ATTACHMENT_RESULT_TTL, now - ATTACHMENT_READ_GRACE))
             self.db.execute(f"UPDATE requests SET state='failed',error='request expired before delivery',result_bytes=length('request expired before delivery'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='queued' AND created<=? ORDER BY created LIMIT {batch_size})", (now, now - queue_ttl))
@@ -283,6 +285,8 @@ class Store:
                 return 409, {"error": "computer does not advertise this inspection feature; update its connector"}
             if body["operation"] == "send" and "agent_id" in body["payload"] and not supports(snapshot, "send_agent", "features"):
                 return 409, {"error": "computer does not advertise child message transport; update its connector"}
+            if body["operation"] == "voice_submit" and "video" in body["payload"] and not supports(snapshot, "voice_video", "features"):
+                return 409, {"error": "computer does not advertise video messages; update its connector"}
             if body["operation"] == "terminal_input" and (node["last_seen"] is None or now-node["last_seen"]>45):
                 return 409, {"error": "computer is offline; terminal input was not queued"}
             usage = self.db.execute("SELECT * FROM workspace_usage WHERE workspace_id=?", (device["workspace_id"],)).fetchone()

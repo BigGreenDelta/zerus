@@ -17,14 +17,26 @@ cargo +1.85.0 clippy --locked --all-targets -- -D warnings
 cargo +1.85.0 test --locked
 ```
 
+[`tests/ORACLE.md`](tests/ORACLE.md) maps every test of the Python reference
+relay to the Rust contract or other test that replaces it.
+
 The server is the default `server` feature. Without it the library is only the
 API v1 codec (`json`), envelope validation (`protocol`) and `error`, with none
 of the HTTP, database or TLS crates, for the outbound connector:
 
 ```sh
-cargo +1.85.0 clippy --locked --no-default-features --lib --test codec -- -D warnings
-cargo +1.85.0 test --locked --no-default-features --test codec
+cargo +1.85.0 clippy --locked --no-default-features --lib --test codec --test vectors -- -D warnings
+cargo +1.85.0 test --locked --no-default-features --test codec --test vectors
 ```
+
+`tests/vectors.rs` checks the library against the golden vectors in
+[`../vectors`](../vectors/README.md), read at run time: `request_hash` through
+the codec at a claim batch's limits, the operation tables, and the `relay`
+column of `validation/*.jsonl`, which `protocol::request` decides. It names every
+case where that column differs from the frozen decision of the Python reference
+relay. After a reviewed change to the validation or to a vector submission,
+`ZERUS_BLESS=1 cargo +1.85.0 test --locked --test vectors` rewrites only that
+column; then run `capture.py --check`.
 
 The image and the infra packager copy only `Cargo.toml`, `Cargo.lock`, `.cargo`
 and `src/**/*.rs|*.sql`, so the crate has no build script, declared test target,
@@ -33,17 +45,25 @@ path dependency or include from outside `src/`
 
 ### PostgreSQL tests
 
-The storage contracts (`tests/contracts.rs`, `tests/directory_create.rs` and
-`tests/administration.rs`) and the connector HTTP suites run on PostgreSQL. Point
-`ZERUS_RELAY_TEST_DATABASE_URL` at a **disposable** server whose role may create
-databases: each test creates its own `relay_test_<uuid>` database and drops it
-afterwards, also when it fails, and credentials are not logged. The Python
+The storage and HTTP contracts (every `tests/*.rs` but the database-free
+`codec.rs`, `vectors.rs`, `alerts.rs` and `private_files.rs`) and the connector
+HTTP suites run on PostgreSQL. Point `ZERUS_RELAY_TEST_DATABASE_URL` at a
+**disposable** server whose role may create databases: each test creates its
+own `relay_test_<uuid>` database and drops it afterwards, also when it fails,
+and credentials are not logged. The Python
 fixtures also drop theirs after Ctrl+C; a killed or interrupted `cargo test` can
 leave some behind. Without the variable the Rust contracts fall back to a
-private SQLite file and the connector HTTP suites skip; a local SQLite run never
-stands in for PostgreSQL. CI sets `ZERUS_REQUIRE_RELAY_E2E=1`, which turns that
-fallback and those skips into failures. A one-line server on a random loopback
-port, whose data, leftovers included, leaves with the container:
+private SQLite file (`tests/python_receipts.rs`, which has only a PostgreSQL
+database, passes without running) and the connector HTTP suites skip; a local
+SQLite run never stands in for PostgreSQL. CI sets `ZERUS_REQUIRE_RELAY_E2E=1`,
+which turns that fallback and those skips into failures. The end-to-end suites
+(`test_end_to_end`, `test_presence_end_to_end` and `test_peer_end_to_end`) run
+each flow against this tree's Python connector in-process and, with
+`ZERUS_CONNECTOR_E2E_COMMAND` naming a built Rust connector
+(`services/mobile/connector`), against that one as its own process with a
+private configuration file; with the requirement set, both must run. A one-line server on
+a random loopback port, whose data, leftovers included, leaves with the
+container:
 
 ```sh
 docker run --rm -d --name zerus-relay-test-postgres -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17.11-alpine -c max_connections=300
@@ -79,16 +99,52 @@ through the `zerus-relay` command line (`provision`, `node`, `invite`,
 directly: the storage effects they used to inspect are Rust contracts. These
 suites exercise the actual Python connector with synthetic native subprocesses,
 exact canonical hashes, Unicode, attachments, one-hop routing and cancellation.
-`test_rust_relay.py` still replays the released Python HTTP assertions,
-including persisted Python receipts, against the Rust relay on a Python-written
-SQLite store. Without `ZERUS_RELAY_BINARY`, the fixture serves the retained
-Python reference relay on a private SQLite store and the Rust-only suites skip.
+`test_rust_relay.py` runs the released HTTP contracts on the same fixture. It
+observes expiry and retention over HTTP with second-scale settings
+(`queue_ttl`, `claim_ttl` and `retention` of 1 second, background maintenance
+every 0.1 seconds) and restarts the relay process on its database.
+`tests/maintenance_contracts.rs` covers what HTTP cannot show, and
+`tests/python_receipts.rs` loads `tests/fixtures/python_relay.sql`, a frozen
+database the removed Python PostgreSQL relay wrote: its receipts keep their
+identity and its schema upgrades in place. Without `ZERUS_RELAY_BINARY`, the
+fixture serves the retained Python reference relay on a private SQLite store
+and the Rust-only suites skip.
 Hosted CI runs the discover once with both variables, `ZERUS_REQUIRE_RELAY_E2E=1`
 and `ZERUS_DIRECTORY_TEST_HGS` naming the built `hgs`, then repeats
 `-p 'test_mobile_speech*.py'` without `ZERUS_RELAY_BINARY`. The reference Python
 HTTP module is retained as an independent compatibility oracle, not selected by
 the supported server CLI. `zerus-mobile` delegates administration and serving to
 `zerus-relay`.
+
+`test_rust_relay.py` used to borrow its cases from the reference relay's
+`test_relay.py` and to seed a Python-written SQLite store. Where each one went
+(Python names drop the `test_` prefix; Rust contracts are in `tests/`):
+
+| Former case | HTTP test in `test_rust_relay.py` | Rust contract |
+| --- | --- | --- |
+| `health_capabilities_and_local_only_administration` | same name | |
+| `pair_once_and_expiry_and_hash_storage` | `pair_once_and_opaque_token` | `maintenance_contracts.rs` `invitations_expire_and_credentials_are_stored_only_as_hashes` |
+| `pair_rate_limit` | same name; the fixture's pairing is the first attempt | `contracts.rs` `scoped_pairing_and_rates` |
+| `failed_authentication_rate_limit` | same name | |
+| `workspace_and_role_isolation` | same name, the foreign computer from `provision` | |
+| `durable_claim_duplicate_result_and_owner` | same name, the other phone from `invite` and `/v1/pair`, the other node from `node` | `contracts.rs` `claims_and_receipts_never_replay` |
+| `single_claim_and_request_validation` | same name | |
+| `expiry_restart_and_late_result` | `expiry_and_restart_keep_claims` (a real restart; PostgreSQL keeps the claim) and `claim_timeout_late_result_and_revoke` | `contracts.rs` `budgets_reserve_results_and_release_on_expiry`, `restart_retires_claims_only_on_sqlite`, `expired_claims_and_revocation_are_terminal` |
+| `queue_limit_retention_tombstones` | same name | `contracts.rs` `claims_and_receipts_never_replay`, `budgets_reserve_results_and_release_on_expiry` |
+| `claim_timeout_and_revoke` | `claim_timeout_late_result_and_revoke`, revoking with `revoke-node` and `revoke-device` | `contracts.rs` `expired_claims_and_revocation_are_terminal` |
+| `device_logout_revokes_token_and_cancels_queue` | same name; the computer never receives the command | `maintenance_contracts.rs` `device_logout_fails_its_queued_requests` |
+| `old_read_history_does_not_consume_mutation_tombstones` | same name | `maintenance_contracts.rs` `read_history_expires_without_consuming_mutation_tombstones` |
+| `long_poll_rechecks_revocation` | same name, revoked by another process before the poll's deadline | |
+| `heartbeat_events_baseline_transition_and_privacy` | same name, the other workspace from `provision` | |
+| `body_cap_nonfinite_and_poll_bounds` | same name | `contracts.rs` `http_oversized_declared_body_is_answered_after_bounded_drain` |
+| `async_question_fingerprints_add_change_remove` | same name | |
+| `push_retired_unifiedpush_and_unavailable_fcm` | same name | |
+| `mark_read_is_exact_and_capability_gated` | same name; the operation set from `vectors/operations.json` | `contracts.rs` `mark_read_payload_is_exact_and_capability_gated` |
+| `set_mobile_delivery_request_validation` | same name | `contracts.rs` `mobile_delivery_is_computer_scoped_and_capability_gated` |
+| `mark_read_is_read_class_and_pruned_like_reads` | same name | `contracts.rs` `mark_read_is_read_class_and_pruned_like_reads` |
+| `attachment_read_is_exact_gated_and_short_lived` | same name, with the 5-second grace after reading | `contracts.rs` `attachment_read_is_exact_gated_and_short_lived` |
+| `existing_python_receipt_identity` | | `python_receipts.rs` `python_receipt_identity_and_presence_alerts_survive_the_upgrade` |
+| `presence_alerts_http_contract` | same name, on a database the Rust relay created | `python_receipts.rs` (a Python-written database upgraded in place) |
 
 ## Boundaries
 
@@ -122,7 +178,8 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   float differential test compares the independent Python encoder. Containers
   are decoded from borrowed raw JSON so the legal object key
   `$serde_json::private::Number` cannot be interpreted as serializer metadata.
-  Legacy Python receipt tests cover this key as well as Unicode and large numbers.
+  `tests/python_receipts.rs` replays a Python-written receipt with this key,
+  Unicode and large numbers.
   The encoder sorts keys itself rather than trusting `Map` order, which
   serde_json's `preserve_order` feature would change; CI rejects that feature.
   `python_default_len` measures plain `json.dumps` output, as the connector's
@@ -410,3 +467,25 @@ Historical Python measurements are in `docs/relay-architecture.md`. This Rust
 migration does not certify the 10,000-computer/50,000-phone planning target.
 Measure sustained metadata/heartbeat rates, notification fanout, PostgreSQL WAL,
 autovacuum, storage and pool saturation before changing deployment limits.
+
+### Archive date pages
+
+`archive_list` is an additive capability-gated, sessionless read. Payload fields
+are `from`, `until` (exclusive Unix seconds, 0–253402300800), `limit` (1–50),
+`cursor` (at most 1024 base64url characters), and literal `query` (256 printable
+characters). The connector invokes only `hgs archives --json`; the native CLI
+validates the cursor, range and catalog again. Native desktop/connector polls omit archived session rows; an upgraded phone
+requests pages only inside Archive. To retain older Android clients, the
+connector attaches a cached recent compatibility window (at most 50 rows and
+128 KiB) plus explicit `mobile_archive` loaded/total/partial metadata. Native
+`archive_revision` invalidates it on an atomic archive-directory change, and it
+expires after five minutes. Upgraded clients ignore this window when the relay
+and node advertise page support. Native identity checks remain authoritative.
+
+The operation has a separate `archive_history` index and one-hour read retention;
+the established `read_history_v3` predicate and durable mutation identities stay
+unchanged. Apply the additive index to both PostgreSQL workers during the normal
+coordinated runtime replacement (fresh backup and isolated restore qualification).
+Update the native CLI and connector before enabling the relay capability, then
+update clients; an older relay/CLI is reported as unavailable, not an empty page.
+No native agent or phone read-mark migration is needed.

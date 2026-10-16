@@ -55,6 +55,8 @@ private slots:
     void initTestCase() {
         QVERIFY(m_directory.isValid());QCoreApplication::setOrganizationName("hgs-swarm-test");QCoreApplication::setApplicationName("controller");
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_directory.path());
+        // Each case counts its requests; a background read on a slow runner would add one.
+        SwarmController::setPollInterval(60 * 60 * 1000);
     }
     void init() {
         QSettings().clear();m_root=m_directory.path()+"/case-"+QString::number(QDateTime::currentMSecsSinceEpoch());QDir().mkpath(m_root);m_program=m_root+"/hgs";

@@ -131,6 +131,39 @@ class AgentCompatibility(unittest.TestCase):
                 compat.install_native('codex', self.package(payload), Path(temporary))
             self.assertEqual(list(Path(temporary).iterdir()), [])
 
+    def test_a_dropped_download_is_retried_and_still_verified(self):
+        payload = self.archive()
+        dropped = ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host')
+        with tempfile.TemporaryDirectory() as temporary, patch.object(compat.time, 'sleep') as sleep, \
+                patch.object(compat.urllib.request, 'urlopen', side_effect=[dropped, io.BytesIO(payload)]) as fetch:
+            native = compat.install_native('codex', self.package(payload), Path(temporary))
+            self.assertEqual(native.read_bytes(), b'synthetic-native-executable')
+            self.assertEqual(fetch.call_count, 2)
+            sleep.assert_called_once()
+
+    def test_refused_or_changed_downloads_are_not_retried(self):
+        payload = self.archive()
+        missing = compat.urllib.error.HTTPError('https://registry.example.test', 404, 'Not Found', {}, None)
+        for response, error in [(missing, compat.urllib.error.HTTPError),
+                                (io.BytesIO(payload + b'changed'), ValueError)]:
+            with self.subTest(error=error.__name__), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(compat.time, 'sleep') as sleep, \
+                    patch.object(compat.urllib.request, 'urlopen', side_effect=[response]) as fetch:
+                with self.assertRaises(error):
+                    compat.install_native('codex', self.package(payload), Path(temporary))
+                self.assertEqual(fetch.call_count, 1)
+                sleep.assert_not_called()
+                self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_a_download_that_keeps_dropping_fails_after_its_attempts(self):
+        payload = self.archive()
+        with tempfile.TemporaryDirectory() as temporary, patch.object(compat.time, 'sleep'), \
+                patch.object(compat.urllib.request, 'urlopen', side_effect=ConnectionResetError(10054, 'reset')) as fetch:
+            with self.assertRaises(ConnectionResetError):
+                compat.install_native('codex', self.package(payload), Path(temporary))
+            self.assertEqual(fetch.call_count, compat.DOWNLOAD_ATTEMPTS)
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
     def test_archive_paths_and_links_cannot_escape_the_fixture(self):
         for payload in (self.archive(name='../outside'), self.archive(symlink=True)):
             with self.subTest(), tempfile.TemporaryDirectory() as temporary, patch.object(

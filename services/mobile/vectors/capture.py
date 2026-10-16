@@ -8,7 +8,9 @@
 The capture runs offline and is deterministic: a fixed clock, synthetic tokens,
 reserved example domains, a scratch state directory, no network connection and
 no native process. The relay-oracle column of validation/*.jsonl is frozen data;
-only --refresh-oracle reads zerus_mobile.server. README.md describes each file.
+only --refresh-oracle recomputes it, with the reference relay's validation as
+services/mobile/tests/relay_oracle.py keeps it. The Rust relay's column is
+copied; its tests/vectors.rs recomputes it. README.md describes each file.
 """
 from __future__ import annotations
 
@@ -35,9 +37,9 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 if __name__ == "__main__":
-    sys.path.insert(0, str(HERE.parent))
+    sys.path[:0] = [str(HERE.parent), str(HERE.parent / "tests")]
 
-from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet, file_reads,  # noqa: E402
+from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet, file_reads, archives,  # noqa: E402
                           history, launch, managed_relay, projects, speech, speech_config, terminal,
                           voice, worktrees)
 from zerus_mobile.connector import Connector, ConnectorError, Journal  # noqa: E402
@@ -71,7 +73,7 @@ SEALED = {"key_id": "a" * 64, "algorithm": speech_config.ALGORITHM,
           "ephemeral_public_key": base64.b64encode(bytes(91)).decode(),
           "nonce": base64.b64encode(bytes(12)).decode(),
           "ciphertext": base64.b64encode(bytes(40)).decode()}
-CONNECTOR_MODULES = ("connector", "context", "attachments", "attachment_reads", "file_reads", "history", "launch",
+CONNECTOR_MODULES = ("connector", "context", "attachments", "attachment_reads", "file_reads", "archives", "history", "launch",
                      "worktrees", "speech", "speech_config", "voice", "recovery", "terminal", "fleet",
                      "projects", "accounts", "managed_relay")
 # AttachmentViewCache.failure() shows UPDATE_REQUIRED for a receipt error
@@ -201,6 +203,7 @@ HELP_LINES = (
     ("preference", "hgs swarm preference set mobile_delivery"),
     ("attachment_read", "hgs " + attachment_reads.HELP_MARKER),
     ("file_read", "hgs " + file_reads.HELP_MARKER),
+    ("archive_list", "hgs " + archives.HELP_MARKER),
     ("speech", "hgs " + speech.HELP_MARKER),
     ("voice", "hgs " + voice.HELP_MARKER),
     ("speech_config", speech_config.HELP_MARKER),
@@ -291,10 +294,15 @@ LAUNCH_ACCOUNTS = {"profiles": ACCOUNTS["profiles"] + [{"id": "native-shell", "p
 
 
 def inspection():
-    """An attention inspection: one open question, one already answered, one of another run."""
+    """An attention inspection: one open question, one optional Codex async question, one optional
+    marker of the wrong type, one already answered and one of another run."""
     return {"name": SESSION, "run_id": RUN, "conversation_id": CONVERSATION, "runtime_state": "live",
             "process_state": "running", "pending_questions": [
                 {"run_id": RUN, "conversation_id": CONVERSATION, "question_id": "q-open", "question_hash": "h-open"},
+                {"run_id": RUN, "conversation_id": CONVERSATION, "question_id": "codex-async:call-optional:0",
+                 "question_hash": "h-optional", "source": "codex_async", "optional": True, "can_skip": True},
+                {"run_id": RUN, "conversation_id": CONVERSATION, "question_id": "q-loose", "question_hash": "h-loose",
+                 "source": "codex_async", "optional": 1},
                 {"run_id": RUN, "conversation_id": CONVERSATION, "question_id": "q-done", "question_hash": "h-done",
                  "answer_delivery": {"status": "submitted"}},
                 {"run_id": "other-run", "conversation_id": CONVERSATION, "question_id": "q-other", "question_hash": "h"}]}
@@ -304,8 +312,13 @@ def help_text(skip=()) -> str:
     return "\n".join(line for name, line in HELP_LINES if name not in skip) + "\n"
 
 
+PAGED_LISTING = {**LISTING,"archive_revision":"0"*64,"archive_paging":True,"sessions":[r for r in LISTING["sessions"] if r.get("state")!="archived"]}
+EMPTY_ARCHIVES = {"version":1,"sessions":[],"next_cursor":"","total":0,"from":0,"until":253402300800,"query":""}
+
+
 def snapshot_native(help_answer) -> Native:
-    return Native({("ls", "--json", "--local"): LISTING, ("swarm", "get"): SWARM, ("account", "ls"): ACCOUNTS,
+    return Native({("ls", "--json", "--local"): LISTING, ("ls", "--json", "--local", "--no-archives"): PAGED_LISTING, ("swarm", "get"): SWARM, ("account", "ls"): ACCOUNTS,
+                   ("archives","--json"): EMPTY_ARCHIVES,
                    ("inspect", SESSION): inspection(), ("--help",): help_answer})
 
 
@@ -356,6 +369,28 @@ def capability_map(runs: dict) -> dict:
             "markers": markers}
 
 
+async def legacy_snapshot_vector(root: Path) -> bytes:
+    """Current Python's full legacy-native heartbeat, separate from paging."""
+    help_answer = help_text(skip=("archive_list",))
+    with fixed_clock():
+        node = make_connector(root)
+    try:
+        node.accounts.wall, node.accounts.clock = (lambda: EPOCH), (lambda: MONOTONIC)
+        node._native = snapshot_native(help_answer)
+        node.fleet.local_id = MACHINE
+        with fixed_clock():
+            snapshot = await node.snapshot()
+        return document({"kind": "snapshot", "id": "heartbeat-legacy", "native": {
+            "ls --json --local": LISTING, "swarm get": SWARM, "account ls": ACCOUNTS,
+            "inspect " + SESSION: inspection(), "--help": help_answer},
+            "peers_discovered": True, "expect": {
+                "heartbeat": {**node.fleet.heartbeat(snapshot), "presence": node.presence},
+                "calls": sorted(node._native.calls, key=compact)}})
+    finally:
+        await node.accounts.close()
+        node.journal.close()
+
+
 def operation_tables(runs: dict) -> bytes:
     sets = {
         "OPERATIONS": context.OPERATIONS, "READ_OPERATIONS": context.READ_OPERATIONS,
@@ -403,6 +438,7 @@ def operation_tables(runs: dict) -> bytes:
                          "speech_config": speech_config.HELP_MARKER,
                          "attachment_read": attachment_reads.HELP_MARKER,
                          "file_read": file_reads.HELP_MARKER,
+                         "archive_list": archives.HELP_MARKER,
                          "directory_create": launch.DIRECTORY_CREATE_HELP},
         "capabilities": capability_map(runs),
     })
@@ -1097,6 +1133,7 @@ def valid_payloads() -> dict:
         "history": identity(limit=50), "recovery_action": identity(job_id=ident("job"), action="now"),
         "mark_read": {"run_id": RUN, "conversation_id": CONVERSATION, "reply_id": "7:100.5", "attention_signature": HASH_A},
         "attachment_read": identity(message_id=ident("message"), index=0, offset=0, length=1024),
+        "archive_list": {"from":0,"until":253402300800,"limit":50,"cursor":"","query":""},
         "file_read": identity(path="/workspace/example/Сводная.xlsx", offset=0, length=1024),
         "voice_profiles": identity(), "voice_submit": identity(speech={"machine_id": MACHINE, "profile_id": "gigaam-ru"}, audio=AUDIO),
         "voice_status": identity(message_id=ident("voice-message")), "voice_cancel": identity(message_id=ident("voice-message")),
@@ -1117,7 +1154,7 @@ def valid_payloads() -> dict:
     }
 
 
-SESSIONLESS = context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
+SESSIONLESS = {"archive_list"} | context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
 
 
 def substitute(value, request_id):
@@ -1181,6 +1218,10 @@ def validation_cases() -> list[dict]:
     case("session/dash", "inspect", session="-help")
     case("session/at", "inspect", session="codex/example@host")
     case("session/control", "inspect", session="codex/example\tsession")
+    # The Rust relay's protocol::text refuses DEL (also payload/run-delete); the reference
+    # relay's text() refused only C0 controls.
+    case("session/delete", "inspect", session="codex/example\x7fsession")
+    case("computer-id/delete", "inspect", top={"computer_id": COMPUTER[:35] + "\x7f"})
     case("session/too-long", "inspect", session="c" * 513)
     case("session/not-string", "inspect", session=7)
     case("session/archive-at-top-level", "inspect", top={"archive_id": ARCHIVE})
@@ -1192,6 +1233,7 @@ def validation_cases() -> list[dict]:
     case("payload/request-id-mismatch", "send", change=put(request_id=ident("other")))
     case("payload/run-missing", "send", change=drop("expected_run_id"))
     case("payload/run-empty", "send", change=put(expected_run_id=""))
+    case("payload/run-delete", "send", change=put(expected_run_id="fixture\x7frun"))
     case("payload/archived-non-inspection", "pause", change=put(archive_id=ARCHIVE),
          source="test_mobile_actions.LifecycleTransportTests.test_old_cli_and_invalid_payload_never_invoke_mutator")
     # inspect
@@ -1297,6 +1339,10 @@ def validation_cases() -> list[dict]:
     case("mark_read/null-marks", "mark_read", change=put(reply_id=None, attention_signature=None))
     case("mark_read/missing-reply", "mark_read", change=drop("reply_id"))
     case("mark_read/unknown-session", "mark_read", session="codex/example/other")
+    case("archive_list/nonempty-session", "archive_list", session=SESSION)
+    case("archive_list/too-large", "archive_list", change=put(limit=51))
+    case("archive_list/invalid-range", "archive_list", change=put(**{"from":10,"until":10}))
+    case("archive_list/extra", "archive_list", change=put(offset=1000))
     # file_read
     case("file_read/length-zero", "file_read", change=put(length=0))
     case("file_read/missing-path", "file_read", change=drop("path"))
@@ -1424,29 +1470,10 @@ def connector_decision(case: dict) -> dict:
 
 
 def live_oracle(submission: dict) -> dict:
-    """The decision of the Python reference relay's submission validation."""
-    from aiohttp import web
-    from zerus_mobile import ingress, server
-    required = ("request_id", "computer_id", "operation", "session", "payload")
-    if not isinstance(submission, dict) or set(submission) - set(required) or not set(required) <= set(submission):
-        return {"decision": "reject", "status": 400, "raised": "HTTPBadRequest", "stage": "fields"}
-    try:
-        server.validate_request(submission)
-        operation = submission["operation"]
-        if operation == "send":
-            attachments.validate_send(submission["payload"])
-        elif operation in {"speech_submit", "voice_submit"}:
-            if ingress.encoded_size(submission, 6 * 1024 * 1024) > 6 * 1024 * 1024:
-                return {"decision": "reject", "status": 413, "raised": "HTTPRequestEntityTooLarge", "stage": "size"}
-        elif ingress.encoded_size(submission, 1024 * 1024) > 1024 * 1024:
-            return {"decision": "reject", "status": 413, "raised": "HTTPRequestEntityTooLarge", "stage": "size"}
-    except web.HTTPException as error:
-        return {"decision": "reject", "status": error.status, "raised": type(error).__name__, "stage": "validate"}
-    except ValueError as error:
-        return {"decision": "reject", "status": 400, "raised": "ValueError", "message": str(error), "stage": "validate"}
-    except (TypeError, KeyError, RecursionError) as error:  # Interpreter wording differs between Python versions.
-        return {"decision": "reject", "status": 400, "raised": type(error).__name__, "stage": "validate"}
-    return {"decision": "accept"}
+    """The decision of the Python reference relay's submission validation,
+    through its test-only copy in services/mobile/tests/relay_oracle.py."""
+    import relay_oracle
+    return relay_oracle.decision(submission)
 
 
 VALIDATION_FAMILIES = {
@@ -1465,17 +1492,27 @@ def validation_file(case_id: str) -> str:
     return "validation/%s.jsonl" % family
 
 
-def frozen_oracle(directory: Path) -> dict:
-    """The committed relay-oracle column: case id -> (submission text, decision)."""
-    oracle = {}
+def frozen_column(directory: Path, column: str) -> dict:
+    """One committed decision column: case id -> (submission text, decision)."""
+    decisions = {}
     for path in sorted(directory.glob("validation/*.jsonl")):
         for row in map(json.loads, path.read_text().splitlines()):
-            if row.get("kind") == "case" and "oracle" in row:
-                oracle[row["id"]] = (compact(row["submission"]), row["oracle"])
-    return oracle
+            if row.get("kind") == "case" and column in row:
+                decisions[row["id"]] = (compact(row["submission"]), row[column])
+    return decisions
 
 
-def validation_vectors(oracle: dict | None) -> tuple[dict[str, bytes], set[str]]:
+def frozen_oracle(directory: Path) -> dict:
+    """The committed relay-oracle column."""
+    return frozen_column(directory, "oracle")
+
+
+def frozen_relay(directory: Path) -> dict:
+    """The committed column of the Rust relay, which relay/tests/vectors.rs computes."""
+    return frozen_column(directory, "relay")
+
+
+def validation_vectors(oracle: dict | None, relay: dict) -> tuple[dict[str, bytes], set[str]]:
     header = {"kind": "context", "name": "default", "context": DEFAULT_CONTEXT,
               "note": "snapshot_age is seconds since the last local snapshot; the connector input is the submission without computer_id"}
     files: dict[str, list] = {}
@@ -1492,11 +1529,15 @@ def validation_vectors(oracle: dict | None) -> tuple[dict[str, bytes], set[str]]
             case["oracle"] = oracle[case["id"]][1]
         else:
             missing.append(case["id"])
+        # A new or changed submission has no relay decision until
+        # ZERUS_BLESS=1 cargo test --test vectors computes it.
+        if relay.get(case["id"], (None,))[0] == compact(case["submission"]):
+            case["relay"] = relay[case["id"]][1]
         files.setdefault(validation_file(case["id"]), [header]).append(case)
     if missing:
         raise CaptureError("validation cases without a frozen relay-oracle decision for their submission: "
                            + ", ".join(missing)
-                           + "\nRun capture.py --refresh-oracle while zerus_mobile.server exists, or remove them.")
+                           + "\nRun capture.py --refresh-oracle, or remove them.")
     return {name: jsonl(rows) for name, rows in files.items()}, observed
 
 
@@ -2027,6 +2068,9 @@ async def execute_runs(root: Path) -> list[dict]:
             row = {"kind": "execute", "id": name, "request": request,
                    "native": [{"argv": list(key), "answer": raised(value) if isinstance(value, BaseException) else copy.deepcopy(value)}
                               for key, value in sorted(node._native.answers.items())]}
+            if not node.attachment_read_supported:
+                # Every other capability of `capable`, without the attachment marker.
+                row["unavailable"] = ["attachment_read"]
             if name == "process-output-too-large":
                 row["native"] = [{"argv": item["argv"], "answer": {**item["answer"], "output": "@fill"},
                                   "fill": {"@fill": [["\u00e9", 180000]]}} for item in row["native"]]
@@ -2123,9 +2167,7 @@ def receipt_vectors(executions: list[dict]) -> bytes:
         "upload": {"method": "POST", "path": "/v1/node/requests/{request_id}/result", "content_type": "application/json",
                    "rule": "the body is json.dumps(json.loads(stored)): the stored text for ordinary values",
                    "example_stored": json.dumps(upload_example), "example_body": json.dumps(json.loads(json.dumps(upload_example)))},
-        "android": {"update_required_substrings": list(ANDROID_UPDATE_REQUIRED), "shown_prefix_characters": ANDROID_ERROR_PREFIX,
-                    "divergence_c": "a peer attachment_read fails today with 'connector could not record native outcome', "
-                                    "which the phone shows as an ordinary attachment error"},
+        "android": {"update_required_substrings": list(ANDROID_UPDATE_REQUIRED), "shown_prefix_characters": ANDROID_ERROR_PREFIX},
     })
 
 
@@ -2252,7 +2294,8 @@ def projection_vectors(runs: dict, executions: list[dict]) -> bytes:
     # Projects and attention run concurrently, so only the set of native calls is a contract.
     calls = sorted(full["calls"], key=compact)
     rows.append({"kind": "snapshot", "id": "heartbeat-snapshot", "native": {
-        "ls --json --local": LISTING, "swarm get": SWARM, "account ls": ACCOUNTS, "inspect " + SESSION: inspection(),
+        "ls --json --local": LISTING, "ls --json --local --no-archives": PAGED_LISTING, "archives --json": EMPTY_ARCHIVES,
+        "swarm get": SWARM, "account ls": ACCOUNTS, "inspect " + SESSION: inspection(),
         "--help": help_text()}, "peers_discovered": True, "expect": {"heartbeat": full["heartbeat"], "calls": calls}})
     rows += executions
     return jsonl(rows)
@@ -2375,25 +2418,26 @@ def size_vectors(root: Path) -> bytes:
 
 # ---------------------------------------------------------------------------
 
-def render(oracle: dict | None) -> dict[str, bytes]:
+def render(oracle: dict | None, relay: dict) -> dict[str, bytes]:
     """Every vector file, keyed by its path below services/mobile/vectors."""
     # Parent directories that Journal creates take the process umask.
     previous = os.umask(0o022)
     try:
-        return _render(oracle)
+        return _render(oracle, relay)
     finally:
         os.umask(previous)
 
 
-def _render(oracle: dict | None) -> dict[str, bytes]:
+def _render(oracle: dict | None, relay: dict) -> dict[str, bytes]:
     files = {}
     with scratch() as root:
         runs = asyncio.run(snapshot_runs(root / "snapshots"))
+        files["heartbeat-legacy.json"] = asyncio.run(legacy_snapshot_vector(root / "legacy-snapshot"))
         executions = asyncio.run(execute_runs(root / "executions"))
         files["identities.json"] = identity_vectors(root / "identities")
         files["sizes.jsonl"] = size_vectors(root)
     files["operations.json"] = operation_tables(runs)
-    validation, observed = validation_vectors(oracle)
+    validation, observed = validation_vectors(oracle, relay)
     files.update(validation)
     files["errors.json"] = error_catalogue(observed)
     files.update(hash_vectors())
@@ -2427,11 +2471,11 @@ def differences(files: dict[str, bytes], directory: Path = HERE) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="recompute and compare without writing")
-    parser.add_argument("--refresh-oracle", action="store_true", help="recompute the relay-oracle column from zerus_mobile.server")
+    parser.add_argument("--refresh-oracle", action="store_true", help="recompute the relay-oracle column from tests/relay_oracle.py")
     args = parser.parse_args()
     oracle = None if args.refresh_oracle else frozen_oracle(HERE)
     try:
-        files = render(oracle)
+        files = render(oracle, frozen_relay(HERE))
     except CaptureError as error:
         print(error, file=sys.stderr)
         return 1

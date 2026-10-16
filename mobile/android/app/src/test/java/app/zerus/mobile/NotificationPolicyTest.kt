@@ -25,6 +25,88 @@ class NotificationPolicyTest {
         prefs: NotificationPreferences = preferences, at: Double = now) =
         NotificationPolicy.plan(state, listOf(value), valueEvent?.let { listOf(value.slot to it) }.orEmpty(), prefs, at, alertsOnly = true)
 
+    private val optionalOn = preferences.copy(optional = true)
+    private fun optional(vararg ids: String, target: String = "run/conversation", kind: SessionAlertKind? = SessionAlertKind.Optional.takeIf { ids.isNotEmpty() },
+        idle: Boolean = false, live: Boolean = true) =
+        NotificationCurrent(slot(), target, "Review requested", "QA laptop", kind, "hash-${ids.size}", idle, live = live,
+            conversation = "conversation", optional = ids.toList())
+    private fun posted(plan: NotificationPlan) = roundtrip(NotificationPolicy.reserve(plan.state, plan.desired.single(), true, 10_000))
+
+    @Test fun optionalQuestionsStayQuietByDefaultAndAnnounceOncePerQuestionWhenEnabled() {
+        assertFalse(preferences.allows(SessionAlertKind.Optional))
+        assertTrue(plan(ready(), optional("a")).desired.isEmpty())
+        val first = plan(ready(), optional("a"), prefs = optionalOn)
+        assertEquals(SessionAlertKind.Optional, first.desired.single().kind)
+        assertTrue(first.desired.single().fresh)
+        assertEquals("Optional question on QA laptop", first.desired.single().body)
+        val shown = posted(first)
+        // A resume with new hashes, the same IDs and a new event keeps the card as it is.
+        val resumed = plan(shown, optional("a", target = "resumed/conversation"), event(2), optionalOn, now + 1)
+        assertFalse(resumed.desired.single().fresh)
+        assertEquals(shown.records.single().postedFingerprint, resumed.desired.single().fingerprint)
+        // Without questions the card is withdrawn.
+        val none = plan(roundtrip(resumed.state), optional(), event(3), optionalOn, now + 2)
+        assertTrue(none.desired.isEmpty()); assertTrue(none.retained.isEmpty())
+        // A new question announces; answering one keeps the card, also once dismissed.
+        val again = plan(shown, optional("a", "b"), event(4), optionalOn, now + 3)
+        assertTrue(again.desired.single().fresh)
+        val answered = plan(posted(again), optional("b"), null, optionalOn, now + 4)
+        assertFalse(answered.desired.single().fresh)
+        assertEquals(again.desired.single().fingerprint, answered.desired.single().fingerprint)
+        // An emptied list and its refill with the same question announce nothing.
+        val emptied = plan(roundtrip(answered.state), optional(), event(5), optionalOn, now + 5)
+        assertTrue(emptied.desired.isEmpty())
+        assertFalse(plan(roundtrip(emptied.state), optional("b"), event(6), optionalOn, now + 6).desired.single().fresh)
+    }
+
+    @Test fun optionalQuestionsSeenElsewhereOrStoppedDoNotAnnounceLater() {
+        // Questions pending while the type was off, or behind a request, are not new later.
+        val disabled = plan(ready(), optional("a"))
+        val enabled = plan(roundtrip(disabled.state), optional("a"), event(2), optionalOn.copy(generation = 1, optionalEnabledAt = 1), now + 1)
+        assertFalse(enabled.desired.single().fresh)
+        assertTrue(SessionAlertKind.Optional in enabled.restoreKinds)
+        val request = plan(ready(), optional("a", kind = SessionAlertKind.Input), prefs = optionalOn)
+        assertEquals(SessionAlertKind.Input, request.desired.single().kind)
+        val resolved = plan(posted(request), optional("a"), event(2), optionalOn, now + 1)
+        assertEquals(SessionAlertKind.Optional, resolved.desired.single().kind)
+        assertFalse(resolved.desired.single().fresh)
+        // A stopped session keeps its announced IDs through the codec and a resume.
+        val shown = posted(plan(ready(), optional("a"), prefs = optionalOn))
+        val stopped = plan(shown, optional("a", live = false), event(2), optionalOn, now + 1)
+        assertTrue(stopped.desired.isEmpty())
+        assertEquals(listOf("a"), roundtrip(stopped.state).records.single().optionalSeen)
+        val restarted = plan(roundtrip(stopped.state), optional("a", target = "resumed/conversation"), event(3), optionalOn, now + 2)
+        assertFalse(restarted.desired.single().fresh)
+        assertTrue(plan(roundtrip(restarted.state), optional("a", "b", target = "resumed/conversation"), event(4), optionalOn, now + 3).desired.single().fresh)
+    }
+
+    @Test fun optionalQuestionsWaitForPresenceAlertsAndYieldToCompletion() {
+        val held = alertPlan(ready(), optional("a"), event(), optionalOn)
+        assertTrue(held.desired.isEmpty())
+        val alerted = alertPlan(roundtrip(held.state), optional("a"), alert(3), optionalOn, now + 1)
+        assertTrue(alerted.desired.single().fresh)
+        assertTrue(alertPlan(posted(alerted), optional("a"), alert(4), optionalOn, now + 2).desired.none { it.fresh })
+        // Disabled optional questions leave a fresh completion to Finished.
+        val idle = optional("a", idle = true)
+        val finished = plan(ready(listOf(idle)), idle, event(kind = "completed"), preferences.copy(finished = true))
+        assertEquals(SessionAlertKind.Finished, finished.desired.single().kind)
+        assertTrue(finished.desired.single().fresh)
+        // Optional cards never join the attention summary.
+        assertFalse(SessionAlertKind.Optional.overflows)
+        assertEquals(setOf(SessionAlertKind.Input, SessionAlertKind.Error), SessionAlertKind.entries.filter { it.overflows }.toSet())
+    }
+
+    @Test fun codecToleratesUnknownKindsAndBoundsSeenQuestions() {
+        val encoded = NotificationStateCodec.encode(NotificationState(records = listOf(NotificationRecord(slot(), "target", now,
+            postedKind = SessionAlertKind.Optional, optionalSeen = (1..80).map { "q$it" }))))
+        val record = NotificationStateCodec.decode(JSONObject(encoded.toString())).records.single()
+        assertEquals(SessionAlertKind.Optional, record.postedKind)
+        assertEquals((17..80).map { "q$it" }, record.optionalSeen)
+        encoded.getJSONArray("records").getJSONObject(0).put("kind", "Future").remove("optional_seen")
+        val future = NotificationStateCodec.decode(JSONObject(encoded.toString())).records.single()
+        assertNull(future.postedKind); assertTrue(future.optionalSeen.isEmpty())
+    }
+
     @Test fun defaultsAndIndependentTypesDoNotEnableFinished() {
         assertTrue(preferences.allows(SessionAlertKind.Input))
         assertTrue(preferences.allows(SessionAlertKind.Error))

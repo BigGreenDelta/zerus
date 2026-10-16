@@ -100,8 +100,9 @@ and 64 KiB of message text. The picker remains bound to its original composition
 if navigation or typing changes; interrupted selection can be canceled in Saved
 drafts. Files remain recoverable with unsent and uncertain messages.
 
-An empty conversation immediately shows “Loading conversation…” while its
-messages load. Background loading status and spinners appear only after five
+An unopened conversation immediately shows “Loading conversation…” while its
+messages load. A resolved empty conversation keeps “No messages yet.” during
+background reads instead of returning to the initial placeholder. Background loading status and spinners appear only after five
 seconds; manual refresh shows progress immediately and reuses any matching
 in-flight read. A thin progress bar accompanies the existing circular refresh
 indicator in catalogs and conversations. Navigation cancels
@@ -111,6 +112,10 @@ reopening. Exact-target encrypted history is cached for seven days, up to 20
 conversations and 20 MiB. Cached messages appear immediately when already
 prepared in memory; cached history permits no action until a fresh inspection
 verifies the conversation. History cache failures do not prevent live reads.
+Catalog parsing, local read-state decoration and session-list filtering, counters
+and grouping run on background workers. The list retains its last projection
+and keyed scroll position while a replacement is prepared; canceled projections
+cannot replace newer search or filter results.
 
 Agent messages and ordinary questions render Markdown with headings, emphasis,
 lists, quotes, links, tables, strikethrough, static tasks and code blocks. Code and
@@ -201,7 +206,15 @@ in stable ID order. Finished turns stay hidden, as with the desktop default,
 unless the child has an unsent draft on this phone. Profile groups are counted
 but not listed. Tapping a child opens its session and then the child's activity
 once that conversation is verified; Back returns to the session. Open subagent
-lists persist with the other Sessions state.
+lists persist with the other Sessions state. A running session with pending
+optional Codex questions, which the agent keeps working without, shows an
+amber question-mark chip with their count (`99+` above 99) right after its
+status badge, as on the desktop; its spoken description says how many are
+waiting. It shares the amber of attention but changes no status or count.
+The listing's `optional_questions` count wins. Without it (an older computer, or
+while hgs cannot read its question index), the chip counts the connector's
+optional attention items once per question. It is hidden for saved, archived,
+exited and offline sessions; open the session to answer or skip the questions.
 
 Long-pressing a session card, or using its accessibility long-press action,
 opens its actions in the desktop context menu order: Open terminal, Mark as read
@@ -314,7 +327,7 @@ worktree, created only after Create session; None and existing or manually
 created worktrees remain available. A launch is confirmed only by its own native
 request identity.
 
-## Voice input
+## Voice and video messages
 
 Settings includes **Voice messages**, with an independently selected transcription
 computer and host-configured profile. Open a conversation to discover the computers
@@ -350,8 +363,8 @@ provider revision: if it changes, explicitly select the provider again before
 sending. See [provider configuration](../../docs/speech-providers.md).
 
 With an empty message and no attachments, the composer shows a microphone in the
-Send position. Hold it to record, release to keep a preview, or slide left to
-cancel the recording. Typing text or adding an attachment restores the Send
+Send position. Tap to switch microphone/camera, hold to record and release to send. Slide left
+to cancel or up to lock. Stop a locked recording to retain a preview. Typing text or adding an attachment restores the Send
 button. While holding, a compact recording row replaces the empty editor: a red
 indicator, elapsed time with tenths of a second, and **Slide to cancel** with a
 left chevron. When the full instruction cannot fit at the current font size, the
@@ -367,8 +380,8 @@ prompts, rejected starts and late gesture events do not produce extra pulses.
 Android's vibration settings are respected. Haptic availability never blocks
 recording or saving its preview.
 Local capture starts without waiting for provider discovery; discovery refreshes
-in the background. Capture lasts at most two minutes. Releasing the microphone,
-stopping or leaving the conversation never sends a message. The preview is an
+in the background. Audio capture lasts at most two minutes. Releasing an owned hold requests sending;
+stopping a locked recording or leaving the conversation keeps a preview without sending. The audio preview is an
 encrypted durable WAV file on this phone. A compact **Pending** card contains
 playback and seeking, with Delete and Send icon buttons on the right. All three
 buttons keep 48 dp touch targets and accessible **Play**, **Discard** and **Send
@@ -390,6 +403,13 @@ The composer preview scrolls within a bounded area while the software keyboard i
 open, keeping the typed draft visible and editable after capture stops.
 With a narrow screen, large system text and an expanded editor, you may need to
 close the keyboard to reach the preview controls.
+
+Video mode records up to 60 seconds and 10 MiB with CameraX, with an owned circular
+preview and a camera switch. The phone extracts mono 16 kHz speech audio on a
+worker; one message UUID retains the original MP4 and its derived WAV. The agent
+receives the recognized text. Video needs the additive `voice_video` capability
+on the relay and conversation computer. Older clients keep audio playback.
+
 
 While recording, the typed draft and selection remain saved beneath the recording
 row, and ordinary message sending and attachment changes are disabled. With a hardware keyboard, **Space** or **Esc** stops capture
@@ -478,7 +498,8 @@ adb -s emulator-5580 shell pm clear app.zerus.mobile
 adb -s emulator-5580 shell am instrument -w app.zerus.mobile.test/app.zerus.mobile.VoiceGestureSmokeInstrumentation
 ```
 
-It checks hold/release preview, left-swipe cancellation, interrupted pointers,
+It checks short-tap mode switching, retained preview when provider discovery is
+unavailable, left-swipe cancellation, interrupted pointers,
 background/navigation stop, permission results after release, preserved drafts
 and zero voice uploads before a separate Send. The compact Pending preview checks
 cover action order and touch targets, local playback and seeking, discard
@@ -583,9 +604,23 @@ and [launcher asset documentation](https://developer.android.com/studio/write/cr
 ## Notifications
 
 In Machines, Session alerts has independent settings for input and approvals,
-errors, and turn completion. Input and errors are on by default; completed turns
-are off. The master switch disables all session alerts. Disabling a type also
-removes its existing cards.
+optional questions, errors, and turn completion. Input and errors are on by
+default; optional questions and completed turns are off. The master switch
+disables all session alerts. Disabling a type also removes its existing cards.
+
+A session whose only pending items are optional Codex questions, which the agent
+keeps working without, notifies as *Optional question on* its computer, and only
+with that switch on. Each question ID announces at most once per session slot:
+answering or skipping one keeps the card, a dismissed card stays dismissed, and
+a resume, connector restart or emptied and refilled list announces nothing
+again. Questions pending while the switch is off, or while the session needs
+input or has an error, are not announced later. Without optional questions the
+card is withdrawn. A blocking request or error in the same session takes
+precedence and its card does not change for new optional questions. When the
+switch is off, a finished turn can still notify. Optional cards never join the
+summary of sessions that need attention, and a new need may replace one when the
+shade is full. Optional-only sessions still count under Needs attention on
+Android, unlike the desktop; aligning them is an open owner decision.
 
 There is one updated card per workspace, computer and live session slot. The
 normal shade shows the authenticated session title and the computer's private
@@ -601,7 +636,7 @@ request can remain until the next refresh when the relay emits no new event.
 
 When the relay advertises `presence_alerts`, a new card needs a relay `alert`
 event for the same workspace, computer and session: an attention or error alert
-for input, approvals or errors (the relay and the phone rank a session that
+for input, approvals, optional questions or errors (the relay and the phone rank a session that
 both asks and fails differently), or completed for an opted-in finished turn.
 The relay sends it only while the item is unread and unresolved, and only when
 the owner is away from every Zerus desktop or chose immediate delivery. A card
@@ -771,3 +806,15 @@ outcomes survive later manual project moves, and the shared catalog keeps its
 existing schema for older desktop binaries. The sidecar is bounded to 10,000
 permanent receipts; at capacity new assignments fail before changing metadata.
 Receipts never enter swarm exports or peer synchronization.
+
+### Synthetic video-message qualification
+
+Use a fresh, isolated Android emulator with emulated front/back cameras (never a
+personal device or webcam). Build with
+`-PzerusInstrumentationRunner=app.zerus.mobile.VideoMessageSmokeInstrumentation`,
+install both debug APKs, then run
+`adb -s <isolated-emulator> shell am instrument -w app.zerus.mobile.test/app.zerus.mobile.VideoMessageSmokeInstrumentation`.
+The runner checks short tap, real CameraX MP4 capture, upward lock, retained
+private media, audio extraction, exact one-time upload and left cancellation
+against an in-process gateway fixture. Its screenshot is saved to the app's
+external files as `video-message-preview.png`.

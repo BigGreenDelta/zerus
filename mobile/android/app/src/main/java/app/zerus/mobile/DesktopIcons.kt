@@ -84,6 +84,12 @@ object DesktopIcons {
         moveTo(10f, 12f); lineTo(14f, 12f)
     }
     val Archive get() = Archived
+    val Calendar = stroke("DesktopCalendar") {
+        roundedRectangle(4f, 5f, 16f, 16f)
+        moveTo(4f, 10f); lineTo(20f, 10f)
+        moveTo(8f, 3f); lineTo(8f, 7f); moveTo(16f, 3f); lineTo(16f, 7f)
+        moveTo(8f, 14f); lineTo(8.01f, 14f); moveTo(12f, 14f); lineTo(12.01f, 14f); moveTo(16f, 14f); lineTo(16.01f, 14f)
+    }
     val Machines = stroke("DesktopMachines") {
         roundedRectangle(3f, 4f, 18f, 12f)
         moveTo(12f, 16f); lineTo(12f, 20f); moveTo(8f, 20f); lineTo(16f, 20f)
@@ -118,6 +124,17 @@ object DesktopIcons {
         moveTo(14.5f, 12.25f); arcTo(3.5f, 2.5f, 0f, false, false, 7.5f, 12.25f)
     }
 
+    /** WorkspaceIcons "question": a circle around the "?" of "git-unknown", with its drawPoint dot. */
+    val Question: ImageVector = ImageVector.Builder("DesktopQuestion", 24.dp, 24.dp, 24f, 24f).apply {
+        path(fill = null, stroke = SolidColor(Color.Black), strokeLineWidth = 1.6f,
+            strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round) {
+            circle(12f, 12f, 9f)
+            moveTo(10f, 10f); curveTo(10f, 7f, 15f, 7f, 15f, 10f)
+            curveTo(15f, 12f, 12f, 11f, 12f, 14f)
+        }
+        path(fill = SolidColor(Color.Black)) { circle(12f, 17f, .8f) }
+    }.build()
+
     fun forName(name: String): ImageVector = when (name.lowercase(Locale.ROOT)) {
         "all", "sessions" -> All
         "attention" -> Attention
@@ -128,6 +145,7 @@ object DesktopIcons {
         "folder", "project", "projects", "group" -> Projects
         "git-branch" -> GitBranch
         "subagents" -> Subagents
+        "question" -> Question
         else -> Terminal
     }
 

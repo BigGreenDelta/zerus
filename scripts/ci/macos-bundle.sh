@@ -17,6 +17,9 @@ rm -rf artifacts/macos-licenses
 python3 scripts/collect-licenses.py artifacts/macos-licenses
 cmake_args=(-G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$qt"
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_ARCHITECTURES=arm64)
+if [ -n "${ZERUS_DEV_BUILD_NUMBER:-}" ]; then
+    cmake_args+=("-DZERUS_DEV_BUILD_NUMBER=$ZERUS_DEV_BUILD_NUMBER")
+fi
 # Release bundles always configure from scratch: a cached build directory can name
 # an SDK that an Xcode update has since removed.
 rm -rf .ci-build/macos-tests .ci-build/macos-release
@@ -31,7 +34,7 @@ cmake --build .ci-build/macos-release --parallel "$jobs"
 python3 scripts/package-macos.py --qt "$qt" --app .ci-build/macos-release/hgs-tray.app \
     --cli target/release/hgs --licenses artifacts/macos-licenses --version "$version" --release "$release" \
     --output "$output"
-python3 scripts/check-macos-bundle.py "$output/Zerus.app" --version "$version" --release "$release" --selftest
+python3 scripts/check-macos-bundle.py "$output/Zerus.app" --version "$version" --release "$release" --selftest --source-commit "$(git rev-parse HEAD)"
 # ditto keeps the framework symlinks and permissions that artifact uploads drop.
 ditto -c -k --keepParent "$output/Zerus.app" "$output/Zerus-unsigned.zip"
 rm -rf "$output/Zerus.app"

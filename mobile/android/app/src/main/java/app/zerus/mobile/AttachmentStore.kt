@@ -133,6 +133,10 @@ class AttachmentStore(context: Context) {
     internal suspend fun importRecording(wav: ByteArray): Attachment = withContext(Dispatchers.IO) {
         FILE_LOCK.withLock { wav.inputStream().use { files.copyFrom(it, "voice.wav", "audio/wav", emptyList()) { ensureActive() } } }
     }
+    internal suspend fun importVideo(mp4: ByteArray): Attachment = withContext(Dispatchers.IO) {
+        require(mp4.size in 1..VideoProtocol.MAX_BYTES)
+        FILE_LOCK.withLock { mp4.inputStream().use { files.copyFrom(it, "video.mp4", "video/mp4", emptyList()) { ensureActive() } } }
+    }
 
     suspend fun payload(attachments: List<Attachment>): JSONArray = withContext(Dispatchers.IO) {
         FILE_LOCK.withLock {

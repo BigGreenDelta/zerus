@@ -12,6 +12,7 @@ zerus-setup
 
 The first public macOS build is
 [nightly 0.42.2.r1291.g5d2e5d0.n17](https://github.com/ufna/zerus/releases/tag/nightly-38794972859).
+For Dev builds from successful main CI, install `ufna/zerus/zerus@dev` instead.
 The stable `zerus` cask will appear with the first owner-triggered signed stable
 release; it is not yet available. After that, install it with
 `brew install --cask ufna/zerus/zerus`.
@@ -20,15 +21,16 @@ release; it is not yet available. After that, install it with
 | --- | --- | --- | --- |
 | `zerus` | manual `release.yml` candidate, `publish.yml` | `VERSION` | `releases/download/vVERSION/` |
 | `zerus@nightly` | daily `nightly.yml`, `publish-nightly.yml` | `VERSION.rCOUNT.gCOMMIT.nNUMBER` | `releases/download/nightly-RUN_ID/` |
+| `zerus@dev` | successful main `ci.yml`, `publish-dev.yml` | `DEV_VERSION-dev.NUMBER` | `zerus.dev/downloads/dev-desktop-RUN_ID/` |
 
-Each cask ships with the AUR packages of the same candidate: `zerus` with the
-stable packages, `zerus@nightly` with `zerus-ade-nightly-bin`. Both install the
-same `Zerus.app` and declare `conflicts_with` each other. The Dev channel, built on
-every main push, has no cask: signing and notarizing every push and committing it
-to the tap would cost a macOS runner and a tap commit per push, and dev artifacts
-live only on the website mirror. Intel Macs and a CLI-only formula are not offered.
+Stable and nightly casks ship with the AUR packages of the same candidate:
+`zerus` with stable packages, `zerus@nightly` with `zerus-ade-nightly-bin`.
+Dev follows successful main CI and uses the existing bounded website mirror,
+without creating a GitHub Release for each push. All casks install the same
+`Zerus.app`; only one channel can be installed. Intel Macs and a CLI-only formula
+are not offered.
 
-Both casks are built only while the repository variable `MACOS_CASKS_ENABLED` is
+Mac casks are built only while the repository variable `MACOS_CASKS_ENABLED` is
 `true`; until the signing credentials exist, stable and nightly candidates stay
 Arch-only and publish as before.
 
@@ -104,7 +106,9 @@ scripts/ci/macos-bundle.sh`) and review the module SBOMs before committing.
 `macos-cask.yml` is a reusable workflow with one input, `channel`. `release.yml`
 calls it with `stable` when `macos_cask=true` (the default; it then requires
 `run_macos=true`) and `MACOS_CASKS_ENABLED` is `true`; `nightly.yml` calls it with
-`nightly` whenever the variable is `true`. Both callers explicitly forward only
+`nightly` whenever the variable is `true`. Trusted main CI calls it with `dev`
+after the full gate succeeds, when both `DEV_UPDATES_ENABLED` and
+`MACOS_CASKS_ENABLED` are enabled. All callers explicitly forward only
 the five Apple secret names declared by the reusable workflow. GitHub requires
 this forwarding even for environment secrets; without it their values are empty.
 The values remain in the main-only `macos-signing` environment and are resolved
@@ -113,11 +117,14 @@ only by the signing job. The callers never use `secrets: inherit`. See
 It runs three jobs after full CI:
 
 1. **macOS bundle** (`macos-15`, no secrets) selects the release version (the
-   product version, or the nightly version computed exactly like
-   `prepare-nightly.py`), installs the pinned Qt and runs
+   product version, the nightly version computed exactly like
+   `prepare-nightly.py`, or `DEV_VERSION-dev.<CI run_number>`), installs the pinned Qt and runs
    `scripts/ci/macos-bundle.sh`. It builds the CLI and GUI with a macOS 14.0 target,
    runs every Qt suite against the bundled Qt, assembles the production bundle,
    runs the bundle checks and self-tests and uploads `Zerus-unsigned.zip`.
+   Dev passes the same CI sequence to CMake. The unsigned, mounted and installed
+   apps report their embedded build identity through `--build-info`; validation
+   requires the expected version, Dev sequence and clean source commit.
    Bundle and installation runners install `tmux` explicitly. Self-tests use a
    private home and existing private socket directory, with only tmux exposed
    alongside system tools; they cannot inspect a developer's running sessions.
@@ -153,7 +160,11 @@ It runs three jobs after full CI:
 Only entitlements with a concrete need are granted, and only to the application:
 `com.apple.security.automation.apple-events` with `NSAppleEventsUsageDescription`
 because Terminal integration runs `osascript`, whose Apple Events TCC attributes
-to Zerus. Without Qt WebEngine there is no helper process that would need JIT.
+to Zerus, and `com.apple.security.device.audio-input` and
+`com.apple.security.device.camera` with `NSMicrophoneUsageDescription` and
+`NSCameraUsageDescription` because the hardened runtime blocks voice and video
+message recording without them. Without Qt WebEngine there is no helper process
+that would need JIT.
 
 The Arch assembly job then adds the signed ZIP, DMG and rendered cask through
 `prepare-release.py --macos` (`homebrew/zerus.rb`) or `prepare-nightly.py --macos`
@@ -192,6 +203,31 @@ The website mirror must run the current `scripts/update_feed.py` before
 with a macOS asset. Like the Windows zip, the macOS zip stays on GitHub:
 the mirror checks its sealed name and GitHub digest but neither stores it nor lists
 it in catalog artifacts; see [public distribution](public-distribution.md).
+
+Dev assembly adds the signed ZIP and DMG through `prepare-dev-update.py --macos`
+to the existing desktop candidate. Its optional top-level `macos` object contains
+the signing provenance plus exact `downloads` entries (`name`, `url`, `size`,
+`sha256`); the source/Arch `artifacts` array stays compatible with older clients.
+The mirror retains these bytes under the same three-build/72-hour grace/20 GiB
+policy as other Dev files. Deploy `macos_release.py`, `dev_updates.py` and
+`update_feed.py` together before the first Mac Dev candidate arrives.
+
+After the mirror job succeeds, `publish-dev.yml` runs `publish-dev-cask.py` in
+the protected release environment. It independently verifies the successful main
+CI run, sealed candidate, exact public catalog and both public Mac file hashes,
+then renders and pushes only `Casks/zerus@dev.rb`. Its `release-publication`
+concurrency group serializes tap writes with stable/nightly publishers. An older
+superseded candidate leaves the tap unchanged; changed bytes under an existing
+version fail. Retry the publisher with the same CI run, without rebuilding.
+
+Stable/nightly v1 catalogs expose the same optional `macos` download projection
+with GitHub URLs. Existing catalogs may gain only this projection from their
+already sealed release; all prior fields and release bytes stay immutable.
+Settings > Updates recognizes actual Homebrew ownership and direct DMG installs,
+defaults to the installed channel unless the user already chose another, compares
+the full installed release identity and offers a copyable Homebrew command or
+DMG download. A channel without a Mac build offers neither an upgrade command nor
+a download. Installation and GUI restart remain explicit.
 
 ## Configuration and credentials
 
@@ -367,6 +403,27 @@ ufna/zerus/zerus@nightly` also downloaded and verified the public package withou
 installing over the developer's app. The desktop/nightly mirror synchronized
 successfully and serves the same release and source commit; macOS downloads
 remain on GitHub.
+
+The first public macOS Dev build, `0.42.3-dev.693`, was qualified on 2026-10-16
+from clean source `f16d73bcd0730157b43a3ca2b8476f0319bf6193`.
+[CI 38813489733](https://github.com/ufna/zerus/actions/runs/38813489733)
+passed the full platform matrix, all 68 production Qt suites, Apple signing and
+notarization, and clean Homebrew installation and removal. Both the read-only
+mounted DMG and the installed cask passed bundle identity and CLI/GUI self-tests.
+[Publisher 38820507139](https://github.com/ufna/zerus/actions/runs/38820507139)
+published the sealed candidate through the bounded Dev mirror and verified its
+public ZIP/DMG bytes before adding `zerus@dev` to the tap. No GitHub Release was
+created for this Dev build.
+
+Independent downloads on macOS matched the published sizes and SHA-256 values;
+the public cask matched the reviewed template and ZIP digest. Gatekeeper and
+stapler accepted the downloaded DMG, and its read-only mounted application passed
+the self-tests with the exact clean source and Dev identity. `brew fetch --cask
+ufna/zerus/zerus@dev` verified the public package without installing it. The
+compiled desktop update controller also parsed the live Dev catalog and exposed
+its correct ZIP and DMG links. The shared developer GUI was left unchanged;
+its coordinated installation remains a separate rollout. The stable `zerus`
+cask remains unavailable until an owner-triggered signed stable release.
 
 Still requiring interactive or subsequent release qualification:
 

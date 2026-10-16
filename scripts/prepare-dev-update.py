@@ -15,6 +15,7 @@ parser.add_argument('--source-commit', required=True)
 parser.add_argument('--published-at', required=True)
 parser.add_argument('--aapt2', type=Path)
 parser.add_argument('--apksigner', type=Path)
+parser.add_argument('--macos', type=Path, help='signed and verified macOS ZIP, DMG and metadata')
 args = parser.parse_args()
 apk = None
 if args.platform == 'android':
@@ -26,7 +27,7 @@ if args.platform == 'android':
         raise SystemExit('One APK and its verification tools are required.')
     apk = mobile.apk_metadata(paths[0], args.aapt2, args.apksigner)
 seal(args.input, args.output, args.platform, args.run_id, args.run_number,
-     args.source_commit, args.published_at, apk)
+     args.source_commit, args.published_at, apk, args.macos)
 if apk:
     if mobile.apk_metadata(args.output / paths[0].name, args.aapt2, args.apksigner) != apk:
         raise SystemExit('Frozen APK identity differs from the verified build.')

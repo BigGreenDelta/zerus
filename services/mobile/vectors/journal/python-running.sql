@@ -16,6 +16,7 @@ INSERT INTO requests VALUES('d46c23ab-2b24-54f2-9d28-1e796b26efae','speech_profi
 INSERT INTO requests VALUES('781658f4-e463-5d81-9206-78fba720533c','attachment_read','running',NULL,0,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1759999900.0,1759999900.0,NULL,0);
 CREATE INDEX delivered_history ON requests(delivered,delivered_at);
 CREATE INDEX terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running';
+CREATE INDEX archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running';
 CREATE INDEX file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running';
 CREATE INDEX attachment_delivered_reads ON requests(delivered_at) WHERE operation='attachment_read' AND delivered=1 AND state!='running';
 CREATE INDEX journal_operation ON requests(operation);

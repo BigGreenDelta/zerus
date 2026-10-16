@@ -84,6 +84,47 @@ private slots:
             QVERIFY2(QJsonArray::fromStringList(matches) == example.value("matches").toArray(), qPrintable(example.value("name").toString()));
         }
     }
+    void optionalQuestionChipFollowsSharedContract()
+    {
+        QFile file(QFileInfo(QString::fromUtf8(__FILE__)).dir().filePath(
+            "../../mobile/android/app/src/test/resources/optional-question-contract.json"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto contract = QJsonDocument::fromJson(file.readAll()).object();
+        const auto parse = [](QJsonObject raw, const QString &name) {
+            raw["name"] = "codex/contract/" + name;
+            QString error;
+            const auto box = HgsClient::parseBox(QJsonDocument(QJsonObject{{"host", "fixture"}, {"ok", true},
+                {"sessions", QJsonArray{raw}}}).toJson(), &error);
+            return std::pair{box, error};
+        };
+        for (const auto &value : contract.value("cases").toArray()) {
+            const auto example = value.toObject(); const auto name = example.value("name").toString();
+            const auto [box, error] = parse(example.value("raw").toObject(), name);
+            QVERIFY2(error.isEmpty(), qPrintable(error)); QCOMPARE(box.sessions.size(), 1);
+            const int count = SessionPresentation::optionalQuestionCount(box.sessions.first(), example.value("online").toBool());
+            QVERIFY2(count == example.value("count").toInt(), qPrintable(name));
+            const QString label = count > 0 ? OptionalQuestionBadge::countText(count) : QString();
+            QVERIFY2(label == example.value("label").toString(), qPrintable(name));
+            // Optional questions never make a session need attention.
+            if (!example.value("raw").toObject().contains("mobile_attention") && example.value("raw").toObject().value("phase") != "input")
+                QVERIFY2(!SessionPresentation::needsAttention(box.sessions.first(), example.value("online").toBool()), qPrintable(name));
+        }
+        QCOMPARE(SessionPresentation::optionalQuestionsLabel(1), QStringLiteral("1 optional question waiting"));
+        QCOMPARE(SessionPresentation::optionalQuestionsLabel(2), QStringLiteral("2 optional questions waiting"));
+        for (const auto &value : contract.value("desktop_sequences").toArray()) {
+            const auto sequence = value.toObject(); const auto name = sequence.value("name").toString();
+            FleetState fleet; qint64 now = 1000;
+            for (const auto &stepValue : sequence.value("steps").toArray()) {
+                const auto step = stepValue.toObject();
+                auto [box, error] = parse(step.value("raw").toObject(), name);
+                QVERIFY2(error.isEmpty(), qPrintable(error));
+                fleet.setLocal(box, now += 1000);
+                QCOMPARE(fleet.local().sessions.size(), 1);
+                const int count = SessionPresentation::optionalQuestionCount(fleet.local().sessions.first(), step.value("online").toBool());
+                QVERIFY2(count == step.value("count").toInt(), qPrintable(name));
+            }
+        }
+    }
     void draftsJoinActiveOnceAndStayOffline()
     {
         auto state = fixture(); const QSet<QString> drafts{"\ncodex/hgs/ready", "\ncodex/hgs/dashboard",

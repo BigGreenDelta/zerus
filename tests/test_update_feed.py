@@ -104,6 +104,9 @@ class MirrorTest(unittest.TestCase):
         # Homebrew downloads it from GitHub; the mirror never deletes and has a fixed disk budget.
         self.assertFalse((self.root/'downloads/v0.37.0/zerus-0.37.0-macos-arm64.zip').exists())
         self.assertNotIn('zerus-0.37.0-macos-arm64.zip',self.client.calls)
+        download=data['macos']['downloads'][0]
+        self.assertEqual(download['url'],'https://github.com/ufna/zerus/releases/download/v0.37.0/'+download['name'])
+        self.assertEqual(download['sha256'],hashlib.sha256(self.client.payload[download['name']]).hexdigest())
     def test_nightly_macos_cask_asset_stays_on_github_and_out_of_the_catalog(self):
         asset='zerus-0.37.0.r123.gaaaaaaa.n5-macos-arm64.zip'
         self.client=FakeGitHub(nightly=True);self.add_macos(asset,cask='zerus@nightly');self.root.mkdir();self.run_mirror(True,'desktop/nightly')
@@ -135,11 +138,26 @@ class MirrorTest(unittest.TestCase):
                     self.assertNotIn(image,files)
                     self.assertNotIn(image,self.client.calls)
                     self.assertNotIn(image,[row['name'] for row in result['artifacts']])
+                    row=result['macos']['downloads'][1]
+                    self.assertEqual(row['name'],image)
+                    self.assertEqual(row['url'],self.client.release['html_url'].replace('/tag/','/download/')+'/'+image)
+                    self.assertEqual(row['size'],len(self.client.payload[image]))
                 row=next(row for row in self.client.release['assets'] if row['name']==image)
                 row['digest']='sha256:'+'f'*64
                 with tempfile.TemporaryDirectory() as stage:
                     with self.assertRaisesRegex(ValueError,'digest mismatch'):
                         feed.validate_and_fetch(self.client,self.client.release,Path(stage),'desktop',channel)
+    def test_existing_mac_release_catalog_can_gain_only_its_additive_download_projection(self):
+        self.add_macos();self.root.mkdir();self.run_mirror()
+        path=self.root/'updates/v1/desktop/stable.json';current=json.loads(path.read_text())
+        legacy={key:value for key,value in current.items() if key!='macos'}
+        path.write_text(json.dumps(legacy));self.run_mirror()
+        self.assertEqual(json.loads(path.read_text()),current)
+        with self.assertRaises(ValueError):feed.check_previous(path,legacy)
+        changed=copy.deepcopy(current);changed['macos']['downloads'][0]['sha256']='0'*64
+        with self.assertRaises(ValueError):feed.check_previous(path,changed)
+        path.write_text(json.dumps(legacy));changed=copy.deepcopy(current);changed['sourceCommit']='0'*40
+        with self.assertRaises(ValueError):feed.check_previous(path,changed)
     def test_disk_image_metadata_cannot_admit_undeclared_or_foreign_assets(self):
         image='zerus-0.37.0-macos-arm64.dmg'
         for metadata in (None,{}, {'asset':'foreign.dmg','notarization_id':'1123abcd-4567-89ef-0123-456789abcdef'},

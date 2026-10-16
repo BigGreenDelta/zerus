@@ -1,15 +1,13 @@
 """Presence-aware alerts across the real connector, the Rust relay and the phone API."""
 import asyncio
 import importlib.util
-import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
 
 from aiohttp import ClientSession
 
-from zerus_mobile.connector import Connector
+from e2e_connector import implementations, running
 from relay_fixture import start_relay
 
 spec = importlib.util.spec_from_file_location("fixture_presence", Path(__file__).with_name("fixture_hgs.py"))
@@ -21,6 +19,11 @@ FIRST, SECOND = "1" * 64, "2" * 64
 
 class PresenceEndToEndTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_desktop_holds_read_drops_and_lock_delivers(self):
+        for implementation in implementations():
+            with self.subTest(connector=implementation):
+                await self.active_desktop_holds_read_drops_and_lock_delivers(implementation)
+
+    async def active_desktop_holds_read_drops_and_lock_delivers(self, implementation):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture = Path(__file__).with_name("fixture_hgs.py")
@@ -40,11 +43,9 @@ class PresenceEndToEndTests(unittest.IsolatedAsyncioTestCase):
 
             presence(1.0)
             session()
-            connector = Connector({"server_url": url, "node_token": node["node_token"],
-                "hgs_path": str(fixture), "state_dir": str(root / "journal"), "poll_interval": 1},
-                allow_insecure_localhost=True)
-            with patch.dict(os.environ, {"ZERUS_MOBILE_FIXTURE_DIR": directory}):
-                task = asyncio.create_task(connector.run())
+            config = {"server_url": url, "node_token": node["node_token"],
+                "hgs_path": str(fixture), "state_dir": str(root / "journal"), "poll_interval": 1}
+            async with running(implementation, config, root, {"ZERUS_MOBILE_FIXTURE_DIR": directory}):
                 try:
                     async with ClientSession() as client:
                         async with client.post(url + "/v1/pair", json={"code": invitation["pair_code"], "device_name": "Test phone"}) as response:
@@ -109,9 +110,6 @@ class PresenceEndToEndTests(unittest.IsolatedAsyncioTestCase):
                                          ("attention", fixture_hgs.initial()["name"], node["node_id"]))
                         self.assertEqual(len(await kinds("alert")), 1)
                 finally:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                    connector.journal.close()
                     await relay.cleanup()
 
 

@@ -32,7 +32,8 @@ object NotificationSettings {
         val next = old.copy(master = enabled, generation = generation,
             inputEnabledAt = if (enabled && old.input) generation else old.inputEnabledAt,
             errorsEnabledAt = if (enabled && old.errors) generation else old.errorsEnabledAt,
-            finishedEnabledAt = if (enabled && old.finished) generation else old.finishedEnabledAt)
+            finishedEnabledAt = if (enabled && old.finished) generation else old.finishedEnabledAt,
+            optionalEnabledAt = if (enabled && old.optional) generation else old.optionalEnabledAt)
         store.saveNotificationPreferences(next)
         state.value = next
         SessionNotifications.cancelDisabled(context, next)
@@ -46,6 +47,7 @@ object NotificationSettings {
             SessionAlertKind.Input -> old.copy(input = enabled, inputEnabledAt = if (enabled && !old.input) generation else old.inputEnabledAt)
             SessionAlertKind.Error -> old.copy(errors = enabled, errorsEnabledAt = if (enabled && !old.errors) generation else old.errorsEnabledAt)
             SessionAlertKind.Finished -> old.copy(finished = enabled, finishedEnabledAt = if (enabled && !old.finished) generation else old.finishedEnabledAt)
+            SessionAlertKind.Optional -> old.copy(optional = enabled, optionalEnabledAt = if (enabled && !old.optional) generation else old.optionalEnabledAt)
         }.copy(generation = generation)
         store.saveNotificationPreferences(next)
         state.value = next
@@ -67,6 +69,7 @@ object NotificationSettings {
         catch (_: Exception) { error = true }
     }
     listOf(Triple(SessionAlertKind.Input, "Input and approvals", preferences.input),
+        Triple(SessionAlertKind.Optional, "Optional questions", preferences.optional),
         Triple(SessionAlertKind.Error, "Errors", preferences.errors),
         Triple(SessionAlertKind.Finished, "Turn finished", preferences.finished)).forEach { (kind, caption, enabled) ->
         Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {

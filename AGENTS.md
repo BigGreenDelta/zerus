@@ -136,9 +136,12 @@ assets. Pure VCS version bumps do not create AUR commits. Stable releases after
 0.42.2 and nightly prereleases also carry the tested Windows x86_64 portable zip
 unchanged; it stays GitHub-only (not mirrored or in the v1 feed). Dev builds have
 no Windows asset.
-The Homebrew casks `zerus` (stable) and `zerus@nightly` (tap `ufna/homebrew-zerus`)
-ship the signed, notarized Apple Silicon `Zerus.app` from the same stable or nightly
-candidate once `MACOS_CASKS_ENABLED` is set. Apple credentials stay in the main-only
+The Homebrew casks `zerus` (stable), `zerus@nightly` and `zerus@dev` (tap
+`ufna/homebrew-zerus`) ship signed, notarized Apple Silicon `Zerus.app` once
+`MACOS_CASKS_ENABLED` is set. Dev also requires `DEV_UPDATES_ENABLED`, follows
+successful main CI and uses the existing bounded mirror; it creates no GitHub
+Release per push. Publish its cask only after verifying the exact public catalog
+and signed ZIP/DMG hashes against that CI candidate. Apple credentials stay in the main-only
 `macos-signing` environment and the tap deploy key in `release`. Casks never quit
 the GUI, unload LaunchAgents or write to user homes; `zerus-setup` stays explicit.
 See `docs/macos-distribution.md`.

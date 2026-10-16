@@ -1,4 +1,5 @@
 #include "HgsClient.h"
+#include <QtMath>
 #include "DownloadCache.h"
 #include "ChildProcess.h"
 #include "ProcessRunner.h"
@@ -24,6 +25,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <utility>
@@ -121,6 +123,22 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
         s.readReplyId = read.value("reply_id").toString();
         s.readAttentionSignature = read.value("attention_signature").toString();
     }
+    // Strict types: anything but a whole non-negative count is unknown, never 0.
+    s.optionalQuestionsReported = obj.contains(QStringLiteral("optional_questions"));
+    const auto optional = obj.value(QStringLiteral("optional_questions"));
+    if (optional.isObject()) {
+        const auto summary = optional.toObject();
+        const auto count = summary.value(QStringLiteral("count"));
+        const double value = count.isDouble() ? count.toDouble() : -1;
+        if (value >= 0 && value <= 1e9 && value == std::floor(value)) {
+            s.optionalQuestions = int(value);
+            for (const auto &id : summary.value(QStringLiteral("ids")).toArray())
+                if (id.isString() && !id.toString().isEmpty() && !s.optionalQuestionIds.contains(id.toString()))
+                    s.optionalQuestionIds << id.toString();
+            const auto latest = summary.value(QStringLiteral("latest_at"));
+            s.optionalQuestionsLatestAt = latest.isDouble() && latest.toDouble() > 0 ? latest.toDouble() : 0;
+        }
+    }
     s.state = obj.value(QStringLiteral("state")).toString(QStringLiteral("running"));
     s.archiveId = s.state == QLatin1String("archived") ? obj.value(QStringLiteral("archive_id")).toString() : QString();
     s.archivedAt = obj.value(QStringLiteral("archived_at")).toDouble();
@@ -176,6 +194,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
 BoxState boxFromObject(const QJsonObject &obj)
 {
     BoxState box;
+    box.archivePaging = obj.value("archive_paging").toBool();
     box.metrics = obj.value("metrics").toObject();
     box.host = obj.value(QStringLiteral("host")).toString();
     box.ok = obj.value(QStringLiteral("ok")).toBool();
@@ -258,6 +277,11 @@ HgsClient::~HgsClient()
         proc->disconnect(); proc->blockSignals(true);
         if (proc->state() != QProcess::NotRunning) { proc->kill(); proc->waitForFinished(1000); }
     }
+}
+
+QList<SessionInfo> HgsClient::parseSessions(const QJsonArray &rows) {
+    QJsonObject box{{"host","archive"},{"ok",true},{"sessions",rows}};
+    return boxFromObject(box).sessions;
 }
 
 BoxState HgsClient::parseBox(const QByteArray &json, QString *error)
@@ -360,6 +384,28 @@ void runHgs(const QString &hgs, const QStringList &args, int timeoutMs, QObject 
 }
 
 } // namespace
+
+void HgsClient::cancelArchivePages(){const auto jobs=std::exchange(m_archiveJobs,{});qDeleteAll(jobs);}
+quint64 HgsClient::requestArchivePage(const QString &host,const QJsonObject &query) {
+    delete m_archiveJobs.take(host); // Cancels only our read-only CLI helper.
+    auto *owner=new QObject(this);m_archiveJobs[host]=owner;
+    const quint64 request=++m_archiveRequest;
+    QStringList args;if(!host.isEmpty())args<<'@'+host;args<<"archives"<<"--json";
+    const auto finish=[this,owner,request,host](const QJsonObject &data,const QString &error){m_archiveJobs.remove(host);owner->deleteLater();emit archivePageReady(request,host,data,error);};
+    runHgs(m_hgs,args,30000,owner,[query,finish](const QByteArray &out){
+        const auto doc=QJsonDocument::fromJson(out);const auto data=doc.object();QString error;
+        const auto rows=data["sessions"].toArray();
+        if(!doc.isObject()||data["version"].toInt()!=1||!data["sessions"].isArray()||rows.size()>50||!data["next_cursor"].isString()||data["next_cursor"].toString().size()>1024||!data["total"].isDouble()||data["total"].toDouble()<rows.size()
+            ||data["from"]!=query["from"]||data["until"]!=query["until"]||data["query"]!=query["query"]||rows.isEmpty()&&!data["next_cursor"].toString().isEmpty()||!query["cursor"].toString().isEmpty()&&query["cursor"]==data["next_cursor"])error=tr("Invalid archive page. Update the computer CLI and refresh.");
+        if(data.contains("previous_cursor")||data.contains("position")) {
+            const auto previous=data["previous_cursor"];const auto position=data["position"].toDouble(-1);
+            if(!previous.isString()||previous.toString().size()>1024||!data["position"].isDouble()||position<0||position!=qFloor(position)||position+rows.size()>data["total"].toDouble())error=tr("Invalid archive window. Refresh the archive.");
+        }
+        for(const auto &value:rows){const auto row=value.toObject();const auto id=row["archive_id"].toString();if(row["state"]!="archived"||row["name"].toString().isEmpty()||QUuid(id).toString(QUuid::WithoutBraces)!=id||!row["archived_at"].isDouble()||row["archived_at"].toDouble()<query["from"].toDouble()||row["archived_at"].toDouble()>=query["until"].toDouble())error=tr("Invalid archived session identity. Refresh the archive.");}
+        finish(data,error);
+    },[finish](const QString &,const QString &error){finish({},error);},QJsonDocument(query).toJson(QJsonDocument::Compact));
+    return request;
+}
 
 void HgsClient::requestVersion()
 {
@@ -517,7 +563,7 @@ void HgsClient::requestLocal()
     emit stateReadStarted({});
     // Large native histories can take longer than five seconds. Keep one poll
     // in flight and allow it to finish instead of continually killing/restarting it.
-    runHgs(m_hgs, {QStringLiteral("ls"), QStringLiteral("--json"), QStringLiteral("--local")},
+    runHgs(m_hgs, {QStringLiteral("ls"), QStringLiteral("--json"), QStringLiteral("--local"), QStringLiteral("--no-archives")},
            15000, this,
            [this](const QByteArray &out) {
                m_localInFlight = false;
@@ -546,7 +592,7 @@ void HgsClient::requestPeer(const QString &peer)
 
     // ssh-рукопожатие может занять больше времени, чем локальный вызов — у самого hgs
     // уже есть ConnectTimeout=3, но обвязка (auth, motd) укладывается не всегда в 5с.
-    runHgs(m_hgs, {QLatin1Char('@') + peer, QStringLiteral("ls"), QStringLiteral("--json")},
+    runHgs(m_hgs, {QLatin1Char('@') + peer, QStringLiteral("ls"), QStringLiteral("--json"), QStringLiteral("--no-archives")},
            15000, this,
            [this, peer](const QByteArray &out) {
                // Снятие метки здесь и в onFailed ниже -- ровно те же два колбэка, которыми

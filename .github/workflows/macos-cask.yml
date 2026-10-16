@@ -1,14 +1,14 @@
 name: macOS cask
 
 # Builds, signs, notarizes and installs the Apple Silicon bundle of one Homebrew
-# channel for an already verified main revision. Only release.yml and nightly.yml
+# channel for an already verified main revision. Only release.yml, nightly.yml and trusted main CI
 # call it and explicitly forward the five Apple secret names. The signing job
 # alone reads their values from macos-signing, whose policy admits only main.
 on:
   workflow_call:
     inputs:
       channel:
-        description: Homebrew channel of the candidate, stable or nightly
+        description: Homebrew channel of the candidate, stable, nightly or dev
         type: string
         required: true
     secrets:
@@ -62,6 +62,8 @@ jobs:
               # The same inputs prepare-nightly.py uses for the Arch nightly.
               count = int(subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], text=True))
               release = nightly_version(product, count, os.environ['COMMIT'], int(os.environ['RUN_NUMBER']))
+          elif channel == 'dev':
+              release = pathlib.Path('DEV_VERSION').read_text().strip() + '-dev.' + os.environ['RUN_NUMBER']
           else:
               release = product
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
@@ -75,6 +77,7 @@ jobs:
       - name: Build, test and assemble the unsigned bundle
         env:
           ZERUS_RELEASE_VERSION: ${{ steps.release.outputs.release }}
+          ZERUS_DEV_BUILD_NUMBER: ${{ inputs.channel == 'dev' && github.run_number || '' }}
         run: ZERUS_QT_PREFIX="$RUNNER_TEMP/qt" bash scripts/ci/macos-bundle.sh
       - name: Retain macOS bundle test logs
         if: always()
@@ -167,5 +170,5 @@ jobs:
         env:
           CHANNEL: ${{ inputs.channel }}
           # Nightly prereleases are tagged with the calling workflow run.
-          TAG: ${{ inputs.channel == 'nightly' && format('nightly-{0}', github.run_id) || '' }}
+          TAG: ${{ inputs.channel == 'nightly' && format('nightly-{0}', github.run_id) || inputs.channel == 'dev' && format('dev-desktop-{0}', github.run_id) || '' }}
         run: bash scripts/ci/macos-cask-install.sh artifacts/macos-signed "$CHANNEL" "$TAG"

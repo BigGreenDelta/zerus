@@ -95,6 +95,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.6.2")
     implementation("androidx.camera:camera-lifecycle:1.6.2")
     implementation("androidx.camera:camera-view:1.6.2")
+    implementation("androidx.camera:camera-video:1.6.2")
     implementation("com.google.zxing:core:3.5.4")
     implementation("org.commonmark:commonmark:0.30.0")
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.30.0")

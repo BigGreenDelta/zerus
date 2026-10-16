@@ -65,6 +65,24 @@ QString attentionFingerprint(const SessionInfo &s) {
         .toJson(QJsonDocument::Compact));
 }
 
+// A successful snapshot reports null optional questions while the host's
+// question index is incomplete or unreadable. Keep the last value listed for the
+// same conversation, whatever the row state, so the chip does not flicker;
+// another conversation starts unknown. Question IDs stay stable across runs.
+void keepOptionalQuestions(QList<SessionInfo> &sessions, const QList<SessionInfo> &before)
+{
+    for (auto &s : sessions) {
+        if (!s.optionalQuestionsReported || s.optionalQuestions >= 0) continue;
+        for (const auto &old : before) {
+            if (old.name != s.name || old.archiveId != s.archiveId
+                || old.conversationId != s.conversationId || old.optionalQuestions < 0) continue;
+            s.optionalQuestions = old.optionalQuestions; s.optionalQuestionIds = old.optionalQuestionIds;
+            s.optionalQuestionsLatestAt = old.optionalQuestionsLatestAt;
+            break;
+        }
+    }
+}
+
 // A queued mark is finished once the host shows it, or once none of its values
 // is current any more: the host would report every field stale.
 bool settled(const ReadMark &mark, const SessionInfo &s) {
@@ -201,7 +219,8 @@ void FleetState::setLocal(const BoxState &box, qint64 /*nowMs*/)
     // Свой бокс не имеет понятия "опрошен давно": мы и есть этот бокс, вызов hgs
     // локальный и синхронный по сути (миллисекунды). localIsAlwaysFresh() полагается
     // на то, что isStale() вообще не смотрит на m_local.
-    m_local = box; updateUnread({}, m_local);
+    BoxState next = box; keepOptionalQuestions(next.sessions, m_local.sessions);
+    m_local = std::move(next); updateUnread({}, m_local);
     m_haveLocal = true;
     if (box.peersKnown) {
         for (auto it = m_peers.begin(); it != m_peers.end(); ) {
@@ -225,7 +244,8 @@ void FleetState::setPeer(const BoxState &box, qint64 nowMs)
     PeerEntry &entry = m_peers[box.host];
 
     if (box.ok) {
-        entry.box = box; updateUnread(box.host, entry.box);
+        const auto before = std::exchange(entry.box.sessions, {});
+        entry.box = box; keepOptionalQuestions(entry.box.sessions, before); updateUnread(box.host, entry.box);
     } else {
         // Пир ответил "я офлайн/сплю" — это не то же самое, что "мы не знаем, что там".
         // hgs в таком случае не может опросить tmux и присылает sessions:[], но реальные

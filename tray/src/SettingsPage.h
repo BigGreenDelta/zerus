@@ -21,6 +21,7 @@
 #include <QFormLayout>
 #include <QUrl>
 #include "ProcessSettings.h"
+#include "QuestionNotificationSettings.h"
 
 class SettingsPage : public QWidget {
 public:
@@ -86,6 +87,9 @@ public:
         auto *completed=new QCheckBox(tr("Show completed subagents"));completed->setObjectName("workspaceShowCompletedSubagents");completed->setChecked(QSettings().value("workspace/showCompletedSubagents",false).toBool());sessions->addWidget(completed);
         auto *completedHint=new QLabel(tr("Include agents whose latest turn has finished in the session list and its counts. Tasks & agents always shows all reported agents. Agents with unknown status remain visible."));completedHint->setWordWrap(true);sessions->addWidget(completedHint);
         connect(completed,&QCheckBox::toggled,this,[this](bool on){QSettings().setValue("workspace/showCompletedSubagents",on);if(appearanceChanged)appearanceChanged();});
+        auto *optionalQuestions=new QCheckBox(tr("Notify about optional questions"));optionalQuestions->setObjectName("notifyOptionalQuestions");optionalQuestions->setChecked(QuestionNotificationSettings::enabled());sessions->addWidget(optionalQuestions);
+        auto *optionalHint=new QLabel(tr("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify."));optionalHint->setWordWrap(true);sessions->addWidget(optionalHint);
+        connect(optionalQuestions,&QCheckBox::toggled,this,[](bool on){QuestionNotificationSettings::setEnabled(on);});
         auto *hint=new QLabel(tr("Closing Zerus keeps agents running. Projects and the arrangement of your workspace are saved on this device."));hint->setWordWrap(true);sessions->addWidget(hint);sessions->addStretch();
         sync=new RecoverySync(executable,this);recovery=new RecoverySettings(sync);recovery->setMaximumWidth(850);addPage(recovery);
         auto *processes=makePage(tr("Processes"));

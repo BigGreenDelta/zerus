@@ -248,6 +248,82 @@ and removes an archive binding only after the native agent confirms the expected
 conversation. Failed restore keeps it. **Forget archive** preserves native history;
 `resume --all` excludes archives.
 
+### Browse Archive by date
+
+Desktop and Android filter **Archived date**, the time a conversation moved into
+Archive, independently of its creation or last message. Choose All dates, Today,
+7/30 calendar days, or an inclusive From/Through range. Days use the viewing
+device's local time zone, including daylight-saving changes. Pages request the
+most recently archived instances first; the desktop retains saved row order within
+each project. **Refresh** starts a fresh view. **Older sessions** and **Newer
+sessions** replace the current page, retaining at most 50 rows per selected online
+computer. Only two cursor anchors per computer are kept, without a growing page
+or cursor history; every matching record remains reachable in either direction.
+The compact period button opens quick ranges and a custom From/Through picker.
+Quick ranges fill the From/Through draft and keep the picker open, so either date
+can be adjusted before **Apply range**. Only Apply changes the active date filter;
+opening a picker, choosing a preset, Cancel, Escape or dismissing the panel never
+fetches a page. **All dates** shows **Any date** for both bounds and applies no
+date limits. Calendar inputs follow the app's desktop theme.
+The navigation row shows the current range for one computer or the loaded/matching
+count across computers. Hover the desktop count or expand the mobile count for
+each computer's exact page range. Older/Newer arrows sit beside this summary;
+their accessible labels describe the direction. Refresh uses the adjacent icon.
+The Archive badge counts rows in the current project/machine scope, with `+` when
+the current window does not contain the whole archive. An unavailable
+computer keeps its own error and retry state; changing dates, search or machines
+discards responses belonging to the previous view.
+
+Upgraded desktop and connector polls use `hgs ls --json --local --no-archives`.
+For older Android clients, the connector attaches a cached recent window of at
+most 50 archived rows/128 KiB and explicit `mobile_archive` loaded/total/partial
+metadata. It refreshes that window only when the native directory revision
+changes or five minutes expire. Native identity checks and the existing fresh
+snapshot gate remain in force for that window. Updated Android ignores this
+compatibility window when page operations are supported; an old relay can still
+show it while the system updates. Full Archive browsing needs the updated client.
+The legacy `ls --json` default remains compatible. The native, read-only ABI is:
+
+```sh
+printf '%s' '{"from":0,"until":253402300800,"limit":50,"cursor":"","query":""}' | hgs archives --json
+```
+
+`from` is inclusive and `until` exclusive Unix seconds (integers, nonnegative);
+`limit` is 1–50. All fields are optional. `query` is literal case-insensitive
+archive metadata search (names, IDs, provider, folder and title), at most 256
+characters; this is distinct from the desktop's global public-message search.
+The result contains `version:1`, `sessions`, `total`, `next_cursor`, the additive
+`previous_cursor` and zero-based `position`, and the echoed range/query. Pass either
+opaque cursor with the same range/query to move older or newer. Both directions
+use date/ID keysets; no offset scan or retained client cursor stack is required.
+Ordering uses `(archived_at, archive_id)` descending, avoiding offset duplicates
+when an earlier page changes. Newer completions appear after Refresh. Deleted or
+restored instances disappear; all actions still recheck exact native identity.
+Cursors belong to one computer/catalog and cannot be reused after rebuilding it.
+
+A rebuildable `archive-catalog-v1.sqlite3` indexes metadata beside the durable
+state. Archive JSON files remain authoritative. Its first use indexes existing
+records; unchanged polls/pages reuse it, and atomic archive writes, rename,
+restore or forget update the directory generation. Only requested rows open
+conversation summaries, outside the state writer lock. Browsing never starts an
+agent or changes read marks. New archive pages use the additive mobile
+`archive_list` capability; older computers retain their previously loaded archive
+view and need an updated CLI/connector/relay for paging. Archive IDs are admitted
+from validated pages for one hour (bounded to 2,000 recently paged instances),
+while native inspection and lifecycle actions still verify name/archive/run.
+An already-open older archive also survives a connector restart or cache expiry:
+`hgs archives lookup --json` accepts only `name` and `archive_id`, reads that one
+authoritative record without scanning the catalog or transcript, and returns its
+name/archive/run/conversation identity. The connector verifies this response and
+any requested run/conversation before admitting an uncached target. Failed or
+mismatched lookups grant no admission; lifecycle operations keep their native
+fresh checks. This internal read ABI adds no relay mutation or phone operation.
+
+Desktop bulk removal is explicitly **Remove loaded archived sessions** when
+paging is enabled. Its confirmation names/counts those loaded instances in the
+current date/machine scope; unloaded entries are kept. Local user grouping follows
+the exact observed run even when its reusable session label later changes owner.
+
 ## Project wrappers
 
 An executable `run_COMMAND.sh` in the project folder runs inside the tmux session.
@@ -298,7 +374,18 @@ live background commands or active subagents continue, intermediate replies rema
 unread in Activity but show no new-reply badge or reply-only attention count on
 desktop or Android. The pending reply becomes visible when work finishes; this
 never marks it as read. Explicit questions, approvals, errors and review reminders
-remain actionable. Routine replies from a turn the
+remain actionable. Optional Codex questions, which the agent continues without,
+are not attention: on the desktop they change neither the session's status nor
+the Needs attention filter, counters or badges. Listings report them separately
+as [`optional_questions`](#optional-questions-in-listings). Settings → Sessions →
+**Notify about optional questions**, off by default, adds an *Optional question*
+banner once for each new question. Questions already pending when it is turned on,
+or first seen while Zerus is focused or the session needs action, are only
+recorded; a stop, resume or temporarily unknown count announces nothing again. The
+banner opens the conversation's Activity. It is withdrawn when its questions are
+answered or skipped, the session is marked as read here or on another device, or
+the setting is turned off; delivered Windows messages remain but no longer open a
+session. Routine replies from a turn the
 agent scheduled itself (Kimi `CronCreate`) are not new replies while a recurring
 job remains: they appear in Activity without an unread mark, badge or banner. The
 reply after the last job ends, a one-shot reminder and any reply to the person's
@@ -347,8 +434,9 @@ See [provider management](speech-providers.md) and
 Russian `v3_e2e_rnnt` profile. Saving or selecting a profile does not install or
 download a model and never falls back to another provider.
 
-On desktop, use **Voice** in the message toolbar, allow microphone access, then
-stop recording to review the recording with **Play**, **Discard** or **Send voice**. Recordings
+On desktop, use **Voice** in the message toolbar. Tap to switch voice/video,
+hold to record, release to send, drag up to lock or release outside to cancel.
+Stop a locked recording to review it with **Play**, **Discard** or **Send**. Audio recordings
 are limited to two minutes and remain separate from the typed draft. Capture
 opens the local microphone without waiting for speech computers or providers.
 Provider discovery runs in the background. If it fails, the recording remains
@@ -364,16 +452,20 @@ action. Holding either key stops capture only once, and editing resumes after
 capture ends unless another delivery lock applies. Android supports the same
 controls with a hardware keyboard; its touch Stop control remains available.
 On Android, an empty editor with no attachments shows a microphone in the Send
-position. Hold to record, release to keep a preview, or slide left to cancel.
+position. Tap to switch voice/video, hold to record, release to send,
+slide left to cancel or up to lock. Stop a locked recording to keep a preview.
 The recording row overlays the retained editor and shows a red indicator, elapsed time and **Slide to cancel**;
 the hint moves and fades as you slide left. Short haptic feedback accompanies
 confirmed capture start and explicit stop/cancel, respecting Android settings.
-Text or attachments restore the ordinary Send button. Releasing the microphone
-never sends the recording; review it and use **Send voice message** separately.
+Text or attachments restore the ordinary Send button. Sending requires a
+confirmed provider for the exact conversation; delayed discovery keeps a preview
+until an explicit Send.
 After granting microphone permission, press again to start recording.
 The preview lists speech profiles reachable from the conversation computer. Explicit Send
 stores the original there, starts recognition and delivers recognized text to
-the pinned agent conversation. One history card retains the playable original,
+the pinned agent conversation. Video is limited to 60 seconds and 10 MiB. Its MP4 and extracted WAV share one
+message identity; the agent receives recognized speech. A tap starts circular
+video playback. One history card retains the playable original,
 expandable transcript and processing or delivery errors across devices. Its
 circular play/pause control sits beside the recording's amplitude waveform;
 the played portion is highlighted, and selecting a point on the waveform seeks
@@ -477,8 +569,9 @@ a folder into a repository.
 The project button beside the machine chooser focuses Sessions on one or more
 logical projects. Check projects to apply changes immediately; selected projects
 appear as removable chips. **All projects** clears this restriction. Right-click
-a project band for **Only this project**, **Add to project filter** (or **Remove
-from project filter**) and **Show all projects**. Multiple projects form a union,
+a project band for **Filter this project**, which replaces the selection with
+that project alone. Clear it using its chip or **All projects** in the chooser.
+Multiple projects selected in the chooser form a union,
 narrowed by the machine, state, folder and search filters. Selection stays local
 to the open workspace while navigating sections; an explicit session link or
 Overview scope opens its requested context. Renaming a project retains selection,
@@ -488,6 +581,11 @@ The project chooser shows parent-session counts for the current state, machine
 and folder scope before project selection or text search, including zero counts.
 Its open checkboxes and selection stay in place during polling. A removed selected
 project remains as **Unavailable project** until removed from the filter.
+
+Changing the state, machine or project filter only changes the session list.
+The open conversation and its draft stay in place even when no row matches;
+its row is selected again when it returns to the list. Click another session
+to open it.
 
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
@@ -1457,6 +1555,17 @@ show only their name, preceded by a folder icon. The opened session's header and
 **Details** show the same line, marked `· worktree` for a linked worktree; the
 full folder path stays in the header tooltip and **Details**.
 
+A running Codex session with pending optional questions, ones the agent keeps
+working without, shows an amber question-mark chip with their count (`99+`
+above 99) right after its status badge, or after a separate new-reply badge, on
+its Sessions and Overview cards; a collapsed strip tile shows a small amber `?`
+mark. Its tooltip and the card's accessible description say how many
+are waiting. The chip shares the amber of attention but never changes the
+session's status, the
+Needs attention filter, counters or badges, and it is hidden for paused,
+stopped, archived or offline sessions and while the count is unknown. Open the
+session to answer or skip the question in Activity.
+
 Existing Git worktrees appear in Projects and the session inspector. Clicking a
 checkout filters Sessions while preserving the open conversation and draft.
 In **New session**, **Auto** creates a generated `work-…` branch from `HEAD` and a
@@ -1919,6 +2028,21 @@ access or wait for the reset, then explicitly send a message to continue. Drafts
 are kept; refreshing usage never retries a turn. Account percentages alone do
 not change a running agent's state. Failed refreshes and offline snapshots are
 labeled as last reported usage.
+
+Claude's **What do you want to do?** usage-limit menu appears in Activity even
+when the failed turn or a background shell leaves hook state at Error or Working.
+Choose the native stop, wait-and-continue, or usage-credit option explicitly;
+there is no preselected answer or automatic approval. Zerus verifies the exact
+process, conversation and complete current panel before each navigation key and
+one confirmation. Usage-credit setup continues in Terminal for any further
+billing consent; unfamiliar account choices are shown read-only there.
+
+After an early reset, fresh complete account usage below the limits shows
+**Usage available** beside the composer and explains how to continue. An open
+native limit menu still needs an answer, and a stopped turn still needs a new
+message. Stale, offline or failed usage reads cannot produce this notice, clear
+the native failure or trigger a retry. Claude's own wait continues under its
+native rules; Zerus does not change the shared recovery policy or enable credits.
 
 Codex failures come from the exact conversation's native error journal and
 structured failed turn completions, including compaction failures. Tool output
@@ -2520,6 +2644,28 @@ host's mark for the current conversation:
 `{conversation_id, reply_id, attention_signature, at}`. A reply is unread while
 `reply_id` differs from `read.reply_id`; attention is unacknowledged while a
 non-null signature differs from `read.attention_signature`.
+
+<a id="optional-questions-in-listings"></a>
+Every session also has `optional_questions`, the questions Codex asked with
+`request_user_input_async` that still wait for the person while the agent
+continues without them: `{count, ids, latest_at}`. `count` is exact; `ids`
+holds the `question_id` of the newest 32, oldest first, and `latest_at` is when
+the newest was asked (seconds since the epoch, or `null` when not recorded).
+Without any it is `{"count": 0}`, as for saved, archived and non-Codex sessions.
+A question stops counting once its answer appears in the conversation, it is
+skipped, or its answer was submitted (**Submitted / Awaiting agent**); one asked
+in an earlier run of the same conversation counts until then. Only the main
+conversation is indexed: async questions of Codex native subagents are not
+counted. The value is `null` while the question index is incomplete or held by
+another process (as above) or cannot be read: unknown, never a count of 0, so a
+reader keeps the last value it had for the conversation. A listing from an
+older hgs has no `optional_questions`; peers forward theirs unchanged. Only
+identities leave the host, never question text, and no value depends on the
+time of the listing. Optional questions are not attention: they never change
+`phase`, and the count does not affect `attention_signature`, which keeps
+covering their identities as described above. Pending blocking requests of other
+providers stay in `phase` and `pending_question_count` is not used for these
+questions.
 
 Kimi sessions report `schedules: {count, recurring, next_at}` folded from the
 native cron journal: pending jobs the agent scheduled for itself, how many of them

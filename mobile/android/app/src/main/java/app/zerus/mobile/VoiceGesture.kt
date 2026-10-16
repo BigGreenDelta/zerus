@@ -2,38 +2,60 @@ package app.zerus.mobile
 
 import android.view.KeyEvent
 
-/** One pointer press owns at most one capture and one terminal action. No delivery actions exist here. */
-internal class VoiceGesture(private val cancelDistance: Float) {
-    data class Finish(val captureId: Long, val cancel: Boolean)
+/** Telegram's short-press/hold/lock state machine; side effects remain with the exact capture owner. */
+internal class VoiceGesture(private val cancelDistance: Float, private val lockDistance: Float = 57f) {
+    enum class End { Send, Preview, Cancel }
+    sealed interface Action {
+        data object SwitchMode : Action
+        data object Start : Action
+        data class Lock(val captureId: Long) : Action
+        data class Finish(val captureId: Long, val end: End) : Action
+    }
     private var pressed = false
     private var captureId: Long? = null
     private var ended = false
+    private var held = false
+    var locked = false; private set
     var progress = 0f; private set
+    var lockProgress = 0f; private set
 
-    init { require(cancelDistance.isFinite() && cancelDistance > 0) }
+    init { require(cancelDistance.isFinite() && cancelDistance > 0 && lockDistance.isFinite() && lockDistance > 0) }
 
     fun begin(): Boolean {
         if (pressed) return false
-        pressed = true; captureId = null; ended = false; progress = 0f
+        pressed = true; captureId = null; ended = false; held = false; locked = false; progress = 0f; lockProgress = 0f
         return true
     }
     fun captured(id: Long?) { if (pressed && !ended) captureId = id }
-    fun move(horizontalDistance: Float): Finish? {
-        if (!pressed || ended || !horizontalDistance.isFinite()) return null
-        progress = (-horizontalDistance / cancelDistance).coerceIn(0f, 1f)
-        return if (progress >= 1f) finish(cancel = true) else null
+    fun hold(): Action? {
+        if (!pressed || ended || held) return null
+        held = true
+        return Action.Start
     }
-    fun release(): Finish? {
-        val result = finish(cancel = false)
+    fun move(horizontalDistance: Float, verticalDistance: Float = 0f): Action? {
+        if (!pressed || ended || locked || !horizontalDistance.isFinite() || !verticalDistance.isFinite()) return null
+        progress = (-horizontalDistance / cancelDistance).coerceIn(0f, 1f)
+        lockProgress = (-verticalDistance / lockDistance).coerceIn(0f, 1f)
+        if (!held && (progress > .15f || lockProgress > .15f)) { ended = true; return null }
+        if (captureId != null && lockProgress >= 1f) { locked = true; return Action.Lock(captureId!!) }
+        return if (progress >= 1f) finish(End.Cancel) else null
+    }
+    fun release(): Action? {
+        val result = if (locked) null else if (pressed && !held && !ended) Action.SwitchMode
+            else finish(if (progress >= .55f) End.Cancel else End.Send)
         pressed = false
         return result
     }
-    /** A system cancellation/second pointer/navigation ends capture into a preview, never sends. */
-    fun interrupt(): Finish? = release()
-    private fun finish(cancel: Boolean): Finish? {
+    /** A lost pointer never switches mode or submits; an already locked capture keeps its own controls. */
+    fun interrupt(): Action? {
+        val result = if (locked) null else finish(End.Preview)
+        pressed = false
+        return result
+    }
+    private fun finish(end: End): Action? {
         if (!pressed || ended) return null
         ended = true
-        return captureId?.let { Finish(it, cancel) }
+        return captureId?.let { Action.Finish(it, end) }
     }
 }
 

@@ -70,12 +70,14 @@ class PrivateStore(context: Context) {
         val value = read("notification_settings_v1").optJSONObject(0) ?: JSONObject()
         NotificationPreferences(value.optBoolean("input", true), value.optBoolean("errors", true),
             value.optBoolean("finished", false), value.optLong("generation"), notificationEnabled(), value.optLong("input_enabled"),
-            value.optLong("errors_enabled"), value.optLong("finished_enabled"))
+            value.optLong("errors_enabled"), value.optLong("finished_enabled"), value.optBoolean("optional", false),
+            value.optLong("optional_enabled"))
     }
     fun saveNotificationPreferences(value: NotificationPreferences) = synchronized(notificationLock) {
         write("notification_settings_v1", JSONArray().put(JSONObject().put("input", value.input).put("errors", value.errors)
             .put("finished", value.finished).put("generation", value.generation).put("input_enabled", value.inputEnabledAt)
-            .put("errors_enabled", value.errorsEnabledAt).put("finished_enabled", value.finishedEnabledAt)))
+            .put("errors_enabled", value.errorsEnabledAt).put("finished_enabled", value.finishedEnabledAt)
+            .put("optional", value.optional).put("optional_enabled", value.optionalEnabledAt)))
     }
     fun notificationState(connection: String): NotificationState = synchronized(notificationLock) {
         val value = read("notification_state_v1:$connection").optJSONObject(0) ?: return@synchronized NotificationState()

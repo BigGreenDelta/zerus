@@ -316,19 +316,20 @@ impl TerminalBackend for Tmux {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name}\t#{window_active}\t#{pane_active}\t#{pane_current_path}",
+                "#{session_name}\t#{session_id}\t#{window_active}\t#{pane_active}\t#{pane_current_path}",
             ]),
             false,
         )?;
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| {
-                let parts: Vec<_> = line.splitn(4, '\t').collect();
-                (parts.len() == 4).then(|| PanePath {
+                let parts: Vec<_> = line.splitn(5, '\t').collect();
+                (parts.len() == 5).then(|| PanePath {
                     session: parts[0].into(),
-                    active_window: parts[1] == "1",
-                    active_pane: parts[2] == "1",
-                    path: parts[3].into(),
+                    session_id: parts[1].into(),
+                    active_window: parts[2] == "1",
+                    active_pane: parts[3] == "1",
+                    path: parts[4].into(),
                 })
             })
             .collect())

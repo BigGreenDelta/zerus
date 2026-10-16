@@ -858,7 +858,9 @@ class Input(Contract):
         drawing.write_bytes("\x1b[2J\x1b[Hfirst line   \r\nsecond \u2713\r\n\x1b[1;31mbold red\x1b[0m tail\r\n"
                             "\x1b[2mdim\x1b[22m plain \x1b[38;5;208mx\x1b[38;2;1;2;3my\x1b[0m\r\n\u6f22\u5b57".encode())
         self.control(pid, f"render {drawing}")
-        frame = self.screen(row, lambda frame, rows: rows[4] == "\u6f22\u5b57", "the drawing")
+        # ConPTY can repaint the text before it moves the cursor past the wide glyphs.
+        frame = self.screen(row, lambda frame, rows: rows[4] == "\u6f22\u5b57" and frame["cursor"] == dict(x=4, y=4),
+                            "the drawing and its cursor")
         resizes = self.events(pid, "resize")
         cols, rows = (resizes[-1]["cols"], resizes[-1]["rows"]) if resizes else agent["size"]
         self.assertEqual((frame["cols"], frame["rows"]), (cols, rows))

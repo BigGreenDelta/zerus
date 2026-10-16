@@ -148,6 +148,23 @@ class AccountTests(ComputerCase):
                           two["usage"]["stale"]), ({"email": "user@example.test"}, 800, False, True))
         self.assert_private_fields_withheld()
 
+    async def test_a_reset_time_that_is_not_an_ascii_timestamp_is_dropped(self):
+        # Provider text is untrusted: a multi-byte reset time is dropped as
+        # Python's pattern drops it, and the heartbeat carries on.
+        windows = [{"id": "primary", "used_percent": 10, "resets_at": "\u20ac\u20ac\u20ac\u20ac-01-01T00:00:00Z"},
+                   {"id": "weekly", "used_percent": 20, "resets_at": "2025-10-09T12:00:00Z"}]
+        status = {"status": "ok", "checked_at": time.time(), "windows": windows}
+        self.hgs.script([{"argv": ["account", "ls"],
+                          "stdout": {"profiles": [profile(installed=False, account_status=status)]}}]
+                        + default_rules(listing()))
+        process = await self.launch()
+        await self.until(lambda: len(self.relay.heartbeats()) >= 2, what="two heartbeats", process=process)
+        [account] = self.accounts()[-1]["accounts"]
+        self.assertEqual(account["usage"]["windows"], [
+            {"id": "primary", "used_percent": 10},
+            {"id": "weekly", "used_percent": 20, "resets_at": "2025-10-09T12:00:00Z"}])
+        self.assertIsNone(process.returncode)
+
     async def test_an_unavailable_catalog_is_reported_without_native_text(self):
         self.hgs.script([{"argv": ["account", "ls"], "exit": 1, "stderr": "private-error\n"}] + default_rules(listing()))
         process = await self.launch()
@@ -205,6 +222,38 @@ class AttentionTests(ComputerCase):
         await self.until(lambda: not attention()["codex/1"] and not attention()["codex/2"], 20,
                          "dropped attention", process)
         self.assertEqual(attention()["codex/0"], [{"question_id": "question-0", "question_hash": "hash-0"}])
+
+    async def test_optional_codex_async_questions_carry_one_boolean(self):
+        row = codex(0)
+
+        def card(question_id: str, **changes) -> dict:
+            return {"run_id": row["run_id"], "conversation_id": row["conversation_id"], "question_id": question_id,
+                    "question_hash": f"hash-{question_id}", "questions": [{"question": "never export"}], **changes}
+        detail = {**row, "pending_questions": [
+            card("codex-async:call:0", source="codex_async", optional=True, can_skip=True, can_answer=False),
+            card("blocking", source="hook", optional=False),
+            card("not-codex", source="hook", optional=True),
+            card("loose", source="codex_async", optional="true"),
+            card("answered", source="codex_async", optional=True, answer_delivery={"status": "submitted"})]}
+        self.hgs.script([{"argv": ["inspect", "codex/0"], "stdout": detail}]
+                        + default_rules(listing(sessions=[row])))
+        process = await self.launch()
+
+        def attention():
+            return self.snapshots()[-1]["sessions"][0].get("mobile_attention")
+
+        await self.until(attention, 15, "attention on the Codex session", process)
+        # Exact shapes: only the optional Codex async item gains the boolean;
+        # blocking items stay {question_id, question_hash}.
+        self.assertEqual(attention(), [
+            {"question_id": "blocking", "question_hash": "hash-blocking"},
+            {"question_id": "codex-async:call:0", "question_hash": "hash-codex-async:call:0", "optional": True},
+            {"question_id": "loose", "question_hash": "hash-loose"},
+            {"question_id": "not-codex", "question_hash": "hash-not-codex"}])
+        self.assertIs(attention()[1]["optional"], True)
+        self.assert_private_fields_withheld()
+        for field in (b"can_skip", b"can_answer", b"codex_async"):
+            self.assertNotIn(field, self.relay.heartbeats()[-1].raw)
 
 
 if __name__ == "__main__":

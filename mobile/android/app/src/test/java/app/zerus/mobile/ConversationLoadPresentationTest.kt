@@ -4,6 +4,23 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ConversationLoadPresentationTest {
+    @Test fun resolvedEmptyConversationStaysEmptyAcrossRepeatedBackgroundPolls() {
+        repeat(4) {
+            assertNull(ConversationLoadPresentation.status(false, true, false, false, false, false, resolved = true))
+            assertNull(ConversationLoadPresentation.status(false, false, false, true, false, false, resolved = true))
+            assertNull(ConversationLoadPresentation.status(false, false, false, false, false, false, resolved = true))
+        }
+        val explicit = ConversationLoadPresentation.status(false, true, true, false, false, false, resolved = true)!!
+        assertFalse(explicit.initial)
+        assertTrue(explicit.spinner)
+        assertEquals("Refreshing conversation…", explicit.text)
+        val slowHistory = ConversationLoadPresentation.status(false, false, false, true, true, false, resolved = true)!!
+        assertFalse(slowHistory.initial)
+        assertEquals("Loading message history…", slowHistory.text)
+        // A different, unopened conversation still gets its own cold placeholder.
+        assertTrue(ConversationLoadPresentation.status(false, true, false, false, false, false, resolved = false)!!.initial)
+    }
+
     @Test fun initialLoadIsExplicitBeforeTheDelayedSpinner() {
         var time = 0L
         val gate = LoadingGate({ time })

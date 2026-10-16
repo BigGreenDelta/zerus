@@ -158,10 +158,11 @@ jobs:
           cargo +1.85.0 test --locked
           cargo +1.85.0 test --locked --test contracts postgres_cross_worker -- --ignored
           # The connector links only the protocol library: it builds without the
-          # server stack, and no build may give serde_json insertion-ordered maps.
-          cargo +1.85.0 clippy --locked --no-default-features --lib --test codec -- -D warnings
+          # server stack, reproduces the golden vectors, and no build may give
+          # serde_json insertion-ordered maps.
+          cargo +1.85.0 clippy --locked --no-default-features --lib --test codec --test vectors -- -D warnings
           cargo +1.85.0 build --locked --no-default-features --lib
-          cargo +1.85.0 test --locked --no-default-features --test codec
+          cargo +1.85.0 test --locked --no-default-features --test codec --test vectors
           library="$(cargo +1.85.0 tree --locked --no-default-features --target all -e normal --prefix none)"
           if grep -E '^(axum|clap|hyper|reqwest|ring|rustls|sqlx|tokio|tower)[ -]' <<<"$library"; then
             echo "The protocol library depends on server crates" >&2
@@ -180,13 +181,16 @@ jobs:
       # Every services/mobile/tests module runs once, and relay fixtures run the
       # Rust process on their own PostgreSQL databases. The speech suites also
       # run against the retained Python reference relay. The black-box connector
-      # suites (test_bb_*) run in the connector job.
+      # suites (test_bb_*) run in the connector job; the end-to-end suites run
+      # here against both connectors, the Rust one built beside the relay.
       - name: Released HTTP and outbound connector compatibility
         env:
           ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           ZERUS_REQUIRE_RELAY_E2E: "1"
         run: |
           cargo +1.85.0 build --locked --bin hgs
+          cargo +1.85.0 build --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir services/mobile/relay/target
+          export ZERUS_CONNECTOR_E2E_COMMAND="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/zerus-mobile-connector"
           python3 -m venv "$RUNNER_TEMP/relay-venv"
           "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile -r services/mobile/tests/requirements.txt
           export ZERUS_RELAY_BINARY="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/zerus-relay"
@@ -243,6 +247,11 @@ jobs:
           cargo +1.85.0 clippy --locked --all-targets --features test-hooks -- -D warnings
           cargo +1.85.0 build --locked --features test-hooks
           cargo +1.85.0 build --locked
+          # The black-box test seams exist only with the test-hooks feature.
+          if grep -q ZERUS_CONNECTOR_TEST_ target/debug/zerus-mobile-connector; then
+            echo "A build without test-hooks reads ZERUS_CONNECTOR_TEST_ variables" >&2
+            exit 1
+          fi
           # No server, database, TLS-library or proxy-aware HTTP stack in the lock.
           if grep -E '^name = "(axum|sqlx|reqwest|openssl-sys|native-tls)"$' Cargo.lock; then
             echo "The connector lock holds a forbidden crate" >&2
@@ -276,10 +285,12 @@ jobs:
             ~/.cargo/git
             services/mobile/connector/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
-      # The Python run covers every module; the Rust run only those in ported.json.
+      # The Python run covers every module; the Rust run only those in ported.json,
+      # against a build with the test-hooks seams (cargo test rebuilt it without).
       - name: Black-box suites against the Python and Rust connectors
         run: |
           "$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_bb_*.py' -v
+          (cd services/mobile/connector && cargo +1.85.0 build --locked --features test-hooks)
           ZERUS_CONNECTOR_COMMAND="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/zerus-mobile-connector" \
             "$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_bb_*.py' -v
 

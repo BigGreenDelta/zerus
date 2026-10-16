@@ -107,7 +107,9 @@ desktop or Android app. Record, review and send: Zerus transcribes the recording
 and delivers the text to the selected agent's native conversation, including on
 another connected computer. Your message stays in Activity as a **playable voice
 message with a waveform and expandable transcript**, so you can compare what you
-said with what the agent received.
+said with what the agent received. Camera mode records video circles with the same
+hold, cancel and lock controls on desktop and Android; the video stays in history
+and its recognized speech goes to the agent.
 
 Choose the processing computer and manage its recognition profiles in
 **Settings → Voice input**. Use **local GigaAM v3 for Russian**, including GPU
@@ -186,7 +188,8 @@ the window. [Integration details](docs/reference.md#deepseek).
 On Arch Linux x86_64, install the stable bundle with `yay -S zerus-ade-bin`, then
 run `zerus-setup` as your normal user.
 [Source and development packages](docs/installation.md#arch-linux) are also available.
-On macOS and other Linux distributions, [build from source](docs/installation.md#local-installation);
+On Apple Silicon macOS, use the [signed DMG or Homebrew cask](docs/installation.md#macos-dmg).
+Other Linux distributions [build from source](docs/installation.md#local-installation);
 see [other platforms](#other-platforms).
 
 [Install Zerus and the CLI](docs/installation.md), then use **New session** to
@@ -218,6 +221,9 @@ as pull requests.
 notarized nightly from the [DMG](docs/installation.md#macos-dmg) or
 [Homebrew tap](docs/installation.md#macos-homebrew):
 `brew install --cask ufna/zerus/zerus@nightly`, then `zerus-setup`.
+For Dev builds from successful main CI, use `ufna/zerus/zerus@dev` instead.
+**Settings > Updates** checks versions and provides the update command or DMG.
+The stable `zerus` cask will appear with the first signed stable release.
 Source builds remain available through the same installer.
 
 **Windows**: nightly releases include a portable x86_64

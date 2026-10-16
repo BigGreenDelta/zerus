@@ -1,3 +1,4 @@
+#include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
 #include "GraphWorkspace.h"
@@ -385,7 +386,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_search = new QLineEdit; m_search->setObjectName("search"); m_search->setPlaceholderText(tr("Search sessions, IDs and messages…"));
     m_search->setClearButtonEnabled(true); m_search->setAccessibleName(tr("Search sessions"));
     connect(m_search, &QLineEdit::textChanged, this, [this]() {
-        m_searchResults->setQuery(m_search->text());
+        m_archiveSearchRows.clear();
+        m_archiveBrowser->setQuery(m_search->text());
+        m_searchResults->setQuery(m_filter=="archived"?QString():m_search->text());
         m_listStack->setCurrentIndex(m_searchResults->active() ? 1 : 0);
         if (!m_searchResults->active()) m_activityView->clearSearchResult();
         rebuild();
@@ -405,7 +408,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         button->setCheckable(true); button->setChecked(pair.first == "all"); button->setAccessibleName(pair.second);
         filterRow->addWidget(button, 1); m_filters.append(button);
         connect(button, &QPushButton::clicked, this, [this, id = pair.first]() {
-            m_restoreKey.clear(); m_renameKey.clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false); m_filter = id; if(id=="all")m_folderFilterPath.clear(); rebuild();
+            m_restoreKey.clear(); m_renameKey.clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false); m_filter = id; m_searchResults->setQuery(id=="archived"?QString():m_search->text());m_listStack->setCurrentIndex(m_searchResults->active()?1:0);if(id=="archived")m_archiveBrowser->setQuery(m_search->text()); if(id=="all")m_folderFilterPath.clear(); rebuild();
         });
     }
     m_machineFilter = new MachineFilter;
@@ -414,6 +417,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     listLayout->addLayout(filterRow); listLayout->addWidget(m_machineFilter); listLayout->addWidget(m_projectFilter);
     connect(m_projectFilter, &ProjectFilter::selectionChanged, this, [this](const QSet<QString> &projects) { m_projectFilters = projects; rebuild(); });
     connect(m_machineFilter, &MachineFilter::selectionChanged, this, [this](const QSet<QString> &hosts) { m_hostFilters = hosts; rebuild(); });
+    m_archiveBrowser=new ArchiveBrowser(m_client,this);listLayout->addWidget(m_archiveBrowser);
+    connect(m_archiveBrowser,&ArchiveBrowser::changed,this,[this]{if(m_filter=="archived")rebuild();});
+    connect(m_archiveBrowser,&ArchiveBrowser::windowChanged,this,[this]{if(m_filter=="archived")m_sessions->scrollToTop();});
     m_folderFilterClear=new QPushButton;m_folderFilterClear->setObjectName("clearFolderFilter");m_folderFilterClear->hide();m_folderFilterClear->setAutoDefault(false);
     connect(m_folderFilterClear,&QPushButton::clicked,this,[this]{m_folderFilterPath.clear();rebuild();});listLayout->addWidget(m_folderFilterClear);
     // Holds the height of filter rows the strip hides, so the list does not move.
@@ -426,6 +432,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     setupSelectionActions();
     m_listStack = new QStackedWidget; m_listStack->addWidget(m_sessions);
     m_searchResults = new SessionSearch(hgsPath); m_listStack->addWidget(m_searchResults); listLayout->addWidget(m_listStack, 1);
+    connect(m_searchResults,&SessionSearch::archiveSessionsReady,this,[this](const QString &host,const QJsonArray &rows){m_archiveSearchRows[host]=HgsClient::parseSessions(rows);rebuild();});
     connect(m_searchResults, &SessionSearch::resultActivated, this,
         [this](const QString &host, const QString &name, const QString &archive, const QString &run, const QJsonObject &event, const QString &query) {
             const QString key = host + '\n' + name + (archive.isEmpty() ? QString() : '\n' + archive);
@@ -1441,7 +1448,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_inspectError = tr("Could not refresh activity: %1").arg(error); renderDetails();
     });
     connect(&m_client, &HgsClient::writeDone, this, [this](const QString &operation, bool ok, const QString &detail) {
-        if (finishSelectionAction(operation, ok, detail)) return;
+        if (finishSelectionAction(operation, ok, detail)) {if(!m_selectionRunning)m_archiveBrowser->refresh();return;}
+        if(ok&&(operation.startsWith("archive ")||operation.startsWith("restore ")||operation.startsWith("forget archive ")||operation.startsWith("rename ")))m_archiveBrowser->refresh();
         if (m_archivedWorktree.size() == 4 && (operation == QStringLiteral("archive %1").arg(m_archivedWorktree[1]) || operation == QStringLiteral("terminate %1").arg(m_archivedWorktree[1]))) {
             if (ok) offerWorktreeCleanup(); else m_archivedWorktree.clear();
         }
@@ -1743,6 +1751,7 @@ void SessionsWindow::applyTheme()
     m_cacheClear->setIcon(workspaceIcon("refresh",QColor(m_muted)));m_cacheClear->setIconSize(QSize(14,14));
     m_fileDrop->setTheme(m_dark);
     m_recovery->setStyleSheet(QStringLiteral("QFrame#recoveryPanel {background:transparent;border:0;} QLabel {border:0;background:transparent;}"));
+    m_archiveBrowser->setTheme(m_dark);
     m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     m_processes->setTheme(m_dark);
@@ -1996,18 +2005,8 @@ void SessionsWindow::showGroupMenu(const QString &id, const QPoint &position)
     connect(menu->addAction(tr("New session…")), &QAction::triggered, this,
             [this, id]() { showNewSession({}, id, selectedHostTarget()); });
     menu->addSeparator();
-    auto *only = menu->addAction(workspaceIcon("projects", QColor(m_muted)), tr("Only this project")); only->setObjectName("filterOnlyProject");
+    auto *only = menu->addAction(workspaceIcon("projects", QColor(m_muted)), tr("Filter this project")); only->setObjectName("filterOnlyProject");
     connect(only, &QAction::triggered, this, [this,id] { if (m_organization.group(id)) m_projectFilter->setSelection({id}); });
-    const bool selected = m_projectFilters.contains(id);
-    auto *toggle = menu->addAction(selected ? tr("Remove from project filter") : tr("Add to project filter")); toggle->setObjectName("toggleProjectFilter");
-    connect(toggle, &QAction::triggered, this, [this,id] {
-        if (!m_organization.group(id)) return;
-        auto next = m_projectFilters; if (next.contains(id)) next.remove(id); else next.insert(id); m_projectFilter->setSelection(next);
-    });
-    if (!m_projectFilters.isEmpty()) {
-        auto *all = menu->addAction(tr("Show all projects")); all->setObjectName("clearProjectFilter");
-        connect(all, &QAction::triggered, this, [this] { m_projectFilter->setSelection({}); });
-    }
     menu->addSeparator();
     const bool collapsed = group->collapsed;
     connect(menu->addAction(collapsed ? tr("Expand project") : tr("Collapse project")), &QAction::triggered, this, [this, id, collapsed]() {
@@ -2566,6 +2565,7 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     roles.insert(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
     roles.insert(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
     roles.insert(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
+    roles.insert(SessionRoles::OptionalQuestions, terminating ? 0 : SessionPresentation::optionalQuestionCount(s, e.online));
     roles.insert(SessionRoles::MachineName, e.machine);
     roles.insert(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
     roles.insert(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); roles.insert(ChildrenRole, childCount(s, false, e.online, includeCompleted));
@@ -2623,6 +2623,7 @@ void SessionsWindow::rebuild()
     if (m_sessions->dragging()) return;
     QSet<QString> selectedKeys;
     for (const auto *item : m_sessions->selectedItems()) selectedKeys.insert(item->data(KeyRole).toString());
+    if (!m_sessions->currentItem() && selectedKeys.isEmpty() && !m_selectedKey.isEmpty()) selectedKeys.insert(m_selectedKey);
     m_rebuilding = true;
     QString requestedSelection = m_selectedKey;
     m_entries.clear(); int online = 0, attention = 0, saved = 0, archived = 0, total = 0, active = 0;
@@ -2641,8 +2642,21 @@ void SessionsWindow::rebuild()
             if (entryHasDraft(m_entries.last())) drafts.insert(key);
         }
     };
-    append({}, m_fleet.local());
-    for (const auto &peer : m_fleet.peerNames()) append(peer, *m_fleet.peer(peer));
+    QMap<QString,QString> archiveHosts;
+    auto withArchive=[&](const QString &host,const BoxState &box){
+        const bool scope=m_hostFilters.isEmpty()||m_hostFilters.contains(host.isEmpty()?"@local":host);
+        BoxState view=box;
+        if(box.archivePaging){
+            view.sessions.removeIf([](const SessionInfo&s){return s.state=="archived";});
+            if(box.ok&&scope)archiveHosts[host]=host.isEmpty()?box.host:host;
+            view.sessions.append(m_archiveBrowser->sessions(host));
+            for(const auto &row:m_archiveSearchRows.value(host)){bool duplicate=false;for(const auto &old:view.sessions)if(old.archiveId==row.archiveId){duplicate=true;break;}if(!duplicate)view.sessions.append(row);}
+        }
+        append(host,view);
+    };
+    withArchive({},m_fleet.local());
+    for(const auto &peer:m_fleet.peerNames())withArchive(peer,*m_fleet.peer(peer));
+    m_archiveBrowser->configure(archiveHosts,m_filter=="archived"&&m_pages->currentIndex()==0);
     updateAttentionIndicator();
     std::sort(m_entries.begin(), m_entries.end(), [](const Entry &a, const Entry &b) {
         if (a.session.state == "archived" && b.session.state == "archived" && a.session.archivedAt != b.session.archivedAt)
@@ -2708,8 +2722,10 @@ void SessionsWindow::rebuild()
     for (auto *button : m_filters) {
         const auto id = button->property("filter").toString(); button->setChecked(m_pages->currentIndex() == 0 && id == m_filter);
         if (id == m_filter) countCaption = button->property("caption").toString();
-        button->setText(QString::number(counts.value(id))); button->setProperty("count", counts.value(id));
-        button->setToolTip(button->property("caption").toString() + QString(" / %1").arg(counts.value(id)));
+        const bool pagedArchive=id=="archived"&&m_archiveBrowser->paged();
+        const bool partial=pagedArchive&&(!m_archiveBrowser->totalsKnown()||m_archiveBrowser->hasMore());
+        button->setText(pagedArchive&&!m_archiveBrowser->totalsKnown()&&!counts.value(id)?QStringLiteral("…"):QString::number(counts.value(id))+(partial?QStringLiteral("+"):QString())); button->setProperty("count", counts.value(id));
+        button->setToolTip(button->property("caption").toString() + (pagedArchive?tr(" / %1 loaded%2").arg(counts.value(id)).arg(partial?tr("; more can be loaded in Archive"):QString()):QString(" / %1").arg(counts.value(id))));
         button->setIcon(workspaceIcon(id, QColor(id == "attention" && attention > 0 ? (m_dark ? "#f0c77b" : "#885400") : id == m_filter ? m_accent : m_muted)));
     }
     m_sessionsNav->setChecked(m_pages->currentIndex() == 0);
@@ -2717,12 +2733,14 @@ void SessionsWindow::rebuild()
     m_searchResults->setProjectScope(projectKeys, !m_projectFilters.isEmpty());
     m_searchResults->setFolderScope(m_folderFilterHost,m_folderFilterPath,m_folderFilterCheckout);
     m_searchResults->setHostsScope(m_fleet, m_filter, m_hostFilters, drafts);
-    const QString query; // Text searches have their own result list and selection.
+    m_search->setPlaceholderText(m_filter=="archived"?tr("Search archive names and IDs…"):tr("Search sessions, IDs and messages…"));
+    const QString query; // Archive metadata search is paged; other text searches have a separate result list.
     QList<Entry> visible;
     QMap<QString, int> machineCounts, projectCounts;
     for (const auto &e : m_entries) {
         const auto &s = e.session;
         if ((s.state == "archived") != (m_filter == "archived")) continue;
+        if(s.state=="archived"&&!m_archiveBrowser->includes(s.archivedAt))continue;
         if (m_filter == "attention" && !entryNeedsAttention(e)
             && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
         if (m_filter == "active" && !entryNeedsAttention(e) && !SessionPresentation::active(s, e.online, drafts.contains(e.key))
@@ -2799,6 +2817,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::LaunchId, row.launch);
         item->setData(SessionRoles::WorkingSince, 0.0);
         item->setData(SessionRoles::Scheduled, false);
+        item->setData(SessionRoles::OptionalQuestions, 0);
         item->setData(SessionRoles::GitStatus, QJsonObject());
         item->setData(SessionRoles::MetaIcon, QString());
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
@@ -2876,6 +2895,8 @@ void SessionsWindow::rebuild()
         if (!s.cwd.isEmpty()) accessibleFields << s.cwd;
         accessibleFields << (s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort));
         if (s.visibleUnreadReply(e.online)) accessibleFields << tr("New reply (not viewed yet)");
+        const int optionalQuestions = roles.value(SessionRoles::OptionalQuestions).toInt();
+        if (optionalQuestions > 0) accessibleFields << SessionPresentation::optionalQuestionsLabel(optionalQuestions);
         if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
         accessibleFields << desc;
         if (!childCount(s, false, e.online, includeCompleted).isEmpty()) accessibleFields << tr("Subagents: %1").arg(childCount(s, true, e.online, includeCompleted));
@@ -2885,8 +2906,9 @@ void SessionsWindow::rebuild()
         item->setData(Qt::AccessibleTextRole, sessionTooltip(accessibleFields, qBound(160, availableWidth - 40, 420)).plain);
         if (e.key == requestedSelection) selectedRow = i;
     }
-    const bool preserveFolderConversation=!m_folderFilterPath.isEmpty()&&selected();
-    if (selectedRow < 0&&!preserveFolderConversation) selectedRow = firstVisible < 0 ? firstSession : firstVisible;
+    // List scopes do not choose a replacement for a conversation that still exists.
+    const bool preserveConversation = selected();
+    if (selectedRow < 0 && !preserveConversation) selectedRow = firstVisible < 0 ? firstSession : firstVisible;
     if (selectedRow >= 0 && m_sessions->item(selectedRow)->data(KeyRole).toString() == m_selectedKey) {
         m_sessions->setCurrentRow(selectedRow, QItemSelectionModel::NoUpdate);
         QItemSelection selection;
@@ -2920,7 +2942,7 @@ void SessionsWindow::rebuild()
     m_rebuilding = false;
     updateSelectionActions();
     m_sessions->syncActivityAnimation();
-    if (!m_searchResults->active()&&!(preserveFolderConversation&&selectedRow<0)) selectSession(); else renderDetails();
+    if (!m_searchResults->active() && !(preserveConversation && selectedRow < 0)) selectSession(); else renderDetails();
 }
 
 void SessionsWindow::updateAttentionIndicator()
@@ -3028,10 +3050,20 @@ void SessionsWindow::renderAccountUsage()
 {
     const auto *entry=selected();const bool visible=m_pages->currentIndex()==0 && entry && entry->session.tracked && entry->session.archiveId.isEmpty() && m_subagentId.isEmpty();
     // Hide only when it should go: hiding and showing again would close an open popover on every refresh.
-    m_usageStrip->setVisible(visible);if(!visible){m_usageLimit->setActive(false);m_usageRefresh->setRefreshing(false);return;}
+    m_usageStrip->setVisible(visible);if(!visible){m_recovery->setUsageNotice({});m_usageLimit->setActive(false);m_usageRefresh->setRefreshing(false);return;}
     m_accountUsageData=m_usageStore->data(AccountUsageRef::bound(entry->host,entry->session));m_accountUsage->setData(m_accountUsageData);
-    const auto warning=AccountUsage::exhausted(m_accountUsageData);m_usageWarning->setText(warning);
-    m_usageLimit->setLabels(AccountUsage::exhaustedSummary(m_accountUsageData),tr("Limit"));m_usageLimit->setDetail(warning);
+    QString notice;
+    const auto failure=m_details.value("provider_error").toObject();
+    if(entry->online && entry->session.cmd=="claude" && m_details.value("run_id").toString()==entry->session.runId
+        && m_details.value("conversation_id").toString()==entry->session.conversationId
+        && m_details.value("provider_status_at").toDouble()>=entry->session.providerStatusAt
+        && (m_details.value("phase")=="error" || m_details.value("attention_id").toString().startsWith("claude-usage-limit:"))
+        && (failure.value("error_kind")=="quota" || failure.value("error_kind")=="session_limit"))
+        notice=AccountUsage::limitRecoveryNotice(m_accountUsageData,failure.value("at").toDouble());
+    m_recovery->setUsageNotice(notice);
+    const auto exhausted=AccountUsage::exhausted(m_accountUsageData);const auto warning=exhausted.isEmpty()?notice:exhausted;m_usageWarning->setText(warning);
+    m_usageLimit->setTone(exhausted.isEmpty()?ChipTone::Neutral:ChipTone::Danger);
+    m_usageLimit->setLabels(exhausted.isEmpty()?tr("Usage available"):AccountUsage::exhaustedSummary(m_accountUsageData),exhausted.isEmpty()?tr("Usage"):tr("Limit"));m_usageLimit->setDetail(warning);
     m_usageLimit->setActive(!warning.isEmpty());
     m_usageRefresh->setRefreshing(m_accountUsageData["refreshing"].toBool());
     m_usageRefresh->setEnabled(entry->online && !m_accountUsageData["refreshing"].toBool());

@@ -286,7 +286,7 @@ class ContextFixtureTests(unittest.IsolatedAsyncioTestCase):
         # This retained fixture deliberately has no speech, file read or folder creation ABI
         # in its CLI help, so those operations stay unadvertised.
         self.assertEqual(set(snapshot["mobile_capabilities"]["operations"]),
-                         OPERATIONS - SPEECH_OPERATIONS - SPEECH_CONFIG_OPERATIONS - VOICE_OPERATIONS - {"directory_create", "file_read"})
+                         OPERATIONS - SPEECH_OPERATIONS - SPEECH_CONFIG_OPERATIONS - VOICE_OPERATIONS - {"directory_create", "file_read", "archive_list"})
         self.assertEqual(len(snapshot["sessions"]), 7)
         inspect = await self.connector.native(["inspect", NAME])
         self.assertEqual(inspect["session_usage"], usage)

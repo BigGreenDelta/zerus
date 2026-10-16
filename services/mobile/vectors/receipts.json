@@ -1,6 +1,5 @@
 {
  "android": {
-  "divergence_c": "a peer attachment_read fails today with 'connector could not record native outcome', which the phone shows as an ordinary attachment error",
   "shown_prefix_characters": 200,
   "update_required_substrings": ["unavailable","unsupported operation"]
  },

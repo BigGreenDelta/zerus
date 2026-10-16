@@ -275,9 +275,18 @@ fn validate(request: &LocalRequest) -> Result<()> {
             no_payload()?;
         }
         "ls" => {
-            let flags = options(rest, &["--json", "--local"], &[])?;
-            ensure!(flags.len() == 2, "snapshot must be local JSON");
+            let flags = options(rest, &["--json", "--local", "--no-archives"], &[])?;
+            ensure!(flags.len() >= 2 && flags.contains_key("--json") && flags.contains_key("--local"), "snapshot must be local JSON");
             no_payload()?;
+        }
+        "archives" => {
+            let payload = request.payload.as_ref().context("archive query required")?;
+            if rest == ["lookup", "--json"] {
+                crate::state::archive_catalog::validate_lookup(payload).map_err(anyhow::Error::msg)?;
+            } else {
+                ensure!(rest == ["--json"], "archives requires its fixed JSON ABI");
+                crate::state::archive_catalog::validate(payload).map_err(anyhow::Error::msg)?;
+            }
         }
         "swarm" => {
             if rest == ["assign-launch", "--json"] {
@@ -1114,6 +1123,19 @@ mod tests {
 
     fn scope() -> Value {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
+    }
+
+    #[test]
+    fn archive_recovery_admits_only_exact_metadata_lookup() {
+        let argv = ["archives", "lookup", "--json"];
+        let payload = json!({"name":"codex/example/old","archive_id":ID});
+        assert!(validate(&request(&argv, Some(payload.clone()))).is_ok());
+        for bad in [json!({"name":"@peer","archive_id":ID}), json!({"name":"codex/example/old","archive_id":"bad"}),
+                    json!({"name":"codex/example/old","archive_id":ID,"action":"forget"})] {
+            assert!(validate(&request(&argv, Some(bad))).is_err());
+        }
+        assert!(validate(&request(&["archives", "lookup", "--json", "--all"], Some(payload))).is_err());
+        assert!(validate(&request(&argv, None)).is_err());
     }
 
     #[test]

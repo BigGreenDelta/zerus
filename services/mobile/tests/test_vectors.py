@@ -1,10 +1,14 @@
 """Golden vectors in services/mobile/vectors stay reproducible from the Python connector."""
+import ast
 import importlib.util
 import json
 from pathlib import Path
 import re
 import sqlite3
 import unittest
+
+import relay_oracle
+import zerus_mobile
 
 VECTORS = Path(__file__).resolve().parents[1] / "vectors"
 # A node_token value, also inside a JSON string holding a configuration file.
@@ -38,12 +42,34 @@ def records(name, data):
     return []
 
 
+class Unqualified(ast.NodeTransformer):
+    """Reads aiohttp's web.HTTPBadRequest as the bridge's HTTPBadRequest."""
+
+    def visit_Attribute(self, node):
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Name) and node.value.id == "web":
+            return ast.copy_location(ast.Name(id=node.attr, ctx=node.ctx), node)
+        return node
+
+
+def imports(tree):
+    """Each module-level imported name: the module and attribute it binds."""
+    bound = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            module = ".".join(part for part in ("zerus_mobile" if node.level else "", node.module or "") if part)
+            bound.update({alias.asname or alias.name: (module, alias.name) for alias in node.names})
+        elif isinstance(node, ast.Import):
+            bound.update({alias.asname or alias.name: (alias.name, None) for alias in node.names})
+    return bound
+
+
 class GoldenVectorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.capture = load_capture()
-        # The relay-oracle column is frozen data: it is copied, never recomputed here.
-        cls.files = cls.capture.render(cls.capture.frozen_oracle(VECTORS))
+        # The relay-oracle and relay columns are frozen data: copied, never recomputed here.
+        cls.files = cls.capture.render(cls.capture.frozen_oracle(VECTORS), cls.capture.frozen_relay(VECTORS))
 
     def cases(self):
         return [row for name, data in self.files.items() if name.startswith("validation/")
@@ -87,7 +113,7 @@ class GoldenVectorTests(unittest.TestCase):
     def test_operation_tables_have_the_reviewed_sizes(self):
         counts = json.loads(self.files["operations.json"])["counts"]
         self.assertEqual((counts["OPERATIONS"], counts["READ_OPERATIONS"], counts["MUTATIONS"], counts["CONTEXT_KEYS"]),
-                         (46, 17, 29, 23))
+                         (47, 18, 29, 23))
 
     def test_every_operation_has_a_valid_case_and_an_envelope(self):
         operations = set(json.loads(self.files["operations.json"])["sets"]["OPERATIONS"])
@@ -102,18 +128,45 @@ class GoldenVectorTests(unittest.TestCase):
         case_id = sorted(frozen)[0]
         frozen[case_id] = ("{}", frozen[case_id][1])
         with self.assertRaisesRegex(self.capture.CaptureError, re.escape(case_id)):
-            self.capture.validation_vectors(frozen)
+            self.capture.validation_vectors(frozen, self.capture.frozen_relay(VECTORS))
 
-    def test_frozen_oracle_matches_the_reference_relay_while_it_exists(self):
-        try:
-            importlib.import_module("zerus_mobile.server")
-        except ImportError:
-            self.skipTest("the Python reference relay was removed; its validation column stays frozen")
+    def test_a_changed_submission_drops_its_frozen_relay_decision(self):
+        relay = self.capture.frozen_relay(VECTORS)
+        changed, kept = sorted(relay)[:2]
+        relay[changed] = ("{}", relay[changed][1])
+        files, _ = self.capture.validation_vectors(self.capture.frozen_oracle(VECTORS), relay)
+        rows = {row["id"]: row for name, data in files.items() for row in records(name, data) if row["kind"] == "case"}
+        self.assertNotIn("relay", rows[changed])
+        self.assertIn("relay", rows[kept])
+
+    def test_every_case_has_a_relay_decision(self):
+        self.assertEqual([case["id"] for case in self.cases() if "relay" not in case], [],
+                         "compute the relay column with ZERUS_BLESS=1 cargo test --test vectors in services/mobile/relay")
+
+    def test_frozen_oracle_matches_the_bridge(self):
         cases = self.cases()
         self.assertGreater(len(cases), 200)
         for case in cases:
             with self.subTest(case=case["id"]):
-                self.assertEqual(case["oracle"], self.capture.live_oracle(case["submission"]))
+                self.assertEqual(case["oracle"], relay_oracle.decision(case["submission"]))
+
+    def test_bridge_copies_the_reference_relay_verbatim_while_it_exists(self):
+        package = Path(zerus_mobile.__file__).resolve().parent
+        if not (package / "server.py").exists():
+            self.skipTest("the Python reference relay was removed; relay_oracle.py keeps its validation")
+        bridge = ast.parse(Path(relay_oracle.__file__).read_text())
+        copies = {node.name: node for node in bridge.body if isinstance(node, ast.FunctionDef)}
+        for source, names in (("server.py", {"text", "validate_request"}), ("ingress.py", {"_encoded", "encoded_size"})):
+            original = Unqualified().visit(ast.parse((package / source).read_text()))
+            functions = [node for node in original.body if isinstance(node, ast.FunctionDef) and node.name in names]
+            self.assertEqual({node.name for node in functions}, names)
+            for node in functions:
+                with self.subTest(source=source, function=node.name):
+                    self.assertEqual(ast.dump(copies[node.name]), ast.dump(node))
+                    # Every imported name the copy uses binds the same object.
+                    theirs, ours = imports(original), imports(bridge)
+                    for name in {item.id for item in ast.walk(node) if isinstance(item, ast.Name)} & set(theirs):
+                        self.assertEqual(ours.get(name), theirs[name], name)
 
 
 if __name__ == "__main__":

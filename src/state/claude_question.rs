@@ -12,6 +12,14 @@ use std::time::{Duration, Instant};
 fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+/// Claude draws the caret of a focused Other editor itself, as one inverse
+/// cell: on a character, or as a space after the last character of a line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Caret {
+    row: usize,
+    column: usize,
+    line_end: bool,
+}
 #[derive(Debug, PartialEq)]
 enum Panel {
     Question {
@@ -20,6 +28,7 @@ enum Panel {
         checked: BTreeSet<usize>,
         other: String,
         empty_other: bool,
+        caret: Option<Caret>,
     },
     Review {
         answers: Vec<String>,
@@ -77,10 +86,20 @@ fn ansi256(red: u16, green: u16, blue: u16) -> u16 {
 fn styled_rows(screen: &str) -> Result<Vec<Vec<(char, OtherStyle)>>> {
     let mut rows = vec![Vec::new()];
     let mut style = OtherStyle::default();
+    // tmux trims trailing spaces after it has written their styling. A row
+    // that ends with inverse switched on lost the caret cell Claude draws
+    // after the last character of a line; restore exactly that one cell.
+    let mut restyled = false;
+    let caret_end = |row: &mut Vec<(char, OtherStyle)>, restyled: bool, style: OtherStyle| {
+        if restyled && style.inverse {
+            row.push((' ', style));
+        }
+    };
     let mut chars = screen.chars();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
             if chars.next() == Some('[') {
+                restyled = true;
                 let codes: String = chars.by_ref().take_while(|ch| *ch != 'm').collect();
                 let codes: Vec<_> = codes
                     .split(';')
@@ -136,11 +155,15 @@ fn styled_rows(screen: &str) -> Result<Vec<Vec<(char, OtherStyle)>>> {
                 }
             }
         } else if ch == '\n' {
+            caret_end(rows.last_mut().unwrap(), restyled, style);
+            restyled = false;
             rows.push(Vec::new());
         } else {
+            restyled = false;
             rows.last_mut().unwrap().push((ch, style));
         }
     }
+    caret_end(rows.last_mut().unwrap(), restyled, style);
     let first = rows
         .iter()
         .position(|row| row.iter().any(|(ch, _)| !ch.is_whitespace()))
@@ -471,6 +494,23 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
     if !multi && checked.len() > 1 {
         return Err("Claude shows multiple selected answers for a single choice".into());
     }
+    // Locate the caret before its trailing cell is removed. More than one
+    // inverse cell is unknown styling and never proves a caret position.
+    let mut carets = other_rows.iter().enumerate().flat_map(|(row, cells)| {
+        cells
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, style))| style.inverse)
+            .map(move |(column, (ch, _))| Caret {
+                row,
+                column,
+                line_end: *ch == ' ' && column + 1 == cells.len(),
+            })
+    });
+    let caret = match (carets.next(), carets.next()) {
+        (Some(caret), None) => Some(caret),
+        _ => None,
+    };
     // Remove exactly the inverse trailing cursor cell, never real spaces.
     if let Some(last) = other_rows.last_mut() {
         if last
@@ -491,6 +531,7 @@ fn parse(screen: &str, card: &Value) -> Result<Panel> {
         checked,
         other,
         empty_other,
+        caret,
     })
 }
 fn wait<T: Transport>(
@@ -564,6 +605,59 @@ fn focus_other<T: Transport>(io: &mut T, card: &Value, index: usize) -> Result<(
     }
     Ok(())
 }
+/// Wait until Claude shows the caret move of the key just sent, still in the
+/// same non-empty Other editor, and return the editor text of that frame.
+/// Every later key is checked against the screen read here: a frame captured
+/// before Claude redraws would report Claude's own redraw as a changed
+/// terminal, or let a reduction be measured from a stale draft. A caret move
+/// changes at most the whitespace Claude shows around the caret and at wraps,
+/// so the frame must show the same draft otherwise: text typed meanwhile never
+/// becomes the screen the next key is checked against.
+fn confirm_caret<T: Transport>(
+    io: &mut T,
+    card: &Value,
+    index: usize,
+    draft: &str,
+    moved: impl Fn(Caret) -> bool,
+    left: &str,
+) -> Result<String> {
+    let visible = |text: &str| text.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+    let draft = visible(draft);
+    let count = card["questions"][index]["options"]
+        .as_array()
+        .unwrap()
+        .len();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let Panel::Question {
+            index: current,
+            focused,
+            other,
+            empty_other: false,
+            caret,
+            ..
+        } = parse(&io.screen()?, card)?
+        else {
+            return Err(left.into());
+        };
+        if current != index || focused != count {
+            return Err(left.into());
+        }
+        let changed = visible(&other) != draft;
+        if !changed && caret.is_some_and(&moved) {
+            return Ok(other);
+        }
+        if Instant::now() >= deadline {
+            return Err(if changed {
+                "Claude's Other draft changed while moving its caret; inspect Terminal"
+            } else {
+                "Claude did not confirm moving the Other caret; inspect Terminal"
+            }
+            .into());
+        }
+        io.pause();
+    }
+}
 fn clear_other<T: Transport>(io: &mut T, card: &Value, index: usize) -> Result<()> {
     clear_other_within(io, card, index, Duration::from_secs(5))
 }
@@ -579,24 +673,12 @@ fn clear_other_within<T: Transport>(io: &mut T, card: &Value, index: usize, wind
     let mut deadline = Instant::now() + window;
     let mut right_without_progress = false;
     for _ in 0..128 {
-        let panel = parse(&io.screen()?, card)?;
-        if matches!(&panel,Panel::Question{index:i,focused:f,empty_other:true,..} if *i==index && *f==count)
-        {
-            return Ok(());
-        }
-        if !matches!(&panel,Panel::Question{index:i,focused:f,..} if *i==index && *f==count) {
-            return Err("Claude left the Other editor".into());
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        // Native clearing operates on a visual line. Repeat only after a
-        // verified reduction; each one renews the shared deadline.
-        io.key("C-e")?;
         let Panel::Question {
             index: current,
             focused,
-            other: before,
+            other,
+            empty_other,
+            caret,
             ..
         } = parse(&io.screen()?, card)?
         else {
@@ -605,6 +687,26 @@ fn clear_other_within<T: Transport>(io: &mut T, card: &Value, index: usize, wind
         if current != index || focused != count {
             return Err("Claude left the Other editor".into());
         }
+        if empty_other {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        // Native clearing removes the visual line before the caret. Repeat
+        // only after a verified reduction; each one renews the shared
+        // deadline. Move the caret to the end of its line first unless Claude
+        // already shows it there, so no key is sent whose effect is unproven.
+        let before = match caret {
+            Some(caret) if caret.line_end => other,
+            Some(_) => {
+                io.key("C-e")?;
+                confirm_caret(io, card, index, &other, |caret| caret.line_end, "Claude left the Other editor")?
+            }
+            None => {
+                return Err("Claude's Other caret is not visible; clear the draft in Terminal".into())
+            }
+        };
         io.key("C-u")?;
         let progress_deadline = deadline.min(Instant::now() + Duration::from_millis(750));
         loop {
@@ -614,6 +716,7 @@ fn clear_other_within<T: Transport>(io: &mut T, card: &Value, index: usize, wind
                 focused,
                 other,
                 empty_other,
+                caret,
                 ..
             } = panel
             else {
@@ -641,11 +744,14 @@ fn clear_other_within<T: Transport>(io: &mut T, card: &Value, index: usize, wind
                         .is_some_and(|(first, _)| first.trim().is_empty())
                 {
                     io.key("Right")?;
-                    if !matches!(parse(&io.screen()?,card)?,Panel::Question{index:i,focused:f,empty_other:false,..}
-                        if i==index && f==count)
-                    {
-                        return Err("Claude left the Other editor during newline traversal".into());
-                    }
+                    confirm_caret(
+                        io,
+                        card,
+                        index,
+                        &other,
+                        |moved| Some(moved) != caret,
+                        "Claude left the Other editor during newline traversal",
+                    )?;
                     right_without_progress = true;
                     break;
                 }
@@ -1356,34 +1462,36 @@ mod tests {
     fn recognizes_windows_panels_like_their_linux_captures() {
         let card = card();
         let question = |screen: &str| parse(screen, &card).unwrap();
-        let empty = |index, focused, checked: &[usize], other: &str| Panel::Question {
+        let empty = |index, focused, checked: &[usize], other: &str, caret| Panel::Question {
             index,
             focused,
             checked: checked.iter().copied().collect(),
             other: other.into(),
             empty_other: true,
+            caret,
         };
         assert_eq!(
             question(WINDOWS_SINGLE),
-            empty(0, 0, &[], "Type something.")
+            empty(0, 0, &[], "Type something.", None)
         );
         assert_eq!(
             question(include_str!(
                 "../../tests/fixtures/claude-question-multi-windows.txt"
             )),
-            empty(1, 0, &[], "Type something")
+            empty(1, 0, &[], "Type something", None)
         );
         assert_eq!(
             question(include_str!(
                 "../../tests/fixtures/claude-question-multi-selected-windows.txt"
             )),
-            empty(1, 0, &[0, 2], "Type something")
+            empty(1, 0, &[0, 2], "Type something", None)
         );
+        // A focused empty editor shows its caret on the hint's first letter.
         assert_eq!(
             question(include_str!(
                 "../../tests/fixtures/claude-question-other-windows.txt"
             )),
-            empty(2, 2, &[], "Type something.")
+            empty(2, 2, &[], "Type something.", Some(Caret { row: 0, column: 0, line_end: false }))
         );
         // The committed answer's truecolour check is decoration, not answer text.
         assert_eq!(
@@ -1395,7 +1503,8 @@ mod tests {
                 focused: 0,
                 checked: BTreeSet::from([2]),
                 other: "Привет from Zerus".into(),
-                empty_other: false
+                empty_other: false,
+                caret: None,
             }
         );
     }
@@ -1494,6 +1603,7 @@ mod tests {
                 checked: BTreeSet::new(),
                 other: visible.into(),
                 empty_other: false,
+                caret: None,
             };
             assert!(pasted_editor(&panel, 2, 2, text));
             assert!(!pasted_editor(&panel, 1, 2, text));
@@ -1510,9 +1620,14 @@ mod tests {
     }
     struct ClearingFixture {
         screen: String,
-        after_key: Option<(&'static str, String)>,
+        after_keys: Vec<(&'static str, String)>,
         keys: Vec<String>,
         pastes: Vec<String>,
+    }
+    impl ClearingFixture {
+        fn new(screen: String, after_keys: Vec<(&'static str, String)>) -> Self {
+            ClearingFixture { screen, after_keys, keys: Vec::new(), pastes: Vec::new() }
+        }
     }
     impl Transport for ClearingFixture {
         fn screen(&mut self) -> Result<String> {
@@ -1520,12 +1635,8 @@ mod tests {
         }
         fn key(&mut self, key: &str) -> Result<()> {
             self.keys.push(key.into());
-            if self
-                .after_key
-                .as_ref()
-                .is_some_and(|(expected, _)| *expected == key)
-            {
-                self.screen = self.after_key.take().unwrap().1;
+            if self.after_keys.first().is_some_and(|(expected, _)| *expected == key) {
+                self.screen = self.after_keys.remove(0).1;
             }
             Ok(())
         }
@@ -1540,31 +1651,63 @@ mod tests {
     #[test]
     fn clearing_requires_proven_empty_and_stops_after_no_progress_or_navigation() {
         let card = card();
-        for (after_key, expected_keys, succeeds) in [
-            (None, vec!["C-e", "C-u"], false),
-            (Some(("C-u", styled_empty())), vec!["C-e", "C-u"], true),
+        let at_end = other_screen("draft\x1b[7m \x1b[0m");
+        let inside = other_screen("dra\x1b[7mf\x1b[0mt");
+        let away = other_screen("draft")
+            .replace("❯ 3.", "  3.")
+            .replace("  2. Later", "❯ 2. Later");
+        for (screen, after_keys, expected_keys, succeeds) in [
+            (at_end.clone(), vec![], vec!["C-u"], false),
+            (at_end.clone(), vec![("C-u", styled_empty())], vec!["C-u"], true),
+            (inside.clone(), vec![("C-e", at_end.clone()), ("C-u", styled_empty())], vec!["C-e", "C-u"], true),
+            // C-u acts from the caret: never send it before Claude shows C-e.
+            (inside.clone(), vec![], vec!["C-e"], false),
+            (inside.clone(), vec![("C-e", away)], vec!["C-e"], false),
+            // A caret move never makes text typed meanwhile the new baseline.
             (
-                Some((
-                    "C-e",
-                    other_screen("draft")
-                        .replace("❯ 3.", "  3.")
-                        .replace("  2. Later", "❯ 2. Later"),
-                )),
+                inside.clone(),
+                vec![("C-e", other_screen("draftX\x1b[7m \x1b[0m")), ("C-u", styled_empty())],
                 vec!["C-e"],
                 false,
             ),
+            // Without a visible caret no clearing key has a provable effect.
+            (other_screen("draft"), vec![], vec![], false),
         ] {
-            let mut io = ClearingFixture {
-                screen: other_screen("draft\x1b[7m \x1b[0m"),
-                after_key,
-                keys: Vec::new(),
-                pastes: Vec::new(),
-            };
+            let mut io = ClearingFixture::new(screen, after_keys);
             assert_eq!(clear_other(&mut io, &card, 2).is_ok(), succeeds);
             assert_eq!(io.keys, expected_keys);
             assert!(io.pastes.is_empty());
             assert!(!io.keys.iter().any(|key| key == "Enter"));
         }
+    }
+    #[test]
+    fn caret_follows_the_single_inverse_editor_cell() {
+        let card = card();
+        let caret = |text: &str| match parse(&other_screen(text), &card).unwrap() {
+            Panel::Question { caret, .. } => caret,
+            Panel::Review { .. } => unreachable!(),
+        };
+        let at = |row, column, line_end| Some(Caret { row, column, line_end });
+        assert_eq!(caret("dra\x1b[7mf\x1b[0mt"), at(0, 3, false));
+        assert_eq!(caret("draft\x1b[7m \x1b[0m"), at(0, 5, true));
+        assert_eq!(caret("draft \x1b[7m \x1b[0m\n     tail"), at(0, 6, true));
+        assert_eq!(caret("draft\x1b[7m \x1b[0mtail"), at(0, 5, false));
+        assert_eq!(caret("first\n     \x1b[7m \x1b[0m"), at(1, 5, true));
+        assert_eq!(caret("\x1b[7mT\x1b[0;2mype something.\x1b[0m"), at(0, 0, false));
+        assert_eq!(caret("answer\x1b[7m \x1b[0m \x1b[38;5;114m✔\x1b[39m"), at(0, 6, true));
+        // tmux trims the caret space after the last character of a line and
+        // resets the style only where the next row starts.
+        assert_eq!(caret("draft\x1b[7m"), at(0, 5, true));
+        assert_eq!(caret("first\x1b[7m\n\x1b[0m     second"), at(0, 5, true));
+        assert_eq!(caret("\x1b[7m\n\x1b[0m     second"), at(0, 0, true));
+        assert_eq!(caret("draf\x1b[7mt"), at(0, 4, false));
+        assert_eq!(caret("draft\x1b[7m\x1b[0m"), None);
+        assert!(matches!(parse(&other_screen("draft\x1b[7m"), &card).unwrap(),
+            Panel::Question { other, empty_other: false, .. } if other == "draft"));
+        assert_eq!(caret("draft"), None);
+        assert_eq!(caret("\x1b[7md\x1b[0mraft\x1b[7m \x1b[0m"), None);
+        // The caret is part of the identity each key is checked against.
+        assert!(!same_panel(&other_screen("dra\x1b[7mf\x1b[0mt"), &other_screen("dr\x1b[7ma\x1b[0mft"), &card));
     }
     struct SlowClearing {
         remaining: usize,
@@ -1589,21 +1732,114 @@ mod tests {
     #[test]
     fn slow_verified_clearing_continues_past_the_idle_window() {
         // Eight verified rounds take longer than the window between them.
+        // The caret already ends each line, so no round needs C-e.
         let mut io = SlowClearing { remaining: 8, keys: Vec::new() };
         clear_other_within(&mut io, &card(), 2, Duration::from_millis(600)).unwrap();
-        assert_eq!(io.keys, ["C-e", "C-u"].repeat(8));
+        assert_eq!(io.keys, ["C-u"].repeat(8));
     }
     #[test]
     fn newline_traversal_without_clear_progress_never_repeats_or_pastes() {
-        let mut io = ClearingFixture {
-            screen: other_screen("\x1b[7m \x1b[0m\n     remaining"),
-            after_key: None,
-            keys: Vec::new(),
-            pastes: Vec::new(),
-        };
+        let mut io = ClearingFixture::new(
+            other_screen("\x1b[7m \x1b[0m\n     remaining"),
+            vec![
+                ("Right", other_screen("\n     \x1b[7mr\x1b[0memaining")),
+                ("C-e", other_screen("\n     remaining\x1b[7m \x1b[0m")),
+            ],
+        );
         assert!(clear_other(&mut io, &card(), 2).is_err());
-        assert_eq!(io.keys, ["C-e", "C-u", "Right", "C-e", "C-u"]);
+        assert_eq!(io.keys, ["C-u", "Right", "C-e", "C-u"]);
         assert!(io.pastes.is_empty());
+    }
+    /// Like `Native`, every key first re-reads the terminal and refuses when it
+    /// differs from the screen the driver last read. As under heavy load,
+    /// Claude shows the effect of each key, in order, only `delay` captures
+    /// after the key was sent.
+    struct DelayedRedraw {
+        card: Value,
+        delay: usize,
+        visible: String,
+        pending: std::collections::VecDeque<(String, usize)>,
+        last: Option<String>,
+        after_keys: Vec<(&'static str, String)>,
+        keys: Vec<String>,
+    }
+    impl DelayedRedraw {
+        fn capture(&mut self) -> String {
+            for (_, captures) in &mut self.pending {
+                *captures = captures.saturating_sub(1);
+            }
+            while self.pending.front().is_some_and(|(_, captures)| *captures == 0) {
+                self.visible = self.pending.pop_front().unwrap().0;
+            }
+            self.visible.clone()
+        }
+    }
+    impl Transport for DelayedRedraw {
+        fn screen(&mut self) -> Result<String> {
+            let screen = self.capture();
+            self.last = Some(screen.clone());
+            Ok(screen)
+        }
+        fn key(&mut self, key: &str) -> Result<()> {
+            let actual = self.capture();
+            if !self.last.as_ref().is_some_and(|last| same_panel(last, &actual, &self.card)) {
+                return Err("terminal changed while preparing the answer".into());
+            }
+            self.keys.push(key.into());
+            if self.after_keys.first().is_some_and(|(expected, _)| *expected == key) {
+                self.pending.push_back((self.after_keys.remove(0).1, self.delay));
+            }
+            Ok(())
+        }
+        fn paste(&mut self, _: &str) -> Result<()> { Err("unexpected paste".into()) }
+        fn resolved(&mut self) -> Result<Option<Value>> { Ok(None) }
+        fn pause(&mut self) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn clearing_waits_for_claude_to_show_each_caret_move() {
+        let card = card();
+        for (screen, after_keys, expected_keys) in [
+            // A wrapped draft: Claude hides the space that ends its last row
+            // until the caret follows it, so a frame read before C-e is
+            // redrawn differs from the screen C-u is then checked against.
+            (
+                "native wo\x1b[7mr\x1b[0mds wrapped\n     content",
+                vec![
+                    ("C-e", "native words wrapped\n     content \x1b[7m \x1b[0m"),
+                    ("C-u", "native words wrapped \x1b[7m \x1b[0m"),
+                    ("C-u", "\x1b[7mT\x1b[0;2mype something.\x1b[0m"),
+                ],
+                vec!["C-e", "C-u", "C-u"],
+            ),
+            // A blank first line: traverse it, then clear the next line.
+            (
+                "\x1b[7m \x1b[0m\n     remaining",
+                vec![
+                    ("Right", "\n     \x1b[7mr\x1b[0memaining"),
+                    ("C-e", "\n     remaining\x1b[7m \x1b[0m"),
+                    ("C-u", "\n     \x1b[7m \x1b[0m"),
+                    ("C-u", "\x1b[7mT\x1b[0;2mype something.\x1b[0m"),
+                ],
+                vec!["C-u", "Right", "C-e", "C-u", "C-u"],
+            ),
+        ] {
+            for delay in 1..=3 {
+                let mut io = DelayedRedraw {
+                    card: card.clone(),
+                    delay,
+                    visible: other_screen(screen),
+                    pending: Default::default(),
+                    last: None,
+                    after_keys: after_keys.iter().map(|(key, text)| (*key, other_screen(text))).collect(),
+                    keys: Vec::new(),
+                };
+                clear_other(&mut io, &card, 2).unwrap();
+                assert_eq!(io.keys, expected_keys);
+                assert!(io.after_keys.is_empty() && io.pending.is_empty());
+            }
+        }
     }
     #[test]
     fn acknowledgement_requires_exact_tool_conversation_and_schema() {

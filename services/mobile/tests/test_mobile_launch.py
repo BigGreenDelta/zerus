@@ -7,7 +7,7 @@ import unittest
 import uuid
 from unittest.mock import AsyncMock, patch
 from zerus_mobile.connector import Connector, native_environment
-from zerus_mobile.server import validate_request
+from relay_oracle import validate_request
 from zerus_mobile.launch import catalog
 
 

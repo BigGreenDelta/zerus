@@ -82,6 +82,7 @@
 #include "SessionOrganization.h"
 #include "MachineFilter.h"
 #include "ProjectFilter.h"
+#include "SessionSearch.h"
 #include "DashboardPage.h"
 #include "AccountUsage.h"
 #include "WorktreePanel.h"
@@ -93,6 +94,7 @@
 #include "LocalSessionHost.h"
 #include "ProcessRunner.h"
 #include "ProcessSettings.h"
+#include "QuestionNotificationSettings.h"
 #include "Shortcuts.h"
 
 class FolderUrlRecorder : public QObject {
@@ -237,10 +239,13 @@ private slots:
     void accountUsageRejectsOtherSessionReplies();
     void usageIndicatorSettingUpdatesFooter();
     void usageLimitBecomesToolbarChip();
+    void earlyQuotaResetExplainsPendingNativeChoiceAndKeepsDraft();
+    void openingChildClearsHiddenAccountUsageRecoveryNotice();
     void dashboardAndMultiMachineNavigation();
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void projectFilterCombinesScopesCountsAndNavigation();
-    void projectHeaderOffersFocusAndAdditiveFilter();
+    void pagedArchiveSearchJoinsExactProjectBeforeFiltering();
+    void projectHeaderFiltersOnlyThisProject();
     void graphNavigationKeepsSharedCardsAndRejectsReusedRun();
     void hiddenPagesRenderWhenShown();
     void pollsKeepUnchangedActivity();
@@ -255,6 +260,8 @@ private slots:
     void dashboardActivityRowsStayReadable_data();
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
+    void listFiltersKeepTheOpenConversation_data();
+    void listFiltersKeepTheOpenConversation();
     void activeFilterCombinesWorkAndAttentionOnce();
     void backgroundShellRowKeepsActiveAndOpensItsProcesses();
     void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
@@ -339,6 +346,7 @@ private slots:
     void terminalChoiceOpensOnlyTheRequestingTerminal_data();
     void terminalChoiceOpensOnlyTheRequestingTerminal();
     void optionalQuestionKeepsComposerAvailable();
+    void optionalQuestionNotificationsAreOptIn();
     void questionCompletionKeepsInputFocus_data();
     void questionCompletionKeepsInputFocus();
     void questionFooterHasRoomAndKeepsAnswers_data();
@@ -457,7 +465,7 @@ private:
     QString program() const { return FakeCli::program(script()); }
     // A copy of the base fixture whose inspect answers with these details, so
     // polls that arrive while a test waits cannot replace them.
-    QString programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child = {}) const;
+    QString programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child = {}, const QJsonObject &usage = {}) const;
     // Created by initTestCase(): listing the data rows (-datatags, as
     // RunQtShard.cmake does) exits without destroying the test object. That
     // listing calls every *_data() function first, so none may use m_dir.
@@ -524,12 +532,13 @@ elif c=='ls':print('{"host":"mac","ok":true,"sessions":[]}')
     auto catalog=QJsonDocument::fromJson(R"({"state":"ok","path":"/repo","selected_root":"/repo","common_dir":"/repo/.git","worktrees":[{"path":"/repo","kind":"main","branch":"main","available":true},{"path":"/linked","kind":"linked","branch":"feat/worktree-catalog","available":true},{"path":"/empty","kind":"linked","branch":"fix/empty-copy","available":true}]})").object();catalog["sampled_at"]=QDateTime::currentSecsSinceEpoch();catalogFile.write(QJsonDocument(catalog).toJson());
 }
 
-QString TestSessionsWindow::programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child) const
+QString TestSessionsWindow::programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child, const QJsonObject &usage) const
 {
     QFile original(script()); if (!original.open(QIODevice::ReadOnly)) return {};
     QByteArray answer;
     if (!child.isEmpty()) answer = "elif c=='inspect' and '--agent' in a:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(child).toJson(QJsonDocument::Compact))) + ")\n";
     answer += "elif c=='inspect':print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact))) + ")\n";
+    if (!usage.isEmpty()) answer += "elif c=='account' and a[1:2]==['inspect']:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(usage).toJson(QJsonDocument::Compact))) + ")\n";
     const QString fixture = m_dir->filePath(name);
     return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? FakeCli::program(fixture) : QString();
 }
@@ -813,6 +822,39 @@ void TestSessionsWindow::graphNavigationKeepsSharedCardsAndRejectsReusedRun()
     }
 }
 
+void TestSessionsWindow::pagedArchiveSearchJoinsExactProjectBeforeFiltering()
+{
+    const QString name="codex/hgs/dashboard", a="10000000-0000-4000-8000-000000000001",b="10000000-0000-4000-8000-000000000002";
+    SessionOrganization org;const auto first=org.createGroup("Focus"),second=org.createGroup("Other");
+    org.moveSession(org.observe("arch",name,"archive-run",a),first);org.moveSession(org.observe("arch",name,"archive-run",b),second);
+    QSettings().setValue("workspace/organization",QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    QTemporaryDir fixture;const auto cli=fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(cli,R"PY(#!/usr/bin/env python3
+import json,sys
+args=sys.argv[1:]
+remote=bool(args and args[0].startswith('@'))
+if remote:args=args[1:]
+if args[0]=='search':
+ rows=[]
+ if not remote:
+  for n in (1,2):
+   ident='10000000-0000-4000-8000-00000000000'+str(n)
+   session={'name':'codex/hgs/dashboard','cmd':'codex','run_id':'archive-run','conversation_id':'archived-conversation','state':'archived','archive_id':ident,'archived_at':n,'tracked':True,'resumable':True}
+   rows.append(dict(name=session['name'],run_id=session['run_id'],conversation_id=session['conversation_id'],archive_id=ident,session=session,message_id='message'+str(n),at=n,role='assistant',snippet='Needle archived '+str(n),event={'detail':'Needle archived '+str(n)}))
+ print(json.dumps({'query':'needle','results':rows,'truncated':False}))
+elif args[0]=='inspect':print(json.dumps({'name':args[1],'run_id':'archive-run','conversation_id':'archived-conversation','archive_id':args[args.index('--archive')+1] if '--archive' in args else '', 'tracked':True,'state':'archived','events':[],'cursor':0}))
+else:print('{}')
+)PY"));
+    auto state=fleet();auto local=state.local();local.archivePaging=true;local.sessions[0].runId="live-run";local.sessions[0].prompt.clear();state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(cli));keepDetailsPollsOut(window);window.setFleet(state);window.resize(1100,760);window.show();
+    auto *projects=window.findChild<ProjectFilter *>();QVERIFY(projects);projects->setSelection({first});
+    auto *query=window.findChild<QLineEdit*>("search");auto *results=window.findChild<QListWidget*>("searchResults");QVERIFY(query&&results);query->setText("needle");
+    QTRY_COMPARE(results->count(),1);QVERIFY(SessionSearch::sessionKey(results->item(0)).endsWith(a));
+    for(auto *filter:window.findChildren<QPushButton*>("sessionFilter"))if(filter->property("filter")=="archived"){QCOMPARE(filter->property("count").toInt(),1);QVERIFY(filter->text().startsWith("1"));}
+    projects->setSelection({second});QTRY_COMPARE(results->count(),1);QVERIFY(SessionSearch::sessionKey(results->item(0)).endsWith(b));
+    projects->setSelection({});QTRY_COMPARE(results->count(),2);
+}
+
 void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
 {
     SessionOrganization org;
@@ -868,7 +910,7 @@ void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
     window.showSession("mac","claude/infra/review"); QVERIFY(projects->selection().isEmpty()); QCOMPARE(parents(),5);
 }
 
-void TestSessionsWindow::projectHeaderOffersFocusAndAdditiveFilter()
+void TestSessionsWindow::projectHeaderFiltersOnlyThisProject()
 {
     SessionOrganization org; const auto work=org.createGroup("Work"), docs=org.createGroup("Docs");
     org.moveSession(org.observe("arch","codex/hgs/dashboard",""),work); org.moveSession(org.observe("mac","claude/infra/review",""),docs);
@@ -883,14 +925,19 @@ void TestSessionsWindow::projectHeaderOffersFocusAndAdditiveFilter()
         return nullptr;
     };
     const auto action=[](QMenu *menu,const QString &name) -> QAction * { for(auto *a:menu->actions()) if(a->objectName()==name)return a;return nullptr; };
-    auto *menu=openMenu(work); QVERIFY(menu); auto *add=action(menu,"toggleProjectFilter"); QVERIFY(add); add->trigger(); menu->hide();
+    auto *menu=openMenu(work); QVERIFY(menu); auto *filter=action(menu,"filterOnlyProject"); QVERIFY(filter);
+    QCOMPARE(filter->text(),QStringLiteral("Filter this project"));
+    QVERIFY(!action(menu,"toggleProjectFilter")); QVERIFY(!action(menu,"clearProjectFilter"));
+    filter->trigger(); menu->hide();
     QCOMPARE(projects->selection(),QSet<QString>{work});
-    projects->setSelection({}); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
-    menu=openMenu(docs); QVERIFY(menu); action(menu,"toggleProjectFilter")->trigger(); menu->hide();
-    projects->setSelection({work,docs}); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
-    menu=openMenu(work); QVERIFY(menu); action(menu,"filterOnlyProject")->trigger(); menu->hide(); QCOMPARE(projects->selection(),QSet<QString>{work});
     QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
-    menu=openMenu(work); QVERIFY(menu); action(menu,"clearProjectFilter")->trigger(); menu->hide(); QVERIFY(projects->selection().isEmpty());
+    menu=openMenu(work); QVERIFY(menu); QVERIFY(!action(menu,"toggleProjectFilter")); QVERIFY(!action(menu,"clearProjectFilter"));
+    action(menu,"filterOnlyProject")->trigger(); menu->hide(); QCOMPARE(projects->selection(),QSet<QString>{work});
+    auto *chip=projects->findChild<QPushButton *>("projectFilterChip"); QVERIFY(chip); chip->click(); QVERIFY(projects->selection().isEmpty());
+    projects->setSelection({work,docs}); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+    menu=openMenu(docs); QVERIFY(menu); action(menu,"filterOnlyProject")->trigger(); menu->hide(); QCOMPARE(projects->selection(),QSet<QString>{docs});
+    auto *chooser=projects->button()->menu(); chooser->popup(window.mapToGlobal(QPoint(100,100))); QTRY_VERIFY(chooser->isVisible());
+    auto *all=chooser->findChild<QPushButton *>("allProjectFilters"); QVERIFY(all); all->click(); chooser->hide(); QVERIFY(projects->selection().isEmpty());
 }
 
 void TestSessionsWindow::dashboardAndMultiMachineNavigation()
@@ -1640,7 +1687,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     window.findChild<MachineFilter *>()->setSelection({"@local"});
     for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "attention") button->click();
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Keep this draft");
-    auto *list = window.findChild<SessionList *>("sessionList"); const auto selectedKey = list->currentItem()->data(SessionRoles::Key);
+    auto *list = window.findChild<SessionList *>("sessionList"); const auto selectedKey = composer->sessionKey();
     auto *action = window.findChild<QAction *>("markAllSessionsRead"); QVERIFY(action); QVERIFY(action->isEnabled());
     QVERIFY(action->text().contains("(5)"));
     // Marks are shared through each session's host, not kept on this device.
@@ -1660,7 +1707,8 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     action->trigger(); QCOMPARE(seen.size(), 1); QCOMPARE(seen[0][0].toJsonObject().size(), 5);
     QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("5 replies marked as read."));
     QVERIFY(!action->isEnabled()); QVERIFY(state.unreadReplies().isEmpty()); QCOMPARE(writes.size(), 0);
-    QCOMPARE(list->currentItem()->data(SessionRoles::Key), selectedKey); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
+    QVERIFY(list->currentItem()); QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selectedKey);
+    QCOMPARE(composer->sessionKey(), selectedKey); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
     // Overview renders when shown.
     window.findChild<QPushButton *>("brandMark")->click();
     QVERIFY(window.findChild<DashboardPage *>()->findChild<QPushButton *>("dashboardAttention")->text().startsWith("1"));
@@ -1735,6 +1783,66 @@ void TestSessionsWindow::usageLimitBecomesToolbarChip()
     QVERIFY(chip->popover()->isVisible());
     // Switching session closes the popover rather than showing another account's limit.
     window.showSession("mac","claude/infra/review");QVERIFY(!chip->popover()->isVisible());
+}
+
+void TestSessionsWindow::earlyQuotaResetExplainsPendingNativeChoiceAndKeepsDraft()
+{
+    const auto now=QDateTime::currentSecsSinceEpoch();const QString hash(64,'a');
+    const auto quotaWindow=[now](int minutes,qint64 resetIn){return QJsonObject{{"window_minutes",minutes},{"used_percent",0},{"resets_at",double(now+resetIn)}};};
+    auto state=fleet();auto box=state.local();auto &session=box.sessions[0];
+    session.cmd="claude";session.runId="run-one";session.conversationId="conversation-one";session.accountId="native-claude";state.setLocal(box,0);
+    const QJsonObject card{{"source","claude_usage_limit"},{"question_id","claude-usage-limit:"+hash},{"question_hash",hash},
+        {"run_id","run-one"},{"conversation_id","conversation-one"},{"can_answer",true},{"answer_transport","claude_tui"},
+        {"questions",QJsonArray{QJsonObject{{"id","usage_limit"},{"question","What do you want to do?"},{"header","Usage limit"},
+            {"options",QJsonArray{QJsonObject{{"id","limit_0"},{"label","Stop and wait for limit to reset"}},
+                QJsonObject{{"id","limit_1"},{"label","Switch to usage credits"}}}}}}}};
+    QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},
+        {"runtime_state","live"},{"process_state","running"},{"last_event_at",double(now-60)},{"provider_status_at",double(now-60)},
+        {"phase","input"},{"activity","busy"},{"attention_id","claude-usage-limit:"+hash},
+        {"provider_error",QJsonObject{{"error_kind","quota"},{"at",double(now-60)},{"detail","Weekly limit reached"}}},
+        {"pending_questions",QJsonArray{card}},{"events",QJsonArray{}},{"cursor",0}};
+    const QJsonObject usage{{"id","native-claude"},{"status","ok"},{"checked_at",double(now)},
+        {"windows",QJsonArray{quotaWindow(300,3600),quotaWindow(10080,86400)}}};
+    SessionsWindow window(programInspecting("claude-limit-reset",details,{},usage));window.setFleet(state);window.show();window.showSession({},"codex/hgs/dashboard");
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer,"Continue after my reset");
+    auto *chip=window.findChild<ToolbarChip *>("usageLimitChip");
+    QTRY_VERIFY(chip->isVisible());QCOMPARE(chip->fullLabel(),QString("Usage available"));QCOMPARE(chip->tone(),ChipTone::Neutral);
+    QVERIFY(chip->toolTip().contains("Answer any open usage-limit choice"));
+    auto *question=window.findChild<QuestionCard *>();QVERIFY(question->isVisible());
+    const auto options=question->findChildren<QAbstractButton *>("questionOption");QCOMPARE(options.size(),2);
+    for(const auto *option:options)QVERIFY(!option->isChecked());
+    QVERIFY(!composer->findChild<QPushButton *>("sendMessage")->isEnabled());
+    QCOMPARE(composer->editor()->toPlainText(),QString("Continue after my reset"));
+}
+
+void TestSessionsWindow::openingChildClearsHiddenAccountUsageRecoveryNotice()
+{
+    const auto now=QDateTime::currentSecsSinceEpoch();
+    auto state=fleet();auto box=state.local();auto &session=box.sessions[0];
+    session.cmd="claude";session.runId="run-one";session.conversationId="conversation-one";session.accountId="native-claude";state.setLocal(box,0);
+    const QJsonObject children{{"review",QJsonObject{{"name","Review"},{"state","working"}}}};
+    const QJsonObject details{{"tracked",true},{"run_id","run-one"},{"conversation_id","conversation-one"},
+        {"runtime_state","live"},{"process_state","running"},{"last_event_at",double(now-60)},{"provider_status_at",double(now-60)},
+        {"phase","error"},{"activity","attention"},{"subagents",children},
+        {"provider_error",QJsonObject{{"error_kind","quota"},{"at",double(now-60)},{"detail","Weekly limit reached"}}},
+        {"events",QJsonArray{}},{"cursor",0}};
+    const QJsonObject child{{"parent_conversation_id","conversation-one"},{"conversation_id","child-conversation"},
+        {"run_id","run-one"},{"events",QJsonArray{}}};
+    const QJsonObject usage{{"id","native-claude"},{"status","ok"},{"checked_at",double(now)},
+        {"windows",QJsonArray{QJsonObject{{"window_minutes",300},{"used_percent",0},{"resets_at",double(now+3600)}},
+            QJsonObject{{"window_minutes",10080},{"used_percent",0},{"resets_at",double(now+86400)}}}}};
+    SessionsWindow window(programInspecting("quota-child-switch",details,child,usage));window.setFleet(state);window.show();window.showSession({},session.name);
+    auto *help=window.findChild<QLabel *>("providerErrorHelp");
+    QTRY_VERIFY(help->text().contains("Latest account usage is below the limit"));
+    auto *stack=window.findChild<QStackedWidget *>("activityStack");
+    window.findChild<QTextBrowser *>("subagents")->anchorClicked(QUrl("hgs-agent:review"));
+    QCOMPARE(stack->currentIndex(),1);
+    QVERIFY(window.findChild<ToolbarChip *>("usageLimitChip")->isHidden());
+    QVERIFY2(!help->text().contains("Latest account usage is below the limit"),qPrintable(help->text()));
+    QVERIFY(help->text().contains("will not retry automatically"));
+    // Returning projects the same fresh parent-account evidence again.
+    window.findChild<QPushButton *>("subagentBack")->click();QCOMPARE(stack->currentIndex(),0);
+    QTRY_VERIFY(help->text().contains("Latest account usage is below the limit"));
 }
 
 void TestSessionsWindow::accountUsageRejectsOtherSessionReplies()
@@ -2984,7 +3092,7 @@ void TestSessionsWindow::peerNamedDifferentlyListsSessionsUnderItsAlias()
     QTemporaryDir fixture; QVERIFY(fixture.isValid());
     const auto peerCli = fixture.filePath("hgs");
     QVERIFY(FakeCli::install(peerCli, "#!/usr/bin/env python3\nimport sys\n"
-        "if sys.argv[1:]!=['@winpeer','ls','--json']:print('unexpected call',file=sys.stderr);sys.exit(1)\n"
+        "if sys.argv[1:]!=['@winpeer','ls','--json','--no-archives']:print('unexpected call',file=sys.stderr);sys.exit(1)\n"
         "print('{\"host\":\"zpeer\",\"ok\":true,\"projects\":{},\"sessions\":[{\"name\":\"codex/win/build\",\"cmd\":\"codex\","
         "\"project\":\"win\",\"tag\":\"build\",\"state\":\"running\",\"activity\":\"idle\"}]}')\n"));
     HgsClient client(FakeCli::program(peerCli)); QList<BoxState> answers;
@@ -3029,6 +3137,72 @@ void TestSessionsWindow::filtersSelectionAndOffline()
     QSignalSpy opened(&window, &SessionsWindow::sessionActivated);
     QTest::keyClick(list, Qt::Key_Return); QCOMPARE(opened.size(), 0);
     window.close(); // Closing a dashboard never invokes a session command.
+}
+
+void TestSessionsWindow::listFiltersKeepTheOpenConversation_data()
+{
+    QTest::addColumn<QString>("scope");
+    for (const auto *scope : {"attention", "active", "paused", "archived", "machine", "project", "empty"})
+        QTest::newRow(scope) << QString::fromLatin1(scope);
+}
+
+void TestSessionsWindow::listFiltersKeepTheOpenConversation()
+{
+    QFETCH(QString, scope);
+    auto state = fleet(); auto local = state.local();
+    auto archive = local.sessions[0]; archive.state = "archived"; archive.archiveId = "archive-one";
+    archive.archivedAt = QDateTime::currentSecsSinceEpoch(); local.sessions.append(archive);
+    state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    const auto current = local.sessions[1]; const QString key = '\n' + current.name;
+    SessionOrganization org; const auto otherProject = org.createGroup("Other project");
+    org.moveSession(org.observe("mac", "claude/infra/review", ""), otherProject);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(program()); window.setFleet(state); keepDetailsPollsOut(window);
+    window.resize(1100,760); window.show(); window.showSession({}, current.name);
+    auto *list = window.findChild<SessionList *>("sessionList");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *title = window.findChild<QLabel *>("detailTitle"); const auto openedTitle = title->text();
+    const QString draft = scope == "active" ? QString() : QStringLiteral("Keep the open session and this draft");
+    setComposerText(composer, draft);
+    auto cursor = composer->editor()->textCursor(); cursor.setPosition(qMin(5, int(draft.size())));
+    cursor.setPosition(qMin(12, int(draft.size())), QTextCursor::KeepAnchor); composer->editor()->setTextCursor(cursor);
+    const auto selection = cursor.selectedText();
+    auto *machines = window.findChild<MachineFilter *>(); auto *projects = window.findChild<ProjectFilter *>();
+    QHash<QString, QPushButton *> filters;
+    for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) filters[button->property("filter").toString()] = button;
+    const auto applyScope = [&] {
+        if (scope == "machine") machines->setSelection({"mac"});
+        else if (scope == "project") projects->setSelection({otherProject});
+        else if (scope == "empty") projects->setSelection({"unavailable-project"});
+        else filters[scope]->click();
+    };
+    const auto clearScope = [&] { filters["all"]->click(); machines->setSelection({}); projects->setSelection({}); };
+    applyScope();
+    for (int i = 0; i < list->count(); ++i) QVERIFY(list->item(i)->data(SessionRoles::Key).toString() != key);
+    QVERIFY(!list->currentItem());
+    QCOMPARE(composer->sessionKey(), key); QCOMPARE(title->text(), openedTitle);
+    QCOMPARE(composer->editor()->toPlainText(), draft); QCOMPARE(composer->editor()->textCursor().selectedText(), selection);
+    // Regular fleet refreshes must not replace a conversation outside the list scope.
+    window.setFleet(state);
+    QCOMPARE(composer->sessionKey(), key); QCOMPARE(title->text(), openedTitle);
+    QCOMPARE(composer->editor()->toPlainText(), draft); QCOMPARE(composer->editor()->textCursor().selectedText(), selection);
+    clearScope();
+    QVERIFY(list->currentItem()); QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), key);
+    QVERIFY(list->selectedItems().contains(list->currentItem()));
+    QCOMPARE(composer->sessionKey(), key); QCOMPARE(composer->editor()->toPlainText(), draft);
+    // An explicit row click still opens that target; the original draft remains recoverable.
+    if (scope != "empty") applyScope();
+    QListWidgetItem *next = nullptr;
+    for (int i = 0; i < list->count(); ++i) {
+        const auto candidate = list->item(i)->data(SessionRoles::Key).toString();
+        if (!list->item(i)->isHidden() && !list->item(i)->data(SessionRoles::Header).toBool()
+            && !candidate.isEmpty() && candidate != key) { next = list->item(i); break; }
+    }
+    QVERIFY(next); const auto nextKey = next->data(SessionRoles::Key).toString(); list->scrollToItem(next);
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, list->visualItemRect(next).center());
+    QCOMPARE(composer->sessionKey(), nextKey);
+    window.showSession({}, current.name);
+    QTRY_COMPARE(composer->editor()->toPlainText(), draft); QCOMPARE(composer->sessionKey(), key);
 }
 
 void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
@@ -3321,6 +3495,8 @@ void TestSessionsWindow::scheduledSettingsApplyOncePerReady_data()
 
 void TestSessionsWindow::scheduledSettingsApplyOncePerReady()
 {
+    // Each settings change and inspection runs the fake CLI, which is slow on Windows runners.
+    constexpr int SettingsTimeout = 20000;
     // A chooser can appear between the idle listing and the dispatch of a
     // pending change; dispatch then schedules it again. The change stays
     // pending for one attempt per Ready transition, never a polling loop.
@@ -3383,7 +3559,7 @@ elif args[0]=='settings':
     auto *efforts = composer->findChild<QComboBox *>("sessionEffortChoice"); efforts->setCurrentIndex(efforts->findData("xhigh"));
     auto *apply = composer->findChild<QPushButton *>("applySessionSettings"); QVERIFY(apply->isEnabled()); apply->click();
     if (!keepSelected) window.showSession({}, "kimi/docs/research");
-    QTRY_COMPARE(changes.size(), 1); QVERIFY(changes[0][1].toBool());
+    QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 1, SettingsTimeout); QVERIFY(changes[0][1].toBool());
     QCOMPARE(changes[0][2].toJsonObject().value("status").toString(), QString("scheduled"));
     const auto list = [&](const QString &activity, const QString &phase) {
         box.sessions[0].activity = activity; box.sessions[0].phase = phase; box.sessions[0].processState = "running";
@@ -3401,13 +3577,13 @@ elif args[0]=='settings':
         const auto seen = inspections.size(); QTest::qWait(150);
         const auto inspected = [&] { return std::count_if(inspections.cbegin() + seen, inspections.cend(),
             [&](const QList<QVariant> &reply) { return reply[1].toString() == selectedName; }); };
-        if (!QTest::qWaitFor([&] { return inspected() >= 2; }, 5000)) return -1;
+        if (!QTest::qWaitFor([&] { return inspected() >= 2; }, SettingsTimeout)) return -1;
         return changes.size() == calls() ? int(changes.size()) : -1;
     };
     // The idle listing starts the automatic apply, but a chooser appeared in
     // the meantime: dispatch schedules it.
     list("idle", "idle");
-    QTRY_COMPARE(changes.size(), 2); QVERIFY(changes[1][1].toBool());
+    QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 2, SettingsTimeout); QVERIFY(changes[1][1].toBool());
     QCOMPARE(changes[1][2].toJsonObject().value("status").toString(), QString("scheduled"));
     // No second attempt while the session stays Ready or shows the chooser.
     list("idle", "idle"); list("idle", "idle"); QCOMPARE(settledCalls(), 2);
@@ -3430,7 +3606,7 @@ elif args[0]=='settings':
             QVERIFY(ready.contains("pending_settings_id")); ready["settings_apply_when"] = "now";
             QVERIFY(FakeCli::replace(snapshot, QJsonDocument(ready).toJson()));
         }
-        QTRY_COMPARE(changes.size(), 3); QCOMPARE(changes[2][1].toBool(), retry == "applied");
+        QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 3, SettingsTimeout); QCOMPARE(changes[2][1].toBool(), retry == "applied");
         auto *notice = window.findChild<QLabel *>("notice"); QVERIFY(notice);
         if (retry == "applied") QVERIFY(notice->isHidden());
         else { QVERIFY(notice->isVisible()); QVERIFY(notice->text().contains(retry)); }
@@ -4287,6 +4463,20 @@ elif args[0]=='answer':
     QCOMPARE(noticeLabel->text(),notice);
 }
 
+void TestSessionsWindow::optionalQuestionNotificationsAreOptIn()
+{
+    SessionsWindow window(program());
+    auto *settings = window.findChild<QWidget *>("settingsPage"); QVERIFY(settings);
+    auto *check = settings->findChild<QCheckBox *>("notifyOptionalQuestions"); QVERIFY(check);
+    QVERIFY(!check->isChecked()); QVERIFY(!QuestionNotificationSettings::enabled());
+    check->setChecked(true);
+    QVERIFY(QuestionNotificationSettings::enabled());
+    QCOMPARE(QSettings().value("notifications/optionalQuestions").toBool(), true);
+    SessionsWindow reopened(program());
+    QVERIFY(reopened.findChild<QCheckBox *>("notifyOptionalQuestions")->isChecked());
+    check->setChecked(false); QVERIFY(!QuestionNotificationSettings::enabled());
+}
+
 void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
 {
     QJsonObject question{{"question_id","optional-one"},{"question_hash","hash"},{"run_id","run-one"},{"conversation_id","conversation-one"},
@@ -5029,6 +5219,7 @@ void TestSessionsWindow::sessionContextMenuSavedAndArchive()
     });
     action("contextRenameSession")->trigger(); QCOMPARE(writes.size(), 0); menu->hide();
     for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+    list->setCurrentRow(0);
     show(); QVERIFY(!action("contextOpenTerminal")); QVERIFY(!action("contextArchiveSession"));
     QCOMPARE(action("contextCopyCommand")->text(), QString("Copy restore command"));
     QCOMPARE(action("contextChangeSession")->text(), QString("Restore session")); QVERIFY(!action("contextChangeSession")->isEnabled()); // Saved name collision.
@@ -6237,6 +6428,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     filter("archived")->click(); QCOMPARE(list->count(), 2);
     QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/dashboard\nrecent"));
     QCOMPARE(list->item(1)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/dashboard\nolder"));
+    list->setCurrentRow(0); // Filtering alone keeps the live conversation open.
     auto *restore = window.findChild<QPushButton *>("pauseAction");
     QCOMPARE(restore->accessibleName(), QString("Restore session")); QVERIFY(!restore->isEnabled());
     QVERIFY(window.findChild<QLabel *>("hint")->text().contains("uses this name"));
@@ -6275,7 +6467,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     local.sessions.removeLast(); local.sessions.append(restored);
     state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), QString("\ncodex/hgs/dashboard"));
-    filter("archived")->click(); QCOMPARE(list->count(), 1);
+    filter("archived")->click(); QCOMPARE(list->count(), 1); list->setCurrentRow(0);
     QVERIFY(!restore->isEnabled()); // The newly restored terminal occupies the name.
     QTimer::singleShot(0, [&]() {
         if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) dialog->button(QMessageBox::Yes)->click();
@@ -6436,7 +6628,10 @@ void TestSessionsWindow::forkKeepsSourceAndGroup()
     SessionsWindow window(fixture); window.setFleet(state); window.show();
     if (sourceState != "running") for (auto *button : window.findChildren<QPushButton *>())
         if (button->property("filter") == (sourceState == "archived" ? "archived" : "paused")) button->click();
-    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list->currentItem());
+    auto *list = window.findChild<SessionList *>("sessionList");
+    for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->data(SessionRoles::Identity).toString() == sourceIdentity) { list->setCurrentRow(i); break; }
+    QVERIFY(list->currentItem());
     QCOMPARE(list->currentItem()->data(SessionRoles::Identity).toString(), sourceIdentity);
     auto *client = window.findChild<HgsClient *>(); QSignalSpy inspected(client, &HgsClient::inspectionReady);
     QSignalSpy writes(client, &HgsClient::writeDone); QTRY_VERIFY(!inspected.isEmpty());
@@ -6467,6 +6662,8 @@ void TestSessionsWindow::forkKeepsSourceAndGroup()
     QCOMPARE(state.local().sessions[0].archiveId, original.archiveId); QCOMPARE(state.local().sessions[0].prompt, original.prompt);
     if (sourceState == "archived") {
         for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+        for (int i = 0; i < list->count(); ++i)
+            if (list->item(i)->data(SessionRoles::Identity).toString() == sourceIdentity) { list->setCurrentRow(i); break; }
         QVERIFY(list->currentItem()); QCOMPARE(list->currentItem()->data(SessionRoles::Identity).toString(), sourceIdentity);
     }
 }
@@ -6563,7 +6760,10 @@ void TestSessionsWindow::renameOtherSessionKinds()
         if (remote) { BoxState local; local.host = "arch"; local.ok = true; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); state.setPeer(box, QDateTime::currentMSecsSinceEpoch()); }
         else state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
         SessionsWindow window(program()); window.setFleet(state); window.show();
-        if (archived) for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+        if (archived) {
+            for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+            window.findChild<SessionList *>("sessionList")->setCurrentRow(0);
+        }
         auto *action = window.findChild<QAction *>("renameSessionAction"); QVERIFY(action->isEnabled());
         auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
         QTimer::singleShot(0, &window, [&]() {
@@ -8903,7 +9103,7 @@ void TestSessionsWindow::localWindowsSessionExplainsDisabledVoice(){
     QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
     settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);
     auto *voice=composer->findChild<ToolbarChip *>("voiceRecord");QVERIFY(voice);
-    QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Record a voice message"));
+    QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Tap to switch voice/video"));
     local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
     QTRY_VERIFY(!voice->isEnabled());
     QCOMPARE(voice->toolTip(),QString("Voice messages cannot be sent to sessions on this Windows computer yet."));
@@ -9489,6 +9689,9 @@ void TestSessionsWindow::cheatSheetOpensKeyboardSettings()
     QCOMPARE(sections->currentItem()->text(), QString("Keyboard"));
 }
 
+// Push tests wait for deliveries through the fake CLI, which is slow on Windows runners.
+constexpr int PushTimeout = 20000;
+
 void TestSessionsWindow::pushSendsNowWhenTheMessageIsQueued()
 {
     PushFixture fixture; QVERIFY(fixture.install(script()));
@@ -9499,10 +9702,10 @@ void TestSessionsWindow::pushSendsNowWhenTheMessageIsQueued()
     QVERIFY(pushes(composer)); QVERIFY(!pushes(window.findChild<MessageComposer *>("subagentComposer")));
     QSignalSpy delivered(client, &HgsClient::messageSent), queued(client, &HgsClient::queueSendFinished);
     pushMessage(window, "Run the release checks before tagging v2"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // The agent queued it; its terminal wraps the text.
     fixture.queue("q-push", "❯ Run the release checks\n  before tagging v2"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-push"}); QTRY_COMPARE(queued.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-push"}, PushTimeout); QTRY_COMPARE(queued.size(), 1);
     // The push is spent: it never resends text or the queue.
     inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList{"q-push"}); QCOMPARE(delivered.size(), 1);
@@ -9510,7 +9713,7 @@ void TestSessionsWindow::pushSendsNowWhenTheMessageIsQueued()
     QCOMPARE(composer->editor()->toPlainText(), QString());
     fixture.queue("q-later", "❯ later"); inspectPush(window, fixture);
     pushMessage(window, {});
-    QTRY_COMPARE(fixture.sentNow(), (QStringList{"q-push", "q-later"})); QCOMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), (QStringList{"q-push", "q-later"}), PushTimeout); QCOMPARE(delivered.size(), 1);
 }
 
 void TestSessionsWindow::pushIgnoresQueuesWithoutTheMessage()
@@ -9520,12 +9723,12 @@ void TestSessionsWindow::pushIgnoresQueuesWithoutTheMessage()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "Summarize the failing tests in one table"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     fixture.queue("q-other", "❯ Rename the release branch"); inspectPush(window, fixture);
     fixture.queue("q-blocked", "❯ Summarize the failing tests in one table", false); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     fixture.queue("q-match", "❯ Rename the release branch\n❯ Summarize the   failing tests in one table"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushIgnoresTheMessageInsideAnotherWord()
@@ -9535,13 +9738,13 @@ void TestSessionsWindow::pushIgnoresTheMessageInsideAnotherWord()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "test suite on CI"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // Only longer words hold the message: "latest" ends with "test", "CI-only" begins with "CI".
     fixture.queue("q-latest", "❯ Rerun the latest suite on CI"); inspectPush(window, fixture);
     fixture.queue("q-longer", "❯ test suite on CI-only runners"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     fixture.queue("q-match", "❯ Rerun the latest suite on CI\n❯ test suite on CI"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushDropsAfterSessionIdentityChange_data()
@@ -9559,7 +9762,7 @@ void TestSessionsWindow::pushDropsAfterSessionIdentityChange()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "Check the deployment logs again"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     fixture.details[field] = value; fixture.queue("q-changed", "❯ Check the deployment logs again"); inspectPush(window, fixture);
     QTRY_COMPARE(notice(window), QString("The message was not pushed: the session changed")); QVERIFY(noticeIsError(window));
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
@@ -9599,11 +9802,11 @@ void TestSessionsWindow::pushFollowsTheRunThatTakesTheMessage()
     fixture.details = QJsonObject{{"tracked", true}, {"run_id", "run-new"}, {"runtime_state", "live"}, {"process_state", "running"},
         {"activity", "idle"}, {"phase", "idle"}, {"first_message_can_send", true}, {"events", QJsonArray{}}, {"cursor", 0}};
     inspectPush(window, fixture);
-    QTRY_COMPARE(delivered.size(), 1); QCOMPARE(delivered[0][3].toJsonObject()["run_id"].toString(), QString("run-new"));
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout); QCOMPARE(delivered[0][3].toJsonObject()["run_id"].toString(), QString("run-new"));
     // The message began the run's first conversation, which the push adopts.
     fixture.details["conversation_id"] = "conversation-new"; fixture.details["activity"] = "busy"; fixture.details["phase"] = "working";
     fixture.queue("q-fresh", "❯ Start over and outline the plan"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-fresh"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-fresh"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushStaysWithItsSession()
@@ -9614,7 +9817,7 @@ void TestSessionsWindow::pushStaysWithItsSession()
     auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
     QSignalSpy delivered(client, &HgsClient::messageSent);
     pushMessage(window, "Draft the release notes for v2"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // Its session is no longer inspected once another one is selected: the push ends at once.
     fixture.queue("q-other-session", "❯ Draft the release notes for v2"); QVERIFY(fixture.save());
     window.showSession({}, "kimi/docs/research");
@@ -9632,7 +9835,7 @@ void TestSessionsWindow::pushTimesOut()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "Wait for the agent to finish the build"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     fixture.queue("q-other", "❯ Something else"); inspectPush(window, fixture);
     // A snapshot that arrives after the deadline never sends the queue, even one holding the message.
     window.setPushTimeoutForTests(0);
@@ -9668,7 +9871,7 @@ void TestSessionsWindow::pushOfAttachmentsAloneSendsWithoutPush()
     setComposerText(composer, {}); QVERIFY(composer->addAttachment("notes.txt", "text/plain", "release notes"));
     QCOMPARE(composer->editor()->toPlainText().trimmed(), QString("[File #1]"));
     pressPush(window); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     QTRY_COMPARE(notice(window), QString("Sent without push: a message without text cannot be found in the agent's queue"));
     QVERIFY(!noticeIsError(window));
     fixture.queue("q-file", "❯ [File #1] (Read the attached file at \"/fixture/notes.txt\")"); inspectPush(window, fixture);
@@ -9841,15 +10044,15 @@ void TestSessionsWindow::pushReplacesAnEarlierPush()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "First message to push"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     pushMessage(window, "Second message to push"); if (QTest::currentTestFailed()) return;
     QCOMPARE(notice(window), QString("The earlier push was replaced by a new one")); QVERIFY(!noticeIsError(window));
-    QTRY_COMPARE(delivered.size(), 2);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 2, PushTimeout);
     // Only the new push sends: a queue with the earlier message alone stays.
     fixture.queue("q-first", "❯ First message to push"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     fixture.queue("q-both", "❯ First message to push\n❯ Second message to push"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-both"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-both"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushWaitsForARunningSendNow()
@@ -9863,10 +10066,10 @@ void TestSessionsWindow::pushWaitsForARunningSendNow()
     // The gated send-now request can outlast the ordinary deadline on a loaded machine.
     window.setPushTimeoutForTests(60000);
     pushMessage(window, "Push this after the earlier queue"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // A send-now request for the earlier queue is still running when the agent queues the message.
     composer->editor()->setFocus(); QTRY_VERIFY(composer->editor()->hasFocus());
-    pressCommand(&window, "queue.sendNow"); QTRY_COMPARE(fixture.sentNow(), QStringList{"q-old"});
+    pressCommand(&window, "queue.sendNow"); QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-old"}, PushTimeout);
     fixture.queue("q-push", "❯ Earlier queued text\n❯ Push this after the earlier queue"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList{"q-old"});
     QVERIFY2(queued.isEmpty(), "The earlier send-now request must still be running");
@@ -9875,7 +10078,7 @@ void TestSessionsWindow::pushWaitsForARunningSendNow()
     QVERIFY(fixture.release());
     QTRY_COMPARE_WITH_TIMEOUT(queued.size(), 1, 15000);
     inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), (QStringList{"q-old", "q-push"}));
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), (QStringList{"q-old", "q-push"}), PushTimeout);
 }
 
 void TestSessionsWindow::pushIgnoresTheCodexQueueHeader()
@@ -9885,7 +10088,7 @@ void TestSessionsWindow::pushIgnoresTheCodexQueueHeader()
     if (QTest::currentTestFailed()) return;
     QSignalSpy delivered(window.findChild<HgsClient *>(), &HgsClient::messageSent);
     pushMessage(window, "interrupt"); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // Codex's queue header says "interrupt"; only a queued item that begins with the message holds it.
     const QString header("• Messages to be submitted after next tool call (press esc to interrupt and send immediately)");
     fixture.queue("q-header", header + "\n  ↳ Check the build first"); inspectPush(window, fixture);
@@ -9894,7 +10097,7 @@ void TestSessionsWindow::pushIgnoresTheCodexQueueHeader()
     fixture.queue("q-follow-up", "• Queued follow-up inputs\n  ↳ Check the build first\n    interrupt"); inspectPush(window, fixture);
     QTest::qWait(150); QCOMPARE(fixture.sentNow(), QStringList());
     fixture.queue("q-match", header + "\n  ↳ Check the build first\n  ↳ interrupt"); inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
 }
 
 void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment_data()
@@ -9921,7 +10124,7 @@ void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment()
     composer->editor()->moveCursor(QTextCursor::End); composer->editor()->insertPlainText("Check this");
     QCOMPARE(composer->editor()->toPlainText(), reference + " Check this");
     pressPush(window); if (QTest::currentTestFailed()) return;
-    QTRY_COMPARE(delivered.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout);
     // The CLI pastes each reference followed by the file's location (src/state/attachments.rs).
     const QString pasted = reference + " (" + instruction + ' ' + path + ") Check this";
     // Only an item that begins with the message holds it: not a header row, not
@@ -9934,5 +10137,5 @@ void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment()
     // The agent's terminal wraps the location onto the next row.
     fixture.queue("q-match", "❯ Rename the release branch\n❯ " + reference + " (" + instruction + "\n  " + path + ") Check this");
     inspectPush(window, fixture);
-    QTRY_COMPARE(fixture.sentNow(), QStringList{"q-match"});
+    QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
 }

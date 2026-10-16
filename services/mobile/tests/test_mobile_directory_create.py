@@ -14,7 +14,7 @@ from aiohttp import ClientSession
 from relay_fixture import start_relay
 from zerus_mobile import context, launch
 from zerus_mobile.connector import Connector, ConnectorError, MUTATIONS
-from zerus_mobile.server import validate_request
+from relay_oracle import validate_request
 
 
 class DirectoryCreate(unittest.IsolatedAsyncioTestCase):

@@ -56,10 +56,11 @@ object ReadAllPolicies {
 object ReadAllHeadCandidates {
     fun candidates(sessions:List<Session>,state:ConversationReadState):List<Session> {
         var slots=(500-state.records.size).coerceAtLeast(0)
+        val recorded=state.records.mapTo(hashSetOf()) { ConversationReadPolicies.key(it.target) }
         return sessions.distinctBy { ConversationReadPolicies.key(it.target) }.filter { row ->
             val t=row.target
             if(SessionFilters.archived(row) || t.run.isBlank() || t.conversation.isBlank()) false
-            else if(state.record(t)!=null) true
+            else if(ConversationReadPolicies.key(t) in recorded) true
             else if(slots>0 && (row.raw.string("reply_id").isNotBlank() || row.raw.optDouble("reply_at",0.0)>0 ||
                 row.raw.optBoolean("unread_reply") || row.raw.optBoolean("mobile_unread_reply"))) { slots--;true } else false
         }

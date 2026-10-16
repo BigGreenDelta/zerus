@@ -8,6 +8,9 @@
 #include "SessionFileReference.h"
 #include "WorkspaceIcons.h"
 #include "speech/VoicePlayerImage.h"
+#include "speech/RoundVideo.h"
+#include <QDialog>
+#include <QVBoxLayout>
 
 #include <QDateTime>
 #include <QAudioOutput>
@@ -891,10 +894,10 @@ struct ActivityRenderResult {
             const auto text = event.value("detail").toString();
             const auto replies = role == "user" ? QuestionReply::parse(text) : QJsonArray();
             if(event.value("source")=="hgs_voice") {
-                const auto voice=event.value("voice").toObject();const auto audio=voice.value("audio").toObject();
+                const auto voice=event.value("voice").toObject();const auto video=voice.value("video").toObject();const auto audio=voice.value("audio").toObject();
                 const auto id=voice.value("id").toString(event.value("message_id").toString());
                 const auto key=QString::fromLatin1(QCryptographicHash::hash((m_sessionKey+"\n"+id).toUtf8(),QCryptographicHash::Sha256).toHex());
-                if(!audio.value("request_id").toString().isEmpty())m_voiceLinks.insert(key,audio);
+                if(!audio.value("request_id").toString().isEmpty())m_voiceLinks.insert(key,video.isEmpty()?audio:video);
                 const auto state=voice.value("state").toString();
                 const QHash<QString,QString> labels{{"queued",tr("Waiting for recognition")},{"transcribing",tr("Recognizing…")},{"ready",tr("Ready to deliver")},
                     {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Sent")},{"failed",tr("Voice message failed")},
@@ -906,6 +909,11 @@ struct ActivityRenderResult {
                 const auto label=tr("Play or pause voice message (%1)").arg(VoicePlayerImage::time(audio.value("duration_ms").toInteger()));
                 QString body=QString("<p style='margin:8px 0 4px;'><a href='hgs-voice:%1' title='%2'><img src='%3' width='%4' height='52' alt='%2'></a></p>")
                     .arg(key,escaped(label),playerUrl.toString(),QString::number(playerWidth));
+                if(!video.isEmpty()){
+                    document->addResource(QTextDocument::ImageResource,playerUrl,VoicePlayerImage::videoPoster(m_scale,document->pixelRatio,video));
+                    body=QString("<p><a href='hgs-voice:%1' title='%2'><img src='%3' width='200' height='200' alt='%2'></a></p>")
+                        .arg(key,escaped(tr("Play video message")),playerUrl.toString());
+                }
                 const auto transcript=voice.value("transcript").toString();
                 if(!transcript.isEmpty()) {
                     const auto toggle="voice-text-"+key;m_toggleKeys.insert(toggle);
@@ -914,7 +922,7 @@ struct ActivityRenderResult {
                 }
                 if(!voice.value("error").toString().isEmpty())body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(voice.value("error").toString()));
                 if(!m_voiceError.isEmpty() && m_voiceError.startsWith(key+"\n"))body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(m_voiceError.mid(key.size()+1)));
-                html+=card(eventKey(event),tr("You (voice)"),timeText(event)+"  "+labels.value(state,tr("Voice message")),body,true);
+                html+=card(eventKey(event),video.isEmpty()?tr("You (voice)"):tr("You (video)"),timeText(event)+"  "+labels.value(state,tr("Voice message")),body,true);
                 ++i;continue;
             }
             const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
@@ -1171,6 +1179,7 @@ ActivityView::ActivityView(QWidget *parent) : QWidget(parent)
 void ActivityView::setSessionKey(const QString &key)
 {
     if (key == m_sessionKey) return;
+    if(m_videoDialog)m_videoDialog->close();
     if(m_voicePlayer)m_voicePlayer->stop();
     m_voiceKey.clear();m_voicePlaying.clear();m_voiceLoading.clear();m_voiceError.clear();m_voiceLinks.clear();m_voicePositions.clear();
     m_voicePressed.clear();m_voicePosition=0;m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;
@@ -1524,7 +1533,8 @@ bool ActivityView::eventFilter(QObject *watched, QEvent *event)
                 const auto rect=voiceRect(key);const auto local=mouse->position()-rect.topLeft();
                 const qreal scale=rect.height()/52.;
                 const auto waveform=VoicePlayerImage::waveformRect(rect.width(),scale);
-                if(waveform.contains(local))activateVoice(key,qBound<qreal>(0,(local.x()-waveform.left())/waveform.width(),1));
+                if(m_voiceLinks.value(key).value("mime")=="video/mp4")activateVoice(key);
+                else if(waveform.contains(local))activateVoice(key,qBound<qreal>(0,(local.x()-waveform.left())/waveform.width(),1));
                 else if(local.x()<48*scale)activateVoice(key);
             }
             return true;
@@ -1597,7 +1607,7 @@ QRect ActivityView::voiceRect(const QString &key) const
 
 void ActivityView::updateVoiceImage(const QString &key)
 {
-    if(key.isEmpty() || !m_voiceLinks.contains(key) || !m_voicePositions.contains(key))return;
+    if(key.isEmpty() || !m_voiceLinks.contains(key) || !m_voicePositions.contains(key) || m_voiceLinks.value(key).value("mime")=="video/mp4")return;
     auto *document=paintDocument(m_browser->document());const QUrl url("hgs-voice-player:"+key);
     const auto previous=document->resource(QTextDocument::ImageResource,url).value<QImage>();
     if(previous.isNull())return;
@@ -1629,6 +1639,7 @@ void ActivityView::activateVoice(const QString &key,std::optional<qreal> fractio
         }
         updateVoiceImage(key);return;
     }
+    if(m_videoDialog)m_videoDialog->close();
     const auto previous=m_voiceKey;
     if(m_voicePlayer){m_voicePlayer->stop();m_voicePlayer->setSource({});}
     m_voiceKey=key;m_voicePosition=position;m_voicePendingSeek=position;m_voiceStartAfterLoad=!fraction.has_value();
@@ -1943,7 +1954,7 @@ void ActivityView::playVoice(const QString &key,const QString &path,const QStrin
     m_voiceLoading.clear();
     if(!error.isEmpty() || path.isEmpty()){m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;m_voiceError=key+"\n"+(error.isEmpty()?tr("Recording is unavailable."):error);render(false);return;}
     if(!m_voicePlayer){
-        m_voicePlayer=new QMediaPlayer(this);m_voiceOutput=new QAudioOutput(this);m_voicePlayer->setAudioOutput(m_voiceOutput);
+        m_voicePlayer=new QMediaPlayer(this);registerMessagePlayer(m_voicePlayer);m_voiceOutput=new QAudioOutput(this);m_voicePlayer->setAudioOutput(m_voiceOutput);
         connect(m_voicePlayer,&QMediaPlayer::playbackStateChanged,this,[this](QMediaPlayer::PlaybackState state){m_voicePlaying=state==QMediaPlayer::PlayingState?m_voiceKey:QString();updateVoiceImage(m_voiceKey);});
         connect(m_voicePlayer,&QMediaPlayer::positionChanged,this,[this](qint64 position){m_voicePosition=position;updateVoiceImage(m_voiceKey);});
         connect(m_voicePlayer,&QMediaPlayer::mediaStatusChanged,this,[this](QMediaPlayer::MediaStatus status){
@@ -1953,11 +1964,21 @@ void ActivityView::playVoice(const QString &key,const QString &path,const QStrin
         });
         connect(m_voicePlayer,&QMediaPlayer::errorOccurred,this,[this](QMediaPlayer::Error,const QString &detail){m_voiceError=m_voiceKey+"\n"+tr("Could not play recording: %1").arg(detail);render(false);});
     }
+    if(m_voiceLinks.value(key).value("mime")=="video/mp4"){
+        if(m_videoDialog)m_videoDialog->close();
+        auto *dialog=new QDialog(this);dialog->setAttribute(Qt::WA_DeleteOnClose);dialog->setWindowTitle(tr("Video message"));m_videoDialog=dialog;
+        auto *layout=new QVBoxLayout(dialog);auto *video=new RoundVideoView(dialog);layout->addWidget(video,0,Qt::AlignHCenter);
+        auto *toggle=new QPushButton(tr("Play / pause"),dialog);layout->addWidget(toggle);
+        connect(toggle,&QPushButton::clicked,dialog,[this]{if(m_voicePlayer->playbackState()==QMediaPlayer::PlayingState)m_voicePlayer->pause();else m_voicePlayer->play();});
+        connect(dialog,&QDialog::finished,this,[this,dialog]{if(m_videoDialog==dialog){m_voicePlayer->stop();m_voicePlayer->setVideoSink(nullptr);m_videoDialog=nullptr;}});
+        m_voicePlayer->setVideoSink(video->sink());dialog->show();
+    } else m_voicePlayer->setVideoSink(nullptr);
     m_voiceKey=key;m_voicePlayer->setSource(QUrl::fromLocalFile(path));
     updateVoiceImage(key);
 }
 void ActivityView::hideEvent(QHideEvent *event)
 {
+    if(m_videoDialog)m_videoDialog->close();
     m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;m_voicePressed.clear();
     if(m_voicePlayer)m_voicePlayer->stop();m_voiceLoading.clear();updateVoiceImage(m_voiceKey);
     QWidget::hideEvent(event);

@@ -75,13 +75,16 @@ def main():
     parser.add_argument("--cli", type=Path, required=True, help="release hgs executable")
     parser.add_argument("--licenses", type=Path, required=True, help="output of collect-licenses.py")
     parser.add_argument("--version", required=True)
-    parser.add_argument("--release", help="--version, or a nightly release version built from it (default: --version)")
+    parser.add_argument("--release", help="stable, nightly or numbered Dev release (default: --version)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.version != (ROOT / "VERSION").read_text().strip():
         parser.error("bundle version must match VERSION")
-    if args.release and not re.fullmatch(re.escape(args.version) + r"(?:\.r\d+\.g[0-9a-f]{7}\.n\d+)?", args.release):
-        parser.error("--release must be --version or a nightly built from it")
+    if args.release:
+        nightly = re.fullmatch(re.escape(args.version) + r"(?:\.r\d+\.g[0-9a-f]{7}\.n\d+)?", args.release)
+        dev = re.fullmatch(re.escape((ROOT / "DEV_VERSION").read_text().strip()) + r"-dev\.[1-9]\d*", args.release)
+        if not nightly and not dev:
+            parser.error("--release must match the stable version or the numbered nightly/Dev source")
     qt = json.loads((args.qt / "zerus-qt.json").read_text())["qt_version"]
     if qt != json.loads((ROOT / "packaging/macos/qt.json").read_text())["qt_version"]:
         parser.error("the Qt prefix does not match packaging/macos/qt.json")

@@ -1,3 +1,4 @@
+#include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
 #include "LocalLaunchWarning.h"
@@ -155,6 +156,7 @@ void SessionsWindow::updateSelectionActions()
         && (m_projectFilters.isEmpty() || m_projectFilters.contains(m_organization.groupFor(entry.identity)))
         && (m_hostFilters.isEmpty() || m_hostFilters.contains(entry.host.isEmpty() ? "@local" : entry.host))
         && selectionActionApplies(entry, SelectionAction::Forget)) ++archived;
+    m_clearArchiveAction->setText(m_archiveBrowser->paged()?tr("Remove loaded archived sessions…"):tr("Clear archive…"));
     m_clearArchiveAction->setEnabled(archived > 0 && !busy);
     m_clearArchiveAction->setIcon(workspaceIcon("trash", QColor(m_muted)));
 }
@@ -205,7 +207,8 @@ void SessionsWindow::clearArchive()
     QList<Entry> entries;
     for (const auto &entry : m_entries) if (entry.session.state == "archived"
         && (m_projectFilters.isEmpty() || m_projectFilters.contains(m_organization.groupFor(entry.identity)))
-        && (m_hostFilters.isEmpty() || m_hostFilters.contains(entry.host.isEmpty() ? "@local" : entry.host))) entries << entry;
+        && (m_hostFilters.isEmpty() || m_hostFilters.contains(entry.host.isEmpty() ? "@local" : entry.host))
+        && m_archiveBrowser->includes(entry.session.archivedAt)) entries << entry;
     runSelectionAction(SelectionAction::Forget, entries, true);
 }
 
@@ -217,7 +220,7 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
     if (targets.isEmpty()) return;
     if (action == SelectionAction::Forget || action == SelectionAction::Terminate) {
         QStringList names; for (const auto &entry : targets) names << entry.machine + " / " + entry.session.name;
-        QString text = clearArchive ? tr("Remove %1 archived sessions from HGS on the selected machines?").arg(targets.size())
+        QString text = clearArchive ? (m_archiveBrowser->paged()?tr("Remove %1 loaded archived sessions in the current date and machine scope? Unloaded entries are kept."):tr("Remove %1 archived sessions from HGS on the selected machines?")).arg(targets.size())
             : tr("%1 %2 selected sessions?").arg(selectionActionText(action)).arg(targets.size());
         text += action == SelectionAction::Terminate
             ? tr("\n\nRunning processes will stop. Tracked Codex, Claude and Kimi conversations are kept in Archive; native conversation history is kept.")

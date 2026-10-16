@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QFontMetrics>
+#include <QBuffer>
+#include <QImageReader>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -13,6 +15,14 @@ namespace VoicePlayerImage {
 inline QString time(qint64 milliseconds) {
     const auto seconds=qMax<qint64>(0,milliseconds)/1000;
     return QStringLiteral("%1:%2").arg(seconds/60).arg(seconds%60,2,10,QLatin1Char('0'));
+}
+inline QImage videoPoster(qreal scale,qreal ratio,const QJsonObject &video) {
+    const auto side=qRound(200*scale);QImage tile(qRound(side*ratio),qRound(side*ratio),QImage::Format_ARGB32_Premultiplied);tile.setDevicePixelRatio(ratio);tile.fill(Qt::transparent);
+    QPainter p(&tile);p.setRenderHint(QPainter::Antialiasing);QPainterPath circle;circle.addEllipse(QRectF(0,0,side,side));p.setClipPath(circle);p.fillRect(QRectF(0,0,side,side),QColor("#26343c"));
+    const auto encoded=video.value("poster_base64").toString().toLatin1();
+    if(encoded.size()<=10924){auto bytes=QByteArray::fromBase64(encoded);QBuffer buffer(&bytes);buffer.open(QIODevice::ReadOnly);QImageReader reader(&buffer,"JPEG");const auto size=reader.size();
+        if(bytes.size()<=8192 && size.width()>0 && size.height()>0 && size.width()<=512 && size.height()<=512){const auto image=reader.read();const auto edge=qMin(image.width(),image.height());p.drawImage(QRectF(0,0,side,side),image,QRect((image.width()-edge)/2,(image.height()-edge)/2,edge,edge));}}
+    p.setBrush(QColor(0,0,0,130));p.setPen(Qt::NoPen);p.drawEllipse(QPointF(side/2.,side/2.),24*scale,24*scale);p.setBrush(Qt::white);QPainterPath play;play.moveTo(side/2.-6*scale,side/2.-12*scale);play.lineTo(side/2.+12*scale,side/2.);play.lineTo(side/2.-6*scale,side/2.+12*scale);play.closeSubpath();p.drawPath(play);return tile;
 }
 inline QRectF waveformRect(qreal width,qreal scale) {
     return {56*scale,2*scale,qMax<qreal>(1,width-60*scale),27*scale};

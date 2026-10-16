@@ -82,7 +82,9 @@ SessionSearch::SessionSearch(const QString &hgs, QWidget *parent) : QWidget(pare
     connect(&m_client, &HgsClient::searchReady, this, [this](quint64 id, const QString &host, const QJsonObject &data) {
         if (m_pending.value(host).first != id) return;
         const auto query = m_pending.take(host).second;
-        if (query == m_query) { m_replies[host] = data; m_errors.remove(host); rebuild(); }
+        if (query == m_query) { m_replies[host] = data; m_errors.remove(host);
+            QJsonArray archives;for(const auto &value:data["results"].toArray()){const auto row=value.toObject()["session"].toObject();if(row["state"]=="archived"&&!row["archive_id"].toString().isEmpty())archives.append(row);}
+            emit archiveSessionsReady(host,archives);rebuild(); }
         else request();
     });
     connect(&m_client, &HgsClient::searchFailed, this, [this](quint64 id, const QString &host, const QString &error) {
@@ -207,7 +209,13 @@ void SessionSearch::rebuild()
         if (!m_hosts.isEmpty() && !m_hosts.contains(host.isEmpty()?QStringLiteral("@local"):host)) return;
         visibleHosts << host;
         const auto reply = m_replies.value(host); truncated |= reply.value("truncated").toBool(); unavailable += reply.value("unavailable_sessions").toInt();
-        for (const auto &s : box.sessions) {
+        auto candidates=box.sessions;
+        for(const auto &value:reply["results"].toArray()){
+            const auto row=value.toObject()["session"].toObject();if(row["state"]!="archived"||row["archive_id"].toString().isEmpty())continue;
+            const auto parsed=HgsClient::parseSessions(QJsonArray{row});if(parsed.isEmpty())continue;
+            const auto &s=parsed.first();bool duplicate=false;for(const auto &old:candidates)if(old.archiveId==s.archiveId){duplicate=true;break;}if(!duplicate)candidates.append(s);
+        }
+        for (const auto &s : candidates) {
             const bool reachable = box.ok && (host.isEmpty() || QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs);
             if (!accepts(host, s, reachable) || !active()) continue;
             const QString machine = host.isEmpty() ? box.host : host;

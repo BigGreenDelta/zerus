@@ -3,9 +3,11 @@
 //! Version-one manifests and journal rows deliberately remain compatible with
 //! the original helper: an upgrade must never orphan a saved conversation.
 mod archive;
+pub(crate) mod archive_catalog;
 mod claude_trust;
 mod claude_permission;
 mod claude_resume;
+mod claude_usage_limit;
 mod claude_question;
 mod claude_statusline;
 mod claude_subagents;
@@ -304,7 +306,11 @@ pub fn merge_snapshot(box_value: Value) -> Result<Value> {
 
 /// `merge_snapshot` of a listing; `ids` holds each listed session's immutable
 /// ID (`$N`) by its listed name.
-pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Result<Value> {
+pub fn merge_listing(box_value: Value, ids: &BTreeMap<String, String>) -> Result<Value> {
+    merge_listing_archives(box_value, ids, true)
+}
+
+pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, String>, include_archives: bool) -> Result<Value> {
     local_sessions()?;
     // A rename renames the terminal session and moves its binding under the
     // state lock. Read the panes and the saved records under it as well, so a
@@ -316,7 +322,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
     let ((snapshot, names), (archived, bindings)) = if root().exists() {
         let _guard = lock(None)?;
         let (snapshot, names) = live_sessions()?;
-        let saved = archive::reconcile_locked(&snapshot)?;
+        let saved = if include_archives { archive::reconcile_locked(&snapshot)? } else { (Vec::new(), archive::reconcile_active_locked(&snapshot)?) };
         ((snapshot, names), saved)
     } else {
         (live_sessions()?, Default::default())
@@ -388,7 +394,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
                     .ok_or("invalid session")?
                     .extend(summary.as_object().ok_or("invalid summary")?.clone());
                 let questions = read_marks::pending_questions(&record, session, true, budget);
-                read_marks::enrich(session, &marks, journal::journal_name(&record), questions.as_deref());
+                read_marks::enrich_listing(session, &marks, journal::journal_name(&record), questions);
             }
             continue;
         }
@@ -411,7 +417,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
                 .unwrap()
                 .clone(),
         );
-        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), Some(&[]));
+        read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
         sessions.push(session);
     }
     for record in archived {
@@ -427,7 +433,7 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
                 .unwrap()
                 .clone(),
         );
-        read_marks::enrich(&mut session, &marks, journal::journal_name(&record), Some(&[]));
+        read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
         sessions.push(session);
     }
     sessions.extend(dsh::snapshots()?);
@@ -437,11 +443,14 @@ pub fn merge_listing(mut box_value: Value, ids: &BTreeMap<String, String>) -> Re
         if session.get("attention_signature").is_none() {
             let owner = string(session, "name").to_owned();
             let questions=if session["agent"]=="opencode" {session["pending_questions"].as_array().cloned().unwrap_or_default()}else{Vec::new()};
-            read_marks::enrich(session, &marks, &owner, Some(&questions));
+            read_marks::enrich_listing(session, &marks, &owner, Ok(Some(questions)));
         }
     }
 
-    workspace::enrich(sessions, &workspace::pane_cwds());
+    // The pane folders are read after the lock is released, when a session may
+    // have been renamed since `snapshot`. They go by the session IDs, which a
+    // rename keeps, to the names that `snapshot` listed (zerus-18u1).
+    workspace::enrich(sessions, &workspace::snapshot_cwds(&names));
     Ok(box_value)
 }
 

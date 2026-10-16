@@ -102,6 +102,13 @@ def ported_modules() -> set[str]:
     return set(json.loads((TESTS / "ported.json").read_text())["rust"])
 
 
+def implemented(operation) -> bool:
+    """Whether the connector under test executes this known operation. A Rust
+    build refuses the others as unsupported (`rust_operations` in ported.json,
+    checked against the build by its runtime_vectors test)."""
+    return IMPLEMENTATION == "python" or operation in json.loads((TESTS / "ported.json").read_text())["rust_operations"]
+
+
 def canonical(value) -> str:
     """The relay's wire and identity encoding (relay json.rs)."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
@@ -193,6 +200,7 @@ def default_rules(listing_value: dict | None = None, help_text: str = HELP_TEXT)
     return [
         {"argv": ["--help"], "stdout_text": help_text},
         {"argv": ["ls", "--json", "--local"], "stdout": listing() if listing_value is None else listing_value},
+        {"argv": ["ls", "--json", "--local", "--no-archives"], "stdout": listing() if listing_value is None else listing_value},
         {"argv": ["swarm", "get"], "stdout": {"schema": 1, "initialized": False, "organization": {"projects": []}}},
         {"argv": ["account", "ls"], "stdout": {"profiles": []}},
         {"argv": ["inspect", SESSION], "stdout": inspection()},

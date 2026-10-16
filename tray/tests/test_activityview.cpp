@@ -244,6 +244,7 @@ private slots:
     void repeatedJournalWindowKeepsOneAttachmentMessage();
     void delayedAttachmentAcknowledgementKeepsOneMessage();
     void voiceMessageRetainsAudioAndExpandableTranscript();
+    void videoMessageIsOneCircleAndLoadsOnlyAfterTap();
     void voiceWaveformSeeksWithoutRelayout_data();
     void voiceWaveformSeeksWithoutRelayout();
     void voiceWaveformAppearance_data();
@@ -1383,6 +1384,23 @@ void TestActivityView::voiceMessageRetainsAudioAndExpandableTranscript()
     QCOMPARE(view.browser()->toPlainText().count("You (voice)"),1);QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),1);
     view.setSessionKey("fixture/other");view.playVoice(played[0][0].toString(),{},"Stale recording error");settle(view);
     QVERIFY(!view.browser()->toPlainText().contains("Stale recording error"));
+}
+
+void TestActivityView::videoMessageIsOneCircleAndLoadsOnlyAfterTap()
+{
+    ActivityView view;view.resize(700,500);view.setSessionKey("fixture/video");view.show();
+    const QString id="aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    const QJsonObject audio{{"request_id",id},{"index",0},{"name","voice.wav"},{"mime","audio/wav"},{"bytes",32044},{"duration_ms",1000}};
+    const QJsonObject video{{"request_id",id},{"index",1},{"name","video.mp4"},{"mime","video/mp4"},{"bytes",4000},{"duration_ms",1000},{"width",480},{"height",480}};
+    const QJsonObject voice{{"id",id},{"run_id","run"},{"conversation_id","conversation"},{"state","submitted"},{"audio",audio},{"video",video},{"transcript","Synthetic video speech"}};
+    const QJsonObject row{{"type","UserMessage"},{"source","hgs_voice"},{"message_id",id},{"request_id",id},{"at",1791018002.0},{"voice",voice},{"attachments",QJsonArray{audio,video}}};
+    QSignalSpy played(&view,&ActivityView::voicePlaybackRequested);
+    view.setActivity({{"voice_messages",QJsonArray{row}}},{});settle(view);QCOMPARE(played.count(),0);
+    QCOMPARE(view.browser()->toPlainText().count("You (video)"),1);
+    QString link;for(const auto &url:links(view.browser()))if(url.startsWith("hgs-voice:"))link=url;
+    QVERIFY(!link.isEmpty());activate(view.browser(),link);QCOMPARE(played.count(),1);QCOMPARE(played[0][1].toJsonObject(),video);
+    view.playVoice(played[0][0].toString(),{},"Synthetic video unavailable");settle(view);
+    QVERIFY(view.browser()->toPlainText().contains("Synthetic video unavailable"));
 }
 
 namespace {

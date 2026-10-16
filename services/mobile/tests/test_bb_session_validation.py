@@ -18,7 +18,7 @@ import time
 import unittest
 import uuid
 
-from connector_harness import canonical_uuid, stopped_journal
+from connector_harness import canonical_uuid, implemented, stopped_journal
 from session_harness import (CONTEXT, SESSION, SessionCase, ack, execution, live_row, session_listing, submission,
                              text, validation)
 
@@ -54,7 +54,10 @@ class SessionValidationTests(SessionCase):
         for row in receipts:
             with self.subTest(row["id"]):
                 request_id = row["submission"]["request_id"]
-                receipt = {"state": "failed", "result": None, "error": text(row["connector"]["error"])}
+                # A build that does not implement a known operation refuses it before validating.
+                error = (text(row["connector"]["error"]) if implemented(row["submission"].get("operation"))
+                         else "unsupported operation")
+                receipt = {"state": "failed", "result": None, "error": error}
                 self.assertEqual(self.relay.results(request_id), [receipt])
                 stored = self.journal.row(request_id)
                 self.assertEqual((stored["state"], json.loads(stored["response"])), ("failed", receipt))

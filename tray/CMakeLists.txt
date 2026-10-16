@@ -76,11 +76,14 @@ target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
 add_library(hgs-speech-recorder STATIC src/speech/SpeechRecorder.cpp)
 target_include_directories(hgs-speech-recorder PUBLIC src)
 target_link_libraries(hgs-speech-recorder PUBLIC Qt6::Multimedia)
+add_library(hgs-round-video STATIC src/speech/RoundVideo.cpp)
+target_include_directories(hgs-round-video PUBLIC src)
+target_link_libraries(hgs-round-video PUBLIC Qt6::Widgets Qt6::Multimedia hgs-speech-recorder)
 add_library(hgs-speech STATIC src/speech/SpeechClient.cpp
     src/speech/SpeechSettings.cpp src/speech/SpeechComposer.cpp)
 target_include_directories(hgs-speech PUBLIC src)
 # The voice composer extends MessageComposer (hgs-tray-ui below).
-target_link_libraries(hgs-speech PUBLIC Qt6::Widgets Qt6::Multimedia hgs-speech-recorder PRIVATE hgs-tray-ui)
+target_link_libraries(hgs-speech PUBLIC Qt6::Widgets Qt6::Multimedia hgs-speech-recorder hgs-round-video PRIVATE hgs-tray-ui)
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
                 OUTPUT_VARIABLE ZERUS_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 execute_process(COMMAND git rev-parse --show-toplevel WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -148,9 +151,9 @@ target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-core Qt6::Widgets
 
 add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)
-target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown)
+target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown hgs-round-video)
 
-add_library(hgs-tray-views STATIC src/SessionsWindow.cpp src/SessionsWindowShortcuts.cpp src/SessionsWindowGoTo.cpp src/SessionSelection.cpp src/NativeUiView.cpp
+add_library(hgs-tray-views STATIC src/ArchiveDatePicker.cpp src/ArchiveDatePicker.h src/ArchiveBrowser.cpp src/ArchiveBrowser.h src/SessionsWindow.cpp src/SessionsWindowShortcuts.cpp src/SessionsWindowGoTo.cpp src/SessionSelection.cpp src/NativeUiView.cpp
     src/NativeBrowserPlugin.cpp src/NativeBrowser.h)
 target_link_libraries(hgs-tray-views PUBLIC hgs-tray-ui hgs-tray-activity
     PRIVATE hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file hgs-updates)

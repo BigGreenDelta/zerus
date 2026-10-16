@@ -18,3 +18,13 @@ pub mod registry;
 mod speech_config;
 #[cfg(feature = "server")]
 pub mod store;
+mod voice_video;
+
+/// Validate additive video media without starting a codec. Shared with the outbound connector.
+pub fn validate_voice_video(
+    value: &serde_json::Value,
+    id: &str,
+    pcm_bytes: usize,
+) -> std::result::Result<serde_json::Value, String> {
+    voice_video::parse(value, id, pcm_bytes).map(|video| video.metadata)
+}
