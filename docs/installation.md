@@ -54,6 +54,15 @@ use that exact path. The desktop installs to `~/.local/bin/hgs-tray` on Linux or
 `~/Applications/hgs-tray.app` on macOS. The installer configures autostart through
 systemd or launchd.
 
+`HGS_MOBILE_CONNECTOR=1 ./install.sh` also builds the Rust mobile connector
+(`services/mobile/connector`) into `~/.local/bin/zerus-mobile-connector`. Later
+runs update that copy when it changed; `HGS_MOBILE_CONNECTOR=0` always skips it.
+The installer never enables, starts or restarts the connector's service: when the
+running service uses the replaced binary, it prints the restart command to run
+after phone actions have drained. `mac-install.sh` passes the variable to the
+Mac's build. Moving a gateway from the Python connector is the owner-approved
+cutover in the connector's design.
+
 Open the workspace from the command line:
 
 ```sh
