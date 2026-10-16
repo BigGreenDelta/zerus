@@ -2550,8 +2550,10 @@ legacy default scope upgrades to Active without replacing its saved pins.
 Dragging a node immediately resizes its project's region; overlap never changes
 project membership. Positions and camera are saved locally per device, including
 when a provisional native identity becomes confirmed. Refresh, filters and reopen
-do not rearrange manual positions. New nodes use free space. Fit changes only the
-camera; Arrange visible is explicit, has Undo and reserves hidden positions.
+do not rearrange manual positions. New nodes use free space among visible cards.
+Fit changes only the camera; Arrange visible is explicit and has Undo. It packs
+only visible cards using their actual heights. Hidden positions remain saved but
+do not reserve space or enlarge the current project regions.
 
 The collector reads metadata rather than prompt bodies or provider transcripts.
 It never launches an agent, sends input or changes read marks. Source bindings are

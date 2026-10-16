@@ -155,11 +155,12 @@ reopening. Use these complementary controls:
 - **Drag a card:** keep its new position. The project's region grows, shrinks
   and moves around its currently visible members during the drag, with padding.
   Crossing another region never changes project membership. No force simulation
-  or refresh moves an existing card; new nodes find unoccupied space, reserving
-  the saved positions of temporarily hidden nodes too.
+  or refresh moves an existing card; new nodes find unoccupied space among
+  visible cards. Hidden saved positions do not reserve space in this scope.
 - **Fit:** change only the camera and zoom to show the visible scope.
-- **Arrange visible:** explicitly arrange the current filtered nodes; hidden
-  positions stay reserved. **Undo arrange** restores the previous positions and
+- **Arrange visible:** explicitly pack the current filtered nodes using actual
+  parent/child card heights. Hidden positions stay saved, but are not obstacles.
+  **Undo arrange** restores the previous positions and
   camera during this visit, including if new nodes arrived meanwhile. A later
   manual drag starts a new layout decision and retires that one-step undo.
 

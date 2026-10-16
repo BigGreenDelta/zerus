@@ -256,8 +256,8 @@ bool GraphCanvas::setGraph(const QList<Node> &nodes, const QList<Relation> &rela
     for (const auto &node : nodes) {
         auto *item = m_nodes.value(node.id);
         if (!item) {
-            // Reserve hidden positions as well. A filter or a partially loaded
-            // projection must not make a previously placed card's slot free.
+            // Reuse this card's saved pin, or place a new card among visible
+            // members. Hidden rosters must not create holes in this scope.
             const auto position = m_positions.contains(node.id)
                                       ? m_positions.value(node.id)
                                       : (initial ? QPointF() : freePosition(node.group));
@@ -387,10 +387,10 @@ void GraphCanvas::updateBounds() {
 QPointF GraphCanvas::freePosition(const QString &group) const {
     QRectF members;
     QList<QRectF> occupied;
-    for (auto it = m_positions.cbegin(); it != m_positions.cend(); ++it) {
-        const QRectF card(it.value(), QSizeF(CardWidth, 104));
+    for (auto *node : m_nodes) {
+        const auto card = node->sceneBoundingRect();
         occupied.append(card.adjusted(-16, -16, 16, 16));
-        if (m_positionGroups.contains(it.key()) && m_positionGroups.value(it.key()) == group)
+        if (m_positionGroups.value(node->id) == group)
             members = members.isNull() ? card : members.united(card);
     }
     // Prefer a free row below the same project, without moving any existing
@@ -412,7 +412,7 @@ QPointF GraphCanvas::freePosition(const QString &group) const {
                 if (free(point))
                     return point;
             }
-    // At most 2000 reserved rectangles cannot fill this 81x81 grid. Its
+    // At most 2000 visible rectangles cannot fill this 81x81 grid. Its
     // coordinates also remain valid when the preferred group is near a limit.
     for (int y = -40; y <= 40; ++y)
         for (int x = -40; x <= 40; ++x) {
@@ -494,42 +494,32 @@ void GraphCanvas::resetLayout() {
         groups[m_nodes.value(id)->group].append(id);
     for (auto &ids : groups)
         ids.sort();
-    QList<QRectF> occupied;
-    for (auto it = m_positions.cbegin(); it != m_positions.cend(); ++it)
-        if (!m_nodes.contains(it.key()))
-            occupied.append(QRectF(it.value(), QSizeF(CardWidth, 104)).adjusted(-16, -16, 16, 16));
+    // Explicit arrangement packs only visible cards. Keep hidden pins in
+    // m_positions for other scopes, but never treat them as obstacles here.
     const qreal wrapWidth =
         qMax<qreal>(1300, std::ceil(std::sqrt(groups.size())) * (CardWidth + 112));
     qreal x = 0, y = 0, rowHeight = 0;
     for (const auto &ids : groups) {
         const int columns = qMin(8, qMax(1, int(std::ceil(std::sqrt(ids.size())))));
-        const qreal width = columns * (CardWidth + 64);
-        qreal height = ((ids.size() + columns - 1) / columns) * 152 + 64;
+        const qreal width = columns * CardWidth + (columns - 1) * 64;
         if (x > 0 && x + width > wrapWidth) {
             x = 0;
             y += rowHeight;
             rowHeight = 0;
         }
-        for (int i = 0; i < ids.size(); ++i) {
-            QPointF point(x + (i % columns) * (CardWidth + 64), y + (i / columns) * 152);
-            // Arrangement affects only the visible scope; hidden manual pins
-            // still reserve their space when the filter is removed later.
-            while (std::any_of(occupied.cbegin(), occupied.cend(), [&](const QRectF &r) {
-                return r.intersects(QRectF(point, QSizeF(CardWidth, 104)));
-            })) {
-                point.ry() += 152;
-                if (!finitePoint(point)) {
-                    point = freePosition(m_nodes.value(ids[i])->group);
-                    break;
-                }
+        qreal localY = 0;
+        for (int start = 0; start < ids.size(); start += columns) {
+            qreal cardHeight = 0;
+            for (int col = 0; col < columns && start + col < ids.size(); ++col) {
+                auto *node = m_nodes.value(ids[start + col]);
+                node->setPos(x + col * (CardWidth + 64), y + localY);
+                m_positions[node->id] = node->pos();
+                cardHeight = qMax(cardHeight, node->boundingRect().height());
             }
-            m_nodes.value(ids[i])->setPos(point);
-            m_positions[ids[i]] = m_nodes.value(ids[i])->pos();
-            occupied.append(QRectF(point, QSizeF(CardWidth, 104)).adjusted(-16, -16, 16, 16));
-            height = qMax(height, point.y() - y + 216);
+            localY += cardHeight + 32;
         }
-        x += width + 48;
-        rowHeight = qMax(rowHeight, height);
+        x += width + 112;
+        rowHeight = qMax(rowHeight, localY - 32 + 112);
     }
     m_applying = wasApplying;
     updateBounds();
@@ -602,8 +592,8 @@ bool GraphCanvas::restoreViewState(const QJsonObject &state) {
         const auto rect = it.value()->sceneBoundingRect();
         bool overlaps = false;
         for (auto pos = m_positions.cbegin(); pos != m_positions.cend(); ++pos)
-            if (pos.key() != it.key() &&
-                rect.intersects(QRectF(pos.value(), QSizeF(CardWidth, 104)))) {
+            if (pos.key() != it.key() && m_nodes.contains(pos.key()) &&
+                rect.intersects(m_nodes.value(pos.key())->sceneBoundingRect())) {
                 overlaps = true;
                 break;
             }

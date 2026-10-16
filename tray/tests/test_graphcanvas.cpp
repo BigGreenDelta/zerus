@@ -300,20 +300,20 @@ class TestGraphCanvas : public QObject {
         QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, backEnd);
         QVERIFY(qAbs(view.groupRect("project").height() - before.height()) < 2);
     }
-    void newCardsAvoidManualAndHiddenPositions() {
+    void newCardsAvoidVisiblePositionsAndRetainHiddenPins() {
         GraphCanvas view;
         QVERIFY(view.setGraph({node("a"), node("hidden")}, {}));
         auto state = view.viewState();
         state["positions"] =
-            QJsonObject{{"a", QJsonArray{404, 0}}, {"hidden", QJsonArray{404, 152}}};
+            QJsonObject{{"a", QJsonArray{404, 0}}, {"hidden", QJsonArray{404, 50000}}};
         QVERIFY(view.restoreViewState(state));
         QVERIFY(view.setGraph({node("a"), node("new")}, {}));
         QCOMPARE(view.nodePosition("a"), QPointF(404, 0));
-        QVERIFY(!view.nodeRect("new").intersects(QRectF(404, 152, 340, 104)));
+        QVERIFY(!view.nodeRect("new").intersects(QRectF(404, 50000, 340, 104)));
         QVERIFY(!view.nodeRect("new").intersects(view.nodeRect("a")));
         const auto added = view.nodePosition("new");
         QVERIFY(view.setGraph({node("new"), node("hidden"), node("a")}, {}));
-        QCOMPARE(view.nodePosition("hidden"), QPointF(404, 152));
+        QCOMPARE(view.nodePosition("hidden"), QPointF(404, 50000));
         QCOMPARE(view.nodePosition("new"), added);
         const auto camera = view.viewState().value("center");
         QVERIFY(view.setGraph({}, {}));
@@ -354,13 +354,86 @@ class TestGraphCanvas : public QObject {
         QVERIFY(view.restoreViewState(state));
         QVERIFY(view.setGraph({node("a")}, {}));
         view.resetLayout();
-        QVERIFY(!view.nodeRect("a").intersects(QRectF(0, 0, 340, 104)));
+        QCOMPARE(view.nodePosition("a"), QPointF()); // Hidden pins do not reserve this slot.
         const auto arranged = view.nodePosition("a");
         view.fitGraph();
         QCOMPARE(view.nodePosition("a"), arranged);
         QVERIFY(view.setGraph({node("a"), node("hidden")}, {}));
         QCOMPARE(view.nodePosition("hidden"), QPointF());
         QCOMPARE(view.nodePosition("a"), arranged);
+    }
+    void visibleArrangementIgnoresHiddenRoster_data() {
+        QTest::addColumn<int>("hiddenCount");
+        QTest::newRow("no-hidden") << 0;
+        QTest::newRow("recorded-100") << 100;
+        QTest::newRow("recorded-1000") << 1000;
+    }
+    void visibleArrangementIgnoresHiddenRoster() {
+        QFETCH(int, hiddenCount);
+        QList<GraphCanvas::Node> visible;
+        for (int i = 0; i < 8; ++i) {
+            auto value = node(QString("visible-%1").arg(i));
+            value.group = i == 0 ? "infra" : i < 6 ? "game" : "engine";
+            if (i != 0 && i != 1)
+                value.roles[SessionRoles::ChildId] = QString("agent-%1").arg(i);
+            visible.append(value);
+        }
+        GraphCanvas reference, noisy;
+        reference.resize(1200, 800);
+        noisy.resize(1200, 800);
+        QVERIFY(reference.setGraph(visible, {}));
+        reference.resetLayout();
+        auto all = visible;
+        QJsonObject hiddenPins;
+        for (int i = 0; i < hiddenCount; ++i) {
+            auto value = node(QString("recorded-%1").arg(i));
+            value.group = "game";
+            value.roles[SessionRoles::ChildId] = value.id;
+            all.append(value);
+            hiddenPins[value.id] = QJsonArray{(i % 8) * 404, (i / 8) * 152};
+        }
+        QVERIFY(noisy.setGraph(all, {}));
+        auto state = noisy.viewState();
+        auto pins = state["positions"].toObject();
+        for (auto it = hiddenPins.begin(); it != hiddenPins.end(); ++it)
+            pins[it.key()] = it.value();
+        state["positions"] = pins;
+        QVERIFY(noisy.restoreViewState(state));
+        QVERIFY(noisy.setGraph(visible, {}));
+        noisy.resetLayout();
+        for (const auto &value : visible)
+            QCOMPARE(noisy.nodePosition(value.id), reference.nodePosition(value.id));
+        for (const auto &group : {"infra", "game", "engine"}) {
+            QCOMPARE(noisy.groupRect(group), reference.groupRect(group));
+            QVERIFY(noisy.groupRect(group).height() <= 280);
+        }
+        const auto directory = qEnvironmentVariable("ZERUS_GRAPH_ARRANGE_RASTERS");
+        if (!directory.isEmpty()) {
+            noisy.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&noisy));
+            noisy.fitGraph();
+            QDir().mkpath(directory);
+            QVERIFY(noisy.grab().save(directory + '/' + QTest::currentDataTag() + ".png"));
+        }
+        const auto retained = noisy.viewState().value("positions").toObject();
+        for (auto it = hiddenPins.begin(); it != hiddenPins.end(); ++it)
+            QCOMPARE(retained.value(it.key()), it.value());
+        for (int i = 0; i < visible.size(); ++i)
+            for (int j = 0; j < i; ++j)
+                QVERIFY(!noisy.nodeRect(visible[i].id).intersects(noisy.nodeRect(visible[j].id)));
+    }
+    void newVisibleCardDoesNotFollowHiddenProjectRows() {
+        GraphCanvas view;
+        QVERIFY(view.setGraph({node("current"), node("recorded")}, {}));
+        auto state = view.viewState();
+        state["positions"] = QJsonObject{{"current", QJsonArray{0, 0}},
+                                         {"recorded", QJsonArray{0, 80000}}};
+        QVERIFY(view.restoreViewState(state));
+        QVERIFY(view.setGraph({node("current"), node("new")}, {}));
+        QCOMPARE(view.nodePosition("current"), QPointF());
+        QVERIFY(view.nodePosition("new").y() < 300);
+        QVERIFY(view.groupRect("project").height() < 400);
+        QCOMPARE(view.viewState()["positions"].toObject()["recorded"], QJsonValue(QJsonArray{0, 80000}));
     }
     void maximumAdmittedLayoutCanBeRestored() {
         GraphCanvas view;
