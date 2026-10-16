@@ -48,6 +48,10 @@ final class AppModel {
     var error = ""
     /// A pasted or scanned `zerus://pair` link waiting for explicit confirmation.
     var invitation: PairingInvite?
+    /// A conversation another screen asked to show; the root view pushes it on Sessions.
+    var conversationRequest: Target?
+    /// A short confirmation shown at the bottom of the screen.
+    var notice = ""
 
     // MARK: Sessions view state
 

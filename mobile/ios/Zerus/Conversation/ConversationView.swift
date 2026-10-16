@@ -6,6 +6,7 @@ import ZerusKit
 struct ConversationView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
     let route: SessionRoute
 
     @State private var position = ScrollPosition(idType: String.self)
@@ -23,6 +24,8 @@ struct ConversationView: View {
     @State private var visible: [String] = []
     @State private var historyProgress = false
     @State private var stopRequest = false
+    @State private var details = false
+    @State private var terminal = false
 
     private var model: ConversationModel { app.conversation }
 
@@ -62,6 +65,7 @@ struct ConversationView: View {
                 .tint(Theme.mint)
                 .frame(height: 3)
                 .opacity(!app.demo && (model.detailProgress || historyProgress) ? 1 : 0)
+            SessionHeaderTools(session: session, details: $details, search: $searching, terminal: $terminal)
             statusStrip(loadStatus: loadStatus, unread: unread, offered: offered, questions: questions, target: target)
             if !notice.isEmpty {
                 HStack {
@@ -95,6 +99,7 @@ struct ConversationView: View {
                                 .foregroundStyle(Theme.muted).id("history:empty")
                         }
                         newerRow(target: target, historyReason: historyReason).id("history:newer")
+                        if !archived { NativeInputQueueCard(target: target).id("history:queue") }
                         if !questions.isEmpty {
                             QuestionsPane(target: target, questions: questions, available: available, display: $display, onReview: { review = $0 })
                                 .id("history:questions")
@@ -107,11 +112,14 @@ struct ConversationView: View {
                 }
                 .scrollPosition($position)
                 .defaultScrollAnchor(.bottom, for: .initialOffset)
-                .defaultScrollAnchor(follow.following ? .bottom : nil, for: .sizeChanges)
                 .scrollDismissesKeyboard(.interactively)
                 .onScrollGeometryChange(for: Bool.self) { geometry in
                     geometry.visibleRect.maxY >= geometry.contentSize.height + geometry.contentInsets.bottom - 24
                 } action: { _, value in atEnd = value }
+                .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { old, new in
+                    // Keep the newest message in view when the composer or header changes height.
+                    if follow.following && follow.opened && old != new && !userScrolling { position.scrollTo(edge: .bottom) }
+                }
                 .onScrollPhaseChange { old, new in
                     userScrolling = new == .interacting || new == .decelerating || new == .tracking
                     if new == .idle && (old == .interacting || old == .decelerating) {
@@ -137,7 +145,7 @@ struct ConversationView: View {
             }
             if archived {
                 VStack(alignment: .leading, spacing: 6) {
-                    ContextSummary(raw: raw, recorded: !model.activityVerified)
+                    ContextFooter(session: session)
                     Text("Archived conversation. Read-only.").font(.footnote).foregroundStyle(Theme.muted)
                 }
                 .padding(16)
@@ -166,6 +174,16 @@ struct ConversationView: View {
             Text("Interrupt the current turn in \(session.title). The session remains available.")
         }
         .reviewDialogs(review: $review, reviewOutgoing: $reviewOutgoing, discard: $discard)
+        .sheet(isPresented: $details) { SessionDetailsSheet(session: session) }
+        .alert("Terminal unavailable", isPresented: $terminal) {
+            Button("Close", role: .cancel) {}
+        } message: {
+            Text(SessionActionsMenu.terminalReason(SessionMenuFacts(target: target, row: raw ?? [:], state: SessionFilters.state(session),
+                                                                      archived: archived, online: online,
+                                                                      supported: (app.relayOperations[target.connectionId] ?? []).intersection(app.machineOperations[target.machineKey] ?? [])))
+                .nonEmpty ?? "Terminal arrives in a later iOS build.")
+        }
+        .onChange(of: model.returnToSessions) { dismiss() }
         .onAppear { openIfNeeded() }
         .onChange(of: target.key) { display = display.forTarget(target.key) }
         .onChange(of: ContentSignature(revision: model.revision, own: model.ownSendId(target), verified: model.activityVerified,
@@ -203,6 +221,7 @@ struct ConversationView: View {
         }
         if events.isEmpty && !loading { keys.append("history:empty") }
         keys.append("history:newer")
+        keys.append("history:queue")
         if !questions.isEmpty { keys.append("history:questions") }
         keys.append("history:tail")
         return keys
@@ -322,33 +341,14 @@ struct ConversationView: View {
             }
         }
         ToolbarItem(placement: .principal) {
-            VStack(spacing: 0) {
-                Text(target.agentId.isEmpty ? SessionFilters.label(session) : target.agentId).font(.headline).lineLimit(1)
-                Text(app.machineName(target.machineKey)).font(.caption2).foregroundStyle(Theme.muted).lineLimit(1)
-            }
+            SessionHeaderTitle(session: session) { details = true }
         }
-        ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                Button("Refresh", systemImage: "arrow.clockwise") { model.refreshActivity(explicit: true) }
-                Button("Search messages", systemImage: "magnifyingglass") { searching = true }
-                if raw?.bool("interrupt_supported") == true && target.agentId.isEmpty {
-                    Button("Stop current turn", systemImage: "stop.circle") { stopRequest = true }
-                        .disabled(!model.interruptReason(target).isEmpty)
-                }
-                if model.canMarkRead(target) || model.readAllPending(target) {
-                    Button("Mark read", systemImage: "checkmark.circle") {
-                        model.markAllRead([target])
-                    }
-                    .disabled(!model.canReadAll(target))
-                }
-                Button("Copy session reference", systemImage: "doc.on.doc") {
-                    let reference = SessionReference.resolve(target, app.machines)
-                    if let uri = reference.uri { UIPasteboard.general.string = uri } else { notice = reference.reason }
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
+        if raw?.bool("interrupt_supported") == true && target.agentId.isEmpty && ["busy", "working"].contains(raw?.string("activity") ?? "") {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { stopRequest = true } label: { Image(systemName: "stop.circle") }
+                    .disabled(!model.interruptReason(target).isEmpty)
+                    .accessibilityLabel("Stop current turn")
             }
-            .accessibilityLabel("Conversation actions")
         }
     }
 

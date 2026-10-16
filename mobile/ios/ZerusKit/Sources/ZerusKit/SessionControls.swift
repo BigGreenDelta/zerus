@@ -564,3 +564,168 @@ extension MobileDelivery {
         return "Shared by your computers through \(gateway)."
     }
 }
+
+// MARK: - Session actions menu
+
+/// One long-press action. A non-empty `reason` disables it and is shown as its supporting line.
+public struct SessionMenuItem: Hashable, Sendable, Identifiable {
+    public let id: String
+    public let label: String
+    public var reason = ""
+    public var hint = ""
+    public init(_ id: String, _ label: String, reason: String = "", hint: String = "") {
+        self.id = id
+        self.label = label
+        self.reason = reason
+        self.hint = hint
+    }
+    public var enabled: Bool { reason.isEmpty }
+}
+
+/// Phone-local read facts for one row; `unavailable` is non-empty while read state cannot change.
+public struct SessionMenuRead: Hashable, Sendable {
+    public var unavailable = ""
+    public var canMark = false
+    public var partial = false
+    public var replies = false
+    public var reminder = false
+    public var checking = false
+    public init(unavailable: String = "", canMark: Bool = false, partial: Bool = false, replies: Bool = false, reminder: Bool = false, checking: Bool = false) {
+        self.unavailable = unavailable
+        self.canMark = canMark
+        self.partial = partial
+        self.replies = replies
+        self.reminder = reminder
+        self.checking = checking
+    }
+}
+
+/// Exact row facts captured by the model. `supported` is the gateway and computer operation intersection.
+public struct SessionMenuFacts: Hashable, Sendable {
+    public var target: Target
+    public var row: JSONObject
+    public var state: String
+    public var archived: Bool
+    public var online: Bool
+    public var supported: Set<String>
+    public var blocked = ""
+    public var busy = ""
+    public var needsAttention = false
+    public var read = SessionMenuRead()
+    public var reference: String?
+    public var folder = ""
+    public var referenceReason = ""
+
+    public init(target: Target, row: JSONObject, state: String, archived: Bool, online: Bool, supported: Set<String>, blocked: String = "", busy: String = "",
+                needsAttention: Bool = false, read: SessionMenuRead = SessionMenuRead(), reference: String? = nil, folder: String = "", referenceReason: String = "") {
+        self.target = target
+        self.row = row
+        self.state = state
+        self.archived = archived
+        self.online = online
+        self.supported = supported
+        self.blocked = blocked
+        self.busy = busy
+        self.needsAttention = needsAttention
+        self.read = read
+        self.reference = reference
+        self.folder = folder
+        self.referenceReason = referenceReason
+    }
+}
+
+/// The Sessions long-press menu, mirroring the desktop session context menu. Native items are presentation
+/// gates from the catalog row only; the opened conversation confirms them after a fresh inspection.
+public enum SessionActionsMenu {
+    public static func items(_ facts: SessionMenuFacts) -> [[SessionMenuItem]] {
+        let archived = facts.archived || !facts.target.archiveId.isEmpty
+        let running = !archived && facts.state == "running"
+        func native(_ operation: String, _ label: String) -> SessionMenuItem { SessionMenuItem(operation, label, reason: operationReason(facts, operation)) }
+        var lifecycle = [archived ? native("restore", "Restore session…") : running ? native("pause", "Pause session…") : native("resume", "Resume session…"),
+                         native("rename", "Rename…"), native("fork", "Fork session…")]
+        if !archived && ["paused", "stopped"].contains(facts.state) { lifecycle.append(native("archive", "Move to archive…")) }
+        let sections: [[SessionMenuItem]] = [
+            archived ? [] : [SessionMenuItem("terminal", "Open terminal", reason: terminalReason(facts))],
+            archived || !facts.target.agentId.isEmpty ? [] : [readItem(facts)],
+            lifecycle,
+            [SessionMenuItem("copy_name", "Copy session name", reason: facts.target.session.isEmpty ? "The session name is not reported." : ""),
+             SessionMenuItem("copy_reference", "Copy session reference", reason: facts.reference == nil
+                ? (facts.referenceReason.isEmpty ? "A reference needs the computer's native identity and the session's identity." : facts.referenceReason) : ""),
+             SessionMenuItem("copy_folder", "Copy folder path", reason: facts.folder.isEmpty ? "The session folder is not reported." : "")],
+            [archived ? native("forget", "Forget archived version…") : running ? native("terminate", "Terminate session…") : native("forget", "Forget saved session…")],
+        ]
+        return sections.filter { !$0.isEmpty }
+    }
+
+    /// Mark as read reuses Read all's evidence rules; otherwise the row offers a phone-local reminder.
+    public static func readItem(_ facts: SessionMenuFacts) -> SessionMenuItem {
+        let read = facts.read
+        guard facts.needsAttention else {
+            return SessionMenuItem("review_later", "Review later", reason: read.unavailable, hint: "Keep a reminder on this phone to review this session later.")
+        }
+        let label = read.canMark && read.partial ? "Mark loaded replies read" : "Mark as read"
+        if !read.unavailable.isEmpty { return SessionMenuItem("mark_read", label, reason: read.unavailable) }
+        if read.canMark { return SessionMenuItem("mark_read", label, hint: read.partial ? "Only replies loaded on this phone are marked read." : "") }
+        if read.reminder {
+            return SessionMenuItem("clear_reminder", "Clear review reminder",
+                                   hint: read.replies ? "Replies stay unread until this phone has verified history or loaded replies." : "")
+        }
+        if read.replies {
+            return SessionMenuItem("mark_read", label, reason: read.checking
+                ? "Waiting for verified history from its machine. Open the session if its replies are not loaded on this phone."
+                : "Needs verified history or loaded replies on this phone. Open the session to read them.")
+        }
+        return SessionMenuItem("mark_read", label, reason: "Questions, approvals and errors clear when you open the session. Mark as read covers replies only.")
+    }
+
+    public static func nativeTerminalReason(_ target: Target, _ row: JSONObject?) -> String {
+        if let row, row.has("terminal_supported"), row["terminal_supported"] != .bool(true) {
+            let reason = row.string("terminal_reason")
+            return reason.isEmpty ? "This native adapter does not provide remote Terminal." : reason
+        }
+        if row?["terminal_supported"] == .bool(true) { return "" }
+        if target.session.components(separatedBy: "/").first == "opencode" {
+            return "OpenCode runs through its native server. Use the conversation instead of Terminal."
+        }
+        return ""
+    }
+
+    public static func terminalReason(_ facts: SessionMenuFacts) -> String {
+        if !facts.blocked.isEmpty { return facts.blocked }
+        if !facts.target.agentId.isEmpty || facts.archived || !facts.target.archiveId.isEmpty { return "Terminal is available only for the live parent session." }
+        if !facts.online { return "The machine is offline." }
+        if !facts.supported.contains("terminal_snapshot") { return "This native adapter does not provide remote Terminal." }
+        return nativeTerminalReason(facts.target, facts.row)
+    }
+
+    public static func operationReason(_ facts: SessionMenuFacts, _ operation: String) -> String {
+        let target = facts.target
+        let archived = facts.archived || !target.archiveId.isEmpty
+        if !SessionActionPolicies.lifecycle.contains(operation) { return "Unsupported session action." }
+        if !facts.blocked.isEmpty { return facts.blocked }
+        if !target.agentId.isEmpty { return "Session controls belong to the parent conversation." }
+        if !facts.online { return "The machine is offline." }
+        if !facts.supported.contains(operation) { return "This gateway or computer does not support this action." }
+        if archived && !["restore", "forget", "rename", "fork"].contains(operation) { return "This archived conversation is read-only." }
+        if !archived && operation == "restore" { return "Select an archived version first." }
+        if !facts.busy.isEmpty { return facts.busy }
+        return SessionControlPresentation.reason(target, operation, facts.row)
+    }
+}
+
+/// Retries reads only after the original mutation receipt is already confirmed.
+public enum ConfirmedTargetResolution {
+    public static func read<T>(isolation: isolated (any Actor)? = #isolation, attempts: Int = 4, active: () -> Bool, pause: () async -> Void,
+                               inspect: () async throws -> T) async throws -> T {
+        precondition((1...8).contains(attempts))
+        var last: Error?
+        for index in 0..<attempts {
+            guard active() else { throw CancellationError() }
+            do { return try await inspect() }
+            catch is CancellationError { throw CancellationError() }
+            catch { last = error }
+            if index + 1 < attempts { await pause() }
+        }
+        throw last ?? ZerusError(.unavailable, "The confirmed destination is not reachable yet.")
+    }
+}

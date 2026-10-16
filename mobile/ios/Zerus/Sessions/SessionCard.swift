@@ -155,22 +155,69 @@ private struct SubagentRow: View {
 }
 
 /// Copy actions that need no native verification.
+/// The Sessions long-press menu, mirroring the desktop context menu. Native items open the exact
+/// session, whose header confirms them against a fresh inspection.
 struct SessionCopyMenu: View {
     @Environment(AppModel.self) private var model
     let session: Session
 
     var body: some View {
-        let reference = SessionReference.resolve(session.target, model.machines)
-        Button { UIPasteboard.general.string = session.target.session } label: { Label("Copy session name", systemImage: "doc.on.doc") }
-        if let uri = reference.uri {
-            Button { UIPasteboard.general.string = uri } label: { Label("Copy session reference", systemImage: "link") }
-        } else {
-            Button {} label: { Label("Copy session reference", systemImage: "link") }.disabled(true)
-            Text(reference.reason)
+        let conversation = model.conversation!
+        let target = session.target
+        ForEach(Array(conversation.sessionMenu(session).enumerated()), id: \.offset) { _, section in
+            Section {
+                ForEach(section) { item in
+                    Button {
+                        run(item, conversation: conversation)
+                    } label: {
+                        Label {
+                            Text(item.label)
+                            if !(item.reason.isEmpty ? item.hint : item.reason).isEmpty { Text(item.reason.isEmpty ? item.hint : item.reason) }
+                        } icon: {
+                            Image(systemName: Self.icon(item.id))
+                        }
+                    }
+                    .disabled(!item.enabled)
+                }
+            }
         }
-        let folder = session.raw.string("cwd")
-        if !folder.isEmpty {
-            Button { UIPasteboard.general.string = folder } label: { Label("Copy folder path", systemImage: "folder") }
+        .onAppear { conversation.prepareReadEvidence(target) }
+    }
+
+    private func run(_ item: SessionMenuItem, conversation: ConversationModel) {
+        let target = session.target
+        switch item.id {
+        case "mark_read":
+            let result = conversation.markAllRead([target])
+            model.notice = ConversationLoadPresentation.readAllOutcome(marked: result.marked, skipped: result.skipped, partial: result.partial)
+        case "clear_reminder": conversation.clearReviewLater(target)
+        case "review_later": conversation.reviewLater(target, conversation.captureReadAttention(target))
+        case "copy_name": UIPasteboard.general.string = target.session
+        case "copy_reference": if let uri = SessionReference.resolve(target, model.machines).uri { UIPasteboard.general.string = uri }
+        case "copy_folder": if !session.raw.string("cwd").isEmpty { UIPasteboard.general.string = session.raw.string("cwd") }
+        default:
+            conversation.openWithSessionAction(session, item.id)
+            model.conversationRequest = target
+        }
+    }
+
+    static func icon(_ id: String) -> String {
+        switch id {
+        case "terminal": "apple.terminal"
+        case "mark_read": "checkmark.circle"
+        case "clear_reminder": "bell.slash"
+        case "review_later": "bookmark"
+        case "pause": "pause.circle"
+        case "resume": "play.circle"
+        case "restore": "arrow.uturn.backward.circle"
+        case "rename": "pencil"
+        case "fork": "arrow.triangle.branch"
+        case "archive": "archivebox"
+        case "copy_name": "doc.on.doc"
+        case "copy_reference": "link"
+        case "copy_folder": "folder"
+        case "terminate": "stop.circle"
+        default: "trash"
         }
     }
 }

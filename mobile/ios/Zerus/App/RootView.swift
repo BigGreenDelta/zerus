@@ -45,6 +45,26 @@ struct RootView: View {
         .minimizingTabBarOnScroll()
         .sheet(isPresented: $settings) { SettingsView() }
         .sheet(item: $pairing) { request in PairingSheet(request: request) }
+        .onChange(of: model.conversationRequest) { _, target in
+            guard let target else { return }
+            model.conversationRequest = nil
+            openConversation(target)
+        }
+        .overlay(alignment: .bottom) {
+            if !model.notice.isEmpty {
+                Text(model.notice)
+                    .font(.footnote)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.bottom, 90)
+                    .transition(.opacity)
+                    .task(id: model.notice) {
+                        try? await Task.sleep(for: .seconds(3))
+                        model.notice = ""
+                    }
+            }
+        }
         .onChange(of: model.invitation) { _, invite in
             guard let invite else { return }
             model.invitation = nil
@@ -59,6 +79,15 @@ struct RootView: View {
                 if Task.isCancelled { break }
                 if model.conversation.selected != nil { model.conversation.refreshActivity() }
                 else if tab != .drafts { model.refresh() }
+            }
+        }
+        .task(id: scenePhase) {
+            // Apply confirmed "next idle" settings intents, as Android checks every ten seconds.
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                if Task.isCancelled { break }
+                if model.storageReady && !model.demo { await model.conversation.watchScheduledSettings() }
             }
         }
         .onAppear {

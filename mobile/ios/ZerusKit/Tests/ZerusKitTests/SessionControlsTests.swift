@@ -359,3 +359,172 @@ final class ContextCommandTests: XCTestCase {
         XCTAssertFalse(ContextPolicies.clearMoved(moved, target, to.with(conversation: "unverified")))
     }
 }
+
+/// Ported from Android SessionActionsMenuTest.
+final class SessionActionsMenuTests: XCTestCase {
+    private let target = Target(computerId: "00000000-0000-4000-8000-000000000001", session: "codex/project/review", run: "run", conversation: "conversation", connectionId: "workspace")
+    private let supported = SessionActionPolicies.lifecycle.union(["terminal_snapshot"])
+    private func row(_ allowed: String...) -> JSONObject {
+        ["allowed_actions": JSON(allowed), "action_reasons": ["pause": "Wait for a confirmed idle live session before pausing"]]
+    }
+    private func facts(_ state: String = "running", raw: JSONObject? = nil, online: Bool = true, read: SessionMenuRead = SessionMenuRead(),
+                       attention: Bool = false, target: Target? = nil) -> SessionMenuFacts {
+        let t = target ?? self.target
+        return SessionMenuFacts(target: t, row: raw ?? row("pause", "rename", "fork", "terminate", "forget"), state: state, archived: !t.archiveId.isEmpty, online: online,
+                                supported: supported, needsAttention: attention, read: read, reference: "zerus://session?x", folder: "/work/project")
+    }
+    private func items(_ facts: SessionMenuFacts) -> [SessionMenuItem] { SessionActionsMenu.items(facts).flatMap { $0 } }
+    private func item(_ facts: SessionMenuFacts, _ id: String) -> SessionMenuItem { items(facts).first { $0.id == id }! }
+
+    func testLiveRunningSessionMirrorsDesktopOrder() {
+        XCTAssertEqual(["terminal", "review_later", "pause", "rename", "fork", "copy_name", "copy_reference", "copy_folder", "terminate"], items(facts()).map(\.id))
+        XCTAssertTrue(items(facts()).allSatisfy(\.enabled))
+    }
+
+    func testSavedSessionOffersResumeArchiveAndForgetButNotTerminate() {
+        let saved = facts("paused", raw: row("resume", "archive", "rename", "fork", "forget"))
+        XCTAssertEqual(["terminal", "review_later", "resume", "rename", "fork", "archive", "copy_name", "copy_reference", "copy_folder", "forget"], items(saved).map(\.id))
+        XCTAssertEqual("Forget saved session…", item(saved, "forget").label)
+        XCTAssertEqual("Move to archive…", item(saved, "archive").label)
+        XCTAssertTrue(items(facts("stopped", raw: row("resume", "archive"))).contains { $0.id == "archive" })
+    }
+
+    func testArchivedVersionHasNoTerminalOrReadItemsAndCannotPause() {
+        let archived = facts("archived", raw: row("restore", "rename", "fork", "forget"), target: target.with(archiveId: "11111111-1111-4111-8111-111111111111"))
+        XCTAssertEqual(["restore", "rename", "fork", "copy_name", "copy_reference", "copy_folder", "forget"], items(archived).map(\.id))
+        XCTAssertEqual("Forget archived version…", item(archived, "forget").label)
+        XCTAssertEqual("This archived conversation is read-only.", SessionActionsMenu.operationReason(archived, "pause"))
+        XCTAssertEqual("Select an archived version first.", SessionActionsMenu.operationReason(facts(), "restore"))
+    }
+
+    func testDisabledItemsExplainNativeAndPhoneGates() {
+        XCTAssertEqual("Wait for a confirmed idle live session before pausing", item(facts(raw: row("rename")), "pause").reason)
+        XCTAssertEqual("The machine is offline.", item(facts(online: false), "pause").reason)
+        XCTAssertEqual("The machine is offline.", item(facts(online: false), "terminal").reason)
+        var narrow = facts()
+        narrow.supported = ["terminal_snapshot"]
+        XCTAssertEqual("This gateway or computer does not support this action.", item(narrow, "rename").reason)
+        var blocked = facts()
+        blocked.blocked = "Unavailable in preview."
+        XCTAssertEqual("Unavailable in preview.", item(blocked, "terminate").reason)
+        var busy = facts()
+        busy.busy = "Resolve the pending delivery or action first."
+        XCTAssertEqual("Resolve the pending delivery or action first.", item(busy, "fork").reason)
+        XCTAssertTrue(item(busy, "terminal").enabled)
+        XCTAssertFalse(SessionActionsMenu.operationReason(facts(raw: [:]), "pause").isEmpty)
+        XCTAssertEqual("Session controls belong to the parent conversation.",
+                       SessionActionsMenu.operationReason(facts(target: target.with(agentId: "child", parentConversation: "conversation")), "pause"))
+    }
+
+    func testTerminalUsesNativeTerminalSupportAndAdapterCapability() {
+        var unsupported = row("pause")
+        unsupported["terminal_supported"] = false
+        unsupported["terminal_reason"] = "Terminal requires this exact live tracked tmux pane"
+        XCTAssertEqual("Terminal requires this exact live tracked tmux pane", item(facts(raw: unsupported), "terminal").reason)
+        var lifecycleOnly = facts()
+        lifecycleOnly.supported = SessionActionPolicies.lifecycle
+        XCTAssertEqual("This native adapter does not provide remote Terminal.", item(lifecycleOnly, "terminal").reason)
+        var supportedRow = row()
+        supportedRow["terminal_supported"] = true
+        XCTAssertTrue(item(facts(raw: supportedRow), "terminal").enabled)
+    }
+
+    func testCopyItemsNeedReportedValues() {
+        var missing = facts()
+        missing.reference = nil
+        missing.folder = ""
+        XCTAssertFalse(item(missing, "copy_reference").enabled)
+        XCTAssertFalse(item(missing, "copy_folder").enabled)
+        XCTAssertTrue(item(missing, "copy_name").enabled)
+    }
+
+    func testReadItemMarksOnlyWithReadAllEvidenceOtherwiseExplains() {
+        func read(_ read: SessionMenuRead, attention: Bool = true) -> SessionMenuItem { SessionActionsMenu.readItem(facts(read: read, attention: attention)) }
+        XCTAssertEqual(SessionMenuItem("review_later", "Review later", hint: "Keep a reminder on this phone to review this session later."), read(SessionMenuRead(), attention: false))
+        XCTAssertEqual("Read state is still loading on this phone.", read(SessionMenuRead(unavailable: "Read state is still loading on this phone."), attention: false).reason)
+        let complete = read(SessionMenuRead(canMark: true, replies: true))
+        XCTAssertEqual("mark_read", complete.id)
+        XCTAssertEqual("Mark as read", complete.label)
+        XCTAssertTrue(complete.enabled)
+        let partial = read(SessionMenuRead(canMark: true, partial: true, replies: true))
+        XCTAssertEqual("Mark loaded replies read", partial.label)
+        XCTAssertTrue(partial.enabled && !partial.hint.isEmpty)
+        let reminder = read(SessionMenuRead(replies: true, reminder: true))
+        XCTAssertEqual("clear_reminder", reminder.id)
+        XCTAssertTrue(reminder.enabled && reminder.hint.contains("stay unread"))
+        let unknown = read(SessionMenuRead(replies: true))
+        XCTAssertFalse(unknown.enabled)
+        XCTAssertTrue(unknown.reason.hasPrefix("Needs verified history"))
+        XCTAssertTrue(read(SessionMenuRead(replies: true, checking: true)).reason.hasPrefix("Waiting for verified history"))
+        XCTAssertTrue(read(SessionMenuRead()).reason.contains("covers replies only"))
+        XCTAssertFalse(read(SessionMenuRead(unavailable: "Unavailable in preview.", canMark: true)).enabled)
+    }
+}
+
+/// Ported from Android ConfirmedTargetResolutionTest.
+final class ConfirmedTargetResolutionTests: XCTestCase {
+    private let target = Target(computerId: "computer", session: "codex/project/chat", run: "run", conversation: "conversation", connectionId: "workspace")
+
+    func testMembershipDelayUsesOnlyReadRetriesAndPreservesOriginalDraftUntilProof() async throws {
+        let original = Draft(target: target, text: "unsent text")
+        let destination = target.with(session: "codex/project/renamed")
+        let action = SessionAction(requestId: "id", target: target, operation: "rename", arguments: [:], status: "completed", resultTarget: destination)
+        var state = MessageState(drafts: [original]).action(action)
+        var reads = 0, pauses = 0
+        let proof = try await ConfirmedTargetResolution.read(active: { true }, pause: {
+            pauses += 1
+            XCTAssertEqual([original], state.drafts)
+        }, inspect: { () throws -> Target in
+            reads += 1
+            if reads < 3 { throw URLError(.timedOut) }
+            return destination
+        })
+        XCTAssertEqual(3, reads)
+        XCTAssertEqual(2, pauses)
+        state = ActionDraftPolicies.promote(state, action)
+        XCTAssertEqual(proof, state.drafts.first?.target)
+        XCTAssertEqual(original.text, state.drafts.first?.text)
+    }
+
+    func testExplicitConfirmedRestoreAcceptsEmptyEditorButPreservesOccupiedAndChangedDraft() {
+        let to = target.with(session: "codex/project/renamed")
+        let action = SessionAction(requestId: "id", target: target, operation: "rename", arguments: [:], status: "completed", resultTarget: to)
+        let draft = Draft(target: target, text: "saved text")
+        let state = MessageState(drafts: [draft, Draft(target: to, text: "")], sessionActions: [action])
+        let restored = ActionDraftPolicies.restore(state, action, draft)
+        XCTAssertEqual(1, restored.drafts.count)
+        XCTAssertEqual(to, restored.drafts.first?.target)
+        XCTAssertEqual(draft.generation, restored.drafts.first?.generation)
+        var occupied = state
+        occupied.drafts = [draft, Draft(target: to, text: "already typed")]
+        XCTAssertEqual(occupied, ActionDraftPolicies.restore(occupied, action, draft))
+        var changedDraft = draft
+        changedDraft.revision = "new"
+        changedDraft.text = "later edit"
+        var changed = state
+        changed.drafts = [changedDraft]
+        XCTAssertEqual(changed, ActionDraftPolicies.restore(changed, action, draft))
+    }
+
+    func testNavigationCancelsFurtherReads() async {
+        var active = true, reads = 0
+        do {
+            _ = try await ConfirmedTargetResolution.read(active: { active }, pause: { active = false }, inspect: { () throws -> Int in
+                reads += 1
+                throw URLError(.notConnectedToInternet)
+            })
+            XCTFail("Expected cancellation")
+        } catch is CancellationError { XCTAssertEqual(1, reads) } catch { XCTFail("Unexpected \(error)") }
+    }
+
+    func testOfflineOutcomeRemainsConfirmedWithoutMutationReplay() async {
+        var reads = 0
+        do {
+            _ = try await ConfirmedTargetResolution.read(active: { true }, pause: {}, inspect: { () throws -> Int in
+                reads += 1
+                throw URLError(.notConnectedToInternet)
+            })
+            XCTFail("Expected unavailable result")
+        } catch is URLError { XCTAssertEqual(4, reads) } catch { XCTFail("Unexpected \(error)") }
+    }
+}

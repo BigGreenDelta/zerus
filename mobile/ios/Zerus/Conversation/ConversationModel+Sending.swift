@@ -22,6 +22,7 @@ extension ConversationModel {
 
     func contextBlocked(_ target: Target) -> Bool {
         messageState.sessionActions.contains { $0.target == target && $0.blocksSending } ||
+            clearExpectation.map { ContextPolicies.sameSessionRun($0.target, target) } == true ||
             messageState.contextOperations.contains { ContextPolicies.sameSessionRun($0.target, target) && $0.blocksSending }
     }
 
@@ -207,22 +208,42 @@ extension ConversationModel {
     }
 
     /// Persists the outgoing record first, then submits it once with its immutable request ID.
-    func sendMessage(_ target: Target, allowColdCache: Bool = false) async {
+    /// A compaction continuation sends only its captured, unchanged message after native compaction completed.
+    func sendMessage(_ target: Target, expectedDraft: Draft? = nil, expectedCompactionId: String = "", allowColdCache: Bool = false,
+                     continuationId: String = "") async {
         guard childSendReason(target).isEmpty, fresh(target), !demo, app.storageReady, NativeEvents.messageBlockReason(activity).isEmpty, !sendingBlocked(target),
-              let connection = app.connections.first(where: { $0.id == target.connectionId }) else { return }
+              let connection = app.connections.first(where: { $0.id == target.connectionId }) else {
+            if !continuationId.isEmpty { cancelCompactContinuation("The conversation is not ready. Your draft was kept without sending.") }
+            return
+        }
         let original = draft(target)
         guard original.attachments.isEmpty else {
             contextNotice = "Attachments are not available on this phone yet. Remove them before sending."
             return
         }
-        if !allowColdCache && ContextPresentation.isCold(activity) {
+        if let expectedDraft, !ContextPolicies.sameDraft(expectedDraft, original) {
+            contextNotice = "Your composition changed. Review it before sending."
+            return
+        }
+        if !expectedCompactionId.isEmpty {
+            guard continuationId == expectedCompactionId, continuation?.requestId == continuationId,
+                  let operation = messageState.contextOperations.first(where: { $0.requestId == continuationId }), let raw = activity,
+                  ContextPolicies.compactStatus(operation, raw) == "completed" else { return }
+        }
+        if expectedCompactionId.isEmpty && !allowColdCache && ContextPresentation.isCold(activity) {
             contextNotice = "Choose how to continue with the cold cache before sending."
             return
         }
+        let intent = continuation.flatMap { $0.requestId == continuationId && !continuationId.isEmpty ? $0 : nil }
+        if let intent { continuationEnqueuing = intent.requestId }
         let id = UUID().uuidString.lowercased(), at = Clock.seconds()
         preparingTargets.insert(target.key)
         deliveryFlights.insert(id)
         defer {
+            if intent != nil {
+                continuationEnqueuing = ""
+                continuation = nil
+            }
             deliveryFlights.remove(id)
             syncOutgoing()
         }
@@ -233,6 +254,8 @@ extension ConversationModel {
         } catch {
             app.error = (error as? ZerusError).map(\.message) ?? "Could not save the outgoing message. It was not sent. Your composition is preserved."
             preparingTargets.remove(target.key)
+            continuationEnqueuing = ""
+            cancelCompactContinuation()
             return
         }
         preparingTargets.remove(target.key)
@@ -244,11 +267,19 @@ extension ConversationModel {
             guard fresh(target), app.connections.contains(where: { $0.id == connection.id }) else {
                 throw ZerusError.invalid("The session changed before transport. Review the saved message.")
             }
-            guard message.attachments.isEmpty else { throw ZerusError.invalid("Attachments are not available on this phone yet. Review the saved message.") }
+            if let intent {
+                guard let cleared = written.drafts.first(where: { $0.key == original.key }), continuation?.requestId == intent.requestId,
+                      intent.permitsTransport(target: selected?.target, navigation: navigationId, now: ProcessInfo.processInfo.systemUptime, written: cleared, current: draft(target)),
+                      let operation = messageState.contextOperations.first(where: { $0.requestId == intent.requestId }), let raw = activity,
+                      ContextPolicies.compactStatus(operation, raw) == "completed" else {
+                    throw ZerusError.invalid("Compact continuation was canceled. The captured message was not sent and remains recoverable.")
+                }
+            }
             var payload = try target.json()
             payload["request_id"] = .string(id)
             payload["text"] = .string(message.text)
             payload["attachments"] = .array([])
+            if !expectedCompactionId.isEmpty { payload["expected_compaction_id"] = .string(expectedCompactionId) }
             attempted = true
             let initial: JSONObject
             do { initial = try await app.client.submit(connection, target: target, operation: "send", payload: payload, id: id) }
