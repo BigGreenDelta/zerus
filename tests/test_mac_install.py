@@ -27,14 +27,16 @@ with open(os.environ['TRANSPORT_LOG'], 'a') as log:
     log.write('ssh\\n')
 command = sys.argv[-1]
 # Native builds, the desktop installer and the live tmux server stay out of scope.
-if command == 'bash -s' or 'tray/install.sh' in command or 'tmux source-file' in command:
+if command.endswith('bash -s') or 'tray/install.sh' in command or 'tmux source-file' in command:
+    with open(os.environ['TRANSPORT_LOG'], 'a') as log:
+        log.write('remote ' + command + '\\n')
     sys.exit(0)
 if command.startswith('bash -s -- '):
     sys.exit(subprocess.run(shlex.split(command), input=data).returncode)
 sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
 ''')
         self.script(self.bin / 'scp', '#!/bin/sh\n[ "$1" = -o ] && [ "$2" = BatchMode=yes ]\n')
-        self.script(self.bin / 'tar', '#!/bin/sh\nexit 0\n')
+        self.script(self.bin / 'tar', '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TRANSPORT_LOG.tar"\nexit 0\n')
         self.script(self.bin / 'tmux', '#!/bin/sh\necho fixture\n')
         self.script(self.bin / 'hostname', '#!/bin/sh\necho fixture-mac\n')
         self.env = {k: v for k, v in os.environ.items() if not k.startswith('HGS_MAC_')}
@@ -52,6 +54,23 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
 
     def config(self):
         return (self.home / '.config/hgs/config').read_text()
+
+    def test_mobile_connector_sources_travel_and_its_build_stays_opt_in(self):
+        for value in ("", "1", "0"):
+            with self.subTest(HGS_MOBILE_CONNECTOR=value):
+                (self.root / 'transport.log.tar').unlink(missing_ok=True)
+                (self.root / 'transport.log').unlink(missing_ok=True)
+                result = self.run_install('fixture-mac', '--no-tray', HGS_MOBILE_CONNECTOR=value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                sent = (self.root / 'transport.log.tar').read_text().splitlines()[0].split()
+                for path in ('services/mobile/connector/Cargo.toml', 'services/mobile/connector/Cargo.lock',
+                             'services/mobile/connector/.cargo', 'services/mobile/connector/src',
+                             'services/mobile/relay/Cargo.toml', 'services/mobile/relay/src'):
+                    self.assertIn(path, sent)
+                self.assertFalse(any('target' in path.split('/') for path in sent), sent)
+                builds = [line for line in (self.root / 'transport.log').read_text().splitlines()
+                          if line.startswith('remote ') and line.endswith('bash -s')]
+                self.assertEqual(builds, [f"remote HGS_MOBILE_CONNECTOR='{value}' bash -s"])
 
     def test_destination_required_before_any_connection(self):
         result = self.run_install()

@@ -21,7 +21,8 @@ build_dir="${CARGO_TARGET_DIR:-$here/target}"
 mkdir -p "$prefix/bin"
 binary_stage="$(mktemp "$prefix/bin/.hgs.XXXXXXXX")"
 shim_stage="$(mktemp "$prefix/bin/.hgs-state.XXXXXXXX")"
-trap 'rm -f "$binary_stage" "$shim_stage"' EXIT
+connector_stage=""
+trap 'rm -f "$binary_stage" "$shim_stage" ${connector_stage:+"$connector_stage"}' EXIT
 install -m 0755 "$build_dir/release/hgs" "$binary_stage"
 install -m 0644 "$here/hgs_state.py" "$shim_stage"
 changed=0
@@ -45,6 +46,48 @@ else
 fi
 if [ "$changed" -eq 1 ]; then echo "Installed hgs Rust CLI."; fi
 "$prefix/bin/hgs" --version
+# The Rust mobile connector builds hyper, rustls, ring and SQLite, so until
+# gateways run it a source install builds it only when asked
+# (HGS_MOBILE_CONNECTOR=1) or to update an installed copy; 0 always skips. Its
+# service is never enabled, started or restarted here.
+connector="$prefix/bin/zerus-mobile-connector"
+case "${HGS_MOBILE_CONNECTOR:-}" in
+    1) build_connector=1 ;;
+    0) build_connector=0 ;;
+    "") if [ -e "$connector" ]; then build_connector=1; else build_connector=0; fi ;;
+    *) echo "hgs: HGS_MOBILE_CONNECTOR must be 0 or 1" >&2; exit 2 ;;
+esac
+if [ "$build_connector" -eq 1 ]; then
+    "$cargo_bin" build --manifest-path "$here/services/mobile/connector/Cargo.toml" --locked --release \
+        --target-dir "$build_dir"
+    connector_stage="$(mktemp "$prefix/bin/.zerus-mobile-connector.XXXXXXXX")"
+    install -m 0755 "$build_dir/release/zerus-mobile-connector" "$connector_stage"
+    if [ ! -L "$connector" ] && cmp -s "$connector_stage" "$connector"; then
+        rm -f "$connector_stage"
+    else
+        mv -f "$connector_stage" "$connector"
+        echo "Installed zerus-mobile-connector."
+        # A running connector keeps the old binary until it restarts: only a
+        # person who has drained phone actions should restart it.
+        running=""
+        if [ "$(uname -s)" = Darwin ]; then
+            agent="$(launchctl print "gui/$(id -u)/com.hgdev.zerus-mobile-connector" 2>/dev/null || true)"
+            case "$agent" in
+                *"$connector"*) running="launchctl kickstart -k gui/$(id -u)/com.hgdev.zerus-mobile-connector" ;;
+            esac
+        elif systemctl --user is-active --quiet zerus-mobile-connector.service 2>/dev/null; then
+            unit="$(systemctl --user show zerus-mobile-connector.service -p ExecStart 2>/dev/null || true)"
+            case "$unit" in
+                *"path=$connector "*) running="systemctl --user restart zerus-mobile-connector.service" ;;
+            esac
+        fi
+        if [ -n "$running" ]; then
+            echo "The running mobile connector still uses its previous binary. Pause phone actions until" \
+                "'zerus-mobile-connector --check --config <file>' reports no running request, then restart it: $running"
+        fi
+    fi
+    "$connector" --version
+fi
 if [ -z "${HGS_INSTALL_PREFIX:-}" ] && [ -z "${HGS_STATE_DIR:-}" ] && [ "$(uname -s)" = "Darwin" ]; then
     session_args=()
     if [ "$changed" -eq 1 ]; then session_args+=(--restart); fi
