@@ -13,19 +13,23 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod execute;
+pub mod files;
 pub mod fsguard;
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
 pub mod http;
 pub mod inspection;
 pub mod journal;
+pub mod media;
 pub mod mutations;
 pub mod native;
 pub mod projects;
+pub mod pybase64;
 pub mod pyjson;
 pub mod pyvalue;
 pub mod request;
 pub mod runtime;
+pub mod speech;
 pub mod url;
 pub mod validate;
 

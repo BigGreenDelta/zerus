@@ -1,11 +1,12 @@
 """Black-box journal classes of computer, read and media operations.
 
-Screens, attachment ranges, transcripts and speech settings leave the journal
+Screens, attachment and file ranges, transcripts and speech settings leave the journal
 two minutes after delivery; catalogs, history and inspections after an hour;
 mutations stay to prevent a repeat. A restart fails an interrupted read and
 leaves an interrupted mutation uncertain. Rows are aged only while the
 connector is stopped, and the journal file is scanned for what it held."""
 import base64
+import hashlib
 import signal
 import time
 import unittest
@@ -13,10 +14,12 @@ import uuid
 
 from bb_operations import (CONVERSATION, READ_OPERATIONS, RECEIPTS, RUN, SESSION, OperationCase, help_text,
                            listing)
-from connector_harness import RESTART_ERROR, BlackBoxCase, default_rules
+from connector_harness import RESTART_ERROR, BlackBoxCase, default_rules, implemented
 
 SCREEN = "BB-SCREEN-SENTINEL"
 FILE = b"BB-FILE-SENTINEL " * 4
+DOCUMENT = b"BB-DOCUMENT-SENTINEL " * 4
+DOCUMENT_PATH = "/example/repo/report.txt"
 TRANSCRIPT = "BB-TRANSCRIPT-SENTINEL"
 VOICE = "BB-VOICE-SENTINEL"
 HISTORY = "BB-HISTORY-SENTINEL"
@@ -27,7 +30,7 @@ TERMINAL = ["terminal", SESSION, "--json"]
 SPEECH = ["speech", "--json"]
 VOICE_ARGV = ["voice", SESSION, "--json"]
 WORKTREES = ["__state", "worktrees", "--path", "/example/repo", "--refresh", "--json"]
-SHORT = {"terminal_snapshot", "attachment_read", "speech_profiles", "speech_stats", "speech_status", "speech_config",
+SHORT = {"terminal_snapshot", "attachment_read", "file_read", "speech_profiles", "speech_stats", "speech_status", "speech_config",
          "speech_config_status", "voice_profiles", "voice_status"}
 HOUR = {"inspect", "history", "catalog", "dirs", "worktrees"}
 DEADLINE = 5.5  # The terminal input claim deadline; the connector refuses one more than 6 s ahead.
@@ -53,6 +56,10 @@ def rules() -> list[dict]:
         {"argv": ["attachment", SESSION, "--request", MESSAGE, "--index", "0", "--conversation", CONVERSATION],
          "stdout": {"request_id": MESSAGE, "index": 0, "name": "note.txt", "mime": "text/plain", "bytes": len(FILE),
                     "data_base64": base64.b64encode(FILE).decode()}},
+        {"argv": ["file-read", SESSION, "--json"],
+         "stdout": identity(requested_path=DOCUMENT_PATH, path=DOCUMENT_PATH, file_name="report.txt", mime="text/plain",
+                            bytes=len(DOCUMENT), sha256=hashlib.sha256(DOCUMENT).hexdigest(),
+                            data_base64=base64.b64encode(DOCUMENT).decode())},
         {"argv": SPEECH, "stdin_fields": {"action": "status"},
          "stdout": {"schema": 1, "job_id": "{{stdin.job_id}}", "state": "completed", "text": TRANSCRIPT}},
         {"argv": SPEECH, "stdin_fields": {"action": "providers"}, "stdout": {"schema": 1, "available": True, "profiles": []}},
@@ -83,18 +90,21 @@ class ReadClassTests(OperationCase, BlackBoxCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.hgs.script(rules() + default_rules(listing(), help_text(
-            "terminal", "history", "launch", "worktree", "directory_create", "attachment_read", "speech", "voice",
-            "speech_config")))
+            "terminal", "history", "launch", "worktree", "directory_create", "attachment_read", "file_read", "speech",
+            "voice", "speech_config")))
 
     def computer(self, operation, own=False, **payload):
         return self.operation(operation, session="", identity=False, own=own, **payload)
 
     def requests(self) -> list[dict]:
+        """One request per operation, without those the connector under test
+        does not implement yet; every read class stays covered."""
         audio = {"format": "pcm_s16le", "sample_rate": 16000, "channels": 1,
                  "data_base64": base64.b64encode(bytes(320)).decode()}
-        return [
+        return [request for request in [
             self.operation("terminal_snapshot"),
             self.operation("attachment_read", message_id=MESSAGE, index=0, offset=0, length=len(FILE)),
+            self.operation("file_read", path=DOCUMENT_PATH, offset=0, length=len(DOCUMENT)),
             self.computer("speech_status", job_id=str(uuid.uuid4())), self.computer("speech_profiles"),
             self.computer("speech_stats"), self.computer("speech_config"),
             self.computer("speech_config_status", operation_id=str(uuid.uuid4()), expected_machine_id=MACHINE),
@@ -105,7 +115,7 @@ class ReadClassTests(OperationCase, BlackBoxCase):
             self.operation("terminal_input", terminal_binding_id="d" * 64, text="echo synthetic", enter=True),
             self.computer("directory_create", own=True, path="/canonical/new"),
             self.computer("speech_submit", own=True, profile_id="gigaam-ru", audio=audio),
-        ]
+        ] if implemented(request["operation"])]
 
     async def test_reads_leave_the_journal_by_class_and_mutations_stay(self):
         requests = self.requests()
@@ -121,7 +131,8 @@ class ReadClassTests(OperationCase, BlackBoxCase):
             results[request["request_id"]] = result
         await self.delivered(first, *requests)
         held = self.journal_bytes()
-        for sentinel in (SCREEN, base64.b64encode(FILE).decode(), TRANSCRIPT, VOICE, HISTORY, INSPECTED):
+        for sentinel in (SCREEN, base64.b64encode(FILE).decode(), base64.b64encode(DOCUMENT).decode(), TRANSCRIPT, VOICE,
+                         HISTORY, INSPECTED):
             self.assertIn(sentinel.encode(), held, "the scan would not see this sentinel")
         first.stop()
 
@@ -130,7 +141,7 @@ class ReadClassTests(OperationCase, BlackBoxCase):
         kept = {row["operation"] for row in self.journal.rows()}
         self.assertEqual(kept, operations - SHORT)
         held = self.journal_bytes()
-        for sentinel in (SCREEN, base64.b64encode(FILE).decode(), TRANSCRIPT, VOICE):
+        for sentinel in (SCREEN, base64.b64encode(FILE).decode(), base64.b64encode(DOCUMENT).decode(), TRANSCRIPT, VOICE):
             self.assertNotIn(sentinel.encode(), held, "a short-lived read stayed in the journal file")
         mark = self.mark()
         for request in requests:

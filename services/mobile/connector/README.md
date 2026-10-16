@@ -12,10 +12,11 @@ runs `inspect`, `process_output`, `mark_read`, `history`, `catalog`, `dirs` and
 `worktrees`, and the mutations of `src/mutations.rs` (send with inline
 attachments, answer, interrupt, send_now, settings, the context commands with
 their preflight, the DeepSeek child-send preflight, process_stop, lifecycle
-operations, recovery_action and set_mobile_delivery) exactly as Python does,
-journals every outcome and uploads it. Every other operation (terminal,
-attachments, voice, speech, launch, directories, worktree creation and the
-one-hop gateway) is claimed, refused with Python's `unsupported operation`
+operations, recovery_action and set_mobile_delivery), and the terminal,
+attachment and file reads, voice, speech and speech configuration of
+`src/media.rs`, `src/files.rs` and `src/speech.rs` exactly as Python does,
+journals every outcome and uploads it. Every other operation (launch,
+directory and worktree creation, archive pages and the one-hop gateway) is claimed, refused with Python's `unsupported operation`
 receipt (which phones show as "update required") and never advertised, until
 its slice implements it (`src/capabilities.rs`, `IMPLEMENTED`;
 `tests/ported.json` lists the same operations for the black-box suites).
@@ -238,4 +239,6 @@ hyper 1 with hyper-util's pooled client (HTTP/1.1 only), http-body-util,
 rustls with ring through hyper-rustls, rustls-native-certs for the system
 roots, and futures-util's function forms of `select` and `join`, so tokio
 needs no proc-macro crates. There is no reqwest, url crate, IDNA, OpenSSL or
-aws-lc-rs.
+aws-lc-rs. The media operations add base64 0.22, the relay's version, to read
+file ranges, recordings and sealed credentials as Python's strict
+`base64.b64decode(validate=True)` does.

@@ -104,6 +104,8 @@ pub struct State {
     pub presence: Value,
     pub presence_retry_at: f64,
     pub accounts: AccountCache,
+    /// Verified attachment and file reads kept for their next ranges.
+    pub reads: crate::files::Reads,
     /// Upload attempts the relay refused, by request (b).
     pub refused: HashMap<String, (u32, f64)>,
 }

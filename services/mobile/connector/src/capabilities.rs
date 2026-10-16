@@ -20,12 +20,30 @@ pub const PROBE_TIMEOUT: f64 = 3.0;
 /// [`crate::mutations::OPERATIONS`]. Every other known operation is refused
 /// as unsupported and never advertised.
 pub const IMPLEMENTED: &[&str] = &[
+    "attachment_read",
     "catalog",
     "dirs",
+    "file_read",
     "history",
     "inspect",
     "mark_read",
     "process_output",
+    "speech_cancel",
+    "speech_config",
+    "speech_config_status",
+    "speech_profile_remove",
+    "speech_profile_test",
+    "speech_profile_upsert",
+    "speech_profiles",
+    "speech_stats",
+    "speech_status",
+    "speech_submit",
+    "terminal_input",
+    "terminal_snapshot",
+    "voice_cancel",
+    "voice_profiles",
+    "voice_status",
+    "voice_submit",
     "worktrees",
 ];
 
@@ -272,6 +290,8 @@ mod tests {
                 "send",
                 "send_now",
                 "settings",
+                "terminal_input",
+                "terminal_snapshot",
                 "terminate",
                 "worktrees"
             ])

@@ -29,8 +29,8 @@ const UINT63: &str = "9223372036854775807";
 
 pub const UNSUPPORTED: &str = "unsupported operation";
 pub const REQUEST_ID: &str = "request_id must be a canonical UUID";
-const SESSION: &str = "session must match an exact local snapshot entry";
-const NONARCHIVED: &str = "session must match an exact nonarchived snapshot entry";
+pub(crate) const SESSION: &str = "session must match an exact local snapshot entry";
+pub(crate) const NONARCHIVED: &str = "session must match an exact nonarchived snapshot entry";
 
 /// What the last local snapshot listed.
 #[derive(Debug, Clone, Default)]
@@ -306,7 +306,7 @@ pub fn validate_launch(
     Ok(())
 }
 
-fn valid_session(session: Option<&Value>) -> Option<&str> {
+pub(crate) fn valid_session(session: Option<&Value>) -> Option<&str> {
     let session = session?.as_str()?;
     let control = |c: char| (c as u32) < 32 || c as u32 == 127;
     (!session.is_empty()
@@ -329,6 +329,9 @@ pub fn validate(
         .and_then(Value::as_str)
         .filter(|operation| crate::capabilities::implemented(operation))
         .ok_or_else(|| error(UNSUPPORTED))?;
+    if crate::media::handles(operation) {
+        return crate::media::validate(operation, request, request_id, context);
+    }
     let validated = |session: &str, payload: Option<Value>| Validated {
         operation: operation.into(),
         session: session.into(),

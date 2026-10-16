@@ -2064,6 +2064,9 @@ async def execute_runs(root: Path) -> list[dict]:
             row = {"kind": "execute", "id": name, "request": request,
                    "native": [{"argv": list(key), "answer": raised(value) if isinstance(value, BaseException) else copy.deepcopy(value)}
                               for key, value in sorted(node._native.answers.items())]}
+            if not node.attachment_read_supported:
+                # Every other capability of `capable`, without the attachment marker.
+                row["unavailable"] = ["attachment_read"]
             if name == "process-output-too-large":
                 row["native"] = [{"argv": item["argv"], "answer": {**item["answer"], "output": "@fill"},
                                   "fill": {"@fill": [["\u00e9", 180000]]}} for item in row["native"]]

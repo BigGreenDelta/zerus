@@ -262,7 +262,7 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (125, 120));
+    assert_eq!((checked, refused), (199, 46));
     archive_refusals.sort();
     assert_eq!(archive_refusals, ARCHIVE_CASES);
 }
@@ -305,6 +305,16 @@ async fn executions_match_the_python_connector() {
         let harness = harness(&format!("execute-{id}"));
         let connector = &harness.connector;
         capable(connector);
+        if let Some(unavailable) = run.get("unavailable") {
+            let mut flags = connector.flags.get();
+            for flag in unavailable.as_array().unwrap() {
+                match flag.as_str().unwrap() {
+                    "attachment_read" => flags.attachment_read = false,
+                    other => panic!("{id}: unknown unavailable capability {other}"),
+                }
+            }
+            connector.flags.set(flags);
+        }
         for native in run["native"].as_array().unwrap() {
             let argv: Vec<String> = native["argv"]
                 .as_array()
@@ -312,9 +322,11 @@ async fn executions_match_the_python_connector() {
                 .iter()
                 .map(|arg| arg.as_str().unwrap().into())
                 .collect();
-            connector
-                .native
-                .answer(argv, filled(&native["answer"], native.get("fill")));
+            // A list is the answers to consecutive calls, as in bb_operations.replay.
+            let answer = filled(&native["answer"], native.get("fill"));
+            for answer in answer.as_array().cloned().unwrap_or_else(|| vec![answer]) {
+                connector.native.answer(argv.clone(), answer);
+            }
         }
         let outcome = connector.execute(run["request"].clone()).await.unwrap();
         let expect = &run["expect"];
@@ -336,9 +348,13 @@ async fn executions_match_the_python_connector() {
     assert_eq!(
         checked,
         [
+            "attachment-read-chunk",
+            "attachment-read-missing-file",
+            "attachment-read-unavailable",
             "catalog-projection",
             "directory-create-route-mismatch",
             "dirs-projection",
+            "file-read-snapshot",
             "gateway-route-invalid",
             "gateway-route-unavailable",
             "inspect-completed",
@@ -352,6 +368,10 @@ async fn executions_match_the_python_connector() {
             "send-native-crash",
             "send-native-timeout",
             "set-mobile-delivery",
+            "speech-submit-drops-text",
+            "terminal-input-expired",
+            "terminal-input-submitted",
+            "terminal-snapshot",
             "unsupported-operation",
             "worktrees-state-prefix",
         ]
