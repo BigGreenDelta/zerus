@@ -47,7 +47,7 @@ impl Failure {
     pub fn text(text: &str) -> Failure {
         Failure::Connector(text.into())
     }
-    fn message(&self) -> &str {
+    pub fn message(&self) -> &str {
         match self {
             Failure::Connector(text) => text,
             Failure::Generic => GENERIC,
@@ -212,6 +212,9 @@ impl<N: Native + 'static> Connector<N> {
 
     /// `_execute_claimed`: the receipt of a claimed request.
     async fn execute_claimed(&self, request: &Map<String, Value>, request_id: &str) -> Value {
+        if crate::media::claims(request) {
+            return self.media(request, request_id).await;
+        }
         // A mutation that failed once its native write may have begun is
         // uncertain.
         let mutation_started = Cell::new(false);
