@@ -336,6 +336,12 @@ impl<N: Native + 'static> Connector<N> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref().expect("validated payload");
         gate(operation, self.flags.get())?;
+        if operation == "voice_submit"
+            && payload.get("video").is_some()
+            && !self.flags.get().voice_video
+        {
+            return Err(Failure::text("native video recording ABI is unavailable"));
+        }
         if operation == "terminal_input" {
             self.terminal_preflight(request, session, payload).await?;
         }

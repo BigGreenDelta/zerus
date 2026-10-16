@@ -43,6 +43,9 @@ def decision(submission) -> dict:
         operation = submission["operation"]
         if operation == "send":
             validate_send(submission["payload"])
+        elif operation == "voice_submit" and "video" in submission["payload"]:
+            if encoded_size(submission, voice.video.MAX_REQUEST_BYTES) > voice.video.MAX_REQUEST_BYTES:
+                return {"decision": "reject", "status": 413, "raised": "HTTPRequestEntityTooLarge", "stage": "size"}
         elif operation in {"speech_submit", "voice_submit"}:
             if encoded_size(submission, 6 * 1024 * 1024) > 6 * 1024 * 1024:
                 return {"decision": "reject", "status": 413, "raised": "HTTPRequestEntityTooLarge", "stage": "size"}

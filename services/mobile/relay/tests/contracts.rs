@@ -61,6 +61,57 @@ fn voice_command(computer: &str, op: &str, message: Option<&str>) -> Value {
     json!({"request_id":id,"computer_id":computer,"operation":op,"session":"codex/example/tag","payload":payload})
 }
 
+#[tokio::test]
+async fn video_voice_requires_host_capability_and_erases_both_media_after_acceptance() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let f = Fixture::new().await;
+    let mut upload = voice_command(&f.node.id, "voice_submit", None);
+    upload["payload"]["audio"]["data_base64"] = json!(STANDARD.encode(vec![0u8; 32000]));
+    let mut mp4 = Vec::new();
+    for (kind, data) in [
+        (b"ftyp", b"isom0000".as_slice()),
+        (b"moov", b"".as_slice()),
+        (b"mdat", b"video".as_slice()),
+    ] {
+        mp4.extend_from_slice(&((8 + data.len()) as u32).to_be_bytes());
+        mp4.extend_from_slice(kind);
+        mp4.extend_from_slice(data);
+    }
+    upload["payload"]["video"] = json!({"format":"mp4","data_base64":STANDARD.encode(mp4),"duration_ms":1000,"width":480,"height":480});
+    protocol::request(&upload).unwrap();
+    f.beat(&json!({"sessions":[{"name":"codex/example/tag"}],"mobile_capabilities":{"protocol_version":1,"operations":protocol::OPERATIONS}})).await;
+    assert_eq!(f.submit(&upload).await.unwrap_err().0.as_u16(), 409);
+    f.beat(&json!({"sessions":[{"name":"codex/example/tag"}],"mobile_capabilities":{"protocol_version":1,"operations":protocol::OPERATIONS,"features":["voice_video"]}})).await;
+    f.submit(&upload).await.unwrap();
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_some());
+    let result = json!({"state":"completed","result":{"schema":1,"message":{"id":upload["request_id"],"state":"queued","revision":1}},"error":null});
+    f.store
+        .result(
+            &f.node,
+            s(&upload, "request_id"),
+            &result,
+            Some(&canonical(&result["result"]).unwrap()),
+        )
+        .await
+        .unwrap();
+    let row = f
+        .store
+        .db
+        .one(
+            "SELECT body,body_bytes FROM requests WHERE id=?",
+            args![&upload["request_id"]],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row["body"], "");
+    assert_eq!(row["body_bytes"], 0);
+    assert_eq!(f.submit(&upload).await.unwrap()["result"], result["result"]);
+    assert!(f.store.claim(&f.node, false).await.unwrap().is_none());
+    f.check_accounting().await;
+    f.close().await;
+}
+
 #[test]
 fn model_settings_match_launch_utf8_byte_bound() {
     let id = Uuid::new_v4().to_string();

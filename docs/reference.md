@@ -432,8 +432,9 @@ See [provider management](speech-providers.md) and
 Russian `v3_e2e_rnnt` profile. Saving or selecting a profile does not install or
 download a model and never falls back to another provider.
 
-On desktop, use **Voice** in the message toolbar, allow microphone access, then
-stop recording to review the recording with **Play**, **Discard** or **Send voice**. Recordings
+On desktop, use **Voice** in the message toolbar. Tap to switch voice/video,
+hold to record, release to send, drag up to lock or release outside to cancel.
+Stop a locked recording to review it with **Play**, **Discard** or **Send**. Audio recordings
 are limited to two minutes and remain separate from the typed draft. Capture
 opens the local microphone without waiting for speech computers or providers.
 Provider discovery runs in the background. If it fails, the recording remains
@@ -449,16 +450,20 @@ action. Holding either key stops capture only once, and editing resumes after
 capture ends unless another delivery lock applies. Android supports the same
 controls with a hardware keyboard; its touch Stop control remains available.
 On Android, an empty editor with no attachments shows a microphone in the Send
-position. Hold to record, release to keep a preview, or slide left to cancel.
+position. Tap to switch voice/video, hold to record, release to send,
+slide left to cancel or up to lock. Stop a locked recording to keep a preview.
 The recording row overlays the retained editor and shows a red indicator, elapsed time and **Slide to cancel**;
 the hint moves and fades as you slide left. Short haptic feedback accompanies
 confirmed capture start and explicit stop/cancel, respecting Android settings.
-Text or attachments restore the ordinary Send button. Releasing the microphone
-never sends the recording; review it and use **Send voice message** separately.
+Text or attachments restore the ordinary Send button. Sending requires a
+confirmed provider for the exact conversation; delayed discovery keeps a preview
+until an explicit Send.
 After granting microphone permission, press again to start recording.
 The preview lists speech profiles reachable from the conversation computer. Explicit Send
 stores the original there, starts recognition and delivers recognized text to
-the pinned agent conversation. One history card retains the playable original,
+the pinned agent conversation. Video is limited to 60 seconds and 10 MiB. Its MP4 and extracted WAV share one
+message identity; the agent receives recognized speech. A tap starts circular
+video playback. One history card retains the playable original,
 expandable transcript and processing or delivery errors across devices. Its
 circular play/pause control sits beside the recording's amplitude waveform;
 the played portion is highlighted, and selecting a point on the waveform seeks

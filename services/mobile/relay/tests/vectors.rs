@@ -304,11 +304,12 @@ fn operation_tables_match_the_python_connector() {
         json!(protocol::MOBILE_DELIVERY),
         operations["sequences"]["MOBILE_DELIVERY"]
     );
-    // The relay serves presence alerts itself; no connector advertises them.
+    // Baseline vectors predate optional recording video (zerus-eo7j). Video is
+    // advertised only by native-capable connectors; presence alerts are relay-owned.
     let features: Vec<&str> = protocol::FEATURES
         .iter()
         .copied()
-        .filter(|feature| *feature != "presence_alerts")
+        .filter(|feature| !["presence_alerts", "voice_video"].contains(feature))
         .collect();
     assert_eq!(sorted(&features), set(&["FEATURES"]));
     // The relay's index predicates are its own text over the same operations.

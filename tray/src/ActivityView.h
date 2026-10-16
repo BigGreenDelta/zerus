@@ -19,6 +19,7 @@ class QTextBrowser;
 class QUrl;
 class QShowEvent;
 class QHideEvent;
+class QDialog;
 class QMediaPlayer;
 class QAudioOutput;
 struct ActivityRenderResult;
@@ -127,6 +128,7 @@ private:
     QHash<QString, QString> m_deliveryKeys, m_attachmentBindings;
     QHash<QString, QJsonObject> m_attachmentLinks;
     QHash<QString, QJsonObject> m_voiceLinks;
+    QDialog *m_videoDialog = nullptr;
     QMediaPlayer *m_voicePlayer = nullptr;
     QAudioOutput *m_voiceOutput = nullptr;
     QString m_voiceKey, m_voicePlaying, m_voiceLoading, m_voiceError;

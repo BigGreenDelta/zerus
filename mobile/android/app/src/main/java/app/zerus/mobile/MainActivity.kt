@@ -1173,7 +1173,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         verticalArrangement = Arrangement.spacedBy(4.dp)) {
         // Measure the editor and its controls first. A voice preview uses only the
         // remaining height, with its controls reachable by scrolling.
-        if (model.speech.recording && !model.speech.touchRecording || model.speech.savingRecording || model.speech.draft != null) {
+        if (model.speech.recording && (!model.speech.touchRecording || model.speech.videoRecorder != null) || model.speech.savingRecording || model.speech.draft != null) {
             Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 280.dp)
                 .verticalScroll(rememberScrollState())) { SpeechComposerStatus(model) }
         }

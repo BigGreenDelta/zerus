@@ -107,7 +107,9 @@ desktop or Android app. Record, review and send: Zerus transcribes the recording
 and delivers the text to the selected agent's native conversation, including on
 another connected computer. Your message stays in Activity as a **playable voice
 message with a waveform and expandable transcript**, so you can compare what you
-said with what the agent received.
+said with what the agent received. Camera mode records video circles with the same
+hold, cancel and lock controls on desktop and Android; the video stays in history
+and its recognized speech goes to the agent.
 
 Choose the processing computer and manage its recognition profiles in
 **Settings → Voice input**. Use **local GigaAM v3 for Russian**, including GPU

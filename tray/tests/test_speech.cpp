@@ -1,5 +1,6 @@
 #include "speech/SpeechClient.h"
 #include "speech/SpeechRecorder.h"
+#include "speech/RoundVideo.h"
 #include "speech/SpeechComposer.h"
 #include "speech/SpeechSettings.h"
 #include "ComposerToolbar.h"
@@ -123,14 +124,19 @@ else:
             while (root/'profiles-gate').exists() or (root/('profiles-gate-'+payload['expected_conversation_id'])).exists(): time.sleep(.01)
             if fail:
                 print('Synthetic provider lookup failure',file=sys.stderr);sys.exit(1)
-            print(json.dumps({'schema':1,'computers':computers}))
+            print(json.dumps({'schema':1,'computers':computers,'features':[] if (root/'video-legacy').exists() else ['voice_video']}))
         else:
             with (root / 'voice-actions').open('a') as log:
                 log.write(json.dumps(payload) + '\n')
             message_id=payload['request_id'] if payload['action']=='submit' else payload['message_id']
             if payload['action']=='submit' and (root/'lost-submit').exists():
                 sys.exit(1)
-            print(json.dumps({'schema':1,'message':{'id':message_id,'run_id':payload['expected_run_id'],'conversation_id':payload['expected_conversation_id'],'created_at':100,'revision':1,'state':'queued','audio':{'request_id':message_id,'index':0,'name':'voice.wav','mime':'audio/wav','bytes':3244,'duration_ms':100}}}))
+            media={}
+            if 'video' in payload:
+                import base64
+                media=dict(payload['video']);media.pop('format');media['bytes']=len(base64.b64decode(media.pop('data_base64')))
+                media.update(request_id=message_id,index=1,name='video.mp4',mime='video/mp4')
+            print(json.dumps({'schema':1,'message':dict({'id':message_id,'run_id':payload['expected_run_id'],'conversation_id':payload['expected_conversation_id'],'created_at':100,'revision':1,'state':'queued','audio':{'request_id':message_id,'index':0,'name':'voice.wav','mime':'audio/wav','bytes':3244,'duration_ms':100}},**({'video':media} if media else {}))}))
     elif payload['action'] == 'providers':
         profiles = json.loads((root / 'profiles').read_text()) if (root / 'profiles').exists() else [{'id':'russian','name':'Russian','available':True}]
         print(json.dumps({'schema':1,'available':True,'profiles':profiles}))
@@ -165,7 +171,26 @@ public:
     void stop() override { ++stops;if(finishImmediately)finish(); }
     void cancel() override { cancelled = true; }
 };
+class FixtureVideoRecorder : public RoundVideoRecorder {
+public:
+    FixtureVideoRecorder():RoundVideoRecorder(nullptr){}
+    int starts=0,stops=0;bool cancelled=false;
+    void start(const QByteArray &) override {++starts;cancelled=false;emit started();}
+    void stop() override {++stops;emit completed(QByteArray(32000,'\0'),QByteArray("synthetic-video"),QJsonObject{{"format","mp4"},{"duration_ms",1000},{"width",480},{"height",480}});}
+    void cancel() override {cancelled=true;}
+};
+
 }
+// These retained-preview tests use the explicit Stop control. Physical gesture
+// behavior (including release-to-send) has separate coverage below.
+static void recordOrPreview(ToolbarChip *voice) {
+    if(voice->fullLabel().startsWith("Send (")) {
+        auto *parent=voice->parentWidget();
+        while(parent && !qobject_cast<MessageComposer *>(parent))parent=parent->parentWidget();
+        Q_ASSERT(parent);parent->findChild<QPushButton *>("voiceStopPreview")->click();
+    } else voice->click();
+}
+
 class TestSpeech : public QObject {
     Q_OBJECT
 private slots:
@@ -429,7 +454,7 @@ private slots:
         QSettings().setValue("speech/machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");QSettings().setValue("speech/profile","russian");QSettings().setValue("speech/profile_revision",1);
         MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();voice->click();
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);recordOrPreview(voice);
         auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());ComposerDraftStore::flushWrites();
         QCOMPARE(ComposerDraftStore().load("voice-message-draft\nfixture\noriginal").formState.value("speech").toObject().value("profile_revision").toInteger(),2);
     }
@@ -444,7 +469,7 @@ private slots:
         {
             MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
             auto *recorder=new FixtureRecorder;SpeechComposer speech(executable,&composer,[&]{return target(composer);},recorder);
-            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();voice->click();QTRY_VERIFY(composer.findChild<QPushButton *>("voiceSend")->isEnabled());
+            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);recordOrPreview(voice);QTRY_VERIFY(composer.findChild<QPushButton *>("voiceSend")->isEnabled());
             ComposerDraftStore::flushWrites();const auto draft=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");QCOMPARE(draft.formState.value("speech").toObject().value("profile_revision").toInteger(),initialRevision);
             id=draft.formState.value("id").toString();audio=draft.attachments[0].data;
         }
@@ -468,7 +493,7 @@ private slots:
         profiles.write(QJsonDocument(QJsonArray{QJsonObject{{"machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"},{"name","Fixture"},{"profiles",QJsonArray{profile}}}}).toJson());profiles.close();
         MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();voice->click();
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);recordOrPreview(voice);
         QTRY_VERIFY(composer.findChild<QPushButton *>("voiceRefreshProviders")->isEnabled());QVERIFY(!composer.findChild<QPushButton *>("voiceSend")->isEnabled());
         QCOMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),0);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
     }
@@ -477,8 +502,8 @@ private slots:
         QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));composer.editor()->setPlainText("Keep this text");
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
         QSignalSpy messages(&speech,&SpeechComposer::messageChanged);QSignalSpy textSends(&composer,&MessageComposer::sendRequested);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();
-        QTRY_VERIFY(voice->fullLabel().startsWith("Stop voice"));voice->click();
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);
+        QTRY_VERIFY(voice->fullLabel().startsWith("Send ("));recordOrPreview(voice);
         auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());
         QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));QCOMPARE(composer.editor()->toPlainText(),"Keep this text");
         ComposerDraftStore::flushWrites();auto draft=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");
@@ -503,12 +528,86 @@ private slots:
         },recorder);
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");
         QTRY_COMPARE(voice->toolTip(),windows);QVERIFY(!voice->isEnabled());QCOMPARE(voice->accessibleDescription(),windows);
-        QCOMPARE(voice->fullLabel(),QString("Voice"));voice->click();QCOMPARE(recorder->starts,0);
+        QCOMPARE(voice->fullLabel(),QString("Voice"));recordOrPreview(voice);QCOMPARE(recorder->starts,0);
         available=true;reason.clear();composer.setAvailability(true,{});
-        QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Record a voice message"));
+        QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Tap to switch"));
         // Unavailable for a passing reason (offline, archived): the usual hint stays.
         available=false;composer.setAvailability(true,{});
-        QVERIFY(!voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Record a voice message"));
+        QVERIFY(!voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Tap to switch"));
+    }
+    void nativeVideoAudioOnExplicitSyntheticFile() {
+        const auto path=qEnvironmentVariable("ZERUS_TEST_VIDEO_FILE");if(path.isEmpty())QSKIP("Set ZERUS_TEST_VIDEO_FILE to an explicitly generated synthetic MP4.");
+        QString error;const auto pcm=RoundVideoRecorder::extractAudio(path,std::make_shared<std::atomic_bool>(false),error);
+        QVERIFY2(error.isEmpty(),qPrintable(error));QVERIFY(pcm.size()>=62000 && pcm.size()<=66000);QVERIFY(rms(pcm)>100);
+    }
+    void videoHoldPersistsTwoMediaAndSendsOnePinnedRequest() {
+        QTemporaryDir dir;QSettings().setValue("speech/video_mode",true);
+        MessageComposer composer;composer.setSessionKey("fixture\nvideo");composer.show();auto *video=new FixtureVideoRecorder;
+        SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},new FixtureRecorder,{},video);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());QCOMPARE(voice->fullLabel(),"Video");
+        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(video->starts,1);
+        QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
+        QTest::mouseRelease(voice,Qt::LeftButton);
+        QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile actions(dir.path()+"/voice-actions");QVERIFY(actions.open(QIODevice::ReadOnly));
+        const auto lines=actions.readAll().trimmed().split('\n');QCOMPARE(lines.size(),1);
+        const auto payload=QJsonDocument::fromJson(lines[0]).object();QCOMPARE(payload.value("expected_conversation_id").toString(),"native-conversation");
+        QCOMPARE(QByteArray::fromBase64(payload.value("video").toObject().value("data_base64").toString().toLatin1()),QByteArray("synthetic-video"));
+        QCOMPARE(QByteArray::fromBase64(payload.value("audio").toObject().value("data_base64").toString().toLatin1()).size(),32000);
+        QCOMPARE(video->stops,1);QTRY_VERIFY(voice->isEnabled());
+        ComposerDraftStore store;QVERIFY(store.load("voice-message-draft\n"+composer.sessionKey()).attachments.isEmpty());
+    }
+    void legacyComputerKeepsPlayableVideoPreviewWithoutDispatch() {
+        QTemporaryDir dir;QSettings().setValue("speech/video_mode",true);QFile old(dir.path()+"/video-legacy");QVERIFY(old.open(QIODevice::WriteOnly));old.close();
+        MessageComposer composer;composer.setSessionKey("fixture\nlegacy-video");composer.show();auto *video=new FixtureVideoRecorder;
+        SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},new FixtureRecorder,{},video);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
+        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(video->starts,1);QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
+        QTest::mouseRelease(voice,Qt::LeftButton);QTRY_VERIFY(composer.findChild<QWidget *>("voicePreview")->isVisible());
+        QVERIFY(!composer.findChild<QPushButton *>("voiceSend")->isEnabled());QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+        ComposerDraftStore::flushWrites();ComposerDraftStore store;const auto draft=store.load("voice-message-draft\n"+composer.sessionKey());
+        QCOMPARE(draft.attachments.size(),2);QCOMPARE(draft.attachments[1].data,QByteArray("synthetic-video"));
+        QCOMPARE(draft.formState.value("video").toObject().value("duration_ms").toInt(),1000);
+    }
+    void telegramShortTapChangesModeWithoutOpeningDevice() {
+        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nshort");composer.show();
+        auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
+        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(voice->fullLabel(),"Video");QCOMPARE(recorder->starts,0);
+        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(voice->fullLabel(),"Voice");QCOMPARE(recorder->starts,0);
+    }
+    void telegramHoldReleaseSendsExactlyOnceAfterProviderConfirmation() {
+        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nhold");composer.show();
+        auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
+        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(recorder->starts,1);
+        QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
+        QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));QTest::mouseRelease(voice,Qt::LeftButton);
+        QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile calls(dir.path()+"/voice-actions");QVERIFY(calls.open(QIODevice::ReadOnly));
+        const auto lines=calls.readAll().trimmed().split('\n');QCOMPARE(lines.size(),1);
+        QCOMPARE(QJsonDocument::fromJson(lines[0]).object().value("action").toString(),"submit");
+        QTRY_VERIFY(voice->isEnabled());QCOMPARE(recorder->stops,1);
+    }
+    void telegramUpwardLockRetainsCaptureUntilExplicitStop() {
+        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nlock");composer.show();
+        auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
+        const auto initial=voice->mapToGlobal(voice->rect().center());
+        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(recorder->starts,1);
+        const auto global=initial-QPoint(0,65);const auto point=voice->mapFromGlobal(global);
+        QMouseEvent move(QEvent::MouseMove,QPointF(point),QPointF(global),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(voice,&move);
+        QTest::mouseRelease(voice,Qt::LeftButton,Qt::NoModifier,point);
+        QCOMPARE(recorder->stops,0);QVERIFY(composer.findChild<QPushButton *>("voiceStopPreview")->isVisible());
+        composer.findChild<QPushButton *>("voiceStopPreview")->click();QCOMPARE(recorder->stops,1);
+        QTRY_VERIFY(composer.findChild<QWidget *>("voicePreview")->isVisible());QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+    }
+    void telegramReleaseOutsideCancelsWithoutSavingOrUploading() {
+        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\ncancel");composer.show();
+        auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
+        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(recorder->starts,1);
+        QTest::mouseRelease(voice,Qt::LeftButton,Qt::NoModifier,QPoint(10,composer.height()+400));
+        QVERIFY(recorder->cancelled);QCOMPARE(recorder->stops,0);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+        QVERIFY(!composer.findChild<QWidget *>("voicePreview")->isVisible());
     }
     void captureStartsBeforeDiscovery_data() {
         QTest::addColumn<QString>("gate");
@@ -521,11 +620,11 @@ private slots:
         composer.editor()->setPlainText("Keep text while discovery waits");auto *recorder=new FixtureRecorder;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");auto *send=composer.findChild<QPushButton *>("voiceSend");
-        QTRY_VERIFY(voice->isEnabled());voice->click();
+        QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);
         // Synchronous local start is required even while either subprocess is gated.
-        QCOMPARE(recorder->starts,1);QVERIFY(voice->fullLabel().startsWith("Stop voice"));QVERIFY(composer.editor()->isReadOnly());
+        QCOMPARE(recorder->starts,1);QVERIFY(voice->fullLabel().startsWith("Send ("));QVERIFY(composer.editor()->isReadOnly());
         if(gate=="profiles-gate")QTRY_VERIFY(QFile::exists(dir.path()+"/profiles-started"));
-        voice->click();QTRY_VERIFY(composer.findChild<QPushButton *>("voiceDiscard")->isEnabled());QVERIFY(!send->isEnabled());
+        recordOrPreview(voice);QTRY_VERIFY(composer.findChild<QPushButton *>("voiceDiscard")->isEnabled());QVERIFY(!send->isEnabled());
         ComposerDraftStore::flushWrites();const auto before=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");
         QCOMPARE(before.attachments.size(),1);QVERIFY(!before.formState.value("id").toString().isEmpty());
         QVERIFY(blocked.remove());QTRY_VERIFY(send->isEnabled());ComposerDraftStore::flushWrites();
@@ -540,10 +639,10 @@ private slots:
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");auto *send=composer.findChild<QPushButton *>("voiceSend");
         auto *refresh=composer.findChild<QPushButton *>("voiceRefreshProviders");auto *provider=composer.findChild<QComboBox *>("voiceProvider");
-        QTRY_VERIFY(voice->isEnabled());voice->click();QCOMPARE(recorder->starts,1);
+        QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QCOMPARE(recorder->starts,1);
         QTRY_VERIFY(provider->toolTip().contains("Synthetic provider lookup failure"));
-        QVERIFY(voice->fullLabel().startsWith("Stop voice"));QVERIFY(composer.editor()->isReadOnly());
-        voice->click();QTRY_VERIFY(refresh->isEnabled());QVERIFY(!send->isEnabled());
+        QVERIFY(voice->fullLabel().startsWith("Send ("));QVERIFY(composer.editor()->isReadOnly());
+        recordOrPreview(voice);QTRY_VERIFY(refresh->isEnabled());QVERIFY(!send->isEnabled());
         ComposerDraftStore::flushWrites();const auto before=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");QCOMPARE(before.attachments.size(),1);
         QVERIFY(failure.remove());refresh->click();QVERIFY(!send->isEnabled());QTRY_VERIFY(send->isEnabled());
         ComposerDraftStore::flushWrites();const auto after=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");
@@ -558,7 +657,7 @@ private slots:
         {
             MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
             auto *recorder=new FixtureRecorder;SpeechComposer speech(executable,&composer,[&]{return target(composer);},recorder);
-            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QCOMPARE(recorder->starts,1);voice->click();
+            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QCOMPARE(recorder->starts,1);recordOrPreview(voice);
             auto *provider=composer.findChild<QComboBox *>("voiceProvider");QTRY_COMPARE(provider->currentText(),"Selected provider (unavailable)");
             QVERIFY(!composer.findChild<QPushButton *>("voiceSend")->isEnabled());
             ComposerDraftStore::flushWrites();const auto draft=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");
@@ -579,10 +678,10 @@ private slots:
         MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         QString conversation="native-conversation";auto *recorder=new FixtureRecorder;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer,conversation);},recorder);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QCOMPARE(recorder->starts,1);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QCOMPARE(recorder->starts,1);
         QTRY_VERIFY(QFile::exists(dir.path()+"/profiles-started"));conversation="replacement-conversation";QVERIFY(gate.remove());
         auto *provider=composer.findChild<QComboBox *>("voiceProvider");QTRY_VERIFY(provider->toolTip().contains("conversation changed"));
-        QVERIFY(voice->fullLabel().startsWith("Stop voice"));voice->click();QTRY_VERIFY(composer.findChild<QPushButton *>("voiceDiscard")->isEnabled());
+        QVERIFY(voice->fullLabel().startsWith("Send ("));recordOrPreview(voice);QTRY_VERIFY(composer.findChild<QPushButton *>("voiceDiscard")->isEnabled());
         QVERIFY(!composer.findChild<QPushButton *>("voiceSend")->isEnabled());ComposerDraftStore::flushWrites();
         const auto draft=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");QCOMPARE(draft.attachments.size(),1);
         QCOMPARE(draft.formState.value("conversation").toString(),"native-conversation");QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
@@ -594,10 +693,10 @@ private slots:
         QString conversation="native-conversation";auto *recorder=new FixtureRecorder;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer,conversation);},recorder);
         QSignalSpy finished(speech.findChild<SpeechClient *>(),&SpeechClient::requestFinished);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QCOMPARE(recorder->starts,1);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QCOMPARE(recorder->starts,1);
         QTRY_VERIFY(QFile::exists(dir.path()+"/profiles-started-native-conversation"));QVERIFY(failure.remove());
         conversation="second-conversation";composer.setSessionKey("fixture\nsecond");QVERIFY(recorder->cancelled);QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));QVERIFY(!composer.editor()->isReadOnly());
-        QTRY_VERIFY(voice->isEnabled());voice->click();QCOMPARE(recorder->starts,2);voice->click();
+        QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QCOMPARE(recorder->starts,2);recordOrPreview(voice);
         auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());
         QCOMPARE(finished.count(),1);QVERIFY(gate.remove());QTRY_COMPARE(finished.count(),2);QVERIFY(send->isEnabled());
         QVERIFY(composer.findChild<QComboBox *>("voiceProvider")->toolTip().isEmpty());ComposerDraftStore::flushWrites();
@@ -611,8 +710,8 @@ private slots:
         MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
         QSignalSpy finished(speech.findChild<SpeechClient *>(),&SpeechClient::requestFinished);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QCOMPARE(recorder->starts,1);
-        QTRY_VERIFY(QFile::exists(dir.path()+"/profiles-started"));voice->click();auto *discard=composer.findChild<QPushButton *>("voiceDiscard");QTRY_VERIFY(discard->isEnabled());
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QCOMPARE(recorder->starts,1);
+        QTRY_VERIFY(QFile::exists(dir.path()+"/profiles-started"));recordOrPreview(voice);auto *discard=composer.findChild<QPushButton *>("voiceDiscard");QTRY_VERIFY(discard->isEnabled());
         QTimer::singleShot(0,&composer,[&]{if(auto *button=composer.findChild<QPushButton *>("confirmVoiceDiscard"))button->click();});
         discard->click();QTRY_VERIFY(voice->isEnabled());QVERIFY(gate.remove());QTRY_COMPARE(finished.count(),1);ComposerDraftStore::flushWrites();
         QVERIFY(ComposerDraftStore().load("voice-message-draft\nfixture\noriginal").attachments.isEmpty());QCOMPARE(recorder->starts,1);
@@ -634,7 +733,7 @@ private slots:
         QShortcut escape(QKeySequence(Qt::Key_Escape),&window);connect(&escape,&QShortcut::activated,&composer,[&]{composer.requestInterrupt();});
         QSignalSpy interrupts(&composer,&MessageComposer::interruptRequested),sent(&composer,&MessageComposer::sendRequested);
         window.resize(700,480);window.show();window.activateWindow();composer.editor()->setFocus();QTRY_VERIFY(composer.editor()->hasFocus());
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_COMPARE(recorder->starts,1);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_COMPARE(recorder->starts,1);
         QVERIFY(composer.editor()->isReadOnly());QVERIFY(composer.editor()->hasFocus());
         QCOMPARE(composer.editor()->textCursor().anchor(),cursor.anchor());QCOMPARE(composer.editor()->textCursor().position(),cursor.position());
         QVERIFY(composer.findChild<QLabel *>("voiceRecordingHint")->isVisible());
@@ -669,7 +768,7 @@ private slots:
         QVERIFY(composer.addAttachment("fixture.txt","text/plain","existing"));
         const auto original=composer.editor()->toPlainText();auto *remove=composer.findChild<QPushButton *>("removeAttachment");QVERIFY(remove);
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
-        composer.show();auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_COMPARE(recorder->starts,1);
+        composer.show();auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_COMPARE(recorder->starts,1);
         QVERIFY(!remove->isEnabled());remove->click();QVERIFY(!composer.addAttachment("new.txt","text/plain","blocked"));
         QFile file(dir.filePath("dropped.txt"));QVERIFY(file.open(QIODevice::WriteOnly));file.write("blocked");file.close();composer.attachDroppedFiles({file.fileName()});
         QMimeData mime;mime.setUrls({QUrl::fromLocalFile(file.fileName())});
@@ -679,7 +778,7 @@ private slots:
         QVERIFY(!composer.setWaitingToSend(composer.sessionKey(),"Blocked while recording"));QCOMPARE(composer.editor()->toPlainText(),original);
         emit recorder->failed(SpeechRecorder::Failure::Recording,"Synthetic capture failure");QVERIFY(!composer.editor()->isReadOnly());QVERIFY(remove->isEnabled());
         QVERIFY(composer.setWaitingToSend(composer.sessionKey(),"Existing waiting lock"));
-        voice->click();QTRY_COMPARE(recorder->starts,2);recorder->finish();
+        recordOrPreview(voice);QTRY_COMPARE(recorder->starts,2);recorder->finish();
         QTRY_VERIFY(composer.findChild<QPushButton *>("voiceSend")->isEnabled());QVERIFY(composer.editor()->isReadOnly());QVERIFY(!remove->isEnabled());
         QVERIFY(composer.setWaitingToSend(composer.sessionKey(),{}));QVERIFY(!composer.editor()->isReadOnly());QVERIFY(remove->isEnabled());
     }
@@ -687,7 +786,7 @@ private slots:
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nlost-release");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         composer.editor()->setPlainText("Draft");composer.editor()->moveCursor(QTextCursor::End);
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
-        composer.show();auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_COMPARE(recorder->starts,1);
+        composer.show();auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_COMPARE(recorder->starts,1);
         QTest::keyPress(composer.editor(),Qt::Key_Space);QTRY_VERIFY(composer.findChild<QPushButton *>("voiceSend")->isEnabled());
         // Release occurred outside this application; a new non-repeat press is
         // ordinary editing, not a second recording operation or a swallowed key.
@@ -697,17 +796,17 @@ private slots:
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\npending");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         auto *recorder=new FixtureRecorder;recorder->startImmediately=false;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);composer.show();
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_COMPARE(recorder->starts,1);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_COMPARE(recorder->starts,1);
         QVERIFY(composer.editor()->isReadOnly());QTest::keyClick(composer.editor(),Qt::Key_Escape);QVERIFY(recorder->cancelled);QVERIFY(!composer.editor()->isReadOnly());
         emit recorder->started();QCOMPARE(voice->fullLabel(),"Voice");QVERIFY(!composer.editor()->isReadOnly());
-        recorder->startImmediately=true;voice->click();QTRY_COMPARE(recorder->starts,2);QVERIFY(composer.editor()->isReadOnly());
+        recorder->startImmediately=true;recordOrPreview(voice);QTRY_COMPARE(recorder->starts,2);QVERIFY(composer.editor()->isReadOnly());
         composer.setSessionKey("fixture\nother");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));QVERIFY(!composer.editor()->isReadOnly());
         QVERIFY(recorder->cancelled);QCOMPARE(recorder->stops,0);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
     }
     void recordingKeysLeaveOtherWindowsAndDialogsAlone() {
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nwindow-scope");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
-        composer.show();auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_COMPARE(recorder->starts,1);
+        composer.show();auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_COMPARE(recorder->starts,1);
         QPushButton other("Other window");other.show();QSignalSpy clicked(&other,&QPushButton::clicked);QTest::keyClick(&other,Qt::Key_Space);QCOMPARE(clicked.count(),1);
         QDialog dialog(&composer);dialog.setModal(true);dialog.show();QTest::keyClick(&dialog,Qt::Key_Escape);QVERIFY(!dialog.isVisible());
         QCOMPARE(recorder->stops,0);QVERIFY(!recorder->cancelled);QVERIFY(composer.editor()->isReadOnly());
@@ -732,7 +831,7 @@ private slots:
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         QString conversation="native-conversation";auto *recorder=new FixtureRecorder;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer,conversation);},recorder);QSignalSpy messages(&speech,&SpeechComposer::messageChanged);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_VERIFY(voice->fullLabel().startsWith("Stop voice"));voice->click();
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_VERIFY(voice->fullLabel().startsWith("Send ("));recordOrPreview(voice);
         auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());send->click();
         conversation="other-conversation";composer.setSessionKey("fixture\nother");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));composer.editor()->setPlainText("Other draft");
         QTRY_COMPARE(messages.count(),1);QCOMPARE(messages[0][0].toString(),"fixture\noriginal");
@@ -744,7 +843,7 @@ private slots:
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         QString conversation="native-conversation";auto *recorder=new FixtureRecorder;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer,conversation);},recorder);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_VERIFY(voice->fullLabel().startsWith("Stop voice"));voice->click();
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_VERIFY(voice->fullLabel().startsWith("Send ("));recordOrPreview(voice);
         auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());conversation="replacement-conversation";send->click();
         QTest::qWait(100);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
         ComposerDraftStore::flushWrites();QVERIFY(!ComposerDraftStore().load("voice-message-draft\nfixture\noriginal").attachments.isEmpty());
@@ -753,7 +852,7 @@ private slots:
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         QString conversation="native-conversation";auto *recorder=new FixtureRecorder;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{auto result=target(composer,conversation);result.warning="Synthetic full-context warning";return result;},recorder);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_VERIFY(voice->fullLabel().startsWith("Stop voice"));voice->click();
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_VERIFY(voice->fullLabel().startsWith("Send ("));recordOrPreview(voice);
         auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());
         bool confirmed=false;
         QTimer::singleShot(0,&composer,[&]{
@@ -771,7 +870,7 @@ private slots:
         {
             MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
             auto *recorder=new FixtureRecorder;SpeechComposer speech(executable,&composer,[&]{return target(composer);},recorder);
-            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_VERIFY(voice->fullLabel().startsWith("Stop voice"));voice->click();
+            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_VERIFY(voice->fullLabel().startsWith("Send ("));recordOrPreview(voice);
             QTRY_VERIFY(composer.findChild<QPushButton *>("voiceSend")->isEnabled());
         }
         ComposerDraftStore::flushWrites();
@@ -803,7 +902,7 @@ private slots:
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\noriginal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
         QFile lost(dir.path()+"/lost-submit");QVERIFY(lost.open(QIODevice::WriteOnly));lost.close();
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());voice->click();QTRY_VERIFY(voice->fullLabel().startsWith("Stop voice"));voice->click();
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);QTRY_VERIFY(voice->fullLabel().startsWith("Send ("));recordOrPreview(voice);
         auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());send->click();QTRY_COMPARE(send->text(),"Check message");send->click();QTRY_VERIFY(voice->isEnabled());
         QFile actions(dir.path()+"/voice-actions");QVERIFY(actions.open(QIODevice::ReadOnly));const auto submit=QJsonDocument::fromJson(actions.readLine()).object();const auto status=QJsonDocument::fromJson(actions.readLine()).object();
         QCOMPARE(submit.value("action").toString(),"submit");QCOMPARE(status.value("action").toString(),"status");QCOMPARE(submit.value("request_id"),status.value("message_id"));QVERIFY(actions.readLine().isEmpty());
@@ -841,7 +940,7 @@ private slots:
             if(open) { open->click(); if(!openSucceeds) fallback=hint->text().startsWith("Could not open system settings automatically."); }
             if(!open || !openSucceeds) dialog->findChild<QPushButton *>("voicePermissionClose")->click();
         });
-        inspect.start(); voice->click(); QTRY_VERIFY(inspected);
+        inspect.start(); recordOrPreview(voice); QTRY_VERIFY(inspected);
         QVERIFY(compact); QVERIFY(noTranscript); QVERIFY(instructions); QVERIFY(buttonCorrect);
         QCOMPARE(opened,supportsSettings?1:0);
         if(supportsSettings) { QCOMPARE(openedUrl,SpeechComposer::microphoneSettingsUrl()); if(!openSucceeds) QVERIFY(fallback); }
@@ -852,7 +951,7 @@ private slots:
         inspected=false; inspect.start(); composer.findChild<ToolbarChip *>("voiceResult")->click(); QTRY_VERIFY(inspected);
         QCOMPARE(recorder->starts,1);
         // A later device failure mentioning permission is still a generic error.
-        recorder->failure=SpeechRecorder::Failure::Recording; voice->click(); QTRY_COMPARE(recorder->starts,2);
+        recorder->failure=SpeechRecorder::Failure::Recording; recordOrPreview(voice); QTRY_COMPARE(recorder->starts,2);
         QVERIFY(!composer.findChild<QDialog *>("voicePermissionDialog"));
         bool generic=false;
         QTimer::singleShot(0,&composer,[&] {
@@ -871,9 +970,9 @@ private slots:
         auto *recorder=new FixtureRecorder; recorder->startImmediately=started;
         SpeechComposer speech(fixture(dir.path()),&composer,[&] {return target(composer);},recorder);
         QSignalSpy finished(speech.findChild<SpeechClient *>(),&SpeechClient::requestFinished);
-        composer.show(); auto *voice=composer.findChild<ToolbarChip *>("voiceRecord"); QTRY_VERIFY(voice->isEnabled()); voice->click();
-        QTRY_VERIFY(started ? voice->fullLabel().startsWith("Stop voice") : voice->fullLabel()=="Opening microphone…");
-        composer.hide(); QVERIFY(recorder->cancelled); QCOMPARE(voice->fullLabel(),"Voice");
+        composer.show(); auto *voice=composer.findChild<ToolbarChip *>("voiceRecord"); QTRY_VERIFY(voice->isEnabled()); recordOrPreview(voice);
+        QTRY_VERIFY(started ? voice->fullLabel().startsWith("Send (") : voice->fullLabel()=="Opening recorder…");
+        composer.hide(); if(started){QCOMPARE(recorder->stops,1);QTRY_VERIFY(composer.findChild<QWidget *>("voicePreview")->isVisibleTo(&composer));}else QVERIFY(recorder->cancelled); QTRY_COMPARE(voice->fullLabel(),"Voice");
         // Late native callbacks from a cancelled capture cannot submit audio.
         recorder->stop(); QTRY_COMPARE(finished.count(),1); ComposerDraftStore::flushWrites();
         QFile payload(dir.path()+"/payload"); QVERIFY(payload.open(QIODevice::ReadOnly));

@@ -143,6 +143,9 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             p.drawPath(left); p.drawPath(right);
             if (name == "connect") p.drawLine(8, 12, 16, 12);
             else { p.drawLine(11, 3, 13, 6); p.drawLine(11, 18, 13, 21); }
+        } else if (name == "video") {
+            p.drawRoundedRect(QRectF(3,5,11,14),2,2);
+            QPainterPath lens;lens.moveTo(14,9);lens.lineTo(21,5);lens.lineTo(21,19);lens.lineTo(14,15);p.drawPath(lens);
         } else if (name == "microphone") {
             p.drawRoundedRect(QRectF(9, 3, 6, 12), 3, 3);
             p.drawArc(QRectF(6, 8, 12, 11), 180 * 16, 180 * 16);

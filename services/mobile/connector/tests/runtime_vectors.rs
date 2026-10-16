@@ -953,3 +953,75 @@ async fn a_refused_result_shortens_the_poll_until_its_next_attempt() {
     tokio::time::advance(std::time::Duration::from_secs(30)).await;
     assert_eq!(connector.poll_wait(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn video_voice_is_capability_gated_and_accepted_once_with_both_media() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let harness = harness("video-voice");
+    let connector = &harness.connector;
+    capable(connector);
+    let mut mp4 = Vec::new();
+    for (kind, data) in [
+        (b"ftyp", b"isom0000".as_slice()),
+        (b"moov", b"".as_slice()),
+        (b"mdat", b"video".as_slice()),
+    ] {
+        mp4.extend_from_slice(&((data.len() + 8) as u32).to_be_bytes());
+        mp4.extend_from_slice(kind);
+        mp4.extend_from_slice(data);
+    }
+    let request = |id: &str| {
+        json!({"request_id":id,"computer_id":"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb","operation":"voice_submit","session":"codex/example/session",
+        "payload":{"request_id":id,"expected_run_id":"run","expected_conversation_id":"conversation","speech":{"machine_id":"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb","profile_id":"fixture"},
+        "audio":{"format":"pcm_s16le","sample_rate":16000,"channels":1,"data_base64":STANDARD.encode(vec![0u8;32000])},
+        "video":{"format":"mp4","data_base64":STANDARD.encode(&mp4),"duration_ms":1000,"width":480,"height":480}}})
+    };
+    let refused = connector
+        .execute(request("11111111-1111-4111-8111-111111111111"))
+        .await
+        .unwrap();
+    assert_eq!(
+        refused,
+        Outcome::Finished(
+            json!({"state":"failed","result":null,"error":"native video recording ABI is unavailable"})
+        )
+    );
+    assert!(connector.native.calls.borrow().is_empty());
+    let mut flags = connector.flags.get();
+    flags.voice_video = true;
+    connector.flags.set(flags);
+    assert!(flags.advertised(false)["features"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("voice_video")));
+    let id = "22222222-2222-4222-8222-222222222222";
+    let upload = request(id);
+    let result = json!({"schema":1,"message":{"id":id,"run_id":"run","conversation_id":"conversation","state":"queued","revision":1,
+        "video":{"request_id":id,"index":1,"name":"video.mp4","mime":"video/mp4","bytes":mp4.len(),"duration_ms":1000,"width":480,"height":480}}});
+    connector.native.answer(
+        vec![
+            "voice".into(),
+            "codex/example/session".into(),
+            "--json".into(),
+        ],
+        result.clone(),
+    );
+    let accepted = connector.execute(upload.clone()).await.unwrap();
+    assert_eq!(
+        accepted,
+        Outcome::Finished(json!({"state":"completed","result":result,"error":null}))
+    );
+    assert_eq!(
+        connector.execute(upload.clone()).await.unwrap(),
+        Outcome::Replayed
+    );
+    assert_eq!(connector.native.calls.borrow().len(), 1);
+    let mut wrong = result;
+    wrong["message"]["video"]["bytes"] = json!(1);
+    assert!(!zerus_mobile_connector::speech::voice_result_valid(
+        "voice_submit",
+        &wrong,
+        &upload["payload"]
+    )
+    .unwrap());
+}

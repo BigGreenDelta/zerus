@@ -16,6 +16,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -104,7 +106,7 @@ import androidx.compose.ui.unit.dp
                 } }, onClick = { profilesOpen = false; speech.chooseProfile(profile.id, target, choicePreview?.audio?.id) }) }
             }
         }
-        Text("Tap Send after recording. Zerus keeps the audio in conversation history, transcribes it, then sends the recognized text to the agent. Your typed draft is kept separately. Your gateway can read the audio.", style = MaterialTheme.typography.bodySmall)
+        Text("Hold to record and release to send; slide up to lock, or left to cancel. Stop a locked recording to preview it. Zerus keeps the media in conversation history, transcribes it, then sends the recognized text to the agent. Your typed draft is kept separately. Your gateway can read the recordings.", style = MaterialTheme.typography.bodySmall)
         if (speech.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (speech.profileNotice.isNotBlank()) Text(speech.profileNotice, style = MaterialTheme.typography.bodySmall)
         if (speech.notice.isNotBlank()) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
@@ -128,7 +130,8 @@ import androidx.compose.ui.unit.dp
     val context = LocalContext.current
     val view = LocalView.current
     val navigation = model.speechNavigation
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycle = lifecycleOwner.lifecycle
     val obscuration = LocalConversationObscuration.current
     val saveCurrentEditor by rememberUpdatedState(saveEditor)
     var settings by remember(target, navigation) { mutableStateOf(false) }
@@ -139,7 +142,8 @@ import androidx.compose.ui.unit.dp
     var dismissedFailure by remember(target, navigation) { mutableStateOf<Long?>(null) }
     var focused by remember(target, navigation) { mutableStateOf(false) }
     val activationKeys = remember(target, navigation) { VoiceActivationKeys() }
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        val granted = grants.values.all { it }
         val captured = permissionTarget; permissionTarget = null
         if (!granted && captured?.first == model.selected?.target && captured?.second == model.speechNavigation) {
             speech.permissionDenied(); settings = false; systemSettingsError = false; microphoneDenied = true
@@ -153,16 +157,18 @@ import androidx.compose.ui.unit.dp
         if (current.text.isNotEmpty() || current.attachments.isNotEmpty() || model.pickerDraft?.target == target) return null
         if (speech.startReason(target).isNotBlank()) { settings = true; return null }
         model.attachments.stopAudio()
-        if (!SpeechMicrophoneAccess.granted(context)) {
+        val required = if (speech.videoMode) arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA) else arrayOf(Manifest.permission.RECORD_AUDIO)
+        if (required.any { androidx.core.content.ContextCompat.checkSelfPermission(context, it) != android.content.pm.PackageManager.PERMISSION_GRANTED }) {
             permissionTarget = target to model.speechNavigation
-            permission.launch(Manifest.permission.RECORD_AUDIO)
+            permission.launch(required)
             return null
         }
         val feedback: (VoiceCaptureFeedback.Event) -> Unit = {
             if (model.selected?.target == target && model.speechNavigation == navigation && obscuration?.obscured != true &&
                 lifecycle.currentState == Lifecycle.State.RESUMED && view.isAttachedToWindow) VoiceHaptics.perform(view, it)
         }
-        return (if (gesture) speech.startGesture(target, feedback) else speech.start(target, feedback)).also { ownedCapture = it }
+        return (if (speech.videoMode) speech.startVideo(target, gesture, RoundVideoRecorder(context, lifecycleOwner), feedback)
+            else if (gesture) speech.startGesture(target, feedback) else speech.start(target, feedback)).also { ownedCapture = it }
     }
     fun stopOwned() { ownedCapture?.let { speech.stopCapture(it, userInitiated = false) } }
     DisposableEffect(target, navigation, lifecycle) {
@@ -181,13 +187,14 @@ import androidx.compose.ui.unit.dp
     val currentStart by rememberUpdatedState<(Boolean) -> Long?>(::start)
     fun activate(captureId: Long?): Boolean {
         if (!currentEnabled) return false
-        if (captureId != null) speech.stopCapture(captureId) else currentStart(false)
+        if (captureId != null) speech.sendCapture(captureId) else currentStart(false)
         return true
     }
     val currentActivate by rememberUpdatedState(::activate)
     val cancelDistance = with(LocalDensity.current) { 80.dp.toPx() }
-    val gesture = remember(target, navigation, cancelDistance) { VoiceGesture(cancelDistance) }
-    val label = if (speech.recording) "Stop recording" else "Voice input"
+    val lockDistance = with(LocalDensity.current) { 57.dp.toPx() }
+    val gesture = remember(target, navigation, cancelDistance, lockDistance) { VoiceGesture(cancelDistance, lockDistance) }
+    val label = if (speech.recordingLocked) "Send recording" else if (speech.recording) "Recording" else if (speech.videoMode) "Video input" else "Voice input"
     val actionCapture = speech.activeCaptureId
     val actionColor = if (speech.recording) MaterialTheme.colorScheme.errorContainer else if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val actionContent = if (speech.recording) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimary
@@ -206,43 +213,72 @@ import androidx.compose.ui.unit.dp
             }
         }.focusable(enabled).semantics {
             role = Role.Button; contentDescription = label
-            stateDescription = if (speech.recording) "Recording. Slide left to cancel." else "Hold to record. Release to review."
+            stateDescription = if (speech.recordingLocked) "Recording locked. Send or stop to preview." else if (speech.recording) "Slide left to cancel, up to lock." else "Tap to switch microphone and camera. Hold to record, release to send."
             if (!enabled) disabled()
-            onClick(label = if (speech.recording) "Stop recording" else "Start recording") {
+            onClick(label = if (speech.recording) "Send recording" else "Start locked recording") {
                 currentActivate(actionCapture)
             }
-            if (actionCapture != null) customActions = listOf(CustomAccessibilityAction("Cancel recording") { speech.cancelCapture(actionCapture); true })
+            customActions = if (actionCapture != null) listOf(
+                CustomAccessibilityAction("Stop and preview") { speech.stopCapture(actionCapture); true },
+                CustomAccessibilityAction("Cancel recording") { speech.cancelCapture(actionCapture); true })
+            else listOf(CustomAccessibilityAction("Switch microphone and camera") { speech.toggleMode(target); true })
         }.pointerInput(target, navigation, gesture) {
-            // These keys do not change when capture starts or the timer ticks.
+            fun apply(action: VoiceGesture.Action?, interrupted: Boolean = false) {
+                when (action) {
+                    VoiceGesture.Action.Start -> gesture.captured(currentStart(true))
+                    VoiceGesture.Action.SwitchMode -> speech.toggleMode(target)
+                    is VoiceGesture.Action.Lock -> speech.lockCapture(action.captureId)
+                    is VoiceGesture.Action.Finish -> when (action.end) {
+                        VoiceGesture.End.Send -> speech.sendCapture(action.captureId)
+                        VoiceGesture.End.Cancel -> speech.finishGesture(action.captureId, true)
+                        VoiceGesture.End.Preview -> speech.finishGesture(action.captureId, false, userInitiated = !interrupted)
+                    }
+                    null -> Unit
+                }
+            }
+            // Keep this pointer owner mounted when capture starts, locks or the timer ticks.
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                 down.consume()
-                if (!gesture.begin()) return@awaitEachGesture
-                try {
-                    if (currentEnabled) {
-                        if (speech.recording) speech.stop() else gesture.captured(currentStart(true))
-                    }
+                if (!currentEnabled) return@awaitEachGesture
+                val existing = speech.activeCaptureId
+                if (existing != null) {
+                    // Locked recording sends on an intentional click; losing the pointer never sends.
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
-                        val pointer = event.changes.firstOrNull { it.id == down.id }
-                        if (pointer == null || event.changes.any { it.id != down.id && it.pressed }) break
-                        val decision = gesture.move(pointer.position.x - down.position.x)
-                        ownedCapture?.let { speech.moveGesture(it, gesture.progress) }
-                        decision?.let { speech.finishGesture(it.captureId, it.cancel) }
+                        val pointer = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (event.changes.any { it.id != down.id && it.pressed }) break
                         pointer.consume()
                         if (!pointer.pressed) {
-                            gesture.release()?.let { speech.finishGesture(it.captureId, it.cancel) }
+                            if (speech.recordingLocked && pointer.position.x in 0f..size.width.toFloat() &&
+                                pointer.position.y in 0f..size.height.toFloat()) speech.sendCapture(existing)
                             break
                         }
                     }
-                } finally {
-                    gesture.interrupt()?.let { speech.finishGesture(it.captureId, it.cancel, userInitiated = false) }
+                    return@awaitEachGesture
                 }
+                if (!gesture.begin()) return@awaitEachGesture
+                var waiting = true
+                val deadline = android.os.SystemClock.uptimeMillis() + 150L
+                try {
+                    while (true) {
+                        val event = if (waiting) withTimeoutOrNull((deadline - android.os.SystemClock.uptimeMillis()).coerceAtLeast(1)) {
+                            awaitPointerEvent(PointerEventPass.Initial)
+                        } else awaitPointerEvent(PointerEventPass.Initial)
+                        if (event == null) { waiting = false; apply(gesture.hold()); continue }
+                        val pointer = event.changes.firstOrNull { it.id == down.id }
+                        if (pointer == null || event.changes.any { it.id != down.id && it.pressed }) break
+                        apply(gesture.move(pointer.position.x - down.position.x, pointer.position.y - down.position.y))
+                        ownedCapture?.let { speech.moveGesture(it, gesture.progress, gesture.lockProgress) }
+                        pointer.consume()
+                        if (!pointer.pressed) { apply(gesture.release()); break }
+                    }
+                } finally { apply(gesture.interrupt(), interrupted = true) }
             }
         }) {
         Box(contentAlignment = Alignment.Center) {
             ComposerActionFace(actionColor, actionContent, focused) {
-                Icon(if (speech.recording) Icons.Default.Stop else Icons.Default.Mic, null,
+                Icon(if (speech.recordingLocked) Icons.AutoMirrored.Filled.Send else if (speech.videoMode) Icons.Default.Videocam else Icons.Default.Mic, null,
                     Modifier.size(22.dp).graphicsLayer { translationX = -12.dp.toPx() * speech.gestureCancelProgress })
             }
         }
@@ -255,9 +291,9 @@ import androidx.compose.ui.unit.dp
     }
     if (microphoneDenied) {
         ObscureConversation()
-        ZerusAlertDialog(onDismissRequest = { microphoneDenied = false }, title = { Text("Microphone access is off") },
+        ZerusAlertDialog(onDismissRequest = { microphoneDenied = false }, title = { Text("Recording access is off") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("In Android app settings, open Permissions, then Microphone, and allow access while using Zerus. Return here and hold Voice input to record, or activate it with accessibility controls.")
+                Text("In Android app settings, open Permissions and allow Microphone and Camera access while using Zerus. Return here and hold Voice input to record, or activate it with accessibility controls.")
                 if (systemSettingsError) Text("Android could not open this page. Open Android Settings, then Apps, Zerus, Permissions and Microphone.", color = MaterialTheme.colorScheme.error)
             } },
             confirmButton = { TextButton(onClick = {
@@ -288,6 +324,9 @@ import androidx.compose.ui.unit.dp
         Box(Modifier.size(8.dp).background(MaterialTheme.colorScheme.error, CircleShape))
         Text(elapsed, modifier = Modifier.semantics { contentDescription = "Recording $elapsed" }, maxLines = 1,
             style = style.copy(fontFeatureSettings = "tnum"), color = MaterialTheme.colorScheme.onSurface)
+        if (speech.touchRecording) Icon(Icons.Default.Lock, "Slide up to lock", Modifier.size(18.dp).graphicsLayer {
+            translationY = -12.dp.toPx() * speech.gestureLockProgress
+        }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         BoxWithConstraints(Modifier.weight(1f).clipToBounds(), contentAlignment = Alignment.Center) {
             val cueText = if (constraints.maxWidth >= fullCueWidth) "Slide to cancel" else "Cancel"
             if (speech.touchRecording) Row(
@@ -313,17 +352,20 @@ import androidx.compose.ui.unit.dp
     var confirmDiscard by remember { mutableStateOf<VoiceDraft?>(null) }
     var providerSettings by remember { mutableStateOf<VoiceDraft?>(null) }
     if (!speech.recording && !speech.savingRecording && draft == null) return
-    if (speech.touchRecording) return
+    if (speech.touchRecording && speech.videoRecorder == null) return
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        speech.videoRecorder?.let { LiveVideoCircle(it) }
         when {
             speech.recording -> {
                 val recordingId = speech.activeCaptureId
                 val configuration = LocalConfiguration.current
                 if (configuration.keyboard != Configuration.KEYBOARD_NOKEYS && configuration.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO)
                     Text("Space or Esc stops recording. Your typed draft is kept.", style = MaterialTheme.typography.bodySmall)
-                FlowRow(Modifier.fillMaxWidth()) {
+                if (speech.touchRecording) Text("Slide up to lock, left to cancel", style = MaterialTheme.typography.bodySmall)
+                else FlowRow(Modifier.fillMaxWidth()) {
                     TextButton(onClick = { recordingId?.let(speech::stopCapture) }) { Text("Stop recording") }
                     TextButton(onClick = { recordingId?.let(speech::cancelCapture) }) { Text("Cancel") }
+                    TextButton(onClick = { recordingId?.let(speech::sendCapture) }) { Text("Send") }
                 }
             }
             speech.savingRecording -> { Text("Saving recording…"); LinearProgressIndicator(Modifier.fillMaxWidth()) }
@@ -333,7 +375,7 @@ import androidx.compose.ui.unit.dp
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
                     Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (model.selected?.target != draft.target) Text("For ${draft.target.session}", style = MaterialTheme.typography.labelMedium)
-                        VoiceAudio(model, draft.target, draft.audio.displayed(), draft.durationMs, status = "Pending", trailing = {
+                        val actions: @Composable () -> Unit = {
                             Row {
                                 ComposerActionButton(onClick = { confirmDiscard = draft }, enabled = true,
                                     containerColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .12f), contentColor = MaterialTheme.colorScheme.onSurface,
@@ -351,7 +393,11 @@ import androidx.compose.ui.unit.dp
                                     Icon(Icons.AutoMirrored.Filled.Send, "Send voice message", Modifier.size(22.dp))
                                 }
                             }
-                        })
+                        }
+                        if (draft.video != null) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            VideoCircle(model, draft.target, draft.video.displayed(draft.audio.id), diameter = 160.dp)
+                            Column { Text("Pending", style = MaterialTheme.typography.labelSmall); actions() }
+                        } else VoiceAudio(model, draft.target, draft.audio.displayed(), draft.durationMs, status = "Pending", trailing = actions)
                         if (speech.loading) Text("Checking transcription provider…", style = MaterialTheme.typography.bodySmall)
                         else if (providerReason.isNotBlank()) {
                             Text(providerReason, style = MaterialTheme.typography.bodySmall)
@@ -415,8 +461,8 @@ import androidx.compose.ui.unit.dp
 @Composable internal fun VoiceMessageContent(model: ZerusViewModel, target: Target?, voice: VoiceMessage) {
     var expanded by rememberSaveable(voice.id) { mutableStateOf(false) }
     val local = model.speech.outgoing.find { it.id == voice.id && target?.let(it::belongsTo) == true }
-    Text("Voice message", style = MaterialTheme.typography.labelMedium)
-    VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform)
+    Text(if (voice.video != null) "Video message" else "Voice message", style = MaterialTheme.typography.labelMedium)
+    if (voice.video != null) VideoCircle(model, target, voice.video) else VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform)
     Text(VoiceProtocol.label(voice.state), style = MaterialTheme.typography.bodySmall)
     val error = local?.error?.ifBlank { voice.error } ?: voice.error
     if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)

@@ -5,12 +5,13 @@ acknowledgement of exactly this request; a mismatched one is uncertain for a
 mutation and failed for a read, and is never repeated. A computer without the
 native voice ABI advertises and runs nothing.
 """
+import base64
 import json
 import unittest
 import uuid
 
 from connector_harness import stopped_journal
-from session_harness import CONVERSATION, RUN, SESSION, SessionCase, submission
+from session_harness import CONVERSATION, RUN, SESSION, SessionCase, submission, help_text
 
 VOICE_MISMATCH = "native voice acknowledgement did not match"
 
@@ -93,6 +94,26 @@ class VoiceMessageTests(SessionCase):
         self.assertEqual(await self.submit(submission("speech", "valid/voice_submit"), process),
                          self.failed("native voice message ABI is unavailable"))
         self.assertEqual(self.native_calls(), [])
+
+    async def test_video_media_crosses_stdio_once_and_requires_additive_capability(self):
+        mp4 = b"".join((8 + len(data)).to_bytes(4, "big") + kind + data
+                       for kind, data in ((b"ftyp", b"isom0000"), (b"moov", b""), (b"mdat", b"video")))
+        request = submission("speech", "valid/voice_submit")
+        request["payload"]["audio"]["data_base64"] = base64.b64encode(bytes(32000)).decode()
+        request["payload"]["video"] = {"format": "mp4", "data_base64": base64.b64encode(mp4).decode(),
+                                         "duration_ms": 1000, "width": 480, "height": 480}
+        metadata = {"request_id": "{{stdin.request_id}}", "index": 1, "name": "video.mp4", "mime": "video/mp4",
+                    "bytes": len(mp4), "duration_ms": 1000, "width": 480, "height": 480}
+        self.hgs.script(self.rules({"argv": ["--help"], "stdout_text": help_text("voice") + "voice-video-v1\n"},
+                                  {"argv": ["voice", SESSION, "--json"], "stdout": voice_message(video=metadata)}))
+        process = await self.launch()
+        features = self.relay.heartbeats()[-1].body["snapshot"]["mobile_capabilities"]["features"]
+        self.assertIn("voice_video", features)
+        result = await self.submit(request, process)
+        expected = voice_message(request["request_id"], video={**metadata, "request_id": request["request_id"]})
+        self.assertEqual(result, {"state": "completed", "result": expected, "error": None})
+        self.assertEqual(json.loads(self.native_calls()[-1]["stdin"]), {"action": "submit", **request["payload"]})
+        await self.assert_replays_once_delivered(request, result, process)
 
     async def test_a_delivered_status_read_is_kept_only_two_minutes(self):
         status = submission("speech", "valid/voice_status")

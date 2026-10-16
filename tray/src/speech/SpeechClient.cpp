@@ -3,6 +3,8 @@
 #include <QJsonDocument>
 #include <QPointer>
 #include <QRegularExpression>
+#include <QThreadPool>
+#include <QRunnable>
 
 namespace {
 ProcessRunner::Request command(const QString &executable, const QString &host, QStringList args)
@@ -78,15 +80,22 @@ void SpeechClient::requestVoice(const QString &host, const QString &session, con
 void SpeechClient::dispatch(const QString &host, const QJsonObject &payload, Reply done, const QString &session)
 {
     auto request = command(m_executable, host, session.isEmpty() ? QStringList{"speech", "--json"} : QStringList{"voice", session, "--json"});
-    request.input = QJsonDocument(payload).toJson(QJsonDocument::Compact);
-    ProcessRunner::run(std::move(request), this, [done, redact = management(payload)](const ProcessRunner::Result &result) {
-        const auto error = failure(result, redact);
-        if (!error.isEmpty()) { done({}, error); return; }
-        QJsonParseError parse;
-        const auto json = QJsonDocument::fromJson(result.standardOutput, &parse);
-        if (result.standardOutput.size() > 1024 * 1024 || parse.error != QJsonParseError::NoError || !json.isObject()
-            || json.object().value("schema").toInt() != 1) { done({}, tr("The speech computer returned an invalid response.")); return; }
-        auto reply = json.object(); reply.remove("client_dispatch_started");
-        done(reply, {});
-    });
+    auto start = [this, request, done, redact=management(payload)](QByteArray input) mutable {
+        auto command=request;command.input=std::move(input);
+        ProcessRunner::run(std::move(command), this, [done, redact](const ProcessRunner::Result &result) {
+            const auto error = failure(result, redact);
+            if (!error.isEmpty()) { done({}, error); return; }
+            QJsonParseError parse;
+            const auto json = QJsonDocument::fromJson(result.standardOutput, &parse);
+            if (result.standardOutput.size() > 1024 * 1024 || parse.error != QJsonParseError::NoError || !json.isObject()
+                || json.object().value("schema").toInt() != 1) { done({}, tr("The speech computer returned an invalid response.")); return; }
+            auto reply=json.object();reply.remove("client_dispatch_started");done(reply, {});
+        });
+    };
+    if(!payload.contains("video")){start(QJsonDocument(payload).toJson(QJsonDocument::Compact));return;}
+    const QPointer<SpeechClient> guard(this);
+    QThreadPool::globalInstance()->start(QRunnable::create([guard,payload,start]() mutable {
+        const auto input=QJsonDocument(payload).toJson(QJsonDocument::Compact);
+        if(guard)QMetaObject::invokeMethod(guard,[guard,input,start]() mutable {if(guard)start(input);},Qt::QueuedConnection);
+    }));
 }

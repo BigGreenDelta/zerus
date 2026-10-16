@@ -171,6 +171,13 @@ once (status 128 plus the signal) without touching the child, leaving its row
 `running` for restart recovery. A journal failure stops the connector with
 status 1, as it stops Python's.
 
+Video messages add `voice_video` only when native help contains `voice-video-v1`
+and the ordinary voice ABI. The optional bounded MP4 travels with derived PCM
+in the same `voice_submit`, under its existing durable UUID. Old native binaries
+refuse video before invocation; a mismatched video acknowledgement remains
+uncertain. `test_bb_voice` exercises the same media/replay contract against both
+connector implementations. See [voice and video messages](../../../docs/voice-messages.md).
+
 ## Divergences from the Python connector
 
 Each divergence is listed in the design; this build implements every row.

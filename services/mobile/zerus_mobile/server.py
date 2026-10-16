@@ -256,7 +256,7 @@ async def pair(request):
 async def capabilities(request):
     await auth(request, "devices")
     providers = ["fcm"] if request.app[PUSH_WORKER].fcm is not None else []
-    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES)})
+    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES | {voice.video.FEATURE})})
 
 
 def small_response(request):
@@ -362,6 +362,10 @@ async def submit(request):
     await blocking(validate_request, value)
     if value["operation"] == "send":
         await blocking(validate_send, value["payload"])
+    elif value["operation"] == "voice_submit" and "video" in value["payload"]:
+        maximum = voice.video.MAX_REQUEST_BYTES
+        if await blocking(encoded_size, value, maximum) > maximum:
+            raise web.HTTPRequestEntityTooLarge(max_size=maximum, actual_size=maximum + 1)
     elif value["operation"] in {"speech_submit", "voice_submit"}:
         if await blocking(encoded_size, value, 6 * 1024 * 1024) > 6 * 1024 * 1024:
             raise web.HTTPRequestEntityTooLarge(max_size=6 * 1024 * 1024, actual_size=6 * 1024 * 1024 + 1)

@@ -36,7 +36,33 @@ def message(request, state="queued"):
                       "waveform": [0] * 64}}}
 
 
+def video_command():
+    request = command()
+    data = b""
+    for kind, content in ((b"ftyp", b"isom0000"), (b"moov", b""), (b"mdat", b"fixture")):
+        data += (8 + len(content)).to_bytes(4, "big") + kind + content
+    request["payload"]["audio"]["data_base64"] = base64.b64encode(bytes(32_000)).decode()
+    request["payload"]["video"] = {"format": "mp4", "data_base64": base64.b64encode(data).decode(),
+                                   "duration_ms": 1000, "width": 480, "height": 480}
+    return request
+
+
 class VoiceValidationTests(unittest.TestCase):
+    def test_video_keeps_existing_speech_identity_and_rejects_unbounded_or_incomplete_media(self):
+        request = video_command()
+        validate_request(request)
+        for field, value in (("duration_ms", 60_001), ("duration_ms", True), ("width", 0),
+                             ("height", 1921), ("format", "avi"), ("data_base64", "AAAA"),
+                             ("poster_base64", "AAAA"), ("path", "/workspace/video.mp4")):
+            changed = copy.deepcopy(request)
+            changed["payload"]["video"][field] = value
+            with self.assertRaises(ValueError, msg=field):
+                validate_request(changed)
+        changed = copy.deepcopy(request)
+        changed["payload"]["audio"]["data_base64"] = base64.b64encode(bytes(96_000)).decode()
+        with self.assertRaises(ValueError):
+            validate_request(changed)
+
     def test_operations_keep_session_and_exact_native_identity(self):
         for operation in voice.OPERATIONS:
             request = command(operation)
@@ -69,6 +95,25 @@ class VoiceConnectorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.connector.journal.close()
         self.temp.cleanup()
+
+    async def test_video_needs_verified_native_capability_and_keeps_the_same_journal_identity(self):
+        request = video_command()
+        with patch.object(self.connector, "native", AsyncMock()) as native:
+            refused = await self.connector.execute(request)
+            self.assertEqual(refused["state"], "failed")
+            native.assert_not_awaited()
+        request = video_command()
+        self.connector.video_supported = True
+        result = message(request)
+        result["message"]["video"] = {"request_id": request["request_id"], "index": 1,
+                                      "name": "video.mp4", "mime": "video/mp4", "duration_ms": 1000, "width": 480, "height": 480,
+                                      "bytes": len(base64.b64decode(request["payload"]["video"]["data_base64"]))}
+        with patch.object(self.connector, "native", AsyncMock(return_value=result)) as native:
+            accepted = await self.connector.execute(request)
+            self.assertEqual(accepted["state"], "completed", accepted)
+            self.assertEqual(await self.connector.execute(request), accepted)
+            native.assert_awaited_once_with(["voice", request["session"], "--json"],
+                                           {"action": "submit", **request["payload"]}, timeout=30)
 
     async def test_acceptance_is_scoped_durable_and_duplicate_never_reinvokes_native(self):
         request = command()

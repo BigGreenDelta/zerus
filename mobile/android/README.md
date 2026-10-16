@@ -327,7 +327,7 @@ worktree, created only after Create session; None and existing or manually
 created worktrees remain available. A launch is confirmed only by its own native
 request identity.
 
-## Voice input
+## Voice and video messages
 
 Settings includes **Voice messages**, with an independently selected transcription
 computer and host-configured profile. Open a conversation to discover the computers
@@ -363,8 +363,8 @@ provider revision: if it changes, explicitly select the provider again before
 sending. See [provider configuration](../../docs/speech-providers.md).
 
 With an empty message and no attachments, the composer shows a microphone in the
-Send position. Hold it to record, release to keep a preview, or slide left to
-cancel the recording. Typing text or adding an attachment restores the Send
+Send position. Tap to switch microphone/camera, hold to record and release to send. Slide left
+to cancel or up to lock. Stop a locked recording to retain a preview. Typing text or adding an attachment restores the Send
 button. While holding, a compact recording row replaces the empty editor: a red
 indicator, elapsed time with tenths of a second, and **Slide to cancel** with a
 left chevron. When the full instruction cannot fit at the current font size, the
@@ -380,8 +380,8 @@ prompts, rejected starts and late gesture events do not produce extra pulses.
 Android's vibration settings are respected. Haptic availability never blocks
 recording or saving its preview.
 Local capture starts without waiting for provider discovery; discovery refreshes
-in the background. Capture lasts at most two minutes. Releasing the microphone,
-stopping or leaving the conversation never sends a message. The preview is an
+in the background. Audio capture lasts at most two minutes. Releasing an owned hold requests sending;
+stopping a locked recording or leaving the conversation keeps a preview without sending. The audio preview is an
 encrypted durable WAV file on this phone. A compact **Pending** card contains
 playback and seeking, with Delete and Send icon buttons on the right. All three
 buttons keep 48 dp touch targets and accessible **Play**, **Discard** and **Send
@@ -403,6 +403,13 @@ The composer preview scrolls within a bounded area while the software keyboard i
 open, keeping the typed draft visible and editable after capture stops.
 With a narrow screen, large system text and an expanded editor, you may need to
 close the keyboard to reach the preview controls.
+
+Video mode records up to 60 seconds and 10 MiB with CameraX, with an owned circular
+preview and a camera switch. The phone extracts mono 16 kHz speech audio on a
+worker; one message UUID retains the original MP4 and its derived WAV. The agent
+receives the recognized text. Video needs the additive `voice_video` capability
+on the relay and conversation computer. Older clients keep audio playback.
+
 
 While recording, the typed draft and selection remain saved beneath the recording
 row, and ordinary message sending and attachment changes are disabled. With a hardware keyboard, **Space** or **Esc** stops capture
@@ -491,7 +498,8 @@ adb -s emulator-5580 shell pm clear app.zerus.mobile
 adb -s emulator-5580 shell am instrument -w app.zerus.mobile.test/app.zerus.mobile.VoiceGestureSmokeInstrumentation
 ```
 
-It checks hold/release preview, left-swipe cancellation, interrupted pointers,
+It checks short-tap mode switching, retained preview when provider discovery is
+unavailable, left-swipe cancellation, interrupted pointers,
 background/navigation stop, permission results after release, preserved drafts
 and zero voice uploads before a separate Send. The compact Pending preview checks
 cover action order and touch targets, local playback and seeking, discard
@@ -798,3 +806,15 @@ outcomes survive later manual project moves, and the shared catalog keeps its
 existing schema for older desktop binaries. The sidecar is bounded to 10,000
 permanent receipts; at capacity new assignments fail before changing metadata.
 Receipts never enter swarm exports or peer synchronization.
+
+### Synthetic video-message qualification
+
+Use a fresh, isolated Android emulator with emulated front/back cameras (never a
+personal device or webcam). Build with
+`-PzerusInstrumentationRunner=app.zerus.mobile.VideoMessageSmokeInstrumentation`,
+install both debug APKs, then run
+`adb -s <isolated-emulator> shell am instrument -w app.zerus.mobile.test/app.zerus.mobile.VideoMessageSmokeInstrumentation`.
+The runner checks short tap, real CameraX MP4 capture, upward lock, retained
+private media, audio extraction, exact one-time upload and left cancellation
+against an in-process gateway fixture. Its screenshot is saved to the app's
+external files as `video-message-preview.png`.

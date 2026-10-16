@@ -285,6 +285,8 @@ class Store:
                 return 409, {"error": "computer does not advertise this inspection feature; update its connector"}
             if body["operation"] == "send" and "agent_id" in body["payload"] and not supports(snapshot, "send_agent", "features"):
                 return 409, {"error": "computer does not advertise child message transport; update its connector"}
+            if body["operation"] == "voice_submit" and "video" in body["payload"] and not supports(snapshot, "voice_video", "features"):
+                return 409, {"error": "computer does not advertise video messages; update its connector"}
             if body["operation"] == "terminal_input" and (node["last_seen"] is None or now-node["last_seen"]>45):
                 return 409, {"error": "computer is offline; terminal input was not queued"}
             usage = self.db.execute("SELECT * FROM workspace_usage WHERE workspace_id=?", (device["workspace_id"],)).fetchone()

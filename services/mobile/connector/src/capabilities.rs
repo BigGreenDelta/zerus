@@ -58,6 +58,7 @@ pub fn implemented(operation: &str) -> bool {
 /// Python's `FEATURES | {"accounts_snapshot"}` and the conditional features,
 /// each with the operation it needs.
 const FEATURE_OPERATIONS: &[(&str, &str)] = &[
+    ("voice_video", "voice_submit"),
     ("accounts_snapshot", "inspect"),
     ("inspect_after", "inspect"),
     ("inspect_agent", "inspect"),
@@ -126,6 +127,7 @@ pub struct Flags {
     pub file_read: bool,
     pub speech: bool,
     pub voice: bool,
+    pub voice_video: bool,
     pub speech_config: bool,
     /// Both peer markers (`fleet.supported`).
     pub peers: bool,
@@ -153,6 +155,7 @@ impl Flags {
             file_read: has("file-read <session> --json"),
             speech: has("speech --json"),
             voice: has("voice <session> --json"),
+            voice_video: has("voice-video-v1"),
             speech_config: has("Speech profile management v1"),
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
         }
@@ -203,6 +206,9 @@ impl Flags {
             "send_agent",
         ]
         .into();
+        if self.voice && self.voice_video {
+            features.insert("voice_video");
+        }
         if self.directory_create {
             features.insert("directory_create_v1");
         }

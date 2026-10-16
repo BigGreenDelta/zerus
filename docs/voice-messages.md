@@ -1,5 +1,43 @@
 # Persistent voice messages
 
+## Video messages and recording controls
+
+Owner direction (2026-10-16, zerus-eo7j): video messages retain the recording
+in conversation history and deliver its recognized speech to the agent. Desktop
+and Android recording controls follow the corresponding open Telegram clients.
+The reference revisions are Telegram Android
+[`f32ffeec763f`](https://github.com/DrKLO/Telegram/blob/f32ffeec763f0bdbf4bec25b52d654f77bff733d/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java#L3059-L3220)
+and Telegram Desktop
+[`b16daff6df63`](https://github.com/telegramdesktop/tdesktop/blob/b16daff6df63e8a812bc2b52a04ff243f67a7d3f/Telegram/SourceFiles/history/view/controls/history_view_voice_record_bar.cpp#L2427-L2451).
+
+A short press switches microphone/camera mode without opening a device. Holding
+starts the selected capture after a short threshold. Releasing an owned,
+unlocked recording requests sending. On Android a left drag cancels and an
+upward drag locks; on desktop releasing outside the recording area cancels and
+dragging up locks. A locked recording continues after release, with separate
+Stop/preview, Send and Cancel controls. Stop retains a reviewable draft. These
+explicit gestures replace the earlier release-to-preview behavior;
+system cancellation, lost focus, navigation, permission callbacks and capture
+limits cannot submit. Completed, explicitly stopped recordings retain a preview. Provider discovery cannot
+silently resume a deferred send, and cold-context confirmation remains explicit.
+
+Video recordings use ordinary MP4 files displayed through a circular viewport.
+Their audio is extracted from the same recording on a background worker and
+converted to the existing mono 16 kHz PCM16 speech input. One durable message UUID
+owns original video, derived audio, transcription, provider pin and delivery
+state. Acceptance saves both media before acknowledging; recognition and native
+delivery continue without the originating client. Only recognized text enters
+native agent input. Original media remain available in archived history.
+
+Video is limited to 60 seconds and 10 MiB; ordinary audio keeps its 120-second
+limit. The additive `voice_video` capability permits an optional `video` on
+`voice_submit`. Clients require that capability from both relay and conversation
+computer before uploading video. Older audio-only payloads stay unchanged, and
+older clients can play the retained audio of a video message. Video metadata
+uses attachment index 1 beside the unchanged audio index 0. Pending and uncertain
+delivery identities are never replayed. Playback starts only after a tap; lists
+use bounded posters and retain at most one active media player per client.
+
 Voice records a separate audio draft. Stopping recording makes it available for
 playback, discard or **Send voice**; it does not change the typed draft. Sending
 authorizes recognition and delivery of the recognized text to the selected
@@ -19,15 +57,16 @@ explicit reselection. The queued voice worker passes the pin through ASR
 acceptance, where a mismatch fails before audio is sent to the provider.
 Discovery must not replace an unavailable explicit selection with another
 provider. A preview recorded before choosing a provider can be assigned one
-before sending. Only an explicit **Send voice**, with a confirmed available
+before sending. Only an explicit send gesture or **Send**, with a confirmed available
 provider for that conversation, authorizes submission. Refreshing providers
 alone never submits the recording.
 
 ## Android recording gesture
 
 When the editor has no text or attachments, its trailing Send action becomes a
-microphone. Hold to record, release to retain a preview, or slide left to cancel.
-Release never uploads, transcribes or sends the recording. A compact **Pending**
+microphone or camera. Tap to switch modes, hold to record, release to send,
+slide left to cancel, or slide up to lock. Stop a locked capture to retain a
+preview without sending. A compact **Pending**
 card identifies the unsent preview, with playback and seeking followed by Delete
 and Send icon buttons. The buttons retain accessible **Discard** and **Send voice
 message** names and 48 dp touch targets; deletion still requires confirmation.
@@ -62,12 +101,11 @@ settings and cannot prevent audio capture or persistence if unavailable.
 The interaction was checked against Telegram Android's
 [recording row](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java#L9742-L9766)
 and [recording feedback](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java#L4706-L5005).
-Zerus implements these interactions in its existing Compose components and keeps
-its separate preview/Send contract.
+Zerus implements these interactions in its existing Compose components with the explicit Stop/preview path described above.
 
 ## Authority and processing
 
-The conversation computer owns each voice message. It retains its original WAV,
+The conversation computer owns each voice message. It retains its original WAV and optional MP4 atomically,
 target identity, selected speech machine/profile and workflow state before
 acknowledging acceptance. Processing continues independently of the client.
 The speech machine may be another configured computer, resolved and verified by
@@ -114,7 +152,14 @@ contains `action`, `request_id`, `expected_run_id` and
 * `submit`: also contains `speech: {machine_id, profile_id}` and
   `audio: {format: "pcm_s16le", sample_rate: 16000, channels: 1, data_base64}`.
   Recording duration is bounded to 120 seconds. The request UUID is the permanent
-  message UUID.
+  message UUID. Optional `video` contains `format: "mp4"`, `data_base64`,
+  `duration_ms` (100–60000), `width` and `height` (16–1920), and optional
+  `poster_base64` (JPEG, at most 8192 decoded bytes). Video requests use at most
+  10 MiB MP4 and 60 seconds PCM; audio/video duration may differ by at most
+  one second. The full video envelope is bounded to 19 MiB; audio-only limits
+  stay unchanged. `profiles.features` advertises `voice_video`; native help
+  includes `voice-video-v1`. Video metadata returns attachment index 1 and
+  its exact byte count, dimensions, duration and optional poster.
   `speech.profile_revision` is an optional exact configuration revision returned
   by provider discovery. Older clients and unversioned providers may omit it.
 * `status` and `cancel`: also contain `message_id`. Each operation has a new
@@ -127,7 +172,7 @@ native request without `action`. Its `request_id` matches the outer request UUID
 
 Message responses have `schema: 1` and `message`, containing `id`, `run_id`,
 `conversation_id`, `created_at`, monotonic `revision`, `state`, and `audio`.
-Optional fields are `transcript`, `error_code` and `error`. Audio metadata uses
+Optional fields are `transcript`, `error_code`, `error` and `video`. Audio metadata uses
 `request_id` equal to the message UUID, `index: 0`, `name: "voice.wav"`,
 `mime: "audio/wav"`, `bytes`, `duration_ms` and an additive `waveform` array.
 The same array appears in the history audio attachment. It contains exactly

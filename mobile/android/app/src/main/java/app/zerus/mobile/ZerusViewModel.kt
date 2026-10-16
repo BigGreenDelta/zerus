@@ -52,6 +52,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         !machineOperations[MachineKey(target.connectionId, target.computerId)].orEmpty().containsAll(VoiceProtocol.operations) -> "Update Zerus on the conversation computer to send voice messages."
         else -> ""
     }
+    internal fun videoHostReason(target: Target): String = voiceHostReason(target).ifBlank {
+        when {
+            VideoProtocol.FEATURE !in relayFeatures[target.connectionId].orEmpty() -> "Update this gateway to send video messages."
+            VideoProtocol.FEATURE !in machineFeatures[MachineKey(target.connectionId,target.computerId)].orEmpty() -> "Update Zerus on this conversation's computer to send video messages."
+            else -> ""
+        }
+    }
     internal fun voiceSendReason(target: Target): String = when {
         !storageReady || updateInstallPreparing -> "Private storage is not ready."
         target.agentId.isNotBlank() || target.archiveId.isNotBlank() -> "Voice messages are available in live parent conversations."

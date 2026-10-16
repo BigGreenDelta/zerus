@@ -321,6 +321,7 @@ class Connector:
         self.speech_supported = False
         self.speech_config_supported = False
         self.voice_supported = False
+        self.video_supported = False
         self.attachment_reads = attachment_reads.AttachmentReads()
         self.file_reads = attachment_reads.AttachmentReads()
         self.capabilities_next_poll = 0.0
@@ -520,7 +521,7 @@ class Connector:
         await self.probe_capabilities()
         operations = (OPERATIONS - (set() if self.archive_supported else {"archive_list"})) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
-            "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
+            "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({voice.video.FEATURE} if self.voice_supported and self.video_supported else set()) | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
                         **({} if self.terminal_supported else {"terminal": "Native CLI lacks the scoped Terminal ABI"})}}
 
@@ -546,6 +547,7 @@ class Connector:
         self.speech_supported = False
         self.speech_config_supported = False
         self.voice_supported = False
+        self.video_supported = False
         if getattr(self, "fleet", None):
             self.fleet.supported = False
         try:
@@ -566,6 +568,7 @@ class Connector:
             self.file_read_supported = isinstance(help_text, str) and file_reads.HELP_MARKER in help_text
             self.speech_supported = isinstance(help_text, str) and speech.HELP_MARKER in help_text
             self.voice_supported = isinstance(help_text, str) and voice.HELP_MARKER in help_text
+            self.video_supported = isinstance(help_text, str) and voice.video.HELP_MARKER in help_text
             self.speech_config_supported = isinstance(help_text, str) and speech_config.HELP_MARKER in help_text
             if getattr(self, "fleet", None):
                 self.fleet.supported = isinstance(help_text, str) and all(
@@ -962,6 +965,8 @@ class Connector:
                         raise ConnectorError("terminal input expired before native delivery")
             if operation in voice.OPERATIONS and not self.voice_supported:
                 raise ConnectorError("native voice message ABI is unavailable")
+            if operation == "voice_submit" and "video" in payload and not self.video_supported:
+                raise ConnectorError("native video message ABI is unavailable")
             if operation in speech_config.OPERATIONS and not self.speech_config_supported:
                 raise ConnectorError("native speech profile management ABI is unavailable")
             if operation in speech.OPERATIONS and not self.speech_supported:

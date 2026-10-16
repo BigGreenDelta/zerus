@@ -121,6 +121,7 @@ pub const FEATURES: &[&str] = &[
     "inspect_agent",
     "presence_alerts",
     "send_agent",
+    "voice_video",
 ];
 /// Largest decoded chunk one `attachment_read` result may carry. Its base64
 /// form and metadata stay below the ordinary 1 MiB result limit.
@@ -406,7 +407,7 @@ pub fn request(v: &Value) -> Result<()> {
     } else {
         let extras: &[&str] = match op {
             "send" => &["text", "attachments", "expected_compaction_id", "agent_id"],
-            "voice_submit" => &["speech", "audio"],
+            "voice_submit" => &["speech", "audio", "video"],
             "voice_status" | "voice_cancel" => &["message_id"],
             "answer" => &["question_id", "expected_question_hash", "answers"],
             "interrupt" => &["expected_turn_started"],
@@ -486,6 +487,15 @@ pub fn request(v: &Value) -> Result<()> {
                     "profile_id":p["speech"]["profile_id"],"audio":p["audio"]}),
                     id,
                 )?;
+                if let Some(video) = p.get("video") {
+                    let pcm = STANDARD
+                        .decode(p["audio"]["data_base64"].as_str().ok_or(Error::BAD)?)
+                        .map_err(|_| Error::BAD)?;
+                    let media =
+                        crate::voice_video::parse(video, id, pcm.len()).map_err(|_| Error::BAD)?;
+                    // Drop decoded media before the canonical request buffer is allocated.
+                    let _ = (media.bytes.len(), media.metadata);
+                }
             }
             "voice_status" | "voice_cancel" => {
                 uuid(&p["message_id"], true)?;
@@ -562,7 +572,9 @@ pub fn request(v: &Value) -> Result<()> {
             uuid(&p["archive_id"], op != "process_output")?;
         }
     }
-    if ["speech_submit", "voice_submit"].contains(&op) {
+    if op == "voice_submit" && p.get("video").is_some() {
+        json::size(v, crate::voice_video::MAX_REQUEST_BYTES)?;
+    } else if ["speech_submit", "voice_submit"].contains(&op) {
         json::size(v, 6 * MIB)?;
     } else if op != "send" {
         json::size(v, MIB)?;

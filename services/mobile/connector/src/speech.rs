@@ -420,6 +420,7 @@ pub fn validate_speech(operation: &str, payload: &Value, request_id: &str) -> Py
 /// exact conversation, sent to a speech profile of one exact computer.
 pub fn validate_voice(operation: &str, payload: &Value, request_id: &str) -> PyResult<()> {
     let extra: &[&str] = match operation {
+        "voice_submit" if payload.get("video").is_some() => &["speech", "audio", "video"],
         "voice_submit" => &["speech", "audio"],
         "voice_status" | "voice_cancel" => &["message_id"],
         _ => &[],
@@ -458,12 +459,20 @@ pub fn validate_voice(operation: &str, payload: &Value, request_id: &str) -> PyR
             return Err(error("invalid voice speech route"));
         };
         job_identity(route.get("machine_id"))?;
-        return submission(
+        submission(
             request_id,
             route.get("profile_id"),
             route.get("profile_revision"),
             &object["audio"],
-        );
+        )?;
+        if let Some(video) = object.get("video") {
+            let encoded = object["audio"]["data_base64"].as_str().unwrap_or_default();
+            let pcm_bytes =
+                encoded.len() / 4 * 3 - (encoded.len() - encoded.trim_end_matches('=').len());
+            zerus_relay::validate_voice_video(video, request_id, pcm_bytes)
+                .map_err(|message| error(&message))?;
+        }
+        return Ok(());
     }
     if extra.contains(&"message_id") {
         job_identity(object.get("message_id"))?;
@@ -539,6 +548,27 @@ pub fn voice_result_valid(operation: &str, result: &Value, payload: &Value) -> P
     } else {
         payload.get("message_id")
     };
+    if operation == "voice_submit" {
+        if let Some(video) = payload.get("video") {
+            let Some(media) = message.get("video") else {
+                return Ok(false);
+            };
+            let encoded = video["data_base64"].as_str().unwrap_or_default();
+            let bytes =
+                encoded.len() / 4 * 3 - (encoded.len() - encoded.trim_end_matches('=').len());
+            if media.get("request_id") != expected
+                || media["index"] != 1
+                || media["mime"] != "video/mp4"
+                || media["name"] != "video.mp4"
+                || media["bytes"].as_u64() != Some(bytes as u64)
+                || ["duration_ms", "width", "height"]
+                    .iter()
+                    .any(|field| media[*field] != video[*field])
+            {
+                return Ok(false);
+            }
+        }
+    }
     Ok(same(message.get("id"), expected)
         && same(message.get("run_id"), payload.get("expected_run_id"))
         && same(
