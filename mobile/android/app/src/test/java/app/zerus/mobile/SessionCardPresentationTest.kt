@@ -13,6 +13,23 @@ class SessionCardPresentationTest {
         SessionCardPresentation.childCount(it, online, false, includeCompleted) to SessionCardPresentation.childCount(it, online, true, includeCompleted)
     }
 
+    @Test fun optionalQuestionChipFollowsSharedContract() {
+        val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/optional-question-contract.json")).bufferedReader().use { it.readText() })
+        contract.getJSONArray("cases").objects().forEach { example ->
+            val name = example.getString("name")
+            val chip = SessionCardPresentation.optionalQuestionChip(session(example.getJSONObject("raw").toString()), example.getBoolean("online"))
+            // Without the listed field Android also counts the connector's optional attention items.
+            assertEquals(name, example.optInt("android_count", example.getInt("count")), chip?.count ?: 0)
+            if (!example.has("android_count")) assertEquals(name, example.getString("label"), chip?.label.orEmpty())
+        }
+        assertEquals("1 optional question waiting", SessionCardPresentation.optionalQuestionDescription(1))
+        assertEquals("2 optional questions waiting", SessionCardPresentation.optionalQuestionDescription(2))
+        // Duplicate attention items count once, and a saved archive shows none.
+        val repeated = """"mobile_attention":[{"question_id":"codex-async:call-a:0","question_hash":"h","optional":true},{"question_id":"codex-async:call-a:0","question_hash":"h2","optional":true}]"""
+        assertEquals(1, SessionCardPresentation.optionalQuestions(live(repeated), true))
+        assertEquals(0, SessionCardPresentation.optionalQuestions(session("""{"activity":"busy",$repeated}""", archive = "archive"), true))
+    }
+
     @Test fun checkoutLineNamesTheFolderBesideTheBranch() {
         val raw = JSONObject("""{"cwd":"/work/zerus-work-76f5c0ef","git_root":"/work/zerus-work-76f5c0ef","git_branch":"work-76f5c0ef","git_worktree":true,
             "git_worktree_name":"zerus-work-76f5c0ef","git_common_dir":"/work/zerus/.git","git_metadata_state":"ok"}""")

@@ -1,6 +1,7 @@
 package app.zerus.mobile
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -44,6 +45,24 @@ import androidx.compose.ui.unit.dp
 
 private fun subagentChildren(model: ZerusViewModel, session: Session, online: Boolean) =
     SessionCardPresentation.children(session, online, drafted = SessionCardPresentation.draftedChildren(session.target, model.drafts))
+
+/**
+ * Pending optional questions, between the machine label and the subagent counter. Information only:
+ * tapping the card opens the conversation, where Questions (n) offers them with Skip.
+ */
+@Composable internal fun SessionOptionalQuestionChip(session: Session, online: Boolean) {
+    val chip = SessionCardPresentation.optionalQuestionChip(session, online) ?: return
+    val foreground = Color(OptionalQuestionPalette.FOREGROUND)
+    val shape = RoundedCornerShape(8.dp)
+    Row(Modifier.clip(shape).background(Color(OptionalQuestionPalette.BACKGROUND))
+        .border(1.dp, Color(OptionalQuestionPalette.BORDER), shape)
+        .clearAndSetSemantics { contentDescription = chip.description }
+        .padding(start = 6.dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Icon(DesktopIcons.Question, null, Modifier.size(16.dp), tint = foreground)
+        Text(chip.label, color = foreground, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+    }
+}
 
 /** The subagent counter, at the end of the card's status row like the desktop card. */
 @Composable internal fun SessionSubagentCounter(model: ZerusViewModel, session: Session, online: Boolean) {

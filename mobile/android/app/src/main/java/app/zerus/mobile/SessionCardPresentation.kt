@@ -11,6 +11,20 @@ data class SessionCardChild(val id: String, val name: String, val status: String
 /** The card's subagent counter: compact label, spoken form, and whether it shows child rows. */
 data class SessionChildCounter(val label: String, val description: String, val expandable: Boolean)
 
+/** The card's optional-question chip: compact count and its spoken form. Information only. */
+data class OptionalQuestionChip(val count: Int, val label: String, val description: String)
+
+/**
+ * Chip colours for the app's dark scheme (it has no light scheme). Indigo keeps the chip apart
+ * from the mint unread dot, amber attention and the status badges; the count text has at least
+ * 4.5:1 contrast on the chip.
+ */
+object OptionalQuestionPalette {
+    const val BACKGROUND = 0xFF262A4A
+    const val FOREGROUND = 0xFFB4B9FF
+    const val BORDER = 0xFF4C5394
+}
+
 /**
  * Session card checkout and subagent semantics from the desktop: branchContext, projectContext,
  * childState, inactiveChild, childStatus and childCount in tray/src/SessionPresentation.h, and
@@ -173,6 +187,37 @@ object SessionCardPresentation {
         val spoken = childCount(session, online, true, includeCompleted)
         return SessionChildCounter(label, if (spoken.isEmpty()) "Subagents" else "Subagents, $spoken", expandable)
     }
+
+    /**
+     * Pending optional Codex questions in the session's current conversation: the chip count shared
+     * with the desktop through optional-question-contract.json. The listing's strict
+     * `optional_questions.count` wins. Without it (an older host, or null while hgs could not read
+     * its question index), the optional `mobile_attention` items published by the connector are
+     * counted once per question ID. A saved, archived, exited or offline session shows none.
+     * Optional questions are not attention: this count never changes status or filters.
+     */
+    fun optionalQuestions(session: Session, online: Boolean): Int {
+        val raw = session.raw
+        if (!online || SessionFilters.archived(session) || SessionFilters.state(session) != "running" ||
+            text(raw, "process_state") == "exited") return 0
+        (raw.opt("optional_questions") as? JSONObject)?.let { summary ->
+            integer(summary, "count", -1).let { if (it >= 0) return it }
+        }
+        return raw.optJSONArray("mobile_attention")?.objects().orEmpty().filter(QuestionPolicies::optionalAttention)
+            .mapNotNull { it.opt("question_id") as? String }.filter { it.isNotBlank() }.distinct().size
+    }
+
+    /** The compact chip label: the count up to 99, then 99+, as the desktop chip. */
+    fun optionalQuestionLabel(count: Int): String = if (count > 99) "99+" else count.toString()
+
+    fun optionalQuestionDescription(count: Int): String =
+        if (count == 1) "1 optional question waiting" else "$count optional questions waiting"
+
+    /** The chip for this card, or null when no optional question is pending. */
+    fun optionalQuestionChip(session: Session, online: Boolean): OptionalQuestionChip? =
+        optionalQuestions(session, online).takeIf { it > 0 }?.let {
+            OptionalQuestionChip(it, optionalQuestionLabel(it), optionalQuestionDescription(it))
+        }
 
     /** Native child inspection accepts only these agent identities. */
     fun openableAgent(id: String): Boolean = id.isNotBlank() && id != "main" && id.length <= 256 &&
