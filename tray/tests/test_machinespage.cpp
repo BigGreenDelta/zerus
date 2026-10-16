@@ -549,19 +549,29 @@ void TestMachinesPage::enablingIsOfferedOnlyToAWindowsConsole()
 {
     MachinesPage page(FakeCli::program(m_script)); start(page);
     auto *enable = widget<QPushButton>(page, "enableLocalSessions"); auto *host = widget<QLabel>(page, "localSessionHost");
+    const auto origin = [&] {
+        for (auto *label : page.findChildren<QLabel *>("muted"))
+            if (label->isVisible() && label->text().startsWith("This computer is a control console")) return label->text();
+        return QString();
+    };
+    const QString remote("This computer is a control console: agents run on the remote machines you add here, over SSH.");
     // Linux, macOS and an older Windows CLI without local_host offer nothing.
     QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
     page.setFleet(windowsComputer(false, sessionHost("not-installed"), "linux"));
-    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
+    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible()); QCOMPARE(origin(), remote);
     page.setFleet(windowsComputer(false, sessionHost("not-installed"), "macos"));
-    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
+    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible()); QCOMPARE(origin(), remote);
     page.setFleet(windowsComputer(false, {}));
-    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
+    QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible()); QCOMPARE(origin(), remote);
     // Before the first answer names the platform, this GUI's own platform counts.
     page.setFleet(windowsComputer(false, sessionHost("not-installed"), {}));
     QCOMPARE(enable->isVisible(), MachinePlatform::build() == MachinePlatform::Style::Windows);
     page.setFleet(windowsComputer(false, sessionHost("not-installed")));
     QVERIFY(enable->isVisible()); QVERIFY(host->isVisible());
+    // The offer is named where the console explains where agents run.
+    QCOMPARE(origin(), remote + " Enable local sessions to run them on this computer too.");
+    page.setFleet(windowsComputer(false, {})); QCOMPARE(origin(), remote);
+    page.setFleet(windowsComputer(false, sessionHost("not-installed")));
     // An enabled computer shows its host without the offer; a remote machine neither.
     page.setFleet(windowsComputer(true, sessionHost("stopped")));
     QVERIFY(!enable->isVisible()); QVERIFY(host->isVisible());

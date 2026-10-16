@@ -120,8 +120,12 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     layout->addLayout(form);
     m_error=plainLabel();m_error->setObjectName("launchError");layout->addWidget(m_error);
     layout->addStretch();auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel);m_cancel=buttons->button(QDialogButtonBox::Cancel);m_start=buttons->addButton(tr("Start session"),QDialogButtonBox::AcceptRole);m_start->setObjectName("primary");layout->addWidget(buttons);
+    // Without a computer to start on, it only opens Machines with this computer
+    // selected; enabling local sessions keeps its own confirmation there.
+    m_openMachines=buttons->addButton(tr("Open Machines"),QDialogButtonBox::ActionRole);m_openMachines->setObjectName("launchOpenMachines");m_openMachines->hide();
     connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);connect(m_start,&QPushButton::clicked,this,&NewSessionDialog::start);
     connect(m_manage,&QToolButton::clicked,this,[this]{const auto id=m_project->currentData().toString();reject();emit projectFoldersRequested(id);});
+    connect(m_openMachines,&QPushButton::clicked,this,[this]{if(m_creation)return;reject();emit machinesRequested();});
     connect(m_project,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;loadMachines();loadFolders();});
     connect(m_machine,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;m_accountPreset=false;loadFolders();});
     connect(m_browse,&QPushButton::clicked,this,&NewSessionDialog::browseFolder);
@@ -344,7 +348,10 @@ void NewSessionDialog::updateForm()
     if(m_accountPreset&&!m_account->currentItem())m_error->setText(m_accountRequest?loadingAccount:missingAccount);
     else if(m_error->text()==loadingAccount||m_error->text()==missingAccount)m_error->clear();
     const auto remoteOnly=tr("Add a remote machine in Machines to start sessions from this computer.");
-    if(noMachine)m_error->setText(remoteOnly);else if(m_error->text()==remoteOnly)m_error->clear();
+    const auto enableOrRemote=tr("Enable local sessions for this computer in Machines, or add a remote machine.");
+    if(noMachine)m_error->setText(LocalSessionHost::canEnable(m_fleet.local())?enableOrRemote:remoteOnly);
+    else if(m_error->text()==remoteOnly||m_error->text()==enableOrRemote)m_error->clear();
+    m_openMachines->setVisible(noMachine);
 }
 void NewSessionDialog::start()
 {

@@ -129,7 +129,7 @@ public:
     }
     void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);}
     // A control-only computer keeps no recovery policy of its own.
-    void setLocalSessions(bool enabled){sync->setLocalSessions(enabled);}
+    void setLocalSessions(bool enabled,bool offered=false){sync->setLocalSessions(enabled);sync->setLocalSessionsOffered(offered);}
     // Neither a control-only computer nor Windows is a mobile gateway: the Mobile
     // connection page is hidden (the row stays, so indices do not move).
     void setMobileGateway(bool gateway){

@@ -22,6 +22,15 @@ std::optional<qint64> ownWindowsSession();
 void setOwnWindowsSessionForTests(std::optional<qint64> session);
 void resetOwnWindowsSessionForTests();
 
+// Whether Machines offers Enable local sessions for this computer (spec D16): it
+// runs Windows, is a control console and its CLI reports a session host. Hints that
+// send a console without remote machines to Machines then name that way too.
+inline bool canEnable(const BoxState &local)
+{
+    return !local.localSessions && !local.localHost.isEmpty()
+        && MachinePlatform::of(local.metrics, true) == MachinePlatform::Style::Windows;
+}
+
 // The Windows session of this computer's session host when a launch on host goes
 // into a host that runs in another Windows session than own; none when it does not:
 // a remote machine, a local machine that is not Windows (local.metrics.platform),

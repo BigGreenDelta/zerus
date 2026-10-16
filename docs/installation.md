@@ -313,9 +313,10 @@ settings are in `%APPDATA%\hgdev\hgs-tray.ini`, and drafts in the
 
 ### Local sessions on Windows
 
-Local sessions stay off until you enable them. Open **Machines**, select this
-computer (*This computer: control console*) and choose **Enable local sessions**,
-or run `.\hgs.exe session-host install` in the extracted folder. Either way, `hgs`
+Local sessions stay off until you enable them. Open **Machines** (**Open
+Machines** in New session while no computer is available), select this computer
+(*This computer: control console*) and choose **Enable local sessions**, or run
+`.\hgs.exe session-host install` in the extracted folder. Either way, `hgs`
 stages these files in your profile (under `HOME` instead when it is set):
 
 - `%USERPROFILE%\.local\bin\hgs.exe`, the stable CLI that sessions, agent hooks and
