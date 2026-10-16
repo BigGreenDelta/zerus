@@ -191,7 +191,12 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
                 main { model.draft(target).text == "Next fixture draft" && model.sendingBlocked(target) } }
             screenshot("e7et-sending.png")
             main { change(model) { state -> state.copy(outgoing = state.outgoing.map { it.copy(status = "uncertain", error = "Synthetic delivery unknown") }) } }
-            await("actionable unknown delivery") { text("Delivery unknown. Check the previous message before sending again.") != null }
+            await("actionable unknown delivery") {
+                find(uiAutomation.rootInActiveWindow) { it.contentDescription?.toString() == "Check previous message delivery" } != null &&
+                    find(uiAutomation.rootInActiveWindow) { it.contentDescription?.toString() == "Review previous message" } != null
+            }
+            check(text("Delivery unknown. Check the previous message before sending again.") == null)
+            check(main { model.outgoing.single().status == "uncertain" })
             check(main { model.draft(target).text == "Next fixture draft" && model.sendingBlocked(target) })
             check(mutations.get() == 0) { "The presentation fixture sent a mutation" }
         } finally {
