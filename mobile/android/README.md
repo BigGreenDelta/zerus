@@ -595,9 +595,23 @@ and [launcher asset documentation](https://developer.android.com/studio/write/cr
 ## Notifications
 
 In Machines, Session alerts has independent settings for input and approvals,
-errors, and turn completion. Input and errors are on by default; completed turns
-are off. The master switch disables all session alerts. Disabling a type also
-removes its existing cards.
+optional questions, errors, and turn completion. Input and errors are on by
+default; optional questions and completed turns are off. The master switch
+disables all session alerts. Disabling a type also removes its existing cards.
+
+A session whose only pending items are optional Codex questions, which the agent
+keeps working without, notifies as *Optional question on* its computer, and only
+with that switch on. Each question ID announces at most once per session slot:
+answering or skipping one keeps the card, a dismissed card stays dismissed, and
+a resume, connector restart or emptied and refilled list announces nothing
+again. Questions pending while the switch is off, or while the session needs
+input or has an error, are not announced later. Without optional questions the
+card is withdrawn. A blocking request or error in the same session takes
+precedence and its card does not change for new optional questions. When the
+switch is off, a finished turn can still notify. Optional cards never join the
+summary of sessions that need attention, and a new need may replace one when the
+shade is full. Optional-only sessions still count under Needs attention on
+Android, unlike the desktop; aligning them is an open owner decision.
 
 There is one updated card per workspace, computer and live session slot. The
 normal shade shows the authenticated session title and the computer's private
@@ -613,7 +627,7 @@ request can remain until the next refresh when the relay emits no new event.
 
 When the relay advertises `presence_alerts`, a new card needs a relay `alert`
 event for the same workspace, computer and session: an attention or error alert
-for input, approvals or errors (the relay and the phone rank a session that
+for input, approvals, optional questions or errors (the relay and the phone rank a session that
 both asks and fails differently), or completed for an opted-in finished turn.
 The relay sends it only while the item is unread and unresolved, and only when
 the owner is away from every Zerus desktop or chose immediate delivery. A card

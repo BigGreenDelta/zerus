@@ -24,13 +24,18 @@ object NotificationCatalogParser {
                 val value = session.raw
                 val phase = value.string("phase")
                 val recovery = value.optJSONObject("recovery")?.string("state").orEmpty()
-                val pending = value.optJSONArray("mobile_attention")?.objects().orEmpty().map {
+                val (optionalItems, blocking) = value.optJSONArray("mobile_attention")?.objects().orEmpty()
+                    .partition(QuestionPolicies::optionalAttention)
+                // Optional questions never change the identity of a request that needs action.
+                val pending = blocking.map {
                     JSONArray(listOf(it.string("question_id"), it.string("question_hash"))).toString()
                 }.sorted()
+                val optional = optionalItems.map { it.string("question_id") }.filter { it.isNotBlank() }.distinct().sorted()
                 val kind = when {
                     phase == "error" && recovery !in setOf("waiting", "dispatching", "retrying") ||
                         recovery in setOf("uncertain", "blocked", "exhausted") -> SessionAlertKind.Error
                     phase in setOf("input", "approval") || pending.isNotEmpty() || value.optInt("pending_question_count") > 0 -> SessionAlertKind.Input
+                    optional.isNotEmpty() -> SessionAlertKind.Optional
                     else -> null
                 }
                 val identity = NotificationPolicy.fingerprint(JSONArray(listOf(phase, value.string("attention_id"),
@@ -42,7 +47,8 @@ object NotificationCatalogParser {
                 current += NotificationCurrent(NotificationSlot(connection.id, machine.id, session.target.session), target,
                     clean(SessionFilters.label(session).ifBlank { session.title }, "Session"), clean(machine.name, "Computer"), kind,
                     identity, value.string("activity") == "idle", machine.online,
-                    SessionFilters.state(session) == "running" && value.string("process_state") != "exited")
+                    SessionFilters.state(session) == "running" && value.string("process_state") != "exited",
+                    session.target.conversation, optional)
             }
         }
         return NotificationCatalog(current, identities)

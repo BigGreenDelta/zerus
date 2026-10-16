@@ -1049,7 +1049,8 @@ live sessions per connector heartbeat. Only their IDs and fingerprints are added
 to snapshots, as `mobile_attention` items `{question_id, question_hash}`; an
 optional Codex async question also carries `optional: true`, and blocking items
 never carry the key. The relay treats both alike, so the phone decides whether
-an optional item notifies. With many live Codex sessions, these alerts can lag
+an optional item notifies: Android announces optional-only sessions only with its
+off-by-default Optional questions switch, once per question ID. With many live Codex sessions, these alerts can lag
 by a complete scan cycle; ordinary native attention phases arrive with the next
 heartbeat.
 
