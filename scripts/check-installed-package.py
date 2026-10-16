@@ -49,6 +49,11 @@ def connector_actions(home, env):
     subprocess.run([str(fake / "systemctl"), "--user", "daemon-reload"], env=actions, check=True)
     (home / "systemctl.calls").unlink()
     drop_ins = home / ".config/systemd/user/zerus-mobile-connector.service.d"
+    # The package's own unit serves the packaged binary: install writes nothing.
+    subprocess.run(["/usr/bin/zerus-setup", "--mobile-connector", "install"], env=actions, check=True,
+                   stdin=subprocess.DEVNULL, timeout=30)
+    assert not (home / ".config/systemd").exists(), "install wrote a unit beside the packaged one"
+    assert not (home / "systemctl.calls").exists()
     for action, present in (("protect", ["50-zerus-killmode.conf"]),
                             ("migrate", ["50-zerus-killmode.conf", "60-zerus-rust-connector.conf"]),
                             ("rollback", ["50-zerus-killmode.conf"])):

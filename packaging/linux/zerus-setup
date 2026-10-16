@@ -11,7 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-CONNECTOR_ACTIONS = ("protect", "migrate", "rollback")
+CONNECTOR_ACTIONS = ("install", "protect", "migrate", "rollback")
 
 
 def main():
@@ -19,15 +19,15 @@ def main():
     parser.add_argument("--prefix", type=Path, default=Path("/usr"),
                         help="system installation prefix (default: /usr)")
     parser.add_argument("--mobile-connector", choices=CONNECTOR_ACTIONS,
-                        help="protect, migrate or roll back the mobile connector's user service; "
-                             "writes one drop-in and starts or restarts nothing")
-    parser.add_argument("--binary", help="with --mobile-connector migrate: the Rust connector to use "
+                        help="install, protect, migrate or roll back the mobile connector's user service; "
+                             "writes one file and starts or restarts nothing")
+    parser.add_argument("--binary", help="with --mobile-connector install or migrate: the Rust connector to use "
                                          "when both /usr/bin and ~/.local/bin copies exist")
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error("run this command as the desktop user, without sudo")
-    if args.binary and args.mobile_connector != "migrate":
-        parser.error("--binary applies to --mobile-connector migrate")
+    if args.binary and args.mobile_connector not in ("install", "migrate"):
+        parser.error("--binary applies to --mobile-connector install and migrate")
     if args.mobile_connector:
         # Only the connector service changes; no compatibility link is made.
         tool = args.prefix.resolve() / "lib/zerus/install-mobile-connector-service.py"
