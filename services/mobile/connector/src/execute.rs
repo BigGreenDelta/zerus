@@ -223,6 +223,15 @@ impl<N: Native + 'static> Connector<N> {
                 .validated(request, request_id)
                 .await
                 .map_err(Failure::Connector)?;
+            if self.flags.get().archive {
+                if let Some(payload) = validated
+                    .payload
+                    .as_ref()
+                    .filter(|payload| payload.get("archive_id").is_some())
+                {
+                    self.archive_preflight(&validated.session, payload).await?;
+                }
+            }
             self.gate(&validated.operation, self.flags.get())?;
             let result = if crate::mutations::handles(&validated.operation) {
                 self.mutate(&validated, request_id, &mutation_started)
@@ -233,7 +242,7 @@ impl<N: Native + 'static> Connector<N> {
             } else {
                 self.run(&validated, request_id).await?
             };
-            Ok(receipt_of(&validated.operation, result))
+            Ok((receipt_of(&validated.operation, result), validated))
         }
         .await;
         let failed = |failure: Failure| {
@@ -245,9 +254,12 @@ impl<N: Native + 'static> Connector<N> {
             receipt(state, Value::Null, Some(failure.message()))
         };
         match outcome {
-            Ok(response) => {
+            Ok((response, validated)) => {
                 match json::python_default_len(&response, true) {
-                    Ok(size) if size <= MAX_RESULT => response,
+                    Ok(size) if size <= MAX_RESULT => {
+                        self.archived(&validated, &response);
+                        response
+                    }
                     Ok(_) => failed(Failure::text(TOO_LARGE)),
                     // A number beyond the double range: Python stores
                     // "Infinity", which no relay accepts.
@@ -272,8 +284,122 @@ impl<N: Native + 'static> Connector<N> {
             .unwrap_or_else(|_| Err(GENERIC.into()))
     }
 
+    /// `archive_preflight`: an archive no page, read or snapshot admits is
+    /// checked natively before anything runs for it.
+    async fn archive_preflight(&self, session: &str, payload: &Value) -> Result<(), Failure> {
+        let archive = payload["archive_id"].as_str().unwrap_or_default();
+        if self.context().admits(session, archive) {
+            return Ok(());
+        }
+        let call = Call::new(["archives", "lookup", "--json"])
+            .payload(json!({"name": session, "archive_id": archive}))
+            .timeout(5.0);
+        let detail = self.call(call).await?;
+        if !crate::archives::lookup_matches(&detail, session, archive, payload) {
+            return Err(Failure::text(crate::archives::LOOKUP_MISMATCH));
+        }
+        let now = self.clock();
+        crate::archives::remember(
+            &mut self.state.borrow_mut().paged_archives,
+            [(session.to_owned(), archive.to_owned())],
+            now,
+        );
+        Ok(())
+    }
+
+    /// After a completed request: a restore or forget revokes its archive, a
+    /// read keeps an admitted one, and a page admits its archives.
+    fn archived(&self, validated: &Validated, response: &Value) {
+        if response["state"] != "completed" {
+            return;
+        }
+        let now = self.clock();
+        let mut state = self.state.borrow_mut();
+        let operation = validated.operation.as_str();
+        if let Some(archive) = validated
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("archive_id"))
+            .and_then(Value::as_str)
+        {
+            let key = (validated.session.clone(), archive.to_owned());
+            if matches!(operation, "restore" | "forget") {
+                state.paged_archives.remove(&key);
+            } else if protocol::READS.contains(&operation) {
+                if let Some(at) = state.paged_archives.get_mut(&key) {
+                    *at = now;
+                }
+            }
+        }
+        if operation == "archive_list" {
+            let targets = crate::archives::targets(&response["result"]);
+            crate::archives::remember(&mut state.paged_archives, targets, now);
+        }
+    }
+
+    /// `hgs archives --json` for one query: a checked page with the project
+    /// memberships of its rows and only the projects they use.
+    async fn archive_page(&self, payload: &Value) -> Result<Value, Failure> {
+        let call = Call::new(["archives", "--json"])
+            .payload(payload.clone())
+            .timeout(30.0);
+        let raw = self.call(call).await?;
+        let mut page = crate::archives::page(&raw, payload).map_err(|error| match error {
+            crate::archives::PageError::Value(text) => Failure::Connector(text),
+            crate::archives::PageError::Other => Failure::Generic,
+        })?;
+        let groups = self
+            .state
+            .borrow()
+            .project_cache
+            .clone()
+            .filter(crate::pyvalue::truthy)
+            .unwrap_or_else(|| crate::projects::unavailable(&self.settings.binding));
+        if let Some(Value::Array(sessions)) = page.get_mut("sessions") {
+            crate::projects::apply_memberships(sessions, &groups);
+        }
+        let used: Vec<Value> = page["sessions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|row| row.get("mobile_project_id").cloned().unwrap_or(Value::Null))
+            .collect();
+        let mut projects: Map<String, Value> = groups
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| key.as_str() != "projects")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let listed = groups["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object)
+            .filter(|project| {
+                let id = project.get("id").cloned().unwrap_or(Value::Null);
+                used.iter().any(|value| crate::pyvalue::py_eq(value, &id))
+            })
+            .map(|project| {
+                Value::Object(
+                    project
+                        .iter()
+                        .filter(|(key, _)| matches!(key.as_str(), "id" | "name" | "color"))
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                )
+            })
+            .collect();
+        projects.insert("projects".into(), Value::Array(listed));
+        page["mobile_projects"] = Value::Object(projects);
+        Ok(page)
+    }
+
     /// The capability checks of `_execute_claimed`, in Python's order.
     fn gate(&self, operation: &str, flags: Flags) -> Result<(), Failure> {
+        if operation == "archive_list" && !flags.archive {
+            return Err(Failure::text(crate::archives::UNAVAILABLE));
+        }
         if operation == "history" && !flags.history {
             return Err(Failure::text("native public history ABI is unavailable"));
         }
@@ -303,6 +429,7 @@ impl<N: Native + 'static> Connector<N> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref();
         match validated.operation.as_str() {
+            "archive_list" => self.archive_page(payload.expect("validated")).await,
             "inspect" => self.inspect(session, payload).await,
             "process_output" => {
                 self.processes("--output", session, payload.expect("validated"), request_id)

@@ -108,6 +108,14 @@ pub struct State {
     pub reads: crate::files::Reads,
     /// Upload attempts the relay refused, by request (b).
     pub refused: HashMap<String, (u32, f64)>,
+    /// The heartbeat's archive preview, its descriptor, the listing
+    /// revision it reflects and its next refresh.
+    pub archive_preview: Vec<Value>,
+    pub archive_preview_meta: Value,
+    pub archive_preview_revision: Option<String>,
+    pub archive_preview_next: f64,
+    /// Archive pairs admitted by a page, read or lookup, with when.
+    pub paged_archives: HashMap<(String, String), f64>,
 }
 
 /// Settings fixed at start.
@@ -165,6 +173,7 @@ impl<N: Native + 'static> Connector<N> {
             flags: Cell::new(Flags::default()),
             state: RefCell::new(State {
                 presence: Value::Null,
+                archive_preview_meta: crate::archives::unavailable(),
                 ..State::default()
             }),
             snapshot_ready: Event::default(),
@@ -202,6 +211,13 @@ impl<N: Native + 'static> Connector<N> {
             snapshot_age: state
                 .snapshot_seen_at
                 .map_or(f64::INFINITY, |seen| self.clock() - seen),
+            paged: state
+                .paged_archives
+                .iter()
+                .filter(|(_, at)| self.clock() - **at <= crate::archives::PAGED_SECONDS)
+                .map(|(pair, _)| pair.clone())
+                .collect(),
+            archive_supported: self.flags.get().archive,
         }
     }
 
@@ -226,8 +242,15 @@ impl<N: Native + 'static> Connector<N> {
 
     /// `Connector.snapshot()`: the listing as phones may see it.
     pub async fn snapshot(self: &Rc<Self>) -> Result<Value, String> {
+        // The archive marker decides the listing's shape, so it is current first.
+        self.probe_capabilities().await;
+        let paged = self.flags.get().archive;
+        let mut argv = vec!["ls", "--json", "--local"];
+        if paged {
+            argv.push("--no-archives");
+        }
         let listing = self
-            .native(Call::new(["ls", "--json", "--local"]))
+            .native(Call::new(argv))
             .await
             .map_err(native_text)?
             .json();
@@ -238,12 +261,16 @@ impl<N: Native + 'static> Connector<N> {
             Some(Value::Array(sessions)) => sessions,
             _ => return Err(INVALID_SNAPSHOT.into()),
         };
-        // Archive paging belongs to a later slice. Preserve the legacy listing
-        // and explicitly report that this connector has no bounded preview.
-        snapshot.insert(
-            "mobile_archive".into(),
-            json!({"schema": 1, "available": false, "loaded": 0, "total": null, "partial": false}),
-        );
+        snapshot.insert("mobile_archive".into(), crate::archives::unavailable());
+        if paged {
+            // A paging CLI lists live sessions only; a bounded recent window
+            // of archives serves phones that only read snapshots.
+            self.refresh_archive_preview(snapshot.get("archive_revision"))
+                .await;
+            let state = self.state.borrow();
+            sessions.extend(state.archive_preview.iter().cloned());
+            snapshot.insert("mobile_archive".into(), state.archive_preview_meta.clone());
+        }
         // Native SSH aliases and the peer-of-peer inventory stay local.
         snapshot.remove("peers");
         // Ended launches carry the last screen lines of failed starts for the
@@ -286,8 +313,19 @@ impl<N: Native + 'static> Connector<N> {
         let ((), projects) =
             future::join(self.read_attention(&sessions), self.read_projects(host)).await;
         self.apply_attention(&mut sessions);
-        let projects = projects.unwrap_or_else(|| projects::unavailable(&self.settings.binding));
+        let mut projects =
+            projects.unwrap_or_else(|| projects::unavailable(&self.settings.binding));
         projects::apply_memberships(&mut sessions, &projects);
+        if paged {
+            // Archive membership is applied to explicit pages; thousands of
+            // IDs do not belong in every live-session heartbeat.
+            if let Some(Value::Array(groups)) = projects.get_mut("projects") {
+                groups.retain(Value::is_object);
+                for group in groups.iter_mut().filter_map(Value::as_object_mut) {
+                    group.remove("archives");
+                }
+            }
+        }
         snapshot.insert("sessions".into(), Value::Array(sessions));
         snapshot.insert("mobile_projects".into(), projects);
         let accounts = self.update_accounts().await;
@@ -298,6 +336,46 @@ impl<N: Native + 'static> Connector<N> {
             self.flags.get().advertised(false),
         );
         Ok(Value::Object(snapshot))
+    }
+
+    /// The archive preview of a paging CLI, read again when the listing's
+    /// archive revision changes and otherwise every 300 s (15 s after a
+    /// failure). An old preview is dropped before a refresh can fail.
+    async fn refresh_archive_preview(&self, revision: Option<&Value>) {
+        let Some(revision) = revision.and_then(Value::as_str) else {
+            return;
+        };
+        let now = self.clock();
+        {
+            let mut state = self.state.borrow_mut();
+            if state.archive_preview_revision.as_deref() == Some(revision)
+                && now < state.archive_preview_next
+            {
+                return;
+            }
+            state.archive_preview.clear();
+            state.archive_preview_meta = crate::archives::unavailable();
+        }
+        let call = Call::new(["archives", "--json"])
+            .payload(json!({}))
+            .timeout(5.0);
+        let preview = match self.native(call).await {
+            Ok(output) => crate::archives::preview(&output.json()).ok(),
+            Err(_) => None,
+        };
+        let mut state = self.state.borrow_mut();
+        match preview {
+            Some((rows, meta)) => {
+                state.archive_preview = rows;
+                state.archive_preview_meta = meta;
+            }
+            None => {
+                state.archive_preview_meta["error"] = json!(crate::archives::PREVIEW_ERROR);
+            }
+        }
+        let available = state.archive_preview_meta["available"] == json!(true);
+        state.archive_preview_revision = Some(revision.to_owned());
+        state.archive_preview_next = now + if available { 300.0 } else { 15.0 };
     }
 
     /// The attention key of a live tracked Codex row the scan may inspect.

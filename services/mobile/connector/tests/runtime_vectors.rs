@@ -20,14 +20,6 @@ use zerus_mobile_connector::runtime::{Connector, Settings};
 use zerus_mobile_connector::{accounts, inspection, projects, validate};
 
 const BINDING: &str = "fixture-binding";
-const ARCHIVE_CASES: [&str; 5] = [
-    "archive_list/extra",
-    "archive_list/invalid-range",
-    "archive_list/nonempty-session",
-    "archive_list/too-large",
-    "valid/archive_list",
-];
-
 /// Native answers by argv, recording every call with Python's option names.
 #[derive(Default)]
 struct Scripted {
@@ -187,7 +179,6 @@ fn parse(text: &str) -> Value {
 fn validation_matches_the_python_connector_for_implemented_operations() {
     let mut checked = 0;
     let mut refused = 0;
-    let mut archive_refusals = Vec::new();
     for family in ["control", "conversation", "envelope", "launch", "speech"] {
         let rows = records(&format!("validation/{family}.jsonl"));
         let base = rows.iter().find(|row| row["kind"] == "context").unwrap()["context"].clone();
@@ -195,6 +186,8 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             let id = case["id"].as_str().unwrap();
             let raw = case.get("context").unwrap_or(&base);
             let context = validate::Context {
+                paged: Default::default(),
+                archive_supported: false,
                 sessions: string_set(&raw["sessions"]),
                 archives: raw["archives"]
                     .as_array()
@@ -228,9 +221,6 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             let result = validate::validate(&request, &request_id, &context);
             if !capabilities::implemented(operation) {
                 assert_eq!(result, Err(validate::UNSUPPORTED.into()), "{id}");
-                if operation == "archive_list" {
-                    archive_refusals.push(id.to_owned());
-                }
                 refused += 1;
                 continue;
             }
@@ -262,9 +252,7 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (238, 7));
-    archive_refusals.sort();
-    assert_eq!(archive_refusals, ARCHIVE_CASES);
+    assert_eq!((checked, refused), (243, 2));
 }
 
 /// Python's `capable(node)`: every flag, the vectors' sessions and archive.
@@ -411,42 +399,52 @@ async fn later_operations_are_refused_without_native_calls() {
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn archive_pages_are_refused_without_native_calls() {
-    let mut checked = Vec::new();
-    for case in records("validation/envelope.jsonl") {
-        if case["submission"]["operation"] != "archive_list" {
-            continue;
-        }
-        let harness = harness(case["id"].as_str().unwrap());
-        capable(&harness.connector);
-        let mut request = case["submission"].as_object().unwrap().clone();
-        request.remove("computer_id");
-        let outcome = harness
-            .connector
-            .execute(Value::Object(request))
-            .await
-            .unwrap();
-        assert_eq!(
-            outcome,
-            Outcome::Finished(
-                json!({"state": "failed", "result": null, "error": "unsupported operation"})
-            ),
-            "{}",
-            case["id"]
-        );
-        assert!(harness.connector.native.calls.borrow().is_empty());
-        checked.push(case["id"].as_str().unwrap().to_owned());
+/// A heartbeat against scripted native answers keyed by their command line.
+async fn heartbeat(vector: &Value) -> (Value, Value, Vec<Value>) {
+    let harness = harness("snapshot");
+    let connector = &harness.connector;
+    for (command, answer) in vector["native"].as_object().unwrap() {
+        let argv: Vec<String> = match command.as_str() {
+            "inspect codex/example/session" => {
+                vec!["inspect".into(), "codex/example/session".into()]
+            }
+            command => command.split(' ').map(String::from).collect(),
+        };
+        connector.native.answer(argv, answer.clone());
     }
-    checked.sort();
-    assert_eq!(checked, ARCHIVE_CASES);
+    let local = tokio::task::LocalSet::new();
+    let snapshot = local.run_until(connector.snapshot()).await.unwrap();
+    let presence = connector.state.borrow().presence.clone();
+    let calls = connector.native.calls.borrow().clone();
+    (snapshot, presence, calls)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_paged_heartbeat_snapshot_matches_the_python_connector() {
+    // A CLI with the archive marker: live sessions only, and the archive
+    // preview of `archives --json` with its descriptor.
+    let vector = projections()
+        .into_iter()
+        .find(|row| row["kind"] == "snapshot")
+        .unwrap();
+    let (snapshot, presence, mut calls) = heartbeat(&vector).await;
+    let expected = &vector["expect"]["heartbeat"];
+    let mut wanted = expected["snapshot"].clone();
+    // This build advertises only what it implements, and no peers yet (C6).
+    wanted["mobile_capabilities"] =
+        Flags::from_help(vector["native"]["--help"].as_str().unwrap()).advertised(false);
+    assert_eq!(snapshot, wanted);
+    assert_eq!(presence, expected["presence"]);
+    calls.sort_by_key(|call| call["argv"].to_string());
+    let mut wanted_calls = vector["expect"]["calls"].as_array().unwrap().clone();
+    wanted_calls.sort_by_key(|call| call["argv"].to_string());
+    assert!(py_eq(&json!(calls), &json!(wanted_calls)), "{calls:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn the_heartbeat_snapshot_matches_the_python_connector() {
-    // C2 has no archive paging implementation. Compare every legacy snapshot
-    // field and native call against current Python with the legacy native ABI.
-    // The separate paged oracle remains intact for the later archive slice.
+    // A CLI without the archive marker: the legacy listing, archives included,
+    // and no archive preview.
     let vector = document("heartbeat-legacy.json");
     let harness = harness("snapshot");
     let connector = &harness.connector;

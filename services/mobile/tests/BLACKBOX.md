@@ -485,6 +485,12 @@ H3's `test_bb_history_pages` kept only its inspection bounds, renamed
 | `test_mobile_archives.ArchiveConnectorTests.test_ordinary_inspect_rejects_raced_archive_or_different_name_response` | `test_bb_archives.test_answers_for_another_target_fail_without_fallback` | covered |
 | `test_mobile_archives.ArchiveRelayTests` (2 tests) | Relay only: `operation_contracts::archive_ids_are_exact_on_reads_and_refused_on_ordinary_mutations`, `archived_rows_never_change_the_live_event_baseline` | covered |
 | `test_mobile_archives.ArchiveFixtureTests.test_optional_synthetic_states_and_archive_pass_through` | `test_bb_archives.test_a_live_session_and_its_archive_use_distinct_native_arguments` | covered |
+| `test_archive_pages.test_read_class_strict_bounds_and_sessionless_envelope` | the `archive_list` vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing`; its one-hour class: `test_bb_journal` | covered |
+| `test_archive_pages.test_page_provenance_survives_active_snapshot_and_native_recheck_remains` | `test_bb_archives.ArchivePageTests.test_a_page_admits_its_archives_for_later_reads` | covered |
+| `test_archive_pages.test_bad_native_pages_never_grant_archive_admission` | `test_bb_archives.ArchivePageTests.test_an_invalid_native_page_fails_as_a_read` | partial: admission after a refused page is a Rust unit test |
+| `test_archive_pages.test_uncached_archive_requires_exact_native_lookup_before_any_action` | `test_bb_archives.ArchivePageTests.test_an_archive_no_page_listed_is_looked_up_once`, `test_a_lookup_for_another_target_runs_nothing` | covered |
+| `test_archive_pages.test_only_successful_deliverable_archive_reads_extend_admission` | the one-hour clock needs an injected clock: Rust `archives::tests::remembered_archives_expire_and_stay_bounded` | partial |
+| `test_archive_pages.test_real_native_pages_stay_lazy_and_admit_exact_archived_inspection` | heartbeat previews and the marker: `test_bb_archives.ArchivePageTests.test_heartbeats_list_live_sessions_and_a_bounded_preview`, `test_a_failed_preview_is_reported_and_admits_nothing`, `test_a_cli_without_the_marker_keeps_the_legacy_listing`; the real CLI stays in-process | partial |
 
 ### Peers and the one-hop gateway
 
