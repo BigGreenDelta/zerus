@@ -88,6 +88,7 @@
 #include "AccountUsageStore.h"
 #include "MachinesPage.h"
 #include "WorkspaceColorDialog.h"
+#include "PopupMouse.h"
 #include "AccountsPage.h"
 #include "FakeCli.h"
 #include "LaunchWarnings.h"
@@ -645,7 +646,7 @@ void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside()
         const auto previews=qEnvironmentVariable("HGS_COLOR_PICKER_PREVIEW");
         if(!previews.isEmpty()){QDir().mkpath(previews);QVERIFY(picker.grab().save(previews+"/color-"+theme+".png"));}
         const QPoint point(window.width()-8,window.height()-8);QVERIFY(!picker.frameGeometry().contains(window.mapToGlobal(point)));
-        QTest::mouseClick(window.windowHandle(),Qt::LeftButton,Qt::NoModifier,point);
+        QVERIFY(PopupMouse::click(&window,Qt::LeftButton,point));
         QTRY_VERIFY(!picker.isVisible());handled=true;
     });
     QCOMPARE(picker.exec(),int(QDialog::Rejected));QVERIFY(handled);QVERIFY(!expired);QVERIFY(!picker.selectedColor().isValid());
@@ -9039,9 +9040,10 @@ void TestSessionsWindow::projectColorsApplyOrCancel()
     auto *page=window.findChild<ProjectsDialog *>();page->selectProject(id);
     bool opened=false;
     const auto edit=[&](bool apply){
-        QTimer::singleShot(0,[&]{
-            auto *dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());
-            if(!dialog)return;
+        opened=false;bool expired=false;QTimer watchdog;watchdog.setSingleShot(true);
+        connect(&watchdog,&QTimer::timeout,&window,[&]{expired=true;if(auto *dialog=page->findChild<QDialog *>("projectColorDialog"))dialog->reject();});watchdog.start(5000);
+        QTimer::singleShot(0,&window,[&]{
+            auto *dialog=page->findChild<QDialog *>("projectColorDialog");QVERIFY(dialog);
             auto *hex=dialog->findChild<QLineEdit *>("projectColorHex");
             opened=hex&&dialog->findChild<QWidget *>("projectFillPreview");
             if(hex)hex->setText("#ffe100");
@@ -9050,6 +9052,7 @@ void TestSessionsWindow::projectColorsApplyOrCancel()
             if(apply)dialog->accept();else dialog->reject();
         });
         page->findChild<QPushButton *>("projectColor")->click();
+        watchdog.stop();QVERIFY(!expired);QVERIFY(opened);
     };
     edit(false);QVERIFY(opened);
     auto restored=SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());

@@ -566,6 +566,6 @@ void ProjectsDialog::chooseColor()
     connect(hex,&QLineEdit::textChanged,&dialog,update);connect(style,&QComboBox::currentIndexChanged,&dialog,update);update();
     connect(custom,&QPushButton::clicked,&dialog,[&]{WorkspaceColorDialog picker(chosen,&dialog);connect(&picker,&QColorDialog::currentColorChanged,&dialog,[&](const QColor &c){preview->setProject(title,c,style->currentData().toBool(),id==m_projects->defaultProject());});if(picker.exec()==QDialog::Accepted)hex->setText(picker.selectedColor().name());update();});
     connect(buttons->button(QDialogButtonBox::Apply),&QPushButton::clicked,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
-    if(dialog.exec()!=QDialog::Accepted)return;
+    if(execWorkspaceColorPopup(dialog)!=QDialog::Accepted)return;
     m_projects->setColor(id,chosen.name());m_projects->setVivid(id,style->currentData().toBool());changed();
 }

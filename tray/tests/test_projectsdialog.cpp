@@ -1,5 +1,6 @@
 #include <QtTest>
 #include "ProjectsDialog.h"
+#include "PopupMouse.h"
 #include <QInputDialog>
 #include <QColorDialog>
 #include <QCheckBox>
@@ -69,7 +70,7 @@ void TestProjectsDialog::projectColorChangesRequireApply()
         auto *buttons=dialog->findChild<QDialogButtonBox *>();
         if(action=="outside"){
             const QPoint point(view.width()-8,view.height()-8);QVERIFY(!dialog->frameGeometry().contains(view.mapToGlobal(point)));
-            QTest::mouseClick(view.windowHandle(),Qt::LeftButton,Qt::NoModifier,point);
+            QVERIFY(PopupMouse::click(&view,Qt::LeftButton,point));
         }else if(action=="escape")QTest::keyClick(dialog,Qt::Key_Escape);
         else buttons->button(action=="apply"?QDialogButtonBox::Apply:QDialogButtonBox::Cancel)->click();
         QTRY_VERIFY(!dialog->isVisible());handled=true;
@@ -108,7 +109,7 @@ void TestProjectsDialog::customProjectColorRemainsStaged()
             else{
                 picker->move(dialog->frameGeometry().right()+15,dialog->frameGeometry().top());
                 const QPoint point(8,8);QVERIFY(!picker->frameGeometry().contains(dialog->mapToGlobal(point)));
-                QTest::mouseClick(dialog->windowHandle(),Qt::LeftButton,Qt::NoModifier,point);
+                QVERIFY(PopupMouse::click(dialog,Qt::LeftButton,point));
             }
             QTRY_VERIFY(!picker->isVisible());
         });

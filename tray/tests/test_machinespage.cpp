@@ -19,6 +19,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include "FakeCli.h"
+#include "PopupMouse.h"
 #include "MachinesPage.h"
 #include "MessageBoxIcons.h"
 #include "MachineAppearance.h"
@@ -383,7 +384,7 @@ void TestMachinesPage::colorPickerDismissalKeepsTheSavedColor()
         QTest::mouseClick(dialog,Qt::LeftButton,Qt::NoModifier,QPoint(8,8));QVERIFY(dialog->isVisible());
         if(action.startsWith("outside")){
             const auto global=outside->mapToGlobal(outside->rect().center());QVERIFY(!dialog->frameGeometry().contains(global));
-            QTest::mouseClick(page.windowHandle(),action=="outside-right"?Qt::RightButton:Qt::LeftButton,Qt::NoModifier,page.mapFromGlobal(global));
+            QVERIFY(PopupMouse::click(&page,action=="outside-right"?Qt::RightButton:Qt::LeftButton,page.mapFromGlobal(global)));
         }else if(action=="escape")QTest::keyClick(dialog,Qt::Key_Escape);
         else dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();
         QTRY_VERIFY(!dialog->isVisible());handled=true;
@@ -395,6 +396,10 @@ void TestMachinesPage::colorPickerDismissalKeepsTheSavedColor()
     QCOMPARE(widget<QLineEdit>(page,"machineAlias")->text(),QString("arch"));
     QVERIFY(!widget<QPushButton>(page,"saveMachine")->isEnabled());
     for(const auto &call:calls())QVERIFY(call.toArray().at(1).toString()!="set");
+    if(action.startsWith("outside")){
+        QVERIFY(PopupMouse::click(&page,Qt::LeftButton,outside->mapTo(&page,outside->rect().center())));
+        QTRY_COMPARE(outsideClicked.size(),1); // The native stimulus reaches the owner after dismissal.
+    }
 }
 void TestMachinesPage::dashboardSelectionWaitsForProfiles()
 {
