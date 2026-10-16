@@ -247,7 +247,8 @@ struct VoiceButton: View {
         .scaleEffect(voice.touchRecording ? 1.25 : 1)
         .animation(.spring(duration: 0.2), value: voice.touchRecording)
         .contentShape(Circle())
-        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
+        // Global coordinates: the composer reflows while recording starts under the finger.
+        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in changed(value, enabled: enabled) }
             .onEnded { _ in ended() })
         .accessibilityElement()

@@ -58,6 +58,11 @@ final class AudioCaptureDevice: CaptureDevice {
         stopped = true
     }
 
+    /// Built outside the main actor: the engine calls it on its realtime thread.
+    nonisolated static func tap(_ sink: PcmSink) -> AVAudioNodeTapBlock {
+        { buffer, _ in sink.append(buffer) }
+    }
+
     func capture(started: @escaping @MainActor () -> Void, progress: @escaping @MainActor (Int) -> Void) async throws -> CapturedMedia {
         if stopped { return CapturedMedia(pcm: Data()) }
         guard AVAudioApplication.shared.recordPermission == .granted else { throw ZerusError.invalid("Allow microphone access to record your voice.") }
@@ -71,7 +76,7 @@ final class AudioCaptureDevice: CaptureDevice {
             throw ZerusError.invalid("This device could not open a microphone.")
         }
         let sink = PcmSink(rate: Int(format.sampleRate), channels: Int(format.channelCount), limit: VoiceProtocol.maxPcmBytes)
-        input.installTap(onBus: 0, bufferSize: 4_096, format: format) { buffer, _ in sink.append(buffer) }
+        input.installTap(onBus: 0, bufferSize: 4_096, format: format, block: Self.tap(sink))
         defer {
             input.removeTap(onBus: 0)
             engine.stop()
