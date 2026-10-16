@@ -63,6 +63,7 @@ class TestGraphCanvas : public QObject {
         QVERIFY(view.setGraph(nodes, relations));
         const auto initial = timer.elapsed();
         const auto position = view.nodePosition("0");
+        const auto initialNeighbor = view.nodePosition("1");
         timer.restart();
         QVERIFY(view.setGraph(nodes, relations));
         const auto refresh = timer.elapsed();
@@ -75,6 +76,19 @@ class TestGraphCanvas : public QObject {
         }
         qInfo() << "Graph cost" << count << edges << "initial ms" << initial << "refresh ms"
                 << refresh << "ten pan frames ms" << timer.elapsed();
+        view.selectNode("0");
+        const auto press = view.mapFromScene(view.nodeRect("0").center());
+        QVERIFY(view.viewport()->rect().contains(press));
+        timer.restart();
+        QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, press);
+        for (int i = 1; i <= 10; ++i) {
+            QTest::mouseMove(view.viewport(), press + QPoint(i * 4, i * 2), 1);
+            view.viewport()->repaint();
+        }
+        QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, press + QPoint(40, 20));
+        qInfo() << "Graph ten physical drag steps ms" << count << timer.elapsed();
+        QVERIFY(view.nodePosition("0") != position);
+        QCOMPARE(view.nodePosition("1"), initialNeighbor);
         QCOMPARE(view.nodeCount(), count);
         QCOMPARE(view.selectedNode(), QString("0"));
     }
