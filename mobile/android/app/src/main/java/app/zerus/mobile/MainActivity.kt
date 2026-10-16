@@ -966,6 +966,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         Box(Modifier.weight(1f).fillMaxWidth().onSizeChanged { viewportHeight = it.height }
             .onGloballyPositioned { viewportBounds = it.boundsInWindow() }) {
             Box(Modifier.fillMaxSize().semantics { if (videoCapture || videoOverlayVisible) hideFromAccessibility() }) {
+            ConversationTailRefresh(model, target.key, Modifier.fillMaxSize()) {
             // The tail item already adds one item gap above the composer.
             LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1021,6 +1022,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         viewportBounds, cardMaxHeight, questionDisplay, ::updateQuestionDisplay, onReview)
                 }
                 item(key = "history:tail") { Spacer(Modifier.height(1.dp)) }
+            }
             }
             if (loadStatus?.initial == true && !queueVisible) Column(Modifier.align(Alignment.Center).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {

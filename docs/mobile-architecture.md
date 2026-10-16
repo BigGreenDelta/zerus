@@ -300,7 +300,8 @@ Explicit refresh shows progress immediately, including when it promotes an
 already-running read. Operation and navigation identities prevent an old
 session's response from replacing the current session or hiding its progress.
 Catalog and conversation reads share their existing progress state with a thin
-top bar; pull-to-refresh keeps its circular indicator. Background reads retain
+top bar; pull-to-refresh keeps its circular indicator. A conversation's pull
+starts past its newest message, so its indicator rises from the bottom. Background reads retain
 the same five-second delay and do not start an extra request for either indicator.
 
 ## Projects and attachments

@@ -7,6 +7,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
+import android.graphics.Rect
+import android.view.InputDevice
+import android.view.MotionEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -27,7 +30,7 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
         try {
             check(BuildConfig.DEBUG && Build.HARDWARE in setOf("ranchu", "goldfish"))
             smoke()
-            result.putString("stream", "Session refresh passed: 5,000-session projection off main, filtering, retained scroll, empty conversation across repeated held background inspections, explicit refresh and draft retention. Zero deliveries.\n")
+            result.putString("stream", "Session refresh passed: 5,000-session projection off main, filtering, retained scroll, empty conversation across repeated held background inspections, explicit and tail-pull refresh and draft retention. Zero deliveries.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             result.putString("stream", "Session refresh failed: ${error.stackTraceToString()}\n")
@@ -39,8 +42,8 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
         runOnMainSync { result.set(runCatching(action)) }
         return result.get().getOrThrow()
     }
-    private fun await(label: String, condition: () -> Boolean) {
-        val deadline = SystemClock.elapsedRealtime() + 15_000
+    private fun await(label: String, timeout: Long = 15_000, condition: () -> Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + timeout
         while (!condition()) {
             check(SystemClock.elapsedRealtime() < deadline) { "Timed out: $label" }
             SystemClock.sleep(40)
@@ -60,6 +63,30 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
         val action = AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id
         if (root.actionList.any { it.id == action } && root.performAction(action)) return true
         return (0 until root.childCount).any { scrollDown(root.getChild(it)) }
+    }
+    /** A finger drag upward from the bottom of the list holding [row], held still before lifting. */
+    private fun pullUp(row: String, dp: Float) {
+        var list = find(uiAutomation.rootInActiveWindow, row) ?: error("No $row")
+        while (list.collectionInfo == null) list = list.parent ?: error("No list around $row")
+        val bounds = Rect().also(list::getBoundsInScreen)
+        val density = targetContext.resources.displayMetrics.density
+        val x = bounds.exactCenterX()
+        val start = bounds.bottom - 48 * density
+        check(start - dp * density > bounds.top) { "The list is too short for a ${dp}dp pull: $bounds" }
+        val end = start - dp * density
+        val down = SystemClock.uptimeMillis()
+        fun inject(action: Int, y: Float) {
+            val properties = MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_FINGER }
+            val coordinates = MotionEvent.PointerCoords().apply { this.x = x; this.y = y; pressure = 1f; size = .1f }
+            val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, 1, arrayOf(properties), arrayOf(coordinates),
+                0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+            try { check(uiAutomation.injectInputEvent(event, true)) } finally { event.recycle() }
+        }
+        inject(MotionEvent.ACTION_DOWN, start)
+        for (step in 1..24) { SystemClock.sleep(16); inject(MotionEvent.ACTION_MOVE, start + (end - start) * step / 24) }
+        SystemClock.sleep(120)
+        inject(MotionEvent.ACTION_MOVE, end)
+        inject(MotionEvent.ACTION_UP, end)
     }
     private fun set(model: ZerusViewModel, name: String, value: Any) {
         model.javaClass.declaredMethods.single { it.name == name }.apply { isAccessible = true }.invoke(model, value)
@@ -161,6 +188,23 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
             check(visible("No messages yet.") && !visible("Loading conversation…"))
             latch.countDown(); gate.set(null)
             await("explicit refresh complete") { main { !model.detailBusy } }
+            // Material3's 80 dp threshold over half the travel: 160 dp past the newest message.
+            // Five-second polls continue meanwhile; only an explicit read shows progress at once.
+            uiAutomation.waitForIdle(300, 5_000)
+            val short = CountDownLatch(1); gate.set(short)
+            pullUp("No messages yet.", 96f)
+            SystemClock.sleep(800)
+            check(main { !model.detailProgress } && !visible("Refreshing conversation…")) { "A short tail pull refreshed" }
+            short.countDown(); gate.set(null)
+            await("short tail pull settled") { main { !model.detailBusy } }
+            val pulled = CountDownLatch(1); gate.set(pulled)
+            val beforePull = reads.get()
+            pullUp("No messages yet.", 240f)
+            // A poll held since the gate opened stays invisible for five seconds.
+            await("tail pull refresh", 1_500) { reads.get() > beforePull && main { model.detailProgress } && visible("Refreshing conversation…") }
+            check(visible("No messages yet.") && !visible("Loading conversation…"))
+            pulled.countDown(); gate.set(null)
+            await("tail pull refresh complete") { main { !model.detailBusy } }
             check(main { model.draft(target).text == "Retained unsent text" })
         } finally {
             gate.get()?.countDown()

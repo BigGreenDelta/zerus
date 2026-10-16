@@ -118,7 +118,9 @@ messages load. A resolved empty conversation keeps “No messages yet.” during
 background reads instead of returning to the initial placeholder. Background loading status and spinners appear only after five
 seconds; manual refresh shows progress immediately and reuses any matching
 in-flight read. A thin progress bar accompanies the existing circular refresh
-indicator in catalogs and conversations. Navigation cancels
+indicator in catalogs and conversations. Pulling a conversation up past its newest
+message, as far as a list's downward pull, is the toolbar's explicit refresh; its
+indicator rises from the bottom. Short pulls and flings do not refresh. Navigation cancels
 ownership of earlier reads so stale results cannot replace a new conversation.
 Matching history reads continue in a bounded shared queue and are reused on
 reopening. Exact-target encrypted history is cached for seven days, up to 20
