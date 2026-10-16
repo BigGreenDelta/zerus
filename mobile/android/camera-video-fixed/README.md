@@ -57,7 +57,13 @@ class and generated AutoValue API, including package-local members, generic sign
 constant values and declared exceptions to survive. Three source-retention annotation
 classes that AndroidX strips when publishing and two exact Java 8 access bridges for
 the new private completer may be present additionally. Original synthetic members,
-including Kotlin default-argument APIs, remain compared. No other
+including Kotlin default-argument APIs, remain compared. JDK 17 also emits four enum-switch
+holders that JDK 21 omits for these same sources. The verifier permits only their exact
+names and declarations: Java 8 synthetic classes extending Object, the explicitly named
+synthetic static final int-array fields and a static initializer, with no other members
+(including private members). Reports separate these holders from source annotations.
+All original API and metadata checks apply on both JDKs. Reproducible AAR hashes are
+specific to the recorded JDK; JDK 17 and 21 AARs need not have identical bytes. No other
 additional class or consumer metadata change is accepted. These checks precede the
 normal module unit-test and release-lint tasks.
 

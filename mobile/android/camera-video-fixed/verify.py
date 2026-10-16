@@ -71,7 +71,7 @@ class ClassReader:
                                 for index in range(count)]
         return result
 
-    def abi(self):
+    def abi(self, *, include_private=False):
         access = self.u2()
         self.u2()  # This class's own name is already the archive entry name.
         parent = self.class_name(self.u2())
@@ -84,14 +84,14 @@ class ClassReader:
                 attributes = self.attributes()
                 # Include package-private/internal APIs and generated AutoValue members too.
                 # Synthetic Kotlin/default and package-local bridges are caller ABI too.
-                if not flags & 0x0002:
+                if include_private or not flags & 0x0002:
                     members.append((kind, name, descriptor, flags, attributes))
         return {'java_major': self.major, 'access': access, 'parent': parent,
                 'interfaces': interfaces, 'members': sorted(members, key=lambda x: x[:4]),
                 'attributes': self.attributes()}
 
 
-def contents(path):
+def contents(path, *, include_private=False):
     with zipfile.ZipFile(path) as aar:
         outer = {name: aar.read(name) for name in aar.namelist() if name != 'classes.jar'}
         bytecode = aar.read('classes.jar')
@@ -99,7 +99,8 @@ def contents(path):
         if len(classes.namelist()) != len(set(classes.namelist())):
             raise ValueError('Duplicate class JAR entries')
         names = classes.namelist()
-        abis = {name: ClassReader(classes.read(name)).abi() for name in names if name.endswith('.class')}
+        abis = {name: ClassReader(classes.read(name)).abi(include_private=include_private)
+                for name in names if name.endswith('.class')}
         metadata = {name: classes.read(name) for name in names if not name.endswith(('.class', '/'))}
         recorder = classes.read('androidx/camera/video/Recorder.class')
     return outer, bytecode, abis, metadata, recorder
@@ -129,6 +130,33 @@ def verify(original, rebuilt, report):
         'androidx/camera/video/Recorder$VideoCapabilitiesSource.class',
         'androidx/camera/video/Recorder$VideoRecordingType.class',
     }
+    # javac 17 emits these enum-switch holders for the same pinned Java 8 sources;
+    # javac 21 does not. Permit their exact declarations, never arbitrary synthetic classes.
+    switch_fields = {
+        'androidx/camera/video/Recorder$8.class': (
+            '$SwitchMap$androidx$camera$video$Recorder$AudioState',
+            '$SwitchMap$androidx$camera$video$Recorder$State'),
+        'androidx/camera/video/VideoEncoderSession$2.class': (
+            '$SwitchMap$androidx$camera$video$VideoEncoderSession$VideoEncoderState',),
+        'androidx/camera/video/internal/audio/AudioSource$3.class': (
+            '$SwitchMap$androidx$camera$video$internal$audio$AudioSource$InternalState',),
+        'androidx/camera/video/internal/encoder/EncoderImpl$4.class': (
+            '$SwitchMap$androidx$camera$video$internal$encoder$EncoderImpl$InternalState',),
+    }
+    full_abis = contents(rebuilt, include_private=True)[2]
+    permitted_switches = []
+    for name in extra:
+        if name not in switch_fields:
+            continue
+        expected = {
+            'java_major': 52, 'access': 0x1020, 'parent': 'java/lang/Object',
+            'interfaces': [], 'attributes': {},
+            'members': [('field', field, '[I', 0x1018, {}) for field in switch_fields[name]]
+                       + [('method', '<clinit>', '()V', 0x0008, {})],
+        }
+        if full_abis[name] == expected:
+            permitted_switches.append(name)
+    unexpected_classes = sorted(set(extra) - permitted_annotations - set(permitted_switches))
     consumer_changes = [name for name in original_outer if original_outer[name] != rebuilt_outer.get(name)]
     metadata_changes = [name for name in original_metadata if original_metadata[name] != rebuilt_metadata.get(name)]
     notice = 'META-INF/androidx/camera/camera-video/ZERUS_BACKPORT_NOTICE.txt'
@@ -136,7 +164,9 @@ def verify(original, rebuilt, report):
         b'mVideoEncodingFuture', b'mAudioEncodingFuture', b'mVideoEncoderCompleter', b'mInProgressVideoEncoder'))
     result = {
         'schema': 1, 'original_classes': len(before), 'rebuilt_classes': len(after),
-        'removed_classes': missing, 'additional_source_annotations': extra, 'changed_nonprivate_abis': changes,
+        'removed_classes': missing, 'additional_source_annotations': sorted(set(extra) & permitted_annotations),
+        'additional_synthetic_enum_switch_classes': permitted_switches,
+        'unexpected_additional_classes': unexpected_classes, 'changed_nonprivate_abis': changes,
         'additional_synthetic_recorder_bridges': bridges,
         'changed_consumer_entries': consumer_changes, 'changed_jar_metadata': metadata_changes,
         'backport_notice_present': notice in rebuilt_metadata, 'backport_owner_fields_present': fields_present,
@@ -147,7 +177,7 @@ def verify(original, rebuilt, report):
         'rebuilt_aar_sha256': hashlib.sha256(Path(rebuilt).read_bytes()).hexdigest(),
     }
     result['passed'] = not (missing or changes or consumer_changes or metadata_changes or
-                            set(extra) - permitted_annotations) and notice in rebuilt_metadata and fields_present
+                            unexpected_classes) and notice in rebuilt_metadata and fields_present
     Path(report).parent.mkdir(parents=True, exist_ok=True)
     Path(report).write_text(json.dumps(result, indent=2) + '\n')
     if not result['passed']:
