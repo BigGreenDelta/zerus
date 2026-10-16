@@ -582,6 +582,11 @@ and folder scope before project selection or text search, including zero counts.
 Its open checkboxes and selection stay in place during polling. A removed selected
 project remains as **Unavailable project** until removed from the filter.
 
+Changing the state, machine or project filter only changes the session list.
+The open conversation and its draft stay in place even when no row matches;
+its row is selected again when it returns to the list. Click another session
+to open it.
+
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
 each session once. Desktop and Android use the same filter IDs and membership

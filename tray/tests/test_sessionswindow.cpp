@@ -258,6 +258,8 @@ private slots:
     void dashboardActivityRowsStayReadable_data();
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
+    void listFiltersKeepTheOpenConversation_data();
+    void listFiltersKeepTheOpenConversation();
     void activeFilterCombinesWorkAndAttentionOnce();
     void backgroundShellRowKeepsActiveAndOpensItsProcesses();
     void activeFilterDraftsRestoreOfflineAndFollowEditsAndDelivery();
@@ -1613,7 +1615,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     window.findChild<MachineFilter *>()->setSelection({"@local"});
     for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "attention") button->click();
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Keep this draft");
-    auto *list = window.findChild<SessionList *>("sessionList"); const auto selectedKey = list->currentItem()->data(SessionRoles::Key);
+    auto *list = window.findChild<SessionList *>("sessionList"); const auto selectedKey = composer->sessionKey();
     auto *action = window.findChild<QAction *>("markAllSessionsRead"); QVERIFY(action); QVERIFY(action->isEnabled());
     QVERIFY(action->text().contains("(5)"));
     // Marks are shared through each session's host, not kept on this device.
@@ -1633,7 +1635,8 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     action->trigger(); QCOMPARE(seen.size(), 1); QCOMPARE(seen[0][0].toJsonObject().size(), 5);
     QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("5 replies marked as read."));
     QVERIFY(!action->isEnabled()); QVERIFY(state.unreadReplies().isEmpty()); QCOMPARE(writes.size(), 0);
-    QCOMPARE(list->currentItem()->data(SessionRoles::Key), selectedKey); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
+    QVERIFY(list->currentItem()); QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selectedKey);
+    QCOMPARE(composer->sessionKey(), selectedKey); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
     // Overview renders when shown.
     window.findChild<QPushButton *>("brandMark")->click();
     QVERIFY(window.findChild<DashboardPage *>()->findChild<QPushButton *>("dashboardAttention")->text().startsWith("1"));
@@ -3062,6 +3065,72 @@ void TestSessionsWindow::filtersSelectionAndOffline()
     QSignalSpy opened(&window, &SessionsWindow::sessionActivated);
     QTest::keyClick(list, Qt::Key_Return); QCOMPARE(opened.size(), 0);
     window.close(); // Closing a dashboard never invokes a session command.
+}
+
+void TestSessionsWindow::listFiltersKeepTheOpenConversation_data()
+{
+    QTest::addColumn<QString>("scope");
+    for (const auto *scope : {"attention", "active", "paused", "archived", "machine", "project", "empty"})
+        QTest::newRow(scope) << QString::fromLatin1(scope);
+}
+
+void TestSessionsWindow::listFiltersKeepTheOpenConversation()
+{
+    QFETCH(QString, scope);
+    auto state = fleet(); auto local = state.local();
+    auto archive = local.sessions[0]; archive.state = "archived"; archive.archiveId = "archive-one";
+    archive.archivedAt = QDateTime::currentSecsSinceEpoch(); local.sessions.append(archive);
+    state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    const auto current = local.sessions[1]; const QString key = '\n' + current.name;
+    SessionOrganization org; const auto otherProject = org.createGroup("Other project");
+    org.moveSession(org.observe("mac", "claude/infra/review", ""), otherProject);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(program()); window.setFleet(state); keepDetailsPollsOut(window);
+    window.resize(1100,760); window.show(); window.showSession({}, current.name);
+    auto *list = window.findChild<SessionList *>("sessionList");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *title = window.findChild<QLabel *>("detailTitle"); const auto openedTitle = title->text();
+    const QString draft = scope == "active" ? QString() : QStringLiteral("Keep the open session and this draft");
+    setComposerText(composer, draft);
+    auto cursor = composer->editor()->textCursor(); cursor.setPosition(qMin(5, int(draft.size())));
+    cursor.setPosition(qMin(12, int(draft.size())), QTextCursor::KeepAnchor); composer->editor()->setTextCursor(cursor);
+    const auto selection = cursor.selectedText();
+    auto *machines = window.findChild<MachineFilter *>(); auto *projects = window.findChild<ProjectFilter *>();
+    QHash<QString, QPushButton *> filters;
+    for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) filters[button->property("filter").toString()] = button;
+    const auto applyScope = [&] {
+        if (scope == "machine") machines->setSelection({"mac"});
+        else if (scope == "project") projects->setSelection({otherProject});
+        else if (scope == "empty") projects->setSelection({"unavailable-project"});
+        else filters[scope]->click();
+    };
+    const auto clearScope = [&] { filters["all"]->click(); machines->setSelection({}); projects->setSelection({}); };
+    applyScope();
+    for (int i = 0; i < list->count(); ++i) QVERIFY(list->item(i)->data(SessionRoles::Key).toString() != key);
+    QVERIFY(!list->currentItem());
+    QCOMPARE(composer->sessionKey(), key); QCOMPARE(title->text(), openedTitle);
+    QCOMPARE(composer->editor()->toPlainText(), draft); QCOMPARE(composer->editor()->textCursor().selectedText(), selection);
+    // Regular fleet refreshes must not replace a conversation outside the list scope.
+    window.setFleet(state);
+    QCOMPARE(composer->sessionKey(), key); QCOMPARE(title->text(), openedTitle);
+    QCOMPARE(composer->editor()->toPlainText(), draft); QCOMPARE(composer->editor()->textCursor().selectedText(), selection);
+    clearScope();
+    QVERIFY(list->currentItem()); QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), key);
+    QVERIFY(list->selectedItems().contains(list->currentItem()));
+    QCOMPARE(composer->sessionKey(), key); QCOMPARE(composer->editor()->toPlainText(), draft);
+    // An explicit row click still opens that target; the original draft remains recoverable.
+    if (scope != "empty") applyScope();
+    QListWidgetItem *next = nullptr;
+    for (int i = 0; i < list->count(); ++i) {
+        const auto candidate = list->item(i)->data(SessionRoles::Key).toString();
+        if (!list->item(i)->isHidden() && !list->item(i)->data(SessionRoles::Header).toBool()
+            && !candidate.isEmpty() && candidate != key) { next = list->item(i); break; }
+    }
+    QVERIFY(next); const auto nextKey = next->data(SessionRoles::Key).toString(); list->scrollToItem(next);
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, list->visualItemRect(next).center());
+    QCOMPARE(composer->sessionKey(), nextKey);
+    window.showSession({}, current.name);
+    QTRY_COMPARE(composer->editor()->toPlainText(), draft); QCOMPARE(composer->sessionKey(), key);
 }
 
 void TestSessionsWindow::activeFilterCombinesWorkAndAttentionOnce()
@@ -5078,6 +5147,7 @@ void TestSessionsWindow::sessionContextMenuSavedAndArchive()
     });
     action("contextRenameSession")->trigger(); QCOMPARE(writes.size(), 0); menu->hide();
     for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+    list->setCurrentRow(0);
     show(); QVERIFY(!action("contextOpenTerminal")); QVERIFY(!action("contextArchiveSession"));
     QCOMPARE(action("contextCopyCommand")->text(), QString("Copy restore command"));
     QCOMPARE(action("contextChangeSession")->text(), QString("Restore session")); QVERIFY(!action("contextChangeSession")->isEnabled()); // Saved name collision.
@@ -6286,6 +6356,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     filter("archived")->click(); QCOMPARE(list->count(), 2);
     QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/dashboard\nrecent"));
     QCOMPARE(list->item(1)->data(Qt::UserRole).toString(), QString("\ncodex/hgs/dashboard\nolder"));
+    list->setCurrentRow(0); // Filtering alone keeps the live conversation open.
     auto *restore = window.findChild<QPushButton *>("pauseAction");
     QCOMPARE(restore->accessibleName(), QString("Restore session")); QVERIFY(!restore->isEnabled());
     QVERIFY(window.findChild<QLabel *>("hint")->text().contains("uses this name"));
@@ -6324,7 +6395,7 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     local.sessions.removeLast(); local.sessions.append(restored);
     state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), QString("\ncodex/hgs/dashboard"));
-    filter("archived")->click(); QCOMPARE(list->count(), 1);
+    filter("archived")->click(); QCOMPARE(list->count(), 1); list->setCurrentRow(0);
     QVERIFY(!restore->isEnabled()); // The newly restored terminal occupies the name.
     QTimer::singleShot(0, [&]() {
         if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) dialog->button(QMessageBox::Yes)->click();
@@ -6485,7 +6556,10 @@ void TestSessionsWindow::forkKeepsSourceAndGroup()
     SessionsWindow window(fixture); window.setFleet(state); window.show();
     if (sourceState != "running") for (auto *button : window.findChildren<QPushButton *>())
         if (button->property("filter") == (sourceState == "archived" ? "archived" : "paused")) button->click();
-    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list->currentItem());
+    auto *list = window.findChild<SessionList *>("sessionList");
+    for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->data(SessionRoles::Identity).toString() == sourceIdentity) { list->setCurrentRow(i); break; }
+    QVERIFY(list->currentItem());
     QCOMPARE(list->currentItem()->data(SessionRoles::Identity).toString(), sourceIdentity);
     auto *client = window.findChild<HgsClient *>(); QSignalSpy inspected(client, &HgsClient::inspectionReady);
     QSignalSpy writes(client, &HgsClient::writeDone); QTRY_VERIFY(!inspected.isEmpty());
@@ -6516,6 +6590,8 @@ void TestSessionsWindow::forkKeepsSourceAndGroup()
     QCOMPARE(state.local().sessions[0].archiveId, original.archiveId); QCOMPARE(state.local().sessions[0].prompt, original.prompt);
     if (sourceState == "archived") {
         for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+        for (int i = 0; i < list->count(); ++i)
+            if (list->item(i)->data(SessionRoles::Identity).toString() == sourceIdentity) { list->setCurrentRow(i); break; }
         QVERIFY(list->currentItem()); QCOMPARE(list->currentItem()->data(SessionRoles::Identity).toString(), sourceIdentity);
     }
 }
@@ -6612,7 +6688,10 @@ void TestSessionsWindow::renameOtherSessionKinds()
         if (remote) { BoxState local; local.host = "arch"; local.ok = true; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); state.setPeer(box, QDateTime::currentMSecsSinceEpoch()); }
         else state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
         SessionsWindow window(program()); window.setFleet(state); window.show();
-        if (archived) for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+        if (archived) {
+            for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+            window.findChild<SessionList *>("sessionList")->setCurrentRow(0);
+        }
         auto *action = window.findChild<QAction *>("renameSessionAction"); QVERIFY(action->isEnabled());
         auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
         QTimer::singleShot(0, &window, [&]() {

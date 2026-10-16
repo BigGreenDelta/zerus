@@ -2529,6 +2529,7 @@ void SessionsWindow::rebuild()
     if (m_sessions->dragging()) return;
     QSet<QString> selectedKeys;
     for (const auto *item : m_sessions->selectedItems()) selectedKeys.insert(item->data(KeyRole).toString());
+    if (!m_sessions->currentItem() && selectedKeys.isEmpty() && !m_selectedKey.isEmpty()) selectedKeys.insert(m_selectedKey);
     m_rebuilding = true;
     QString requestedSelection = m_selectedKey;
     m_entries.clear(); int online = 0, attention = 0, saved = 0, archived = 0, total = 0, active = 0;
@@ -2836,8 +2837,9 @@ void SessionsWindow::rebuild()
         item->setData(Qt::AccessibleTextRole, sessionTooltip(accessibleFields, qBound(160, availableWidth - 40, 420)).plain);
         if (e.key == requestedSelection) selectedRow = i;
     }
-    const bool preserveFolderConversation=!m_folderFilterPath.isEmpty()&&selected();
-    if (selectedRow < 0&&!preserveFolderConversation) selectedRow = firstVisible < 0 ? firstSession : firstVisible;
+    // List scopes do not choose a replacement for a conversation that still exists.
+    const bool preserveConversation = selected();
+    if (selectedRow < 0 && !preserveConversation) selectedRow = firstVisible < 0 ? firstSession : firstVisible;
     if (selectedRow >= 0 && m_sessions->item(selectedRow)->data(KeyRole).toString() == m_selectedKey) {
         m_sessions->setCurrentRow(selectedRow, QItemSelectionModel::NoUpdate);
         QItemSelection selection;
@@ -2871,7 +2873,7 @@ void SessionsWindow::rebuild()
     m_rebuilding = false;
     updateSelectionActions();
     m_sessions->syncActivityAnimation();
-    if (!m_searchResults->active()&&!(preserveFolderConversation&&selectedRow<0)) selectSession(); else renderDetails();
+    if (!m_searchResults->active() && !(preserveConversation && selectedRow < 0)) selectSession(); else renderDetails();
 }
 
 void SessionsWindow::updateAttentionIndicator()
