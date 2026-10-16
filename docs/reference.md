@@ -368,7 +368,15 @@ never marks it as read. Explicit questions, approvals, errors and review reminde
 remain actionable. Optional Codex questions, which the agent continues without,
 are not attention: on the desktop they change neither the session's status nor
 the Needs attention filter, counters or badges. Listings report them separately
-as [`optional_questions`](#optional-questions-in-listings). Routine replies from a turn the
+as [`optional_questions`](#optional-questions-in-listings). Settings → Sessions →
+**Notify about optional questions**, off by default, adds an *Optional question*
+banner once for each new question. Questions already pending when it is turned on,
+or first seen while Zerus is focused or the session needs action, are only
+recorded; a stop, resume or temporarily unknown count announces nothing again. The
+banner opens the conversation's Activity. It is withdrawn when its questions are
+answered or skipped, the session is marked as read here or on another device, or
+the setting is turned off; delivered Windows messages remain but no longer open a
+session. Routine replies from a turn the
 agent scheduled itself (Kimi `CronCreate`) are not new replies while a recurring
 job remains: they appear in Activity without an unread mark, badge or banner. The
 reply after the last job ends, a one-shot reminder and any reply to the person's

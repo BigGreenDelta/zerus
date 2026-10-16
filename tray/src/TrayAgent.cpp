@@ -1,4 +1,5 @@
 #include "TrayAgent.h"
+#include "QuestionNotificationSettings.h"
 #include "AutomaticApprovals.h"
 
 #include <QCoreApplication>
@@ -468,6 +469,7 @@ void TrayAgent::refreshIcon()
 void TrayAgent::observeAttention(const QString &host, const BoxState &box)
 {
     const auto before = m_attention.state();
+    m_attention.setOptionalQuestions(QuestionNotificationSettings::enabled());
     const auto changes = m_attention.observe(host, box);
     if (m_attention.state() != before)
         QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));

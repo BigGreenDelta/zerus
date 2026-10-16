@@ -93,6 +93,7 @@
 #include "LocalSessionHost.h"
 #include "ProcessRunner.h"
 #include "ProcessSettings.h"
+#include "QuestionNotificationSettings.h"
 #include "Shortcuts.h"
 
 class FolderUrlRecorder : public QObject {
@@ -341,6 +342,7 @@ private slots:
     void terminalChoiceOpensOnlyTheRequestingTerminal_data();
     void terminalChoiceOpensOnlyTheRequestingTerminal();
     void optionalQuestionKeepsComposerAvailable();
+    void optionalQuestionNotificationsAreOptIn();
     void questionCompletionKeepsInputFocus_data();
     void questionCompletionKeepsInputFocus();
     void questionFooterHasRoomAndKeepsAnswers_data();
@@ -4313,6 +4315,20 @@ elif args[0]=='answer':
     QTRY_COMPARE(answered.size(),2);QVERIFY(tabs->currentWidget()->objectName()!="terminalView");
     // It still names the session whose Codex is updating.
     QCOMPARE(noticeLabel->text(),notice);
+}
+
+void TestSessionsWindow::optionalQuestionNotificationsAreOptIn()
+{
+    SessionsWindow window(program());
+    auto *settings = window.findChild<QWidget *>("settingsPage"); QVERIFY(settings);
+    auto *check = settings->findChild<QCheckBox *>("notifyOptionalQuestions"); QVERIFY(check);
+    QVERIFY(!check->isChecked()); QVERIFY(!QuestionNotificationSettings::enabled());
+    check->setChecked(true);
+    QVERIFY(QuestionNotificationSettings::enabled());
+    QCOMPARE(QSettings().value("notifications/optionalQuestions").toBool(), true);
+    SessionsWindow reopened(program());
+    QVERIFY(reopened.findChild<QCheckBox *>("notifyOptionalQuestions")->isChecked());
+    check->setChecked(false); QVERIFY(!QuestionNotificationSettings::enabled());
 }
 
 void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
