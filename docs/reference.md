@@ -599,6 +599,10 @@ their parent session active. Drafts and explicit review-later reminders remain
 active offline; stale work alone does not. Archives stay in Archive. Active also
 applies to desktop content search, and the Dashboard's Active counter opens this
 same filter. Creating, clearing or sending a draft updates the filter and count.
+Cards with an unsent draft have a blue edge in the Draft color, including the
+open conversation, offline sessions and Graph inspection. Collapsed tiles use
+the same color around their frame. Attention and errors retain their warning
+colors; working indicators and unread identity remain unchanged.
 
 The **+** in the session list header opens **New session**, like the one in the
 side rail. The button beside **⋯** collapses the list into a strip. Every project

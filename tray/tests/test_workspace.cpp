@@ -46,6 +46,8 @@ private slots:
     void dialogDismissalStaysRightmostAcrossChanges_data();
     void dialogDismissalStaysRightmostAcrossChanges();
     void draftStatusSitsBetweenWorkAndReplies();
+    void draftCardEdgesKeepTheirColor_data();
+    void draftCardEdgesKeepTheirColor();
     void gitStatusSeparatesEvidenceAndExpires();
     void gitStatusCardsKeepMetadataAndMachineReadable();
     void optionalQuestionChipFollowsTheStatusBadge();
@@ -735,21 +737,65 @@ void TestWorkspace::draftStatusSitsBetweenWorkAndReplies()
     const auto status = [&](bool selected = false) { return SessionDelegate::statusOf(list.model()->index(0, 0), selected); };
     item->setData(SessionRoles::Status, "Ready"); item->setData(SessionRoles::Draft, true);
     QCOMPARE(status().kind, SessionStatusBadge::Draft); QCOMPARE(status().caption, QString("Draft"));
+    QCOMPARE(status().emphasis, IdentityBadges::Draft);QCOMPARE(status(true).emphasis, IdentityBadges::Draft);
     QCOMPARE(status(true).kind, SessionStatusBadge::Neutral);   // the open session shows its draft in place
     item->setData(SessionRoles::Unread, true);
     QCOMPARE(status().kind, SessionStatusBadge::Draft); QVERIFY(status().additionalUnread);
     item->setData(SessionRoles::Working, 1);
     QCOMPARE(status().kind, SessionStatusBadge::Working); QVERIFY(!status().additionalUnread);
-    QVERIFY(!status().unread); QCOMPARE(status().emphasis, IdentityBadges::Normal);
+    QVERIFY(!status().unread); QCOMPARE(status().emphasis, IdentityBadges::Draft);
     QVERIFY(item->data(SessionRoles::Unread).toBool()); // Presentation never consumes the read identity.
     item->setData(SessionRoles::Working, 0); item->setData(SessionRoles::Attention, true);
     QCOMPARE(status().kind, SessionStatusBadge::Attention);
+    QCOMPARE(status().emphasis, IdentityBadges::Attention);
     item->setData(SessionRoles::Attention, false); item->setData(SessionRoles::Unread, false); item->setData(SessionRoles::Status, "Paused");
     QCOMPARE(status().kind, SessionStatusBadge::Draft);
     item->setData(SessionRoles::Draft, false);
     QCOMPARE(status().kind, SessionStatusBadge::Paused);
     item->setData(SessionRoles::Draft, true); item->setData(SessionRoles::Status, "Offline");
     QCOMPARE(status().kind, SessionStatusBadge::Neutral); QCOMPARE(status().caption, QString("Offline"));
+    QCOMPARE(status().emphasis, IdentityBadges::Draft);
+}
+
+void TestWorkspace::draftCardEdgesKeepTheirColor_data()
+{
+    QTest::addColumn<bool>("dark");QTest::addColumn<bool>("selected");QTest::addColumn<QString>("state");
+    for(bool dark:{false,true})for(bool selected:{false,true})for(const auto &state:{"Ready","Working","Offline","Needs input","Error"})
+        QTest::newRow(qPrintable(QString("%1-%2-%3").arg(dark?"dark":"light",selected?"selected":"closed",state)))<<dark<<selected<<QString(state);
+}
+void TestWorkspace::draftCardEdgesKeepTheirColor()
+{
+    QFETCH(bool,dark);QFETCH(bool,selected);QFETCH(QString,state);
+    QListWidget list;list.setProperty("hgsDark",dark);list.setProperty("compact",true);
+    auto *item=new QListWidgetItem(&list);item->setData(SessionRoles::Title,"Pending draft");item->setData(SessionRoles::Agent,"codex");
+    item->setData(SessionRoles::Status,state);item->setData(SessionRoles::Draft,true);item->setData(SessionRoles::Unread,true);
+    item->setData(SessionRoles::Working,state=="Working"?1:0);
+    const bool attention=state=="Needs input"||state=="Error";item->setData(SessionRoles::Attention,attention);
+    item->setData(SessionRoles::Failure,state=="Error");
+    const auto index=list.model()->index(0,0);
+    SessionDelegate delegate;
+    const QColor expected=attention?IdentityBadges::attentionColor(dark,state=="Error"):SessionStatusBadge::edge(SessionStatusBadge::Draft,dark);
+    const auto near=[](QColor a,QColor b){return qAbs(a.red()-b.red())+qAbs(a.green()-b.green())+qAbs(a.blue()-b.blue())<8;};
+    for(bool inspection:{false,true})for(qreal expansion:{1.,.6,0.}){
+        list.setProperty("selectionIsInspection",inspection);list.setProperty("expansion",expansion);list.setProperty("expandedRowWidth",360);
+        QImage image(expansion==1?360:84,94,QImage::Format_ARGB32_Premultiplied);image.fill(dark?QColor("#1c2229"):QColor("#ffffff"));
+        QStyleOptionViewItem option;option.widget=&list;option.font=list.font();option.rect=image.rect();option.state=QStyle::State_Enabled|(selected?QStyle::State_Selected:QStyle::State_None);
+        {QPainter painter(&image);delegate.paint(&painter,option,index);}
+        const auto previews=qEnvironmentVariable("HGS_DRAFT_CARD_PREVIEW");
+        if(!previews.isEmpty()&&!inspection){QDir().mkpath(previews);QVERIFY(image.save(previews+QString("/%1-%2-%3-%4.png").arg(dark?"dark":"light",selected?"selected":"closed",state).arg(expansion)));}
+        if(expansion==1)QVERIFY(near(image.pixelColor(4,47),expected));
+        else if(expansion>0){
+            const QColor surface=selected?QColor(dark?"#303b47":"#dde7ef"):QColor(dark?"#1c2229":"#ffffff");
+            const auto alpha=SessionStrip::fullOpacity(expansion);
+            const QColor blended(qRound(expected.red()*alpha+surface.red()*(1-alpha)),qRound(expected.green()*alpha+surface.green()*(1-alpha)),qRound(expected.blue()*alpha+surface.blue()*(1-alpha)));
+            QVERIFY(near(image.pixelColor(4,47),blended));
+        }
+        else if(expansion==0){
+            const auto kind=attention?(state=="Error"?SessionStatusBadge::Error:SessionStatusBadge::Attention):SessionStatusBadge::Draft;
+            QVERIFY(near(image.pixelColor(2,47),SessionStatusBadge::edge(kind,dark)));
+        }
+        QVERIFY(item->data(SessionRoles::Draft).toBool());QVERIFY(item->data(SessionRoles::Unread).toBool());
+    }
 }
 
 QTEST_MAIN(TestWorkspace)

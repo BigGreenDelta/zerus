@@ -123,8 +123,10 @@ public:
         const bool error = index.data(SessionRoles::Failure).toBool() || s.state == "Error";
         s.working = index.data(SessionRoles::Working).toInt() > 0;
         s.paused = s.state == "Paused";
-        s.draft = index.data(SessionRoles::Draft).toBool() && !selected && !s.attention && !s.working && s.state != "Offline";
-        s.emphasis = s.attention ? (error ? IdentityBadges::Error : IdentityBadges::Attention) : s.unread ? IdentityBadges::Unread : IdentityBadges::Normal;
+        const bool hasDraft = index.data(SessionRoles::Draft).toBool();
+        s.draft = hasDraft && !selected && !s.attention && !s.working && s.state != "Offline";
+        s.emphasis = s.attention ? (error ? IdentityBadges::Error : IdentityBadges::Attention)
+            : hasDraft ? IdentityBadges::Draft : s.unread ? IdentityBadges::Unread : IdentityBadges::Normal;
         s.kind = s.attention ? (error ? SessionStatusBadge::Error : SessionStatusBadge::Attention)
             : s.working ? (s.state == "Background" ? SessionStatusBadge::Background : SessionStatusBadge::Working) : s.draft ? SessionStatusBadge::Draft : s.unread ? SessionStatusBadge::Unread
             : index.data(SessionRoles::Scheduled).toBool() ? SessionStatusBadge::Scheduled
@@ -523,7 +525,7 @@ private:
         IdentityBadges::paintRow(p, cardOption, dark);
         // A tile shows its state in the color of its frame, with a faint glow
         // inward; the card's attention edge appears only as it grows.
-        const QColor edge = SessionStatusBadge::edge(status.kind, dark);
+        const QColor edge = SessionStatusBadge::edge(status.emphasis == IdentityBadges::Draft ? SessionStatusBadge::Draft : status.kind, dark);
         if (strip > 0) {
             p->save(); p->setOpacity(strip); p->setBrush(Qt::NoBrush);
             for (int i = 1; edge.isValid() && i <= 7; ++i) {
@@ -541,7 +543,7 @@ private:
         }
         if (status.emphasis != IdentityBadges::Normal && full > 0) {
             p->save(); p->setOpacity(full);
-            IdentityBadges::paintEdge(p, cardOption.rect, IdentityBadges::attentionColor(dark, status.emphasis == IdentityBadges::Error));
+            IdentityBadges::paintEdge(p, cardOption.rect, IdentityBadges::emphasisColor(dark, status.emphasis));
             p->restore();
         }
         SharedBadges shared;
