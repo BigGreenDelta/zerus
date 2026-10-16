@@ -13,6 +13,8 @@ struct MachinesScreen: View {
     @Binding var settings: Bool
     @Binding var pairing: PairingRequest?
     @State private var disconnecting: Connection?
+    @State private var naming: Machine?
+    @State private var coloring: Machine?
 
     var body: some View {
         NavigationStack {
@@ -33,19 +35,19 @@ struct MachinesScreen: View {
                 }
                 if model.demo {
                     Section {
-                        workspace(name: "Design workstation", connectionId: "demo")
-                        Button { model.stopPreview() } label: { Label("Leave preview", systemImage: "xmark.circle") }
+                        MachineTree(connectionId: "demo", naming: $naming, coloring: $coloring)
+                        Button { model.stopPreview() } label: { Label("Exit preview", systemImage: "xmark.circle") }
                     } header: { Text("Read-only preview") }
                 }
                 ForEach(model.connections) { connection in
                     Section {
-                        workspace(name: connection.displayName, connectionId: connection.id)
+                        MachineTree(connectionId: connection.id, naming: $naming, coloring: $coloring)
                         Button(role: .destructive) { disconnecting = connection } label: {
-                            Label("Disconnect", systemImage: "link.badge.minus")
+                            Label("Disconnect workspace", systemImage: "link.badge.minus")
                         }
                         .disabled(model.busy)
                     } header: {
-                        Text(connection.displayName)
+                        Text(connection.displayName).textCase(nil)
                     } footer: {
                         Text(connection.endpoint).textSelection(.enabled)
                     }
@@ -63,7 +65,7 @@ struct MachinesScreen: View {
             .navigationTitle("Machines")
             .zerusScreen()
             .overlay(alignment: .top) {
-                if model.catalogBusy || model.busy { ProgressView().progressViewStyle(.linear).tint(Theme.mint) }
+                if model.catalogProgress || model.busy { ProgressView().progressViewStyle(.linear).tint(Theme.mint) }
             }
             .confirmationDialog(disconnecting.map { "Disconnect \($0.displayName)?" } ?? "",
                                 isPresented: Binding(get: { disconnecting != nil }, set: { if !$0 { disconnecting = nil } }),
@@ -72,61 +74,178 @@ struct MachinesScreen: View {
             } message: { _ in
                 Text("This removes the gateway credential from this phone. Saved drafts remain available.")
             }
+            .sheet(item: $naming) { machine in MachineNameSheet(machine: machine) }
+            .sheet(item: $coloring) { machine in MachineColorSheet(machine: machine) }
         }
     }
+}
 
-    @ViewBuilder
-    private func workspace(name: String, connectionId: String) -> some View {
+private struct MachineTree: View {
+    @Environment(AppModel.self) private var model
+    let connectionId: String
+    @Binding var naming: Machine?
+    @Binding var coloring: Machine?
+
+    var body: some View {
         let groups = MachineCatalog.groups(connectionId, model.machines)
         if groups.isEmpty {
             Text(model.catalogBusy ? "Loading computers…" : "No computers reported yet.").foregroundStyle(Theme.muted)
         }
         ForEach(groups, id: \.root.machine.id) { group in
-            MachineRow(row: group.root, indented: false)
-            ForEach(group.children, id: \.machine.id) { child in MachineRow(row: child, indented: true) }
+            MachineRow(row: group.root, child: false, naming: $naming, coloring: $coloring)
+            ForEach(group.children, id: \.machine.id) { child in
+                MachineRow(row: child, child: true, naming: $naming, coloring: $coloring)
+            }
         }
     }
 }
 
 private struct MachineRow: View {
+    @Environment(AppModel.self) private var model
     let row: MachineTreeRow
-    let indented: Bool
+    let child: Bool
+    @Binding var naming: Machine?
+    @Binding var coloring: Machine?
 
     var body: some View {
         let machine = row.machine
-        HStack(spacing: 12) {
-            if indented { Image(systemName: "arrow.turn.down.right").foregroundStyle(Theme.muted).font(.caption) }
-            Image(systemName: "desktopcomputer")
-                .foregroundStyle(MachineTint.color(machine.key))
-                .frame(width: 28)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(machine.name).lineLimit(2)
-                Text(caption).font(.caption).foregroundStyle(Theme.muted).lineLimit(2)
+        HStack(alignment: .top, spacing: 8) {
+            if child { Image(systemName: "arrow.turn.down.right").font(.caption).foregroundStyle(Theme.muted).padding(.top, 4) }
+            VStack(alignment: .leading, spacing: 4) {
+                MachineLabel(name: machine.name, colorHex: model.machineColor(machine.key))
+                if !caption.isEmpty { Text(caption).font(.footnote).foregroundStyle(Theme.muted) }
+                Text(MachineCatalog.status(machine)).font(.footnote)
+                    .foregroundStyle(machine.online && !machine.lastKnown ? Theme.mint : Theme.muted)
             }
             Spacer(minLength: 0)
-            Circle().fill(machine.online && !machine.lastKnown ? Theme.mint : Theme.muted.opacity(0.5))
-                .frame(width: 8, height: 8)
-                .accessibilityHidden(true)
+            if !model.demo {
+                Menu {
+                    Button { naming = machine } label: { Label("Rename machine", systemImage: "pencil") }
+                    Button { coloring = machine } label: { Label("Label color", systemImage: "paintpalette") }
+                } label: {
+                    Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                }
+                .disabled(!model.storageReady)
+                .accessibilityLabel("Actions for \(machine.name)")
+            }
         }
-        .accessibilityElement(children: .combine)
+        .padding(.leading, child ? 12 : 0)
     }
 
     private var caption: String {
-        var parts = [MachineCatalog.status(row.machine)]
-        if !row.gatewayName.isEmpty { parts.append("Through \(row.gatewayName)") }
-        parts.append(row.machine.hgsVersion.isEmpty ? "version unavailable" : "hgs \(row.machine.hgsVersion)")
-        return parts.joined(separator: " · ")
+        switch row.machine.route {
+        case .direct: "Gateway"
+        case .unknown: ""
+        case .via: row.gatewayName.isEmpty ? "Through another computer" : "Through \(row.gatewayName)"
+        }
     }
 }
 
-/// Machine label colors use the desktop palette and tonal blends.
-enum MachineTint {
-    static func color(_ key: MachineKey, overrides: [MachineColorOverride] = []) -> Color {
-        let hex = MachineColors.color(overrides, key)
-        return Color(hex: (try? MachineColors.foreground(hex, dark: true)) ?? 0x9AACB2)
+/// A private phone label; it never changes the hostname, SSH settings or session identity.
+private struct MachineNameSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let machine: Machine
+    @State private var name = ""
+    @State private var prepared = false
+
+    var body: some View {
+        let saving = model.machineNameSaving.contains(machine.key)
+        let valid = (try? MachineNames.checked(name)) != nil
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Machine name", text: $name).disabled(saving).submitLabel(.done).onSubmit(save)
+                } footer: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("This private label applies only to this machine in this workspace. Its hostname, SSH settings and session identity stay unchanged.")
+                        Text("Reported name: \(machine.nativeName)")
+                    }
+                }
+                if !model.machineAlias(machine.key).isEmpty {
+                    Section {
+                        Button("Reset to reported name") {
+                            Task { if await model.renameMachine(machine.key, nil) { dismiss() } }
+                        }
+                        .disabled(saving)
+                    }
+                }
+            }
+            .navigationTitle("Name on this phone")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(saving) }
+                ToolbarItem(placement: .confirmationAction) { Button(saving ? "Saving…" : "Save", action: save).disabled(!valid || saving) }
+            }
+            .interactiveDismissDisabled(saving)
+            .onAppear {
+                guard !prepared else { return }
+                prepared = true
+                name = machine.name
+            }
+        }
+        .presentationDetents([.medium])
     }
-    static func background(_ key: MachineKey, overrides: [MachineColorOverride] = []) -> Color {
-        let hex = MachineColors.color(overrides, key)
-        return Color(hex: (try? MachineColors.background(hex, dark: true)) ?? 0x1A2225)
+
+    private func save() {
+        guard (try? MachineNames.checked(name)) != nil else { return }
+        Task { if await model.renameMachine(machine.key, name) { dismiss() } }
+    }
+}
+
+/// Palette and automatic reset edit only this phone's exact machine profile.
+private struct MachineColorSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let machine: Machine
+    @State private var choice: String?
+    @State private var prepared = false
+
+    var body: some View {
+        let saving = model.machineColorSaving.contains(machine.key)
+        let preview = choice ?? MachineColors.automatic(machine.key)
+        NavigationStack {
+            Form {
+                Section {
+                    MachineLabel(name: model.machineName(machine.key, fallback: machine.name), colorHex: preview)
+                    Text("Selected: \(choice == nil ? "Automatic" : (MachineColors.palette.firstIndex(of: choice!).map { MachineColors.names[$0] } ?? "Custom")) (\(preview))")
+                        .font(.footnote)
+                } footer: {
+                    Text("Saved only on this phone for this machine in this workspace. You can change it while offline.")
+                }
+                Section {
+                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(48)), count: 4), alignment: .leading, spacing: 8) {
+                        ForEach(MachineColors.palette, id: \.self) { hex in
+                            Button { choice = hex } label: {
+                                Circle().fill(Color(projectHex: hex) ?? .gray).frame(width: 32, height: 32)
+                                    .overlay { if choice == hex { Image(systemName: "checkmark").foregroundStyle(.black) } }
+                                    .frame(width: 48, height: 48)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("\(MachineColors.names[MachineColors.palette.firstIndex(of: hex)!]), \(hex)")
+                            .accessibilityAddTraits(choice == hex ? .isSelected : [])
+                        }
+                    }
+                    Button { choice = nil } label: {
+                        HStack { Text("Automatic (reset)"); Spacer(); if choice == nil { Image(systemName: "checkmark").foregroundStyle(Theme.mint) } }
+                    }
+                }
+                .disabled(saving)
+            }
+            .navigationTitle("Machine label color")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(saving) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(saving ? "Saving…" : "Save") { Task { if await model.setMachineColor(machine.key, choice) { dismiss() } } }.disabled(saving)
+                }
+            }
+            .interactiveDismissDisabled(saving)
+            .onAppear {
+                guard !prepared else { return }
+                prepared = true
+                choice = model.machineColorOverride(machine.key)
+            }
+        }
     }
 }

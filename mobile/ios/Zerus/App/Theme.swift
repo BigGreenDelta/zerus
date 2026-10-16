@@ -10,6 +10,8 @@ enum Theme {
     static let onSurface = Color(hex: 0xE9F0F2)
     static let outline = Color(hex: 0x354449)
     static let errorSurface = Color(hex: 0x3A2821)
+    static let surfaceVariant = Color(hex: 0x26323A)
+    static let selection = Color(hex: 0x243136)
 }
 
 extension Color {
