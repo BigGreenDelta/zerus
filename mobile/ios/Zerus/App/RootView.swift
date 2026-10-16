@@ -42,6 +42,7 @@ struct RootView: View {
                 MachinesScreen(settings: $settings, pairing: $pairing)
             } label: { Label("Machines", systemImage: "desktopcomputer") }
         }
+        .minimizingTabBarOnScroll()
         .sheet(isPresented: $settings) { SettingsView() }
         .sheet(item: $pairing) { request in PairingSheet(request: request) }
         .onChange(of: model.invitation) { _, invite in
@@ -127,6 +128,18 @@ struct MainToolbar: ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Button { settings = true } label: { Image(systemName: "gearshape") }
                 .accessibilityLabel("Settings")
+        }
+    }
+}
+
+extension View {
+    /// iOS 26 shrinks the floating tab bar while reading, leaving room for the composer.
+    @ViewBuilder
+    func minimizingTabBarOnScroll() -> some View {
+        if #available(iOS 26, *) {
+            tabBarMinimizeBehavior(.onScrollDown)
+        } else {
+            self
         }
     }
 }

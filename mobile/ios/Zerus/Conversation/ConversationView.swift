@@ -152,7 +152,6 @@ struct ConversationView: View {
         .navigationTitle(SessionFilters.label(session))
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(!target.agentId.isEmpty)
-        .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbar(session: session, raw: raw) }
         .sheet(isPresented: Binding(get: { display.expanded }, set: { if !$0 { display = display.close() } })) {
             ExpandedQuestionSheet(target: target, questions: questions, available: available, display: $display, onReview: { review = $0 })
