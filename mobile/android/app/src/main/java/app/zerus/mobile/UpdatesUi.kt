@@ -100,6 +100,8 @@ class AndroidUpdateViewModel(application: Application): AndroidViewModel(applica
     }
     val blocked=interactionBlocked()
     val busy=blocked || updater.busy || state.status in setOf("loading","checking","downloading")
+    val selectionId = model.pickerId
+    val canCancelSelection = model.pickerDraft != null && !model.attachmentPreparing && !model.attachmentImporting
     UpdateProgressPanel(state,busy,updater.preparingInstall,updater.updates.confirmation != null,
         model.updateInstallReason().takeUnless { updater.preparingInstall }.orEmpty(),updater.error,
         onChannel={ if(!blocked) updater.setChannel(it) },onAction={ action ->
@@ -118,13 +120,14 @@ class AndroidUpdateViewModel(application: Application): AndroidViewModel(applica
                 UpdateAction.Recover -> updater.recover()
                 UpdateAction.CancelInstall -> updater.cancelInstall()
             }
-        },cancelEnabled=!blocked && (!updater.busy || state.status=="downloading"))
+        },cancelEnabled=!blocked && (!updater.busy || state.status=="downloading"),
+        onCancelSelection=if(canCancelSelection) ({ if(!blocked && !updater.busy) model.cancelAttachmentPick(selectionId, pendingOnly=true) }) else null)
 }
 
 /** Stable slots keep status changes from moving the actions and the following About section. */
 @Composable internal fun UpdateProgressPanel(state: UpdateState,busy: Boolean,preparing: Boolean,
     confirmationAvailable: Boolean,installReason: String,error: String,onChannel:(String)->Unit,
-    onAction:(UpdateAction)->Unit,cancelEnabled:Boolean=true) {
+    onAction:(UpdateAction)->Unit,cancelEnabled:Boolean=true,onCancelSelection:(()->Unit)?=null) {
     val presentation=UpdatePresentation.content(state,preparing,confirmationAvailable)
     val pending=state.sessionId>=0
     Column(verticalArrangement=Arrangement.spacedBy(12.dp)) {
@@ -158,6 +161,8 @@ class AndroidUpdateViewModel(application: Application): AndroidViewModel(applica
         }
         val issue=state.error.ifBlank { error }.ifBlank { if(pending) "" else installReason }
         if(issue.isNotBlank()) Text(issue,color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall)
+        if(onCancelSelection != null) TextButton(onClick=onCancelSelection,enabled=!busy,
+            modifier=Modifier.align(Alignment.End).heightIn(min=48.dp)) { Text("Cancel selection") }
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val density=LocalDensity.current
             val measurer=rememberTextMeasurer()

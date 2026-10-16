@@ -94,11 +94,17 @@ card. Expand it to read and select the full text. Send now remains a manual
 action, available only when the current agent and queued message allow it.
 
 Attach files through the system document picker. The app copies and encrypts
-selected bytes privately rather than sending document URIs or trusting mutable
-files. The supported gateway limits are eight files, 10 MiB per file, 20 MiB total,
+selected bytes privately before adding them to the original draft, rather than
+sending document URIs or trusting mutable files. A restored picker
+callback waits for private drafts to load and stays bound to its exact launch
+identity. A fresh app launch clears an interrupted selection without discarding
+the draft or its existing files. Pending selection can also be canceled from
+Updates, Saved drafts, or any open conversation; a late canceled result cannot
+attach to a newer selection. Active imports continue to block installation.
+The supported gateway limits are eight files, 10 MiB per file, 20 MiB total,
 and 64 KiB of message text. The picker remains bound to its original composition
-if navigation or typing changes; interrupted selection can be canceled in Saved
-drafts. Files remain recoverable with unsent and uncertain messages.
+if navigation or typing changes. Files remain recoverable with unsent and
+uncertain messages.
 
 An unopened conversation immediately shows “Loading conversation…” while its
 messages load. A resolved empty conversation keeps “No messages yet.” during

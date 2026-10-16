@@ -2314,7 +2314,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         activity?.takeIf { it.string("run_id")==target.run && it.string("conversation_id")==target.conversation } ?: sessions.find { it.target==target }?.raw)
     fun beginAttachmentPick(target: Target, onReady: (String) -> Unit) {
         if(attachmentReason(target).isNotBlank()) return
-        if (speech.recording || target.archiveId.isNotBlank() || childSendReason(target).isNotBlank() || demo || !storageReady || target.key in preparingTargets || attachmentPreparing || pickerDraft != null || importJob?.isActive == true || attachmentImporting) return
+        if (speech.recording || updateInstallPreparing || target.archiveId.isNotBlank() || childSendReason(target).isNotBlank() || demo || !storageReady || target.key in preparingTargets || attachmentPreparing || pickerDraft != null || importJob?.isActive == true || attachmentImporting) return
         if (continuation?.draft?.target == target) cancelCompactContinuation("Selecting files canceled the automatic continuation. Your composition is preserved.")
         val origin = draft(target); if (origin.status != "editing") return
         val id = UUID.randomUUID().toString()
@@ -2359,9 +2359,20 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-    fun cancelAttachmentPick() {
+    fun recoverAttachmentPick(selectionId: String, launchedId: String) {
+        if (!storageReady) return
+        val busy = attachmentPreparing || attachmentImporting || importJob?.isActive == true
+        if (AttachmentSelection.recover(messageState, selectionId, launchedId, busy) == messageState) return
+        try {
+            editState { AttachmentSelection.recover(it, selectionId, launchedId, busy) }
+            flushDrafts()
+            error = "File selection was interrupted. Your draft is preserved; choose files again."
+        } catch (e: Exception) { error = e.message.orEmpty() }
+    }
+    fun cancelAttachmentPick(selectionId: String = pickerId, pendingOnly: Boolean = false) {
+        if (selectionId != pickerId || (pendingOnly && (attachmentPreparing || attachmentImporting || importJob?.isActive == true))) return
         importJob?.cancel()
-        try { editState { it.copy(pickerDraft = null, pickerId = "") }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
+        try { editState { AttachmentSelection.cancel(it, selectionId) }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
     }
     private fun protectedAttachmentIds(): Set<String> {
         fun refs(state: MessageState) = state.drafts.flatMap { it.attachments } + state.outgoing.flatMap { it.attachments } + state.pickerDraft?.attachments.orEmpty()

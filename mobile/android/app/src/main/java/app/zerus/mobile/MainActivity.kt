@@ -13,7 +13,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
@@ -119,24 +118,33 @@ class MainActivity : ComponentActivity() {
     private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) SessionNotifications.initialize(this)
     }
-    private val fileLaunchers = mutableMapOf<String, ActivityResultLauncher<Array<String>>>()
-    private fun fileLauncher(selectionId: String): ActivityResultLauncher<Array<String>> = fileLaunchers.getOrPut(selectionId) {
-        activityResultRegistry.register("zerus-files:$selectionId", ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-            model.finishAttachmentPick(uris, selectionId)
-        }
-    }
+    private lateinit var filePicker: AttachmentPickerHost
+    private companion object { const val FILE_SELECTION = "zerus.fileSelection" }
     override fun onStop() { model.speech.background(); model.attachments.stopAudio(); super.onStop() }
-    override fun onDestroy() { fileLaunchers.values.forEach { it.unregister() }; super.onDestroy() }
+    override fun onDestroy() { if (::filePicker.isInitialized) filePicker.close(); super.onDestroy() }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(FILE_SELECTION, filePicker.launchedId)
+        super.onSaveInstanceState(outState)
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         sanitizeLaunchIntent(intent)
         super.onCreate(savedInstanceState)
+        filePicker = AttachmentPickerHost(activityResultRegistry, savedInstanceState?.getString(FILE_SELECTION).orEmpty()) { uris, id ->
+            model.finishAttachmentPick(uris, id)
+        }
         AppTelemetry.opened()
         SessionNotifications.initialize(this)
         enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.rgb(16, 21, 23)))
         readIntent(intent)
-        model.pickerId.takeIf { it.isNotBlank() }?.let { fileLauncher(it) }
         setContent { MaterialTheme(colorScheme = Scheme) {
+            LaunchedEffect(model.storageReady, model.pickerId) {
+                if (model.storageReady) {
+                    val id = model.pickerId
+                    if (model.pickerDraft == null || !filePicker.restore(id)) model.recoverAttachmentPick(id, filePicker.launchedId)
+                    filePicker.retain(model.pickerId)
+                }
+            }
             ZerusApp(model, invitation, updateRequest, onInvitationUsed = { invitation = null }, onNotifications = {
                 if (Build.VERSION.SDK_INT >= 33) requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
             }, onLive = { enabled ->
@@ -144,9 +152,9 @@ class MainActivity : ComponentActivity() {
                 if (enabled) startForegroundService(service) else stopService(service)
             }, onAttach = { target ->
                 model.beginAttachmentPick(target) { selectionId ->
-                    if (isDestroyed || isFinishing) return@beginAttachmentPick
-                    try { fileLauncher(selectionId).launch(arrayOf("*/*")) }
-                    catch (_: Exception) { model.cancelAttachmentPick() }
+                    if (isDestroyed || isFinishing) { model.cancelAttachmentPick(selectionId); return@beginAttachmentPick }
+                    try { filePicker.launch(selectionId) }
+                    catch (_: Exception) { model.cancelAttachmentPick(selectionId) }
                 }
             })
         } }
@@ -1197,10 +1205,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             } }
         }
-        if (model.pickerDraft?.target == target) Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(if (model.attachmentImporting) "Saving selected files…" else "File selection is pending.", Modifier.weight(1f), color = Muted, style = MaterialTheme.typography.labelSmall)
-            TextButton(onClick = { model.cancelAttachmentPick() }) { Text("Cancel") }
-        }
+        PendingAttachmentSelection(model, target)
         if (previous?.status == "sending") Text("Sending… You can write the next message.", color = Muted, style = MaterialTheme.typography.labelSmall)
         else if (previous?.status == "uncertain") Text("Delivery unknown. Check the previous message before sending again.", color = Amber, style = MaterialTheme.typography.labelSmall)
         CompactMessageInput(state = editor, placeholder = sendReason.ifBlank { "Message" },
@@ -1213,7 +1218,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             focusRequester = focusRequester, onFocusChanged = { focused = it },
             leading = {
                 IconButton(onClick = { restorePickerFocus = focused; pickerStarted = false; onAttach(target) },
-                    enabled = !recording && !model.demo && model.storageReady && model.attachmentReason(target).isBlank() && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
+                    enabled = !recording && !model.demo && model.storageReady && !model.updateInstallPreparing && model.attachmentReason(target).isBlank() && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
                     Icon(Icons.Default.AttachFile, "Attach files", Modifier.size(24.dp).rotate(45f), tint = Muted)
                 }
             }, action = {
@@ -1299,10 +1304,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             } }
         }
-        if (model.pickerDraft != null) item { Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("A file selection was interrupted or is pending.", Modifier.weight(1f), color = Muted)
-            TextButton(onClick = { model.cancelAttachmentPick() }) { Text("Cancel selection") }
-        } }
+        if (model.pickerDraft != null) item { PendingAttachmentSelection(model) }
         if (unresolved.isNotEmpty()) item { Text("Outgoing messages", style = MaterialTheme.typography.titleMedium) }
         items(unresolved.sortedByDescending { it.createdAt }, key = { "outgoing:${it.requestId}" }) { message ->
             Card(colors = CardDefaults.cardColors(containerColor = Surface)) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

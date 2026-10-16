@@ -130,7 +130,7 @@ class PersistenceRaceTest {
                 }
             }
             entered.await(); importer.cancel()
-            actor.edit { it.copy(pickerDraft = null, pickerId = "") }
+            actor.edit { AttachmentSelection.cancel(it, "selection") }
             release.complete(Unit); importer.join()
             assertTrue(file.id in cleanupProtected)
             val final = actor.flush()
