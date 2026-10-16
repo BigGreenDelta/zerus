@@ -239,6 +239,9 @@ class QuestionDeliverySmokeInstrumentation : Instrumentation() {
             check(other.performAction(AccessibilityNodeInfo.ACTION_FOCUS))
             sendKeyDownUpSync(KeyEvent.KEYCODE_ENTER)
             node("Send all")
+            await("navigation clears this window's input focus") {
+                find(uiAutomation.rootInActiveWindow) { it.isEditable && it.isFocused } == null
+            }
             check(answers.get() == 0) { "Enter on an earlier question submitted the request" }
             node("Choose the second answer")
             check(answers.get() == 0) { "Enter on an earlier question submitted the request" }

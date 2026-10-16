@@ -138,12 +138,12 @@ import org.json.JSONObject
         saver = androidx.compose.foundation.ScrollState.Saver) { androidx.compose.foundation.ScrollState(scrollOffset) }
     LaunchedEffect(bodyScroll) { snapshotFlow { bodyScroll.value }.collect { onScroll(it) } }
     fun checkpoint() { onScroll(bodyScroll.value) }
+    @Composable fun Content(inDialog: Boolean, contentLimit: Dp) {
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     fun navigate(next: Int) {
         checkpoint(); focusManager.clearFocus(); keyboard?.hide(); onPage(next)
     }
-    @Composable fun Content(inDialog: Boolean, contentLimit: Dp) {
     val approvalSupported = QuestionPolicies.approvalSupported(question)
     val window = LocalWindowInfo.current
     val view = LocalView.current
