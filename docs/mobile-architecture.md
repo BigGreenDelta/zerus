@@ -321,7 +321,8 @@ Active replaces Working and combines current work with sessions needing
 attention, counting each session once. Explicit review-later reminders remain
 active offline; cached work and input states alone do not.
 Filtering and search produce project groups containing only matching sessions;
-the separate Projects catalog includes empty canonical projects. Directory
+the separate Projects catalog includes empty canonical projects. Both keep the
+order in which `hgs swarm get` lists the projects, the swarm's shared order. Directory
 fallback groups remain confined to the session list. Provider badges and filter
 glyphs reuse the desktop drawing geometry.
 

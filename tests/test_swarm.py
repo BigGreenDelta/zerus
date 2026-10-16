@@ -21,6 +21,18 @@ if (root / ('offline-' + alias)).exists():
 env = dict(os.environ, HGS_CONFIG_DIR=str(root / alias), HGS_STATE_DIR=str(root / alias / 'state'))
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
+if (root / ('preference-' + alias)).exists():
+    # A member from before the shared project order: it lists the kinds it
+    # accepts, without "order", and rejects that kind.
+    request = sys.stdin.read()
+    if args[1:] == ['exchange'] and any(op['key']['kind'] == 'order' for op in json.loads(request)['operations']):
+        print('unknown variant from a newer member', file=sys.stderr); sys.exit(1)
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=request, env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout)
+    if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'order']
+    print(json.dumps(output)); sys.exit(0)
 if not (root / ('old-' + alias)).exists():
     os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
 # A member from before shared preferences: it rejects unknown fields and key
@@ -454,6 +466,71 @@ class Swarm(unittest.TestCase):
         self.assertTrue(self.call('b', 'sync')['c']['ok'])
         self.assertEqual(self.call('c', 'preference', 'get', '--json'), {'mobile_delivery': 'away_10'})
         self.assertNotIn('catalog_outdated', self.call('b', 'get')['peers']['c'])
+
+
+    def order(self, node, ids):
+        before = self.call(node, 'get')
+        desired = copy.deepcopy(before['organization'])
+        projects = {p['id']: p for p in desired['projects']}
+        desired['projects'] = [projects[id] for id in ids] + [p for p in desired['projects'] if p['id'] not in ids]
+        desired['project_order'] = [p['id'] for p in desired['projects']]
+        return self.patch(node, before, desired)
+
+    def shown(self, node):
+        organization = self.call(node, 'get')['organization']
+        return [p['id'] for p in organization['projects']], organization.get('project_order')
+
+    def test_the_project_order_is_shared_by_every_member(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        self.assertEqual(self.shown('a'), (['a', 'b', 'c'], None))
+        self.order('c', ['c', 'a', 'b'])
+        snapshots = self.converge()
+        for node in 'abc':
+            self.assertEqual(self.shown(node), (['c', 'a', 'b'], ['c', 'a', 'b']), node)
+        self.assertEqual({len(s['conflicts']) for s in snapshots}, {0})
+        # A desktop without the shared order applies its own order as before;
+        # the swarm's order stays.
+        before = self.call('a', 'get')
+        desired = copy.deepcopy(before['organization'])
+        desired.pop('project_order')
+        desired['projects'].reverse()
+        next(p for p in desired['projects'] if p['id'] == 'a')['name'] = 'Renamed by an older desktop'
+        self.patch('a', before, desired)
+        self.converge()
+        self.assertEqual(self.shown('b'), (['c', 'a', 'b'], ['c', 'a', 'b']))
+
+    def test_joining_keeps_the_swarm_project_order(self):
+        self.order('b', ['b'])
+        self.order('a', ['a'])
+        self.join('a', 'b')
+        self.assertEqual(self.shown('a'), (['b', 'a'], ['b', 'a']))
+
+    def test_a_joiner_brings_its_mapped_order_to_a_swarm_without_one(self):
+        before = self.call('c', 'get')
+        desired = copy.deepcopy(before['organization'])
+        desired['projects'].append(project('d', 'Other', 'c', '/d'))
+        desired['project_order'] = ['c', 'd']
+        self.patch('c', before, desired)
+        # c's project c becomes b's project b; unmapped, d would come first.
+        self.join('c', 'b', mapping={'c': 'b'})
+        self.assertEqual(self.shown('c'), (['b', 'd'], ['b', 'd']))
+
+    def test_members_from_before_the_shared_order_keep_syncing_projects(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        (self.root / 'preference-c').touch()  # c answers b like a release without the shared order
+        self.order('a', ['b', 'c', 'a'])
+        self.call('a', 'preference', 'set', 'mobile_delivery', 'away_10', '--json')
+        for node in ('a', 'b', 'b'):
+            self.assertTrue(all(row['ok'] for row in self.call(node, 'sync').values()), node)
+        self.assertEqual(self.shown('b'), (['b', 'c', 'a'], ['b', 'c', 'a']))
+        self.assertEqual(self.shown('c'), (['a', 'b', 'c'], None))
+        self.assertEqual(self.call('c', 'preference', 'get', '--json'), {'mobile_delivery': 'away_10'})
+        self.assertNotIn('catalog_outdated', self.call('b', 'get')['peers']['c'])
+        (self.root / 'preference-c').unlink()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(self.shown('c'), (['b', 'c', 'a'], ['b', 'c', 'a']))
 
 
 if __name__ == '__main__':

@@ -29,6 +29,13 @@ class ProjectsTest {
         val another = parse(listOf(a), connection.copy(id = "workspace-b"))
         assertNotEquals(result.sessions.first().projectKey, another.sessions.first().projectKey)
     }
+    @Test fun projectsAndSessionGroupsKeepTheSharedCatalogOrder() {
+        // hgs lists projects in the swarm's shared order, the order desktops show.
+        val result = parse(listOf(computer("a", listOf(project("z-first", "Zeta", listOf("one")), project("m", "Alpha", listOf("two")),
+            project("b-last", "Mid", listOf("three"))), listOf(session("three", "/c"), session("one", "/a"), session("two", "/b")))))
+        assertEquals(listOf("z-first", "m", "b-last"), result.projects.map { it.key.id })
+        assertEquals(listOf("Zeta", "Alpha", "Mid"), SessionFilters.grouped(result.sessions, result.projects).map { it.name })
+    }
     @Test fun offlinePeerWithoutSnapshotIsNotReportedAsCatalogFailure() {
         val online = computer("a", listOf(project("p", "Project"))).put("online", true)
         val offline = JSONObject().put("id", "mac").put("name", "Mac").put("online", false).put("snapshot", JSONObject.NULL)

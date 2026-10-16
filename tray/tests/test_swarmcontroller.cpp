@@ -113,6 +113,48 @@ print(json.dumps(result))
         project=local["projects"].toArray()[0].toObject();project["folders"]=QJsonArray{posix,stale};local["projects"]=QJsonArray{project};
         QCOMPARE(SwarmController::presentation(shared,local,"node-a")["projects"].toArray()[0].toObject()["folders"],shared["projects"].toArray()[0].toObject()["folders"]);
     }
+    static QJsonObject orderedProject(const QString &id) {
+        return {{"id",id},{"name",id},{"color","#123456"},{"vivid",false},{"folders",QJsonArray{}},{"sessions",QJsonArray{}}};
+    }
+    static QStringList projectIds(const QJsonObject &organization) {
+        QStringList result;for(const auto &p:organization["projects"].toArray())result<<p.toObject()["id"].toString();return result;
+    }
+    void presentationFollowsTheSharedProjectOrder() {
+        auto local=organization("Local");auto a=orderedProject("a");a["collapsed"]=true;
+        local["projects"]=QJsonArray{a,orderedProject("b"),orderedProject("c")};
+        QJsonObject shared{{"version",2},{"projects",QJsonArray{orderedProject("c"),orderedProject("a"),orderedProject("new"),orderedProject("b")}}};
+        // Without a shared order (an older CLI, or nobody reordered) this desktop keeps its own.
+        QCOMPARE(projectIds(SwarmController::presentation(shared,local)),QStringList({"a","b","c","new"}));
+        shared["project_order"]=QJsonArray{"c","a","new","b"};
+        const auto result=SwarmController::presentation(shared,local);
+        QCOMPARE(projectIds(result),QStringList({"c","a","new","b"}));
+        // Collapse state stays local, and the order is derived again when sent.
+        QVERIFY(result["projects"].toArray()[1].toObject()["collapsed"].toBool());
+        QVERIFY(!result.contains("project_order"));
+    }
+    void reorderingPublishesTheSharedProjectOrder() {
+        auto initial=organization("Original");initial["projects"]=QJsonArray{orderedProject("a"),orderedProject("b")};
+        write("response",QJsonDocument(QJsonObject{{"schema",1},{"organization",initial},{"versions",QJsonObject{}},{"peers",QJsonObject{}},{"conflicts",QJsonArray{}}}).toJson());
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);
+        QJsonObject ready;connect(&controller,&SwarmController::organizationReady,this,[&](const QJsonObject &value){ready=value;});
+        controller.start(initial);QTRY_VERIFY(controller.settled());
+        QCOMPARE(requests()[0].toObject()["input"].toObject()["project_order"],QJsonValue(QJsonArray{"a","b"}));
+        const auto order=[&](int request,const char *field)->QJsonValue{return requests()[request].toObject()["input"].toObject()[field].toObject()["project_order"];};
+        // An unrelated edit sends the unchanged order, which the CLI does not rewrite.
+        SessionOrganization model(ready);model.renameGroup("a","Renamed");controller.edit(model.toJson());
+        QTRY_COMPARE(requests().size(),2);QTRY_VERIFY(controller.settled());
+        QCOMPARE(order(1,"base"),QJsonValue(QJsonArray{"a","b"}));QCOMPARE(order(1,"desired"),QJsonValue(QJsonArray{"a","b"}));
+        model.moveGroup("b","a");controller.edit(model.toJson());
+        QTRY_COMPARE(requests().size(),3);QTRY_VERIFY(controller.settled());
+        QCOMPARE(order(2,"base"),QJsonValue(QJsonArray{"a","b"}));QCOMPARE(order(2,"desired"),QJsonValue(QJsonArray{"b","a"}));
+        // The CLI lists projects in the written order, which this desktop keeps showing.
+        QCOMPARE(projectIds(ready),QStringList({"b","a"}));
+        // Another computer's order replaces this one at the next read.
+        auto remote=initial;remote["projects"]=QJsonArray{orderedProject("a"),orderedProject("b")};remote["project_order"]=QJsonArray{"a","b"};
+        write("response",QJsonDocument(QJsonObject{{"schema",1},{"organization",remote},{"versions",QJsonObject{}},{"peers",QJsonObject{}},{"conflicts",QJsonArray{}}}).toJson());
+        controller.refresh();QTRY_COMPARE(requests().size(),4);QTRY_VERIFY(controller.settled());
+        QCOMPARE(requests()[3].toObject()["action"].toString(),QString("get"));QCOMPARE(projectIds(ready),QStringList({"a","b"}));
+    }
     void localWindowsFoldersNeverReachTheCatalog() {
         const QJsonObject posix{{"id","posix"},{"machine","desktop"},{"path","/work"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
         const QJsonObject drive{{"id","drive"},{"machine","desktop"},{"path","C:/work"},{"name","Drive"},{"machine_id",""},{"machine_name",""}};
@@ -198,8 +240,9 @@ print(json.dumps(result))
     }
     void posixRequestsKeepTheirForm() {
         // Without local Windows folders a request is the former shared organization:
-        // fallback rows removed, the explicit hint added, folders as they were, before
-        // and after a snapshot names this computer. Unix GUIs store nothing else.
+        // fallback rows removed, the explicit hint and the shown project order added,
+        // folders as they were, before and after a snapshot names this computer. Unix
+        // GUIs store nothing else.
         auto local=organization("Original");auto project=local["projects"].toArray()[0].toObject();
         project["folders"]=QJsonArray{QJsonObject{{"id","posix"},{"machine","desktop"},{"path","/work/C:/x"},{"name",""}},
                                       QJsonObject{{"id","root"},{"machine","mac"},{"path","/"},{"name","Root"}},
@@ -215,6 +258,7 @@ print(json.dumps(result))
         controller.start(local);QTRY_VERIFY(controller.settled());
         auto expected=local;expected.remove("unassigned_sessions");expected["session_assignments_explicit"]=true;
         project["sessions"]=QJsonArray{"desktop\nseen"};expected["projects"]=QJsonArray{project,bare};
+        expected["project_order"]=QJsonArray{"p","bare"};
         const auto input=requests().first().toObject()["input"].toObject();
         QCOMPARE(input,expected);QCOMPARE(QJsonDocument(input).toJson(QJsonDocument::Compact),QJsonDocument(expected).toJson(QJsonDocument::Compact));
         controller.edit(local);QTRY_COMPARE(requests().size(),2);QTRY_VERIFY(controller.settled());
