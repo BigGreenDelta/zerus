@@ -426,6 +426,29 @@ public struct MessageState: Codable, Hashable, Sendable {
         return copy
     }
 
+    /// Adds picked files to the draft that owned the picker, or keeps them as a detached recovery draft.
+    public func selectionResult(_ origin: Draft, _ added: [Attachment]) throws -> MessageState {
+        guard pickerDraft?.generation == origin.generation, pickerDraft?.target == origin.target else {
+            throw ZerusError.invalid("File selection was canceled. The original draft is preserved.")
+        }
+        var copy = self
+        copy.pickerDraft = nil
+        copy.pickerId = ""
+        if added.isEmpty { return copy }
+        let current = drafts.first { draft in
+            draft.generation == origin.generation && draft.detachedId.isEmpty && draft.status == "editing" &&
+                (draft.target == origin.target || origin.target.resolves(to: draft.target) ||
+                 ContextPolicies.clearMoved(self, origin.target, draft.target) || ActionDraftPolicies.moved(self, origin.target, draft.target))
+        }
+        var restored = current ?? origin
+        restored.attachments += added
+        restored.revision = UUID().uuidString.lowercased()
+        if current == nil { restored.detachedId = UUID().uuidString.lowercased() }
+        try AttachmentPolicy.selection(restored.attachments)
+        copy.drafts = drafts.filter { $0.key != restored.key } + [restored]
+        return copy
+    }
+
     public func enqueue(_ draft: Draft, requestId: String, at: Double) throws -> MessageState {
         guard draft.target.archiveId.isEmpty else { throw ZerusError.invalid("Archived conversations are read-only.") }
         guard draft.detachedId.isEmpty, draft.questionId.isEmpty, draft.status == "editing" else {
