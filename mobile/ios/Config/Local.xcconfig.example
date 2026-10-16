@@ -1,0 +1,3 @@
+// Copy to Local.xcconfig (ignored by Git) and set your Apple Developer team ID
+// for development signing on a device. The value is never committed.
+ZERUS_DEVELOPMENT_TEAM = ABCDE12345

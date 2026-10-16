@@ -6,6 +6,11 @@ The Rust mobile relay lives in `services/mobile/relay/`; the outbound Python
 connector remains in `services/mobile/zerus_mobile/`. Keep API v1 and durable
 request identities compatible; see `services/mobile/relay/README.md` for relay
 contracts, isolated PostgreSQL tests and container memory qualification.
+The Android client lives in `mobile/android/`; the native iOS client (Swift
+package `ZerusKit` plus SwiftUI app) lives in `mobile/ios/`. Install iOS Dev
+builds with `mobile/ios/scripts/dev-install.sh` or `remote-dev-install.sh`; never
+commit team IDs, device identifiers or signing material. TestFlight uploads run
+only from trusted main; see `docs/ios-distribution.md`.
 `design/` contains prototypes and original artwork, not runtime dependencies.
 
 The repository language is English. Write documentation and other project-facing

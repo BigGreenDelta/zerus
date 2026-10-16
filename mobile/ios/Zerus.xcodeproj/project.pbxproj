@@ -1,0 +1,215 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A1000000000000000000B001 /* ZerusKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000D001 /* ZerusKit */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A1000000000000000000F001 /* Zerus.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zerus.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1000000000000000000F002 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
+		A1000000000000000000F003 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
+		A1000000000000000000F004 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
+		A1000000000000000000F005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		A1000000000000000000E001 /* Zerus */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Zerus; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000009002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000000000000000000B001 /* ZerusKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000006001 = {
+			isa = PBXGroup;
+			children = (
+				A1000000000000000000E001 /* Zerus */,
+				A10000000000000000006003 /* Config */,
+				A10000000000000000006002 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000006002 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A1000000000000000000F001 /* Zerus.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A10000000000000000006003 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				A1000000000000000000F002 /* Base.xcconfig */,
+				A1000000000000000000F003 /* Debug.xcconfig */,
+				A1000000000000000000F004 /* Release.xcconfig */,
+				A1000000000000000000F005 /* Info.plist */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000007001 /* Zerus */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000004002 /* Build configuration list for PBXNativeTarget "Zerus" */;
+			buildPhases = (
+				A10000000000000000009001 /* Sources */,
+				A10000000000000000009002 /* Frameworks */,
+				A10000000000000000009003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A1000000000000000000E001 /* Zerus */,
+			);
+			name = Zerus;
+			packageProductDependencies = (
+				A1000000000000000000D001 /* ZerusKit */,
+			);
+			productName = Zerus;
+			productReference = A1000000000000000000F001 /* Zerus.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000008001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					A10000000000000000007001 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = A10000000000000000004001 /* Build configuration list for PBXProject "Zerus" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10000000000000000006001;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A10000000000000000003001 /* XCLocalSwiftPackageReference "ZerusKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A10000000000000000006002 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10000000000000000007001 /* Zerus */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A10000000000000000009003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000009001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A1000000000000000000C001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000F003 /* Debug.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		A1000000000000000000C002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000F004 /* Release.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		A1000000000000000000C003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000F003 /* Debug.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		A1000000000000000000C004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000F004 /* Release.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000004001 /* Build configuration list for PBXProject "Zerus" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1000000000000000000C001 /* Debug */,
+				A1000000000000000000C002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000004002 /* Build configuration list for PBXNativeTarget "Zerus" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1000000000000000000C003 /* Debug */,
+				A1000000000000000000C004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A10000000000000000003001 /* XCLocalSwiftPackageReference "ZerusKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ZerusKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A1000000000000000000D001 /* ZerusKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ZerusKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A10000000000000000008001 /* Project object */;
+}

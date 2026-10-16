@@ -1,6 +1,7 @@
 # Mobile architecture
 
-Status: Android app, protocol version 1. The Android client,
+Status: Android app, protocol version 1; a native iOS client with the same
+safety rules is in development in `mobile/ios`. The clients,
 relay and computer connector live in this repository under the MIT license,
 except for attributed Apache-2.0 terminal adaptations from MuxPod. Their source
 headers identify the upstream revision, and the APK includes the complete

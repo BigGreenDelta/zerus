@@ -1,0 +1,10 @@
+# Swift package and Xcode build products
+.build/
+.swiftpm/
+build/
+DerivedData/
+xcuserdata/
+*.xcresult
+
+# Private signing configuration (team ID); see Config/Local.xcconfig.example
+Config/Local.xcconfig
