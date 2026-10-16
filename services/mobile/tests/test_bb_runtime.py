@@ -384,8 +384,8 @@ class NativeOutputTests(RuntimeCase):
 
 class DivergenceTests(RuntimeCase):
     async def test_claims_wait_for_the_first_capability_probe(self):
-        # Divergence a: Python claims as soon as its listing is ready, before
-        # the probe that enables mark_read has answered.
+        # Archive-aware Python probes before its listing; both connectors now
+        # wait for the first probe before claiming an optional read.
         self.hgs.script([{"argv": ["--help"], "stdout_text": READ_HELP, "delay": 1.5},
                          {"argv": ["read", SESSION, "--json"], "stdout": READ_RECEIPT},
                          *default_rules(help_text=READ_HELP)[1:]])
@@ -395,13 +395,15 @@ class DivergenceTests(RuntimeCase):
         result = await self.until(lambda: self.relay.results(request["request_id"]), what="the read receipt",
                                   process=process)
         first = self.polls()[0]
-        if IMPLEMENTATION == "python":
-            self.assertEqual(result, [{"state": "failed", "result": None,
-                                       "error": "native shared read ABI is unavailable"}])
-            self.assertEqual(first.query, "wait=1")
-        else:
-            self.assertEqual(result, [{"state": "completed", "result": READ_RECEIPT, "error": None}])
-            self.assertEqual(first.query, "wait=25")
+        self.assertEqual(result, [{"state": "completed", "result": READ_RECEIPT, "error": None}])
+        self.assertEqual(first.query, "wait=25")
+        probes = self.hgs.calls("--help")
+        self.assertEqual(len(probes), 1)
+        finished = self.hgs.finished(probes[0]["pid"])
+        self.assertIsNotNone(finished)
+        reads = self.hgs.calls("read", SESSION, "--json")
+        self.assertEqual(len(reads), 1)
+        self.assertGreaterEqual(reads[0]["at"], finished["at"])
 
     async def test_a_refused_read_result_is_retired_after_three_spaced_attempts(self):
         # Divergence b: Python retries the refused upload before every poll

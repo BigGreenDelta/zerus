@@ -287,7 +287,7 @@ divergence survives a rollback to Python.
 
 | # | Python today | Rust |
 |---|---|---|
-| a | Requests can be claimed after `snapshot_ready` but before the first capability probe. Flags reset to false before the await, so a failed probe disables everything for 300 s. | Claims wait for the first probe, at most 3 s. New flags are swapped in atomically; a failed probe keeps the previous ones. |
+| a | Archive-aware startup now probes before listing and claiming, matching Rust's initial wait. Flags still reset to false before the await, so a failed later probe disables everything for 300 s. | Claims wait for the first probe, at most 3 s. New flags are swapped in atomically; a failed probe keeps the previous ones. |
 | b | One result the relay rejects (400/413/422) blocks every claim: `flush` re-raises it before polling (`connector.py:1226-1237`, `1277-1303`). | That row gets 3 attempts at least 30 s apart, then is marked delivered locally with the fixed log line "Relay rejected a stored result; preserving local outcome"; the relay's claim expires to uncertain anyway (`claim_ttl` 90 s). Other rows and polling never wait. New receipts are sanitised before journaling: a non-string error gets a fixed text, errors are cut to 4,096 code points, and the canonical receipt with `request_id` is at most 1 MiB. Stored rows are never rewritten. |
 | c | A peer `attachment_read` raises TypeError, giving "connector could not record native outcome". | Works through the peer callback with a 14,046,552-byte cap. |
 | d | Any 400/404/422 on the extended heartbeat disables gateway sharing until restart. | Re-probed after 300 s, like presence. |
