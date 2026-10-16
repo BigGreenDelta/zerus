@@ -216,6 +216,12 @@ public struct QuestionSendRefusal: Hashable, Sendable {
     public let questionId: String
     public let questionHash: String
     public let text: String
+    public init(target: Target, questionId: String, questionHash: String, text: String) {
+        self.target = target
+        self.questionId = questionId
+        self.questionHash = questionHash
+        self.text = text
+    }
     public func text(for target: Target, _ question: Question) -> String {
         target == self.target && question.id == questionId && question.hash == questionHash ? text : ""
     }

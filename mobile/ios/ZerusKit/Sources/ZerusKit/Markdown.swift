@@ -326,7 +326,7 @@ public actor MarkdownDocumentCache {
         let flight = Task<MarkdownDocument, Never> {
             await self.acquire()
             let document = await Task.detached(priority: .userInitiated) { parse(source) }.value
-            await self.finish(source, document)
+            self.finish(source, document)
             return document
         }
         flights[source] = flight

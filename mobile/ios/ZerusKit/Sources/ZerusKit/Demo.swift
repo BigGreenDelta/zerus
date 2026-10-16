@@ -4,6 +4,34 @@ import Foundation
 public enum DemoCatalog {
     public static let connection = Connection(id: "demo", label: "Design workstation", url: "https://workstation.example", token: "")
 
+    /// Preview transcript: the Android demo exchange plus a reply that exercises Markdown rendering.
+    public static let events: [Event] = [
+        Event(id: "1", role: "You", text: "Review the API migration and call out any compatibility risks.", time: "10:42", at: 1_700_000_520),
+        Event(id: "2", role: "Codex", text: """
+            I found **two clients** still using the previous endpoint:
+
+            1. `billing-sync` calls `/v1/orders` every minute.
+            2. The dashboard export reads `/v1/orders?format=csv`.
+
+            | Client | Calls per day | Risk |
+            | :--- | ---: | :---: |
+            | billing-sync | 1,440 | High |
+            | dashboard export | 12 | Low |
+
+            I can keep a compatibility route while the new API rolls out:
+
+            ```swift
+            router.get("/v1/orders") { request in
+                try await orders.list(request, version: .legacy)
+            }
+            ```
+
+            - [x] Map every caller
+            - [ ] Announce the removal date
+            """, time: "10:43", at: 1_700_000_580),
+        Event(id: "3", role: "Codex", text: "Should I keep the previous endpoint available during migration?", time: "10:44", at: 1_700_000_640),
+    ]
+
     public static func make() -> (projects: [ProjectSummary], sessions: [Session]) {
         let machines = [("demo", "Design workstation"), ("demo-laptop", "Preview laptop"), ("demo-build", "Preview build machine with a long display name")]
         let name = Dictionary(uniqueKeysWithValues: machines)

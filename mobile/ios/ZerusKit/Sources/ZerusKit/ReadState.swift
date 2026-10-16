@@ -491,6 +491,25 @@ public enum UnreadPresentation {
         if nativeUnread { return UnreadBadge(text: "?", description: "The computer reports an unread reply; the total is not reported") }
         return nil
     }
+
+    public struct Opening: Hashable, Sendable {
+        public let anchor: ConversationAnchor?
+        public let unavailableSaved: Bool
+    }
+
+    /// The first reading position: remembered or saved place, else the unread divider, else the newest message.
+    /// A missing saved position never silently drops the reader at the newest message.
+    public static func opening(memory: ConversationAnchor?, saved: SavedConversationViewport?, boundary: String, keys: [String]) -> Opening {
+        let remembered = memory.flatMap { $0.following ? nil : $0 } ?? saved.map { ConversationAnchor(itemKey: "event:" + $0.eventId, offset: $0.offset, following: false) }
+        if let remembered, keys.contains(remembered.itemKey) { return Opening(anchor: remembered, unavailableSaved: false) }
+        if !boundary.isEmpty && keys.contains("history:unread") {
+            return Opening(anchor: ConversationAnchor(itemKey: "history:unread", offset: 0, following: false), unavailableSaved: remembered != nil)
+        }
+        if remembered != nil {
+            return Opening(anchor: keys.first { $0.hasPrefix("event:") }.map { ConversationAnchor(itemKey: $0, offset: 0, following: false) }, unavailableSaved: true)
+        }
+        return Opening(anchor: nil, unavailableSaved: false)
+    }
 }
 
 /// Read-operation ownership and delayed presentation, using an injected monotonic clock.

@@ -658,3 +658,35 @@ final class ConversationViewportTests: XCTestCase {
         XCTAssertEqual("Saved\ncomposition", ComposerReconciler.external(current: "empty", generation: "restored", text: "Saved\ncomposition").replacement)
     }
 }
+
+/// Ported from Android UnreadPresentationTest.
+final class OpeningPositionTests: XCTestCase {
+    private let keys = ["history:earlier", "event:old", "history:unread", "event:new", "history:tail"]
+
+    func testSavedPositionWinsOverUnreadDivider() {
+        let position = UnreadPresentation.opening(memory: nil, saved: SavedConversationViewport(eventId: "old", offset: 37), boundary: "new", keys: keys)
+        XCTAssertEqual("event:old", position.anchor?.itemKey)
+        XCTAssertEqual(37, position.anchor?.offset)
+        XCTAssertFalse(position.unavailableSaved)
+    }
+
+    func testFirstUnreadIsShownWhenNoReadingAnchorExists() {
+        XCTAssertEqual("history:unread", UnreadPresentation.opening(memory: nil, saved: nil, boundary: "new", keys: keys).anchor?.itemKey)
+        XCTAssertNil(UnreadPresentation.opening(memory: nil, saved: nil, boundary: "", keys: keys.filter { $0 != "history:unread" }).anchor)
+    }
+
+    func testDeliberateMemoryPositionWinsOverDurableOlderPosition() {
+        let memory = ConversationAnchor(itemKey: "event:new", offset: 17, following: false)
+        XCTAssertEqual(memory, UnreadPresentation.opening(memory: memory, saved: SavedConversationViewport(eventId: "old", offset: 10), boundary: "new", keys: keys).anchor)
+    }
+
+    func testMissingSavedPositionIsExplicitAndNeverFallsToTail() {
+        let withUnread = UnreadPresentation.opening(memory: nil, saved: SavedConversationViewport(eventId: "missing", offset: 10), boundary: "new", keys: keys)
+        XCTAssertTrue(withUnread.unavailableSaved)
+        XCTAssertEqual("history:unread", withUnread.anchor?.itemKey)
+        let noUnread = UnreadPresentation.opening(memory: nil, saved: SavedConversationViewport(eventId: "missing", offset: 10), boundary: "",
+                                                  keys: keys.filter { $0 != "history:unread" })
+        XCTAssertEqual("event:old", noUnread.anchor?.itemKey)
+        XCTAssertTrue(noUnread.unavailableSaved)
+    }
+}

@@ -34,8 +34,12 @@ struct SessionsScreen: View {
                 }
             }
             .navigationTitle(title)
-            .navigationDestination(for: SessionRoute.self) { route in SessionPlaceholderView(target: route.target) }
+            .navigationDestination(for: SessionRoute.self) { route in ConversationView(route: route) }
             .zerusScreen()
+        }
+        .onChange(of: path.count) { _, count in
+            // Leaving the conversation stops its reads; switching tabs keeps it open.
+            if count == 0 { model.conversation.close() }
         }
     }
 
@@ -273,31 +277,5 @@ private struct MachineFilterSheet: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
         .presentationDetents([.medium, .large])
-    }
-}
-
-/// Session placeholder until the conversation view opens the exact target.
-struct SessionPlaceholderView: View {
-    @Environment(AppModel.self) private var model
-    let target: Target
-
-    var body: some View {
-        let session = model.sessions.first { $0.target == target }
-        List {
-            if let session {
-                Section {
-                    SessionStatusBadge(session: session, online: model.online(session))
-                    LabeledContent("Computer", value: model.machineName(target.machineKey))
-                    LabeledContent("Session", value: target.session)
-                    if !session.preview.isEmpty { Text(session.preview).foregroundStyle(Theme.muted) }
-                }
-            }
-            Section {
-                ForEach(SessionReference.identifiers(target), id: \.self) { Text($0).font(.footnote).textSelection(.enabled) }
-            }
-        }
-        .navigationTitle(session.map(SessionFilters.label) ?? target.session)
-        .navigationBarTitleDisplayMode(.inline)
-        .zerusScreen()
     }
 }

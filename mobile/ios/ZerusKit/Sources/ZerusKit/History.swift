@@ -104,6 +104,10 @@ public enum ConversationMerge {
     public struct Result: Sendable {
         public let events: [Event]
         public let recordedRequestIds: Set<String>
+        public init(events: [Event], recordedRequestIds: Set<String>) {
+            self.events = events
+            self.recordedRequestIds = recordedRequestIds
+        }
     }
 
     public static func merge(target: Target, native: [Event], outgoing: [OutgoingMessage]) -> Result {

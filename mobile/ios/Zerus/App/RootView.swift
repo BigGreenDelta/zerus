@@ -31,8 +31,10 @@ struct RootView: View {
                 })
             } label: { Label("Projects", systemImage: "folder") }
             Tab(value: AppTab.drafts) {
-                DraftsPlaceholder(settings: $settings)
+                DraftsScreen(settings: $settings, onOpen: openConversation)
             } label: { Label("Drafts", systemImage: "square.and.pencil") }
+            .badge(model.conversation.drafts.filter { $0.status != "editing" && $0.status != "submitted" && $0.questionId != "__interrupt" }.count +
+                   model.conversation.normalizedOutgoing.filter { ["uncertain", "failed"].contains($0.status) }.count)
             Tab(value: AppTab.accounts) {
                 AccountsScreen(settings: $settings, onMachines: { tab = .machines })
             } label: { Label("Accounts", systemImage: "person.crop.circle") }
@@ -54,7 +56,8 @@ struct RootView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
                 if Task.isCancelled { break }
-                if tab != .drafts { model.refresh() }
+                if model.conversation.selected != nil { model.conversation.refreshActivity() }
+                else if tab != .drafts { model.refresh() }
             }
         }
         .onAppear {
@@ -67,6 +70,13 @@ struct RootView: View {
                 tab = ["sessions": .sessions, "projects": .projects, "drafts": .drafts, "accounts": .accounts,
                        "machines": .machines][arguments[index + 1]] ?? tab
             }
+            // `-zerus-open N` opens the Nth session of the catalog.
+            if let index = arguments.firstIndex(of: "-zerus-open"), index + 1 < arguments.count, let row = Int(arguments[index + 1]) {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(600))
+                    if model.sessions.indices.contains(row) { openConversation(model.sessions[row].target) }
+                }
+            }
             #endif
         }
         .alert("Zerus", isPresented: Binding(get: { !model.error.isEmpty }, set: { if !$0 { model.error = "" } })) {
@@ -74,6 +84,15 @@ struct RootView: View {
         } message: {
             Text(model.error)
         }
+    }
+
+    /// Opens an exact conversation from another tab.
+    private func openConversation(_ target: Target) {
+        model.clearSessionScope()
+        tab = .sessions
+        var path = NavigationPath()
+        path.append(SessionRoute(target: target))
+        sessionsPath = path
     }
 
     private func select(_ next: AppTab) {
@@ -108,21 +127,6 @@ struct MainToolbar: ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Button { settings = true } label: { Image(systemName: "gearshape") }
                 .accessibilityLabel("Settings")
-        }
-    }
-}
-
-/// Drafts arrive with the conversation sub-project.
-private struct DraftsPlaceholder: View {
-    @Binding var settings: Bool
-
-    var body: some View {
-        NavigationStack {
-            ContentUnavailableView("No saved drafts", systemImage: "square.and.pencil",
-                                   description: Text("Unsent messages and deliveries to review appear here."))
-                .toolbar { MainToolbar(settings: $settings) }
-                .navigationTitle("Drafts")
-                .zerusScreen()
         }
     }
 }

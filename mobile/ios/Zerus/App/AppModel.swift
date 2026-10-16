@@ -28,7 +28,10 @@ final class AppModel {
     private(set) var machineOperations: [MachineKey: Set<String>] = [:]
     private(set) var machineFeatures: [MachineKey: Set<String>] = [:]
     /// Live catalog rows, before archive pages are merged.
-    @ObservationIgnored private var catalogSessions: [Session] = []
+    @ObservationIgnored private var catalogSessions: [Session] = [] { didSet { catalogRevision += 1 } }
+    /// Changes whenever the live catalog is replaced, so off-main annotations can detect a newer catalog.
+    @ObservationIgnored private(set) var catalogRevision = 0
+    var catalogRows: [Session] { catalogSessions }
     /// The published session catalog: live rows and bounded archive pages.
     private(set) var sessions: [Session] = []
     private(set) var projects: [ProjectSummary] = []
@@ -70,7 +73,11 @@ final class AppModel {
     @ObservationIgnored private var progressTask: Task<Void, Never>?
     @ObservationIgnored private var catalogGeneration = 0
 
-    init(client: RelayClient, connectionStore: ConnectionStore, sealedStore: SealedFileStore?) {
+    /// The open conversation and its delivery state.
+    @ObservationIgnored private(set) var conversation: ConversationModel!
+
+    init(client: RelayClient, connectionStore: ConnectionStore, sealedStore: SealedFileStore?,
+         cache: ConversationCache? = nil, pages: ConversationPageCache? = nil) {
         self.client = client
         self.connectionStore = connectionStore
         self.sealedStore = sealedStore
@@ -78,11 +85,13 @@ final class AppModel {
             guard let self else { throw CancellationError() }
             return try await self.loadArchivePage(key, query)
         }, reset: { [weak self] in self?.publishSessions() })
+        conversation = ConversationModel(app: self, cache: cache, pages: pages)
     }
 
     static func live() -> AppModel {
         AppModel(client: RelayClient(), connectionStore: KeychainConnectionStore(),
-                 sealedStore: try? SealedFileStore.applicationSupport(keys: KeychainKeyProvider()))
+                 sealedStore: try? SealedFileStore.applicationSupport(keys: KeychainKeyProvider()),
+                 cache: try? ConversationCache.live(), pages: try? ConversationPageCache.live())
     }
 
     func start() async {
@@ -118,6 +127,7 @@ final class AppModel {
         let connected = Set(connections.map(\.id))
         let accounts = OrderedStatePersistence(initial: loaded.1.filter { connected.contains($0.key.connectionId) }) { try sealed.write("account_catalog", $0) }
         accounts.onChange = { [weak self] in self?.accountCatalogs = $0 }
+        await conversation.openReadState(sealed)
         accounts.onResult = { [weak self] failure in
             self?.accountsError = failure == nil ? "" : "Account snapshots could not be saved. Existing private data is preserved."
         }
@@ -141,14 +151,47 @@ final class AppModel {
     func flushPrivateState() {
         messages?.flushAsync()
         accountsStore?.flushAsync()
+        conversation.flushRead()
     }
 
     private func messageStateChanged(_ value: MessageState) {
-        let namesChanged = messageState.machineAliases != value.machineAliases
-        let draftsChanged = messageState.drafts != value.drafts
+        let old = messageState
+        let namesChanged = old.machineAliases != value.machineAliases
+        let draftsChanged = old.drafts != value.drafts
         messageState = value
         if namesChanged { machines = machines.map { MachineNames.apply($0, value.machineAliases) } }
         if namesChanged || draftsChanged { scheduleList() }
+        conversation.messageStateChanged(old: old, new: value)
+    }
+
+    /// Applies a private-state reducer now and schedules its debounced write.
+    func editMessages(_ reduce: @escaping @Sendable (MessageState) -> MessageState) {
+        guard let messages else {
+            error = "Private storage is not ready."
+            return
+        }
+        messages.edit(reduce)
+    }
+
+    /// Writes a reducer before returning; transport may follow only after this succeeds.
+    @discardableResult
+    func durableMessages(_ reduce: @escaping @Sendable (MessageState) throws -> MessageState,
+                         acknowledge: (@Sendable (MessageState, MessageState) -> MessageState)? = nil) async throws -> MessageState {
+        guard let messages else { throw ZerusError.invalid("Private storage is not ready.") }
+        return try await messages.durable(reduce, acknowledge: acknowledge)
+    }
+
+    @discardableResult
+    func flushMessages() async throws -> MessageState {
+        guard let messages else { throw ZerusError.invalid("Private storage is not ready.") }
+        return try await messages.flush()
+    }
+
+    /// Replaces live rows with their read annotations when the catalog has not changed meanwhile.
+    func annotateCatalog(_ rows: [Session], revision: Int) {
+        guard revision == catalogRevision else { return }
+        catalogSessions = rows
+        publishSessions()
     }
 
     func scenePhaseChanged(_ phase: ScenePhase) {
@@ -217,6 +260,7 @@ final class AppModel {
             machineOperations = machineOperations.filter { $0.key.connectionId != connection.id }
             machineFeatures = machineFeatures.filter { $0.key.connectionId != connection.id }
             publishSessions()
+            await conversation.forget(connection: connection.id)
         } catch {
             self.error = "Could not revoke this phone on the gateway. The connection is preserved. \(Self.message(error, fallback: ""))"
         }
@@ -321,6 +365,8 @@ final class AppModel {
         projectWarnings = warnings
         if let scope = sessionProjectScope { sessionProjectScope = projects.first { $0.key == scope.key } ?? scope }
         publishSessions()
+        conversation.refreshReadAttention()
+        conversation.adoptSharedReads()
         let rows = nextSessions, hosts = nextMachines
         let index = await Task.detached { ConversationIndex.capture(rows, hosts) }.value
         if connections == original {
@@ -331,6 +377,7 @@ final class AppModel {
             }
         }
         configureArchive()
+        conversation.watchHistoryHeads()
     }
 
     /// Merges live rows with archive pages and rebuilds the visible list.
@@ -437,10 +484,14 @@ final class AppModel {
         let sessions = self.sessions, machines = self.machines, projects = self.projects
         let selected = selectedMachines, query = sessionQuery, project = sessionProjectScope?.key, filter = sessionFilter
         let drafts = messageState.drafts, range = archive?.range ?? ArchiveRange()
+        let later = Set((conversation?.readState.records ?? []).filter(\.reviewLater).map { ConversationReadPolicies.key($0.target) })
         Task { [weak self] in
             let prepared = await Task.detached(priority: .userInitiated) {
                 SessionListPresentation.prepare(sessions: sessions, machines: machines, projects: projects, selectedMachines: selected,
-                                                query: query, project: project, filter: filter, drafts: drafts, archiveRange: range)
+                                                query: query, project: project, filter: filter, drafts: drafts, archiveRange: range,
+                                                readAllCandidate: { row, online in
+                                                    ReadAllPolicies.listCandidate(row, online: online, reviewLater: later.contains(ConversationReadPolicies.key(row.target)))
+                                                })
             }.value
             guard let self, self.listGeneration == generation else { return }
             self.listPresentation = prepared
@@ -516,6 +567,7 @@ final class AppModel {
     var displayedAccounts: [AccountCatalog] { demo ? AccountSnapshots.demo(now: Clock.seconds()) : accountCatalogs }
 
     func preview() {
+        conversation.back()
         demo = true
         let names = [("demo", "Design workstation"), ("demo-laptop", "Preview laptop"), ("demo-build", "Preview build machine with a long display name")]
         machines = names.enumerated().map { index, item in
@@ -531,6 +583,7 @@ final class AppModel {
     }
 
     func stopPreview() {
+        conversation.back()
         demo = false
         machines = []
         projects = []

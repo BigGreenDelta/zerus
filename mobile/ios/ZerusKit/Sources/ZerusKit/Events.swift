@@ -86,6 +86,13 @@ public struct NativeQuestionAnswer: Codable, Hashable, Sendable {
     public var optionIds: [String]
     public var text: String
     public var skip: Bool
+
+    public init(questionId: String, optionIds: [String], text: String, skip: Bool) {
+        self.questionId = questionId
+        self.optionIds = optionIds
+        self.text = text
+        self.skip = skip
+    }
 }
 
 public struct NativeQuestionDelivery: Codable, Hashable, Sendable {

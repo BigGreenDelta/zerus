@@ -542,14 +542,15 @@ public enum HistoryReadPaths {
     }
 
     /// A corrupt or incompatible saved page is a miss, never evidence for a live action.
-    public static func saved(_ cached: () async throws -> HistoryPage?) async throws -> HistoryPage? {
+    public static func saved(isolation: isolated (any Actor)? = #isolation, _ cached: () async throws -> HistoryPage?) async throws -> HistoryPage? {
         do { return try await cached() }
         catch is CancellationError { throw CancellationError() }
         catch { return nil }
     }
 
     /// A network page is verified; a saved page only stands in when the network read fails.
-    public static func read(network: () async throws -> HistoryPage, cached: () async throws -> HistoryPage?) async throws -> Result {
+    public static func read(isolation: isolated (any Actor)? = #isolation, network: () async throws -> HistoryPage,
+                            cached: () async throws -> HistoryPage?) async throws -> Result {
         do { return Result(page: try await network(), verified: true) }
         catch is CancellationError { throw CancellationError() }
         catch {
@@ -559,7 +560,8 @@ public enum HistoryReadPaths {
     }
 
     /// A reset index rejects every cursor of its previous epoch. Reopen the verified head once it reports another epoch.
-    public static func reopening(epoch: String?, read: () async throws -> Result, head: () async throws -> HistoryPage) async throws -> Reopened {
+    public static func reopening(isolation: isolated (any Actor)? = #isolation, epoch: String?, read: () async throws -> Result,
+                                 head: () async throws -> HistoryPage) async throws -> Reopened {
         var failure: Error?
         var first: Result?
         do { first = try await read() }
