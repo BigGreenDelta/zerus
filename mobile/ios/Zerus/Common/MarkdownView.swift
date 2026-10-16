@@ -19,10 +19,38 @@ enum MarkdownMemo {
     }
 }
 
-/// Renders agent Markdown. Only safe http(s) links open; everything else stays visible as text.
+/// Opens a Markdown link to a file on the conversation's computer; unset outside conversations.
+struct ComputerFileLink {
+    let open: @MainActor (ComputerFileReference) -> Void
+    init(_ open: @escaping @MainActor (ComputerFileReference) -> Void) { self.open = open }
+
+    static let scheme = "zerus-computer-file"
+
+    /// An inert in-app URL that carries the original destination; the system never opens it.
+    static func url(_ destination: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = "open"
+        components.queryItems = [URLQueryItem(name: "d", value: destination)]
+        return components.url
+    }
+
+    static func reference(_ url: URL) -> ComputerFileReference? {
+        guard url.scheme == scheme, let destination = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "d" })?.value else { return nil }
+        return ComputerFileReference.parse(destination)
+    }
+}
+
+extension EnvironmentValues {
+    @Entry var computerFileLink: ComputerFileLink?
+}
+
+/// Renders agent Markdown. Safe http(s) links open in the browser; links to files on the
+/// conversation's computer open its file sheet; everything else stays visible as text.
 struct MarkdownContent: View {
     let source: String
     @State private var loaded: MarkdownDocument?
+    @Environment(\.computerFileLink) private var fileLink
 
     var body: some View {
         let document = MarkdownMemo.document(source) ?? (loaded?.source == source ? loaded : nil)
@@ -35,7 +63,12 @@ struct MarkdownContent: View {
         }
         .textSelection(.enabled)
         .environment(\.openURL, OpenURLAction { url in
-            ZerusKit.MarkdownText.safeURL(url.absoluteString) != nil ? .systemAction : .discarded
+            if let reference = ComputerFileLink.reference(url) {
+                guard let fileLink else { return .discarded }
+                fileLink.open(reference)
+                return .handled
+            }
+            return ZerusKit.MarkdownText.safeURL(url.absoluteString) != nil ? .systemAction : .discarded
         })
         .task(id: source) {
             guard source.utf8.count > MarkdownMemo.syncLimit else { return }
@@ -205,8 +238,8 @@ enum MarkdownInlines {
             case .link(let children, let destination, let safe):
                 var inner = AttributedString()
                 append(children, into: &inner, bold: bold, italic: italic, strike: strike)
-                if let safe {
-                    inner.link = safe
+                if let link = safe ?? (ComputerFileReference.parse(destination) != nil ? ComputerFileLink.url(destination) : nil) {
+                    inner.link = link
                     inner.foregroundColor = Theme.mint
                     inner.underlineStyle = .single
                     result += inner

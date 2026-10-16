@@ -26,6 +26,8 @@ struct ConversationView: View {
     @State private var stopRequest = false
     @State private var details = false
     @State private var terminal = false
+    @State private var terminalOpen = false
+    @State private var terminalUnavailable: String?
 
     private var model: ConversationModel { app.conversation }
 
@@ -90,7 +92,7 @@ struct ConversationView: View {
                         }.id("history:missing-anchor")
                         ForEach(events) { event in
                             if event.id == unreadBoundary { unreadDivider.id("history:unread") }
-                            MessageBubble(event: event, agent: agentName(session, raw), outgoing: model.outgoing.first { $0.requestId == event.outgoingId },
+                            MessageBubble(event: event, target: target, agent: agentName(session, raw), outgoing: model.outgoing.first { $0.requestId == event.outgoingId },
                                           onReviewOutgoing: { reviewOutgoing = $0 })
                                 .id("event:" + event.id)
                         }
@@ -175,16 +177,21 @@ struct ConversationView: View {
         }
         .reviewDialogs(review: $review, reviewOutgoing: $reviewOutgoing, discard: $discard)
         .sheet(isPresented: $details) { SessionDetailsSheet(session: session) }
-        .alert("Terminal unavailable", isPresented: $terminal) {
-            Button("Close", role: .cancel) {}
-        } message: {
-            Text(SessionActionsMenu.terminalReason(SessionMenuFacts(target: target, row: raw ?? [:], state: SessionFilters.state(session),
-                                                                      archived: archived, online: online,
-                                                                      supported: (app.relayOperations[target.connectionId] ?? []).intersection(app.machineOperations[target.machineKey] ?? [])))
-                .nonEmpty ?? "Terminal arrives in a later iOS build.")
-        }
+        .modifier(ConversationTools(session: session, raw: raw, archived: archived, online: online, terminal: $terminal, terminalOpen: $terminalOpen,
+                                    terminalUnavailable: $terminalUnavailable))
         .onChange(of: model.returnToSessions) { dismiss() }
-        .onAppear { openIfNeeded() }
+        .onAppear {
+            openIfNeeded()
+            #if DEBUG
+            // `-zerus-terminal` shows a synthetic captured screen for simulator UI checks.
+            if ProcessInfo.processInfo.arguments.contains("-zerus-terminal") && app.demo {
+                model.terminalState = ["name": .string(target.session), "run_id": .string(target.run), "conversation_id": .string(target.conversation),
+                                       "terminal_binding_id": "fixture", "cols": 60, "rows": 8, "cursor": ["x": 2, "y": 6],
+                                       "screen": .string("\u{1b}[1;32muser@example\u{1b}[0m:\u{1b}[34m~/project\u{1b}[0m$ git status\nOn branch \u{1b}[36mmain\u{1b}[0m\nChanges not staged for commit:\n  \u{1b}[31mmodified:   src/orders.rs\u{1b}[0m\n\u{1b}[7m inverse \u{1b}[27m \u{1b}[4munderline\u{1b}[24m \u{1b}[2mdim\u{1b}[22m 界面 😀\n\n$ ")]
+                terminalOpen = true
+            }
+            #endif
+        }
         .onChange(of: target.key) { display = display.forTarget(target.key) }
         .onChange(of: ContentSignature(revision: model.revision, own: model.ownSendId(target), verified: model.activityVerified,
                                        boundary: unreadBoundary, ready: readReady, newer: model.hasNewer, questions: questions.count)) {
@@ -499,5 +506,41 @@ struct ConversationSearchSheet: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
             .zerusScreen()
         }
+    }
+}
+
+/// File links and Terminal, kept out of the main body so older compilers type-check it quickly.
+private struct ConversationTools: ViewModifier {
+    @Environment(AppModel.self) private var app
+    let session: Session
+    let raw: JSONObject?
+    let archived: Bool
+    let online: Bool
+    @Binding var terminal: Bool
+    @Binding var terminalOpen: Bool
+    @Binding var terminalUnavailable: String?
+
+    func body(content: Content) -> some View {
+        let target = session.target
+        content
+            .sheet(item: Binding(get: { app.computerFiles.selection }, set: { if $0 == nil { app.computerFiles.close() } })) { ComputerFileSheet(selection: $0) }
+            .environment(\.computerFileLink, ComputerFileLink { [weak app] reference in app?.computerFiles.show(target, reference) })
+            .onChange(of: terminal) { _, requested in
+                guard requested else { return }
+                terminal = false
+                if let reason = reason(target) { terminalUnavailable = reason } else { terminalOpen = true }
+            }
+            .alert("Terminal unavailable", isPresented: Binding(get: { terminalUnavailable != nil }, set: { if !$0 { terminalUnavailable = nil } })) {
+                Button("Close", role: .cancel) { terminalUnavailable = nil }
+            } message: {
+                Text(terminalUnavailable ?? "")
+            }
+            .fullScreenCover(isPresented: $terminalOpen) { TerminalView(session: session) }
+    }
+
+    private func reason(_ target: Target) -> String? {
+        let supported = (app.relayOperations[target.connectionId] ?? []).intersection(app.machineOperations[target.machineKey] ?? [])
+        let facts = SessionMenuFacts(target: target, row: raw ?? [:], state: SessionFilters.state(session), archived: archived, online: online, supported: supported)
+        return SessionActionsMenu.terminalReason(facts).nonEmpty ?? app.conversation.terminalOpenReason(target).nonEmpty
     }
 }

@@ -52,12 +52,22 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
 
     /// Serialized-size estimate used for the bounded history window.
     public var approximateBytes: Int {
-        var size = 260 + id.utf8.count + role.utf8.count + text.utf8.count + time.utf8.count + requestId.utf8.count + source.utf8.count +
-            delivery.utf8.count + outgoingId.utf8.count + nativeType.utf8.count + submittedText.utf8.count + originalId.utf8.count +
-            historyId.utf8.count + historyCursor.utf8.count + historyEpoch.utf8.count
+        // Separate statements: one long `+` chain takes the type checker tens of seconds.
+        var size = 260
+        let fields: [String] = [id, role, text, time, requestId, source, delivery, outgoingId, nativeType, submittedText, originalId,
+                                historyId, historyCursor, historyEpoch]
+        for field in fields { size += field.utf8.count }
         for value in originalIds { size += value.utf8.count + 3 }
-        for file in attachments { size += 90 + file.name.utf8.count + file.mime.utf8.count + file.reference.utf8.count + file.messageId.utf8.count }
-        if let voice { size += 300 + voice.transcript.utf8.count + voice.error.utf8.count + voice.nativeBinding.utf8.count + voice.waveform.count * 4 }
+        for file in attachments {
+            let names: [String] = [file.name, file.mime, file.reference, file.messageId]
+            size += 90
+            for name in names { size += name.utf8.count }
+        }
+        if let voice {
+            let texts: [String] = [voice.transcript, voice.error, voice.nativeBinding]
+            size += 300 + voice.waveform.count * 4
+            for value in texts { size += value.utf8.count }
+        }
         return size
     }
 }

@@ -28,6 +28,8 @@ extension ConversationModel {
     // MARK: Actions
 
     func actionReason(_ target: Target, _ operation: String) -> String {
+        if operation == "terminal_input" { return terminalReason(target) }
+        if terminalVisible { return "Return to Activity before using session controls." }
         if !target.agentId.isEmpty { return "Session controls belong to the parent conversation." }
         guard app.storageReady, !demo, selected?.target == target, activityVerified else { return "Refresh this exact session before taking an action." }
         guard let raw = activity else { return "Refresh this session." }
@@ -104,7 +106,8 @@ extension ConversationModel {
         return request.navigation == navigationId && request.target == target ? request.operation : nil
     }
 
-    func submitSessionAction(_ target: Target, _ operation: String, _ args: JSONObject, authorized: SessionAction? = nil, frame: ConversationFrame? = nil) {
+    func submitSessionAction(_ target: Target, _ operation: String, _ args: JSONObject, authorized: SessionAction? = nil, frame: ConversationFrame? = nil,
+                             terminalBuffer: TerminalBuffer? = nil) {
         let inspected = frame?.raw ?? activity ?? [:]
         let reason = authorized.map { authorizedSettingsReason(target, args, $0, frame) } ?? actionReason(target, operation)
         guard reason.isEmpty else {
@@ -135,17 +138,19 @@ extension ConversationModel {
             }
             do {
                 _ = try await app.durableMessages({ state in
+                    if let terminalBuffer { return try TerminalBuffers.enqueue(state, terminalBuffer, action) }
                     if let authorized { return try ScheduledSettingsAttempt.begin(state, authorized: authorized, attempt: action) }
                     return state.action(action)
                 }, acknowledge: { current, written in
-                    var next = written.sessionActions.first { $0.requestId == action.requestId }.map(current.action) ?? current
+                    var next = terminalBuffer.map { TerminalBuffers.acknowledge(current, written, $0, action) }
+                        ?? written.sessionActions.first { $0.requestId == action.requestId }.map(current.action) ?? current
                     if let authorized, let source = written.sessionActions.first(where: { $0.requestId == authorized.requestId }) { next = next.action(source) }
                     return next
                 })
                 preparingTargets.remove(target.key)
                 let live = authorized == nil ? activity ?? [:] : inspected
                 if authorized == nil {
-                    guard selected?.target == target, navigationId == navigation, activityVerified else {
+                    guard selected?.target == target, navigationId == navigation, operation == "terminal_input" || activityVerified else {
                         throw ZerusError.invalid("The session changed before the action was sent.")
                     }
                 } else {
@@ -155,8 +160,14 @@ extension ConversationModel {
                         throw ZerusError.invalid("The authorized native settings changed before delivery.")
                     }
                 }
-                guard SessionActionPolicies.evidence(operation, live, arguments) == evidence else {
-                    throw ZerusError.invalid("The displayed native action details changed before delivery.")
+                if operation == "terminal_input" {
+                    guard terminalCurrent(target, binding: arguments.string("terminal_binding_id")) else {
+                        throw ZerusError.invalid("Terminal binding expired before delivery. Input was not sent.")
+                    }
+                } else {
+                    guard SessionActionPolicies.evidence(operation, live, arguments) == evidence else {
+                        throw ZerusError.invalid("The displayed native action details changed before delivery.")
+                    }
                 }
                 guard SessionActionPolicies.inspectReason(target, operation, arguments, live).isEmpty else {
                     throw ZerusError.invalid("The native action target or catalog changed before delivery.")
@@ -172,6 +183,11 @@ extension ConversationModel {
                 catch let failure as RelayError {
                     rejected = Self.rejectedStatuses.contains(failure.status)
                     throw failure
+                }
+                if operation == "terminal_input" {
+                    await settleSessionAction(action, try await app.client.waitForReceipt(connection, initial: initial, maxPolls: 50, pollDelay: .milliseconds(100)))
+                    if selected?.target == target && terminalVisible { terminalSnapshot(target) }
+                    return
                 }
                 await settleSessionAction(action, try await app.client.waitForReceipt(connection, initial: initial))
                 guard let completed = messageState.sessionActions.first(where: { $0.requestId == action.requestId }) else { return }
