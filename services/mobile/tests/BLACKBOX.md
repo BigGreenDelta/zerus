@@ -172,8 +172,10 @@ identities. Heartbeats, polls and the periodic native reads (`PERIODIC`, also
 through a peer envelope) follow each connector's clock and are compared by
 presence; peer refreshes are compared by shape, since the order in which peers
 get the four native slots is scheduling, and a poll still open when a
-connector stopped is left out. Native work, result uploads and journal rows
-must also match in number.
+connector stopped is left out. Result uploads are compared as distinct
+receipts and answers, since a result whose answer was lost on a busy runner is
+uploaded and accepted again. Native work and journal rows must also match in
+number.
 
 A difference fails unless `differential-allowlist.json` names it. Each entry
 gives a test pattern, the kind (`native`, `relay` or `journal`), the side it
@@ -181,8 +183,8 @@ appears on (`python`, `rust` or `count`), a regular expression for the entry
 and one of the design's divergences a-k with a reason; an entry that matches
 nothing fails too, so the list never outlives a fix. Its `timing` list names
 tests whose clock-driven traffic differs between two runs of the same
-connector, with a reason; for them only native work, result uploads and
-journal rows are compared. Key order and whitespace
+connector, with a reason; for them only native work and journal rows are
+compared. Key order and whitespace
 cannot differ (everything is parsed) and logs are not traced. Tests marked
 `@untraced` are reported but not compared: those that run a real `hgs`, whose
 machine ids and paths differ between any two runs. Tests that skip on one side

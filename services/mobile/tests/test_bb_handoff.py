@@ -99,6 +99,8 @@ class HandoffTests(BlackBoxCase):
 
     async def refuses_a_changed_body(self, process, request):
         """The same identity with another body: no native work, no upload, no journal change."""
+        # A replay marks its row delivered again only after its upload.
+        await self.delivered(process, request)
         before = self.journal.row(request["request_id"])
         uploads = len(self.relay.uploads(request["request_id"]))
         mark = len(self.relay.deliveries)

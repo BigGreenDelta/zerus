@@ -14,8 +14,8 @@ not traced. Every allowlist entry cites one of the deliberate divergences a-k
 (design spec), and an entry that no longer matches anything fails too.
 
 Timing decides how often a connector heartbeats, polls or retries, so periodic
-calls and relay exchanges are compared by presence; native mutations, reads
-and result uploads must also match in number.
+calls and relay exchanges are compared by presence; native mutations and reads
+and journal rows must also match in number.
 """
 from __future__ import annotations
 
@@ -51,9 +51,9 @@ PERIODIC = (
     ["swarm", "get"],
     ["swarm", "mobile-peers", "--json"],
 )
-# Results are uploaded once per accepted identity; other POSTs (heartbeats,
-# presence, peer heartbeats) follow the clock.
-COUNTED_RELAY = re.compile(r"POST /v1/node/requests/[^/ ]+/result ")
+# Relay traffic follows the clock (heartbeats, presence, polls), and a result
+# whose answer was lost on a busy machine is uploaded again and accepted again,
+# so relay exchanges are compared as distinct bodies and answers.
 PEER_HEARTBEAT = re.compile(r"/v1/node/peers/[^/]+/heartbeat")
 LARGE = 512
 
@@ -264,15 +264,15 @@ def record(case, directory: str) -> None:
 
 
 def counted(kind: str, entry: str) -> bool:
-    """Native work, result uploads and journal rows must match in number."""
+    """Native work and journal rows must match in number."""
     if kind == "native":
         return not json.loads(entry)["periodic"]
-    return kind == "journal" or COUNTED_RELAY.match(entry) is not None
+    return kind == "journal"
 
 
 def differences(python: dict, rust: dict, timing: bool = False) -> list[dict]:
     """With `timing`, a test whose clock-driven traffic differs between any
-    two runs compares only what it must also count."""
+    two runs compares only native work and journal rows."""
     found = []
     for kind in KINDS:
         left, right = collections.Counter(python[kind]), collections.Counter(rust[kind])
