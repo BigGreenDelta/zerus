@@ -247,12 +247,7 @@ pub(super) fn exchange(machine: &str, record: &Value) -> Option<Projection> {
         || event
             != id(
                 "event",
-                &json!([
-                    record["source"]["node"],
-                    request,
-                    record["route"],
-                    record["name"]
-                ]),
+                &json!([record["source"]["node"], request]),
             )
         || record["target"]["name"] != record["name"]
         || record["target"]["run_id"] != record["expected_run_id"]
@@ -296,7 +291,7 @@ mod tests {
         let request = "11111111-1111-4111-8111-111111111112";
         let key = id(
             "event",
-            &json!([source.key(), request, "mac", "claude/example/recipient"]),
+            &json!([source.key(), request]),
         );
         json!({"schema":1,"id":key,"status":"submitted","source":{"endpoint":source,"node":source.key(),"name":"codex/example/review","run_id":"source-run"},
             "target":{"endpoint":target,"node":target.key(),"name":"claude/example/recipient","run_id":"recipient-run"},
@@ -318,18 +313,18 @@ mod tests {
         event["request_id"] = json!("11111111-1111-4111-8111-111111111113");
         event["id"] = json!(id(
             "event",
-            &json!([
-                event["source"]["node"],
-                event["request_id"],
-                event["route"],
-                event["name"]
-            ])
+            &json!([event["source"]["node"], event["request_id"]])
         ));
         let next = exchange(MACHINE, &event).unwrap();
         assert_ne!(
             projected.first_key_value().unwrap().0,
             next.first_key_value().unwrap().0
         );
+    }
+    #[test]
+    fn route_aliases_do_not_duplicate_one_observed_delivery() {
+        let first=delivery();let mut alias=first.clone();alias["route"]=json!("another-configured-alias");
+        assert_eq!(exchange(MACHINE,&first),exchange(MACHINE,&alias));
     }
     #[test]
     fn unconfirmed_or_mismatched_delivery_never_infers_an_arrow() {

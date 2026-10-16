@@ -108,6 +108,13 @@ class TestGraphProjection : public QObject {
         QCOMPARE(result.relations[0].line.to, key(to));
         QVERIFY(result.nodes[0].targets.isEmpty());
         QVERIFY(result.nodes[1].targets.isEmpty());
+        auto repeated = values;
+        repeated[id("event", 'd')] = values[id("event", 'b')];
+        SessionGraphStore duplicate;
+        apply(duplicate, repeated);
+        const auto deduplicated = GraphProjection::compose(duplicate, {}, {"mac"});
+        QCOMPARE(deduplicated.relations.size(), 1);
+        QCOMPARE(deduplicated.relations[0].events.size(), 2);
         auto forged = values;
         auto row = forged[id("event", 'b')].toObject();
         auto value = row["value"].toObject();

@@ -98,7 +98,7 @@ fn reserve(
         "Invalid graph send scope"
     );
     let digest = format!("{:x}", Sha256::digest(input));
-    let id = model::id("event", &json!([origin["node"], request_id, route, name]));
+    let id = model::id("event", &json!([origin["node"], request_id]));
     let event = json!({"schema":1,"id":id,"source":origin,"route":route,"name":name,
         "request_id":request_id,"expected_run_id":request["expected_run_id"],
         "expected_conversation_id":request["expected_conversation_id"],

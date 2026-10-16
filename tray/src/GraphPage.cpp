@@ -9,6 +9,7 @@
 #include <QHideEvent>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
@@ -70,6 +71,21 @@ class GraphSummary : public QWidget {
   private:
     QStandardItemModel model;
     SessionDelegate delegate;
+};
+
+// QListView's native Return activation differs between macOS and Unix styles.
+// Keep the graph inspector's documented Enter action consistent on both.
+class GraphConnections final : public QListWidget {
+  protected:
+    void keyPressEvent(QKeyEvent *event) override {
+        if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) && currentItem() &&
+            (currentItem()->flags() & Qt::ItemIsEnabled)) {
+            emit itemActivated(currentItem());
+            event->accept();
+            return;
+        }
+        QListWidget::keyPressEvent(event);
+    }
 };
 
 GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(parent) {
@@ -165,7 +181,7 @@ GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(par
     m_focus->setObjectName("graphFocusConnections");
     body->addWidget(m_focus);
     body->addWidget(plain(tr("Connections")));
-    m_connections = new QListWidget;
+    m_connections = new GraphConnections;
     m_connections->setObjectName("graphConnections");
     m_connections->setAccessibleName(tr("Recorded connections"));
     m_connections->setMinimumHeight(130);

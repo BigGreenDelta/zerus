@@ -407,6 +407,7 @@ GraphProjection::Result GraphProjection::compose(const SessionGraphStore &store,
     // A delivery receipt may name a verified endpoint on a currently offline
     // computer. Keep a boundary node without borrowing a live name or route.
     QMap<QString, QList<QPair<QString, QJsonObject>>> exchanges;
+    QSet<QString> deliveryReceipts;
     for (auto it = facts.cbegin(); it != facts.cend(); ++it) {
         if (it->kind != "event")
             continue;
@@ -426,6 +427,11 @@ GraphProjection::Result GraphProjection::compose(const SessionGraphStore &store,
         }
         from = result.aliases.value(from, from);
         to = result.aliases.value(to, to);
+        const auto receiptIdentity = QString::fromUtf8(
+            QJsonDocument(QJsonArray{from, to, v["request_id"]}).toJson(QJsonDocument::Compact));
+        if (deliveryReceipts.contains(receiptIdentity))
+            continue;
+        deliveryReceipts.insert(receiptIdentity);
         for (const auto &pair : {qMakePair(from, source), qMakePair(to, target)})
             if (!nodes.contains(pair.first)) {
                 GraphPage::Node node;
@@ -450,7 +456,9 @@ GraphProjection::Result GraphProjection::compose(const SessionGraphStore &store,
                     QJsonDocument(QJsonArray{"message", from, to}).toJson(QJsonDocument::Compact),
                     QCryptographicHash::Sha256)
                     .toHex());
-        auto presentedEvent = v; presentedEvent["from"] = from; presentedEvent["to"] = to;
+        auto presentedEvent = v;
+        presentedEvent["from"] = from;
+        presentedEvent["to"] = to;
         exchanges[relation].append({it.key(), presentedEvent});
     }
     // A retained native fork receipt can outlive its origin binding. Preserve
