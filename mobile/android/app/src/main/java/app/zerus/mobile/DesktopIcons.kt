@@ -118,6 +118,17 @@ object DesktopIcons {
         moveTo(14.5f, 12.25f); arcTo(3.5f, 2.5f, 0f, false, false, 7.5f, 12.25f)
     }
 
+    /** WorkspaceIcons "question": a circle around the "?" of "git-unknown", with its drawPoint dot. */
+    val Question: ImageVector = ImageVector.Builder("DesktopQuestion", 24.dp, 24.dp, 24f, 24f).apply {
+        path(fill = null, stroke = SolidColor(Color.Black), strokeLineWidth = 1.6f,
+            strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round) {
+            circle(12f, 12f, 9f)
+            moveTo(10f, 10f); curveTo(10f, 7f, 15f, 7f, 15f, 10f)
+            curveTo(15f, 12f, 12f, 11f, 12f, 14f)
+        }
+        path(fill = SolidColor(Color.Black)) { circle(12f, 17f, .8f) }
+    }.build()
+
     fun forName(name: String): ImageVector = when (name.lowercase(Locale.ROOT)) {
         "all", "sessions" -> All
         "attention" -> Attention
@@ -128,6 +139,7 @@ object DesktopIcons {
         "folder", "project", "projects", "group" -> Projects
         "git-branch" -> GitBranch
         "subagents" -> Subagents
+        "question" -> Question
         else -> Terminal
     }
 

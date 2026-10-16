@@ -206,7 +206,14 @@ in stable ID order. Finished turns stay hidden, as with the desktop default,
 unless the child has an unsent draft on this phone. Profile groups are counted
 but not listed. Tapping a child opens its session and then the child's activity
 once that conversation is verified; Back returns to the session. Open subagent
-lists persist with the other Sessions state.
+lists persist with the other Sessions state. A running session with pending
+optional Codex questions, which the agent keeps working without, shows a
+question-mark chip with their count (`99+` above 99) before the subagent
+counter, as on the desktop; its spoken description says how many are waiting.
+The listing's `optional_questions` count wins. Without it (an older computer, or
+while hgs cannot read its question index), the chip counts the connector's
+optional attention items once per question. It is hidden for saved, archived,
+exited and offline sessions; open the session to answer or skip the questions.
 
 Long-pressing a session card, or using its accessibility long-press action,
 opens its actions in the desktop context menu order: Open terminal, Mark as read

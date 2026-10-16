@@ -16,6 +16,16 @@ object QuestionPolicies {
     }
     fun key(question: Question) = question.id + ":" + question.hash
 
+    /**
+     * Whether one snapshot `mobile_attention` item is an optional Codex question the agent can
+     * continue without. Connectors mark these with `optional: true`. Older connectors send no
+     * `optional` key; every `codex-async:` card hgs produces is optional (src/state/codex_questions.rs),
+     * so that ID prefix identifies them. Any other item is a blocking request.
+     */
+    fun optionalAttention(item: JSONObject): Boolean =
+        if (item.has("optional")) item.opt("optional") == true
+        else (item.opt("question_id") as? String)?.startsWith("codex-async:") == true
+
     fun queue(questions: List<Question>, target: Target, chosen: String): QuestionQueue {
         val distinct = questions.filter { it.id.isNotBlank() && it.prompts.isNotEmpty() }.distinctBy { it.id }
         val submitted = distinct.filter { submitted(it, target) != null }
