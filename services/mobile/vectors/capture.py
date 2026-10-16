@@ -2160,9 +2160,7 @@ def receipt_vectors(executions: list[dict]) -> bytes:
         "upload": {"method": "POST", "path": "/v1/node/requests/{request_id}/result", "content_type": "application/json",
                    "rule": "the body is json.dumps(json.loads(stored)): the stored text for ordinary values",
                    "example_stored": json.dumps(upload_example), "example_body": json.dumps(json.loads(json.dumps(upload_example)))},
-        "android": {"update_required_substrings": list(ANDROID_UPDATE_REQUIRED), "shown_prefix_characters": ANDROID_ERROR_PREFIX,
-                    "divergence_c": "a peer attachment_read fails today with 'connector could not record native outcome', "
-                                    "which the phone shows as an ordinary attachment error"},
+        "android": {"update_required_substrings": list(ANDROID_UPDATE_REQUIRED), "shown_prefix_characters": ANDROID_ERROR_PREFIX},
     })
 
 
