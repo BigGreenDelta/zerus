@@ -244,7 +244,7 @@ private slots:
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void projectFilterCombinesScopesCountsAndNavigation();
     void pagedArchiveSearchJoinsExactProjectBeforeFiltering();
-    void projectHeaderOffersFocusAndAdditiveFilter();
+    void projectHeaderFiltersOnlyThisProject();
     void hiddenPagesRenderWhenShown();
     void pollsKeepUnchangedActivity();
     void multiSelectionKeepsConversationAndGroupMenu_data();
@@ -836,7 +836,7 @@ void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
     window.showSession("mac","claude/infra/review"); QVERIFY(projects->selection().isEmpty()); QCOMPARE(parents(),5);
 }
 
-void TestSessionsWindow::projectHeaderOffersFocusAndAdditiveFilter()
+void TestSessionsWindow::projectHeaderFiltersOnlyThisProject()
 {
     SessionOrganization org; const auto work=org.createGroup("Work"), docs=org.createGroup("Docs");
     org.moveSession(org.observe("arch","codex/hgs/dashboard",""),work); org.moveSession(org.observe("mac","claude/infra/review",""),docs);
@@ -851,14 +851,19 @@ void TestSessionsWindow::projectHeaderOffersFocusAndAdditiveFilter()
         return nullptr;
     };
     const auto action=[](QMenu *menu,const QString &name) -> QAction * { for(auto *a:menu->actions()) if(a->objectName()==name)return a;return nullptr; };
-    auto *menu=openMenu(work); QVERIFY(menu); auto *add=action(menu,"toggleProjectFilter"); QVERIFY(add); add->trigger(); menu->hide();
+    auto *menu=openMenu(work); QVERIFY(menu); auto *filter=action(menu,"filterOnlyProject"); QVERIFY(filter);
+    QCOMPARE(filter->text(),QStringLiteral("Filter this project"));
+    QVERIFY(!action(menu,"toggleProjectFilter")); QVERIFY(!action(menu,"clearProjectFilter"));
+    filter->trigger(); menu->hide();
     QCOMPARE(projects->selection(),QSet<QString>{work});
-    projects->setSelection({}); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
-    menu=openMenu(docs); QVERIFY(menu); action(menu,"toggleProjectFilter")->trigger(); menu->hide();
-    projects->setSelection({work,docs}); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
-    menu=openMenu(work); QVERIFY(menu); action(menu,"filterOnlyProject")->trigger(); menu->hide(); QCOMPARE(projects->selection(),QSet<QString>{work});
     QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
-    menu=openMenu(work); QVERIFY(menu); action(menu,"clearProjectFilter")->trigger(); menu->hide(); QVERIFY(projects->selection().isEmpty());
+    menu=openMenu(work); QVERIFY(menu); QVERIFY(!action(menu,"toggleProjectFilter")); QVERIFY(!action(menu,"clearProjectFilter"));
+    action(menu,"filterOnlyProject")->trigger(); menu->hide(); QCOMPARE(projects->selection(),QSet<QString>{work});
+    auto *chip=projects->findChild<QPushButton *>("projectFilterChip"); QVERIFY(chip); chip->click(); QVERIFY(projects->selection().isEmpty());
+    projects->setSelection({work,docs}); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+    menu=openMenu(docs); QVERIFY(menu); action(menu,"filterOnlyProject")->trigger(); menu->hide(); QCOMPARE(projects->selection(),QSet<QString>{docs});
+    auto *chooser=projects->button()->menu(); chooser->popup(window.mapToGlobal(QPoint(100,100))); QTRY_VERIFY(chooser->isVisible());
+    auto *all=chooser->findChild<QPushButton *>("allProjectFilters"); QVERIFY(all); all->click(); chooser->hide(); QVERIFY(projects->selection().isEmpty());
 }
 
 void TestSessionsWindow::dashboardAndMultiMachineNavigation()

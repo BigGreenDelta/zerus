@@ -1995,18 +1995,8 @@ void SessionsWindow::showGroupMenu(const QString &id, const QPoint &position)
     connect(menu->addAction(tr("New session…")), &QAction::triggered, this,
             [this, id]() { showNewSession({}, id, selectedHostTarget()); });
     menu->addSeparator();
-    auto *only = menu->addAction(workspaceIcon("projects", QColor(m_muted)), tr("Only this project")); only->setObjectName("filterOnlyProject");
+    auto *only = menu->addAction(workspaceIcon("projects", QColor(m_muted)), tr("Filter this project")); only->setObjectName("filterOnlyProject");
     connect(only, &QAction::triggered, this, [this,id] { if (m_organization.group(id)) m_projectFilter->setSelection({id}); });
-    const bool selected = m_projectFilters.contains(id);
-    auto *toggle = menu->addAction(selected ? tr("Remove from project filter") : tr("Add to project filter")); toggle->setObjectName("toggleProjectFilter");
-    connect(toggle, &QAction::triggered, this, [this,id] {
-        if (!m_organization.group(id)) return;
-        auto next = m_projectFilters; if (next.contains(id)) next.remove(id); else next.insert(id); m_projectFilter->setSelection(next);
-    });
-    if (!m_projectFilters.isEmpty()) {
-        auto *all = menu->addAction(tr("Show all projects")); all->setObjectName("clearProjectFilter");
-        connect(all, &QAction::triggered, this, [this] { m_projectFilter->setSelection({}); });
-    }
     menu->addSeparator();
     const bool collapsed = group->collapsed;
     connect(menu->addAction(collapsed ? tr("Expand project") : tr("Collapse project")), &QAction::triggered, this, [this, id, collapsed]() {

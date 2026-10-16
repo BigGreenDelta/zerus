@@ -567,8 +567,9 @@ a folder into a repository.
 The project button beside the machine chooser focuses Sessions on one or more
 logical projects. Check projects to apply changes immediately; selected projects
 appear as removable chips. **All projects** clears this restriction. Right-click
-a project band for **Only this project**, **Add to project filter** (or **Remove
-from project filter**) and **Show all projects**. Multiple projects form a union,
+a project band for **Filter this project**, which replaces the selection with
+that project alone. Clear it using its chip or **All projects** in the chooser.
+Multiple projects selected in the chooser form a union,
 narrowed by the machine, state, folder and search filters. Selection stays local
 to the open workspace while navigating sections; an explicit session link or
 Overview scope opens its requested context. Renaming a project retains selection,
