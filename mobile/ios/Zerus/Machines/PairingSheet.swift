@@ -9,10 +9,17 @@ struct PairingSheet: View {
     @State private var server = ""
     @State private var code = ""
     @State private var prepared = false
+    @State private var scanning = false
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Button { scanning = true } label: { Label("Scan QR code", systemImage: "qrcode.viewfinder") }
+                        .disabled(model.busy)
+                } footer: {
+                    Text("Scan an invitation from your machine, or enter its code. Review the gateway before pairing.")
+                }
                 Section {
                     if request.fromLink {
                         Label("Review this invitation before pairing.", systemImage: "exclamationmark.shield")
@@ -52,6 +59,12 @@ struct PairingSheet: View {
                 }
             }
             .interactiveDismissDisabled(model.busy)
+            .fullScreenCover(isPresented: $scanning) {
+                PairingScanner { invite in
+                    server = invite.server
+                    code = invite.code
+                }
+            }
             .onAppear {
                 guard !prepared else { return }
                 prepared = true

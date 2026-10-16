@@ -1,0 +1,504 @@
+import SwiftUI
+import ZerusKit
+
+/// The open conversation: canonical history window, unread divider, native questions and the composer.
+/// Reading position, following and read marks follow the Android viewport policies.
+struct ConversationView: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.scenePhase) private var scenePhase
+    let route: SessionRoute
+
+    @State private var position = ScrollPosition(idType: String.self)
+    @State private var follow = ConversationFollowState()
+    @State private var atEnd = true
+    @State private var userScrolling = false
+    @State private var latestPending = false
+    @State private var unavailableSaved = false
+    @State private var display = QuestionDisplayState(owner: "")
+    @State private var review: Draft?
+    @State private var reviewOutgoing: OutgoingMessage?
+    @State private var discard: Draft?
+    @State private var searching = false
+    @State private var notice = ""
+    @State private var visible: [String] = []
+    @State private var historyProgress = false
+    @State private var stopRequest = false
+
+    private var model: ConversationModel { app.conversation }
+
+    private var session: Session {
+        if let selected = model.selected { return selected }
+        return app.sessions.first { $0.target == route.target } ??
+            Session(target: route.target, title: route.target.session, agent: "", status: "", project: "", preview: "", pendingCount: 0, raw: [:])
+    }
+
+    var body: some View {
+        let session = self.session
+        let target = session.target
+        let archived = !target.archiveId.isEmpty
+        let events = model.events
+        let questions = archived || app.demo ? [] : model.questions
+        let raw = model.activity
+        let warning = app.demo ? "" : (raw?.string("pending_questions_error", "provider_messages_error") ?? "")
+        let unreadBoundary = events.contains { $0.id == model.firstUnreadEventId } ? model.firstUnreadEventId : ""
+        let readReady = model.readPositionReady || app.demo
+        let unread = UnreadPresentation.badge(total: model.unreadCount(target), loaded: model.loadedUnreadCount(target))
+        let historyReason = app.demo ? "" : model.historyReason(target)
+        let bounded = !model.historyEpoch.isEmpty
+            ? (model.hasOlder || model.hasNewer ? "Showing part of the conversation. Use the history controls to load more messages." : "")
+            : (model.historyTruncated ? "Showing recent activity. Older messages may be outside the available history." : "")
+        let loadStatus = ConversationLoadPresentation.status(hasContent: !events.isEmpty || !questions.isEmpty, detailLoading: model.detailBusy,
+                                                             detailProgress: model.detailProgress, historyLoading: model.olderLoading,
+                                                             historyProgress: historyProgress, demo: app.demo, resolved: raw != nil)
+        let loading = loadStatus?.initial == true
+        let offered = Set(questions.filter { !$0.prompts.isEmpty && !$0.id.isEmpty && QuestionPolicies.submitted($0, target) == nil }.map(\.id)).count
+        let keys = Self.keys(events: events, questions: questions, warning: warning, bounded: bounded, unreadBoundary: unreadBoundary, loading: loading)
+        let online = model.activityVerified || app.demo
+        let available = online && model.activityVerified && !model.contextBlocked(target)
+
+        VStack(spacing: 0) {
+            ProgressView()
+                .progressViewStyle(.linear)
+                .tint(Theme.mint)
+                .frame(height: 3)
+                .opacity(!app.demo && (model.detailProgress || historyProgress) ? 1 : 0)
+            statusStrip(loadStatus: loadStatus, unread: unread, offered: offered, questions: questions, target: target)
+            if !notice.isEmpty {
+                HStack {
+                    Text(notice).font(.footnote).foregroundStyle(Theme.amber)
+                    Spacer()
+                    Button { notice = "" } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss notice")
+                }
+                .padding(.horizontal, 16)
+            }
+            ZStack(alignment: .bottomTrailing) {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        earlierRow(target: target, events: events, historyReason: historyReason, loading: loading).id("history:earlier")
+                        statusRow(session: session, raw: raw, events: events, loading: loading, online: online).id("history:status")
+                        if !warning.isEmpty { Text(warning).font(.footnote).foregroundStyle(Theme.amber).id("history:warning") }
+                        if !bounded.isEmpty { Text(bounded).font(.footnote).foregroundStyle(Theme.muted).id("history:bounded") }
+                        Group {
+                            if unavailableSaved {
+                                Text("Your saved reading position is outside the loaded messages. Showing the earliest available messages.")
+                                    .font(.footnote).foregroundStyle(Theme.muted)
+                            } else { Color.clear.frame(height: 0) }
+                        }.id("history:missing-anchor")
+                        ForEach(events) { event in
+                            if event.id == unreadBoundary { unreadDivider.id("history:unread") }
+                            MessageBubble(event: event, agent: agentName(session, raw), outgoing: model.outgoing.first { $0.requestId == event.outgoingId },
+                                          onReviewOutgoing: { reviewOutgoing = $0 })
+                                .id("event:" + event.id)
+                        }
+                        if events.isEmpty && !loading {
+                            Text(raw != nil || app.demo ? "No messages yet." : "No recent messages are available. Refresh to load activity.")
+                                .foregroundStyle(Theme.muted).id("history:empty")
+                        }
+                        newerRow(target: target, historyReason: historyReason).id("history:newer")
+                        if !questions.isEmpty {
+                            QuestionsPane(target: target, questions: questions, available: available, display: $display, onReview: { review = $0 })
+                                .id("history:questions")
+                        }
+                        Color.clear.frame(height: 1).id("history:tail")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .scrollTargetLayout()
+                }
+                .scrollPosition($position)
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(follow.following ? .bottom : nil, for: .sizeChanges)
+                .scrollDismissesKeyboard(.interactively)
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.visibleRect.maxY >= geometry.contentSize.height + geometry.contentInsets.bottom - 24
+                } action: { _, value in atEnd = value }
+                .onScrollPhaseChange { old, new in
+                    userScrolling = new == .interacting || new == .decelerating || new == .tracking
+                    if new == .idle && (old == .interacting || old == .decelerating) {
+                        follow = ConversationViewport.userScrolled(follow, atEnd: atEnd)
+                        follow.opened = true
+                    }
+                    if new == .idle { follow = ConversationViewport.settled(follow, atEnd: atEnd, hasNewer: model.hasNewer) }
+                }
+                .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.5) { ids in visible = ids }
+                .refreshable { model.refreshActivity(explicit: true) }
+
+                if loading {
+                    VStack(spacing: 12) {
+                        if loadStatus?.spinner == true { ProgressView() }
+                        Text(loadStatus?.text ?? "").foregroundStyle(Theme.muted)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+                }
+                if (!follow.following || model.hasNewer || latestPending) && (!events.isEmpty || !questions.isEmpty) && !atEnd {
+                    latestButton(target: target, unread: unread, keys: keys)
+                }
+            }
+            if archived {
+                VStack(alignment: .leading, spacing: 6) {
+                    ContextSummary(raw: raw, recorded: !model.activityVerified)
+                    Text("Archived conversation. Read-only.").font(.footnote).foregroundStyle(Theme.muted)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.bar)
+            } else {
+                Composer(session: session, online: online, onReview: { review = $0 })
+                    .id(ComposerIdentity.lane(target))
+            }
+        }
+        .background(Theme.background.ignoresSafeArea())
+        .navigationTitle(SessionFilters.label(session))
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(!target.agentId.isEmpty)
+        .toolbar(.hidden, for: .tabBar)
+        .toolbar { toolbar(session: session, raw: raw) }
+        .sheet(isPresented: Binding(get: { display.expanded }, set: { if !$0 { display = display.close() } })) {
+            ExpandedQuestionSheet(target: target, questions: questions, available: available, display: $display, onReview: { review = $0 })
+        }
+        .sheet(isPresented: $searching) {
+            ConversationSearchSheet(events: events) { id in jump(to: id, events: model.events, target: target) }
+        }
+        .alert("Stop this turn?", isPresented: $stopRequest) {
+            Button("Stop turn", role: .destructive) { Task { await model.interrupt(target) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Interrupt the current turn in \(session.title). The session remains available.")
+        }
+        .reviewDialogs(review: $review, reviewOutgoing: $reviewOutgoing, discard: $discard)
+        .onAppear { openIfNeeded() }
+        .onChange(of: target.key) { display = display.forTarget(target.key) }
+        .onChange(of: ContentSignature(revision: model.revision, own: model.ownSendId(target), verified: model.activityVerified,
+                                       boundary: unreadBoundary, ready: readReady, newer: model.hasNewer, questions: questions.count)) {
+            applyContent(target: target, keys: keys, events: events, questions: questions, unreadBoundary: unreadBoundary, readReady: readReady)
+        }
+        .task(id: VisibilityKey(ids: visible, readable: scenePhase == .active && follow.opened && readReady && !userScrolling)) {
+            guard scenePhase == .active, follow.opened, readReady, !userScrolling, !app.demo else { return }
+            // A transient row during initial positioning or a fling is not a deliberate read.
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            let ids = Set(visible.filter { $0.hasPrefix("event:") }.map { String($0.dropFirst(6)) })
+            model.visibleMessages(target, ids)
+            if let first = visible.first(where: { $0.hasPrefix("event:") }) { model.saveViewport(target, eventId: String(first.dropFirst(6)), offset: 0) }
+            if visible.contains("history:earlier") && model.hasOlder && !model.olderLoading && model.olderError.isEmpty { model.loadOlder(target) }
+        }
+        .task(id: model.olderLoading) {
+            historyProgress = false
+            guard model.olderLoading, !app.demo else { return }
+            try? await Task.sleep(for: .seconds(5))
+            if model.olderLoading { historyProgress = true }
+        }
+    }
+
+    // MARK: Rows
+
+    private static func keys(events: [Event], questions: [Question], warning: String, bounded: String, unreadBoundary: String, loading: Bool) -> [String] {
+        var keys = ["history:earlier", "history:status"]
+        if !warning.isEmpty { keys.append("history:warning") }
+        if !bounded.isEmpty { keys.append("history:bounded") }
+        keys.append("history:missing-anchor")
+        for event in events {
+            if event.id == unreadBoundary { keys.append("history:unread") }
+            keys.append("event:" + event.id)
+        }
+        if events.isEmpty && !loading { keys.append("history:empty") }
+        keys.append("history:newer")
+        if !questions.isEmpty { keys.append("history:questions") }
+        keys.append("history:tail")
+        return keys
+    }
+
+    @ViewBuilder
+    private func earlierRow(target: Target, events: [Event], historyReason: String, loading: Bool) -> some View {
+        VStack(spacing: 4) {
+            if !loading {
+                if !model.olderError.isEmpty {
+                    Text(model.olderError).font(.footnote).foregroundStyle(Theme.amber).multilineTextAlignment(.center)
+                    Button("Retry history") { model.retryHistory(target) }.disabled(model.olderLoading || !historyReason.isEmpty)
+                } else if model.hasOlder {
+                    Button("Load earlier messages") { model.loadOlder(target) }.disabled(model.olderLoading || !historyReason.isEmpty)
+                } else if !model.historyEpoch.isEmpty && !model.historyIndexing {
+                    Text(model.historyComplete ? "Beginning of conversation" : "No earlier page reported; history may be incomplete.")
+                        .font(.caption2).foregroundStyle(Theme.muted)
+                }
+                if model.historyIndexing {
+                    Text("History is still indexing. Unread totals may be unavailable.").font(.caption2).foregroundStyle(Theme.muted)
+                }
+                if !historyReason.isEmpty && !events.isEmpty { Text(historyReason).font(.caption2).foregroundStyle(Theme.muted) }
+            }
+        }
+        .font(.footnote.weight(.semibold))
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func statusRow(session: Session, raw: JSONObject?, events: [Event], loading: Bool, online: Bool) -> some View {
+        if !loading && !events.isEmpty {
+            HStack(spacing: 8) {
+                if raw == nil && !app.demo {
+                    Tag(text: "Checking…", color: Theme.muted)
+                } else {
+                    Tag(text: SelectedSessionPresentation.status(session, raw), color: Theme.mint)
+                }
+                Tag(text: app.demo ? "Preview" : (model.activityVerified ? "Connected" : (raw != nil ? "Last known" : "Checking…")),
+                    color: online ? Theme.mint : Theme.amber)
+            }
+        } else {
+            Color.clear.frame(height: 0)
+        }
+    }
+
+    private var unreadDivider: some View {
+        HStack(spacing: 12) {
+            Rectangle().fill(Theme.mint.opacity(0.4)).frame(height: 1)
+            Text("Unread messages").font(.caption.weight(.semibold)).foregroundStyle(Theme.mint).fixedSize()
+            Rectangle().fill(Theme.mint.opacity(0.4)).frame(height: 1)
+        }
+    }
+
+    @ViewBuilder
+    private func newerRow(target: Target, historyReason: String) -> some View {
+        if model.hasNewer {
+            HStack {
+                Spacer()
+                Button("Load newer messages") { model.loadNewer(target) }.disabled(model.olderLoading || !historyReason.isEmpty)
+                Button("Latest") { requestLatest(target: target) }.disabled(latestPending || model.olderLoading || !historyReason.isEmpty)
+                Spacer()
+            }
+            .font(.footnote.weight(.semibold))
+        } else {
+            Color.clear.frame(height: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func statusStrip(loadStatus: ConversationLoadPresentation.Status?, unread: UnreadBadge?, offered: Int, questions: [Question], target: Target) -> some View {
+        let strip = loadStatus.flatMap { $0.initial ? nil : $0 }
+        if strip != nil || unread != nil || offered > 0 {
+            HStack(spacing: 8) {
+                if strip?.spinner == true { ProgressView().controlSize(.mini) }
+                Text(strip?.text ?? unread.map { "\($0.text) unread" } ?? "")
+                    .font(.caption)
+                    .foregroundStyle(strip == nil && unread != nil ? Theme.mint : Theme.muted)
+                Spacer()
+                if offered > 0 {
+                    Button("Questions (\(offered))") {
+                        if !display.expanded, let question = QuestionPolicies.queue(questions, target, chosen: display.chosen).selected {
+                            display = display.open(question)
+                        }
+                    }
+                    .font(.caption.weight(.semibold))
+                }
+            }
+            .padding(.horizontal, 16)
+            .frame(minHeight: 28)
+        }
+    }
+
+    private func latestButton(target: Target, unread: UnreadBadge?, keys: [String]) -> some View {
+        Button { requestLatest(target: target) } label: {
+            HStack(spacing: 4) {
+                if latestPending { ProgressView().controlSize(.small) } else { Image(systemName: "chevron.down") }
+                Text(latestPending ? "Loading latest…" : unread.map { "\($0.text) unread" } ?? "Latest").font(.caption.weight(.semibold))
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 44)
+            .foregroundStyle(Theme.mint)
+            .background(Color(hex: 0x2D4142), in: RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+        .disabled(latestPending || (model.hasNewer && model.olderLoading))
+        .padding(16)
+        .accessibilityLabel("Jump to latest messages")
+        .accessibilityValue(latestPending ? "Loading latest messages" : unread?.description ?? "")
+    }
+
+    @ToolbarContentBuilder
+    private func toolbar(session: Session, raw: JSONObject?) -> some ToolbarContent {
+        let target = session.target
+        if !target.agentId.isEmpty {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { model.back() } label: { Image(systemName: "chevron.backward") }.accessibilityLabel("Back to parent conversation")
+            }
+        }
+        ToolbarItem(placement: .principal) {
+            VStack(spacing: 0) {
+                Text(target.agentId.isEmpty ? SessionFilters.label(session) : target.agentId).font(.headline).lineLimit(1)
+                Text(app.machineName(target.machineKey)).font(.caption2).foregroundStyle(Theme.muted).lineLimit(1)
+            }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Button("Refresh", systemImage: "arrow.clockwise") { model.refreshActivity(explicit: true) }
+                Button("Search messages", systemImage: "magnifyingglass") { searching = true }
+                if raw?.bool("interrupt_supported") == true && target.agentId.isEmpty {
+                    Button("Stop current turn", systemImage: "stop.circle") { stopRequest = true }
+                        .disabled(!model.interruptReason(target).isEmpty)
+                }
+                if model.canMarkRead(target) || model.readAllPending(target) {
+                    Button("Mark read", systemImage: "checkmark.circle") {
+                        model.markAllRead([target])
+                    }
+                    .disabled(!model.canReadAll(target))
+                }
+                Button("Copy session reference", systemImage: "doc.on.doc") {
+                    let reference = SessionReference.resolve(target, app.machines)
+                    if let uri = reference.uri { UIPasteboard.general.string = uri } else { notice = reference.reason }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .accessibilityLabel("Conversation actions")
+        }
+    }
+
+    private func agentName(_ session: Session, _ raw: JSONObject?) -> String {
+        if !session.target.agentId.isEmpty, let provider = raw?.string("provider"), !provider.isEmpty { return provider }
+        return session.agent
+    }
+
+    // MARK: Behaviour
+
+    private func openIfNeeded() {
+        let current = model.selected?.target
+        if current == route.target || current?.resolves(to: route.target) == true || (current.map { route.target.resolves(to: $0) } ?? false) ||
+            (current?.agentId.isEmpty == false && current?.session == route.target.session) {
+            model.refreshActivity()
+            return
+        }
+        follow = ConversationFollowState()
+        display = QuestionDisplayState(owner: route.target.key)
+        let session = app.sessions.first { $0.target == route.target } ??
+            Session(target: route.target, title: route.target.session, agent: "", status: "", project: "", preview: "", pendingCount: 0, raw: [:])
+        model.open(session)
+    }
+
+    private func applyContent(target: Target, keys: [String], events: [Event], questions: [Question], unreadBoundary: String, readReady: Bool) {
+        guard !(events.isEmpty && questions.isEmpty && model.activity == nil && !app.demo) else { return }
+        let ownSendId = model.ownSendId(target)
+        let own = events.last { $0.outgoingId == ownSendId || $0.requestId == ownSendId }
+        let ownKey = own.map { questions.isEmpty ? "history:tail" : "event:" + $0.id }
+        let explicitSend = !ownSendId.isEmpty && ownSendId != follow.ownSendId && ownKey != nil
+        let firstOpen = !follow.opened
+        if firstOpen && !explicitSend && !readReady { return }
+        if firstOpen && !explicitSend {
+            let opening = UnreadPresentation.opening(memory: nil, saved: model.conversationViewport(target), boundary: unreadBoundary, keys: keys)
+            unavailableSaved = opening.unavailableSaved
+            follow.anchor = opening.anchor
+            follow.following = opening.anchor?.following ?? true
+        }
+        if model.hasNewer && !explicitSend { follow.following = false }
+        if explicitSend && model.hasNewer && !latestPending { requestLatest(target: target) }
+        let request = ConversationViewport.content(follow, keys: keys, ownSendId: ownSendId, ownItemKey: ownKey)
+        follow = request.state
+        if explicitSend || firstOpen || !userScrolling, let index = request.index { scroll(to: keys[index], last: index == keys.count - 1) }
+    }
+
+    private func scroll(to key: String, last: Bool) {
+        if last { position.scrollTo(edge: .bottom) } else { position.scrollTo(id: key, anchor: .top) }
+    }
+
+    private func requestLatest(target: Target) {
+        guard model.selected?.target == target, !latestPending, !(model.hasNewer && model.olderLoading) else { return }
+        let needsHistory = model.hasNewer
+        let reason = needsHistory ? model.historyReason(target) : ""
+        guard reason.isEmpty else {
+            notice = "Could not reach the latest messages. \(reason)"
+            return
+        }
+        latestPending = true
+        Task {
+            defer { latestPending = false }
+            if needsHistory {
+                guard let read = model.jumpToLatest(target) else {
+                    notice = "Could not load the latest messages. \(model.olderError.isEmpty ? "Wait for the current history read, then try again." : model.olderError)"
+                    return
+                }
+                await read.value
+                // The read prepares its presentation off the main actor; wait until it is installed.
+                for _ in 0..<50 where model.olderLoading { try? await Task.sleep(for: .milliseconds(20)) }
+            }
+            guard model.selected?.target == target else { return }
+            let keys = Self.keys(events: model.events, questions: model.questions, warning: "", bounded: "", unreadBoundary: "", loading: false)
+            let request = ConversationViewport.loadedLatest(follow, keys: keys, hasNewer: needsHistory && model.hasNewer, error: needsHistory ? model.olderError : "")
+            if !request.failure.isEmpty {
+                notice = request.failure
+            } else {
+                follow = request.state
+                withAnimation { position.scrollTo(edge: .bottom) }
+            }
+        }
+    }
+
+    private func jump(to eventId: String, events: [Event], target: Target) {
+        searching = false
+        guard let match = ConversationSearch.resolve(events, eventId) else {
+            notice = "That message is no longer in the loaded window. Search again or load its earlier page."
+            return
+        }
+        follow.opened = true
+        follow.following = false
+        follow.anchor = ConversationAnchor(itemKey: "event:" + match.id, offset: 0, following: false)
+        withAnimation { position.scrollTo(id: "event:" + match.id, anchor: .top) }
+    }
+}
+
+private struct ContentSignature: Equatable {
+    let revision: Int
+    let own: String
+    let verified: Bool
+    let boundary: String
+    let ready: Bool
+    let newer: Bool
+    let questions: Int
+}
+
+private struct VisibilityKey: Equatable {
+    let ids: [String]
+    let readable: Bool
+}
+
+/// Searches loaded messages only; results never advance read state.
+struct ConversationSearchSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let events: [Event]
+    let onSelect: (String) -> Void
+    @State private var query = ""
+
+    var body: some View {
+        let prepared = ConversationSearch.prepare(events)
+        let results = ConversationSearch.find(prepared, query)
+        NavigationStack {
+            List {
+                if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    Section {
+                        ForEach(results.hits, id: \.eventId) { hit in
+                            Button { onSelect(hit.eventId) } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Text(hit.role).font(.caption.weight(.semibold)).foregroundStyle(Theme.muted)
+                                        Spacer()
+                                        if hit.at > 0 { Text(MessageTime.text(hit.at)).font(.caption2).foregroundStyle(Theme.muted) }
+                                    }
+                                    Text(hit.snippet).font(.footnote).foregroundStyle(Theme.onSurface).lineLimit(4)
+                                }
+                            }
+                        }
+                    } footer: {
+                        Text(results.matches == 0 ? "No loaded message matches." :
+                             results.matches > results.hits.count ? "\(results.matches) loaded messages match; showing the first \(results.hits.count)." :
+                             "\(results.matches) loaded \(results.matches == 1 ? "message matches" : "messages match").")
+                    }
+                } else {
+                    Text("Search the messages loaded on this phone.").foregroundStyle(Theme.muted)
+                }
+            }
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search messages")
+            .navigationTitle("Search")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
+            .zerusScreen()
+        }
+    }
+}

@@ -7,28 +7,40 @@ enum AppTab: Hashable {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
     @State private var tab: AppTab = .sessions
     @State private var settings = false
     @State private var pairing: PairingRequest?
+    @State private var sessionsPath = NavigationPath()
+    @State private var projectsPath = NavigationPath()
 
     var body: some View {
         @Bindable var model = model
-        TabView(selection: $tab) {
-            Tab("Sessions", systemImage: "rectangle.stack", value: AppTab.sessions) {
-                PlaceholderScreen(title: "Sessions", settings: $settings, onPair: { tab = .machines })
-            }
-            Tab("Projects", systemImage: "folder", value: AppTab.projects) {
-                PlaceholderScreen(title: "Projects", settings: $settings, onPair: { tab = .machines })
-            }
-            Tab("Drafts", systemImage: "square.and.pencil", value: AppTab.drafts) {
-                PlaceholderScreen(title: "Drafts", settings: $settings, onPair: { tab = .machines })
-            }
-            Tab("Accounts", systemImage: "person.crop.circle", value: AppTab.accounts) {
-                PlaceholderScreen(title: "Accounts", settings: $settings, onPair: { tab = .machines })
-            }
-            Tab("Machines", systemImage: "desktopcomputer", value: AppTab.machines) {
+        TabView(selection: Binding(get: { tab }, set: { select($0) })) {
+            Tab(value: AppTab.sessions) {
+                SessionsScreen(settings: $settings, path: $sessionsPath, onPair: { tab = .machines }, onBackToProject: {
+                    model.clearSessionScope()
+                    tab = .projects
+                })
+            } label: { Label("Sessions", systemImage: "rectangle.stack") }
+            Tab(value: AppTab.projects) {
+                ProjectsScreen(settings: $settings, path: $projectsPath, onPair: { tab = .machines }, onViewSessions: { project in
+                    model.viewProjectSessions(project)
+                    sessionsPath = NavigationPath()
+                    tab = .sessions
+                })
+            } label: { Label("Projects", systemImage: "folder") }
+            Tab(value: AppTab.drafts) {
+                DraftsScreen(settings: $settings, onOpen: openConversation)
+            } label: { Label("Drafts", systemImage: "square.and.pencil") }
+            .badge(model.conversation.drafts.filter { $0.status != "editing" && $0.status != "submitted" && $0.questionId != "__interrupt" }.count +
+                   model.conversation.normalizedOutgoing.filter { ["uncertain", "failed"].contains($0.status) }.count)
+            Tab(value: AppTab.accounts) {
+                AccountsScreen(settings: $settings, onMachines: { tab = .machines })
+            } label: { Label("Accounts", systemImage: "person.crop.circle") }
+            Tab(value: AppTab.machines) {
                 MachinesScreen(settings: $settings, pairing: $pairing)
-            }
+            } label: { Label("Machines", systemImage: "desktopcomputer") }
         }
         .sheet(isPresented: $settings) { SettingsView() }
         .sheet(item: $pairing) { request in PairingSheet(request: request) }
@@ -37,6 +49,16 @@ struct RootView: View {
             model.invitation = nil
             tab = .machines
             pairing = PairingRequest(server: invite.server, code: invite.code, fromLink: true)
+        }
+        .task(id: scenePhase) {
+            // While visible, refresh every five seconds, as the Android client does.
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                if Task.isCancelled { break }
+                if model.conversation.selected != nil { model.conversation.refreshActivity() }
+                else if tab != .drafts { model.refresh() }
+            }
         }
         .onAppear {
             #if DEBUG
@@ -48,6 +70,13 @@ struct RootView: View {
                 tab = ["sessions": .sessions, "projects": .projects, "drafts": .drafts, "accounts": .accounts,
                        "machines": .machines][arguments[index + 1]] ?? tab
             }
+            // `-zerus-open N` opens the Nth session of the catalog.
+            if let index = arguments.firstIndex(of: "-zerus-open"), index + 1 < arguments.count, let row = Int(arguments[index + 1]) {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(600))
+                    if model.sessions.indices.contains(row) { openConversation(model.sessions[row].target) }
+                }
+            }
             #endif
         }
         .alert("Zerus", isPresented: Binding(get: { !model.error.isEmpty }, set: { if !$0 { model.error = "" } })) {
@@ -56,9 +85,31 @@ struct RootView: View {
             Text(model.error)
         }
     }
+
+    /// Opens an exact conversation from another tab.
+    private func openConversation(_ target: Target) {
+        model.clearSessionScope()
+        tab = .sessions
+        var path = NavigationPath()
+        path.append(SessionRoute(target: target))
+        sessionsPath = path
+    }
+
+    private func select(_ next: AppTab) {
+        if next == tab {
+            // Tapping the current tab returns to its root, like other iOS apps.
+            switch next {
+            case .sessions: sessionsPath = NavigationPath()
+            case .projects: projectsPath = NavigationPath()
+            default: break
+            }
+        }
+        if next != .sessions { model.clearSessionScope() }
+        tab = next
+    }
 }
 
-/// The common top bar: brand, version and the Settings button.
+/// The common top bar: brand and the Settings button.
 struct MainToolbar: ToolbarContent {
     @Environment(AppModel.self) private var model
     @Binding var settings: Bool
@@ -74,38 +125,8 @@ struct MainToolbar: ToolbarContent {
                 .withoutGlassBackground()
         }
         ToolbarItem(placement: .topBarTrailing) {
-            Button { model.refresh(explicit: true) } label: { Image(systemName: "arrow.clockwise") }
-                .accessibilityLabel("Refresh")
-                .disabled(model.demo)
-        }
-        ToolbarItem(placement: .topBarTrailing) {
             Button { settings = true } label: { Image(systemName: "gearshape") }
                 .accessibilityLabel("Settings")
-        }
-    }
-}
-
-/// Screens that later sub-projects fill in; they already route to pairing.
-private struct PlaceholderScreen: View {
-    @Environment(AppModel.self) private var model
-    let title: String
-    @Binding var settings: Bool
-    let onPair: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            ContentUnavailableView {
-                Label(title, systemImage: "hammer")
-            } description: {
-                Text(model.connections.isEmpty && !model.demo
-                     ? "Pair a workspace in Machines to browse its sessions."
-                     : "\(title) arrive in the next iOS development build.")
-            } actions: {
-                if model.connections.isEmpty && !model.demo { Button("Open Machines", action: onPair) }
-            }
-            .toolbar { MainToolbar(settings: $settings) }
-            .navigationTitle(title)
-            .zerusScreen()
         }
     }
 }
