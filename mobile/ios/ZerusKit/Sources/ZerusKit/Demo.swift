@@ -6,7 +6,9 @@ public enum DemoCatalog {
 
     /// Preview transcript: the Android demo exchange plus a reply that exercises Markdown rendering.
     public static let events: [Event] = [
-        Event(id: "1", role: "You", text: "Review the API migration and call out any compatibility risks.", time: "10:42", at: 1_700_000_520),
+        Event(id: "1", role: "You", text: "Review the API migration and call out any compatibility risks.", time: "10:42", at: 1_700_000_520,
+              attachments: [DisplayedAttachment(name: "orders-traffic.csv", mime: "text/csv", bytes: 48_213,
+                                                messageId: "00000000-0000-4000-8000-0000000000d1", index: 0)]),
         Event(id: "2", role: "Codex", text: """
             I found **two clients** still using the previous endpoint:
 
@@ -17,6 +19,8 @@ public enum DemoCatalog {
             | :--- | ---: | :---: |
             | billing-sync | 1,440 | High |
             | dashboard export | 12 | Low |
+
+            The full call log is in [orders-traffic.md](docs/orders-traffic.md:12).
 
             I can keep a compatibility route while the new API rolls out:
 

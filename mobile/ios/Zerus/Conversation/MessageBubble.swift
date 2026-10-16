@@ -27,6 +27,7 @@ enum MessageTime {
 struct MessageBubble: View {
     @Environment(AppModel.self) private var app
     let event: Event
+    let target: Target?
     let agent: String
     let outgoing: OutgoingMessage?
     let onReviewOutgoing: (OutgoingMessage) -> Void
@@ -94,13 +95,7 @@ struct MessageBubble: View {
     private var attachments: some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(Array(event.attachments.enumerated()), id: \.offset) { _, file in
-                Label {
-                    Text(file.name).lineLimit(1).truncationMode(.middle)
-                } icon: {
-                    Image(systemName: "paperclip")
-                }
-                .font(.footnote)
-                .foregroundStyle(Theme.muted)
+                AttachmentRow(target: target, file: file)
             }
         }
     }

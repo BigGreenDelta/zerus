@@ -15,8 +15,8 @@ Design and roadmap: [iOS architecture and foundation](../../docs/superpowers/spe
 
 - `ZerusKit/` is a Swift package with the platform-neutral core: JSON values,
   protocol models, policies ported from the Kotlin client, the relay client and
-  sealed persistence. It uses Foundation, CryptoKit and Security only, so its
-  tests run on a Mac with `swift test`.
+  sealed persistence. It uses Foundation, CryptoKit, Security and
+  UniformTypeIdentifiers only, so its tests run on a Mac with `swift test`.
 - `Zerus/` holds the SwiftUI app and platform services. `Zerus.xcodeproj` uses
   file-system synchronized folders, so new files are picked up without editing
   the project.
@@ -30,7 +30,12 @@ available after first unlock on this device only, never synchronized or restored
 to another phone. Other private state (drafts, outgoing messages, read positions)
 is sealed with AES-GCM under a Keychain key, written atomically, protected until
 first unlock and excluded from backup. Each sealed file authenticates its own
-name. Production builds require HTTPS; the relay client never follows redirects
+name. Selected files are copied into separate sealed files whose names, types
+and digests are authenticated; a message sends their verified bytes, and a copy
+is removed only when no draft or outgoing message still references it. Opened
+attachments and computer files are verified against their digest into bounded
+caches (100 MiB, one day) and leave the app only through Quick Look, Share or an
+explicit Save to Files. Production builds require HTTPS; the relay client never follows redirects
 and keeps no cookies or cached responses.
 
 ## Build and test

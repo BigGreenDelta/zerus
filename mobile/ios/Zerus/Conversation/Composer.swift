@@ -14,6 +14,7 @@ struct Composer: View {
     @State private var coldDraft: Draft?
     @State private var coldClear = false
     @State private var blockedReason: String?
+    @State private var pick: PickRequest?
     @FocusState private var focused: Bool
 
     private var model: ConversationModel { app.conversation }
@@ -22,7 +23,7 @@ struct Composer: View {
     var body: some View {
         let draft = model.draft(target)
         let reason = sendReason(draft)
-        let canSend = reason.isEmpty && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let canSend = reason.isEmpty && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.attachments.isEmpty)
         let previous = model.normalizedOutgoing.last { $0.belongs(to: target) && ["sending", "uncertain"].contains($0.status) }
         VStack(alignment: .leading, spacing: 6) {
             ContextFooter(session: session, captureDraft: capture)
@@ -43,7 +44,17 @@ struct Composer: View {
             if !model.contextNotice.isEmpty {
                 Text(model.contextNotice).font(.caption).foregroundStyle(Theme.amber)
             }
+            if !draft.attachments.isEmpty { chips(draft) }
+            if model.messageState.pickerDraft?.target == target && model.attachmentImporting {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("Adding files…")
+                }
+                .font(.caption)
+                .foregroundStyle(Theme.muted)
+            }
             HStack(alignment: .bottom, spacing: 8) {
+                attachMenu(draft)
                 TextField(reason.isEmpty ? "Message" : reason, text: $text, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($focused)
@@ -108,6 +119,63 @@ struct Composer: View {
             Text("The next message may process the full conversation again, increasing token use or cost. Send with full context, compact it into a summary first, or clear it and keep your draft. Compaction uses tokens and may omit details.")
         }
         .clearContextConfirmation(isPresented: $coldClear, session: session, beforeClear: { _ = capture() })
+        .modifier(AttachmentPickers(request: $pick))
+    }
+
+    private func chips(_ draft: Draft) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(draft.attachments, id: \.id) { file in
+                    HStack(spacing: 4) {
+                        Button { app.viewer.open(target, file.displayed()) } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: AttachmentRow.icon(file.mime)).foregroundStyle(Theme.muted)
+                                Text(file.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: 150, alignment: .leading)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Preview \(file.name)")
+                        Button { Task { await model.removeAttachment(target, id: file.id) } } label: {
+                            Image(systemName: "xmark").font(.caption2.weight(.bold)).frame(width: 24, height: 24)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.muted)
+                        .disabled(model.messageState.pickerDraft?.target == target || draft.status != "editing")
+                        .accessibilityLabel("Remove \(file.name)")
+                    }
+                    .font(.caption)
+                    .padding(.leading, 9)
+                    .padding(.trailing, 3)
+                    .padding(.vertical, 3)
+                    .background(Color(hex: 0x243136), in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
+        }
+    }
+
+    private func attachMenu(_ draft: Draft) -> some View {
+        let reason = model.attachBlockReason(target)
+        return Menu {
+            Button { choose(.photos) } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
+            if CameraPicker.available { Button { choose(.camera) } label: { Label("Take Photo", systemImage: "camera") } }
+            Button { choose(.files) } label: { Label("Choose Files", systemImage: "folder") }
+        } label: {
+            Image(systemName: "paperclip")
+                .font(.body.weight(.semibold))
+                .frame(width: 34, height: 40)
+        }
+        .foregroundStyle(reason.isEmpty ? Theme.muted : Theme.muted.opacity(0.4))
+        .disabled(!reason.isEmpty || pick != nil)
+        .accessibilityLabel("Attach files")
+        .accessibilityHint(reason)
+    }
+
+    private func choose(_ kind: PickKind) {
+        if model.draft(target).text != text { model.edit(target, text: text) }
+        Task {
+            guard let id = await model.beginAttachmentPick(target) else { return }
+            pick = PickRequest(id: id, kind: kind, remaining: AttachmentPolicy.maxFiles - model.draft(target).attachments.count)
+        }
     }
 
     /// Saves the editor text and returns the exact draft a context action captures.
@@ -135,7 +203,8 @@ struct Composer: View {
         if !app.storageReady { return "Private storage is not ready. Sending is unavailable." }
         if draft.status == "submitting" { return "Sending the saved draft. Wait for its result." }
         if draft.status != "editing" { return "Review the saved draft before sending again." }
-        if !draft.attachments.isEmpty { return "Attachments are not available on this phone yet." }
+        if model.messageState.pickerDraft?.target == target { return "Wait for the selected files to finish importing." }
+        if !draft.attachments.isEmpty, let attachments = model.attachmentReason(target).nonEmpty { return attachments }
         if !block.isEmpty { return block }
         if !online || target.run.isEmpty { return "Refresh to verify the session before sending." }
         if previous?.status == "uncertain" { return "Delivery unknown. Check the previous message before sending again." }

@@ -217,8 +217,9 @@ extension ConversationModel {
             return
         }
         let original = draft(target)
-        guard original.attachments.isEmpty else {
-            contextNotice = "Attachments are not available on this phone yet. Remove them before sending."
+        if !original.attachments.isEmpty, let reason = attachmentReason(target).nonEmpty ?? (app.attachmentStore == nil ? "Private attachment storage is unavailable." : nil) {
+            contextNotice = reason
+            if !continuationId.isEmpty { cancelCompactContinuation("The draft was kept without sending. \(reason)") }
             return
         }
         if let expectedDraft, !ContextPolicies.sameDraft(expectedDraft, original) {
@@ -264,6 +265,12 @@ extension ConversationModel {
         var attempted = false
         var rejected: RelayError?
         do {
+            var files: JSON = .array([])
+            if !message.attachments.isEmpty {
+                guard let store = app.attachmentStore else { throw ZerusError.invalid("Private attachment storage is unavailable.") }
+                let attachments = message.attachments
+                files = try await Task.detached(priority: .userInitiated) { try store.payload(attachments) }.value
+            }
             guard fresh(target), app.connections.contains(where: { $0.id == connection.id }) else {
                 throw ZerusError.invalid("The session changed before transport. Review the saved message.")
             }
@@ -278,7 +285,7 @@ extension ConversationModel {
             var payload = try target.json()
             payload["request_id"] = .string(id)
             payload["text"] = .string(message.text)
-            payload["attachments"] = .array([])
+            payload["attachments"] = files
             if !expectedCompactionId.isEmpty { payload["expected_compaction_id"] = .string(expectedCompactionId) }
             attempted = true
             let initial: JSONObject

@@ -83,24 +83,48 @@ final class AppModel {
     @ObservationIgnored private(set) var conversation: ConversationModel!
     /// The New session form.
     @ObservationIgnored private(set) var launch: LaunchModel!
+    /// Sealed copies of selected files, separate from private state.
+    @ObservationIgnored let attachmentStore: AttachmentStore?
+    /// Opens message attachments.
+    @ObservationIgnored private(set) var viewer: AttachmentViewer!
+    /// Opens Markdown links to files on a conversation's computer.
+    @ObservationIgnored private(set) var computerFiles: ComputerFiles!
 
     init(client: RelayClient, connectionStore: ConnectionStore, sealedStore: SealedFileStore?,
-         cache: ConversationCache? = nil, pages: ConversationPageCache? = nil) {
+         cache: ConversationCache? = nil, pages: ConversationPageCache? = nil, attachmentStore: AttachmentStore? = nil,
+         attachmentCache: AttachmentViewCache? = nil, computerFileCache: AttachmentViewCache? = nil) {
         self.client = client
         self.connectionStore = connectionStore
         self.sealedStore = sealedStore
+        self.attachmentStore = attachmentStore
         archive = ArchivePaging(load: { [weak self] key, query in
             guard let self else { throw CancellationError() }
             return try await self.loadArchivePage(key, query)
         }, reset: { [weak self] in self?.publishSessions() })
         conversation = ConversationModel(app: self, cache: cache, pages: pages)
         launch = LaunchModel(app: self)
+        viewer = AttachmentViewer(app: self, store: attachmentStore, cache: attachmentCache)
+        computerFiles = ComputerFiles(app: self, cache: computerFileCache)
     }
 
     static func live() -> AppModel {
         AppModel(client: RelayClient(), connectionStore: KeychainConnectionStore(),
                  sealedStore: try? SealedFileStore.applicationSupport(keys: KeychainKeyProvider()),
-                 cache: try? ConversationCache.live(), pages: try? ConversationPageCache.live())
+                 cache: try? ConversationCache.live(), pages: try? ConversationPageCache.live(),
+                 attachmentStore: try? AttachmentStore.live(), attachmentCache: viewCache("attachment-view"), computerFileCache: viewCache("computer-file-view"))
+    }
+
+    private static func viewCache(_ name: String) -> AttachmentViewCache? {
+        guard let caches = try? FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true) else { return nil }
+        return AttachmentViewCache(root: caches.appendingPathComponent(name, isDirectory: true))
+    }
+
+    /// Whether the gateway and computer both serve an additive read operation.
+    func attachmentAccess(_ target: Target, operation: String) -> AttachmentAccess {
+        let relay = relayOperations[target.connectionId], machine = machineOperations[target.machineKey]
+        let online = machines.first { $0.key == target.machineKey }?.online
+        return operation == ComputerFileProtocol.operation ? ComputerFileProtocol.access(relay: relay, machine: machine, online: online)
+            : AttachmentIdentity.access(relay: relay, machine: machine, online: online)
     }
 
     func start() async {
@@ -111,6 +135,9 @@ final class AppModel {
             connections = try await Task.detached { try store.load() }.value
             try await openPrivateState()
             storageReady = true
+            conversation.recoverAttachmentPick()
+            let caches = [viewer.cache, computerFiles.cache].compactMap { $0 }
+            Task.detached(priority: .utility) { caches.forEach { $0.trim() } }
             refresh()
         } catch {
             self.error = "Private storage could not be opened. Existing data has been preserved. \(error.localizedDescription)"
@@ -269,6 +296,8 @@ final class AppModel {
             machineOperations = machineOperations.filter { $0.key.connectionId != connection.id }
             machineFeatures = machineFeatures.filter { $0.key.connectionId != connection.id }
             publishSessions()
+            viewer.clear()
+            computerFiles.clear()
             await conversation.forget(connection: connection.id)
         } catch {
             self.error = "Could not revoke this phone on the gateway. The connection is preserved. \(Self.message(error, fallback: ""))"

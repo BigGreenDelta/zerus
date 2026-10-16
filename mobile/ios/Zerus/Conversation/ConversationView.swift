@@ -90,7 +90,7 @@ struct ConversationView: View {
                         }.id("history:missing-anchor")
                         ForEach(events) { event in
                             if event.id == unreadBoundary { unreadDivider.id("history:unread") }
-                            MessageBubble(event: event, agent: agentName(session, raw), outgoing: model.outgoing.first { $0.requestId == event.outgoingId },
+                            MessageBubble(event: event, target: target, agent: agentName(session, raw), outgoing: model.outgoing.first { $0.requestId == event.outgoingId },
                                           onReviewOutgoing: { reviewOutgoing = $0 })
                                 .id("event:" + event.id)
                         }
@@ -175,6 +175,8 @@ struct ConversationView: View {
         }
         .reviewDialogs(review: $review, reviewOutgoing: $reviewOutgoing, discard: $discard)
         .sheet(isPresented: $details) { SessionDetailsSheet(session: session) }
+        .sheet(item: Binding(get: { app.computerFiles.selection }, set: { if $0 == nil { app.computerFiles.close() } })) { ComputerFileSheet(selection: $0) }
+        .environment(\.computerFileLink, ComputerFileLink { [weak app] reference in app?.computerFiles.show(target, reference) })
         .alert("Terminal unavailable", isPresented: $terminal) {
             Button("Close", role: .cancel) {}
         } message: {

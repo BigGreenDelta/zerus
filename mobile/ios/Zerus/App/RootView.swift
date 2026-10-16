@@ -1,3 +1,4 @@
+import QuickLook
 import SwiftUI
 import ZerusKit
 
@@ -44,6 +45,7 @@ struct RootView: View {
         }
         .minimizingTabBarOnScroll()
         .sheet(isPresented: $settings) { SettingsView() }
+        .quickLookPreview(Binding(get: { model.viewer.opened?.file }, set: { if $0 == nil { model.viewer.opened = nil } }))
         .sheet(isPresented: $model.choosingLaunchMachine) { NewSessionMachineSheet() }
         .fullScreenCover(isPresented: Binding(get: { model.launch.visible }, set: { if !$0 { model.launch.close() } })) {
             if let machine = model.launch.machine { LaunchForm(machine: machine).environment(model) }
@@ -109,6 +111,15 @@ struct RootView: View {
                 Task {
                     try? await Task.sleep(for: .milliseconds(600))
                     if model.sessions.indices.contains(row) { openConversation(model.sessions[row].target) }
+                    // `-zerus-attachment` taps the first message attachment; `-zerus-file-link` the first file link.
+                    try? await Task.sleep(for: .milliseconds(600))
+                    let target = model.conversation.selected?.target
+                    if arguments.contains("-zerus-attachment"), let file = model.conversation.events.flatMap(\.attachments).first {
+                        model.viewer.open(target, file)
+                    }
+                    if arguments.contains("-zerus-file-link"), let target, let reference = ComputerFileReference.parse("docs/orders-traffic.md:12") {
+                        model.computerFiles.show(target, reference)
+                    }
                 }
             }
             #endif

@@ -134,6 +134,9 @@ final class ConversationModel {
     var receiptFlights: Set<String> = []
     var answerFlights: [String: String] = [:]
     var preparingTargets: Set<String> = []
+    var attachmentPreparing = false
+    var attachmentImporting = false
+    @ObservationIgnored var importTask: Task<Void, Never>?
     var deliveryFlights: Set<String> = []
     /// Outbox rows, with interrupted sends shown as unconfirmed.
     var normalizedOutgoing: [OutgoingMessage] = []

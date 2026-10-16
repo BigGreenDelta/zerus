@@ -92,7 +92,7 @@ struct DraftsScreen: View {
                 Text(verbatim: draft.text.isEmpty ? "Saved question answer" : draft.text).lineLimit(8).textSelection(.enabled)
             }
             ForEach(draft.attachments, id: \.id) { file in
-                Label(file.name, systemImage: "paperclip").font(.footnote).foregroundStyle(Theme.muted)
+                AttachmentRow(target: draft.target, file: file.displayed())
             }
             Text("\(app.machineName(draft.target.machineKey)) · Run \(String(draft.target.run.prefix(12)))").font(.caption2).foregroundStyle(Theme.muted)
             HStack(spacing: 16) {
