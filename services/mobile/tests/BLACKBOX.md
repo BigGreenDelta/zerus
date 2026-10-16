@@ -25,7 +25,9 @@ source tree with the interpreter running the tests, which needs `aiohttp`
 | `ZERUS_CONNECTOR_IMPLEMENTATION` | `python` or `rust`; defaults to `python` without a command and `rust` with one. Assertions on a reviewed divergence depend on it. |
 
 Outside Python mode only the modules listed under `rust` in `ported.json` run;
-the others skip. `test_bb_harness.py` and
+the others skip. Within a ported module, a known operation missing from
+`rust_operations` expects the `unsupported operation` receipt; the connector's
+`runtime_vectors` test keeps that list equal to what the build implements. `test_bb_harness.py` and
 `test_bb_attachment_read.ScriptedAnswerTests` check the harness itself and
 always run. `test_bb_directories.NativeDirectoryTests`,
 `test_bb_speech.SpeechConfigurationTests.test_real_cli_manages_a_profile_without_inference`
@@ -327,9 +329,9 @@ case, mapped in [`ORACLE.md`](../relay/tests/ORACLE.md).
 |---|---|---|
 | `VoiceValidationTests.test_operations_keep_session_and_exact_native_identity` | the voice vectors in `test_bb_session_validation.test_rejected_vectors_fail_with_their_receipt_and_run_nothing` and `test_bb_speech.SpeechJobTests.test_vector_rejections_never_reach_native` | covered |
 | `VoiceValidationTests.test_routes_are_machine_identities_not_caller_aliases` | same | covered |
-| `VoiceConnectorTests.test_acceptance_is_scoped_durable_and_duplicate_never_reinvokes_native` | `test_bb_controls.test_voice_operations_reach_native_with_their_action_once` | covered |
-| `VoiceConnectorTests.test_wrong_conversation_ack_is_uncertain_and_not_replayed` | `test_bb_controls.test_a_mismatched_voice_acknowledgement_never_repeats` | covered |
-| `VoiceConnectorTests.test_old_host_rejects_without_native_and_status_read_is_short_lived` | `test_bb_controls.test_hgs_without_the_voice_abi_advertises_and_runs_nothing`, `test_a_delivered_status_read_is_kept_only_two_minutes`, `test_bb_speech.SpeechConfigurationTests.test_speech_and_its_configuration_are_separate_capabilities`, `test_bb_read_classes` | covered |
+| `VoiceConnectorTests.test_acceptance_is_scoped_durable_and_duplicate_never_reinvokes_native` | `test_bb_voice.test_voice_operations_reach_native_with_their_action_once` | covered |
+| `VoiceConnectorTests.test_wrong_conversation_ack_is_uncertain_and_not_replayed` | `test_bb_voice.test_a_mismatched_voice_acknowledgement_never_repeats` | covered |
+| `VoiceConnectorTests.test_old_host_rejects_without_native_and_status_read_is_short_lived` | `test_bb_voice.test_hgs_without_the_voice_abi_advertises_and_runs_nothing`, `test_a_delivered_status_read_is_kept_only_two_minutes`, `test_bb_speech.SpeechConfigurationTests.test_speech_and_its_configuration_are_separate_capabilities`, `test_bb_read_classes` | covered |
 
 ### Other modules with connector cases
 
@@ -368,7 +370,7 @@ native outcome", which `test_bb_worktrees` pins.
 wrote suites for them; the integration kept one module per subject: H3's
 inline attachment, history page and voice message tests were merged into
 `test_bb_send`, `test_bb_history_recovery.HistoryTests` and
-`test_bb_controls.VoiceMessageTests` (keeping the cases those lacked), and
+`test_bb_voice.VoiceMessageTests` (keeping the cases those lacked), and
 H3's `test_bb_history_pages` kept only its inspection bounds, renamed
 `test_bb_inspection_bounds`.
 

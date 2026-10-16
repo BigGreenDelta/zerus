@@ -6,16 +6,21 @@
 relays and `hgs` must not be able to tell the two apart, except in the
 deliberate divergences below.
 
-This build runs the relay runtime with the read operations: it heartbeats
-the projected native listing, long-polls the relay, runs `inspect`,
-`process_output`, `mark_read`, `history`, `catalog`, `dirs` and `worktrees`
-exactly as Python does, journals every outcome and uploads it. Every other
-operation (all mutations, terminal, attachments, voice, speech, launch,
-directories, worktree creation and the one-hop gateway) is claimed, refused
-with Python's `unsupported operation` receipt (which phones show as "update
-required") and never advertised, until its slice implements it
-(`src/capabilities.rs`, `IMPLEMENTED`). Nothing packages or starts this binary
-yet; gateways keep running the Python connector.
+This build runs the relay runtime with the read operations and the session
+mutations: it heartbeats the projected native listing, long-polls the relay,
+runs `inspect`, `process_output`, `mark_read`, `history`, `catalog`, `dirs` and
+`worktrees`, and the mutations of `src/mutations.rs` (send with inline
+attachments, answer, interrupt, send_now, settings, the context commands with
+their preflight, the DeepSeek child-send preflight, process_stop, lifecycle
+operations, recovery_action and set_mobile_delivery) exactly as Python does,
+journals every outcome and uploads it. Every other operation (terminal,
+attachments, voice, speech, launch, directories, worktree creation and the
+one-hop gateway) is claimed, refused with Python's `unsupported operation`
+receipt (which phones show as "update required") and never advertised, until
+its slice implements it (`src/capabilities.rs`, `IMPLEMENTED`;
+`tests/ported.json` lists the same operations for the black-box suites).
+Nothing packages or starts this binary yet; gateways keep running the Python
+connector.
 
 Archive paging is also deferred: `archive_list` is refused and never
 advertised, even when the CLI offers it. Heartbeats retain the legacy listing

@@ -247,10 +247,11 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
                 }
                 _ => {
                     assert_eq!(expect["stage"], "receipt", "{id}");
-                    assert!(
-                        expect.get("raised").is_none(),
-                        "{id}: generic receipts are not validation"
-                    );
+                    // A TypeError in a validator is Python's generic receipt.
+                    if let Some(raised) = expect.get("raised") {
+                        assert_eq!(raised, "TypeError", "{id}");
+                        assert_eq!(expect["error"], execute::GENERIC, "{id}");
+                    }
                     assert_eq!(
                         result,
                         Err(expect["error"].as_str().unwrap().into()),
@@ -261,7 +262,7 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (54, 191));
+    assert_eq!((checked, refused), (125, 120));
     archive_refusals.sort();
     assert_eq!(archive_refusals, ARCHIVE_CASES);
 }
@@ -343,8 +344,14 @@ async fn executions_match_the_python_connector() {
             "inspect-completed",
             "inspect-native-crash",
             "mark-read-not-found",
+            "pause-native-failed",
             "process-output",
             "process-output-too-large",
+            "restore-archive",
+            "send-completed",
+            "send-native-crash",
+            "send-native-timeout",
+            "set-mobile-delivery",
             "unsupported-operation",
             "worktrees-state-prefix",
         ]
@@ -677,6 +684,27 @@ fn receipts_fit_python_and_the_relay() {
     assert_eq!(typed["error"], execute::ERROR_NOT_TEXT);
     let kept = json!({"state": "completed", "result": {"ok": true}, "error": null});
     assert_eq!(execute::sanitize(kept.clone(), request_id, true), kept);
+}
+
+/// The black-box suites expect `unsupported operation` for exactly the known
+/// operations this build does not implement, from `tests/ported.json`.
+#[test]
+fn ported_operations_name_what_this_build_implements() {
+    let raw = std::fs::read(vectors().join("../tests/ported.json")).unwrap();
+    let ported: Value = serde_json::from_slice(&raw).unwrap();
+    let listed: Vec<&str> = ported["rust_operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|op| op.as_str().unwrap())
+        .collect();
+    let mut implemented: Vec<&str> = zerus_relay::protocol::OPERATIONS
+        .iter()
+        .copied()
+        .filter(|operation| capabilities::implemented(operation))
+        .collect();
+    implemented.sort_unstable();
+    assert_eq!(listed, implemented);
 }
 
 #[test]

@@ -14,6 +14,17 @@ use zerus_relay::json;
 pub const ARCHIVE_SNAPSHOT_TTL: f64 = 45.0;
 pub const MAX_PAYLOAD: usize = crate::native::MAX_PAYLOAD;
 const IDENTITY_FIELDS: [&str; 3] = ["request_id", "expected_run_id", "expected_conversation_id"];
+/// Operations that may name an archive in their payload besides inspect.
+const ARCHIVED_OUTPUT: [&str; 8] = [
+    "process_output",
+    "history",
+    "restore",
+    "forget",
+    "rename",
+    "fork",
+    "attachment_read",
+    "file_read",
+];
 const UINT63: &str = "9223372036854775807";
 
 pub const UNSUPPORTED: &str = "unsupported operation";
@@ -330,6 +341,13 @@ pub fn validate(
         validate_launch(operation, request.get("payload"), request_id)?;
         return Ok(validated("", request.get("payload").cloned()));
     }
+    if operation == "set_mobile_delivery" {
+        if request.get("session").and_then(Value::as_str) != Some("") {
+            return Err(error("the delivery setting uses no session target"));
+        }
+        crate::mutations::validate_delivery(request.get("payload"))?;
+        return Ok(validated("", request.get("payload").cloned()));
+    }
     let session = valid_session(request.get("session")).ok_or_else(|| error(SESSION))?;
     if request.contains_key("archive_id") {
         return Err(error("archive identity belongs only in inspect payload"));
@@ -367,10 +385,13 @@ pub fn validate(
             .map(|_| payload.clone());
         return Ok(validated(session, payload));
     }
-    // process_output and history: the scoped path.
+    // Every other session operation: the scoped path.
     let payload = request.get("payload");
     let object = payload.and_then(Value::as_object);
     if let Some(archive) = object.and_then(|payload| payload.get("archive_id")) {
+        if !ARCHIVED_OUTPUT.contains(&operation) {
+            return Err(error("archived targets support inspection only"));
+        }
         let archive = checked_uuid(Some(archive))?;
         if context.snapshot_age > ARCHIVE_SNAPSHOT_TTL
             || !context.archives.contains(&(session.into(), archive))
@@ -394,7 +415,8 @@ pub fn validate(
     let payload = payload.expect("checked");
     match operation {
         "history" => validate_history(payload, request_id)?,
-        _ => validate_process_output(payload, request_id)?,
+        "process_output" => validate_process_output(payload, request_id)?,
+        _ => crate::mutations::validate(operation, payload, request_id)?,
     }
     match json::python_default_len(payload, false) {
         Ok(size) if size > MAX_PAYLOAD => Err(error(crate::native::REQUEST_TOO_LARGE)),

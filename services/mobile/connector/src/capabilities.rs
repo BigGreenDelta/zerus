@@ -16,8 +16,9 @@ pub const REPROBE_SECONDS: f64 = 300.0;
 /// `hgs --help` budget (seconds).
 pub const PROBE_TIMEOUT: f64 = 3.0;
 
-/// Operations this connector executes. Every other known operation is
-/// refused as unsupported and never advertised.
+/// Operations this connector executes, with the session mutations of
+/// [`crate::mutations::OPERATIONS`]. Every other known operation is refused
+/// as unsupported and never advertised.
 pub const IMPLEMENTED: &[&str] = &[
     "catalog",
     "dirs",
@@ -29,7 +30,7 @@ pub const IMPLEMENTED: &[&str] = &[
 ];
 
 pub fn implemented(operation: &str) -> bool {
-    IMPLEMENTED.contains(&operation)
+    IMPLEMENTED.contains(&operation) || crate::mutations::handles(operation)
 }
 
 /// Python's `FEATURES | {"accounts_snapshot"}` and the conditional features,
@@ -250,22 +251,57 @@ mod tests {
         assert_eq!(
             advertised["operations"],
             json!([
+                "answer",
+                "archive",
                 "catalog",
+                "clear_context",
+                "compact_context",
                 "dirs",
+                "forget",
+                "fork",
                 "history",
                 "inspect",
+                "interrupt",
                 "mark_read",
+                "pause",
                 "process_output",
+                "process_stop",
+                "rename",
+                "restore",
+                "resume",
+                "send",
+                "send_now",
+                "settings",
+                "terminate",
                 "worktrees"
             ])
         );
         assert_eq!(
             advertised["features"],
-            json!(["accounts_snapshot", "inspect_after", "inspect_agent"])
+            json!([
+                "accounts_snapshot",
+                "inspect_after",
+                "inspect_agent",
+                "send_agent"
+            ])
         );
         assert_eq!(advertised["reasons"], json!({}));
         let none = Flags::default().advertised(false);
-        assert_eq!(none["operations"], json!(["inspect", "process_output"]));
+        assert_eq!(
+            none["operations"],
+            json!([
+                "answer",
+                "clear_context",
+                "compact_context",
+                "inspect",
+                "interrupt",
+                "process_output",
+                "process_stop",
+                "send",
+                "send_now",
+                "settings"
+            ])
+        );
         assert_eq!(none["reasons"].as_object().unwrap().len(), 2);
     }
 }

@@ -102,6 +102,13 @@ def ported_modules() -> set[str]:
     return set(json.loads((TESTS / "ported.json").read_text())["rust"])
 
 
+def implemented(operation) -> bool:
+    """Whether the connector under test executes this known operation. A Rust
+    build refuses the others as unsupported (`rust_operations` in ported.json,
+    checked against the build by its runtime_vectors test)."""
+    return IMPLEMENTATION == "python" or operation in json.loads((TESTS / "ported.json").read_text())["rust_operations"]
+
+
 def canonical(value) -> str:
     """The relay's wire and identity encoding (relay json.rs)."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
