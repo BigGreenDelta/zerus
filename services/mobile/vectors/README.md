@@ -80,8 +80,7 @@ strict JSON reader can load it. JSONL files hold one record per line.
 - `android` marks a receipt error that `AttachmentViewCache.failure()` treats
   specially: `update_required` when it contains `unavailable` or
   `unsupported operation`, `truncated` when the phone shows only its first 200
-  characters. A peer `attachment_read` failure is currently the unflagged
-  `connector could not record native outcome` (divergence c changes it).
+  characters.
 - `stage: before_journal` means the connector rejects the request without a
   journal row or an upload ("Rejected relay request" in the log).
 - A row with `envelope: request` is polled as the only member of a relay

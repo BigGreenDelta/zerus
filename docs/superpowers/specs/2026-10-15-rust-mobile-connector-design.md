@@ -248,8 +248,6 @@ binding is refused with Python's text; nothing is ever rebound.
 - Android matches substrings: `AttachmentViewCache.kt:115-121` turns an error
   containing "unavailable" or "unsupported operation" into "update required" and
   cuts other errors to 200 characters. `errors.json` marks such messages.
-  Divergence c changes the peer `attachment_read` failure the phone sees today
-  ("connector could not record native outcome").
 - `mobile_capabilities.operations` and `features` stay sorted, with the same
   feature names and help-marker mapping.
 
@@ -289,7 +287,7 @@ divergence survives a rollback to Python.
 |---|---|---|
 | a | Archive-aware startup now probes before listing and claiming, matching Rust's initial wait. Flags still reset to false before the await, so a failed later probe disables everything for 300 s. | Claims wait for the first probe, at most 3 s. New flags are swapped in atomically; a failed probe keeps the previous ones. |
 | b | One result the relay rejects (400/413/422) blocks every claim: `flush` re-raises it before polling (`connector.py:1226-1237`, `1277-1303`). | That row gets 3 attempts at least 30 s apart, then is marked delivered locally with the fixed log line "Relay rejected a stored result; preserving local outcome"; the relay's claim expires to uncertain anyway (`claim_ttl` 90 s). Other rows and polling never wait. New receipts are sanitised before journaling: a non-string error gets a fixed text, errors are cut to 4,096 code points, and the canonical receipt with `request_id` is at most 1 MiB. Stored rows are never rewritten. |
-| c | A peer `attachment_read` raises TypeError, giving "connector could not record native outcome". | Works through the peer callback with a 14,046,552-byte cap. |
+| c | Retired: since main's cc42fff9 a peer `attachment_read` reads the file through the peer callback with an output bound. It used to raise TypeError, giving "connector could not record native outcome". | The same, with a 14,046,552-byte cap; `test_bb_peer_operations` pins both. |
 | d | Any 400/404/422 on the extended heartbeat disables gateway sharing until restart. | Re-probed after 300 s, like presence. |
 | e | No checks on `connector.json`. | Refused if not owned by the effective uid or if group- or world-writable (`hgs_path` is executed); a warning only if group- or world-readable. `--check` reports it before cutover. |
 | f | `state_dir` goes through `expanduser`, so `~user` works. | `~`, `~/...`, absolute and CWD-relative paths work; `~user` is refused with an explicit error and reported by `--check`. Neither the GUI nor the docs produce it. |
@@ -685,7 +683,8 @@ accounts 30/300 s single-flight, attention 2 per poll, archives 45 s).
 **C6. Gateway and peers.** Discovery (12 s, 128 KiB, at most 32 peers,
 fail-closed), uuid5 `route_id`, per-route contexts sharing the journal, a
 semaphore of 4, the 1 MiB peer snapshot, 405 handling, `gateway_one_hop`, the
-`__mobile-peer-local` guard; divergences c and d.
+`__mobile-peer-local` guard; the peer `attachment_read` (retired divergence c)
+and divergence d.
 
 *Accept (C3-C6):* the matching modules pass against Rust (C3: H2; C4: H2 and H3,
 with the real-CLI speech roundtrips and the journal key-leakage scan; C5: H3 with

@@ -135,8 +135,7 @@ because the peer callback took no output bound; since main's cc42fff9 gave it
 one, Python reads the file through the peer and serves the requested range as
 Rust does, which
 `test_bb_peer_operations.test_peer_attachment_read_reads_the_file_through_the_peer`
-pins for both. The design, `vectors/README.md` and the `divergence_c` note of
-`vectors/receipts.json` still describe the old Python failure.
+pins for both.
 
 Under h, neither may kill the native mutation child, and no request is
 claimed after the signal. For a mutation SIGINT is not covered: Python's
