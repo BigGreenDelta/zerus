@@ -481,7 +481,8 @@ final class QuestionPresentationTests: XCTestCase {
     }
 
     func testRequiredFieldsHaveExactStringTypes() {
-        for (key, value) in [("answer", JSON.bool(true)), ("question", .int(1)), ("questionItemId", .string("")), ("question", .string("  "))] {
+        let changes: [(String, JSON)] = [("answer", .bool(true)), ("question", .int(1)), ("questionItemId", .string("")), ("question", .string("  "))]
+        for (key, value) in changes {
             var changed = item().object!
             changed[key] = value
             XCTAssertNil(QuestionReplyPresentation.parse(envelope(JSON.object(changed).compact)))

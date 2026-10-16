@@ -76,7 +76,8 @@ final class ConversationCacheTests: XCTestCase {
         let cache = engine()
         var unnamed = raw()
         unnamed["name"] = nil
-        for change in [("name", JSON.string("other")), ("run_id", "other"), ("conversation_id", "other"), ("archive_id", "other"), ("state", "archived")] {
+        let changes: [(String, JSON)] = [("name", "other"), ("run_id", "other"), ("conversation_id", "other"), ("archive_id", "other"), ("state", "archived")]
+        for change in changes {
             var identity = raw()
             identity[change.0] = change.1
             write(cache, identity: identity)
