@@ -73,7 +73,25 @@ ZERUS_CONNECTOR_COMMAND=$PWD/target/debug/zerus-mobile-connector \
 
 `cargo test` rebuilds that binary without the feature, so build it again
 after testing. Only the modules listed in `services/mobile/tests/ported.json`
-run then. `test_bb_check.py` runs only in that mode: it reads the journal of a
+run then; that is every black-box module except the harness self-test, which
+runs in every mode.
+
+The parity gate (design slice C7) adds three parts, all in CI's connector job
+(`BLACKBOX.md` has the details):
+
+- **Differential traces.** Both suite runs set `ZERUS_CONNECTOR_TRACE_DIR`,
+  and `python3 ../tests/differential.py compare PYTHON_DIR RUST_DIR` fails on
+  any difference in native argv, parsed stdin, environment keys, relay uploads,
+  heartbeats and final journal rows that `differential-allowlist.json` does
+  not attribute to one of the divergences below.
+- **Journal handoffs.** `test_bb_handoff` passes one state directory from
+  Python to Rust and back under SIGKILLed mutations, replays, conflicting
+  redeliveries, tombstones, the outbox and foreign bindings, against this
+  tree's Python and each rollback baseline in
+  `services/mobile/tests/rollback-baselines.json`.
+- **Soak.** `ZERUS_CONNECTOR_SOAK_SECONDS=300` runs `test_bb_soak`: Terminal
+  screens at four a second with `poll_interval` 1 must leave resident memory
+  and open descriptors flat. `test_bb_check.py` runs only in that mode: it reads the journal of a
 running Python connector with `--check`. `test_bb_runtime.py` holds the
 runtime's own contracts (TLS roots, proxy variables, redirects, output caps,
 stop signals and divergences a, b, g and h) with reads as the vehicle.

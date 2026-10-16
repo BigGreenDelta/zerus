@@ -19,6 +19,7 @@ import sys
 import unittest
 
 from connector_harness import ROOT
+from differential import REAL_HGS, untraced
 from gateway_harness import GatewayCase, error, route_id
 
 TIMED_OUT = {error("native command timed out"), error("native peer command timed out")}
@@ -71,6 +72,7 @@ def running(pid: int) -> bool:
     return state.returncode == 0 and not state.stdout.strip().startswith(("Z", "X"))
 
 
+@untraced(REAL_HGS)
 class PeerTransportTests(GatewayCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()

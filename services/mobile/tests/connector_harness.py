@@ -41,10 +41,13 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from urllib.parse import parse_qsl, urlsplit
 import uuid
 
 from aiohttp import web
+
+import differential
 
 TESTS = Path(__file__).resolve().parent
 SERVICE = TESTS.parent
@@ -78,11 +81,15 @@ CONVERSATION_ID = "bb-conversation-1"
 HELP_TEXT = "Usage: hgs [@host] <command> [options]\n"
 
 
+# The Python connector of this source tree.
+PYTHON_COMMAND = [sys.executable, "-m", "zerus_mobile.connector"]
+
+
 def connector_command() -> list[str]:
     configured = os.environ.get("ZERUS_CONNECTOR_COMMAND")
     if configured:
         return shlex.split(configured)
-    return [sys.executable, "-m", "zerus_mobile.connector"]
+    return PYTHON_COMMAND
 
 
 IMPLEMENTATION = os.environ.get("ZERUS_CONNECTOR_IMPLEMENTATION") or (
@@ -96,6 +103,15 @@ IMPLEMENTATION = os.environ.get("ZERUS_CONNECTOR_IMPLEMENTATION") or (
 # needs one runs only against Rust.
 NATIVE_TIMEOUT_HOOK = "ZERUS_CONNECTOR_TEST_NATIVE_TIMEOUT"
 CLOCK_SCALE_HOOK = "ZERUS_CONNECTOR_TEST_CLOCK_SCALE"
+# Where each case writes its differential trace (differential.py), if anywhere.
+TRACE_DIR = os.environ.get("ZERUS_CONNECTOR_TRACE_DIR")
+
+# A shell without job control starts background commands with SIGINT ignored,
+# and an ignored signal stays ignored across exec: a Python connector would
+# never see Ctrl+C. Connectors start with the default disposition, as under
+# systemd or launchd, however these suites were started.
+if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
 
 def ported_modules() -> set[str]:
@@ -743,8 +759,8 @@ def stopped_journal(state_dir: Path):
 
 
 class ConnectorProcess:
-    def __init__(self, case: BlackBoxCase, args: list[str], env: dict):
-        self.case, self.args, self.env = case, args, env
+    def __init__(self, case: BlackBoxCase, args: list[str], env: dict, command: list[str]):
+        self.case, self.args, self.env, self.command = case, args, env, command
         self.index = len(case.processes)
         self.log_path = case.scratch / f"connector-{self.index}.log"
         self.process: subprocess.Popen | None = None
@@ -753,7 +769,7 @@ class ConnectorProcess:
     def start(self) -> ConnectorProcess:
         with open(self.log_path, "wb") as log:
             self.process = subprocess.Popen(
-                [*connector_command(), *self.args], cwd=self.case.scratch, env=self.env,
+                [*self.command, *self.args], cwd=self.case.scratch, env=self.env,
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         self.case.hgs.parent(self.process.pid)
         if sys.platform.startswith("linux"):
@@ -811,6 +827,11 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         if self.tests_connector and IMPLEMENTATION != "python" and type(self).__module__ not in ported_modules():
             self.skipTest(f"{type(self).__module__} is not ported to {IMPLEMENTATION} (ported.json)")
+        if TRACE_DIR:
+            # Both runs of a traced case then use the same identities.
+            identities = mock.patch.object(uuid, "uuid4", differential.seeded_uuid4(self.id()))
+            identities.start()
+            self.addCleanup(identities.stop)
         self.scratch = Path(tempfile.mkdtemp(prefix="zerus-bb-")).resolve()
         self.addCleanup(shutil.rmtree, self.scratch, ignore_errors=True)
         for name in ("home", "tmp", "hgs-config", "hgs-state"):
@@ -829,6 +850,8 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
         for process in self.processes:
             process.stop()
         await self.relay.stop()
+        if TRACE_DIR:
+            differential.record(self, TRACE_DIR)
         findings = self.findings + self.relay.violations
         for process in self.processes:
             if self.relay.token in process.output():
@@ -850,14 +873,14 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
                 config[key] = value
         return config
 
-    def environment(self, extra: dict | None = None) -> dict:
+    def environment(self, extra: dict | None = None, command: list[str] | None = None) -> dict:
         home = self.home
         env = {"HOME": str(home), "PATH": os.pathsep.join([str(self.hgs.bin), "/usr/bin", "/bin"]),
                "TMPDIR": str(self.scratch / "tmp"), "XDG_CONFIG_HOME": str(home / ".config"),
                "XDG_STATE_HOME": str(home / ".local/state"), "XDG_DATA_HOME": str(home / ".local/share"),
                "XDG_CACHE_HOME": str(home / ".cache"), "HGS_CONFIG_DIR": str(self.scratch / "hgs-config"),
                "HGS_STATE_DIR": str(self.scratch / "hgs-state")}
-        if not os.environ.get("ZERUS_CONNECTOR_COMMAND"):
+        if (command or connector_command()) == PYTHON_COMMAND:
             env.update(PYTHONPATH=str(SERVICE), PYTHONDONTWRITEBYTECODE="1")
         env.update(extra or {})
         return env
@@ -879,17 +902,19 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
         return path
 
     async def launch(self, config: dict | None = None, *, text: str | None = None, args=("--allow-insecure-localhost",),
-                     env: dict | None = None, ready: bool = True) -> ConnectorProcess:
-        """Start a connector; with `ready`, wait until it heartbeats and polls."""
+                     env: dict | None = None, ready: bool = True, command: list[str] | None = None) -> ConnectorProcess:
+        """Start a connector (by default the one under test); with `ready`,
+        wait until it heartbeats and polls."""
         path = self.write_config(self.config() if config is None and text is None else config, text=text)
-        process = self.spawn(["--config", str(path), *args], env)
+        process = self.spawn(["--config", str(path), *args], env, command)
         if ready:
             await self.ready(process)
         return process
 
-    def spawn(self, args: list[str], env: dict | None = None) -> ConnectorProcess:
+    def spawn(self, args: list[str], env: dict | None = None, command: list[str] | None = None) -> ConnectorProcess:
         """Start a connector with exactly these arguments."""
-        process = ConnectorProcess(self, list(args), self.environment(env))
+        command = command or connector_command()
+        process = ConnectorProcess(self, list(args), self.environment(env, command), command)
         self.processes.append(process)
         return process.start()
 

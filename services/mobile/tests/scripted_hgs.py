@@ -139,11 +139,13 @@ def main():
     fcntl.flock(log, fcntl.LOCK_EX)
     try:
         previous = {}
-        with open(root / "calls.jsonl", "rb") as earlier:
-            for line in earlier.read().splitlines():
-                event = json.loads(line)
-                if event.get("event") == "start" and event.get("rule") is not None:
-                    previous[event["rule"]] = previous.get(event["rule"], 0) + 1
+        # Only `times` needs the log, which a long soak makes large.
+        if any("times" in candidate for candidate in rules):
+            with open(root / "calls.jsonl", "rb") as earlier:
+                for line in earlier.read().splitlines():
+                    event = json.loads(line)
+                    if event.get("event") == "start" and event.get("rule") is not None:
+                        previous[event["rule"]] = previous.get(event["rule"], 0) + 1
         chosen = rule = None
         for index, candidate in enumerate(rules):
             key = candidate.get("id", index)
