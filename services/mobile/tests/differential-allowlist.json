@@ -8,9 +8,6 @@
      "divergence": "b", "why": "Python journals the receipt as the native command returned it."},
     {"test": "test_bb_native_limits.RefusedResultTests.*", "kind": "journal", "side": "rust", "match": "\"operation\":\"(pause|send)\"",
      "divergence": "b", "why": "Rust journals the sanitised receipt."},
-    {"test": "test_bb_runtime.DivergenceTests.test_an_upload_accepted_on_its_second_attempt_restores_the_long_poll",
-     "kind": "relay", "side": "rust", "match": "^GET /v1/node/requests \\{\"wait\":\"1\"\\} 200$",
-     "divergence": "b", "why": "Rust shortens its polls to keep the spaced retry of a refused result."},
     {"test": "test_bb_runtime.StopTests.test_sig*", "kind": "relay", "side": "python",
      "match": "\"error\":\"connector stopped before recording the native result\"",
      "divergence": "h", "why": "Python dies on the signal; the next start fails the read in progress."},
@@ -41,9 +38,5 @@
      "divergence": "h", "why": "Python's next start journals the creation as uncertain."},
     {"test": "test_bb_worktrees.WorktreeTests.test_sigterm_never_cuts_a_creation_short", "kind": "journal", "side": "rust",
      "match": "\"response\":\\{\"json\":\\{\"error\":null,", "divergence": "h", "why": "Rust journals the creation's real outcome."}
-  ],
-  "timing": [
-    {"test": "test_bb_gateway_downgrade.GatewayDowngradeTests.*",
-     "why": "Peer refreshes race the heartbeat that turns gateway sharing off, so which peer heartbeats reach the relay first differs between two runs of either connector."}
   ]
 }

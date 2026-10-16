@@ -13,9 +13,9 @@ traces are parsed, so key order and whitespace never differ; connector logs are
 not traced. Every allowlist entry cites one of the deliberate divergences a-k
 (design spec), and an entry that no longer matches anything fails too.
 
-Timing decides how often a connector heartbeats, polls or retries, so periodic
-calls and relay exchanges are compared by presence; native mutations and reads
-and journal rows must also match in number.
+What a connector's clock drives (polls, single heartbeats, periodic native
+reads) is reported but not compared; a shape summarizing each run's heartbeats
+is. Native work and journal rows also match in number.
 """
 from __future__ import annotations
 
@@ -171,6 +171,36 @@ def native_entry(event: dict, norm: Normalizer) -> str:
                       "env": sorted(set(event.get("env", {})) - HARNESS_ENVIRONMENT)})
 
 
+# Exchanges that follow a connector's clock rather than a request.
+CLOCKED = re.compile(r"^(GET |POST /v1/node/heartbeat |POST /v1/node/peers/[^/ ]+/heartbeat |POST /v1/node/presence )")
+
+
+def shapes(case) -> list[str]:
+    """What every accepted heartbeat of a run offers together: snapshot keys,
+    capability operations and features, and whether it carried gateway fields.
+    Unlike single heartbeats, which follow the clock, a run's union is stable."""
+    found = {}
+    for exchange in case.relay.exchanges:
+        body = exchange.body
+        if exchange.method != "POST" or exchange.status != 200 or not isinstance(body, dict):
+            continue
+        if exchange.path == "/v1/node/heartbeat":
+            kind = "heartbeat"
+        elif PEER_HEARTBEAT.fullmatch(exchange.path):
+            kind = "peer heartbeat"
+        else:
+            continue
+        snapshot = body.get("snapshot") if isinstance(body.get("snapshot"), dict) else {}
+        capabilities = snapshot.get("mobile_capabilities") if isinstance(snapshot.get("mobile_capabilities"), dict) else {}
+        shape = found.setdefault(kind, {"body": set(), "snapshot": set(), "operations": set(), "features": set()})
+        shape["body"] |= set(body)
+        shape["snapshot"] |= set(snapshot)
+        for key in ("operations", "features"):
+            shape[key] |= {item for item in capabilities.get(key, []) if isinstance(item, str)}
+    return [f"SHAPE {kind} " + canonical({key: sorted(value) for key, value in shape.items()})
+            for kind, shape in sorted(found.items())]
+
+
 def relay_entry(exchange, norm: Normalizer) -> str | None:
     path = norm.text(exchange.path)
     if exchange.method == "GET" and exchange.status == 499:
@@ -256,6 +286,7 @@ def record(case, directory: str) -> None:
     native = collections.Counter(native_entry(event, norm) for event in case.hgs.events() if event["event"] == "start")
     relay = collections.Counter(entry for entry in (relay_entry(exchange, norm) for exchange in case.relay.exchanges)
                                 if entry is not None)
+    relay.update(shapes(case))
     trace = {"test": case.id(), "native": dict(sorted(native.items())), "relay": dict(sorted(relay.items())),
              "journal": journal_rows(norm)}
     if norm.journal is not None:
@@ -270,14 +301,22 @@ def counted(kind: str, entry: str) -> bool:
     return kind == "journal"
 
 
-def differences(python: dict, rust: dict, timing: bool = False) -> list[dict]:
-    """With `timing`, a test whose clock-driven traffic differs between any
-    two runs compares only native work and journal rows."""
-    found = []
+def clocked(kind: str, entry: str) -> bool:
+    """Traffic a connector's clock drives: periodic native reads, polls and
+    single heartbeats. Two runs of one connector differ in it too."""
+    if kind == "native":
+        return json.loads(entry)["periodic"]
+    return kind == "relay" and CLOCKED.match(entry) is not None
+
+
+def differences(python: dict, rust: dict) -> tuple[list[dict], int]:
+    """Differences that fail, and the number of clock-driven ones reported."""
+    found, informational = [], 0
     for kind in KINDS:
         left, right = collections.Counter(python[kind]), collections.Counter(rust[kind])
         for entry in sorted(set(left) | set(right)):
-            if timing and not counted(kind, entry):
+            if clocked(kind, entry):
+                informational += (entry in left) != (entry in right)
                 continue
             if entry not in right:
                 found.append({"kind": kind, "side": "python", "entry": entry})
@@ -286,17 +325,14 @@ def differences(python: dict, rust: dict, timing: bool = False) -> list[dict]:
             elif counted(kind, entry) and left[entry] != right[entry]:
                 found.append({"kind": kind, "side": "count", "entry": entry,
                               "python": left[entry], "rust": right[entry]})
-    return found
+    return found, informational
 
 
-def load_allowlist(path: Path) -> tuple[list[dict], list[dict]]:
+def load_allowlist(path: Path) -> list[dict]:
     document = json.loads(path.read_text())
-    if set(document) != {"allow", "timing"}:
-        raise SystemExit("the allowlist holds exactly `allow` and `timing`")
-    entries, timing = document["allow"], document["timing"]
-    for entry in timing:
-        if set(entry) != {"test", "why"} or not entry["why"].strip():
-            raise SystemExit(f"timing entry needs exactly test and why: {entry}")
+    if set(document) != {"allow"}:
+        raise SystemExit("the allowlist holds exactly `allow`")
+    entries = document["allow"]
     for entry in entries:
         unknown = set(entry) - {"test", "kind", "side", "match", "divergence", "why"}
         if unknown or not {"test", "kind", "side", "match", "divergence", "why"} <= set(entry):
@@ -304,7 +340,7 @@ def load_allowlist(path: Path) -> tuple[list[dict], list[dict]]:
         if entry["divergence"] not in DIVERGENCES or entry["kind"] not in KINDS or entry["side"] not in ("python", "rust", "count"):
             raise SystemExit(f"allowlist entry names an unknown divergence, kind or side: {entry}")
         re.compile(entry["match"])
-    return entries, timing
+    return entries
 
 
 def allowed(entries: list[dict], test: str, difference: dict) -> dict | None:
@@ -314,22 +350,23 @@ def allowed(entries: list[dict], test: str, difference: dict) -> dict | None:
 
 
 def compare(python_dir: Path, rust_dir: Path, allowlist: Path, out=sys.stdout) -> int:
-    entries, timing = load_allowlist(allowlist)
+    entries = load_allowlist(allowlist)
     used = set()
     python = {path.stem: json.loads(path.read_text()) for path in python_dir.glob("*.json")}
     rust = {path.stem: json.loads(path.read_text()) for path in rust_dir.glob("*.json")}
     if not python or not rust:
         print("differential: no traces to compare", file=out)
         return 1
-    unexpected = 0
+    unexpected = clock_driven = 0
     untraced = collections.Counter()
     for test in sorted(set(python) & set(rust)):
         reason = python[test].get("untraced") or rust[test].get("untraced")
         if reason:
             untraced[reason] += 1
             continue
-        clocked = any(fnmatch.fnmatchcase(test, entry["test"]) for entry in timing)
-        for difference in differences(python[test], rust[test], clocked):
+        found, informational = differences(python[test], rust[test])
+        clock_driven += informational
+        for difference in found:
             entry = allowed(entries, test, difference)
             if entry is not None:
                 used.add(id(entry))
@@ -342,6 +379,8 @@ def compare(python_dir: Path, rust_dir: Path, allowlist: Path, out=sys.stdout) -
         print(f"differential: allowlist entry matched nothing: {canonical(entry)}", file=out)
     for reason, count in sorted(untraced.items()):
         print(f"differential: {count} untraced: {reason}", file=out)
+    print(f"differential: {clock_driven} clock-driven differences in polls, single heartbeats and periodic "
+          "reads (not compared)", file=out)
     print(f"differential: {len(set(python) & set(rust)) - sum(untraced.values())} tests compared, "
           f"{len(set(python) - set(rust))} traced only "
           f"against Python, {len(set(rust) - set(python))} only against Rust, {unexpected} unexpected differences",

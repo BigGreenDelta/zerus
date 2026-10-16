@@ -168,23 +168,23 @@ markers, and large values a digest. A `request_hash` that equals Python's hash
 of a body the relay handed out is marked as such, so both implementations must
 hash every request as Python does even when the request carries the test's
 clock. Each test seeds `uuid.uuid4` from its id, so both runs use the same
-identities. Heartbeats, polls and the periodic native reads (`PERIODIC`, also
-through a peer envelope) follow each connector's clock and are compared by
-presence; peer refreshes are compared by shape, since the order in which peers
-get the four native slots is scheduling, and a poll still open when a
-connector stopped is left out. Result uploads are compared as distinct
-receipts and answers, since a result whose answer was lost on a busy runner is
-uploaded and accepted again. Native work and journal rows must also match in
-number.
+identities.
+
+What a connector's clock drives differs between two runs of the same connector
+and is reported but not compared: polls, single heartbeats, presence and peer
+heartbeats, and the periodic native reads (`PERIODIC`, also through a peer
+envelope). Instead each run's accepted heartbeats are summarized in a shape (the
+union of their body and snapshot keys and capability operations and features),
+which must match. Native work and journal rows must match in number; result
+uploads must match as distinct receipts and answers, since a result whose
+answer was lost on a busy runner is uploaded and accepted again. Delivery flags
+race the teardown's SIGKILL and are left out of journal rows.
 
 A difference fails unless `differential-allowlist.json` names it. Each entry
 gives a test pattern, the kind (`native`, `relay` or `journal`), the side it
 appears on (`python`, `rust` or `count`), a regular expression for the entry
 and one of the design's divergences a-k with a reason; an entry that matches
-nothing fails too, so the list never outlives a fix. Its `timing` list names
-tests whose clock-driven traffic differs between two runs of the same
-connector, with a reason; for them only native work and journal rows are
-compared. Key order and whitespace
+nothing fails too, so the list never outlives a fix. Key order and whitespace
 cannot differ (everything is parsed) and logs are not traced. Tests marked
 `@untraced` are reported but not compared: those that run a real `hgs`, whose
 machine ids and paths differ between any two runs. Tests that skip on one side
