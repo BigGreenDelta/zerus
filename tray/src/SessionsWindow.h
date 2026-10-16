@@ -348,6 +348,7 @@ private:
     QString m_restoreKey, m_renameKey, m_forkKey, m_forkGroup, m_forkBefore;
     bool m_renameArchived = false;
     QString m_selectedKey, m_filter = "all";
+    bool m_initialSelectionPending = true;
     QString m_folderFilterHost,m_folderFilterPath;
     bool m_folderFilterCheckout=false;
     QPushButton *m_folderFilterClear=nullptr;

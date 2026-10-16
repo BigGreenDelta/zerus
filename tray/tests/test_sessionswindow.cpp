@@ -384,6 +384,8 @@ private slots:
     void arbitraryFolderAndTerminalPreference();
     void terminationProgress_data();
     void terminationProgress();
+    void listTerminationKeepsUnrelatedConversations_data();
+    void listTerminationKeepsUnrelatedConversations();
     void remoteFolderLaunch();
     void launchNameFollowsRenameRules();
     void openCodeModelLaunchUsesNativeAccountAndActivity();
@@ -8002,7 +8004,7 @@ void TestSessionsWindow::arbitraryFolderAndTerminalPreference()
 void TestSessionsWindow::terminationProgress_data()
 {
     QTest::addColumn<QString>("mode");
-    for(const auto &mode:{"success","failure","offline","replacement","archive"})QTest::newRow(mode)<<QString(mode);
+    for(const auto &mode:{"success","failure","offline","replacement","archive","search"})QTest::newRow(mode)<<QString(mode);
 }
 void TestSessionsWindow::terminationProgress()
 {
@@ -8023,6 +8025,9 @@ print(json.dumps({'tracked':True,'events':[],'cursor':0}))
     QSettings().setValue("workspace/organization",QJsonDocument(organization.toJson()).toJson(QJsonDocument::Compact));
     SessionsWindow window(FakeCli::program(fake.fileName()));auto state=fleet();window.setFleet(state);window.show();window.showSession({},"codex/hgs/dashboard");
     auto *list=window.findChild<SessionList *>("sessionList");auto *client=window.findChild<HgsClient *>();
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    setComposerText(composer,"Keep my draft after termination");
+    if(mode=="search")window.findChild<QLineEdit *>("search")->setText("dashboard");
     QSignalSpy writes(client,&HgsClient::writeDone);QSignalSpy refresh(&window,&SessionsWindow::refreshRequested);
     const auto row=[&]() -> QListWidgetItem * {for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::Key).toString()=="\ncodex/hgs/dashboard")return list->item(i);return nullptr;};
     QTimer::singleShot(0,&window,[&]{auto *question=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());QVERIFY(question);question->button(QMessageBox::Yes)->click();});
@@ -8034,6 +8039,8 @@ print(json.dumps({'tracked':True,'events':[],'cursor':0}))
     QTRY_COMPARE(writes.size(),1);QVERIFY(!refresh.isEmpty());
     if(mode=="failure"){
         QVERIFY(row()->data(SessionRoles::Status).toString()!="Terminating…");
+        QCOMPARE(composer->sessionKey(),QString("\ncodex/hgs/dashboard"));
+        QCOMPARE(composer->editor()->toPlainText(),QString("Keep my draft after termination"));
         bool error=false;for(auto *label:window.findChildren<QLabel *>())error|=label->text().contains("Could not stop this session");QVERIFY(error);return;
     }
     window.setFleet(state);QCOMPARE(row()->data(SessionRoles::Status).toString(),QString("Terminating…"));
@@ -8053,9 +8060,72 @@ print(json.dumps({'tracked':True,'events':[],'cursor':0}))
         auto archived=local.sessions[0];archived.state="archived";archived.archiveId="terminated-archive";local.sessions.append(archived);
     }
     local.sessions.removeFirst();state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QVERIFY(!row());
+    QVERIFY(!list->currentItem());QVERIFY(list->selectedItems().isEmpty());
+    QCOMPARE(composer->sessionKey(),QString());
+    QCOMPARE(window.findChild<QStackedWidget *>("detail")->currentIndex(),0);
+    ComposerDraftStore::flushWrites();
+    QCOMPARE(ComposerDraftStore().load("\ncodex/hgs/dashboard").text,QString("Keep my draft after termination"));
+    // Polling and a newly arriving session cannot choose another conversation.
+    window.setFleet(state);QVERIFY(!list->currentItem());QCOMPARE(composer->sessionKey(),QString());
+    auto incoming=local.sessions[0];incoming.name="codex/new/incoming";local.sessions.append(incoming);
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    window.findChild<QLineEdit *>("search")->clear();
+    QVERIFY(!list->currentItem());QCOMPARE(composer->sessionKey(),QString());
     if(mode=="archive"){
         SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
         QCOMPARE(saved.groupFor("arch\narchive\nterminated-archive"),group);
+    }
+    QListWidgetItem *next=nullptr;
+    for(int i=0;i<list->count();++i)if(!list->item(i)->isHidden()&&(list->item(i)->flags()&Qt::ItemIsSelectable)){next=list->item(i);break;}
+    QVERIFY(next);const auto nextKey=next->data(SessionRoles::Key).toString();list->scrollToItem(next);
+    QTest::mouseClick(list->viewport(),Qt::LeftButton,{},list->visualItemRect(next).center());
+    QCOMPARE(composer->sessionKey(),nextKey);QCOMPARE(window.findChild<QStackedWidget *>("detail")->currentIndex(),1);
+}
+
+void TestSessionsWindow::listTerminationKeepsUnrelatedConversations_data()
+{
+    QTest::addColumn<QString>("mode");
+    for(const auto *mode:{"context","bulk-current","bulk-other"})QTest::newRow(mode)<<QString::fromLatin1(mode);
+}
+void TestSessionsWindow::listTerminationKeepsUnrelatedConversations()
+{
+    QFETCH(QString,mode);
+    auto state=fleet();auto local=state.local();
+    SessionsWindow window(program());window.setFleet(state);window.resize(1100,850);window.show();window.showSession({},local.sessions[0].name);
+    auto *list=window.findChild<SessionList *>("sessionList");auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    const auto key=composer->sessionKey();setComposerText(composer,"Keep the current draft");
+    const auto toggle=[&](int index){
+        QListWidgetItem *item=nullptr;
+        for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::Key).toString()=='\n'+local.sessions[index].name){item=list->item(i);break;}
+        QVERIFY(item);list->scrollToItem(item);QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::ControlModifier,list->visualItemRect(item).center());
+    };
+    QSet<QString> removed;
+    QAction *action=nullptr;
+    if(mode=="context"){
+        QTest::keyClick(list,Qt::Key_Menu);auto *menu=window.findChild<QMenu *>("sessionContextMenu");
+        action=menu->findChild<QAction *>("contextTerminateSession");removed={local.sessions[0].name};menu->hide();
+    }else{
+        if(mode=="bulk-other"){toggle(0);toggle(1);toggle(3);removed={local.sessions[1].name,local.sessions[3].name};}
+        else{toggle(1);removed={local.sessions[0].name,local.sessions[1].name};}
+        QSet<QString> chosen;for(const auto *item:list->selectedItems())chosen.insert(item->data(SessionRoles::Key).toString().section('\n',1,1));
+        QCOMPARE(chosen,removed);
+        action=window.findChild<QAction *>("selectionstop");
+    }
+    QVERIFY(action);QVERIFY(action->isEnabled());
+    QTimer::singleShot(0,&window,[&]{auto *dialog=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());QVERIFY(dialog);
+        if(auto *yes=dialog->button(QMessageBox::Yes))yes->click();
+        else for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();break;}
+    });
+    QSignalSpy writes(window.findChild<HgsClient *>(),&HgsClient::writeDone);action->trigger();QTRY_COMPARE(writes.size(),removed.size());
+    for(const auto &write:writes)QVERIFY(write[1].toBool());
+    local.sessions.removeIf([&](const SessionInfo &session){return removed.contains(session.name);});
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);window.setFleet(state);
+    if(mode=="bulk-other"){
+        QCOMPARE(composer->sessionKey(),key);QCOMPARE(composer->editor()->toPlainText(),QString("Keep the current draft"));
+        QVERIFY(list->currentItem());QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(),key);
+    }else{
+        QVERIFY(!list->currentItem());QVERIFY(list->selectedItems().isEmpty());QCOMPARE(composer->sessionKey(),QString());
+        QCOMPARE(window.findChild<QStackedWidget *>("detail")->currentIndex(),0);
     }
 }
 

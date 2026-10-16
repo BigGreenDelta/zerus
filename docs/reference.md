@@ -587,6 +587,10 @@ The open conversation and its draft stay in place even when no row matches;
 its row is selected again when it returns to the list. Click another session
 to open it.
 
+When the open session is terminated or removed, the conversation pane returns
+to **Select a session**. Polling, new sessions and filter changes keep this
+selection empty until you choose a session. Unsent drafts remain in **Saved drafts**.
+
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
 each session once. Desktop and Android use the same filter IDs and membership

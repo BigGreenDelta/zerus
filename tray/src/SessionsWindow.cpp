@@ -2951,7 +2951,11 @@ void SessionsWindow::rebuild()
     }
     // List scopes do not choose a replacement for a conversation that still exists.
     const bool preserveConversation = selected();
-    if (selectedRow < 0 && !preserveConversation) selectedRow = firstVisible < 0 ? firstSession : firstVisible;
+    // Choose a first row only on initial load. A removed conversation leaves an
+    // empty selection until an explicit choice, even after later fleet updates.
+    if (!m_selectedKey.isEmpty()) m_initialSelectionPending = false;
+    if (selectedRow < 0 && !preserveConversation && m_initialSelectionPending) selectedRow = firstVisible < 0 ? firstSession : firstVisible;
+    if (selectedRow >= 0) m_initialSelectionPending = false;
     if (selectedRow >= 0 && m_sessions->item(selectedRow)->data(KeyRole).toString() == m_selectedKey) {
         m_sessions->setCurrentRow(selectedRow, QItemSelectionModel::NoUpdate);
         QItemSelection selection;
@@ -2985,7 +2989,8 @@ void SessionsWindow::rebuild()
     m_rebuilding = false;
     updateSelectionActions();
     m_sessions->syncActivityAnimation();
-    if (!m_searchResults->active() && !(preserveConversation && selectedRow < 0)) selectSession(); else renderDetails();
+    // A vanished target also clears while search results own the list.
+    if ((selectedRow < 0 && !preserveConversation) || (selectedRow >= 0 && !m_searchResults->active())) selectSession(); else renderDetails();
 }
 
 void SessionsWindow::updateAttentionIndicator()
