@@ -4,6 +4,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ConversationLoadPresentationTest {
+    @Test fun openingCachedHistoryIsVisibleImmediatelyAcrossBothReadStages() {
+        val inspection = ConversationLoadPresentation.status(true, true, false, false, false, false, opening = true)!!
+        val history = ConversationLoadPresentation.status(true, false, false, true, false, false, resolved = true, opening = true)!!
+        for (status in listOf(inspection, history)) {
+            assertFalse(status.initial)
+            assertTrue(status.spinner)
+            assertEquals("Updating messages…", status.text)
+        }
+        assertNull(ConversationLoadPresentation.status(true, false, true, false, true, false, opening = true))
+        // Once this opening has settled, fast background polls stay quiet.
+        assertNull(ConversationLoadPresentation.status(true, true, false, false, false, false, opening = false))
+    }
+
     @Test fun resolvedEmptyConversationStaysEmptyAcrossRepeatedBackgroundPolls() {
         repeat(4) {
             assertNull(ConversationLoadPresentation.status(false, true, false, false, false, false, resolved = true))

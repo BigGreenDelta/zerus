@@ -52,7 +52,8 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
     private fun find(root: AccessibilityNodeInfo?, text: String): AccessibilityNodeInfo? {
         if (root == null) return null
         root.refresh()
-        if (root.isVisibleToUser && (root.text?.toString() == text || root.contentDescription?.toString() == text)) return root
+        if (root.isVisibleToUser && (root.text?.toString() == text || root.contentDescription?.toString() == text ||
+                Build.VERSION.SDK_INT >= 30 && root.stateDescription?.toString() == text)) return root
         for (index in 0 until root.childCount) find(root.getChild(index), text)?.let { return it }
         return null
     }

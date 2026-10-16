@@ -5,13 +5,15 @@ object ConversationLoadPresentation {
     data class Status(val text: String, val initial: Boolean, val spinner: Boolean)
 
     fun status(hasContent: Boolean, detailLoading: Boolean, detailProgress: Boolean,
-        historyLoading: Boolean, historyProgress: Boolean, demo: Boolean, resolved: Boolean = false): Status? {
+        historyLoading: Boolean, historyProgress: Boolean, demo: Boolean, resolved: Boolean = false,
+        opening: Boolean = false): Status? {
         if (demo || !detailLoading && !historyLoading) return null
-        val progress = detailLoading && detailProgress || historyLoading && historyProgress
+        val progress = opening || detailLoading && detailProgress || historyLoading && historyProgress
         val initial = !hasContent && !resolved
         if (!initial && !progress) return null
         val text = when {
             initial -> "Loading conversation…"
+            opening -> "Updating messages…"
             historyLoading && detailLoading -> "Refreshing conversation and history…"
             historyLoading -> "Loading message history…"
             else -> "Refreshing conversation…"

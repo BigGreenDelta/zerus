@@ -88,7 +88,10 @@ and long text scrolls within the field rather than covering its actions.
 
 The message composer clears after the text and immutable attachment snapshots
 are atomically saved in the private outgoing queue. It stays editable while the
-previous message is sending. Each bubble shows Sending, Sent, Not sent, or
+previous message is sending. The field keeps its **Message** placeholder; routine
+sending feedback belongs to the outgoing bubble rather than repeated composer
+notices. The send action explains a blocked submission on request; unknown
+delivery and saved-draft recovery remain visible. Each bubble shows Sending, Sent, Not sent, or
 Delivery unknown; unknown delivery blocks another send to the same conversation
 until its exact receipt or native delivery row confirms it, or an explicit review.
 Opening a verified conversation checks an uncertain message's saved receipt once;
@@ -119,10 +122,13 @@ uncertain messages.
 
 An unopened conversation immediately shows “Loading conversation…” while its
 messages load. A resolved empty conversation keeps “No messages yet.” during
-background reads instead of returning to the initial placeholder. Background loading status and spinners appear only after five
-seconds; manual refresh shows progress immediately and reuses any matching
-in-flight read. A thin progress bar accompanies the existing circular refresh
-indicator in catalogs and conversations. Pulling a conversation up past its newest
+background reads instead of returning to the initial placeholder. Opening cached
+messages immediately animates the existing **Refresh** action until the initial
+inspection and history reads settle. Cached messages remain readable, and the
+indicator never inserts a row or moves the transcript. Later background reads
+show progress only after five seconds; manual refresh shows it immediately and
+reuses any matching in-flight read. Catalogs retain their thin progress bar.
+Pulling a conversation up past its newest
 message, as far as a list's downward pull, is the toolbar's explicit refresh; its
 indicator rises from the bottom. Short pulls and flings do not refresh. Navigation cancels
 ownership of earlier reads so stale results cannot replace a new conversation.

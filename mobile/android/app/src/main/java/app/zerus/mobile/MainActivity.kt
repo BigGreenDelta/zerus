@@ -243,6 +243,8 @@ class MainActivity : ComponentActivity() {
     }
     BackHandler(model.selected != null || tab == 1 && model.selectedProject != null || tab == 0 && model.sessionProjectScope != null) { back() }
     val selected = model.selected
+    val conversationLoad = selected?.let { rememberConversationLoad(model, it.target) }
+    val conversationObscured = LocalConversationObscuration.current?.obscured == true
     var sessionDetails by remember(selected?.target?.key) { mutableStateOf(false) }
     if (selected != null && sessionDetails) {
         ObscureConversation()
@@ -271,8 +273,14 @@ class MainActivity : ComponentActivity() {
                     IconButton(onClick = { stopRequest = selected to model.activity!!.optDouble("turn_started") }) {
                         Icon(Icons.Default.StopCircle, "Stop turn")
                     }
-                IconButton(onClick = { if (selected == null) model.refresh(explicit = true) else model.refreshActivity(explicit = true) }) {
-                    Icon(Icons.Default.Refresh, "Refresh")
+                IconButton(onClick = { if (selected == null) model.refresh(explicit = true) else model.refreshActivity(explicit = true) },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Refresh"
+                        if (!conversationObscured) conversationLoad?.let { stateDescription = it.text; liveRegion = LiveRegionMode.Polite }
+                    }) {
+                    if (conversationLoad?.spinner == true && !conversationObscured)
+                        CircularProgressIndicator(Modifier.size(24.dp), color = Mint, strokeWidth = 2.dp)
+                    else Icon(Icons.Default.Refresh, null)
                 }
                 if (selected == null) IconButton(onClick = { keyboard?.hide(); settings = true }, modifier = Modifier.semantics {
                     if (updateState.sessionId >= 0) stateDescription = "Installation pending"
@@ -303,7 +311,7 @@ class MainActivity : ComponentActivity() {
                     IconButton(onClick = { model.clearError() }) { Icon(Icons.Default.Close, "Dismiss error") }
                 }
             }
-            if (selected != null) Conversation(model, selected, onReview = { review = it }, onReviewOutgoing = { reviewOutgoing = it }, onAttach = onAttach, positions = readingPositions,jumpRequest = messageJump,onJumpConsumed = { messageJump = null })
+            if (selected != null) Conversation(model, selected, conversationLoad, onReview = { review = it }, onReviewOutgoing = { reviewOutgoing = it }, onAttach = onAttach, positions = readingPositions,jumpRequest = messageJump,onJumpConsumed = { messageJump = null })
             else MainListsRefresh(model,tab to project?.key?.key) { when (tab) {
                 0 -> SessionsScreen(model, onPair = { tab = 3 })
                 1 -> if (project != null) ProjectDetails(model, project, onViewSessions = { model.viewProjectSessions(project); tab = 0 })
@@ -706,7 +714,30 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         } }, confirmButton = { TextButton(onClick = { machineDialog = false }) { Text("Done") } })
 }
 
-@Composable private fun Conversation(model: ZerusViewModel, session: Session, onReview: (Draft) -> Unit,
+@Composable private fun rememberConversationLoad(model: ZerusViewModel, target: Target): ConversationLoadPresentation.Status? {
+    var opening by remember(target.key) { mutableStateOf(true) }
+    // The opening inspection and canonical history can finish in either order.
+    // Keep their first refresh visible until the owned window is ready; later
+    // automatic polls retain the ordinary five-second progress threshold.
+    LaunchedEffect(target.key, model.detailBusy, model.olderLoading, model.readPositionReady, model.activityVerified) {
+        if (model.activityVerified && model.readPositionReady && !model.detailBusy && !model.olderLoading) opening = false
+    }
+    val historyGate = remember(target.key) { LoadingGate(android.os.SystemClock::elapsedRealtime) }
+    var historyProgress by remember(target.key) { mutableStateOf(false) }
+    LaunchedEffect(target.key, model.olderLoading, model.demo) {
+        historyProgress = false
+        if (!model.olderLoading || model.demo) { historyGate.cancel(); return@LaunchedEffect }
+        val operation = historyGate.begin(target.key).operation
+        delay(historyGate.remaining(operation.id))
+        if (historyGate.owns(operation.id)) historyProgress = historyGate.visible()
+    }
+    val hasContent = model.conversationEvents.isNotEmpty() ||
+        target.archiveId.isBlank() && model.conversationQuestions.isNotEmpty() || model.speech.outgoing.any { it.belongsTo(target) }
+    return ConversationLoadPresentation.status(hasContent, model.detailBusy, model.detailProgress,
+        model.olderLoading, historyProgress, model.demo, resolved = model.activity != null, opening = opening)
+}
+
+@Composable private fun Conversation(model: ZerusViewModel, session: Session, loadStatus: ConversationLoadPresentation.Status?, onReview: (Draft) -> Unit,
     onReviewOutgoing: (OutgoingMessage) -> Unit, onAttach: (Target) -> Unit,
     positions: MutableMap<String, ConversationAnchor>,jumpRequest: ConversationMessageJump?,onJumpConsumed: () -> Unit) {
     val target = session.target
@@ -743,17 +774,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val boundedNotice = if(model.historyEpoch.isNotBlank()) {
         if(model.hasOlder || model.hasNewer) "Showing part of the conversation. Use the history controls to load more messages." else ""
     } else if(model.conversationHistoryTruncated) "Showing recent activity. Older messages may be outside the available history." else ""
-    val historyGate = remember(target.key) { LoadingGate(android.os.SystemClock::elapsedRealtime) }
-    var historyProgress by remember(target.key) { mutableStateOf(false) }
-    LaunchedEffect(target.key, model.olderLoading, model.demo) {
-        historyProgress = false
-        if (!model.olderLoading || model.demo) { historyGate.cancel(); return@LaunchedEffect }
-        val operation = historyGate.begin(target.key).operation
-        delay(historyGate.remaining(operation.id))
-        if (historyGate.owns(operation.id)) historyProgress = historyGate.visible()
-    }
-    val loadStatus = ConversationLoadPresentation.status(events.isNotEmpty() || questions.isNotEmpty(),
-        model.detailBusy, model.detailProgress, model.olderLoading, historyProgress, model.demo, resolved = raw != null)
     val conversationLoading = loadStatus?.initial == true
     val context = LocalContext.current
     val keys = buildList {
@@ -942,18 +962,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
     }
     Column(Modifier.fillMaxSize().imePadding()) {
-        Box(Modifier.fillMaxWidth().height(4.dp)) {
-            if (!obscured && !model.demo && (model.detailProgress || historyProgress))
-                LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
-        }
-        val stripStatus = loadStatus?.takeIf { !it.initial || queueVisible }
-        if (stripStatus != null || unread != null || offeredQuestionCount > 0) {
+        if (unread != null || offeredQuestionCount > 0) {
             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (stripStatus?.spinner == true && !obscured) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                Text(stripStatus?.text ?: unread?.let { "${it.text} unread" }.orEmpty(),
-                    Modifier.weight(1f).semantics { if (!obscured && stripStatus != null) liveRegion = LiveRegionMode.Polite },
-                    color = if (stripStatus == null && unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
+                Text(unread?.let { "${it.text} unread" }.orEmpty(), Modifier.weight(1f),
+                    color = if (unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
                 if (offeredQuestionCount > 0) TextButton(onClick = {
                     if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
                 }) { Text("Questions ($offeredQuestionCount)") }
@@ -1026,7 +1039,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             }
             if (loadStatus?.initial == true && !queueVisible) Column(Modifier.align(Alignment.Center).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (loadStatus.spinner && !obscured) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                 Text(loadStatus.text, Modifier.semantics { if (!obscured) liveRegion = LiveRegionMode.Polite }, color = Muted, style = MaterialTheme.typography.bodyMedium)
             }
             if ((!follow.following || model.hasNewer || latestPending) && (events.isNotEmpty() || questions.isNotEmpty()) &&
@@ -1224,11 +1236,10 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             } }
         }
         PendingAttachmentSelection(model, target)
-        if (previous?.status == "sending") Text("Sending… You can write the next message.", color = Muted, style = MaterialTheme.typography.labelSmall)
-        else if (previous?.status == "uncertain") OutgoingRecovery(previous,
+        if (previous?.status == "uncertain") OutgoingRecovery(previous,
             "outgoing:${previous.requestId}" in model.receiptFlights,
             { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) })
-        CompactMessageInput(state = editor, placeholder = if(previous?.status == "uncertain") "Message" else sendReason.ifBlank { "Message" },
+        CompactMessageInput(state = editor, placeholder = "Message",
             recordingContent = if (recording) ({ SpeechRecordingRow(model.speech) }) else null,
             // Keep an already-open IME session in place during capture. The hidden
             // editor remains locked by the synchronous text-and-selection filter.
