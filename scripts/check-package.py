@@ -33,7 +33,7 @@ def main():
                 f"usr/share/licenses/{args.package_name}/LICENSE", f"usr/share/licenses/{args.package_name}/libvterm-LICENSE",
                 f"usr/share/licenses/{args.package_name}/md4c-LICENSE",
                 f"usr/share/licenses/{args.package_name}/rust/inventory.json", "usr/share/doc/zerus/build-info.json",
-                PLUGIN, CONNECTOR, CONNECTOR_UNIT]
+                PLUGIN, CONNECTOR, CONNECTOR_UNIT, "usr/lib/zerus/install-mobile-connector-service.py"]
     for name in required:
         if not (root / name).is_file():
             raise SystemExit(f"Missing package file: {name}")
