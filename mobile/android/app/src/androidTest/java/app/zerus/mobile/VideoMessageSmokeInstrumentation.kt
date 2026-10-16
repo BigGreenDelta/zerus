@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 /** Explicit fresh-emulator qualification: CameraX uses the emulator's synthetic cameras. */
 class VideoMessageSmokeInstrumentation : Instrumentation() {
+    private fun step(name: String) { sendStatus(0, Bundle().apply { putString("stream", "Video fixture ${SystemClock.elapsedRealtime()}: $name\n") }) }
     override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
     private fun <T> main(action: () -> T): T {
         val value = AtomicReference<Result<T>>()
@@ -36,15 +37,16 @@ class VideoMessageSmokeInstrumentation : Instrumentation() {
     }
     private fun find(label: String, root: AccessibilityNodeInfo? = uiAutomation.rootInActiveWindow): AccessibilityNodeInfo? {
         root ?: return null
+        root.refresh()
         if (root.isVisibleToUser && (root.text?.toString() == label || root.contentDescription?.toString() == label)) return root
         for (i in 0 until root.childCount) find(label, root.getChild(i))?.let { return it }; return null
     }
-    private fun node(label: String): AccessibilityNodeInfo {
+    private fun node(label: String, enabled: Boolean = false): AccessibilityNodeInfo {
         val deadline = SystemClock.elapsedRealtime() + 15_000
-        while (true) { find(label)?.let { return it }; check(SystemClock.elapsedRealtime() < deadline) { "Missing $label" }; SystemClock.sleep(50) }
+        while (true) { find(label)?.takeIf { !enabled || it.isEnabled }?.let { return it }; check(SystemClock.elapsedRealtime() < deadline) { "Missing ${if(enabled) "enabled " else ""}$label" }; SystemClock.sleep(50) }
     }
     private fun tap(label: String) {
-        var target: AccessibilityNodeInfo? = node(label)
+        var target: AccessibilityNodeInfo? = node(label, enabled = true)
         while (target != null && !target.isClickable) target = target.parent
         check(target?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) { "Cannot activate $label" }
     }
@@ -58,7 +60,9 @@ class VideoMessageSmokeInstrumentation : Instrumentation() {
         try { check(uiAutomation.injectInputEvent(event, true)) } finally { event.recycle() }
     }
     private fun down(label: String): Press {
-        val bounds = Rect().also { node(label).getBoundsInScreen(it) }
+        // Model settlement can precede the frame that re-enables the microphone.
+        // Never inject a new gesture into the previous disabled preview action.
+        val bounds = Rect().also { node(label, enabled = true).getBoundsInScreen(it) }
         return Press(SystemClock.uptimeMillis(), bounds.exactCenterX(), bounds.exactCenterY()).also { touch(it, MotionEvent.ACTION_DOWN) }
     }
     override fun onStart() {
@@ -84,13 +88,15 @@ class VideoMessageSmokeInstrumentation : Instrumentation() {
                         .put("machine_id", "b4075bf0-9c22-4a67-b768-55af2d2936a4").put("name", "Fixture")
                         .put("profiles", JSONArray().put(JSONObject().put("id", "fixture").put("name", "Fixture").put("available", true)))))
                     "voice_submit" -> {
-                        check(sends.incrementAndGet() in 1..2);sent.set(payload)
-                        val video = payload.getJSONObject("video");val pcm = Base64.getDecoder().decode(payload.getJSONObject("audio").getString("data_base64"))
-                        val mp4 = Base64.getDecoder().decode(video.getString("data_base64"));check(mp4.size <= VideoProtocol.MAX_BYTES)
-                        check(mp4.copyOfRange(4, 8).contentEquals("ftyp".toByteArray()))
+                        check(sends.incrementAndGet() in 1..4);sent.set(payload)
+                        val video = payload.optJSONObject("video");val pcm = Base64.getDecoder().decode(payload.getJSONObject("audio").getString("data_base64"))
                         val id = input.getString("request_id")
-                        val metadata = JSONObject(video.toString()).apply { remove("format"); remove("data_base64") }
-                            .put("request_id", id).put("index", 1).put("name", "video.mp4").put("mime", "video/mp4").put("bytes", mp4.size)
+                        val metadata = video?.let {
+                            val mp4 = Base64.getDecoder().decode(it.getString("data_base64"));check(mp4.size <= VideoProtocol.MAX_BYTES)
+                            check(mp4.copyOfRange(4, 8).contentEquals("ftyp".toByteArray()))
+                            JSONObject(it.toString()).apply { remove("format"); remove("data_base64") }
+                                .put("request_id", id).put("index", 1).put("name", "video.mp4").put("mime", "video/mp4").put("bytes", mp4.size)
+                        }
                         JSONObject().put("schema", 1).put("message", JSONObject().put("id", id).put("run_id", target.run)
                             .put("conversation_id", target.conversation).put("created_at", System.currentTimeMillis() / 1000.0).put("revision", 1).put("state", "submitted")
                             .put("audio", JSONObject().put("request_id", id).put("index", 0).put("name", "voice.wav").put("mime", "audio/wav").put("bytes", pcm.size + 44).put("duration_ms", pcm.size / 32))
@@ -128,9 +134,9 @@ class VideoMessageSmokeInstrumentation : Instrumentation() {
                 touch(held, MotionEvent.ACTION_MOVE, dy = up);touch(held, MotionEvent.ACTION_UP, dy = up)
                 await("Locked capture") { model.speech.recordingLocked }
                 SystemClock.sleep(300);check(main { model.speech.recording });check(sends.get() == 0)
-                tap("Switch camera");await("Persistent recording after camera switch") { model.speech.seconds >= 3 }
+                step("switch locked recording camera");tap("Switch camera");await("Persistent recording after camera switch") { model.speech.seconds >= 3 }
                 val stoppedCapture = main { checkNotNull(model.speech.activeCaptureId) }
-                tap("Stop recording")
+                step("stop after camera switch");tap("Stop recording")
                 main { model.speech.sendCapture(stoppedCapture) } // A late release after Stop cannot authorize Send.
                 await("Durable video preview") { model.speech.draft?.video != null && !model.speech.busy }
                 val draft = main { checkNotNull(model.speech.draft) };val video = checkNotNull(draft.video)
@@ -149,23 +155,47 @@ class VideoMessageSmokeInstrumentation : Instrumentation() {
                 try { await("Confirmed provider") { !model.speech.loading && model.speech.sendReason().isBlank() } }
                 catch (error: Exception) { throw IllegalStateException(main { "Provider: ${model.speech.sendReason()}, notice=${model.speech.notice}, profile=${model.speech.profileNotice}, loading=${model.speech.loading}, draftProvider=${model.speech.draft?.machineId}/${model.speech.draft?.profileId}, computers=${model.speech.computers}" }, error) }
                 // Exercise the retained preview's explicit Send through accessibility.
-                tap("Send voice message")
+                step("send retained video");tap("Send video message")
                 await("Single accepted video") { model.speech.outgoing.singleOrNull()?.state == "submitted" }
                 val payload = checkNotNull(sent.get())
                 check(Base64.getDecoder().decode(payload.getJSONObject("video").getString("data_base64")).contentEquals(original.toByteArray()))
                 check(Base64.getDecoder().decode(payload.getJSONObject("audio").getString("data_base64")).contentEquals(pcm))
                 check(sends.get() == 1);check(main { model.speech.draft == null })
-                val cancel = down("Video input");await("Second capture") { model.speech.seconds >= 1 && model.speech.recording }
+                step("cancel next capture");val cancel = down("Video input");await("Second capture") { model.speech.seconds >= 1 && model.speech.recording }
                 touch(cancel, MotionEvent.ACTION_MOVE, dx = -110f * targetContext.resources.displayMetrics.density)
                 touch(cancel, MotionEvent.ACTION_UP)
                 await("Cancelled media removed") { !model.speech.busy };check(main { model.speech.draft == null });check(sends.get() == 1)
-                val ordinaryRelease = down("Video input")
+                step("default release-send");val ordinaryRelease = down("Video input")
                 await("Confirmed provider during held video") { model.speech.recording && model.speech.seconds >= 1 && !model.speech.loading }
                 touch(ordinaryRelease, MotionEvent.ACTION_UP)
                 await("Release sends once") { model.speech.outgoing.size == 2 && model.speech.outgoing.all { it.state == "submitted" } }
                 check(sends.get() == 2);check(main { model.speech.draft == null && model.speech.outgoing.map { it.id }.distinct().size == 2 })
+                main { model.speech.setPreviewBeforeSend(true) }
+                for ((label, videoMode) in listOf("Video input" to true, "Voice input" to false)) {
+                    step("preview option: $label")
+                    if (!videoMode) { val switch = down("Video input");touch(switch, MotionEvent.ACTION_UP);node(label) }
+                    val before = sends.get()
+                    val held = down(label)
+                    await("Preview-option capture with confirmed provider") { model.speech.recording && model.speech.seconds >= 1 && !model.speech.loading }
+                    val capture = main { checkNotNull(model.speech.activeCaptureId) }
+                    main { model.speech.setPreviewBeforeSend(false) }
+                    check(main { model.speech.captureNeedsPreview && model.speech.previewBeforeSend })
+                    touch(held, MotionEvent.ACTION_UP)
+                    await("Release retains reviewable media") { !model.speech.busy && model.speech.draft != null }
+                    check(sends.get() == before)
+                    val retained = main { checkNotNull(model.speech.draft) }
+                    check((retained.video != null) == videoMode)
+                    check(PrivateStore(targetContext).voiceState().let { it.previewBeforeSend && it.draft == retained })
+                    main { model.speech.sendCapture(capture) } // Late release cannot submit a saved preview.
+                    check(sends.get() == before)
+                    tap(if (videoMode) "Send video message" else "Send voice message")
+                    await("Separate Send submits exact retained media once") { model.speech.draft == null && sends.get() == before + 1 && model.speech.activeRequests.isEmpty() }
+                    check(sent.get().getString("request_id") == model.speech.outgoing.last().id)
+                    check(sent.get().has("video") == videoMode)
+                }
+                check(sends.get() == 4 && model.speech.outgoing.size == 4)
             } finally { main { model.attachments.stopAudio();activity.finish() };client.dispatcher.executorService.shutdown() }
-            report.putString("stream", "Video message smoke passed: synthetic CameraX MP4/audio extraction, short-tap mode, upward lock, stop/retained encrypted preview, one upload per explicit send (preview and hold/release), tap playback, camera switch and left cancellation.\n")
+            report.putString("stream", "Video message smoke passed: synthetic CameraX MP4/audio extraction, short-tap mode, upward lock, stop/retained encrypted preview, default release-send, tap playback, camera switch and left cancellation. Preview preference retains BOTH video and audio after physical release despite a confirmed provider; stale release and mid-capture setting changes cannot send. Separate Send uploads the exact durable recording once.\n")
             finish(Activity.RESULT_OK, report)
         } catch (error: Throwable) { report.putString("stream", "Video smoke failed: ${error.stackTraceToString()}\n");finish(Activity.RESULT_CANCELED, report) }
     }

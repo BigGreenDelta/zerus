@@ -48,14 +48,15 @@ internal object VoiceWaveform {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable internal fun VoicePlayer(identity: String, waveform: List<Int>, durationMs: Int,
     positionMs: Int, playing: Boolean, loading: Boolean, onToggle: () -> Unit, onSeek: (Float) -> Unit,
-    status: String? = null, trailing: (@Composable () -> Unit)? = null) {
+    status: String? = null, trailing: (@Composable () -> Unit)? = null, metadata: (@Composable () -> Unit)? = null) {
     var seeking by remember(identity, durationMs) { mutableStateOf<Float?>(null) }
     val fraction = seeking ?: VoiceWaveform.progress(positionMs, durationMs)
     val displayedPosition = seeking?.let { VoiceWaveform.seekPosition(it, durationMs) } ?: positionMs
     val bins = remember(waveform) { waveform.takeIf(VoiceWaveform::valid).orEmpty() }
     val played = MaterialTheme.colorScheme.primary
     val unplayed = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .65f)
-    val time = "${VoiceWaveform.time(displayedPosition)} / ${VoiceWaveform.time(durationMs)}"
+    val time = if (metadata != null) VoiceWaveform.time(if (playing || displayedPosition > 0) displayedPosition else durationMs)
+        else "${VoiceWaveform.time(displayedPosition)} / ${VoiceWaveform.time(durationMs)}"
     @Composable fun PlayControl(compact: Boolean) {
         val content: @Composable () -> Unit = {
             if (loading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp,
@@ -117,13 +118,17 @@ internal object VoiceWaveform {
             Track(Modifier.weight(1f))
             trailing()
         }
-    } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+    } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         PlayControl(compact = false)
         Column(Modifier.weight(1f)) {
             Track(Modifier.fillMaxWidth())
-            Text(time,
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(time, modifier = Modifier.align(Alignment.CenterVertically),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                metadata?.invoke()
+            }
         }
     }
 }

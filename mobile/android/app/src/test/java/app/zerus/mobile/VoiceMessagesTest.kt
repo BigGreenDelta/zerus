@@ -11,6 +11,27 @@ import org.junit.Test
 import java.util.UUID
 
 class VoiceMessagesTest {
+    @Test fun previewPreferenceRoundTripsWithoutChangingSavedMediaAndLegacyKeepsReleaseSend() {
+        val original = VoiceState()
+        val legacy = VoiceCodec.encode(original).apply { remove("preview_before_send") }
+        assertFalse(VoiceCodec.decode(legacy).previewBeforeSend)
+        val pending = VoiceDraft(target, "", "", audio, 200, 50.0)
+        val state = VoiceState(draft = pending, outgoing = listOf(entry(message("submitted"))), videoMode = true, previewBeforeSend = true)
+        assertEquals(state, VoiceCodec.decode(VoiceCodec.encode(state)))
+        val changed = VoiceCodec.decode(VoiceCodec.encode(state.copy(previewBeforeSend = false)))
+        assertEquals(state.draft, changed.draft)
+        assertEquals(state.outgoing, changed.outgoing)
+        assertTrue(changed.videoMode)
+    }
+
+    @Test fun onlyNativeSubmissionGetsASentIconAndUnknownStatesStayUnconfirmed() {
+        assertEquals(RecordingDelivery.Sent, RecordingDelivery.of("submitted"))
+        for (state in listOf("uploading", "queued", "transcribing", "ready", "waiting_agent", "delivering", "failed", "cancelled", "uncertain", "read", "finished", "")) {
+            assertNotEquals(RecordingDelivery.Sent, RecordingDelivery.of(state))
+        }
+        assertEquals(RecordingDelivery.Uncertain, RecordingDelivery.of("read"))
+        assertEquals("Sent to agent", RecordingDelivery.Sent.description)
+    }
     private val target = Target("owner", "example", "run", "conversation", "workspace")
     private val id = UUID.randomUUID().toString()
     private val audio = Attachment(UUID.randomUUID().toString(), "voice.wav", "audio/wav", 6444, "a".repeat(64))

@@ -21,6 +21,13 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Subject
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material3.*
@@ -77,6 +84,15 @@ import androidx.compose.ui.unit.dp
             Text("This recording is no longer available.")
             return@Column
         }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Preview before sending")
+                Text("Review audio and video recordings, then tap Send. Applies on this device.", style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(checked = speech.previewBeforeSend, onCheckedChange = speech::setPreviewBeforeSend,
+                enabled = speech.ready && !speech.recording && !speech.savingRecording && !model.updateInstallPreparing,
+                modifier = Modifier.semantics { contentDescription = "Preview before sending" })
+        }
         Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.", style = MaterialTheme.typography.bodySmall)
         TextButton(onClick = { manage = true }, enabled = !model.demo && model.storageReady && !model.updateInstallPreparing) { Text("Manage speech providers") }
         Box {
@@ -106,7 +122,8 @@ import androidx.compose.ui.unit.dp
                 } }, onClick = { profilesOpen = false; speech.chooseProfile(profile.id, target, choicePreview?.audio?.id) }) }
             }
         }
-        Text("Hold to record and release to send; slide up to lock, or left to cancel. Stop a locked recording to preview it. Zerus keeps the media in conversation history, transcribes it, then sends the recognized text to the agent. Your typed draft is kept separately. Your gateway can read the recordings.", style = MaterialTheme.typography.bodySmall)
+        Text((if (speech.previewBeforeSend) "Hold to record and release to preview; tap Send when ready. " else "Hold to record and release to send. ") +
+            "Slide up to lock, or left to cancel. Stop always keeps a preview. Zerus keeps the media in conversation history, transcribes it, then sends the recognized text to the agent. Your typed draft is kept separately. Your gateway can read the recordings.", style = MaterialTheme.typography.bodySmall)
         if (speech.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (speech.profileNotice.isNotBlank()) Text(speech.profileNotice, style = MaterialTheme.typography.bodySmall)
         if (speech.notice.isNotBlank()) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
@@ -194,7 +211,8 @@ import androidx.compose.ui.unit.dp
     val cancelDistance = with(LocalDensity.current) { 80.dp.toPx() }
     val lockDistance = with(LocalDensity.current) { 57.dp.toPx() }
     val gesture = remember(target, navigation, cancelDistance, lockDistance) { VoiceGesture(cancelDistance, lockDistance) }
-    val label = if (speech.recordingLocked) "Send recording" else if (speech.recording) "Recording" else if (speech.videoMode) "Video input" else "Voice input"
+    val finishLabel = if (speech.captureNeedsPreview) "Stop and preview" else "Send recording"
+    val label = if (speech.recordingLocked) finishLabel else if (speech.recording) "Recording" else if (speech.videoMode) "Video input" else "Voice input"
     val actionCapture = speech.activeCaptureId
     val actionColor = if (speech.recording) MaterialTheme.colorScheme.errorContainer else if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val actionContent = if (speech.recording) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimary
@@ -213,9 +231,11 @@ import androidx.compose.ui.unit.dp
             }
         }.focusable(enabled).semantics {
             role = Role.Button; contentDescription = label
-            stateDescription = if (speech.recordingLocked) "Recording locked. Send or stop to preview." else if (speech.recording) "Slide left to cancel, up to lock." else "Tap to switch microphone and camera. Hold to record, release to send."
+            stateDescription = if (speech.recordingLocked) "Recording locked. $finishLabel." else if (speech.recording) "Slide left to cancel, up to lock."
+                else if (speech.previewBeforeSend) "Tap to switch microphone and camera. Hold to record, release to preview."
+                else "Tap to switch microphone and camera. Hold to record, release to send."
             if (!enabled) disabled()
-            onClick(label = if (speech.recording) "Send recording" else "Start locked recording") {
+            onClick(label = if (speech.recording) finishLabel else "Start locked recording") {
                 currentActivate(actionCapture)
             }
             customActions = if (actionCapture != null) listOf(
@@ -278,7 +298,7 @@ import androidx.compose.ui.unit.dp
         }) {
         Box(contentAlignment = Alignment.Center) {
             ComposerActionFace(actionColor, actionContent, focused) {
-                Icon(if (speech.recordingLocked) Icons.AutoMirrored.Filled.Send else if (speech.videoMode) Icons.Default.Videocam else Icons.Default.Mic, null,
+                Icon(if (speech.recordingLocked) (if (speech.captureNeedsPreview) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send) else if (speech.videoMode) Icons.Default.Videocam else Icons.Default.Mic, null,
                     Modifier.size(22.dp).graphicsLayer { translationX = -12.dp.toPx() * speech.gestureCancelProgress })
             }
         }
@@ -365,7 +385,7 @@ import androidx.compose.ui.unit.dp
                 else FlowRow(Modifier.fillMaxWidth()) {
                     TextButton(onClick = { recordingId?.let(speech::stopCapture) }) { Text("Stop recording") }
                     TextButton(onClick = { recordingId?.let(speech::cancelCapture) }) { Text("Cancel") }
-                    TextButton(onClick = { recordingId?.let(speech::sendCapture) }) { Text("Send") }
+                    if (!speech.captureNeedsPreview) TextButton(onClick = { recordingId?.let(speech::sendCapture) }) { Text("Send") }
                 }
             }
             speech.savingRecording -> { Text("Saving recording…"); LinearProgressIndicator(Modifier.fillMaxWidth()) }
@@ -390,11 +410,11 @@ import androidx.compose.ui.unit.dp
                                 }, enabled = sendReason.isBlank(),
                                     containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary,
                                     disabledContainerColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .12f), disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant) {
-                                    Icon(Icons.AutoMirrored.Filled.Send, "Send voice message", Modifier.size(22.dp))
+                                    Icon(Icons.AutoMirrored.Filled.Send, if (draft.video == null) "Send voice message" else "Send video message", Modifier.size(22.dp))
                                 }
                             }
                         }
-                        if (draft.video != null) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (draft.video != null) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             VideoCircle(model, draft.target, draft.video.displayed(draft.audio.id), diameter = 160.dp)
                             Column { Text("Pending", style = MaterialTheme.typography.labelSmall); actions() }
                         } else VoiceAudio(model, draft.target, draft.audio.displayed(), draft.durationMs, status = "Pending", trailing = actions)
@@ -446,7 +466,8 @@ import androidx.compose.ui.unit.dp
 }
 
 @Composable internal fun VoiceAudio(model: ZerusViewModel, target: Target?, audio: DisplayedAttachment, durationMs: Int,
-    waveform: List<Int> = emptyList(), status: String? = null, trailing: (@Composable () -> Unit)? = null) {
+    waveform: List<Int> = emptyList(), status: String? = null, trailing: (@Composable () -> Unit)? = null,
+    metadata: (@Composable () -> Unit)? = null) {
     val viewer = model.attachments
     val key = AttachmentIdentity.playbackKey(target, audio)
     val row = viewer.state(target, audio)
@@ -454,28 +475,63 @@ import androidx.compose.ui.unit.dp
     VoicePlayer(key, waveform, durationMs, if (active) viewer.audioPositionMs else 0,
         active && viewer.playing, row?.loading == true,
         onToggle = { viewer.toggleAudio(target, audio) },
-        onSeek = { viewer.seekAudio(target, audio, it, durationMs) }, status = status, trailing = trailing)
+        onSeek = { viewer.seekAudio(target, audio, it, durationMs) }, status = status, trailing = trailing, metadata = metadata)
     row?.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 }
 
-@Composable internal fun VoiceMessageContent(model: ZerusViewModel, target: Target?, voice: VoiceMessage) {
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable internal fun VoiceMessageContent(model: ZerusViewModel, target: Target?, voice: VoiceMessage, at: Double = voice.createdAt) {
     var expanded by rememberSaveable(voice.id) { mutableStateOf(false) }
+    var actionsOpen by remember(voice.id) { mutableStateOf(false) }
     val local = model.speech.outgoing.find { it.id == voice.id && target?.let(it::belongsTo) == true }
-    Text(if (voice.video != null) "Video message" else "Voice message", style = MaterialTheme.typography.labelMedium)
-    if (voice.video != null) VideoCircle(model, target, voice.video) else VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform)
-    Text(VoiceProtocol.label(voice.state), style = MaterialTheme.typography.bodySmall)
+    val delivery = RecordingDelivery.of(voice.state)
+    val pending = local != null && voice.state !in setOf("submitted", "failed", "cancelled")
+    val restorable = local?.canRestoreUnsent == true
+    val metadata: @Composable () -> Unit = {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (voice.transcript.isNotBlank()) IconToggleButton(checked = expanded, onCheckedChange = { expanded = it }) {
+                Icon(Icons.Default.Subject, if (expanded) "Hide recognized text" else "Show recognized text", Modifier.size(20.dp))
+            }
+            if (pending || restorable) Box {
+                IconButton(onClick = { actionsOpen = true }) { Icon(Icons.Default.MoreVert, "Recording actions", Modifier.size(20.dp)) }
+                DropdownMenu(expanded = actionsOpen, onDismissRequest = { actionsOpen = false }) {
+                    if (pending && local != null) {
+                        DropdownMenuItem(text = { Text("Check status") }, enabled = local.id !in model.speech.activeRequests,
+                            onClick = { actionsOpen = false; model.speech.checkStatus(local) })
+                        DropdownMenuItem(text = { Text("Cancel delivery") }, enabled = voice.state != "uploading",
+                            onClick = { actionsOpen = false; model.speech.cancel(local) })
+                    }
+                    if (restorable && local != null) DropdownMenuItem(text = { Text("Return to recording") },
+                        enabled = model.speech.draft == null && !model.speech.savingRecording,
+                        onClick = { actionsOpen = false; model.speech.restoreUnsent(local) })
+                }
+            }
+            if (at > 0) Text(remember(at) { java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date((at * 1000).toLong())) }, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TooltipBox(positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                tooltip = { PlainTooltip { Text(VoiceProtocol.label(voice.state)) } }, state = rememberTooltipState()) {
+                val color = if (delivery in setOf(RecordingDelivery.Failed, RecordingDelivery.Uncertain)) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                Box(Modifier.heightIn(min = 48.dp).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+                    if (delivery == RecordingDelivery.Processing) CircularProgressIndicator(Modifier.size(16.dp)
+                        .semantics { contentDescription = VoiceProtocol.label(voice.state) }, color = color, strokeWidth = 1.5.dp)
+                    else Icon(when (delivery) {
+                        RecordingDelivery.Sent -> Icons.Default.Check
+                        RecordingDelivery.Failed -> Icons.Default.ErrorOutline
+                        RecordingDelivery.Cancelled -> Icons.Default.Close
+                        RecordingDelivery.Uploading -> Icons.Default.CloudUpload
+                        else -> Icons.Default.HelpOutline
+                    }, delivery.description, Modifier.size(18.dp), tint = color)
+                }
+            }
+        }
+    }
+    if (voice.video != null) VideoCircle(model, target, voice.video, metadata = metadata)
+    else VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform, metadata = metadata)
     val error = local?.error?.ifBlank { voice.error } ?: voice.error
     if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-    if (voice.transcript.isNotBlank()) {
-        TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide recognized text" else "Show recognized text") }
-        if (expanded) SelectionContainer { Text(voice.transcript) }
-    }
-    if (local != null && voice.state !in setOf("submitted", "failed", "cancelled")) Row {
-        TextButton(onClick = { model.speech.checkStatus(local) }, enabled = local.id !in model.speech.activeRequests) { Text("Check status") }
-        TextButton(onClick = { model.speech.cancel(local) }, enabled = voice.state != "uploading") { Text("Cancel delivery") }
-    }
-    if (local?.canRestoreUnsent == true) TextButton(onClick = { model.speech.restoreUnsent(local) },
-        enabled = model.speech.draft == null && !model.speech.savingRecording) { Text("Return to recording") }
+    if (expanded && voice.transcript.isNotBlank()) SelectionContainer { Text(voice.transcript) }
 }
 
 @Composable internal fun VoiceSavedMessages(model: ZerusViewModel) {

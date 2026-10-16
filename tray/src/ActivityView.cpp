@@ -899,8 +899,8 @@ struct ActivityRenderResult {
                 const auto key=QString::fromLatin1(QCryptographicHash::hash((m_sessionKey+"\n"+id).toUtf8(),QCryptographicHash::Sha256).toHex());
                 if(!audio.value("request_id").toString().isEmpty())m_voiceLinks.insert(key,video.isEmpty()?audio:video);
                 const auto state=voice.value("state").toString();
-                const QHash<QString,QString> labels{{"queued",tr("Waiting for recognition")},{"transcribing",tr("Recognizing…")},{"ready",tr("Ready to deliver")},
-                    {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Sent")},{"failed",tr("Voice message failed")},
+                const QHash<QString,QString> labels{{"uploading",tr("Sending recording…")},{"queued",tr("Waiting for recognition")},{"transcribing",tr("Recognizing…")},{"ready",tr("Ready to deliver")},
+                    {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Sent to agent")},{"failed",tr("Voice message failed")},
                     {"cancelled",tr("Cancelled")},{"uncertain",tr("Delivery not confirmed")}};
                 const int playerWidth=qBound(140,int(qMin(width,widthWithScrollBar)/m_scale)-72,420);
                 const QUrl playerUrl("hgs-voice-player:"+key);
@@ -911,18 +911,28 @@ struct ActivityRenderResult {
                     .arg(key,escaped(label),playerUrl.toString(),QString::number(playerWidth));
                 if(!video.isEmpty()){
                     document->addResource(QTextDocument::ImageResource,playerUrl,VoicePlayerImage::videoPoster(m_scale,document->pixelRatio,video));
-                    body=QString("<p><a href='hgs-voice:%1' title='%2'><img src='%3' width='200' height='200' alt='%2'></a></p>")
+                    body=QString("<p style='margin:4px 0;'><a href='hgs-voice:%1' title='%2'><img src='%3' width='200' height='200' alt='%2'></a></p>")
                         .arg(key,escaped(tr("Play video message")),playerUrl.toString());
                 }
                 const auto transcript=voice.value("transcript").toString();
+                QString transcriptAction;
                 if(!transcript.isEmpty()) {
                     const auto toggle="voice-text-"+key;m_toggleKeys.insert(toggle);
-                    body+=QString("<p><a href='hgs-activity:%1' style='color:%2;'>%3</a></p>").arg(toggle,accent,escaped(m_expanded.value(toggle)?tr("Hide transcript"):tr("Show transcript")));
-                    if(m_expanded.value(toggle))body+=userMessage(transcript);
+                    const QUrl icon("hgs-voice-transcript:"+key);
+                    document->addResource(QTextDocument::ImageResource,icon,VoicePlayerImage::transcriptIcon(m_scale,document->pixelRatio,m_dark,m_expanded.value(toggle)));
+                    const auto label=escaped(m_expanded.value(toggle)?tr("Hide transcript"):tr("Show transcript"));
+                    transcriptAction=QString("<a href='hgs-activity:%1' title='%2'><img src='%3' width='32' height='32' style='vertical-align:middle;' alt='%2'></a>").arg(toggle,label,icon.toString());
                 }
+                const auto statusLabel=escaped(labels.value(state,tr("Delivery not confirmed")));
+                const QUrl statusIcon("hgs-voice-status:"+key);
+                document->addResource(QTextDocument::ImageResource,statusIcon,VoicePlayerImage::deliveryIcon(state,m_scale,document->pixelRatio,m_dark));
+                const auto mediaTime=video.isEmpty()?QString():VoicePlayerImage::time(video.value("duration_ms").toInteger());
+                body+=QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin:0;'><tr><td valign='middle' style='font-size:11px;color:%3;'>%1%2</td><td align='right' valign='middle' style='font-size:11px;color:%3;'>%4 &nbsp;<img src='%5' width='18' height='18' style='vertical-align:middle;' alt='%6' title='%6'></td></tr></table>")
+                    .arg(transcriptAction,escaped(mediaTime),muted,escaped(timeText(event)),statusIcon.toString(),statusLabel);
+                if(!transcript.isEmpty() && m_expanded.value("voice-text-"+key))body+=userMessage(transcript);
                 if(!voice.value("error").toString().isEmpty())body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(voice.value("error").toString()));
                 if(!m_voiceError.isEmpty() && m_voiceError.startsWith(key+"\n"))body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(m_voiceError.mid(key.size()+1)));
-                html+=card(eventKey(event),video.isEmpty()?tr("You (voice)"):tr("You (video)"),timeText(event)+"  "+labels.value(state,tr("Voice message")),body,true);
+                html+=card(eventKey(event),video.isEmpty()?tr("You (voice)"):tr("You (video)"),{},body,true);
                 ++i;continue;
             }
             const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :

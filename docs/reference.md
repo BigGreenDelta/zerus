@@ -436,6 +436,9 @@ download a model and never falls back to another provider.
 
 On desktop, use **Voice** in the message toolbar. Tap to switch voice/video,
 hold to record, release to send, drag up to lock or release outside to cancel.
+Enable **Preview before sending** in Voice input settings to keep both audio
+and video for a separate Send instead. The setting is local to this device and
+applies to the next recording; existing drafts and deliveries are unchanged.
 Stop a locked recording to review it with **Play**, **Discard** or **Send**. Audio recordings
 are limited to two minutes and remain separate from the typed draft. Capture
 opens the local microphone without waiting for speech computers or providers.

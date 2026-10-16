@@ -378,7 +378,10 @@ sending. See [provider configuration](../../docs/speech-providers.md).
 
 With an empty message and no attachments, the composer shows a microphone in the
 Send position. Tap to switch microphone/camera, hold to record and release to send. Slide left
-to cancel or up to lock. Stop a locked recording to retain a preview. Typing text or adding an attachment restores the Send
+to cancel or up to lock. **Preview before sending** in Voice settings keeps both
+audio and video after release for playback and a separate Send. It defaults off
+on this device; an active capture keeps the preference it started with.
+Stop a locked recording to retain a preview. Typing text or adding an attachment restores the Send
 button. While holding, a compact recording row replaces the empty editor: a red
 indicator, elapsed time with tenths of a second, and **Slide to cancel** with a
 left chevron. When the full instruction cannot fit at the current font size, the

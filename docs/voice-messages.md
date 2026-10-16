@@ -12,11 +12,14 @@ and Telegram Desktop
 
 A short press switches microphone/camera mode without opening a device. Holding
 starts the selected capture after a short threshold. Releasing an owned,
-unlocked recording requests sending. On Android a left drag cancels and an
+unlocked recording requests sending by default. **Preview before sending** in
+Voice settings instead retains both audio and video for review and a separate
+**Send**. The device-local preference defaults off and is captured at recording
+start; changing it cannot send an existing recording. On Android a left drag cancels and an
 upward drag locks; on desktop releasing outside the recording area cancels and
 dragging up locks. A locked recording continues after release, with separate
 Stop/preview, Send and Cancel controls. Stop retains a reviewable draft. These
-explicit gestures replace the earlier release-to-preview behavior;
+explicit gestures keep release-to-send as the default;
 system cancellation, lost focus, navigation, permission callbacks and capture
 limits cannot submit. Completed, explicitly stopped recordings retain a preview. Provider discovery cannot
 silently resume a deferred send, and cold-context confirmation remains explicit.
@@ -69,7 +72,7 @@ slide left to cancel, or slide up to lock. Stop a locked capture to retain a
 preview without sending. A compact **Pending**
 card identifies the unsent preview, with playback and seeking followed by Delete
 and Send icon buttons. The buttons retain accessible **Discard** and **Send voice
-message** names and 48 dp touch targets; deletion still requires confirmation.
+message** / **Send video message** names and 48 dp touch targets; deletion still requires confirmation.
 Provider settings appear only when the preview needs provider recovery, and a
 recording for a different conversation identifies that original destination.
 Text or attachments restore the ordinary Send action.
@@ -102,6 +105,21 @@ The interaction was checked against Telegram Android's
 [recording row](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java#L9742-L9766)
 and [recording feedback](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java#L4706-L5005).
 Zerus implements these interactions in its existing Compose components with the explicit Stop/preview path described above.
+
+## Message presentation
+
+Audio and video use one compact media block with aligned metadata and icon
+controls. Recognized text is collapsed behind its transcript icon. Android's
+recording menu contains status checks, cancellation and unsent recovery actions;
+errors remain visible. Status icons preserve the actual workflow: pending or
+processing, one check for confirmed native submission, cancellation, failure or
+unconfirmed delivery. There are no read/completion ticks. An unfamiliar state
+remains unconfirmed. Icon controls retain accessible names and touch targets.
+
+The visual reference is Telegram Android's
+[ChatMessageCell](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java),
+which groups media time and delivery glyphs. Zerus uses its own UI components
+and state model; no Telegram source is copied.
 
 ## Authority and processing
 

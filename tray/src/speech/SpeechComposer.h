@@ -69,6 +69,7 @@ private:
     QPushButton *m_stopPreview;
     bool m_videoMode=false, m_captureVideo=false, m_videoSupported=false;
     bool m_pressed=false, m_locked=true, m_sendAfterSaved=false, m_pressStartedLocked=false;
+    bool m_previewBeforeSend=false;
     QPoint m_pressPosition;
     QByteArray m_video;
     QJsonObject m_videoMeta;

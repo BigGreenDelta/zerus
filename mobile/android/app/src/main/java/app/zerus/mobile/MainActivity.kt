@@ -1063,7 +1063,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 if (!own) Text(agent.ifBlank { event.role }, color = Muted, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                 if (replies == null && event.role == "You (answer)") Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                 if (event.voice != null) {
-                    ProvideTextStyle(conversationTextStyle()) { VoiceMessageContent(model, model.selected?.target, event.voice) }
+                    ProvideTextStyle(conversationTextStyle()) { VoiceMessageContent(model, model.selected?.target, event.voice, at = event.at) }
                 } else if (replies != null) {
                     Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1086,7 +1086,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
                 if (event.voice == null) AttachmentRows(event.attachments, model.selected?.target, model)
                 if(event.detailTruncated) Text("Message text shortened",color = Amber,style = MaterialTheme.typography.labelSmall)
-                if (event.delivery.isNotBlank() || event.at > 0) Row(Modifier.fillMaxWidth(),
+                if (event.voice == null && (event.delivery.isNotBlank() || event.at > 0)) Row(Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                     if (event.at > 0) Text(java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
                         .format(java.util.Date((event.at * 1000).toLong())), color = Muted, style = MaterialTheme.typography.labelSmall)

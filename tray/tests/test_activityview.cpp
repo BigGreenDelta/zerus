@@ -251,6 +251,8 @@ private slots:
     void voiceWaveformSeeksWithoutRelayout();
     void voiceWaveformAppearance_data();
     void voiceWaveformAppearance();
+    void recordingMetadataAppearance_data();
+    void recordingMetadataAppearance();
     void attachmentThumbnailArrivesWithoutMovingTranscript();
     void liveCompactionProgressPreservesTranscriptAndClears();
     void sessionClearIsAColoredBoundaryAndSurvivesReload();
@@ -1406,7 +1408,12 @@ void TestActivityView::voiceMessageRetainsAudioAndExpandableTranscript()
     QJsonObject voice{{"id",id},{"run_id","run"},{"conversation_id","conversation"},{"state","transcribing"},{"audio",audio}};
     QJsonObject row{{"type","UserMessage"},{"source","hgs_voice"},{"message_id",id},{"request_id",id},{"at",1791018002.0},{"voice",voice},{"attachments",QJsonArray{audio}}};
     view.setActivity({{"voice_messages",QJsonArray{row}}},{});
-    auto text=view.browser()->toPlainText();QVERIFY(text.contains("You (voice)"));QVERIFY(text.contains("Recognizing"));
+    auto imageLabel=[&](const QString &label){
+        for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it)
+            if(it.fragment().charFormat().property(QTextFormat::ImageAltText).toString()==label)return true;
+        return false;
+    };
+    auto text=view.browser()->toPlainText();QVERIFY(text.contains("You (voice)"));QVERIFY(!text.contains("Recognizing"));QVERIFY(imageLabel("Recognizing…"));
     bool accessiblePlayer=false;
     for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it)
         accessiblePlayer|=it.fragment().charFormat().property(QTextFormat::ImageAltText).toString().contains("Play or pause voice message (0:01)");
@@ -1420,12 +1427,12 @@ void TestActivityView::voiceMessageRetainsAudioAndExpandableTranscript()
     voice["state"]="submitted";voice["transcript"]="Recognized voice fixture";row["voice"]=voice;row["detail"]="Recognized voice fixture";
     auto local=row;local["id"]="voice-local";local["submitted_at"]=1791018002.0;local["status"]="sent";
     view.setTimeline({{"voice_messages",QJsonArray{row}}},{row,journalEvent(3,"UserPromptSubmit","Recognized voice fixture")},{local});
-    text=view.browser()->toPlainText();QCOMPARE(text.count("You (voice)"),1);QVERIFY(text.contains("Show transcript"));
+    text=view.browser()->toPlainText();QCOMPARE(text.count("You (voice)"),1);QVERIFY(!text.contains("Show transcript"));QVERIFY(imageLabel("Show transcript"));QVERIFY(imageLabel("Sent to agent"));
     // Similar native text without an exact correlation remains a separate message.
     QCOMPARE(text.count("Recognized voice fixture"),1);
     QString toggle;for(const auto &url:links(view.browser()))if(url.startsWith("hgs-activity:voice-text-"))toggle=url;
     QVERIFY(!toggle.isEmpty());activate(view.browser(),toggle);settle(view);
-    QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),2);QVERIFY(view.browser()->toPlainText().contains("Hide transcript"));
+    QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),2);QVERIFY(imageLabel("Hide transcript"));
     voice["native_binding"]=QJsonObject{{"journal_seq",3}};row["voice"]=voice;
     view.setTimeline({{"voice_messages",QJsonArray{row}},{"prompt","Recognized voice fixture"}},{journalEvent(3,"UserPromptSubmit","Recognized voice fixture")},{});
     QCOMPARE(view.browser()->toPlainText().count("You (voice)"),1);QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),1);
@@ -1559,6 +1566,37 @@ void TestActivityView::voiceWaveformAppearance()
     const auto placeholder=VoicePlayerImage::draw(240,1,1,dark,invalid,0,false,false);QVERIFY(!placeholder.isNull());
     const auto screenshots=qEnvironmentVariable("ZERUS_VOICE_PLAYER_SCREENSHOTS");
     if(!screenshots.isEmpty()){QDir().mkpath(screenshots);QVERIFY(view.grab().save(screenshots+"/"+QString::fromLatin1(QTest::currentDataTag())+".png"));}
+}
+
+void TestActivityView::recordingMetadataAppearance_data()
+{
+    QTest::addColumn<bool>("dark");QTest::addColumn<bool>("videoMode");QTest::addColumn<int>("width");QTest::addColumn<QString>("state");
+    for(bool dark:{true,false})for(bool video:{true,false})for(int width:{340,620})for(const auto &state:QStringList{"submitted","transcribing","uncertain"})
+        QTest::newRow(qPrintable(QString("%1-%2-%3-%4").arg(dark?"dark":"light",video?"video":"audio",QString::number(width),state)))<<dark<<video<<width<<state;
+}
+void TestActivityView::recordingMetadataAppearance()
+{
+    QFETCH(bool,dark);QFETCH(bool,videoMode);QFETCH(int,width);QFETCH(QString,state);
+    SettledActivityView view;view.resize(width,540);view.setTheme(dark);view.setSessionKey("fixture/media-icons");view.show();
+    auto row=waveformMessage();auto voice=row["voice"].toObject();voice["state"]=state;
+    if(state=="uncertain")voice["error"]="Delivery is unconfirmed. Check the original conversation.";
+    if(videoMode)voice["video"]=QJsonObject{{"request_id",voice["id"]},{"index",1},{"mime","video/mp4"},{"duration_ms",10000},{"width",480},{"height",480}};
+    row["voice"]=voice;view.setActivity({{"voice_messages",QJsonArray{row}}},{});settle(view);
+    const auto text=view.browser()->toPlainText();QVERIFY(!text.contains("Sent"));QVERIFY(!text.contains("Show transcript"));QVERIFY(!text.contains("Recognizing"));
+    bool status=false,transcript=false;
+    for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it){
+        const auto format=it.fragment().charFormat();if(!format.isImageFormat())continue;
+        const QUrl resource(format.toImageFormat().name());
+        if(resource.scheme()=="hgs-voice-status"){
+            status=true;QCOMPARE(format.property(QTextFormat::ImageAltText).toString(),state=="submitted"?"Sent to agent":state=="transcribing"?"Recognizing…":"Delivery not confirmed");
+            QVERIFY(!view.browser()->document()->resource(QTextDocument::ImageResource,resource).value<QImage>().isNull());
+        }
+        if(resource.scheme()=="hgs-voice-transcript"){transcript=true;QCOMPARE(format.property(QTextFormat::ImageAltText).toString(),"Show transcript");}
+    }
+    QVERIFY(status && transcript);QVERIFY(view.browser()->horizontalScrollBar()->maximum()==0);
+    if(state=="uncertain")QVERIFY(text.contains(voice["error"].toString()));
+    const auto directory=qEnvironmentVariable("ZERUS_RECORDING_MESSAGE_SCREENSHOTS");
+    if(!directory.isEmpty()){QDir().mkpath(directory);QVERIFY(view.grab().save(directory+"/"+QString::fromLatin1(QTest::currentDataTag())+".png"));}
 }
 
 void TestActivityView::attachmentsStayWithTheirMessageAndOpenExactFile()

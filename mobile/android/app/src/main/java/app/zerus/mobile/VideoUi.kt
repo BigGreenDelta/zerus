@@ -42,7 +42,9 @@ import java.util.Base64
 }
 
 /** Only an explicit tap creates a decoder; the shared attachment player owns audio focus. */
-@Composable internal fun VideoCircle(model: ZerusViewModel, target: Target?, video: VideoMessage, diameter: androidx.compose.ui.unit.Dp = 200.dp) {
+@OptIn(ExperimentalLayoutApi::class)
+@Composable internal fun VideoCircle(model: ZerusViewModel, target: Target?, video: VideoMessage, diameter: androidx.compose.ui.unit.Dp = 200.dp,
+    metadata: (@Composable () -> Unit)? = null) {
     val viewer = model.attachments
     val key = AttachmentIdentity.playbackKey(target, video.file)
     val active = viewer.playingKey == key
@@ -92,7 +94,11 @@ import java.util.Base64
                 else if (!active || !viewer.playing) Icon(Icons.Default.PlayArrow, "Play video message", Modifier.size(48.dp))
             }
         }
-        Text("${if (active) viewer.audioPositionMs / 1000 else video.durationMs / 1000}s", style = MaterialTheme.typography.labelSmall)
+        FlowRow(Modifier.width(diameter), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(VoiceWaveform.time(if (active) viewer.audioPositionMs else video.durationMs),
+                modifier = Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.labelSmall)
+            metadata?.invoke()
+        }
         row?.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
 }

@@ -263,6 +263,7 @@ void SpeechComposer::start() {
     if(m_loading || m_state!=State::Idle || !target.available || target.run.isEmpty() || target.conversation.isEmpty() || !m_composer->isInputVisible())return;
     pauseMessagePlayback();
     m_video.clear();m_videoMeta={};m_captureVideo=m_videoMode;m_sendAfterSaved=false;
+    m_previewBeforeSend=QSettings().value("speech/preview_before_send",false).toBool();
     m_target=target;m_notice.clear();m_noticeKind=Notice::General;m_state=State::Starting;++m_generation;
     m_selectedProfile=preferredProfile();m_profileBound=false;m_profilesLoading=false;m_profilesValidated=false;m_profileError.clear();
     m_syncing=true;m_provider->clear();m_syncing=false;update();
@@ -280,6 +281,7 @@ void SpeechComposer::recorded(const QByteArray &base64) {
 }
 void SpeechComposer::requestSendRecording(){
     if(m_state!=State::Recording)return;
+    if(m_previewBeforeSend){m_sendAfterSaved=false;stopRecording();return;}
     // A release never waits for late provider discovery to become a future Send.
     m_sendAfterSaved=!selectedProfile().isEmpty() && (!m_captureVideo || m_videoSupported);
     if(!m_sendAfterSaved)m_notice=m_captureVideo && !m_videoSupported?tr("Update hgs on the conversation computer to send video messages."):tr("Review the transcription provider before sending. The recording is kept.");
@@ -420,14 +422,18 @@ void SpeechComposer::update() {
     const auto current=m_currentTarget();const bool recording=m_state==State::Recording;
     m_composer->setRecording(recording || m_state==State::Starting);
     m_recordingHint->setVisible(recording);
-    m_recordingHint->setText(m_locked?tr("Recording locked. Send, or Stop to preview. Space / Esc to stop"):tr("Release to send. Drag up to lock. Release outside to cancel"));
+    m_recordingHint->setText(m_previewBeforeSend
+        ?(m_locked?tr("Recording locked. Stop to preview. Space / Esc to stop"):tr("Release to preview. Drag up to lock. Release outside to cancel"))
+        :(m_locked?tr("Recording locked. Send, or Stop to preview. Space / Esc to stop"):tr("Release to send. Drag up to lock. Release outside to cancel")));
     m_stopPreview->setVisible(recording && m_locked);
     m_videoView->setVisible(m_captureVideo && (m_state==State::Starting || recording || !m_pcm.isEmpty()));
     m_voice->setActive(true);m_voice->setEnabled(!m_loading && (recording || (m_state==State::Idle && current.available && !current.conversation.isEmpty() && m_composer->isInputVisible())));
-    m_voice->setTone(recording?ChipTone::Danger:ChipTone::Quiet);m_voice->setIconName(recording?(m_locked?"send":"stop"):(m_videoMode?"video":"microphone"));
-    m_voice->setLabels(recording?(m_locked?tr("Send (%1)"):tr("Recording (%1)")).arg(duration(m_seconds)):m_state==State::Starting?tr("Opening recorder…"):m_state==State::Saving?tr("Saving recording…"):(m_videoMode?tr("Video"):tr("Voice")));
+    m_voice->setTone(recording?ChipTone::Danger:ChipTone::Quiet);m_voice->setIconName(recording?(m_locked && !m_previewBeforeSend?"send":"stop"):(m_videoMode?"video":"microphone"));
+    m_voice->setLabels(recording?(m_locked?(m_previewBeforeSend?tr("Stop (%1)"):tr("Send (%1)")):tr("Recording (%1)")).arg(duration(m_seconds)):m_state==State::Starting?tr("Opening recorder…"):m_state==State::Saving?tr("Saving recording…"):(m_videoMode?tr("Video"):tr("Voice")));
     m_voice->setDetail(!recording && !current.available && !current.reason.isEmpty()?current.reason
-        :tr("Tap to switch voice/video. Hold to record; release to send. Drag up to lock; release outside to cancel."));
+        :(recording?m_previewBeforeSend:QSettings().value("speech/preview_before_send",false).toBool())
+            ?tr("Tap to switch voice/video. Hold to record; release to preview. Drag up to lock; release outside to cancel.")
+            :tr("Tap to switch voice/video. Hold to record; release to send. Drag up to lock; release outside to cancel."));
     m_cancel->setActive(m_state==State::Starting || recording);
     const bool preview=!m_pcm.isEmpty();m_preview->setVisible(preview);m_previewLabel->setText(tr("Voice %1").arg(duration(m_seconds)));
     m_play->setText(m_player && m_player->playbackState()==QMediaPlayer::PlayingState?tr("Pause"):tr("Play"));
