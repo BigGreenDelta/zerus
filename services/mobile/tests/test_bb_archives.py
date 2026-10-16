@@ -186,10 +186,13 @@ class ArchivePageTests(OperationCase, BlackBoxCase):
         self.script({"argv": PAGE_ARGV, "stdin_fields": {"limit": 2}, "stdout": listed})
         process = await self.launch()
         mark = self.mark()
-        response = await self.submit(self.page(limit=2), process)
+        request = self.page(limit=2)
+        response = await self.submit(request, process)
         self.assertEqual(response["state"], "completed", response)
         result = response["result"]
         self.assertEqual([row["archive_id"] for row in result["sessions"]], [PAGED, ARCHIVE])
+        # The page names its request, as every computer read does.
+        self.assertEqual(result["request_id"], request["request_id"])
         # Only the projects these rows belong to come along, by id, name and colour.
         used = {row.get("mobile_project_id") for row in result["sessions"]}
         projects = result["mobile_projects"]["projects"]

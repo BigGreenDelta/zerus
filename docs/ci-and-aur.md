@@ -29,6 +29,8 @@ can select a PR head or another exact revision.
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
 | Quick checks | Always | Privacy, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.85 unit tests |
 | Rust relay | Always | Rust 1.85 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
+| Rust mobile connector | Always | Rust 1.85 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
+| Rust mobile connector on macOS | Always | Cold Rust 1.85 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |
@@ -121,7 +123,7 @@ save them.
 | --- | --- | --- | --- | --- |
 | `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
 | `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.85.0 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
-| `arch-cargo-v1-` | Arch package | Month, `Cargo.lock` hash | Exact key missed; package built | Cargo registry only |
+| `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `windows-qt-6.10.3-` | Windows | Hash of the Qt pin and installer | Exact key missed; desktop build passed | The pinned Qt archives, no WebEngine |
 | `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-`, `windows-ccache-v1-` | Arch desktop, Arch package, macOS, Windows | Architecture (macOS, Windows), Qt release (Windows), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100, 100 and 500 MB |
@@ -1012,11 +1014,21 @@ Each flavor installs the same ADE bundle:
   Native UI. It alone links Qt WebEngine and loads only when `qt6-webengine` is
   installed; otherwise Native UI opens in the browser. `check-package.py`
   requires it and rejects an `hgs-tray` that links Qt WebEngine itself.
+- `/usr/bin/zerus-mobile-connector`, the Rust mobile connector, and its user
+  unit `zerus-mobile-connector.service` (`KillMode=process`, configuration
+  `%E/hgs/mobile/connector.json`, skipped while that file is missing). The
+  package never enables it, and an existing
+  `~/.config/systemd/user/zerus-mobile-connector.service`, such as the Python
+  connector's, keeps precedence; switching an installation over is the
+  owner-approved cutover in the connector design. `check-package.py` requires
+  both, a release build without test hooks that links only the C runtime, and
+  the unit's `ExecStart` and kill mode.
 - A desktop entry, existing application icons and system-provided **user** unit
   definitions for `hgs-tray`, `hgs-swarm` and `hgs-recovery`.
 - Documentation and a sample tmux configuration under `/usr/share/doc/zerus`.
 - Zerus MIT, vendored libvterm MIT and the exact host-target Cargo dependency
-  license texts under `/usr/share/licenses/<package-name>`.
+  license texts of `hgs` and the mobile connector (both locks) under
+  `/usr/share/licenses/<package-name>`.
 
 Qt and KDE libraries are dynamically linked system dependencies. Qt WebEngine is
 needed only by the native UI plugin. Upgrades keep an installed `qt6-webengine`:
