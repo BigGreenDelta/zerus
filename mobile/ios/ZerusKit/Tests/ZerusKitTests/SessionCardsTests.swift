@@ -219,6 +219,7 @@ final class SessionCardsTests: XCTestCase {
         XCTAssertEqual(SessionPreview.render(envelope(reply("Continue"))), "Answer: Continue")
         XCTAssertEqual(SessionPreview.render(envelope("[\(reply("First")),\(reply("Second"))]")), "Answer: First; Second")
         XCTAssertEqual(SessionPreview.render(envelope(reply(""))), "Answer: (empty answer)")
+        XCTAssertEqual(SessionPreview.render(envelope("[\n\(reply("Pretty")),\r\n\(reply("Printed"))\n]")), "Answer: Pretty; Printed")
         XCTAssertEqual(SessionPreview.render(open + "[{\"answer\":\"\",…"), "Question response")
         let prefix = "# Context from my IDE setup:\nOpen files: synthetic.kt\n## My request for Codex:\n"
         XCTAssertEqual(SessionPreview.render(prefix + envelope(reply("Proceed"))), "Answer: Proceed")

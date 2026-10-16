@@ -1,0 +1,574 @@
+import XCTest
+@testable import ZerusKit
+
+/// Ported from Android QuestionPoliciesTest, QuestionTrackingTest, QuestionSendConfirmationTest,
+/// QuestionReplyPresentationTest, QuestionSubmitGateTest, QuestionDisplayStateTest and ApprovalReviewTest.
+final class QuestionPoliciesTests: XCTestCase {
+    private let target = Target(computerId: "computer", session: "session", run: "run", conversation: "conversation", connectionId: "workspace")
+    private let prompt = Prompt(id: "q", text: "Question", choices: [Choice(id: "first", label: "First", description: ""), Choice(id: "second", label: "Second", description: "")],
+                                multi: false, required: true, other: false, header: "", body: "", otherLabel: "", otherDescription: "")
+    private func question(_ id: String = "request", optional: Bool = false, canAnswer: Bool = true, at: Double = 1) -> Question {
+        Question(id: id, hash: "hash-\(id)", prompts: [prompt], canAnswer: canAnswer, canSkip: true, optional: optional, delivery: "",
+                 createdAt: at, run: target.run, conversation: target.conversation)
+    }
+    private func submitted() -> Question {
+        var q = question(optional: true)
+        q.source = "codex_async"
+        q.delivery = "submitted"
+        q.answerDelivery = NativeQuestionDelivery(requestId: "uuid", questionId: q.id, questionHash: q.hash, run: target.run, conversation: target.conversation,
+                                                  status: "submitted", answers: [NativeQuestionAnswer(questionId: "q", optionIds: ["second"], text: "", skip: false)])
+        return q
+    }
+
+    func testParserPreservesFullDisclosureAndDefaultsOtherFalse() throws {
+        let body = String(repeating: "dangerous command\n", count: 300)
+        let raw: JSON = ["pending_questions": [["question_id": "id", "question_hash": "hash", "approval": true, "trust_request": true,
+            "created_at": 123.0, "source": "claude_tool_approval", "answer_unavailable_reason": "Exact native reason", "run_id": "r",
+            "conversation_id": "c", "tool_call_id": "tool",
+            "questions": [["id": "q", "question": "Approve?", "header": "Header", "body": .string(body), "other_label": "Custom",
+                           "other_description": "Native custom disclosure"]]]]]
+        let parsed = try XCTUnwrap(NativeEvents.questions(raw.object!).first)
+        XCTAssertEqual(body, parsed.prompts.first?.body)
+        XCTAssertEqual("Header", parsed.prompts.first?.header)
+        XCTAssertEqual("Native custom disclosure", parsed.prompts.first?.otherDescription)
+        XCTAssertEqual(false, parsed.prompts.first?.other)
+        XCTAssertTrue(parsed.approval)
+        XCTAssertTrue(parsed.trustRequest)
+        XCTAssertEqual("Exact native reason", parsed.unavailableReason)
+        XCTAssertEqual(123, parsed.createdAt)
+        XCTAssertEqual("tool", parsed.toolCallId)
+    }
+
+    func testParserPreservesTypedSubmittedAnswerInNativeOrder() throws {
+        let q = submitted()
+        let delivery: JSON = ["request_id": "uuid", "question_id": .string(q.id), "question_hash": .string(q.hash), "run_id": .string(target.run),
+                              "conversation_id": .string(target.conversation), "status": "submitted",
+                              "answers": [["question_id": "q", "selected_option_ids": ["second", "first"], "text": "literal"]]]
+        let parsed = try XCTUnwrap(NativeEvents.questions(JSON.object(["pending_questions": [["answer_delivery": delivery]]]).object!).first)
+        XCTAssertEqual(["second", "first"], parsed.answerDelivery?.answers.first?.optionIds)
+        XCTAssertEqual("literal", parsed.answerDelivery?.answers.first?.text)
+    }
+
+    func testRequiredActionableRequestTakesPriorityOverOptionalAndUnavailable() {
+        let unavailable = question("unavailable", canAnswer: false)
+        let required = question("required")
+        let optional = question("optional", optional: true)
+        XCTAssertEqual(required, QuestionPolicies.queue([optional, unavailable, required], target, chosen: QuestionPolicies.key(optional)).selected)
+    }
+
+    func testOptionalNewestFirstSelectionSurvivesPollInsertion() {
+        let old = question("old", optional: true, at: 1)
+        let chosen = question("chosen", optional: true, at: 2)
+        let fresh = question("new", optional: true, at: 3)
+        let queue = QuestionPolicies.queue([old, fresh, chosen], target, chosen: QuestionPolicies.key(chosen))
+        XCTAssertEqual(chosen, queue.selected)
+        XCTAssertEqual([fresh, chosen, old], queue.optional)
+        XCTAssertEqual(1, queue.index)
+    }
+
+    func testSubmittedMatchingRequestIsHiddenFromOfferedCountAndRetainsAnswer() {
+        let sent = submitted()
+        let next = question("next", optional: true)
+        let queue = QuestionPolicies.queue([sent, next], target, chosen: "")
+        XCTAssertEqual(next, queue.selected)
+        XCTAssertEqual(1, queue.promptCount)
+        XCTAssertEqual([sent], queue.submitted)
+        XCTAssertEqual(["second"], QuestionPolicies.submitted(sent, target)?.answers.first?.optionIds)
+    }
+
+    func testNativeSubmissionMustMatchEveryIdentityField() {
+        let sent = submitted()
+        let delivery = sent.answerDelivery!
+        let changes: [(inout NativeQuestionDelivery) -> Void] = [{ $0.questionId = "other" }, { $0.questionHash = "other" }, { $0.run = "other" },
+                                                                 { $0.conversation = "other" }, { $0.status = "uncertain" }]
+        for change in changes {
+            var changed = delivery
+            change(&changed)
+            var q = sent
+            q.answerDelivery = changed
+            XCTAssertNil(QuestionPolicies.submitted(q, target))
+        }
+        XCTAssertNil(QuestionPolicies.submitted(sent, target.with(run: "reused")))
+        XCTAssertNil(QuestionPolicies.submitted(sent, target.with(conversation: "new")))
+        var hook = sent
+        hook.source = "hook"
+        XCTAssertNil(QuestionPolicies.submitted(hook, target))
+        var required = sent
+        required.optional = false
+        XCTAssertNil(QuestionPolicies.submitted(required, target))
+    }
+
+    func testQuestionHashReuseDoesNotSelectReplacedOptionalRequest() {
+        let old = question("same", optional: true)
+        var replacement = old
+        replacement.hash = "replacement"
+        let newest = question("newest", optional: true, at: 5)
+        XCTAssertEqual(newest, QuestionPolicies.queue([replacement, newest], target, chosen: QuestionPolicies.key(old)).selected)
+    }
+
+    func testDuplicateIdsAndEmptyQuestionsAreNotOfferedTwice() {
+        let q = question()
+        var blank = q
+        blank.id = ""
+        var empty = q
+        empty.id = "empty"
+        empty.prompts = []
+        XCTAssertEqual(1, QuestionPolicies.queue([q, q, blank, empty], target, chosen: "").promptCount)
+    }
+
+    func testMissingOptionsNeverCreateUnsupportedFreeformAnswer() {
+        var unsupported = prompt
+        unsupported.choices = []
+        XCTAssertFalse(QuestionPolicies.complete([unsupported], options: [:], texts: ["q": "invented"]))
+        XCTAssertFalse(QuestionPolicies.answerError([unsupported], options: [:], texts: ["q": "invented"]).isEmpty)
+        XCTAssertEqual("", QuestionPolicies.answers([unsupported], options: [:], texts: ["q": "invented"]).array?.first?.string("text"))
+    }
+
+    func testMultiAnswersUseSourceOptionOrder() {
+        var multi = prompt
+        multi.multi = true
+        let result = QuestionPolicies.answers([multi], options: ["q": ["second", "first"]], texts: [:])
+        XCTAssertEqual(JSON(["first", "second"]), result.array?.first?.value("selected_option_ids"))
+    }
+
+    func testCustomAnswerByteAndCommandRulesMatchNative() {
+        var p = prompt
+        p.other = true
+        XCTAssertFalse(QuestionPolicies.answerError([p], options: [:], texts: ["q": String(repeating: "é", count: 2049)]).isEmpty)
+        XCTAssertFalse(QuestionPolicies.answerError([p], options: [:], texts: ["q": "/command"]).isEmpty)
+        XCTAssertFalse(QuestionPolicies.answerError([p], options: [:], texts: ["q": "a\nb"]).isEmpty)
+        XCTAssertTrue(QuestionPolicies.complete([p], options: [:], texts: ["q": "literal <tag>"]))
+    }
+
+    func testApprovalRequiresExactNativeIds() {
+        var approval = question()
+        approval.approval = true
+        XCTAssertFalse(QuestionPolicies.approvalSupported(approval))
+        var choices = prompt
+        choices.choices = [Choice(id: "allow", label: "Yes", description: ""), Choice(id: "deny", label: "No", description: "")]
+        approval.prompts = [choices]
+        XCTAssertTrue(QuestionPolicies.approvalSupported(approval))
+    }
+}
+
+final class QuestionTrackingTests: XCTestCase {
+    private let target = Target(computerId: "computer", session: "session", run: "run", conversation: "conversation", connectionId: "workspace")
+    private let delivery = NativeQuestionDelivery(requestId: "receipt", questionId: "question", questionHash: "hash", run: "run", conversation: "conversation",
+                                                  status: "submitted", answers: [NativeQuestionAnswer(questionId: "prompt", optionIds: ["allow"], text: "captured", skip: false)])
+    private var card: Question {
+        Question(id: "question", hash: "hash", prompts: [], canAnswer: true, canSkip: true, optional: true, delivery: "", source: "codex_async",
+                 run: "run", conversation: "conversation", answerDelivery: delivery)
+    }
+
+    func testUnseenSubmittedAnswerSurvivesRestartAndStaleNativePoll() throws {
+        let state = QuestionTracking.remember(MessageState(), target, [card])
+        let restored = try JSONDecoder().decode(MessageState.self, from: JSONEncoder().encode(state))
+        var stale = card
+        stale.answerDelivery = nil
+        stale.delivery = ""
+        XCTAssertEqual(delivery, QuestionTracking.restore(restored, target, [stale]).first?.answerDelivery)
+        XCTAssertEqual("submitted", restored.drafts.first?.status)
+    }
+
+    func testOtherConversationOrHashCannotAcquireLock() {
+        let state = QuestionTracking.remember(MessageState(), target, [card])
+        var changed = card
+        changed.hash = "new"
+        changed.answerDelivery = nil
+        XCTAssertNil(QuestionTracking.restore(state, target, [changed]).first?.answerDelivery)
+        XCTAssertTrue(QuestionTracking.remember(MessageState(), target.with(conversation: "new"), [card]).drafts.isEmpty)
+    }
+
+    func testUnrelatedUncertainSubmissionIsPreserved() {
+        let draft = Draft(target: target, text: "private", status: "uncertain", requestId: "different", questionId: "question", questionHash: "hash", answers: "original")
+        XCTAssertEqual([draft], QuestionTracking.remember(MessageState(drafts: [draft]), target, [card]).drafts)
+    }
+
+    func testReceiptSettlesOnlyTheExactAttempt() {
+        let draft = Draft(target: target, text: "", status: "submitting", requestId: "request", questionId: "question", questionHash: "hash")
+        let completed = object(#"{"request_id":"request","state":"completed","result":{"status":"answered","question_id":"question"}}"#)
+        XCTAssertEqual("submitted", QuestionTracking.settle(MessageState(drafts: [draft]), draft, completed).drafts.first?.status)
+        let foreign = object(#"{"request_id":"request","state":"completed","result":{"status":"answered","question_id":"other"}}"#)
+        XCTAssertEqual("uncertain", QuestionTracking.settle(MessageState(drafts: [draft]), draft, foreign).drafts.first?.status)
+        let failed = object(#"{"request_id":"request","state":"failed"}"#)
+        XCTAssertEqual("failed", QuestionTracking.settle(MessageState(drafts: [draft]), draft, failed).drafts.first?.status)
+        var interrupt = draft
+        interrupt.questionId = "__interrupt"
+        let stopped = object(#"{"request_id":"request","state":"completed","result":{"status":"completed"}}"#)
+        XCTAssertTrue(QuestionTracking.settle(MessageState(drafts: [interrupt]), interrupt, stopped).drafts.isEmpty)
+    }
+}
+
+final class QuestionSendConfirmationTests: XCTestCase {
+    private let target = Target(computerId: "computer", session: "session", run: "run", conversation: "conversation", connectionId: "workspace")
+    private let prompt = Prompt(id: "prompt", text: "Choose", choices: [Choice(id: "allow", label: "Allow", description: ""), Choice(id: "deny", label: "Deny", description: "")],
+                                multi: false, required: true, other: true, header: "", body: "", otherLabel: "", otherDescription: "")
+    private var question: Question {
+        Question(id: "question", hash: "hash", prompts: [prompt], canAnswer: true, canSkip: true, optional: false, delivery: "pending",
+                 source: "claude", run: target.run, conversation: target.conversation, toolCallId: "tool")
+    }
+    private var answers: String { QuestionPolicies.answers(question.prompts, options: [:], texts: ["prompt": "Exact  Other answer"]).compact }
+    private lazy var draft = Draft(target: target, text: "Exact  Other answer", questionId: question.id, questionHash: question.hash,
+                                   answers: answers, revision: "revision", generation: "generation")
+    private func intent(_ q: Question? = nil, _ payload: String? = nil) -> QuestionSendIntent {
+        QuestionSendPolicies.capture(target, navigation: 1, question: q ?? question, draft: draft, answers: payload ?? answers)
+    }
+    private func prepared(_ answers: String? = nil) -> Draft {
+        var copy = draft
+        copy.status = "submitting"
+        copy.requestId = "request"
+        copy.answers = answers ?? self.answers
+        return copy
+    }
+
+    func testNativeKimiCacheChoicesKeepExactAnswersWithoutSecondConsent() {
+        var cachePrompt = prompt
+        cachePrompt.id = "cache"
+        cachePrompt.choices = (0...3).map { Choice(id: "cache_\($0)", label: "Native choice \($0)", description: "") }
+        var cache = question
+        cache.source = "kimi_cache_hint"
+        cache.toolCallId = "kimi_cache_hint"
+        cache.prompts = [cachePrompt]
+        for choice in 0...3 {
+            let payload = QuestionPolicies.answers(cache.prompts, options: ["cache": ["cache_\(choice)"]], texts: [:]).compact
+            let pending = intent(cache, payload)
+            let gate = QuestionSendGate()
+            XCTAssertEqual(pending, gate.request(pending, cold: true))
+            XCTAssertNil(gate.pending)
+            let ready = prepared(payload)
+            XCTAssertTrue(pending.permitsPrepared(target: target, navigation: 1, current: cache, prepared: ready, requestId: "request", cold: true, consent: false))
+            XCTAssertTrue(pending.answers.contains("cache_\(choice)"))
+            var changed = cache
+            changed.hash = "changed"
+            XCTAssertFalse(pending.permitsPrepared(target: target, navigation: 1, current: changed, prepared: ready, requestId: "request", cold: true, consent: false))
+            XCTAssertFalse(pending.permitsPrepared(target: target.with(run: "changed"), navigation: 1, current: cache, prepared: ready, requestId: "request", cold: true, consent: false))
+            changed = cache
+            changed.source = "claude"
+            XCTAssertFalse(pending.permitsPrepared(target: target, navigation: 1, current: changed, prepared: ready, requestId: "request", cold: true, consent: false))
+        }
+        var other = cache
+        other.toolCallId = "other"
+        XCTAssertTrue(QuestionSendPolicies.requiresCacheConsent(other, cold: true))
+        XCTAssertTrue(QuestionSendPolicies.requiresCacheConsent(question, cold: true))
+    }
+
+    func testDefaultColdRequestCannotReleaseTransportOrChangeSavedForm() {
+        let gate = QuestionSendGate()
+        let original = draft
+        let pending = intent()
+        XCTAssertNil(gate.request(pending, cold: true))
+        XCTAssertEqual(pending, gate.pending)
+        XCTAssertEqual(original, pending.draft)
+        XCTAssertEqual("editing", pending.draft.status)
+        XCTAssertEqual("", pending.draft.requestId)
+        // A second submit event must not replace the first captured form.
+        XCTAssertNil(gate.request(intent(nil, answers.replacingOccurrences(of: "Exact", with: "Changed")), cold: true))
+        XCTAssertEqual(pending, gate.pending)
+        gate.cancel(pending)
+        XCTAssertNil(gate.pending)
+        XCTAssertNil(gate.confirm(pending, valid: true))
+    }
+
+    func testConfirmationPostsExactCapturedBytesAtMostOnce() {
+        let gate = QuestionSendGate()
+        let pending = intent()
+        var posted: [String] = []
+        _ = gate.request(pending, cold: true)
+        for _ in 0..<2 {
+            if let approved = gate.confirm(pending, valid: pending.matches(target: target, navigation: 1, current: question, draft: draft)) { posted.append(approved.answers) }
+        }
+        XCTAssertEqual([answers], posted)
+        XCTAssertTrue(posted[0].contains("Exact  Other"))
+        XCTAssertNil(gate.pending)
+    }
+
+    func testEqualRecaptureIsNotTheActiveConfirmation() {
+        let gate = QuestionSendGate()
+        let pending = intent()
+        _ = gate.request(pending, cold: true)
+        let duplicate = intent()
+        XCTAssertFalse(gate.active(duplicate))
+        XCTAssertNil(gate.confirm(duplicate, valid: true))
+        XCTAssertTrue(gate.active(pending))
+    }
+
+    func testInactiveDuplicateCannotReportRefusalWhileAcceptedAnswerIsSending() {
+        let gate = QuestionSendGate()
+        var accepted = 0
+        var refused = 0
+        func callback(_ intent: QuestionSendIntent, _ valid: Bool) {
+            guard gate.active(intent) else { return }
+            if gate.confirm(intent, valid: valid) == nil { refused += 1 } else { accepted += 1 }
+        }
+        let pending = intent()
+        _ = gate.request(pending, cold: true)
+        callback(pending, true)
+        callback(pending, false)
+        XCTAssertEqual(1, accepted)
+        XCTAssertEqual(0, refused)
+        let next = intent()
+        _ = gate.request(next, cold: true)
+        callback(next, false)
+        callback(next, false)
+        XCTAssertEqual(1, accepted)
+        XCTAssertEqual(1, refused)
+    }
+
+    func testNewProcessCannotRestoreConsent() throws {
+        let retained = QuestionSendGate()
+        let pending = intent()
+        _ = retained.request(pending, cold: true)
+        XCTAssertEqual(pending, retained.pending)
+        let restarted = QuestionSendGate()
+        XCTAssertNil(restarted.confirm(pending, valid: true))
+        let recovered = try JSONDecoder().decode(MessageState.self, from: JSONEncoder().encode(MessageState(drafts: [draft]))).drafts[0]
+        XCTAssertTrue(ContextPolicies.sameDraft(draft, recovered))
+        XCTAssertNil(restarted.request(QuestionSendPolicies.capture(target, navigation: 1, question: question, draft: recovered, answers: answers), cold: true))
+    }
+
+    func testNavigationTargetQuestionSchemaAndRawDraftChangesInvalidateConsent() {
+        let pending = intent()
+        XCTAssertTrue(pending.matches(target: target, navigation: 1, current: question, draft: draft))
+        XCTAssertFalse(pending.matches(target: target, navigation: 2, current: question, draft: draft))
+        var changedTargets = [target.with(computerId: "other"), target.with(run: "other"), target.with(conversation: "other"), target.with(session: "other")]
+        var connection = target
+        connection.connectionId = "other"
+        changedTargets.append(connection)
+        for changed in changedTargets { XCTAssertFalse(pending.matches(target: changed, navigation: 1, current: question, draft: draft)) }
+        let questionChanges: [(inout Question) -> Void] = [
+            { $0.id = "other" }, { $0.hash = "other" }, { $0.toolCallId = "other" }, { $0.source = "other" }, { $0.run = "other" },
+            { $0.conversation = "other" }, { $0.prompts[0].text = "Changed"; $0.prompts[0].choices.reverse() }, { $0.canAnswer = false },
+            { $0.delivery = "pending"; $0.canAnswer = false; $0.canSkip = true }]
+        for change in questionChanges {
+            var changed = question
+            change(&changed)
+            XCTAssertFalse(pending.matches(target: target, navigation: 1, current: changed, draft: draft))
+        }
+        let draftChanges: [(inout Draft) -> Void] = [{ $0.generation = "other" }, { $0.revision = "other" }, { $0.text = "Changed" },
+                                                     { [answers] in $0.answers = answers.replacingOccurrences(of: "  ", with: " ") }, { $0.status = "uncertain" }]
+        for change in draftChanges {
+            var changed = draft
+            change(&changed)
+            XCTAssertFalse(pending.matches(target: target, navigation: 1, current: question, draft: changed))
+        }
+        let gate = QuestionSendGate()
+        _ = gate.request(pending, cold: true)
+        var revised = draft
+        revised.revision = "changed"
+        XCTAssertNil(gate.confirm(pending, valid: pending.matches(target: target, navigation: 1, current: question, draft: revised)))
+        XCTAssertNil(gate.confirm(pending, valid: true))
+    }
+
+    func testApprovalAndSkipUseTheSameColdConsentWithTheirOwnCapability() {
+        var approval = question
+        approval.approval = true
+        approval.canSkip = false
+        let allow = QuestionPolicies.answers(approval.prompts, options: ["prompt": ["allow"]], texts: [:]).compact
+        let skip = JSON.array([["question_id": "prompt", "skip": true, "selected_option_ids": [], "text": ""]]).compact
+        var unanswerable = question
+        unanswerable.canAnswer = false
+        for (q, payload) in [(approval, allow), (unanswerable, skip)] {
+            let gate = QuestionSendGate()
+            let pending = intent(q, payload)
+            XCTAssertTrue(pending.matches(target: target, navigation: 1, current: q, draft: draft))
+            XCTAssertNil(gate.request(pending, cold: true))
+            XCTAssertEqual(payload, gate.confirm(pending, valid: true)?.answers)
+        }
+        var unskippable = question
+        unskippable.canSkip = false
+        XCTAssertFalse(QuestionSendPolicies.available(unskippable, target, skip))
+        XCTAssertFalse(QuestionSendPolicies.available(unanswerable, target, allow))
+    }
+
+    func testExpiryOrStateChangeDuringPersistenceCannotReleasePreparedAnswer() {
+        let pending = intent()
+        let ready = prepared()
+        XCTAssertTrue(pending.permitsPrepared(target: target, navigation: 1, current: question, prepared: ready, requestId: "request", cold: false, consent: false))
+        XCTAssertFalse(pending.permitsPrepared(target: target, navigation: 1, current: question, prepared: ready, requestId: "request", cold: true, consent: false))
+        XCTAssertTrue(pending.permitsPrepared(target: target, navigation: 1, current: question, prepared: ready, requestId: "request", cold: true, consent: true))
+        let changes: [(inout Draft) -> Void] = [{ $0.requestId = "other" }, { $0.generation = "other" }, { $0.revision = "other" },
+                                                { [answers] in $0.answers = answers.replacingOccurrences(of: "  ", with: " ") }, { $0.status = "uncertain" }]
+        for change in changes {
+            var changed = ready
+            change(&changed)
+            XCTAssertFalse(pending.permitsPrepared(target: target, navigation: 1, current: question, prepared: changed, requestId: "request", cold: true, consent: true))
+        }
+        XCTAssertFalse(pending.permitsPrepared(target: target, navigation: 2, current: question, prepared: ready, requestId: "request", cold: true, consent: true))
+        var tool = question
+        tool.toolCallId = "other"
+        XCTAssertFalse(pending.permitsPrepared(target: target, navigation: 1, current: tool, prepared: ready, requestId: "request", cold: true, consent: true))
+    }
+
+    func testRefusalCannotLeakToAnotherComputerRunOrQuestion() {
+        let refusal = QuestionSendRefusal(target: target, questionId: question.id, questionHash: question.hash, text: "Cache expired; nothing was sent.")
+        XCTAssertEqual(refusal.text, refusal.text(for: target, question))
+        XCTAssertEqual("", refusal.text(for: target.with(computerId: "other"), question))
+        XCTAssertEqual("", refusal.text(for: target.with(run: "other"), question))
+        var changed = question
+        changed.hash = "other"
+        XCTAssertEqual("", refusal.text(for: target, changed))
+        changed = question
+        changed.id = "other"
+        XCTAssertEqual("", refusal.text(for: target, changed))
+    }
+
+    func testBenignPollingMetadataDoesNotInvalidateThePinnedQuestion() {
+        var polled = question
+        polled.createdAt = 500
+        polled.unavailableReason = "Previous observation"
+        polled.delivery = "refreshed"
+        XCTAssertTrue(intent().matches(target: target, navigation: 1, current: polled, draft: draft))
+    }
+
+    func testExpiryRestoresExactOriginalApprovalFormOnlyWhilePreparedRequestIsOwned() {
+        let allow = QuestionPolicies.answers(question.prompts, options: ["prompt": ["allow"]], texts: [:]).compact
+        var approval = question
+        approval.approval = true
+        let pending = intent(approval, allow)
+        let ready = prepared(allow)
+        XCTAssertEqual([draft], pending.restoreAfterExpiry(MessageState(drafts: [ready]), requestId: "request").drafts)
+        let changes: [(inout Draft) -> Void] = [{ $0.requestId = "other" }, { $0.revision = "other" }, { $0.generation = "other" }, { $0.text = "changed" },
+                                                { [answers] in $0.answers = answers }, { $0.status = "uncertain" }, { [target] in $0.target = target.with(run: "other") }]
+        for change in changes {
+            var changed = ready
+            change(&changed)
+            XCTAssertEqual([changed], pending.restoreAfterExpiry(MessageState(drafts: [changed]), requestId: "request").drafts)
+        }
+    }
+
+    func testForeignPayloadDoesNotMatchQuestion() {
+        let foreign = QuestionSendPolicies.capture(target, navigation: 1, question: question, draft: draft, answers: answers.replacingOccurrences(of: "prompt", with: "foreign"))
+        XCTAssertFalse(foreign.matches(target: target, navigation: 1, current: question, draft: draft))
+    }
+}
+
+final class QuestionPresentationTests: XCTestCase {
+    private func item(_ answer: String = "literal <tag>\n```code```") -> JSON {
+        ["questionItemId": "native-1", "question": "Keep both paths?", "answer": .string(answer)]
+    }
+    private func envelope(_ body: String) -> String { "<send_user_message_question_reply>\n\(body)\n</send_user_message_question_reply>" }
+
+    func testCompleteObjectPreservesLiteralText() throws {
+        let result = try XCTUnwrap(QuestionReplyPresentation.parse(envelope(item().compact))?.first)
+        XCTAssertEqual("Keep both paths?", result.question)
+        XCTAssertEqual("literal <tag>\n```code```", result.answer)
+    }
+
+    func testCompleteArrayPreservesAllAnswersWithoutPreviewLimit() throws {
+        let long = String(repeating: "answer ", count: 10000)
+        let result = try XCTUnwrap(QuestionReplyPresentation.parse(envelope(JSON.array([item(long), item("")]).compact)))
+        XCTAssertEqual(2, result.count)
+        XCTAssertEqual(long, result[0].answer)
+        XCTAssertEqual("", result[1].answer)
+    }
+
+    func testNativeIdePrefixUsesFinalRequestMarkerOnly() {
+        XCTAssertNotNil(QuestionReplyPresentation.parse("# Context from my IDE setup:\ncontext\n## My request for Codex:\n" + envelope(item().compact)))
+        XCTAssertNil(QuestionReplyPresentation.parse("# Context from my IDE setup:\n" + envelope(item().compact)))
+        XCTAssertNil(QuestionReplyPresentation.parse("unrelated preface\n" + envelope(item().compact)))
+    }
+
+    func testEmbeddedExampleOrTruncatedEnvelopeRemainsLiteral() {
+        XCTAssertNil(QuestionReplyPresentation.parse("Example: " + envelope(item().compact)))
+        XCTAssertNil(QuestionReplyPresentation.parse(envelope(item().compact) + " trailing"))
+        XCTAssertNil(QuestionReplyPresentation.parse(String(envelope(item().compact).dropLast(10)) + "…"))
+    }
+
+    func testOneMalformedArrayMemberRejectsEntirePresentation() {
+        XCTAssertNil(QuestionReplyPresentation.parse(envelope(JSON.array([item(), ["answer": "x"]]).compact)))
+        XCTAssertNil(QuestionReplyPresentation.parse(envelope("[]")))
+        XCTAssertNil(QuestionReplyPresentation.parse(envelope("null")))
+    }
+
+    func testRequiredFieldsHaveExactStringTypes() {
+        for (key, value) in [("answer", JSON.bool(true)), ("question", .int(1)), ("questionItemId", .string("")), ("question", .string("  "))] {
+            var changed = item().object!
+            changed[key] = value
+            XCTAssertNil(QuestionReplyPresentation.parse(envelope(JSON.object(changed).compact)))
+        }
+    }
+
+    func testMalformedJavascriptSyntaxIsNotJson() {
+        for body in [#"{'questionItemId':'i','question':'q','answer':'a'}"#, #"{questionItemId:"i",question:"q",answer:"a"}"#,
+                     #"{"questionItemId":"i","question":"q","answer":"a",}"#] {
+            XCTAssertNil(QuestionReplyPresentation.parse(envelope(body)))
+        }
+    }
+
+    func testHugeExponentCannotBeCoercedIntoRequiredText() {
+        let keys = ["answer", "question", "questionItemId"]
+        for key in keys {
+            let json = "{" + keys.map { "\"\($0)\":" + ($0 == key ? "1e999999" : "\"literal\"") }.joined(separator: ",") + "}"
+            XCTAssertNil(QuestionReplyPresentation.parse(envelope(json)))
+        }
+    }
+
+    func testOversizedHistoryRemainsLiteralRatherThanPreviewTruncated() {
+        XCTAssertNil(QuestionReplyPresentation.parse(envelope(item(String(repeating: "x", count: 256 * 1024)).compact)))
+    }
+
+    func testOnlyExplicitUserRolesUseUserBubble() {
+        XCTAssertTrue(QuestionReplyPresentation.isOwnRole("You"))
+        XCTAssertTrue(QuestionReplyPresentation.isOwnRole("You (answer)"))
+        XCTAssertFalse(QuestionReplyPresentation.isOwnRole("You (malformed)"))
+        XCTAssertFalse(QuestionReplyPresentation.isOwnRole("Agent"))
+    }
+
+    func testSubmitGateAllowsOneAttemptUntilFinished() {
+        let gate = QuestionSubmitGate()
+        XCTAssertTrue(gate.claim(true))
+        XCTAssertFalse(gate.claim(true))
+        gate.finish()
+        XCTAssertFalse(gate.claim(false))
+        XCTAssertTrue(gate.claim(true))
+    }
+
+    func testDisplayStateNeverRebindsToAnotherRequest() {
+        let original = Question(id: "question", hash: "hash", prompts: [], canAnswer: true, canSkip: true, optional: true, delivery: "")
+        let state = QuestionDisplayState(owner: "owner").open(original)
+        var changed = original
+        changed.hash = "changed"
+        var other = original
+        other.id = "other"
+        XCTAssertEqual(original, state.resolve([original]))
+        XCTAssertNil(state.resolve([]))
+        XCTAssertNil(state.resolve([changed]))
+        XCTAssertNil(state.resolve([other]))
+        XCTAssertNil(state.resolve([original, original]))
+        XCTAssertFalse(state.close().expanded)
+        XCTAssertFalse(state.forTarget("other run").expanded)
+    }
+
+    func testDisplayStateKeepsEachPartWithoutDelimiterCollisionsAndStaysBounded() {
+        func question(_ id: String, _ hash: String = "hash") -> Question {
+            Question(id: id, hash: hash, prompts: [], canAnswer: true, canSkip: true, optional: true, delivery: "")
+        }
+        let a = question("a:b", "c")
+        let b = question("a", "b:c")
+        let state = QuestionDisplayState(owner: "owner").open(a).withPage(a, 1).withOffset(a, page: 1, 99)
+            .close().open(b).withPage(b, 3).withOffset(b, page: 3, 155).close().open(a)
+        XCTAssertEqual(1, state.page(a))
+        XCTAssertEqual(99, state.offset(a, page: 1))
+        XCTAssertEqual(0, state.offset(a, page: 2))
+        XCTAssertEqual(3, state.page(b))
+        XCTAssertEqual(155, state.offset(b, page: 3))
+        var bounded = QuestionDisplayState(owner: "owner")
+        for i in 0..<100 { bounded = bounded.withPage(question("\(i)"), i).withOffset(question("\(i)"), page: i, i) }
+        XCTAssertEqual(64, bounded.pages.count)
+        XCTAssertEqual(64, bounded.offsets.count)
+        XCTAssertEqual(99, bounded.page(question("99")))
+        XCTAssertEqual(0, bounded.page(question("0")))
+    }
+
+    func testApprovalReviewNeedsThreeContinuousVisibleSeconds() {
+        var review = ApprovalReview().observe(eligible: true, now: 1)
+        XCTAssertEqual(3, review.secondsRemaining(now: 1))
+        XCTAssertEqual(1, review.secondsRemaining(now: 3.999))
+        XCTAssertEqual(0, review.secondsRemaining(now: 4))
+        review = review.observe(eligible: false, now: 4.1)
+        XCTAssertEqual(3, review.secondsRemaining(now: 10))
+        review = review.observe(eligible: true, now: 10)
+        XCTAssertEqual(0, review.secondsRemaining(now: 13))
+        XCTAssertEqual(3, ApprovalReview().observe(eligible: true, now: 5).observe(eligible: true, now: 4).secondsRemaining(now: 10))
+    }
+}

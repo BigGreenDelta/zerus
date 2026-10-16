@@ -281,23 +281,31 @@ public enum SessionPreview {
         return text + suffix
     }
 
-    /// Strict bounded JSON grammar for question replies.
+    /// Strict bounded JSON grammar for question replies. Scalars, not graphemes: `\r\n` is two separators.
     struct Cursor {
-        let input: [Character]
+        static let blank: Set<Unicode.Scalar> = [" ", "\t", "\r", "\n"]
+        static let tokenEnd: Set<Unicode.Scalar> = [" ", "\t", "\r", "\n", ",", "]", "}"]
+        let input: [Unicode.Scalar]
         var index = 0
         let replyDepth: Int
 
         init(_ text: String) {
-            input = Array(text)
-            replyDepth = text.drop(while: { " \t\r\n".contains($0) }).hasPrefix("[") ? 1 : 0
+            input = Array(text.unicodeScalars)
+            replyDepth = input.first { !Cursor.blank.contains($0) } == "[" ? 1 : 0
         }
 
-        mutating func space() { while index < input.count, " \t\r\n".contains(input[index]) { index += 1 } }
-        func peek() -> Character? { index < input.count ? input[index] : nil }
-        mutating func consume(_ char: Character) -> Bool {
+        mutating func space() { while index < input.count, Cursor.blank.contains(input[index]) { index += 1 } }
+        func peek() -> Unicode.Scalar? { index < input.count ? input[index] : nil }
+        mutating func consume(_ char: Unicode.Scalar) -> Bool {
             space()
             if peek() == char { index += 1; return true }
             return false
+        }
+
+        func text(_ range: Range<Int>) -> String {
+            var view = String.UnicodeScalarView()
+            view.append(contentsOf: input[range])
+            return String(view)
         }
 
         mutating func string() -> String? {
@@ -309,19 +317,19 @@ public enum SessionPreview {
                 let char = input[index]
                 index += 1
                 switch char {
-                case "\"": return String(input[start..<index])
+                case "\"": return text(start..<index)
                 case "\\":
                     guard index < input.count else { return nil }
                     let escape = input[index]
                     index += 1
                     if escape == "u" {
                         for _ in 0..<4 {
-                            guard index < input.count, input[index].isHexDigit else { return nil }
+                            guard index < input.count, input[index].properties.isASCIIHexDigit else { return nil }
                             index += 1
                         }
-                    } else if !"\"\\/bfnrt".contains(escape) { return nil }
+                    } else if !"\"\\/bfnrt".unicodeScalars.contains(escape) { return nil }
                 default:
-                    if let scalar = char.unicodeScalars.first, scalar.value < 32 { return nil }
+                    if char.value < 32 { return nil }
                 }
             }
             return nil
@@ -356,8 +364,8 @@ public enum SessionPreview {
                 return consume("]")
             default:
                 let start = index
-                while index < input.count, !" \t\r\n,]}".contains(input[index]) { index += 1 }
-                let token = String(input[start..<index])
+                while index < input.count, !Cursor.tokenEnd.contains(input[index]) { index += 1 }
+                let token = text(start..<index)
                 return ["true", "false", "null"].contains(token) || Cursor.isNumber(token)
             }
         }
