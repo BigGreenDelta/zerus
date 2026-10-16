@@ -48,6 +48,12 @@ final class AppModel {
     var error = ""
     /// A pasted or scanned `zerus://pair` link waiting for explicit confirmation.
     var invitation: PairingInvite?
+    /// A conversation another screen asked to show; the root view pushes it on Sessions.
+    var conversationRequest: Target?
+    /// A short confirmation shown at the bottom of the screen.
+    var notice = ""
+    /// The New session machine chooser is open.
+    var choosingLaunchMachine = false
 
     // MARK: Sessions view state
 
@@ -75,6 +81,8 @@ final class AppModel {
 
     /// The open conversation and its delivery state.
     @ObservationIgnored private(set) var conversation: ConversationModel!
+    /// The New session form.
+    @ObservationIgnored private(set) var launch: LaunchModel!
 
     init(client: RelayClient, connectionStore: ConnectionStore, sealedStore: SealedFileStore?,
          cache: ConversationCache? = nil, pages: ConversationPageCache? = nil) {
@@ -86,6 +94,7 @@ final class AppModel {
             return try await self.loadArchivePage(key, query)
         }, reset: { [weak self] in self?.publishSessions() })
         conversation = ConversationModel(app: self, cache: cache, pages: pages)
+        launch = LaunchModel(app: self)
     }
 
     static func live() -> AppModel {

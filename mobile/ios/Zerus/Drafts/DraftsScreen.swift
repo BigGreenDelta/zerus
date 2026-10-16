@@ -9,6 +9,8 @@ struct DraftsScreen: View {
     @State private var review: Draft?
     @State private var reviewOutgoing: OutgoingMessage?
     @State private var discard: Draft?
+    @State private var reviewContext: ContextOperation?
+    @State private var reviewAction: SessionAction?
 
     private var model: ConversationModel { app.conversation }
 
@@ -17,6 +19,8 @@ struct DraftsScreen: View {
             .filter { (!$0.text.isEmpty || !$0.attachments.isEmpty || !$0.answers.isEmpty) && !["submitted", "recorded"].contains($0.status) && $0.questionId != "__interrupt" }
             .sorted { $0.updatedAt > $1.updatedAt }
         let unresolved = model.normalizedOutgoing.filter { ["sending", "uncertain", "failed"].contains($0.status) }.sorted { $0.createdAt > $1.createdAt }
+        let contexts = model.contextOperations.filter { ["sending", "submitted", "uncertain", "failed"].contains($0.status) }.sorted { $0.createdAt > $1.createdAt }
+        let actions = model.sessionActions.filter { ["sending", "uncertain", "failed"].contains($0.status) || $0.needsProjectReview }.sorted { $0.createdAt > $1.createdAt }
         NavigationStack {
             List {
                 Section {
@@ -24,13 +28,26 @@ struct DraftsScreen: View {
                         .font(.footnote).foregroundStyle(Theme.muted)
                         .listRowBackground(Color.clear)
                 }
+                if !model.actionResultNotice.isEmpty {
+                    Text(model.actionResultNotice).font(.footnote).foregroundStyle(Theme.amber)
+                }
                 ForEach(unsent, id: \.key) { draft in draftCard(draft) }
                 if !unresolved.isEmpty {
                     Section("Outgoing messages") {
                         ForEach(unresolved, id: \.requestId) { message in outgoingCard(message) }
                     }
                 }
-                if unsent.isEmpty && unresolved.isEmpty {
+                if !contexts.isEmpty {
+                    Section("Context commands") {
+                        ForEach(contexts, id: \.requestId) { operation in contextCard(operation) }
+                    }
+                }
+                if !actions.isEmpty {
+                    Section("Native actions") {
+                        ForEach(actions, id: \.requestId) { action in actionCard(action) }
+                    }
+                }
+                if unsent.isEmpty && unresolved.isEmpty && contexts.isEmpty && actions.isEmpty {
                     ContentUnavailableView("No saved drafts", systemImage: "square.and.pencil",
                                            description: Text("Your unsent messages will appear here."))
                         .listRowBackground(Color.clear)
@@ -40,6 +57,20 @@ struct DraftsScreen: View {
             .navigationTitle("Saved drafts")
             .zerusScreen()
             .reviewDialogs(review: $review, reviewOutgoing: $reviewOutgoing, discard: $discard)
+            .alert("Review context command", isPresented: Binding(get: { reviewContext != nil }, set: { if !$0 { reviewContext = nil } }), presenting: reviewContext) { operation in
+                Button("Mark reviewed") { model.reviewContextOperation(operation) }
+                Button("Cancel", role: .cancel) {}
+            } message: { operation in
+                Text("\(ActionText.context(operation.operation, operation.status))\n\nThe command may already have changed \(operation.target.session). Check its original receipt and the native conversation before allowing another context command. Reviewing does not repeat the command or send a message.")
+            }
+            .alert("Review native action?", isPresented: Binding(get: { reviewAction != nil }, set: { if !$0 { reviewAction = nil } }), presenting: reviewAction) { action in
+                Button("Mark reviewed") { model.reviewSessionAction(action) }
+                Button("Cancel", role: .cancel) {}
+            } message: { action in
+                Text(action.needsProjectReview
+                     ? "\(action.resultTarget?.session ?? "")\nThe session was created. Review its project placement before dismissing this notice. Marking reviewed never creates another session."
+                     : "\(ActionText.title(action))\nThis action may already have changed the machine. Check its original receipt and native state first. Marking it reviewed does not undo or repeat it.")
+            }
         }
     }
 
@@ -69,8 +100,62 @@ struct DraftsScreen: View {
                     Button(session.target == draft.target ? "Open conversation" : "Open current conversation") { onOpen(session.target) }
                 }
                 if !draft.detachedId.isEmpty { Button("Restore") { model.restoreDetached(draft) } }
+                if let action = model.confirmedDraftAction(draft) {
+                    Button("Restore to confirmed session") { model.restoreDraftToConfirmedResult(draft, action) }
+                }
                 if draft.status != "editing" { Button("Review") { review = draft }.disabled(flight) }
                 Button("Discard", role: .destructive) { discard = draft }.disabled(flight)
+            }
+            .buttonStyle(.borderless)
+            .font(.footnote.weight(.semibold))
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func contextCard(_ operation: ContextOperation) -> some View {
+        let flight = model.receiptFlights.contains("context:\(operation.requestId)")
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(operation.target.session).font(.subheadline.weight(.semibold)).lineLimit(1)
+            Text(ActionText.context(operation.operation, operation.status)).font(.caption).foregroundStyle(Theme.amber)
+            if !operation.error.isEmpty { Text(operation.error).font(.footnote).foregroundStyle(Theme.amber) }
+            Text("The original command identity is saved. It is never repeated automatically.").font(.caption).foregroundStyle(Theme.muted)
+            HStack(spacing: 16) {
+                if let session = app.sessions.first(where: { ContextPolicies.sameSessionRun($0.target, operation.target) }) {
+                    Button("Open") { onOpen(session.target) }
+                }
+                if ["submitted", "uncertain"].contains(operation.status) {
+                    Button("Check result") { model.checkContextOperation(operation) }
+                        .disabled(flight || !app.connections.contains { $0.id == operation.target.connectionId })
+                }
+                if ["failed", "uncertain"].contains(operation.status) { Button("Review") { reviewContext = operation }.disabled(flight) }
+            }
+            .buttonStyle(.borderless)
+            .font(.footnote.weight(.semibold))
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func actionCard(_ action: SessionAction) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(ActionText.title(action)).font(.subheadline.weight(.semibold)).lineLimit(1)
+            Text(action.needsProjectReview ? "Session created / Project assignment needs review" : "\(ActionText.label(action.operation)) / \(ActionText.status(action))")
+                .font(.caption).foregroundStyle(Theme.amber)
+            if !action.error.isEmpty { Text(action.error).font(.footnote).foregroundStyle(Theme.muted) }
+            Text("The original request is saved. It is never repeated automatically.").font(.caption).foregroundStyle(Theme.muted)
+            HStack(spacing: 16) {
+                if action.needsProjectReview {
+                    Button("Open created session") {
+                        if let result = action.resultTarget { onOpen(result) }
+                    }
+                    .disabled(!app.connections.contains { $0.id == action.target.connectionId })
+                    Button("Mark reviewed") { reviewAction = action }
+                }
+                if let session = app.sessions.first(where: { $0.target == action.target }) { Button("Open") { onOpen(session.target) } }
+                if action.status == "uncertain" {
+                    Button("Check original receipt") { model.checkSessionAction(action) }
+                        .disabled(!app.connections.contains { $0.id == action.target.connectionId })
+                    Button("Review") { reviewAction = action }
+                }
             }
             .buttonStyle(.borderless)
             .font(.footnote.weight(.semibold))

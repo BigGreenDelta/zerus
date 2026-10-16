@@ -141,7 +141,32 @@ final class ConversationModel {
     var questionSendRefusal: QuestionSendRefusal?
     var lastOwnSend: (target: Target, id: String)?
 
+    // MARK: Session controls
+
+    var actionFlights: Set<String> = []
+    var contextFlights: Set<String> = []
+    var continuation: CompactContinuation?
+    var actionResultNotice = ""
+    /// Bumped when a confirmed action removed the open session, so the screen returns to Sessions.
+    var returnToSessions = 0
+    var sessionMenuRequest: (target: Target, operation: String, navigation: Int64)?
+    var processOutputId = ""
+    var processOutputResult: JSONObject?
+    var processOutputError = ""
+    var processOutputLoading = false
+
     // MARK: Ignored bookkeeping
+
+    @ObservationIgnored var clearExpectation: (requestId: String, target: Target, navigation: Int64, confirmed: Bool)?
+    @ObservationIgnored var continuationEnqueuing = ""
+    @ObservationIgnored var acknowledgedContexts: Set<String> = []
+    @ObservationIgnored var contextObservations: Set<String> = []
+    @ObservationIgnored var contextNoticeOwner: String?
+    @ObservationIgnored var pendingSettingsAttempts: Set<String> = []
+    @ObservationIgnored let scheduledReadScheduler = HistoryHeadScheduler()
+    @ObservationIgnored var actionResultTask: Task<Void, Never>?
+    @ObservationIgnored var resolvingActionResults: Set<String> = []
+    @ObservationIgnored var processOutputTask: Task<Void, Never>?
 
     @ObservationIgnored var navigationId: Int64 = 0
     @ObservationIgnored var frames = RecentMap<ConversationFrame>()
@@ -202,7 +227,10 @@ final class ConversationModel {
         historyIndexing = false
         historyComplete = false
         olderError = ""
+        actionResultNotice = ""
         if session.target.agentId.isEmpty { parentSelection = nil }
+        cancelCompactContinuation()
+        clearExpectation = nil
         app.flushPrivateState()
         navigationId += 1
         cancelDetail()
@@ -260,6 +288,8 @@ final class ConversationModel {
             open(parent, preserveProject: true)
             return false
         }
+        cancelCompactContinuation()
+        clearExpectation = nil
         app.flushPrivateState()
         if selected != nil {
             navigationId += 1
@@ -276,6 +306,8 @@ final class ConversationModel {
     func close() {
         parentSelection = nil
         pendingAgentOpen = nil
+        cancelCompactContinuation()
+        clearExpectation = nil
         app.flushPrivateState()
         guard selected != nil else { return }
         navigationId += 1
@@ -299,12 +331,20 @@ final class ConversationModel {
         olderTask?.cancel()
         olderLoading = false
         readPositionReady = readTrackingReady
+        processOutputTask?.cancel()
+        processOutputLoading = false
+        processOutputResult = nil
+        processOutputError = ""
     }
 
     // MARK: Inspection
 
     func refreshActivity(explicit: Bool = false) {
         guard !demo, let original = selected else { return }
+        if let action = pendingActionResult(original.target) {
+            openSessionActionResult(action)
+            return
+        }
         guard let connection = app.connections.first(where: { $0.id == original.target.connectionId }) else { return }
         let navigation = navigationId
         let start = detailGate.begin("\(navigation):\(original.target.key)", explicit: explicit)
@@ -332,6 +372,29 @@ final class ConversationModel {
                 let frame = try await self.inspectOnce(connection, original.target).value
                 guard self.detailGate.owns(operation.id), self.navigationId == navigation, self.selected?.target == original.target else { return }
                 if let owner = self.detailReadErrorOwner, owner.target == original.target, owner.navigation == navigation { self.app.error = "" }
+                let clear = self.clearExpectation.flatMap { $0.navigation == navigation && ContextPolicies.sameSessionRun($0.target, frame.target) ? $0 : nil }
+                if let clear, frame.target.conversation != clear.target.conversation, !clear.confirmed {
+                    // A new conversation is accepted only after the original clear receipt confirms it.
+                    self.activityVerified = false
+                    self.activeFrameVerified = false
+                    self.historyCached = self.activity != nil
+                    return
+                }
+                if let clear, clear.confirmed, !frame.target.conversation.isEmpty, frame.target.conversation != clear.target.conversation,
+                   let operation = self.messageState.contextOperations.first(where: { $0.requestId == clear.requestId && $0.status == "completed" }) {
+                    self.app.editMessages { ContextPolicies.promoteClearDraft($0, operation, to: frame.target) }
+                    var updated = original
+                    updated.target = frame.target
+                    updated.status = frame.raw.string("activity", "phase", "state")
+                    updated.raw = frame.raw
+                    self.selected = updated
+                    self.installFrame(frame, verified: true)
+                    self.clearExpectation = nil
+                    self.contextNotice = self.drafts.contains { $0.target == operation.target && $0.questionId.isEmpty && $0.detachedId.isEmpty }
+                        ? "Context cleared. The previous composition remains in Saved drafts; restore it explicitly when ready." : "Context cleared. Your composition was kept."
+                    return
+                }
+                if let clear = self.clearExpectation, !ContextPolicies.sameSessionRun(clear.target, frame.target) { self.clearExpectation = nil }
                 var updated = original
                 updated.target = frame.target
                 updated.status = frame.raw.string("activity", "phase", "state")
@@ -506,6 +569,8 @@ final class ConversationModel {
             }
             self.captureUnreadBoundary(frame.target, merged.events)
             guard self.activityVerified else { return }
+            self.observeContext(frame)
+            self.observeScheduledSettings(frame)
             if QuestionTracking.remember(self.messageState, frame.target, frame.questions) != self.messageState {
                 self.app.editMessages { QuestionTracking.remember($0, frame.target, frame.questions) }
             }
@@ -537,6 +602,9 @@ final class ConversationModel {
     /// Outbox changes refresh the merged presentation.
     func messageStateChanged(old: MessageState, new: MessageState) {
         let submittedLocks: (MessageState) -> [Draft] = { $0.drafts.filter { $0.status == "submitted" && !$0.questionId.isEmpty } }
+        if let intent = continuation, continuationEnqueuing != intent.requestId, !intent.unchanged(draft(intent.draft.target)) {
+            cancelCompactContinuation("Draft changed. Compaction may finish, but your message has not been sent.")
+        }
         if old.outgoing != new.outgoing || submittedLocks(old) != submittedLocks(new) { syncOutgoing() }
     }
 

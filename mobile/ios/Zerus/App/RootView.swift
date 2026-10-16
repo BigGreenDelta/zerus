@@ -42,8 +42,33 @@ struct RootView: View {
                 MachinesScreen(settings: $settings, pairing: $pairing)
             } label: { Label("Machines", systemImage: "desktopcomputer") }
         }
+        .minimizingTabBarOnScroll()
         .sheet(isPresented: $settings) { SettingsView() }
+        .sheet(isPresented: $model.choosingLaunchMachine) { NewSessionMachineSheet() }
+        .fullScreenCover(isPresented: Binding(get: { model.launch.visible }, set: { if !$0 { model.launch.close() } })) {
+            if let machine = model.launch.machine { LaunchForm(machine: machine).environment(model) }
+        }
         .sheet(item: $pairing) { request in PairingSheet(request: request) }
+        .onChange(of: model.conversationRequest) { _, target in
+            guard let target else { return }
+            model.conversationRequest = nil
+            openConversation(target)
+        }
+        .overlay(alignment: .bottom) {
+            if !model.notice.isEmpty {
+                Text(model.notice)
+                    .font(.footnote)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.bottom, 90)
+                    .transition(.opacity)
+                    .task(id: model.notice) {
+                        try? await Task.sleep(for: .seconds(3))
+                        model.notice = ""
+                    }
+            }
+        }
         .onChange(of: model.invitation) { _, invite in
             guard let invite else { return }
             model.invitation = nil
@@ -58,6 +83,15 @@ struct RootView: View {
                 if Task.isCancelled { break }
                 if model.conversation.selected != nil { model.conversation.refreshActivity() }
                 else if tab != .drafts { model.refresh() }
+            }
+        }
+        .task(id: scenePhase) {
+            // Apply confirmed "next idle" settings intents, as Android checks every ten seconds.
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                if Task.isCancelled { break }
+                if model.storageReady && !model.demo { await model.conversation.watchScheduledSettings() }
             }
         }
         .onAppear {
@@ -125,8 +159,25 @@ struct MainToolbar: ToolbarContent {
                 .withoutGlassBackground()
         }
         ToolbarItem(placement: .topBarTrailing) {
+            Button { model.choosingLaunchMachine = true } label: { Image(systemName: "plus") }
+                .disabled(model.demo || model.connections.isEmpty)
+                .accessibilityLabel("New session")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Button { settings = true } label: { Image(systemName: "gearshape") }
                 .accessibilityLabel("Settings")
+        }
+    }
+}
+
+extension View {
+    /// iOS 26 shrinks the floating tab bar while reading, leaving room for the composer.
+    @ViewBuilder
+    func minimizingTabBarOnScroll() -> some View {
+        if #available(iOS 26, *) {
+            tabBarMinimizeBehavior(.onScrollDown)
+        } else {
+            self
         }
     }
 }
