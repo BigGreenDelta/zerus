@@ -60,8 +60,9 @@ runs update that copy when it changed; `HGS_MOBILE_CONNECTOR=0` always skips it.
 The installer never enables, starts or restarts the connector's service: when the
 running service uses the replaced binary, it prints the restart command to run
 after phone actions have drained. `mac-install.sh` passes the variable to the
-Mac's build. Moving a gateway from the Python connector is the owner-approved
-cutover in the connector's design.
+Mac's build. [Connect a computer](mobile-deployment.md#connect-a-computer) sets up
+its service, and [Move a computer to the Rust connector](mobile-deployment.md#move-a-computer-to-the-rust-connector)
+switches one that runs the Python connector.
 
 Open the workspace from the command line:
 

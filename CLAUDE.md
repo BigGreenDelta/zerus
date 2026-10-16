@@ -2,10 +2,12 @@
 
 Zerus provides a desktop UI and the `hgs` CLI for persistent local and remote
 agent sessions. The CLI lives in `src/`; the Qt GUI lives in `tray/src/`.
-The Rust mobile relay lives in `services/mobile/relay/`; the outbound Python
-connector remains in `services/mobile/zerus_mobile/`. Keep API v1 and durable
-request identities compatible; see `services/mobile/relay/README.md` for relay
-contracts, isolated PostgreSQL tests and container memory qualification.
+The Rust mobile relay lives in `services/mobile/relay/` and the Rust outbound
+connector in `services/mobile/connector/`; the legacy Python connector remains in
+`services/mobile/zerus_mobile/` until every gateway has moved. Keep API v1, durable
+request identities and the connector journal compatible; see
+`services/mobile/relay/README.md` for relay contracts, isolated PostgreSQL tests
+and container memory qualification. Moving a live gateway is owner-approved.
 The Android client lives in `mobile/android/`; the native iOS client (Swift
 package `ZerusKit` plus SwiftUI app) lives in `mobile/ios/`. Install iOS Dev
 builds with `mobile/ios/scripts/dev-install.sh` or `remote-dev-install.sh`; never
