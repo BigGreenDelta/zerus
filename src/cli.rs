@@ -511,6 +511,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
         return crate::host::admin::dispatch(&config, args, dry);
     }
+    if command == "send" && args.len() == 2 && args[1] == "--json" && !dry {
+        if let Some(origin) = state::session_graph::send_origin() {
+            return state::session_graph::forward_send(&target, args, origin);
+        }
+    }
     if !target.is_empty() && !config.is_self(&target) {
         return remote(&config, &target, command, args, dry);
     }

@@ -767,6 +767,9 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":string(&record,"conversation_id"),"first_message":string(&record,"conversation_id").is_empty(),"digest":digest,"status":"in_progress",
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});
+    if let Some(target) = session_graph::target_receipt(&record) {
+        receipt["graph_target"] = target;
+    }
     if let Err(error) = atomic(&receipt_path, &receipt.to_string()) {
         cleanup();
         return Err(error);

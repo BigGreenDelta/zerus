@@ -46,6 +46,48 @@ class TestGraphPage : public QObject {
                  "Verified delivery receipt · submitted, consumption unknown"}};
     }
   private slots:
+    void deliveryEvidenceIsPagedAndExplicitlyOpensOneExactReceipt() {
+        GraphPage page(nullptr, {});
+        page.resize(1400, 900);
+        page.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&page));
+        auto edges = relations();
+        for (int i = 0; i < 101; ++i)
+            edges[0].events.append(QJsonObject{{"id", QString("event-%1").arg(i)},
+                                               {"request_id", QString("request-%1").arg(i)},
+                                               {"at", 1000 + i}});
+        QVERIFY(page.setProjection(nodes(), edges));
+        QSignalSpy open(&page, &GraphPage::evidenceRequested);
+        page.focusNode("review");
+        auto *connections = page.findChild<QListWidget *>("graphConnections");
+        connections->setCurrentRow(0);
+        connections->setFocus();
+        QTest::keyClick(connections, Qt::Key_Return);
+        auto *evidence = page.findChild<QListWidget *>("graphEvidence");
+        QTRY_VERIFY(evidence->isVisible());
+        QCOMPARE(evidence->count(), 50);
+        QCOMPARE(open.size(), 0);
+        auto *older = page.findChild<QPushButton *>("graphEvidenceOlder");
+        QTest::mouseClick(older, Qt::LeftButton);
+        QCOMPARE(evidence->count(), 50);
+        QCOMPARE(evidence->item(0)->data(Qt::UserRole).toString(), QString("request-50"));
+        auto *button = page.findChild<QPushButton *>("graphEvidenceOpen");
+        QVERIFY(button->isEnabled());
+        QTest::mouseClick(button, Qt::LeftButton);
+        QCOMPARE(open.size(), 1);
+        QCOMPARE(open[0][5].toString(), QString("request-50"));
+        QVERIFY(page.setProjection(nodes(), edges));
+        QCOMPARE(evidence->item(0)->data(Qt::UserRole).toString(), QString("request-50"));
+        QTest::mouseClick(older, Qt::LeftButton);
+        QCOMPARE(evidence->count(), 1);
+        QVERIFY(!older->isEnabled());
+        auto unavailable = nodes();
+        unavailable[1].targets[0].available = false;
+        QVERIFY(page.setProjection(unavailable, edges));
+        QVERIFY(!button->isEnabled());
+        QTest::mouseClick(button, Qt::LeftButton);
+        QCOMPARE(open.size(), 1);
+    }
     void initTestCase() {
         QVERIFY(settings.isValid());
         QCoreApplication::setOrganizationName("ZerusGraphFixture");
@@ -53,6 +95,34 @@ class TestGraphPage : public QObject {
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
                            qEnvironmentVariable("ZERUS_GRAPH_SETTINGS_ROOT", settings.path()));
+    }
+    void nativeIdentityUpgradePreservesPinsCameraAndSelectionAcrossReopen() {
+        GraphPage page(nullptr, {});
+        auto provisional = nodes();
+        provisional[0].card.id = "provisional";
+        QVERIFY(page.setProjection(provisional, {}));
+        page.focusNode("provisional");
+        auto state = page.viewState();
+        auto canvas = state["canvas"].toObject();
+        auto positions = canvas["positions"].toObject();
+        positions["provisional"] = QJsonArray{1500, 900};
+        canvas["positions"] = positions;
+        canvas["scale"] = .75;
+        canvas["center"] = QJsonArray{1300, 800};
+        state["canvas"] = canvas;
+        QVERIFY(page.restoreViewState(state));
+        const auto camera = page.canvas()->viewState().value("center");
+        QVERIFY(page.setProjection(nodes(), {}, {{"provisional", "review"}}));
+        QCOMPARE(page.canvas()->nodeRect("review").topLeft(), QPointF(1500, 900));
+        QCOMPARE(page.canvas()->viewState()["center"], camera);
+        QCOMPARE(page.viewState()["selectedNode"].toString(), QString("review"));
+        QVERIFY(
+            !page.viewState()["canvas"].toObject()["positions"].toObject().contains("provisional"));
+        GraphPage reopened(nullptr, {});
+        QVERIFY(reopened.setProjection(nodes(), {}, {{"provisional", "review"}}));
+        QVERIFY(reopened.restoreViewState(state));
+        QCOMPARE(reopened.canvas()->nodeRect("review").topLeft(), QPointF(1500, 900));
+        QCOMPARE(reopened.viewState()["selectedNode"].toString(), QString("review"));
     }
     void inspectDoesNotNavigateAndOpenCarriesExactIdentity() {
         GraphPage page(nullptr, {});
@@ -119,8 +189,10 @@ class TestGraphPage : public QObject {
         QCOMPARE(canvas->viewState().value("center"), heldCamera);
         QTest::mouseRelease(canvas->viewport(), Qt::LeftButton, Qt::NoModifier, press);
         QTRY_VERIFY(page.findChild<QWidget *>("graphInspector")->isVisible());
-        QCoreApplication::processEvents(); // The reveal follows the splitter layout.
-        QTRY_VERIFY(canvas->viewport()->rect().contains(canvas->mapFromScene(bounds).boundingRect()));
+        QCoreApplication::processEvents(); // The reveal follows the splitter
+                                           // layout.
+        QTRY_VERIFY(
+            canvas->viewport()->rect().contains(canvas->mapFromScene(bounds).boundingRect()));
         QCOMPARE(canvas->viewState().value("positions"), positions);
         QCOMPARE(open.size(), 0);
         canvas->horizontalScrollBar()->setValue(canvas->horizontalScrollBar()->value() + 60);
@@ -257,7 +329,8 @@ class TestGraphPage : public QObject {
                 page.canvas()->horizontalScrollBar()->value() + 40);
             page.focusProject("Zerus");
             saved = page.viewState();
-            page.hide(); // Navigation flushes the coalesced write, even before its timer.
+            page.hide(); // Navigation flushes the coalesced write, even before its
+                         // timer.
         }
         // Reopen immediately, without waiting for the pending background write.
         GraphPage reopened(nullptr, key);

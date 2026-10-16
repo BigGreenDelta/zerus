@@ -177,6 +177,8 @@ public:
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
     quint64 requestGraph(const QString &host, bool changes, const QString &cursor = {});
+    quint64 requestGraphTarget(const QString &host,const QString &name,const QString &run,const QString &conversation,
+        const QString &archive,const QString &agent,const QString &machine,const QString &message = {});
     // `hgs session-host <action> --json` on this computer (Windows, spec D2):
     // install enables local sessions and stages the stable CLI and a host image.
     quint64 requestSessionHost(const QString &action);
@@ -317,6 +319,8 @@ signals:
     void subagentInspectionFailed(const QString &host, const QString &name, const QString &agentId, const QString &archiveId, const QString &error);
     void localReady(const BoxState &box);
     void graphReady(quint64 request, const QString &host, const QJsonObject &page);
+    void graphTargetReady(quint64 request,const QJsonObject &reply);
+    void graphTargetFailed(quint64 request,const QString &error);
     void graphFailed(quint64 request, const QString &host, const QString &error);
     void peerReady(const BoxState &box);
     void projectsReady(const QList<ProjectInfo> &projects);

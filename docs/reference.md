@@ -2514,14 +2514,29 @@ and the v2 Dev catalogs have no Windows artifact.
 
 ## JSON and external clients
 
-### Relationship metadata (Graph implementation)
+### Session and agent Graph
 
 `hgs [@host] graph snapshot --json` reads a derived, host-owned metadata index.
-This initial collector projects saved conversation/run identities, persisted child
-rosters and confirmed fork bindings. It reports communication and archive coverage
-as `not_indexed`; this command does not imply that the Graph workspace is shipped.
-The collector never reads prompt bodies or provider transcripts, launches an agent,
-sends input or changes read marks. Source bindings are unchanged.
+The desktop Graph destination combines saved conversation/run identities,
+archived bindings, persisted native child rosters, current native API children,
+confirmed forks and verified Zerus submission receipts. Cards reuse Sessions'
+status, provider, computer, branch, Draft and unread presentation. Search and
+project/machine filters keep cross-project neighbors visible as context. Archived
+sessions and completed children have explicit filters. A list provides the same
+inspection and exact-target actions without using the canvas.
+
+Dragging a node immediately resizes its project's region; overlap never changes
+project membership. Positions and camera are saved locally per device, including
+when a provisional native identity becomes confirmed. Refresh, filters and reopen
+do not rearrange manual positions. New nodes use free space. Fit changes only the
+camera; Arrange visible is explicit, has Undo and reserves hidden positions.
+
+The collector reads metadata rather than prompt bodies or provider transcripts.
+It never launches an agent, sends input or changes read marks. Source bindings are
+unchanged. Selection only inspects Graph. Open Activity performs a fresh native
+identity read before opening the exact current run, archive or child; old hosts
+without that read fail visibly. Graph can open an archive outside the currently
+loaded Archive page without listing the whole archive catalog.
 
 Each call advances at most 32 bindings, with a 2 MiB ordinary input budget and a
 50 ms cooperative work budget. One manifest may finish within a 16 MiB hard cap;
@@ -2540,6 +2555,29 @@ Replies contain a native `machine_id`, index `epoch`, monotonic `revision`, type
 Changes carry explicit tombstones. A missing row on a partial page is not removal.
 Names and routes are labels; exact binding/run targets remain separate even when
 multiple bindings share one conversation. Conflicting observations remain explicit.
+
+New agent-originated `hgs send ... --json` calls reserve bounded private metadata
+before ordinary delivery. Attribution requires a saved live native process to be
+an actual ancestor of the sending CLI; `HGS_SESSION` labels alone are insufficient.
+GUI and connector subprocesses remove those labels. The recipient receipt pins
+its own native machine/provider/account/conversation identity. The source ledger
+stores no message or attachment bodies, retains 30 days and cannot replay input.
+Old, uncertain or unattributed attempts remain explicit coverage gaps. Existing
+quoted message envelopes are not retrospectively treated as verified edges.
+
+One directed line aggregates distinct confirmed submissions between its endpoints;
+its inspector pages 50 receipts at a time. Submission does not imply a reply or
+completed work, and local timestamps do not establish cross-computer causal order.
+Unavailable computers remain boundary nodes with no borrowed actions. Explicit
+Open delivered message reads only the selected native receipt, not the transcript:
+`hgs [@host] graph receipt --json` accepts JSON stdin with `name`,
+`expected_run_id`, `expected_conversation_id`, `message_request_id` and optional
+`archive_id`. Every identity is checked again; the response contains one bounded
+public delivery event. Graph metadata polling never fetches message bodies.
+
+Desktop transport uses configured native hosts directly. The first desktop
+preview does not add an Android Graph destination or a mobile relay operation.
+
 
 ### Existing session snapshots
 

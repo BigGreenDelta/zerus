@@ -1,6 +1,8 @@
 #pragma once
 #include "GraphCanvas.h"
+#include <QJsonArray>
 #include <QWidget>
+#include <optional>
 
 class QLabel;
 class QLineEdit;
@@ -21,32 +23,45 @@ class GraphPage : public QWidget {
     struct Target {
         QString host, name, run, conversation, archive, agent;
         bool available = false;
+        QJsonObject metadata;
+        QString machine;
     };
     struct Node {
         GraphCanvas::Node card;
         QString project, identity, detail;
         QList<Target> targets;
+        bool archived = false, completedChild = false;
     };
     struct Relation {
         GraphCanvas::Relation line;
         QString evidence;
+        QJsonArray events;
     };
     // An empty key disables local persistence for isolated preview/fixtures.
     explicit GraphPage(QWidget *parent = nullptr,
                        const QString &viewStateKey = QStringLiteral("workspace/graphView"));
     ~GraphPage() override;
-    bool setProjection(const QList<Node> &nodes, const QList<Relation> &relations);
+    bool setProjection(const QList<Node> &nodes, const QList<Relation> &relations,
+                       const QHash<QString, QString> &aliases = {});
     void setTheme(bool dark);
     void setFreshness(const QString &summary, const QString &details = {});
     void focusNode(const QString &id);
+    bool focusTarget(const QString &host, const QString &name, const QString &run,
+                     const QString &conversation, const QString &archive = {});
     void focusProject(const QString &id);
     GraphCanvas *canvas() const { return m_canvas; }
     QJsonObject viewState() const;
     bool restoreViewState(const QJsonObject &state);
+    std::optional<Target> target(const QString &host, const QString &name, const QString &run,
+                                 const QString &conversation, const QString &archive,
+                                 const QString &agent) const;
   signals:
     void refreshRequested();
     void openRequested(const QString &host, const QString &name, const QString &run,
                        const QString &conversation, const QString &archive, const QString &agent);
+    void evidenceRequested(const QString &host, const QString &name, const QString &run,
+                           const QString &conversation, const QString &archive,
+                           const QString &request);
 
   protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -64,6 +79,10 @@ class GraphPage : public QWidget {
     void arrangeVisible();
     void undoArrange();
     void updateFreshness();
+    void renderEvidence();
+    void updateEvidenceAction();
+    QJsonObject applyAliases(QJsonObject state) const;
+    QHash<QString, QString> m_aliases;
     QList<Node> m_nodes;
     QList<Relation> m_relations;
     GraphCanvas *m_canvas;
@@ -82,11 +101,18 @@ class GraphPage : public QWidget {
     GraphSummary *m_summary;
     QListView *m_list;
     QListWidget *m_connections, *m_targets;
+    QListWidget *m_evidence;
+    QLabel *m_evidenceCount;
+    QPushButton *m_evidenceNewer, *m_evidenceOlder, *m_evidenceOpen;
+    QWidget *m_evidencePanel;
+    QString m_evidenceRelation;
+    int m_evidenceOffset = 0;
     QSplitter *m_splitter;
     QStackedWidget *m_views;
     QMenu *m_filterMenu;
     QByteArray m_inspectionSignature;
     QString m_selectedNode, m_selectedRelation, m_project, m_neighborhood;
     QString m_pendingReveal;
-    bool m_attentionOnly = false, m_dark = true, m_overlay = false, m_rendering = false;
+    bool m_attentionOnly = false, m_showArchives = false, m_showCompleted = false;
+    bool m_dark = true, m_overlay = false, m_rendering = false;
 };

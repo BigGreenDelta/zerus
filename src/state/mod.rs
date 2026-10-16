@@ -57,7 +57,7 @@ mod resume_input;
 mod scan_cache;
 mod schedules;
 mod search;
-mod session_graph;
+pub(crate) mod session_graph;
 mod storage;
 mod subagents;
 mod native_subagents;

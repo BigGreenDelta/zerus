@@ -202,7 +202,35 @@ pub(super) fn history_receipt(record:&Value,agent:&str,path:&Path)->Result<Optio
     Ok(Some((json!({"type":"UserPromptSubmit","source":"hgs_delivery","message_id":receipt["request_id"],"agent_id":"",
         "at":receipt.get("submitted_at").unwrap_or(&receipt["at"]),"detail":text,"submitted_text":text,"attachments":public_files(&receipt)}),string(&receipt,"submitted_text").to_owned())))
 }
-pub(super) fn history_directory(record:&Value)->PathBuf {directory(record)}
+pub(super) fn history_directory(record:&Value)->PathBuf {directory(record)
+}
+
+/// Explicitly requested Graph evidence from one exact durable send. It does
+/// not enumerate receipts, fetch attachment bytes or acknowledge any message.
+pub(super) fn graph_receipt(record: &Value, id: &str) -> Result<Value> {
+    let id = uuid::Uuid::parse_str(id).map_err(|_| "Invalid delivery request ID")?;
+    if id.is_nil() {
+        return Err("Invalid delivery request ID".into());
+    }
+    let value = receipt(&directory(record).join(format!("{id}.json")))?;
+    if !belongs(&value, record, "") || value["request_id"] != id.to_string() {
+        return Err("This delivery receipt is unavailable for the exact conversation".into());
+    }
+    let text = message_text(&value);
+    let truncated = text.len() > 32 * 1024;
+    let end = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= 32 * 1024)
+        .last()
+        .unwrap_or(0);
+    let detail = if truncated { &text[..end] } else { &text };
+    Ok(
+        json!({"type":"UserPromptSubmit","source":"hgs_delivery","message_id":id.to_string(),"agent_id":"",
+        "at":value.get("submitted_at").unwrap_or(&value["at"]),"detail":detail,
+        "content_truncated":truncated,"attachments":public_files(&value)}),
+    )
+}
 
 pub(super) fn stage_native(request: &Value) -> Result<Value> {
     if request["attachments"].is_null() {

@@ -1347,6 +1347,11 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 receipt["submitted_text"] = json!(text);
                 receipt["submitted_at"] = json!(now());
                 receipt["status"] = json!("pending");
+                if agent_id.is_empty() {
+                    if let Some(target) = session_graph::target_receipt(&record) {
+                        receipt["graph_target"] = target;
+                    }
+                }
                 atomic(&receipt_path, &receipt.to_string())?;
                 if agent_id.is_empty() {
                     rpc(

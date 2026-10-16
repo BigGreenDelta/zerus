@@ -12,12 +12,16 @@ struct Binding {
     QString project, projectLabel;
     QMap<int, QVariant> roles;
     bool available = false;
+    QJsonValue generation;
+    bool completed = false;
 };
 struct Result {
     QList<GraphPage::Node> nodes;
     QList<GraphPage::Relation> relations;
+    QHash<QString, QString> aliases;
     int unresolved = 0, omitted = 0;
 };
 Result compose(const SessionGraphStore &store, const QList<Binding> &bindings,
-               const QSet<QString> &confirmedRoutes, int limit = 2000);
-}
+               const QSet<QString> &confirmedRoutes, int limit = 2000,
+               const QJsonObject &context = {});
+} // namespace GraphProjection

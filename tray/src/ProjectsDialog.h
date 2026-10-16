@@ -36,6 +36,7 @@ signals:
     void writeReported(const QString &op, bool ok);
     void projectsChanged(const QString &host);
     void organizationChanged();
+    void graphRequested(const QString &project);
     void swarmRequested();
     void catalogDraftEditing(bool active);
     void folderSessionsRequested(const QString &host, const QString &path, bool checkout);

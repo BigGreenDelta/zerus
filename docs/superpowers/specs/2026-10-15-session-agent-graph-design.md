@@ -471,10 +471,16 @@ Node inspection waits until a pointer gesture ends before opening the side pane,
 so shrinking the canvas cannot move a card beneath a held pointer. The camera
 then reveals the selected card without changing positions; polling never repeats
 that reveal or replaces a manually adjusted camera.
-Verified communication provenance, archive and full native-child
-coverage, final platform/performance qualification and Android transport remain
-unfinished. This milestone is not a usable Graph release;
-the first-release boundary below is unchanged.
+The first desktop release now adds verified new-send provenance, archived native
+bindings, current native-API children and receipt-level navigation. Attribution is
+based on actual native process ancestry plus the recipient's own exact receipt;
+older quoted envelopes remain explicitly unattributed. Delivery metadata is
+retained for 30 days without message bodies. Equivalent live/archive structural
+proofs retain one child identity; contradictory observations stay unresolved.
+Manual positions follow only verified provisional-to-confirmed aliases. Archived
+and completed-child filters and bounded 50-receipt inspection avoid unbounded UI
+lists. Native Android Graph transport and its destination remain a following
+release; they are not implied by the desktop preview.
 
 ## Delivery boundaries and acceptance
 

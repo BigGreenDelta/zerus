@@ -4,6 +4,7 @@
 #include "WorkspacePageHeader.h"
 #include "WorkspaceStyle.h"
 #include <QApplication>
+#include <QDateTime>
 #include <QFrame>
 #include <QHideEvent>
 #include <QJsonArray>
@@ -169,6 +170,66 @@ GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(par
     m_connections->setAccessibleName(tr("Recorded connections"));
     m_connections->setMinimumHeight(130);
     body->addWidget(m_connections, 1);
+    m_evidencePanel = new QWidget;
+    auto *evidenceLayout = new QVBoxLayout(m_evidencePanel);
+    evidenceLayout->setContentsMargins(0, 0, 0, 0);
+    evidenceLayout->addWidget(plain(tr("Delivery evidence")));
+    m_evidenceCount = plain();
+    m_evidenceCount->setWordWrap(true);
+    m_evidenceCount->setObjectName("graphEvidenceCount");
+    evidenceLayout->addWidget(m_evidenceCount);
+    m_evidence = new QListWidget;
+    m_evidence->setObjectName("graphEvidence");
+    m_evidence->setAccessibleName(tr("Recorded delivery receipts"));
+    m_evidence->setMinimumHeight(100);
+    m_evidence->setMaximumHeight(200);
+    evidenceLayout->addWidget(m_evidence);
+    auto *evidencePages = new QHBoxLayout;
+    m_evidenceNewer = new QPushButton(tr("Newer"));
+    m_evidenceNewer->setObjectName("graphEvidenceNewer");
+    m_evidenceOlder = new QPushButton(tr("Older"));
+    m_evidenceOlder->setObjectName("graphEvidenceOlder");
+    evidencePages->addWidget(m_evidenceNewer);
+    evidencePages->addWidget(m_evidenceOlder);
+    evidenceLayout->addLayout(evidencePages);
+    m_evidenceOpen = new QPushButton(tr("Open delivered message"));
+    m_evidenceOpen->setObjectName("graphEvidenceOpen");
+    evidenceLayout->addWidget(m_evidenceOpen);
+    body->addWidget(m_evidencePanel);
+    m_evidencePanel->hide();
+    connect(m_evidenceNewer, &QPushButton::clicked, this, [this] {
+        m_evidenceOffset = qMax(0, m_evidenceOffset - 50);
+        renderEvidence();
+    });
+    connect(m_evidenceOlder, &QPushButton::clicked, this, [this] {
+        m_evidenceOffset += 50;
+        renderEvidence();
+    });
+    connect(m_evidence, &QListWidget::currentRowChanged, this, [this] { updateEvidenceAction(); });
+    connect(m_evidenceOpen, &QPushButton::clicked, this, [this] {
+        const auto edge =
+            std::find_if(m_relations.cbegin(), m_relations.cend(),
+                         [this](const Relation &r) { return r.line.id == m_selectedRelation; });
+        if (edge == m_relations.cend() || !m_evidence->currentItem())
+            return;
+        const auto node = std::find_if(m_nodes.cbegin(), m_nodes.cend(),
+                                       [&](const Node &n) { return n.card.id == edge->line.to; });
+        if (node == m_nodes.cend())
+            return;
+        QList<Target> candidates;
+        for (const auto &t : node->targets)
+            if (t.available && t.agent.isEmpty() && t.archive.isEmpty())
+                candidates.append(t);
+        if (candidates.isEmpty())
+            for (const auto &t : node->targets)
+                if (t.available && t.agent.isEmpty())
+                    candidates.append(t);
+        if (candidates.size() != 1)
+            return;
+        const auto &t = candidates.first();
+        emit evidenceRequested(t.host, t.name, t.run, t.conversation, t.archive,
+                               m_evidence->currentItem()->data(Qt::UserRole).toString());
+    });
     body->addStretch();
     scroll->setWidget(content);
     panel->addWidget(scroll, 1);
@@ -348,7 +409,8 @@ void GraphPage::hideEvent(QHideEvent *event) {
     }
 }
 
-bool GraphPage::setProjection(const QList<Node> &nodes, const QList<Relation> &relations) {
+bool GraphPage::setProjection(const QList<Node> &nodes, const QList<Relation> &relations,
+                              const QHash<QString, QString> &aliases) {
     if (nodes.size() > 2000 || relations.size() > 10000)
         return false;
     QSet<QString> ids, edges;
@@ -363,10 +425,18 @@ bool GraphPage::setProjection(const QList<Node> &nodes, const QList<Relation> &r
             return false;
         edges.insert(edge.line.id);
     }
+    m_aliases = aliases;
+    const auto previous = viewState();
+    const auto upgraded = applyAliases(previous);
+    if (!m_beforeArrange.isEmpty())
+        m_beforeArrange =
+            applyAliases(QJsonObject{{"canvas", m_beforeArrange}})["canvas"].toObject();
     m_nodes = nodes;
     m_relations = relations;
     m_haveProjection = true;
     render();
+    if (previous != upgraded)
+        restoreViewState(upgraded);
     // Remember new automatically placed nodes too, after the old saved layout
     // has been applied. Ordinary identical refreshes are coalesced by the store.
     if (m_viewStore && m_viewLoaded && m_viewError.isEmpty())
@@ -375,8 +445,10 @@ bool GraphPage::setProjection(const QList<Node> &nodes, const QList<Relation> &r
 }
 void GraphPage::render() {
     const auto query = m_search->text().trimmed();
-    QSet<QString> visible, primary;
+    QSet<QString> visible, primary, archives;
     for (const auto &node : m_nodes) {
+        if (node.archived)
+            archives.insert(node.card.id);
         const auto &roles = node.card.roles;
         const QString text = QStringList{roles.value(SessionRoles::Title).toString(),
                                          roles.value(SessionRoles::Host).toString(),
@@ -386,7 +458,11 @@ void GraphPage::render() {
                                          node.identity,
                                          node.card.id}
                                  .join(' ');
-        if ((m_project.isEmpty() || (node.card.group.isEmpty() ? QStringLiteral("@unassigned")
+        if ((m_showArchives || !node.archived) &&
+            (m_showCompleted || !node.completedChild ||
+             roles.value(SessionRoles::Attention).toBool() ||
+             roles.value(SessionRoles::Draft).toBool()) &&
+            (m_project.isEmpty() || (node.card.group.isEmpty() ? QStringLiteral("@unassigned")
                                                                : node.card.group) == m_project) &&
             (!m_attentionOnly || roles.value(SessionRoles::Attention).toBool() ||
              roles.value(SessionRoles::Unread).toBool()) &&
@@ -394,6 +470,15 @@ void GraphPage::render() {
             primary.insert(node.card.id);
     }
     visible = primary;
+    // An archived endpoint remains useful context for a visible current
+    // conversation; unrelated archives remain opt-in.
+    for (const auto &edge : m_relations)
+        if (primary.contains(edge.line.from) || primary.contains(edge.line.to)) {
+            if (archives.contains(edge.line.from))
+                visible.insert(edge.line.from);
+            if (archives.contains(edge.line.to))
+                visible.insert(edge.line.to);
+        }
     if (!m_project.isEmpty())
         for (const auto &edge : m_relations)
             if (primary.contains(edge.line.from) || primary.contains(edge.line.to)) {
@@ -432,11 +517,13 @@ void GraphPage::render() {
             .arg(m_nodes.size())
             .arg(edges.size())
             .arg(m_neighborhood.isEmpty() ? QString() : tr(" · Focused neighborhood")));
-    m_filters->setText(m_project.isEmpty() && !m_attentionOnly && m_neighborhood.isEmpty()
+    m_filters->setText(m_project.isEmpty() && !m_attentionOnly && m_neighborhood.isEmpty() &&
+                               !m_showArchives && !m_showCompleted
                            ? tr("Filters")
                            : tr("Filters (%1)")
                                  .arg(int(!m_project.isEmpty()) + int(m_attentionOnly) +
-                                      int(!m_neighborhood.isEmpty())));
+                                      int(!m_neighborhood.isEmpty()) + int(m_showArchives) +
+                                      int(m_showCompleted)));
     if (m_inspectorWanted)
         inspectSelection();
 }
@@ -467,7 +554,8 @@ void GraphPage::inspectNode(const QString &id) {
         m_pendingReveal = id;
     } else {
         inspectSelection();
-        if (opening) m_pendingReveal = id;
+        if (opening)
+            m_pendingReveal = id;
         revealInspectedNode();
     }
     saveView();
@@ -527,10 +615,14 @@ void GraphPage::inspectSelection() {
              (edge.line.from == m_selectedNode || edge.line.to == m_selectedNode)) ||
             edge.line.id == m_selectedRelation)
             signature.append(QJsonArray{edge.line.id, edge.line.from, edge.line.to, edge.line.kind,
-                                        edge.line.description, edge.evidence});
+                                        edge.line.description, edge.evidence, edge.events.size(),
+                                        edge.events.isEmpty() ? QJsonValue() : edge.events.first(),
+                                        edge.events.isEmpty() ? QJsonValue() : edge.events.last()});
     const auto currentSignature = QJsonDocument(signature).toJson(QJsonDocument::Compact);
-    if (!m_inspector->isHidden() && currentSignature == m_inspectionSignature)
+    if (!m_inspector->isHidden() && currentSignature == m_inspectionSignature) {
+        updateEvidenceAction();
         return;
+    }
     m_inspectionSignature = currentSignature;
     const QString previousTarget =
         m_targets->currentItem() ? m_targets->currentItem()->toolTip() : QString();
@@ -544,6 +636,7 @@ void GraphPage::inspectSelection() {
     m_open->setVisible(node != m_nodes.cend());
     m_focus->setVisible(node != m_nodes.cend());
     m_summary->setVisible(node != m_nodes.cend());
+    m_evidencePanel->hide();
     if (node != m_nodes.cend()) {
         m_summary->setCard(node->card);
         m_title->setText(node->card.roles.value(SessionRoles::Title).toString());
@@ -594,12 +687,127 @@ void GraphPage::inspectSelection() {
             }
         }
     }
+    renderEvidence();
     // Connections select edges; endpoint rows select their exact node.
     m_connections->verticalScrollBar()->setValue(oldScroll);
     m_inspector->show();
     arrangeInspector();
 }
+void GraphPage::renderEvidence() {
+    const auto edge =
+        std::find_if(m_relations.cbegin(), m_relations.cend(),
+                     [this](const Relation &r) { return r.line.id == m_selectedRelation; });
+    if (edge == m_relations.cend() || edge->events.isEmpty()) {
+        m_evidencePanel->hide();
+        return;
+    }
+    const auto previous = m_evidence->currentItem()
+                              ? m_evidence->currentItem()->data(Qt::UserRole).toString()
+                              : QString();
+    if (m_evidenceRelation != edge->line.id) {
+        m_evidenceRelation = edge->line.id;
+        m_evidenceOffset = 0;
+    }
+    m_evidenceOffset = qBound(0, m_evidenceOffset, int((edge->events.size() - 1) / 50) * 50);
+    const int end = qMin(m_evidenceOffset + 50, int(edge->events.size()));
+    {
+        const QSignalBlocker block(m_evidence);
+        m_evidence->clear();
+        int selected = 0;
+        for (int i = m_evidenceOffset; i < end; ++i) {
+            const auto event = edge->events[i].toObject();
+            const auto request = event["request_id"].toString();
+            auto *item = new QListWidgetItem(
+                tr("%1 · Submitted\nRequest %2")
+                    .arg(QDateTime::fromSecsSinceEpoch(qint64(event["at"].toDouble()))
+                             .toLocalTime()
+                             .toString("d MMM HH:mm:ss"),
+                         request.left(12)),
+                m_evidence);
+            item->setData(Qt::UserRole, request);
+            item->setToolTip(tr("Request: %1\nEvidence: %2\nConfirmed terminal/native submission; "
+                                "response and task completion are not implied.")
+                                 .arg(request, event["id"].toString()));
+            if (request == previous)
+                selected = i - m_evidenceOffset;
+        }
+        m_evidence->setCurrentRow(selected);
+    }
+    m_evidenceCount->setText(tr("%1–%2 of %3 receipts in loaded history")
+                                 .arg(m_evidenceOffset + 1)
+                                 .arg(end)
+                                 .arg(edge->events.size()));
+    m_evidenceNewer->setEnabled(m_evidenceOffset > 0);
+    m_evidenceOlder->setEnabled(end < edge->events.size());
+    updateEvidenceAction();
+    m_evidencePanel->show();
+}
+void GraphPage::updateEvidenceAction() {
+    const auto edge =
+        std::find_if(m_relations.cbegin(), m_relations.cend(),
+                     [this](const Relation &r) { return r.line.id == m_selectedRelation; });
+    if (edge == m_relations.cend()) {
+        m_evidenceOpen->setEnabled(false);
+        return;
+    }
+    const auto node = std::find_if(m_nodes.cbegin(), m_nodes.cend(),
+                                   [&](const Node &n) { return n.card.id == edge->line.to; });
+    int current = 0, available = 0;
+    if (node != m_nodes.cend())
+        for (const auto &t : node->targets)
+            if (t.available && t.agent.isEmpty()) {
+                ++available;
+                if (t.archive.isEmpty())
+                    ++current;
+            }
+    m_evidenceOpen->setEnabled(m_evidence->currentItem() &&
+                               (current == 1 || (current == 0 && available == 1)));
+    m_evidenceOpen->setToolTip(
+        m_evidenceOpen->isEnabled()
+            ? tr("Read this exact delivery receipt from the recipient computer "
+                 "and open it in Activity.")
+            : tr("The recipient needs one available exact binding. Open its node "
+                 "to inspect the available bindings."));
+}
+std::optional<GraphPage::Target> GraphPage::target(const QString &host, const QString &name,
+                                                   const QString &run, const QString &conversation,
+                                                   const QString &archive,
+                                                   const QString &agent) const {
+    std::optional<Target> result;
+    for (const auto &node : m_nodes)
+        for (const auto &t : node.targets)
+            if (t.host == host && t.name == name && t.run == run &&
+                t.conversation == conversation && t.archive == archive && t.agent == agent &&
+                t.available) {
+                if (result)
+                    return std::nullopt;
+                result = t;
+            }
+    return result;
+}
+bool GraphPage::focusTarget(const QString &host, const QString &name, const QString &run,
+                            const QString &conversation, const QString &archive) {
+    QString found;
+    for (const auto &node : m_nodes)
+        for (const auto &t : node.targets)
+            if (t.host == host && t.name == name && t.run == run &&
+                t.conversation == conversation && t.archive == archive && t.agent.isEmpty()) {
+                if (!found.isEmpty() && found != node.card.id)
+                    return false;
+                found = node.card.id;
+            }
+    if (found.isEmpty())
+        return false;
+    focusNode(found);
+    return true;
+}
 void GraphPage::focusNode(const QString &id) {
+    for (const auto &node : m_nodes)
+        if (node.card.id == id) {
+            m_showArchives |= node.archived;
+            m_showCompleted |= node.completedChild;
+            break;
+        }
     m_project.clear();
     m_attentionOnly = false;
     m_neighborhood.clear();
@@ -624,9 +832,9 @@ void GraphPage::updateFreshness() {
                                 ? m_freshnessSummary
                                 : m_viewError + tr(" · changes kept in this window");
     m_freshness->setText(summary);
-    m_freshness->setToolTip(
-        m_freshnessDetails + "\n" +
-        tr("Positions, zoom and camera are saved on this device. Refresh keeps your layout."));
+    m_freshness->setToolTip(m_freshnessDetails + "\n" +
+                            tr("Positions, zoom and camera are saved on this "
+                               "device. Refresh keeps your layout."));
     m_freshness->setAccessibleName(summary);
 }
 void GraphPage::rebuildFilters() {
@@ -636,6 +844,8 @@ void GraphPage::rebuildFilters() {
         m_project.clear();
         m_neighborhood.clear();
         m_attentionOnly = false;
+        m_showArchives = false;
+        m_showCompleted = false;
         m_search->clear();
         render();
         saveView();
@@ -645,6 +855,24 @@ void GraphPage::rebuildFilters() {
     attention->setChecked(m_attentionOnly);
     connect(attention, &QAction::toggled, this, [this](bool enabled) {
         m_attentionOnly = enabled;
+        render();
+        saveView();
+    });
+    auto *archives = m_filterMenu->addAction(tr("Archived sessions"));
+    archives->setObjectName("graphShowArchives");
+    archives->setCheckable(true);
+    archives->setChecked(m_showArchives);
+    connect(archives, &QAction::toggled, this, [this](bool on) {
+        m_showArchives = on;
+        render();
+        saveView();
+    });
+    auto *completed = m_filterMenu->addAction(tr("Completed agents"));
+    completed->setObjectName("graphShowCompleted");
+    completed->setCheckable(true);
+    completed->setChecked(m_showCompleted);
+    connect(completed, &QAction::toggled, this, [this](bool on) {
+        m_showCompleted = on;
         render();
         saveView();
     });
@@ -701,21 +929,29 @@ void GraphPage::setTheme(bool dark) {
     m_list->setProperty("hgsDark", dark);
     m_list->viewport()->update();
     WorkspacePageHeader::theme(m_refresh, nullptr, tr("Refresh graph"), dark);
-    setStyleSheet(
-        QString("#graphPage {background:%4;color:%5;} #graphPage QLabel {color:%5;} #graphPage "
-                "QLineEdit,#graphPage QListView {background:%1;color:%5;border:1px solid "
-                "%2;border-radius:5px;padding:5px;} #graphPage QListView::item:selected "
-                "{background:%6;color:%5;} #graphPage QPushButton "
-                "{background:%1;color:%5;border:1px solid %2;border-radius:6px;padding:6px "
-                "10px;min-height:20px;} #graphPage QPushButton:disabled {color:%3;} #graphPage "
-                "QPushButton:hover {border-color:%3;} #graphInspectorContent {background:%1;} "
-                "#graphPage QScrollArea {background:transparent;border:0;} #graphInspector "
-                "{background:%1;border:1px solid %2;border-radius:8px;} #graphInspectorTitle "
-                "{font-size:15px;font-weight:600;} #graphScope,#graphFreshness {color:%3;}")
-            .arg(dark ? "#1c2229" : "#ffffff", dark ? "#333c47" : "#dce2e8",
-                 dark ? "#a2adbc" : "#627082", dark ? "#171d24" : "#f2f5f6",
-                 dark ? "#e8edf4" : "#1a2733", dark ? "#303b47" : "#dde7ef") +
-        workspaceScrollbars(dark));
+    setStyleSheet(QString("#graphPage {background:%4;color:%5;} #graphPage QLabel "
+                          "{color:%5;} #graphPage "
+                          "QLineEdit,#graphPage QListView "
+                          "{background:%1;color:%5;border:1px solid "
+                          "%2;border-radius:5px;padding:5px;} #graphPage "
+                          "QListView::item:selected "
+                          "{background:%6;color:%5;} #graphPage QPushButton "
+                          "{background:%1;color:%5;border:1px solid "
+                          "%2;border-radius:6px;padding:6px "
+                          "10px;min-height:20px;} #graphPage QPushButton:disabled "
+                          "{color:%3;} #graphPage "
+                          "QPushButton:hover {border-color:%3;} #graphInspectorContent "
+                          "{background:%1;} "
+                          "#graphPage QScrollArea {background:transparent;border:0;} "
+                          "#graphInspector "
+                          "{background:%1;border:1px solid %2;border-radius:8px;} "
+                          "#graphInspectorTitle "
+                          "{font-size:15px;font-weight:600;} #graphScope,#graphFreshness "
+                          "{color:%3;}")
+                      .arg(dark ? "#1c2229" : "#ffffff", dark ? "#333c47" : "#dce2e8",
+                           dark ? "#a2adbc" : "#627082", dark ? "#171d24" : "#f2f5f6",
+                           dark ? "#e8edf4" : "#1a2733", dark ? "#303b47" : "#dde7ef") +
+                  workspaceScrollbars(dark));
     for (auto *button : findChildren<QPushButton *>())
         if (button->property("glyph").isValid())
             button->setIcon(workspaceIcon(button->property("glyph").toString(),
@@ -727,13 +963,37 @@ QJsonObject GraphPage::viewState() const {
             {"project", m_project},
             {"query", m_search->text()},
             {"attention", m_attentionOnly},
+            {"archives", m_showArchives},
+            {"completed", m_showCompleted},
             {"neighborhood", m_neighborhood},
             {"selectedNode", m_selectedNode},
             {"selectedRelation", m_selectedRelation},
             {"inspector", m_inspectorWanted},
             {"list", m_listToggle->isChecked()}};
 }
-bool GraphPage::restoreViewState(const QJsonObject &state) {
+QJsonObject GraphPage::applyAliases(QJsonObject state) const {
+    auto canvas = state["canvas"].toObject();
+    auto positions = canvas["positions"].toObject();
+    for (auto it = m_aliases.cbegin(); it != m_aliases.cend(); ++it) {
+        if (it.key() == it.value() || it.key().isEmpty() || it.value().isEmpty())
+            continue;
+        if (positions.contains(it.key())) {
+            if (!positions.contains(it.value()))
+                positions[it.value()] = positions[it.key()];
+            positions.remove(it.key());
+        }
+        for (const auto &field : {"selectedNode", "neighborhood"})
+            if (state[field] == it.key())
+                state[field] = it.value();
+        if (canvas["selected"] == it.key())
+            canvas["selected"] = it.value();
+    }
+    canvas["positions"] = positions;
+    state["canvas"] = canvas;
+    return state;
+}
+bool GraphPage::restoreViewState(const QJsonObject &rawState) {
+    const auto state = applyAliases(rawState);
     m_restoring = true;
     if (state["schema"] != 1 || !state["canvas"].isObject() ||
         !m_canvas->restoreViewState(state["canvas"].toObject())) {
@@ -744,6 +1004,8 @@ bool GraphPage::restoreViewState(const QJsonObject &state) {
     m_neighborhood = state["neighborhood"].toString().left(512);
     m_search->setText(state["query"].toString().left(512));
     m_attentionOnly = state["attention"].toBool();
+    m_showArchives = state["archives"].toBool();
+    m_showCompleted = state["completed"].toBool();
     m_selectedNode = state["selectedNode"].toString().left(512);
     m_selectedRelation = state["selectedRelation"].toString().left(512);
     m_inspectorWanted = state["inspector"].toBool();

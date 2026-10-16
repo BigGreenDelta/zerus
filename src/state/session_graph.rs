@@ -3,6 +3,10 @@
 //! adapter, opens a terminal or reads message bodies.
 mod index;
 mod model;
+mod sends;
+
+pub(super) use sends::target_receipt;
+pub(crate) use sends::{forward_send, send_origin};
 
 use super::*;
 use anyhow::{ensure, Result as GraphResult};
@@ -34,7 +38,13 @@ fn candidate(path: &Path) -> bool {
 fn inventory(root: &Path) -> GraphResult<(Vec<(String, PathBuf)>, bool)> {
     let mut paths = Vec::new();
     let mut complete = true;
-    for directory in ["", "bindings", "dsh/bindings", "opencode/bindings"] {
+    for directory in [
+        "",
+        "bindings",
+        "dsh/bindings",
+        "opencode/bindings",
+        "archives",
+    ] {
         let entries = match fs::read_dir(root.join(directory)) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -42,7 +52,12 @@ fn inventory(root: &Path) -> GraphResult<(Vec<(String, PathBuf)>, bool)> {
         };
         for entry in entries {
             let path = entry?.path();
-            if !candidate(&path) {
+            let archive = directory == "archives"
+                && path.extension().and_then(|s| s.to_str()) == Some("json")
+                && path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| {
+                    uuid::Uuid::parse_str(s).is_ok_and(|id| !id.is_nil() && id.to_string() == s)
+                });
+            if !candidate(&path) && !archive {
                 continue;
             }
             if paths.len() == MAX_SOURCES {
@@ -60,6 +75,13 @@ fn inventory(root: &Path) -> GraphResult<(Vec<(String, PathBuf)>, bool)> {
         if !complete {
             break;
         }
+    }
+    for id in sends::source_ids(root)? {
+        if paths.len() == MAX_SOURCES {
+            complete = false;
+            break;
+        }
+        paths.push((format!("sends/{id}"), root.join("graph/sends.sqlite3")));
     }
     paths.sort_by(|a, b| a.0.cmp(&b.0));
     Ok((paths, complete))
@@ -80,6 +102,21 @@ fn collect(index: &mut Index, machine: &str, root: &Path) -> GraphResult<()> {
             return Ok(());
         }
         let read = (|| -> GraphResult<()> {
+            if let Some(id) = source.strip_prefix("sends/") {
+                let record = sends::load(id)?;
+                let data = serde_json::to_vec(&record)?;
+                bytes += data.len() as u64;
+                ensure!(data.len() <= 16 * 1024, "Graph send metadata size limit");
+                let stamp = format!("{:x}", Sha256::digest(&data));
+                if index.stamp(source)?.as_deref() == Some(&stamp) {
+                    index.seen(source, generation)?;
+                    return Ok(());
+                }
+                let projection = model::exchange(machine, &record)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid graph send identity"))?;
+                index.publish(source, &stamp, generation, &projection, "")?;
+                return Ok(());
+            }
             let meta = path.symlink_metadata()?;
             ensure!(
                 meta.is_file() && !meta.file_type().is_symlink(),
@@ -119,15 +156,24 @@ fn collect(index: &mut Index, machine: &str, root: &Path) -> GraphResult<()> {
             bytes += data.len() as u64;
             ensure!(data.len() as u64 <= MAX_RECORD, "binding_size_limit");
             let record: Value = serde_json::from_slice(&data)?;
-            let expected = format!(
-                "{:x}.json",
-                Sha256::digest(string(&record, "name").as_bytes())
-            );
+            let archived = source.starts_with("archives/");
+            let expected = if archived {
+                format!("{}.json", string(&record, "archive_id"))
+            } else {
+                format!(
+                    "{:x}.json",
+                    Sha256::digest(string(&record, "name").as_bytes())
+                )
+            };
             ensure!(
                 path.file_name().and_then(|v| v.to_str()) == Some(&expected),
                 "binding_identity_mismatch"
             );
             let native = source.starts_with("dsh/") || source.starts_with("opencode/");
+            ensure!(
+                !archived || record["state"] == "archived",
+                "archive_state_mismatch"
+            );
             ensure!(
                 if native {
                     record["backend"]
@@ -162,6 +208,58 @@ fn collect(index: &mut Index, machine: &str, root: &Path) -> GraphResult<()> {
 }
 
 fn run(args: &[String]) -> GraphResult<Value> {
+    if args == ["receipt", "--json"] {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            name: String,
+            expected_run_id: String,
+            expected_conversation_id: String,
+            message_request_id: String,
+            #[serde(default)]
+            archive_id: String,
+        }
+        let mut bytes = Vec::new();
+        io::stdin().take(8193).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 8192, "Graph receipt scope is too large");
+        let request: Request = serde_json::from_slice(&bytes)?;
+        ensure!(
+            !request.name.is_empty()
+                && request.name.len() <= 512
+                && !request.expected_run_id.is_empty()
+                && request.expected_run_id.len() <= 128
+                && request.expected_conversation_id.len() <= 512
+                && [
+                    &request.name,
+                    &request.expected_run_id,
+                    &request.expected_conversation_id
+                ]
+                .iter()
+                .all(|s| !s.chars().any(char::is_control)),
+            "Invalid graph receipt scope"
+        );
+        let record = if !request.archive_id.is_empty() {
+            archive::read_archive(&request.name, &request.archive_id)
+        } else if dsh::exists(&request.name) {
+            dsh::binding(&request.name)
+        } else if opencode::exists(&request.name) {
+            opencode::binding(&request.name)
+        } else {
+            read(&request.name)
+        }
+        .map_err(anyhow::Error::msg)?;
+        ensure!(
+            record["run_id"] == request.expected_run_id
+                && record["conversation_id"] == request.expected_conversation_id,
+            "Graph conversation changed; refresh before opening evidence"
+        );
+        let event = attachments::graph_receipt(&record, &request.message_request_id)
+            .map_err(anyhow::Error::msg)?;
+        return Ok(
+            json!({"schema":1,"machine_id":target_receipt(&record).and_then(|v|v["endpoint"]["machine"].as_str().map(str::to_owned)),"name":request.name,"run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,
+            "archive_id":request.archive_id,"message_request_id":request.message_request_id,"event":event}),
+        );
+    }
     let (changes, mut at) = match args.first().map(String::as_str) {
         Some("snapshot") => (false, 1),
         Some("changes") => (true, 1),
@@ -222,6 +320,7 @@ fn run(args: &[String]) -> GraphResult<Value> {
         collect(&mut index, &machine, &root)?;
     }
     let mut result = index.page(cursor, changes, limit)?;
+    result["coverage"]["delivery_recording"] = sends::coverage()?;
     result["machine_id"] = json!(machine);
     result["host"] = json!(config.selves.first().cloned().unwrap_or_default());
     Ok(result)

@@ -1468,6 +1468,9 @@ fn send(record: &Value, request: &Value) -> Result<Value> {
         );
     }
     let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"digest":digest,"native_message_id":message_id,"text":text,"submitted_text":text,"submitted_at":now(),"at":now(),"status":"pending","attachments":[],"transport":"native_opencode"});
+    if let Some(target) = session_graph::target_receipt(record) {
+        receipt["graph_target"] = target;
+    }
     atomic(&path, &receipt.to_string())?;
     let answer = rpc(
         record,

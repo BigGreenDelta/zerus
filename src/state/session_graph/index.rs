@@ -178,7 +178,9 @@ impl Index {
         };
         let coverage = json!({"bindings_complete":self.get("complete")?=="true",
             "source_errors":self.db.query_row("SELECT count(*) FROM sources WHERE error<>''",[],|r|r.get::<_,i64>(0))?,
-            "communication":"not_indexed","native_children":"persisted_rosters_only","archives":"not_indexed"});
+            "communication":"verified_zerus_sends","historical_communication":"unattributed",
+            "native_children":"persisted_rosters","archives":"saved_archive_metadata",
+            "communication_retention_days":30});
         if cursor.epoch != self.epoch
             || cursor.revision > revision
             || (!changes && cursor.revision != revision)

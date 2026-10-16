@@ -116,6 +116,26 @@ class SessionGraph(unittest.TestCase):
         self.graph('snapshot', '--limit', '1000000', success=False)
         self.graph('snapshot', '--unknown', success=False)
 
+    def test_archived_identity_survives_live_name_reuse_without_transcripts(self):
+        import uuid
+        path,old=self.record(subagents={'child':dict(name='Reviewer',started=1.0)})
+        first,_=self.full()
+        original=next(r['id'] for r in first if r['item']['kind']=='node')
+        archive=str(uuid.uuid4());old.update(archive_id=archive,state='archived')
+        directory=self.state/'archives';directory.mkdir()
+        (directory/(archive+'.json')).write_text(json.dumps(old))
+        path.unlink()
+        self.record(conversation='replacement')
+        rows,_=self.full()
+        nodes=[r['id'] for r in rows if r['item']['kind']=='node']
+        self.assertEqual(len(nodes),2);self.assertIn(original,nodes)
+        archived=[r['item']['value'] for r in rows if r['item']['kind']=='binding'
+                  and r['item']['value']['archived']]
+        self.assertEqual(len(archived),1)
+        self.assertEqual(archived[0]['archive_id'],archive)
+        self.assertEqual(sum(r['item']['kind']=='child' for r in rows),1)
+        self.assertFalse((self.state/'events.sqlite3').exists())
+
     @unittest.skipIf(os.name=='nt', 'Unix symlink fixture')
     def test_symlink_binding_never_reads_external_record(self):
         path, value = self.record()

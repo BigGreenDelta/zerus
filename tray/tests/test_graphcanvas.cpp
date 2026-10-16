@@ -4,6 +4,7 @@
 #include <QGraphicsScene>
 #include <QJsonArray>
 #include <QMouseEvent>
+#include <QScrollBar>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -32,6 +33,50 @@ class TestGraphCanvas : public QObject {
         QCoreApplication::setApplicationName("GraphCanvas");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, home.path());
+    }
+    void boundedLargeGraphKeepsManualPinsAndReportsInteractionCost_data() {
+        QTest::addColumn<int>("count");
+        QTest::addColumn<int>("edges");
+        QTest::newRow("ordinary-250-750") << 250 << 750;
+        QTest::newRow("ceiling-2000-10000") << 2000 << 10000;
+    }
+    void boundedLargeGraphKeepsManualPinsAndReportsInteractionCost() {
+        QFETCH(int, count);
+        QFETCH(int, edges);
+        GraphCanvas view;
+        view.resize(1200, 800);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        QList<GraphCanvas::Node> nodes;
+        QList<GraphCanvas::Relation> relations;
+        for (int i = 0; i < count; ++i) {
+            auto n = node(QString::number(i));
+            n.group = QString("project-%1").arg(i / 50);
+            nodes.append(n);
+        }
+        for (int i = 0; i < edges; ++i)
+            relations.append({QString("edge-%1").arg(i), QString::number(i % count),
+                              QString::number((i * 37 + 1) % count), "message",
+                              "Verified submission"});
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(view.setGraph(nodes, relations));
+        const auto initial = timer.elapsed();
+        const auto position = view.nodePosition("0");
+        timer.restart();
+        QVERIFY(view.setGraph(nodes, relations));
+        const auto refresh = timer.elapsed();
+        QCOMPARE(view.nodePosition("0"), position);
+        view.selectNode("0");
+        timer.restart();
+        for (int i = 0; i < 10; ++i) {
+            view.horizontalScrollBar()->setValue(view.horizontalScrollBar()->value() + 8);
+            view.viewport()->repaint();
+        }
+        qInfo() << "Graph cost" << count << edges << "initial ms" << initial << "refresh ms"
+                << refresh << "ten pan frames ms" << timer.elapsed();
+        QCOMPARE(view.nodeCount(), count);
+        QCOMPARE(view.selectedNode(), QString("0"));
     }
     void exactSessionsRenderer_data() {
         QTest::addColumn<bool>("dark");

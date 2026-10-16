@@ -326,6 +326,11 @@ QString GraphController::details() const {
                 text += tr(" · partly indexed");
             if (host->coverage.value("communication") == "not_indexed")
                 text += tr(" · communication history not indexed");
+            if(host->coverage.value("communication")=="verified_zerus_sends")
+                text += tr(" · verified Zerus deliveries (30 days); older unattributed exchanges unavailable");
+            const auto delivery=host->coverage["delivery_recording"].toObject();
+            if(delivery["unknown_deliveries"].toInt()>0)text+=tr(" · %1 send attempts lack verified endpoint metadata").arg(delivery["unknown_deliveries"].toInt());
+            if(delivery["recording_gap"].toBool())text+=tr(" · some delivery metadata could not be recorded");
             if (host->coverage.value("source_errors").toInt() > 0)
                 text += tr(" · some source metadata unavailable");
         } else

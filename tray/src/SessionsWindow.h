@@ -112,6 +112,9 @@ protected:
 private:
     ArchiveBrowser *m_archiveBrowser = nullptr;
     QMap<QString,QList<SessionInfo>> m_archiveSearchRows;
+    QMap<QString,SessionInfo> m_graphArchiveRows;
+    quint64 m_graphOpenRequest=0;
+    QJsonObject m_graphOpenScope;
     struct Entry { QString host, machine, key, identity; SessionInfo session; bool online; };
     void applyTheme();
     void updateWindowPinAppearance();
@@ -133,6 +136,9 @@ private:
     void updateSessionFeedback();
     void rebuild();
     QMap<int, QVariant> sessionCardRoles(const Entry &entry) const;
+    QMap<int,QVariant> childCardRoles(const Entry &entry,const QString &id,const QJsonObject &child) const;
+    void requestGraphOpen(const QString &host,const QString &name,const QString &run,const QString &conversation,
+        const QString &archive,const QString &agent,const QString &message = {});
     void updateGraph();
     void openGraphTarget(const QString &host, const QString &name, const QString &run,
                          const QString &conversation, const QString &archive, const QString &agent);
