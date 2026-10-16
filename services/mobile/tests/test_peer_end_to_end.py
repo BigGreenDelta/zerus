@@ -1,5 +1,6 @@
 """Phone HTTP through a running gateway, with isolated native-shaped peers."""
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 import tempfile
@@ -9,7 +10,7 @@ import uuid
 
 from aiohttp import ClientSession
 
-from zerus_mobile.connector import Connector
+from e2e_connector import implementations, running
 from relay_fixture import start_relay
 
 
@@ -19,6 +20,11 @@ PEER = '00000000-0000-4000-8000-000000000002'
 
 class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
     async def test_phone_reaches_peer_only_through_enrolled_gateway(self):
+        for implementation in implementations():
+            with self.subTest(connector=implementation):
+                await self.phone_reaches_peer_only_through_enrolled_gateway(implementation)
+
+    async def phone_reaches_peer_only_through_enrolled_gateway(self, implementation):
         with tempfile.TemporaryDirectory(prefix='zerus-peer-http-') as directory:
             root = Path(directory)
             native = root / 'hgs'
@@ -33,10 +39,11 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
             self.addAsyncCleanup(relay.cleanup)
             url, gateway = relay.url, relay.node
             phone = await relay.pair('Example phone', relay.invitation['pair_code'])
-            connector = Connector({'server_url': url, 'node_token': gateway['node_token'],
+            config = {'server_url': url, 'node_token': gateway['node_token'],
                                    'hgs_path': str(native), 'state_dir': str(root / 'journal'),
-                                   'poll_interval': 1}, allow_insecure_localhost=True)
-            task = asyncio.create_task(connector.run())
+                                   'poll_interval': 1}
+            stack = contextlib.AsyncExitStack()
+            connector = await stack.enter_async_context(running(implementation, config, root))
             try:
                 async with ClientSession(headers={'Authorization': 'Bearer ' + phone['device_token']}) as client:
                     async def call(method, path, body=None):
@@ -48,8 +55,7 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                     async def wait_for(path, predicate, seconds=15):
                         async def poll():
                             while True:
-                                if task.done():
-                                    task.result()
+                                connector.check()
                                 result = await call('GET', path)
                                 if predicate(result):
                                     return result
@@ -101,12 +107,15 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                         not any(row.get('machine_id') == PEER and row['online'] for row in data['computers']))
                     self.assertEqual(await call('POST', '/v1/requests', body), receipt)
             finally:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                connector.journal.close()
+                await stack.aclose()
                 await relay.cleanup()
 
     async def test_unreachable_peer_stays_listed_offline_under_its_gateway(self):
+        for implementation in implementations():
+            with self.subTest(connector=implementation):
+                await self.unreachable_peer_stays_listed_offline_under_its_gateway(implementation)
+
+    async def unreachable_peer_stays_listed_offline_under_its_gateway(self, implementation):
         with tempfile.TemporaryDirectory(prefix='zerus-peer-offline-') as directory:
             root = Path(directory)
             native = root / 'hgs'
@@ -121,17 +130,17 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
             self.addAsyncCleanup(relay.cleanup)
             url, gateway = relay.url, relay.node
             phone = await relay.pair('Example phone', relay.invitation['pair_code'])
-            connector = Connector({'server_url': url, 'node_token': gateway['node_token'],
+            config = {'server_url': url, 'node_token': gateway['node_token'],
                                    'hgs_path': str(native), 'state_dir': str(root / 'journal'),
-                                   'poll_interval': 1}, allow_insecure_localhost=True)
-            task = asyncio.create_task(connector.run())
+                                   'poll_interval': 1}
+            stack = contextlib.AsyncExitStack()
+            connector = await stack.enter_async_context(running(implementation, config, root))
             try:
                 async with ClientSession(headers={'Authorization': 'Bearer ' + phone['device_token']}) as client:
                     async def wait_for(predicate, seconds=15):
                         async def poll():
                             while True:
-                                if task.done():
-                                    task.result()
+                                connector.check()
                                 async with client.get(url + '/v1/computers') as response:
                                     self.assertEqual(response.status, 200)
                                     data = await response.json()
@@ -172,9 +181,7 @@ class PeerEndToEndTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(restored['id'], online['id'])
                     self.assertLess(offline['last_seen_at'], restored['last_seen_at'])
             finally:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                connector.journal.close()
+                await stack.aclose()
                 await relay.cleanup()
 
 

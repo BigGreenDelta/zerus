@@ -3,21 +3,24 @@ import asyncio
 import base64
 import hashlib
 import json
-import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
 import uuid
 
 from aiohttp import ClientSession
 
-from zerus_mobile.connector import Connector
+from e2e_connector import implementations, running
 from relay_fixture import start_relay
 
 
 class EndToEndTests(unittest.IsolatedAsyncioTestCase):
     async def test_pair_inspect_send_once_question_alert_and_revoke(self):
+        for implementation in implementations():
+            with self.subTest(connector=implementation):
+                await self.pair_inspect_send_once_question_alert_and_revoke(implementation)
+
+    async def pair_inspect_send_once_question_alert_and_revoke(self, implementation):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture = Path(__file__).with_name("fixture_hgs.py")
@@ -26,11 +29,9 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             # Also when a step before the try below fails.
             self.addAsyncCleanup(relay.cleanup)
             url, node, invitation = relay.url, relay.node, relay.invitation
-            connector = Connector({"server_url": url, "node_token": node["node_token"],
-                "hgs_path": str(fixture), "state_dir": str(root / "journal"), "poll_interval": 1},
-                allow_insecure_localhost=True)
-            with patch.dict(os.environ, {"ZERUS_MOBILE_FIXTURE_DIR": directory}):
-                task = asyncio.create_task(connector.run())
+            config = {"server_url": url, "node_token": node["node_token"],
+                "hgs_path": str(fixture), "state_dir": str(root / "journal"), "poll_interval": 1}
+            async with running(implementation, config, root, {"ZERUS_MOBILE_FIXTURE_DIR": directory}):
                 try:
                     async with ClientSession() as client:
                         async with client.post(url + "/v1/pair", json={"code": invitation["pair_code"], "device_name": "Test phone"}) as response:
@@ -132,9 +133,6 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
                         async with client.get(url + "/v1/computers", headers=headers) as response:
                             self.assertEqual(response.status, 401)
                 finally:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                    connector.journal.close()
                     await relay.cleanup()
 
 
