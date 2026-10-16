@@ -207,9 +207,10 @@ unless the child has an unsent draft on this phone. Profile groups are counted
 but not listed. Tapping a child opens its session and then the child's activity
 once that conversation is verified; Back returns to the session. Open subagent
 lists persist with the other Sessions state. A running session with pending
-optional Codex questions, which the agent keeps working without, shows a
-question-mark chip with their count (`99+` above 99) before the subagent
-counter, as on the desktop; its spoken description says how many are waiting.
+optional Codex questions, which the agent keeps working without, shows an
+amber question-mark chip with their count (`99+` above 99) right after its
+status badge, as on the desktop; its spoken description says how many are
+waiting. It shares the amber of attention but changes no status or count.
 The listing's `optional_questions` count wins. Without it (an older computer, or
 while hgs cannot read its question index), the chip counts the connector's
 optional attention items once per question. It is hidden for saved, archived,

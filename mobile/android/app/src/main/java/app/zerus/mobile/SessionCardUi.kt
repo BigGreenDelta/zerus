@@ -1,7 +1,6 @@
 package app.zerus.mobile
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -47,20 +46,20 @@ private fun subagentChildren(model: ZerusViewModel, session: Session, online: Bo
     SessionCardPresentation.children(session, online, drafted = SessionCardPresentation.draftedChildren(session.target, model.drafts))
 
 /**
- * Pending optional questions, between the machine label and the subagent counter. Information only:
+ * Pending optional questions, right after the status badge (and its separate new reply badge) in
+ * the attention amber, like the desktop card. Information only: it changes no status or count, and
  * tapping the card opens the conversation, where Questions (n) offers them with Skip.
  */
 @Composable internal fun SessionOptionalQuestionChip(session: Session, online: Boolean) {
     val chip = SessionCardPresentation.optionalQuestionChip(session, online) ?: return
-    val foreground = Color(OptionalQuestionPalette.FOREGROUND)
-    val shape = RoundedCornerShape(8.dp)
-    Row(Modifier.clip(shape).background(Color(OptionalQuestionPalette.BACKGROUND))
-        .border(1.dp, Color(OptionalQuestionPalette.BORDER), shape)
+    val colors = DesktopSessionPalette.colors(DesktopBadgeKind.Attention, MaterialTheme.colorScheme.background.luminance() < .5f)
+    val foreground = Color(colors.foreground)
+    Row(Modifier.clip(RoundedCornerShape(5.dp)).background(Color(colors.background))
         .clearAndSetSemantics { contentDescription = chip.description }
-        .padding(start = 6.dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        .padding(start = 4.dp, end = 7.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
         Icon(DesktopIcons.Question, null, Modifier.size(16.dp), tint = foreground)
-        Text(chip.label, color = foreground, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+        Text(chip.label, color = foreground, style = MaterialTheme.typography.labelSmall, maxLines = 1)
     }
 }
 

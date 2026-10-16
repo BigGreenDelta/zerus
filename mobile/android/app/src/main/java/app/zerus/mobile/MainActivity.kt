@@ -384,6 +384,7 @@ class MainActivity : ComponentActivity() {
                 Icon(Icons.Default.MarkEmailUnread, "New reply", Modifier.padding(4.dp).size(12.dp), tint = Color(unread.foreground))
             }
         }
+        SessionOptionalQuestionChip(session, online)
     }
 }
 @Composable private fun SessionDetailBadge(session: Session,raw: JSONObject?) {
@@ -657,7 +658,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             SessionBadge(session, online)
                             Box(Modifier.weight(1f)) { MachineLabel(machine?.name ?: session.target.computerId,colorHex = model.machineColor(MachineKey(session.target.connectionId,session.target.computerId))) }
-                            SessionOptionalQuestionChip(session, online)
                             SessionSubagentCounter(model, session, online)
                         }
                         SessionCheckoutLine(session)
