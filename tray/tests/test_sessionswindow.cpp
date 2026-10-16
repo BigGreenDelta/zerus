@@ -654,13 +654,16 @@ void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside()
 void TestSessionsWindow::savedDraftsGoToTheirSession_data()
 {
     QTest::addColumn<QString>("theme");
-    QTest::newRow("dark") << QString("dark");
-    QTest::newRow("light") << QString("light");
+    QTest::addColumn<bool>("doubleClick");
+    QTest::newRow("dark") << QString("dark") << false;
+    QTest::newRow("light") << QString("light") << false;
+    QTest::newRow("dark-double-click") << QString("dark") << true;
+    QTest::newRow("light-double-click") << QString("light") << true;
 }
 
 void TestSessionsWindow::savedDraftsGoToTheirSession()
 {
-    QFETCH(QString, theme); QSettings().setValue("workspace/theme", theme);
+    QFETCH(QString, theme); QFETCH(bool, doubleClick); QSettings().setValue("workspace/theme", theme);
     auto state = fleet(); auto box = state.local();
     box.sessions[1].conversationId = "conversation-one"; box.sessions[1].subagentSource = "hooks";
     box.sessions[1].subagents = {{"worker", QJsonObject{{"name", "Worker"}, {"state", "working"}}}};
@@ -708,7 +711,14 @@ void TestSessionsWindow::savedDraftsGoToTheirSession()
                 dialog->resize(620, 460); list->scrollToItem(list->currentItem()); QTest::qWait(50);
                 QVERIFY(dialog->grab().save(preview + "/drafts-narrow-" + theme + ".png"));
             }
-            if (available) open->click(); else dialog->reject();
+            if (doubleClick) {
+                list->scrollToItem(list->currentItem());
+                const auto point = list->visualItemRect(list->currentItem()).center();
+                QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+                QTest::mouseDClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+                QCOMPARE(dialog->isVisible(), !available);
+                if (!available) dialog->reject();
+            } else if (available) open->click(); else dialog->reject();
         });
         window.findChild<QPushButton *>("savedDrafts")->click();
     };

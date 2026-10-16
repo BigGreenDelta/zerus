@@ -867,6 +867,8 @@ recently edited drafts first; each row names the draft's session and computer
 (and whether it is a subagent message, question answer or voice message), with
 its time and first line. **Go to session** opens the session that owns the
 selected draft, or its subagent, while that session is in the session list.
+Double-clicking a draft opens the same owning session; unavailable sessions
+remain in the draft browser for preview, copying or explicit restoration.
 Rows reuse the Sessions cards, including provider and computer badges, with
 the last-edited date beside the model footer. Long fields stay within the card;
 rows have no hover tooltip because the selected draft's full text appears in
@@ -1395,15 +1397,22 @@ catalog assignments and unresolved conflicts remain available for review.
 
 Folder entries contain a machine, path and optional label. Browse works for local
 and remote folders, including ordinary non-Git directories. The desktop folder
-browser offers **New folder…** on the selected remote computer. Enter a new
-folder path and explicitly choose **Create folder**; the parent must already
-exist. A missing path entered in the browser is carried into that form. Once
+browser offers **New folder** on the selected remote computer. Enter only the
+child folder name directly in the list and press **Create** or Enter; Escape
+cancels the inline entry. The list context menu and Ctrl+Shift+N (Command+Shift+N
+on macOS) open the same entry. The arrow beside **New folder** offers a separate
+name-only dialog with the parent shown above it. A missing path entered in the
+browser supplies that form's parent and initial name; the parent must already
+exist. Once
 creation is confirmed, choose **Use this folder** to select it for the project
 or session. Browsing and cancelling the creation form do not create anything,
 and existing paths are never replaced. This requires an updated `hgs` on the
 selected computer; older peers can still browse existing folders. If creation
-cannot be confirmed, open the path with **Go** before deciding whether to try
-again. Creating a folder does not initialize Git or start an agent.
+cannot be confirmed, the browser checks that exact path without repeating
+creation. An available folder can be selected immediately, including an empty
+folder or one that already existed; an unsuccessful check retains the creation
+error and **Go** remains available. Creating a folder does not initialize Git
+or start an agent.
 
 The CLI equivalent is `hgs [@host] dirs --create <path> [--request-id UUID]`.
 It creates one directory and returns the canonical path plus the exact request

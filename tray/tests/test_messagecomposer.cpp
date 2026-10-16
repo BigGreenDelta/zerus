@@ -159,6 +159,7 @@ private slots:
     void storageFailureKeepsDraftAndBlocksDispatch();
     void endedSessionDraftCanBeRecovered();
     void savedDraftsNameAndOpenTheirSession();
+    void savedDraftActivationRechecksAvailability();
     void draftReplacementRequiresConfirmation();
     void renameCollisionKeepsBothDrafts();
     void typingDoesNotRewriteAttachmentSnapshots();
@@ -442,6 +443,32 @@ void TestMessageComposer::savedDraftsNameAndOpenTheirSession()
     composer.showSavedDrafts();
     QCOMPARE(requested.size(), 1); QCOMPARE(requested[0][0].toString(), child);
     QCOMPARE(composer.sessionKey(), QString("arch\nother")); QVERIFY(composer.editor()->toPlainText().isEmpty());
+}
+
+void TestMessageComposer::savedDraftActivationRechecksAvailability()
+{
+    const QString key = "arch\nclaude/example/review";
+    ComposerDraft draft; draft.text = "Keep this draft"; QVERIFY(ComposerDraftStore().save(key, draft));
+    MessageComposer composer; setSessionReady(composer, "mac\nclaude/example/current");
+    bool available = true;
+    composer.canOpenDraftSession = [&](const QString &) { return available; };
+    QSignalSpy requested(&composer, &MessageComposer::draftSessionRequested);
+    QSignalSpy sent(&composer, &MessageComposer::sendRequested);
+    QTimer::singleShot(0, &composer, [&] {
+        auto *dialog = composer.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
+        auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 1);
+        auto *open = dialog->findChild<QPushButton *>("openSavedDraftSession"); QVERIFY(open->isEnabled());
+        available = false; // The computer or exact session disappeared after selection.
+        open->click(); QVERIFY(dialog->isVisible());
+        const auto point = list->visualItemRect(list->currentItem()).center();
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+        QTest::mouseDClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+        QVERIFY(dialog->isVisible()); QVERIFY(requested.isEmpty()); QVERIFY(sent.isEmpty());
+        dialog->reject();
+    });
+    composer.showSavedDrafts();
+    QVERIFY(requested.isEmpty()); QVERIFY(sent.isEmpty());
+    QCOMPARE(ComposerDraftStore().load(key).text, draft.text);
 }
 
 void TestMessageComposer::draftReplacementRequiresConfirmation()

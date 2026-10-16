@@ -1026,10 +1026,15 @@ void MessageComposer::showSavedDrafts()
     });
 
     connect(copy, &QPushButton::clicked, &dialog, [&] { QApplication::clipboard()->setText(selected.text); });
-    connect(open, &QPushButton::clicked, &dialog, [&] {
+    const auto openSession = [&] {
         if (!list->currentItem()) return;
-        requested = list->currentItem()->data(Qt::UserRole).toString(); dialog.accept();
-    });
+        const auto key = list->currentItem()->data(Qt::UserRole).toString();
+        if (ComposerDraftStore::owner(key).kind == ComposerDraftOwner::Kind::Unknown
+            || !canOpenDraftSession || !canOpenDraftSession(key)) return;
+        requested = key; dialog.accept();
+    };
+    connect(open, &QPushButton::clicked, &dialog, openSession);
+    connect(list, &QListWidget::itemDoubleClicked, &dialog, openSession);
     connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
     connect(restore, &QPushButton::clicked, &dialog, [&] {
         if(selected.formState.value("kind")=="voice_message")return;
