@@ -82,6 +82,14 @@ Debug builds accept `-zerus-demo` (open the read-only preview) and
 `-zerus-tab NAME` launch arguments for screenshots, for example
 `dev-install.sh --simulator -- -zerus-demo -zerus-tab machines`.
 
+## TestFlight and the App Store
+
+Dev builds reach TestFlight internal testers from every successful main CI run;
+Stable builds are uploaded on demand and submitted for review. Uploads use an App
+Store Connect API key in a main-only environment. See
+[iOS distribution](../../docs/ios-distribution.md) for the channels, the one-time
+setup and the submission checklist.
+
 ## Versions
 
 `DEV_VERSION` names the next planned iOS release; `Config/Base.xcconfig`

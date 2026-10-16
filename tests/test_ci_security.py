@@ -1250,6 +1250,66 @@ class WorkflowSecurityTests(unittest.TestCase):
             for secret in apple_secrets:
                 self.assertNotIn(f"secrets.{secret}", workflow.replace(macos, ""), name)
 
+    def test_app_store_connect_secrets_stay_in_the_ios_upload_job(self):
+        text = (ROOT / ".github/workflows/ios-testflight.yml").read_text()
+        self.assertRegex(text, r"(?m)^cache-mode: none$")
+        self.assertNotRegex(text, r"actions/cache[@/]")
+        upload = job(text, "upload")
+        self.assertRegex(upload, r"(?m)^    environment: ios-testflight$")
+        self.assertEqual(field(upload, "runs-on"), "macos-15")
+        self.assertRegex(field(upload, "timeout-minutes"), r"^\d+$")
+        self.assertIn('test "$WORKFLOW_REF" = refs/heads/main', upload)
+        self.assertIn('test "$WORKFLOW_REPOSITORY" = ufna/zerus', upload)
+        self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", upload), ["actions/checkout"])
+        self.assertIn("persist-credentials: false", upload)
+        self.assertRegex(upload, r"if: always\(\)\n        run: rm -rf \"\$RUNNER_TEMP/app-store-connect\"")
+        asc_secrets = {"APP_STORE_CONNECT_API_KEY_P8", "APP_STORE_CONNECT_API_KEY_ID", "APP_STORE_CONNECT_API_ISSUER_ID"}
+        declarations = text.split("    secrets:\n", 1)[1].split("\n  workflow_dispatch:", 1)[0]
+        self.assertEqual(set(re.findall(r"(?m)^      (\w+):$", declarations)), asc_secrets)
+        for secret in asc_secrets:
+            self.assertIn(f"secrets.{secret}", upload)
+        self.assertIn("vars.IOS_TEAM_ID", upload)
+        # Dispatch offers only Stable; Dev build numbers come from the CI sequence.
+        dispatch = text.split("  workflow_dispatch:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertIn("options: [stable]", dispatch)
+        ci = self.ci
+        self.assertNotIn("secrets: inherit", ci)
+        dev_ios = job(ci, "dev-ios")
+        self.assertEqual(field(dev_ios, "uses"), "./.github/workflows/ios-testflight.yml")
+        self.assertIn("channel: dev", dev_ios)
+        forwarded = dict(re.findall(r"(?m)^      (\w+): \$\{\{ secrets\.(\w+) \}\}$", dev_ios))
+        self.assertEqual(forwarded, {secret: secret for secret in asc_secrets})
+        for secret in asc_secrets:
+            self.assertNotIn(f"secrets.{secret}", ci.replace(dev_ios, ""))
+        for workflow in (ROOT / ".github/workflows").glob("*.yml"):
+            if workflow.name not in {"ci.yml", "ios-testflight.yml"}:
+                self.assertNotIn("APP_STORE_CONNECT_API", workflow.read_text(), workflow.name)
+
+    def test_ios_testflight_dev_follows_only_a_successful_main_gate(self):
+        expression = field(job(self.ci, "dev-ios"), "if")
+        self.assertIn("!cancelled()", expression)
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        expression = re.sub(r"!(?!=)", "not ", expression)
+        expression = re.sub(r"\bfalse\b", "False", expression)
+        expression = re.sub(r"\bneeds\.([\w-]+)\.", r"needs['\1'].", expression)
+
+        def runs(gate="success", automatic="success", event="push", ref="refs/heads/main", enabled="true",
+                 repository="ufna/zerus", private=False, cancelled=False):
+            return bool(eval(expression, {"__builtins__": {}}, {
+                "cancelled": lambda: cancelled,
+                "github": SimpleNamespace(repository=repository, ref=ref, event_name=event,
+                                          event=SimpleNamespace(repository=SimpleNamespace(private=private))),
+                "vars": SimpleNamespace(IOS_TESTFLIGHT_ENABLED=enabled),
+                "needs": {"gate": SimpleNamespace(result=gate), "automatic": SimpleNamespace(result=automatic)},
+            }))
+
+        self.assertTrue(runs())
+        for change in ({"gate": "failure"}, {"gate": "skipped"}, {"automatic": "failure"}, {"automatic": "skipped"},
+                       {"event": "pull_request"}, {"event": "workflow_dispatch"}, {"ref": "refs/heads/feature"},
+                       {"enabled": ""}, {"repository": "fork/zerus"}, {"private": True}, {"cancelled": True}):
+            with self.subTest(change=change):
+                self.assertFalse(runs(**change))
+
     def assemble_runs(self, workflow, verify, macos, enabled, requested=True):
         expression = field(job(workflow, "assemble"), "if")
         self.assertIn("!cancelled()", expression)

@@ -134,6 +134,20 @@ jobs:
       APPLE_NOTARY_API_KEY_P8: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
       APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
       APPLE_NOTARY_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
+  dev-ios:
+    name: iOS TestFlight Dev build
+    # Independent of the zerus.dev Dev catalog: TestFlight delivers it to internal testers.
+    needs: [gate, automatic]
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.IOS_TESTFLIGHT_ENABLED == 'true'
+    uses: ./.github/workflows/ios-testflight.yml
+    with:
+      channel: dev
+    secrets:
+      APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
   dev:
     name: Verified main dev candidates
     needs: [gate, automatic, dev-android, dev-macos]
