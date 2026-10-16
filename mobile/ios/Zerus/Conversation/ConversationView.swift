@@ -177,23 +177,8 @@ struct ConversationView: View {
         }
         .reviewDialogs(review: $review, reviewOutgoing: $reviewOutgoing, discard: $discard)
         .sheet(isPresented: $details) { SessionDetailsSheet(session: session) }
-        .sheet(item: Binding(get: { app.computerFiles.selection }, set: { if $0 == nil { app.computerFiles.close() } })) { ComputerFileSheet(selection: $0) }
-        .environment(\.computerFileLink, ComputerFileLink { [weak app] reference in app?.computerFiles.show(target, reference) })
-        .onChange(of: terminal) { _, requested in
-            guard requested else { return }
-            terminal = false
-            let reason = SessionActionsMenu.terminalReason(SessionMenuFacts(target: target, row: raw ?? [:], state: SessionFilters.state(session),
-                                                                            archived: archived, online: online,
-                                                                            supported: (app.relayOperations[target.connectionId] ?? []).intersection(app.machineOperations[target.machineKey] ?? [])))
-                .nonEmpty ?? model.terminalOpenReason(target).nonEmpty
-            if let reason { terminalUnavailable = reason } else { terminalOpen = true }
-        }
-        .alert("Terminal unavailable", isPresented: Binding(get: { terminalUnavailable != nil }, set: { if !$0 { terminalUnavailable = nil } })) {
-            Button("Close", role: .cancel) { terminalUnavailable = nil }
-        } message: {
-            Text(terminalUnavailable ?? "")
-        }
-        .fullScreenCover(isPresented: $terminalOpen) { TerminalView(session: session) }
+        .modifier(ConversationTools(session: session, raw: raw, archived: archived, online: online, terminal: $terminal, terminalOpen: $terminalOpen,
+                                    terminalUnavailable: $terminalUnavailable))
         .onChange(of: model.returnToSessions) { dismiss() }
         .onAppear {
             openIfNeeded()
@@ -521,5 +506,41 @@ struct ConversationSearchSheet: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
             .zerusScreen()
         }
+    }
+}
+
+/// File links and Terminal, kept out of the main body so older compilers type-check it quickly.
+private struct ConversationTools: ViewModifier {
+    @Environment(AppModel.self) private var app
+    let session: Session
+    let raw: JSONObject?
+    let archived: Bool
+    let online: Bool
+    @Binding var terminal: Bool
+    @Binding var terminalOpen: Bool
+    @Binding var terminalUnavailable: String?
+
+    func body(content: Content) -> some View {
+        let target = session.target
+        content
+            .sheet(item: Binding(get: { app.computerFiles.selection }, set: { if $0 == nil { app.computerFiles.close() } })) { ComputerFileSheet(selection: $0) }
+            .environment(\.computerFileLink, ComputerFileLink { [weak app] reference in app?.computerFiles.show(target, reference) })
+            .onChange(of: terminal) { _, requested in
+                guard requested else { return }
+                terminal = false
+                if let reason = reason(target) { terminalUnavailable = reason } else { terminalOpen = true }
+            }
+            .alert("Terminal unavailable", isPresented: Binding(get: { terminalUnavailable != nil }, set: { if !$0 { terminalUnavailable = nil } })) {
+                Button("Close", role: .cancel) { terminalUnavailable = nil }
+            } message: {
+                Text(terminalUnavailable ?? "")
+            }
+            .fullScreenCover(isPresented: $terminalOpen) { TerminalView(session: session) }
+    }
+
+    private func reason(_ target: Target) -> String? {
+        let supported = (app.relayOperations[target.connectionId] ?? []).intersection(app.machineOperations[target.machineKey] ?? [])
+        let facts = SessionMenuFacts(target: target, row: raw ?? [:], state: SessionFilters.state(session), archived: archived, online: online, supported: supported)
+        return SessionActionsMenu.terminalReason(facts).nonEmpty ?? app.conversation.terminalOpenReason(target).nonEmpty
     }
 }
