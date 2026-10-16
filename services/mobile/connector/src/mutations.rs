@@ -541,9 +541,9 @@ impl<N: Native + 'static> Connector<N> {
         if LIFECYCLE.contains(&operation) && !flags.lifecycle {
             return Err(Failure::text("native scoped lifecycle ABI is unavailable"));
         }
-        // The main connector always has a fleet; only a preference-capable
-        // hgs changes the shared setting.
-        if operation == "set_mobile_delivery" && !flags.preference {
+        // Only the gateway's own preference-capable hgs changes the shared
+        // setting; a peer context has no fleet.
+        if operation == "set_mobile_delivery" && (!flags.preference || self.fleet.is_none()) {
             return Err(Failure::text(DELIVERY_UNAVAILABLE));
         }
         if operation == "recovery_action" {

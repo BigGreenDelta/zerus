@@ -215,11 +215,17 @@ impl Flags {
         features
     }
 
-    /// `mobile_capabilities` as this build advertises it: Python's sets
-    /// limited to implemented operations and the features they carry.
+    /// `mobile_capabilities` of the main connector, which has a fleet.
     pub fn advertised(&self, one_hop: bool) -> Value {
+        self.advertised_for(true, one_hop)
+    }
+
+    /// `mobile_capabilities` as this build advertises it: Python's sets
+    /// limited to implemented operations and the features they carry. A
+    /// peer context has no fleet.
+    pub fn advertised_for(&self, fleet: bool, one_hop: bool) -> Value {
         let operations: Vec<&str> = self
-            .python_operations(true)
+            .python_operations(fleet)
             .into_iter()
             .filter(|operation| implemented(operation))
             .collect();

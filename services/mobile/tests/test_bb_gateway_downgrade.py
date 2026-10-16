@@ -4,10 +4,12 @@ A relay that refuses the extended heartbeat (400, 404 or 422) or the peer
 heartbeat endpoint (405) turns gateway sharing off: plain heartbeats, no peer
 heartbeats, no one-hop polls. A transient failure does not. Divergence d:
 Python keeps sharing off until restart and Rust probes again after 300 s;
-within these tests both stay off, and a restart probes again in both.
+within the shared tests both stay off, and a restart probes again in both.
+A Rust-only test scales the 300 s with the test-hooks clock.
 """
 import unittest
 
+from connector_harness import CLOCK_SCALE_HOOK, IMPLEMENTATION
 from gateway_harness import Fleet, GatewayCase, LOCAL, Peer, ROUTE, one_hop
 
 
@@ -81,6 +83,23 @@ class GatewayDowngradeTests(GatewayCase):
         process.stop()
         restarted = await self.launch()
         await self.gateway_ready(restarted)
+
+    async def test_rust_shares_the_gateway_again_after_its_retry_time(self):
+        # Divergence d: Rust offers the manifest again after 300 s, here
+        # scaled to 3 s; Python only after a restart (the test above).
+        if IMPLEMENTATION == "python":
+            self.skipTest("Python keeps gateway sharing off until restart")
+        process = await self.launch(env={CLOCK_SCALE_HOOK: "100"})
+        await self.gateway_ready(process)
+        mark = len(self.relay.exchanges)
+        rule = self.relay.rule("POST", "/v1/node/heartbeat", 400, when=lambda exchange: set(exchange.body) != {"snapshot"})
+        await self.downgraded(process, mark)
+        self.relay.rules.remove(rule)
+        await self.until(lambda: any(beat.status == 200 and "machine_id" in beat.body for beat in self.attempts(mark)),
+                         20, "a shared heartbeat again", process)
+        # Wake the long poll that started while sharing was off.
+        self.assertEqual((await self.submit(self.submission("inspect", peer=False), process))["state"], "completed")
+        await self.gateway_ready(process)
 
     async def test_refused_gateway_fields_downgrade_with_404_and_422(self):
         # The relay accepts presence but not the gateway fields.

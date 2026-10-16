@@ -17,13 +17,14 @@ attachment and file reads, voice, speech and speech configuration of
 `src/media.rs`, `src/files.rs` and `src/speech.rs`, and the launch, directory
 and worktree creations of `src/launch.rs`, and the archive pages of
 `src/archives.rs` exactly as Python does, journals every outcome and uploads
-it. Every other operation (the one-hop gateway) is claimed, refused with
-Python's `unsupported operation`
-receipt (which phones show as "update required") and never advertised, until
-its slice implements it (`src/capabilities.rs`, `IMPLEMENTED`;
-`tests/ported.json` lists the same operations for the black-box suites).
-Nothing packages or starts this binary yet; gateways keep running the Python
-connector.
+it. As a one-hop gateway (`src/fleet.rs`) it discovers its direct peers
+through `hgs swarm mobile-peers`, lists them in its heartbeats, sends each
+peer's heartbeat and runs routed requests in that peer's context through
+`hgs swarm mobile-peer`, rechecking the route at every call. Every black-box
+module runs against it (`tests/ported.json`, with the operations it implements
+under `rust_operations`); an unknown operation is refused with Python's
+`unsupported operation` receipt. Nothing packages or starts this binary yet;
+gateways keep running the Python connector.
 
 With a CLI that pages archives (`archives --json` in its help), heartbeats
 list live sessions only (`ls --json --local --no-archives`) plus a bounded
@@ -86,7 +87,7 @@ build, and packages never enable it.
 | Variable | Meaning |
 |---|---|
 | `ZERUS_CONNECTOR_TEST_NATIVE_TIMEOUT` | The default native timeout in seconds, Python's 45 s otherwise. Calls with their own budget (2, 3, 5, 25 s) keep it. |
-| `ZERUS_CONNECTOR_TEST_CLOCK_SCALE` | Divides the spacing between attempts of a result the relay refuses (30 s, divergence b). |
+| `ZERUS_CONNECTOR_TEST_CLOCK_SCALE` | Divides the spacing between attempts of a result the relay refuses (30 s, divergence b) and the wait before a relay that refused the gateway gets the manifest again (300 s, divergence d). |
 
 ## Command line
 
@@ -172,14 +173,15 @@ status 1, as it stops Python's.
 
 ## Divergences from the Python connector
 
-Each divergence is listed in the design; this build implements every row
-except c and d, which arrive with the one-hop gateway. None survives a
-rollback to Python.
+Each divergence is listed in the design; this build implements every row.
+Row c is retired: Python now reads a peer `attachment_read` through the peer
+as Rust does. None survives a rollback to Python.
 
 | # | Python | Rust | Tests |
 |---|---|---|---|
 | a | Archive-aware startup now waits for the first capability probe before listing and claiming; a failed later probe disables every optional operation for 300 s. | Claims also wait for the first probe, at most 3 s; a failed later probe keeps the previous flags. | `test_bb_runtime.DivergenceTests.test_claims_wait_for_the_first_capability_probe`, `runtime_vectors::a_failed_probe_keeps_the_previous_flags` |
 | b | A result the relay refuses with 400, 413 or 422 is retried before every poll, so it blocks every later claim. | That row gets three attempts at least 30 s apart, polls shorten to keep that schedule, then it is marked delivered locally with "Relay rejected a stored result; preserving local outcome"; other rows and claims go on. A new receipt is made acceptable first: an error is cut to 4,096 code points, a non-string error becomes "native command reported an error that was not text", and a receipt whose canonical form with its request_id exceeds 1 MiB becomes "native result exceeds relay size limit" without its result (failed for reads, uncertain for mutations). | `test_bb_runtime.DivergenceTests.test_a_refused_read_result_is_retired_after_three_spaced_attempts`, `runtime_vectors::receipts_fit_python_and_the_relay` |
+| d | A relay that refuses the extended heartbeat (400, 404 or 422) or the peer heartbeat endpoint (405) turns gateway sharing off until restart. | The manifest and peer heartbeats are offered again after 300 s. | `test_bb_gateway_downgrade.GatewayDowngradeTests.test_rust_shares_the_gateway_again_after_its_retry_time` |
 | e | No checks on `connector.json`. | Refused unless owned by the effective uid and not group- or world-writable, because `hgs_path` is executed; a group- or world-readable file only logs a warning. | `binary::check_reports_reviewed_divergences_as_refusals`, `binary::main_outcomes_match_the_python_connector` (`main-world-writable-config`), `test_bb_check` |
 | f | `state_dir` goes through `expanduser`, so `~user` works. | `~`, `~/...`, absolute and working-directory-relative paths work; `~user` is refused. | `config_vectors` (`state-tilde-user`), `binary` (`main-unknown-home-user`), `test_bb_check` |
 | g | A stored NaN, Infinity or lone surrogate re-uploads as JSON the relay refuses, which blocks the outbox. | Rows upload as stored text. A row the relay could not accept (not strict JSON within its depth 32 and 50,000 values, not a valid receipt, or over 1 MiB) uploads as "the stored native result could not be uploaded; this request will not execute again", failed for reads and uncertain for mutations; the row itself is never rewritten. | `test_bb_runtime.DivergenceTests.test_a_stored_row_the_relay_cannot_accept_uploads_a_substitute`, `runtime_vectors::stored_rows_upload_as_stored_or_as_a_fixed_substitute` |
