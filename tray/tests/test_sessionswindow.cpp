@@ -459,7 +459,7 @@ private:
     QString program() const { return FakeCli::program(script()); }
     // A copy of the base fixture whose inspect answers with these details, so
     // polls that arrive while a test waits cannot replace them.
-    QString programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child = {}) const;
+    QString programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child = {}, const QJsonObject &usage = {}) const;
     // Created by initTestCase(): listing the data rows (-datatags, as
     // RunQtShard.cmake does) exits without destroying the test object. That
     // listing calls every *_data() function first, so none may use m_dir.
@@ -526,12 +526,13 @@ elif c=='ls':print('{"host":"mac","ok":true,"sessions":[]}')
     auto catalog=QJsonDocument::fromJson(R"({"state":"ok","path":"/repo","selected_root":"/repo","common_dir":"/repo/.git","worktrees":[{"path":"/repo","kind":"main","branch":"main","available":true},{"path":"/linked","kind":"linked","branch":"feat/worktree-catalog","available":true},{"path":"/empty","kind":"linked","branch":"fix/empty-copy","available":true}]})").object();catalog["sampled_at"]=QDateTime::currentSecsSinceEpoch();catalogFile.write(QJsonDocument(catalog).toJson());
 }
 
-QString TestSessionsWindow::programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child) const
+QString TestSessionsWindow::programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child, const QJsonObject &usage) const
 {
     QFile original(script()); if (!original.open(QIODevice::ReadOnly)) return {};
     QByteArray answer;
     if (!child.isEmpty()) answer = "elif c=='inspect' and '--agent' in a:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(child).toJson(QJsonDocument::Compact))) + ")\n";
     answer += "elif c=='inspect':print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact))) + ")\n";
+    if (!usage.isEmpty()) answer += "elif c=='account' and a[1:2]==['inspect']:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(usage).toJson(QJsonDocument::Compact))) + ")\n";
     const QString fixture = m_dir->filePath(name);
     return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? FakeCli::program(fixture) : QString();
 }
@@ -1718,11 +1719,10 @@ void TestSessionsWindow::earlyQuotaResetExplainsPendingNativeChoiceAndKeepsDraft
         {"phase","input"},{"activity","busy"},{"attention_id","claude-usage-limit:"+hash},
         {"provider_error",QJsonObject{{"error_kind","quota"},{"at",double(now-60)},{"detail","Weekly limit reached"}}},
         {"pending_questions",QJsonArray{card}},{"events",QJsonArray{}},{"cursor",0}};
-    SessionsWindow window(programInspecting("claude-limit-reset",details));window.setFleet(state);window.show();window.showSession({},"codex/hgs/dashboard");
+    const QJsonObject usage{{"id","native-claude"},{"status","ok"},{"checked_at",double(now)},
+        {"windows",QJsonArray{quotaWindow(300,3600),quotaWindow(10080,86400)}}};
+    SessionsWindow window(programInspecting("claude-limit-reset",details,{},usage));window.setFleet(state);window.show();window.showSession({},"codex/hgs/dashboard");
     auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer,"Continue after my reset");
-    auto *usage=window.findChild<AccountUsageStore *>()->findChild<HgsClient *>();
-    usage->accountsReady(1,{},QJsonObject{{"id","native-claude"},{"status","ok"},{"checked_at",double(now)},
-        {"windows",QJsonArray{quotaWindow(300,3600),quotaWindow(10080,86400)}}});
     auto *chip=window.findChild<ToolbarChip *>("usageLimitChip");
     QTRY_VERIFY(chip->isVisible());QCOMPARE(chip->fullLabel(),QString("Usage available"));QCOMPARE(chip->tone(),ChipTone::Neutral);
     QVERIFY(chip->toolTip().contains("Answer any open usage-limit choice"));
@@ -1746,11 +1746,10 @@ void TestSessionsWindow::openingChildClearsHiddenAccountUsageRecoveryNotice()
         {"events",QJsonArray{}},{"cursor",0}};
     const QJsonObject child{{"parent_conversation_id","conversation-one"},{"conversation_id","child-conversation"},
         {"run_id","run-one"},{"events",QJsonArray{}}};
-    SessionsWindow window(programInspecting("quota-child-switch",details,child));window.setFleet(state);window.show();window.showSession({},session.name);
-    auto *usage=window.findChild<AccountUsageStore *>()->findChild<HgsClient *>();
-    usage->accountsReady(1,{},QJsonObject{{"id","native-claude"},{"status","ok"},{"checked_at",double(now)},
+    const QJsonObject usage{{"id","native-claude"},{"status","ok"},{"checked_at",double(now)},
         {"windows",QJsonArray{QJsonObject{{"window_minutes",300},{"used_percent",0},{"resets_at",double(now+3600)}},
-            QJsonObject{{"window_minutes",10080},{"used_percent",0},{"resets_at",double(now+86400)}}}}});
+            QJsonObject{{"window_minutes",10080},{"used_percent",0},{"resets_at",double(now+86400)}}}}};
+    SessionsWindow window(programInspecting("quota-child-switch",details,child,usage));window.setFleet(state);window.show();window.showSession({},session.name);
     auto *help=window.findChild<QLabel *>("providerErrorHelp");
     QTRY_VERIFY(help->text().contains("Latest account usage is below the limit"));
     auto *stack=window.findChild<QStackedWidget *>("activityStack");
