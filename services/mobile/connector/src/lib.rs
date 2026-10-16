@@ -20,6 +20,7 @@ pub mod hooks;
 pub mod http;
 pub mod inspection;
 pub mod journal;
+pub mod launch;
 pub mod media;
 pub mod mutations;
 pub mod native;

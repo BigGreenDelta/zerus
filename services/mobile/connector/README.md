@@ -14,9 +14,10 @@ attachments, answer, interrupt, send_now, settings, the context commands with
 their preflight, the DeepSeek child-send preflight, process_stop, lifecycle
 operations, recovery_action and set_mobile_delivery), and the terminal,
 attachment and file reads, voice, speech and speech configuration of
-`src/media.rs`, `src/files.rs` and `src/speech.rs` exactly as Python does,
-journals every outcome and uploads it. Every other operation (launch,
-directory and worktree creation, archive pages and the one-hop gateway) is claimed, refused with Python's `unsupported operation`
+`src/media.rs`, `src/files.rs` and `src/speech.rs`, and the launch, directory
+and worktree creations of `src/launch.rs` exactly as Python does, journals
+every outcome and uploads it. Every other operation (archive pages and the
+one-hop gateway) is claimed, refused with Python's `unsupported operation`
 receipt (which phones show as "update required") and never advertised, until
 its slice implements it (`src/capabilities.rs`, `IMPLEMENTED`;
 `tests/ported.json` lists the same operations for the black-box suites).

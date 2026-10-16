@@ -262,7 +262,7 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (199, 46));
+    assert_eq!((checked, refused), (238, 7));
     archive_refusals.sort();
     assert_eq!(archive_refusals, ARCHIVE_CASES);
 }

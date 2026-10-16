@@ -68,7 +68,7 @@ impl From<NativeError> for Failure {
 
 /// `except ValueError as error: raise ConnectorError(str(error))`; any other
 /// exception is the generic text.
-fn py(error: PyError) -> Failure {
+pub(crate) fn py(error: PyError) -> Failure {
     match error {
         PyError::Value(text) => Failure::Connector(text),
         PyError::Type => Failure::Generic,
@@ -227,6 +227,9 @@ impl<N: Native + 'static> Connector<N> {
             let result = if crate::mutations::handles(&validated.operation) {
                 self.mutate(&validated, request_id, &mutation_started)
                     .await?
+            } else if crate::launch::handles(&validated.operation) {
+                self.create(&validated, request_id, &mutation_started)
+                    .await?
             } else {
                 self.run(&validated, request_id).await?
             };
@@ -274,10 +277,16 @@ impl<N: Native + 'static> Connector<N> {
         if operation == "history" && !flags.history {
             return Err(Failure::text("native public history ABI is unavailable"));
         }
-        if matches!(operation, "catalog" | "dirs" | "worktrees") && !flags.launch {
+        let launch = crate::capabilities::LAUNCH.contains(&operation);
+        if launch && operation != "directory_create" && !flags.launch {
             return Err(Failure::text("native exact launch-ID ABI is unavailable"));
         }
-        if operation == "worktrees" && !flags.worktree {
+        if operation == "directory_create" && !flags.directory_create {
+            return Err(Failure::text(
+                "native explicit directory creation ABI is unavailable",
+            ));
+        }
+        if crate::capabilities::WORKTREES.contains(&operation) && !flags.worktree {
             return Err(Failure::text("native mobile worktree ABI is unavailable"));
         }
         if operation == "mark_read" && !flags.read {
@@ -286,7 +295,7 @@ impl<N: Native + 'static> Connector<N> {
         Ok(())
     }
 
-    async fn call(&self, call: Call) -> Result<Value, Failure> {
+    pub(crate) async fn call(&self, call: Call) -> Result<Value, Failure> {
         Ok(self.native(call).await?.json())
     }
 
@@ -707,7 +716,8 @@ pub fn mark_read_result(result: &Value, payload: &Value) -> bool {
     applied && read
 }
 
-fn absolute(value: Option<&Value>) -> Result<String, PyError> {
+/// `worktrees.absolute(value)`.
+pub(crate) fn absolute(value: Option<&Value>) -> Result<String, PyError> {
     let value = bounded(value, 4096, false)?;
     if !value.starts_with('/') {
         return Err(PyError::value("worktree path must be absolute"));
