@@ -2547,7 +2547,8 @@ identity read before opening the exact current run, archive or child; old hosts
 without that read fail visibly. Graph can open an archive outside the currently
 loaded Archive page without listing the whole archive catalog.
 
-Each call advances at most 32 bindings, with a 2 MiB ordinary input budget and a
+Each call reads at most 32 new or changed metadata records and checks at most
+512 cached stamps, with a 2 MiB ordinary input budget and a
 50 ms cooperative work budget. One manifest may finish within a 16 MiB hard cap;
 directory inventory is capped at 10,000 source files. These are bounds, not a
 measured latency guarantee. Partial or capped inventory never removes unseen

@@ -156,8 +156,8 @@ fn confirm(id: &str, mut event: Value, bytes: &[u8]) -> anyhow::Result<()> {
     // inter-host clock ordering. The local observation time remains separate.
     event["submitted_at"] = receipt["submitted_at"].clone();
     open(false)?.execute(
-        "UPDATE sends SET payload=?2 WHERE id=?1",
-        params![id, event.to_string()],
+        "UPDATE sends SET payload=?2,at=max(at+0.001,?3) WHERE id=?1",
+        params![id, event.to_string(), now()],
     )?;
     Ok(())
 }
@@ -229,14 +229,16 @@ pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate
     Ok(status.code().unwrap_or(1))
 }
 
-pub(super) fn source_ids(root: &Path) -> anyhow::Result<Vec<String>> {
+pub(super) fn source_ids(root: &Path) -> anyhow::Result<Vec<(String, String)>> {
     if !root.join("graph/sends.sqlite3").exists() {
         return Ok(Vec::new());
     }
     let db = open(true)?;
-    let mut q = db.prepare("SELECT id FROM sends WHERE at>=?1 ORDER BY id LIMIT 10001")?;
+    let mut q = db.prepare("SELECT id,at FROM sends WHERE at>=?1 ORDER BY id LIMIT 10001")?;
     let rows = q
-        .query_map([now() - 30.0 * 24.0 * 3600.0], |r| r.get(0))?
+        .query_map([now() - 30.0 * 24.0 * 3600.0], |r| {
+            Ok((r.get(0)?, format!("send-v1:{:.9}", r.get::<_, f64>(1)?)))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }

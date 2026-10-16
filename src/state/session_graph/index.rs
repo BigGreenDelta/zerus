@@ -89,11 +89,16 @@ impl Index {
             )
             .optional()?)
     }
-    pub fn seen(&self, source: &str, generation: i64) -> Result<()> {
-        self.db.execute(
-            "UPDATE sources SET seen=?2 WHERE source=?1",
-            params![source, generation],
-        )?;
+    pub fn checkpoint(&mut self, sources: &[String], generation: i64, after: &str) -> Result<()> {
+        let tx = self.db.transaction()?;
+        for source in sources {
+            tx.execute(
+                "UPDATE sources SET seen=?2 WHERE source=?1",
+                params![source, generation],
+            )?;
+        }
+        tx.execute("UPDATE meta SET value=?1 WHERE key='scan_after'", [after])?;
+        tx.commit()?;
         Ok(())
     }
     pub fn source_error(&self, source: &str, generation: i64, error: &str) -> Result<()> {

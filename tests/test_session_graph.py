@@ -67,6 +67,25 @@ class SessionGraph(unittest.TestCase):
         self.assertFalse((self.state/'events.sqlite3').exists())
         self.assertFalse((self.state/'input_receipts').exists())
 
+    def test_current_bindings_and_cached_stamps_do_not_wait_for_archive_backfill(self):
+        import uuid
+        path, current = self.record()
+        bindings = self.state/'bindings'; bindings.mkdir()
+        (bindings/path.name).write_text(json.dumps(current)); path.unlink()
+        archives = self.state/'archives'; archives.mkdir()
+        for i in range(80):
+            archive = str(uuid.uuid4())
+            saved = dict(current, name=f'codex/example/archived-{i}', run_id=f'archive-run-{i}',
+                         conversation_id=f'archived-native-{i}', state='archived', archive_id=archive)
+            (archives/(archive+'.json')).write_text(json.dumps(saved))
+        first = self.graph('snapshot')
+        self.assertTrue(any(r['item']['kind']=='binding' and
+                            r['item']['value']['name']==current['name'] for r in first['items']))
+        self.full()
+        # A warm unchanged inventory checks metadata rather than spending the
+        # 32 changed-record budget on old archives again.
+        self.assertTrue(self.graph('snapshot')['coverage']['bindings_complete'])
+
     def test_partial_scan_retains_inventory_and_changes_include_exact_deletion(self):
         paths = [self.record(name=f'codex/example/s{i}', conversation=f'native-{i}')[0] for i in range(75)]
         first = self.graph('snapshot')
@@ -78,6 +97,25 @@ class SessionGraph(unittest.TestCase):
         changes = self.graph('changes', '--after', cursor)
         deleted = [r for r in changes['items'] if r['deleted']]
         self.assertEqual(len(deleted), 3)  # exact node, binding, provisional alias
+
+    def test_old_scan_order_upgrade_keeps_live_sources_and_exact_removal(self):
+        import sqlite3
+        from contextlib import closing
+        path, _ = self.record()
+        rows, _ = self.full()
+        directory = self.state/'bindings'; directory.mkdir()
+        new = directory/path.name
+        new.write_bytes(path.read_bytes()); path.unlink()
+        self.full()
+        with closing(sqlite3.connect(self.state/'graph/index.sqlite3')) as db:
+            with db:
+                db.execute("DELETE FROM meta WHERE key='scan_order'")
+                db.execute("UPDATE meta SET value='archives/old.json' WHERE key='scan_after'")
+        repaired, _ = self.full()
+        self.assertEqual(repaired, rows)
+        new.unlink()
+        removed, _ = self.full()
+        self.assertEqual(removed, [])
 
     def test_corrupt_source_retains_last_good_and_exposes_coverage_gap(self):
         path, _ = self.record()

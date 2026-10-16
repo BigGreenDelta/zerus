@@ -22,6 +22,22 @@ const MAX_SOURCES: usize = 10_000;
 const SLICE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RECORD: u64 = 16 * 1024 * 1024;
 const SLICE_RECORDS: usize = 32;
+const SLICE_STAMPS: usize = 512;
+
+type InventorySource = (String, PathBuf, Option<String>);
+
+fn source_order(source: &str) -> (u8, &str) {
+    (
+        if source.starts_with("archives/") {
+            2
+        } else if source.starts_with("sends/") {
+            1
+        } else {
+            0
+        },
+        source,
+    )
+}
 
 fn candidate(path: &Path) -> bool {
     let stem = path
@@ -35,7 +51,7 @@ fn candidate(path: &Path) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn inventory(root: &Path) -> GraphResult<(Vec<(String, PathBuf)>, bool)> {
+fn inventory(root: &Path) -> GraphResult<(Vec<InventorySource>, bool)> {
     let mut paths = Vec::new();
     let mut complete = true;
     for directory in [
@@ -43,8 +59,26 @@ fn inventory(root: &Path) -> GraphResult<(Vec<(String, PathBuf)>, bool)> {
         "bindings",
         "dsh/bindings",
         "opencode/bindings",
+        "sends",
         "archives",
     ] {
+        if directory == "sends" {
+            for (id, stamp) in sends::source_ids(root)? {
+                if paths.len() == MAX_SOURCES {
+                    complete = false;
+                    break;
+                }
+                paths.push((
+                    format!("sends/{id}"),
+                    root.join("graph/sends.sqlite3"),
+                    Some(stamp),
+                ));
+            }
+            if !complete {
+                break;
+            }
+            continue;
+        }
         let entries = match fs::read_dir(root.join(directory)) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -70,51 +104,64 @@ fn inventory(root: &Path) -> GraphResult<(Vec<(String, PathBuf)>, bool)> {
                     path.file_name().unwrap().to_string_lossy()
                 ),
                 path,
+                None,
             ));
         }
         if !complete {
             break;
         }
     }
-    for id in sends::source_ids(root)? {
-        if paths.len() == MAX_SOURCES {
-            complete = false;
-            break;
-        }
-        paths.push((format!("sends/{id}"), root.join("graph/sends.sqlite3")));
-    }
-    paths.sort_by(|a, b| a.0.cmp(&b.0));
+    paths.sort_by(|a, b| source_order(&a.0).cmp(&source_order(&b.0)));
     Ok((paths, complete))
 }
 
 fn collect(index: &mut Index, machine: &str, root: &Path) -> GraphResult<()> {
     let started = Instant::now();
     let (paths, complete) = inventory(root)?;
+    // Restart the derived scan once when upgrading the ordering. Keep all
+    // prior facts until the new complete inventory has actually been seen.
+    if !matches!(index.get("scan_order").as_deref(), Ok("live-first-v1")) {
+        index.set("scan_after", "")?;
+        index.set("scan_order", "live-first-v1")?;
+    }
     let after = index.get("scan_after")?;
     let generation = index.generation()?;
     index.set("complete", "false")?;
     let mut bytes = 0;
-    for (count, (source, path)) in paths.iter().filter(|(key, _)| key > &after).enumerate() {
-        if count >= SLICE_RECORDS
+    let mut changed = 0;
+    let mut seen = Vec::new();
+    let mut scanned = after.clone();
+    for (count, (source, path, known_stamp)) in paths
+        .iter()
+        .filter(|(key, _, _)| after.is_empty() || source_order(key) > source_order(&after))
+        .enumerate()
+    {
+        if count >= SLICE_STAMPS
+            || changed >= SLICE_RECORDS
             || bytes >= SLICE_BYTES
             || (count > 0 && started.elapsed() > Duration::from_millis(50))
         {
+            index.checkpoint(&seen, generation, &scanned)?;
             return Ok(());
         }
+        let mut loaded = false;
         let read = (|| -> GraphResult<()> {
             if let Some(id) = source.strip_prefix("sends/") {
+                let stamp = known_stamp
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("Missing graph send stamp"))?;
+                if index.stamp(source)?.as_deref() == Some(stamp) {
+                    seen.push(source.clone());
+                    return Ok(());
+                }
+                loaded = true;
                 let record = sends::load(id)?;
                 let data = serde_json::to_vec(&record)?;
                 bytes += data.len() as u64;
                 ensure!(data.len() <= 16 * 1024, "Graph send metadata size limit");
-                let stamp = format!("{:x}", Sha256::digest(&data));
-                if index.stamp(source)?.as_deref() == Some(&stamp) {
-                    index.seen(source, generation)?;
-                    return Ok(());
-                }
                 let projection = model::exchange(machine, &record)
                     .ok_or_else(|| anyhow::anyhow!("Invalid graph send identity"))?;
-                index.publish(source, &stamp, generation, &projection, "")?;
+                index.publish(source, stamp, generation, &projection, "")?;
                 return Ok(());
             }
             let meta = path.symlink_metadata()?;
@@ -132,6 +179,11 @@ fn collect(index: &mut Index, machine: &str, root: &Path) -> GraphResult<()> {
                     .join(path.file_name().unwrap())
                     .exists()
             {
+                if index.stamp(source)?.as_deref() == Some("superseded") {
+                    seen.push(source.clone());
+                    return Ok(());
+                }
+                loaded = true;
                 index.publish(
                     source,
                     "superseded",
@@ -147,10 +199,11 @@ fn collect(index: &mut Index, machine: &str, root: &Path) -> GraphResult<()> {
                 meta.modified()?.duration_since(UNIX_EPOCH)?.as_nanos()
             );
             if index.stamp(source)?.as_deref() == Some(&stamp) {
-                index.seen(source, generation)?;
+                seen.push(source.clone());
                 return Ok(());
             }
             let file = fs::File::open(path)?;
+            loaded = true;
             let mut data = Vec::new();
             file.take(MAX_RECORD + 1).read_to_end(&mut data)?;
             bytes += data.len() as u64;
@@ -196,13 +249,17 @@ fn collect(index: &mut Index, machine: &str, root: &Path) -> GraphResult<()> {
             index.publish(source, &stamp, generation, &projection, "")?;
             Ok(())
         })();
+        if loaded || read.is_err() {
+            changed += 1;
+        }
         if read.is_err() {
             // Do not persist parser text: it may contain private source data.
             // Retain last-good facts with an explicit coverage error.
             index.source_error(source, generation, "binding_unavailable")?;
         }
-        index.set("scan_after", source)?;
+        scanned.clone_from(source);
     }
+    index.checkpoint(&seen, generation, &scanned)?;
     index.finish_scan(generation, complete)?;
     Ok(())
 }
