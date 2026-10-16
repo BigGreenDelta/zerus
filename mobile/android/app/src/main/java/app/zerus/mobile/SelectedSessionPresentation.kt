@@ -10,6 +10,20 @@ object SelectedSessionPresentation {
             inspection.string("conversation_id") != target.conversation ||
             target.archiveId.isNotBlank() && inspection.string("archive_id") != target.archiveId ||
             target.agentId.isNotBlank() && inspection.string("parent_conversation_id") != target.parentConversation) return selected
+        val currentWait=selected.raw.optJSONObject("coordination_wait")
+        val inspectedWait=inspection.optJSONObject("coordination_wait")
+        val inspectedRevision=if(inspectedWait?.optInt("schema")==1 && inspectedWait.string("status")=="ok" &&
+            inspectedWait.string("run_id")==target.run && inspectedWait.string("conversation_id")==target.conversation)
+            inspectedWait.optLong("revision") else -1
+        if(currentWait?.string("status")=="ok" && currentWait.string("run_id")==target.run &&
+            currentWait.string("conversation_id")==target.conversation && currentWait.optLong("revision") > inspectedRevision) {
+            // Shallow metadata copy: never serialize the whole inspected history
+            // during header composition, or let an older cache resurrect a wait.
+            val combined=JSONObject()
+            inspection.keys().forEach { key -> combined.put(key,inspection.get(key)) }
+            combined.put("coordination_wait",currentWait)
+            return selected.copy(raw=combined)
+        }
         return selected.copy(raw = inspection)
     }
     fun status(selected: Session,inspection: JSONObject?): String {

@@ -584,6 +584,45 @@ GraphProjection::Result GraphProjection::compose(const SessionGraphStore &store,
         else
             result.omitted += events.size();
     }
+    // Explicit dependencies use the same exact current source binding as the
+    // card. A reference names the producer; an ambiguous account/run match never
+    // becomes an edge. No message text or peer activity is interpreted here.
+    const auto waitTargetKey = [](const QString &machine,const QString &provider,const QString &conversation,const QString &run) {
+        return QString::fromUtf8(QJsonDocument(QJsonArray{machine,provider,conversation,run}).toJson(QJsonDocument::Compact));
+    };
+    QHash<QString,QSet<QString>> waitTargets;
+    for (const auto &bindingId : verifiedBindings) {
+        const auto &binding = facts[bindingId];
+        const auto node = binding.value["node"].toString();
+        const auto endpoint = facts[node].value["endpoint"].toObject();
+        waitTargets[waitTargetKey(binding.machine,endpoint["provider"].toString(),endpoint["conversation"].toString(),binding.value["run_id"].toString())].insert(node);
+        waitTargets[waitTargetKey(binding.machine,endpoint["provider"].toString(),endpoint["conversation"].toString(),{})].insert(node);
+    }
+    QSet<QString> shownWaits;
+    for (const auto &binding : bindings) {
+        if (!binding.available || !binding.archive.isEmpty() || !binding.agent.isEmpty()) continue;
+        const auto from = parentIds.value(key(binding));
+        if (!shown.contains(from)) continue;
+        const auto wait = binding.roles.value(SessionRoles::CoordinationWait).toJsonObject();
+        if (wait["status"] != "ok" || wait["run_id"] != binding.run || wait["conversation_id"] != binding.conversation) continue;
+        result.omitted += qMax(0,wait["count"].toInt()-int(wait["items"].toArray().size()));
+        for (const auto &row : wait["items"].toArray()) {
+            const auto item = row.toObject(), owner = item["waiter"].toObject(), producer = item["producer"].toObject();
+            const auto state = item["state"].toString(), id = item["id"].toString();
+            if ((state != "awaiting_ack" && state != "awaiting_result") || QUuid(id).isNull()
+                || owner["run_id"] != binding.run || endpointKey(owner["endpoint"].toObject()) != from) { ++result.unresolved; continue; }
+            const auto targets = waitTargets.value(waitTargetKey(producer["machine"].toString(),producer["provider"].toString(),producer["conversation_id"].toString(),producer["run_id"].toString()));
+            if (targets.size()!=1) { ++result.unresolved; continue; }
+            const auto to = *targets.begin(), relationId = "wait:" + from + ':' + id;
+            if (!shown.contains(to) || shownWaits.contains(relationId)) continue;
+            shownWaits.insert(relationId);
+            if (result.relations.size() >= 10000) { ++result.omitted; continue; }
+            const auto label = state == "awaiting_ack" ? QObject::tr("Waiting for acceptance") : QObject::tr("Waiting for result");
+            result.relations.append({{relationId,from,to,"wait",label},
+                QObject::tr("Explicitly declared dependency. %1\n%2\nSince %3. A submitted message or an idle producer does not settle it.")
+                    .arg(label,item["label"].toString(),QDateTime::fromSecsSinceEpoch(qint64(item["created_at"].toDouble())).toLocalTime().toString(Qt::ISODate))});
+        }
+    }
     for (const auto &relation : currentChildren)
         if (shown.contains(relation.line.from) && shown.contains(relation.line.to)) {
             if (result.relations.size() < 10000)

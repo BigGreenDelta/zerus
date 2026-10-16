@@ -1,5 +1,12 @@
 # Zerus Android
 
+Independent-session waits declared through `hgs wait` appear as **Waiting for
+acceptance** or **Waiting for result**, with producer, computer and elapsed time.
+They remain in Active while the exact waiter is live and online; work and
+attention retain priority, and intermediate reply badges wait for settlement.
+The additive snapshot metadata uses the shared desktop filter contract. See
+[Agent coordination](../../docs/agent-coordination.md).
+
 Settings → About shows the Android app version and each connected computer's
 reported `hgs` CLI version. Offline reports are marked `last known`; older CLIs
 without version metadata show `version unavailable`, and an unreachable peer

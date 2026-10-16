@@ -49,6 +49,17 @@ class TestGraphPage : public QObject {
                  "Verified delivery receipt · submitted, consumption unknown"}};
     }
   private slots:
+    void activeWaitKeepsItsReadyIndependentProducerAsContext() {
+        GraphPage page(nullptr,{});
+        auto waiter=node("waiter","Focus"),producer=node("producer","Other"),unrelated=node("unrelated","Other");
+        producer.active=false; unrelated.active=false;
+        const QList<GraphPage::Relation> waits{{{"wait-one","waiter","producer","wait","Waiting for result"},"Explicit dependency"}};
+        QVERIFY(page.setProjection({waiter,producer,unrelated},waits));
+        QCOMPARE(page.canvas()->nodeCount(),2);QVERIFY(!page.canvas()->nodeRect("producer").isEmpty());
+        QVERIFY(page.canvas()->nodeRect("unrelated").isEmpty());
+        page.focusProject("Focus");QCOMPARE(page.canvas()->nodeCount(),2);
+        QVERIFY(page.setProjection({waiter,producer,unrelated},{}));QCOMPARE(page.canvas()->nodeCount(),1);
+    }
     void quickScopesDefaultToActiveAndKeepRecordedChildrenOut() {
         GraphPage page(nullptr, {});
         auto working = node("working", "Focus");

@@ -2603,6 +2603,8 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     roles.insert(SessionRoles::Working, !isTerminating(e) && SessionPresentation::working(s, e.online));
     roles.insert(SessionRoles::WorkingSince, SessionPresentation::backgroundIdle(s) ? s.backgroundStarted : s.phase == "compacting" ? s.compactionStarted : s.turnStarted);
     roles.insert(SessionRoles::Scheduled, !isTerminating(e) && scheduled(s, e.online));
+    roles.insert(SessionRoles::CoordinationWait, !terminating && SessionPresentation::currentActivity(s,e.online) && s.hasCoordinationWait() ? s.coordinationWait : QJsonObject());
+    roles.insert(SessionRoles::Waiting, !terminating && e.online && SessionPresentation::waitingIdle(s));
     roles.insert(SessionRoles::OptionalQuestions, terminating ? 0 : SessionPresentation::optionalQuestionCount(s, e.online));
     roles.insert(SessionRoles::MachineName, e.machine);
     roles.insert(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
@@ -3372,7 +3374,10 @@ void SessionsWindow::renderDetails()
         else if (reason == "user_archived") meta += '\n' + tr("Moved to archive");
     }
     m_meta->setToolTip(sessionTooltip({meta, m_details.value("model").toString(s.model)}, 420).html); updateHeaderText();
-    m_badge->setText(state); const auto color = tone(s.state=="running" && s.processState!="exited" && entry->online && s.phase=="error"?QStringLiteral("Error"):state, m_dark);
+    const bool waiting=entry->online && SessionPresentation::waitingIdle(s);
+    m_badge->setText(waiting?SessionPresentation::waitingCaption(s):state); const auto color = waiting
+        ? QColor(m_dark ? "#edd096" : "#795913")
+        : tone(s.state=="running" && s.processState!="exited" && entry->online && s.phase=="error"?QStringLiteral("Error"):state, m_dark);
     setWorkspaceStyle(m_badge, QString("color:%1; background:%2; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600;")
                           .arg(color.name(), m_dark ? "#2b323d" : "#edf1f5"));
     m_badge->setMinimumWidth(state == "Background" ? m_badge->fontMetrics().horizontalAdvance(state) + 16 : 0);

@@ -76,6 +76,16 @@ work completes. Historical, unknown and offline jobs never establish current wor
 Keep this contract aligned across desktop, Android, shared fixtures and docs;
 changes to these status semantics need explicit owner direction.
 
+Owner-approved independent-agent waits use `hgs wait`, separately from native
+work. Before handing off work whose acceptance or result you will wait for,
+declare the wait and give the producer its scoped reply ticket. Acknowledge
+acceptance explicitly; deliver the result through the normal guarded send before
+finishing the wait with that exact submission receipt. Cancel abandoned waits.
+Never infer acknowledgement or completion from prose, Beads status, a native Stop
+or peer idleness. Preserve exact waiter identity, native work/attention priority,
+bounded previews and paged journals. Check the selected installed CLI's help
+marker before using `wait` on an older peer. See `docs/agent-coordination.md`.
+
 Use non-interactive filesystem commands and `ssh/scp -o BatchMode=yes` in automation.
 On Windows, reach `ssh.exe` only through `hgs.exe`: Windows OpenSSH hangs after
 using a synchronous pipe, so scripts and tests must not pipe it directly.

@@ -186,7 +186,7 @@ Collapsed group edges show aggregate counts; expansion reveals their endpoints.
 | Message / result transfer | Solid mint arrow, sender to recipient | Recorded exchange with identified endpoints; click for evidence |
 | Fork | Thin branching connector, origin to new conversation | Confirmed native fork lineage; not delegation or continued identity |
 | Referenced conversation | Dotted neutral arrow, containing message to referenced conversation | Exact parsed reference only; optional layer, never counted as a sent message |
-| Waiting for result | Dashed amber arrow, waiting session to expected producer | Later: explicit scoped declaration with a clear settlement event |
+| Waiting for result | Dashed amber arrow, waiting session to expected producer | Explicit `hgs wait` declaration, scoped acceptance ticket and confirmed result delivery; see `docs/agent-coordination.md` |
 | User annotation | Dotted connector labeled Manual | Later: authored note, visibly different from observed facts |
 
 Color is redundant with line pattern, arrow and text. Amber remains meaningful
@@ -497,8 +497,8 @@ communication, edge evidence, Activity navigation, cache/freshness, list alterna
 and honest partial coverage. Structured provenance for new Zerus-mediated sends is
 part of the data work, not postponed until after a decorative canvas ships.
 
-**Following releases:** wider native/external event coverage, explicit wait/handoff
-metadata and history browsing; Android parity on the deployed read contract;
+**Following releases:** wider native/external event coverage and handoff history
+browsing; Android Graph parity on the deployed read contract;
 workflow authoring only after a separate owner-reviewed specification.
 
 Qualify at least these synthetic scenarios before product delivery:

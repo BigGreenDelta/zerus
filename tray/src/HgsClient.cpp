@@ -112,6 +112,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.scheduledJobs = schedules.value("count").toInt(-1);
     s.recurringSchedules = schedules.value("recurring").toInt(-1);
     s.nextScheduledAt = schedules.value("next_at").toDouble();
+    s.coordinationWait = obj.value("coordination_wait").toObject();
     const auto work = obj.value("process_work").toObject();
     s.backgroundProcesses = work.value("count").toInt(-1);
     s.backgroundStarted = work.value("started_at").toDouble();

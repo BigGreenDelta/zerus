@@ -366,11 +366,11 @@ class MainActivity : ComponentActivity() {
         Text(text, Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = color, style = MaterialTheme.typography.labelSmall)
     }
 }
-@Composable private fun SessionBadge(session: Session, online: Boolean) {
+@Composable private fun SessionBadge(session: Session, online: Boolean, modifier: Modifier = Modifier) {
     val badge = DesktopSessionPalette.badge(session, online)
     val dark = MaterialTheme.colorScheme.background.luminance() < .5f
     val colors = DesktopSessionPalette.colors(badge.kind, dark)
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier,horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         Surface(color = Color(colors.background), shape = RoundedCornerShape(5.dp)) {
             Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically) {
@@ -380,10 +380,12 @@ class MainActivity : ComponentActivity() {
                         fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                     DesktopBadgeKind.Paused -> Icon(DesktopIcons.Paused, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Unread -> Icon(Icons.Default.MarkEmailUnread, null, Modifier.size(12.dp), tint = Color(colors.foreground))
-                    DesktopBadgeKind.Scheduled -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
+                    DesktopBadgeKind.Scheduled, DesktopBadgeKind.Waiting -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Neutral -> Unit
                 }
-                Text(badge.caption, color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall)
+                Text(badge.caption, color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall,
+                    maxLines=if(badge.kind==DesktopBadgeKind.Waiting) 1 else Int.MAX_VALUE,
+                    overflow=if(badge.kind==DesktopBadgeKind.Waiting) TextOverflow.Ellipsis else TextOverflow.Clip)
             }
         }
         if (badge.additionalUnread) {
@@ -664,7 +666,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             Icon(Icons.Default.ChevronRight, "Open", tint = Muted, modifier = Modifier.size(20.dp))
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            SessionBadge(session, online)
+                            SessionBadge(session, online, if(online && SessionFilters.waitingIdle(session)) Modifier.weight(1.5f,fill=false) else Modifier)
                             Box(Modifier.weight(1f)) { MachineLabel(machine?.name ?: session.target.computerId,colorHex = model.machineColor(MachineKey(session.target.connectionId,session.target.computerId))) }
                             SessionSubagentCounter(model, session, online)
                         }
@@ -672,7 +674,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         SessionFilters.archiveDate(session).takeIf { it.isNotBlank() }?.let { archivedDate ->
                             Text("Archived $archivedDate", color = Muted, style = MaterialTheme.typography.labelSmall)
                         }
-                        Text(session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)
+                        Text(if(online && SessionFilters.waitingIdle(session)) SessionFilters.waitingLabel(session) else session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)
                         if (model.connections.size > 1) Text(model.connections.find { it.id == session.target.connectionId }?.displayName.orEmpty(), color = Muted, style = MaterialTheme.typography.labelSmall)
                         SessionSubagentRows(model, session, online)
                     }

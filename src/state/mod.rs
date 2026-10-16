@@ -56,6 +56,7 @@ mod rename;
 mod resume_input;
 mod scan_cache;
 mod schedules;
+mod waits;
 mod search;
 pub(crate) mod session_graph;
 mod storage;
@@ -451,6 +452,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     // have been renamed since `snapshot`. They go by the session IDs, which a
     // rename keeps, to the names that `snapshot` listed (zerus-18u1).
     workspace::enrich(sessions, &workspace::snapshot_cwds(&names));
+    waits::decorate(sessions);
     Ok(box_value)
 }
 
@@ -611,6 +613,8 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
 pub fn dispatch(args: &[String]) -> Result<i32> {
+    // Coordination metadata never starts or controls a native session host.
+    if args.first().map(String::as_str)==Some("wait") { return waits::dispatch(&args[1..]); }
     session_operations()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());

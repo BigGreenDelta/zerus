@@ -596,6 +596,19 @@ void GraphPage::render() {
             primary.insert(node.card.id);
     }
     visible = primary;
+    // An explicitly awaited independent producer is useful context even when
+    // it is Ready. Keep its own Active flag unchanged and respect machine scope;
+    // ordinary message/parent edges still cannot resurrect inactive rosters.
+    if (m_filter == "active") {
+        QHash<QString,const Node *> byId;
+        for (const auto &node : m_nodes) byId.insert(node.card.id,&node);
+        for (const auto &edge : m_relations) {
+            if (edge.line.kind != "wait" || !primary.contains(edge.line.from)) continue;
+            const auto *producer=byId.value(edge.line.to,nullptr);
+            if (producer && !producer->archived && producer->card.roles.value(SessionRoles::ChildId).toString().isEmpty()
+                && matchesMachine(*producer)) visible.insert(edge.line.to);
+        }
+    }
     // Keep cross-project collaborators within the explicitly selected state and
     // machine scope. A project filter must not resurrect inactive child rosters.
     if (!m_projects.isEmpty())

@@ -65,6 +65,39 @@ class TestGraphProjection : public QObject {
                 true};
     }
   private slots:
+    void explicitWaitEdgesRequireExactSourceAndProducerBindings() {
+        const auto endpoint=[&](const QString &conversation) {
+            return QJsonObject{{"machine",machine},{"provider","claude"},{"namespace","account:"+QString(64,'a')},
+                {"conversation",conversation},{"provisional_run",""}};
+        };
+        const auto nodeKey=[](const QJsonObject &v) {return "node:"+QString::fromLatin1(QCryptographicHash::hash(QJsonDocument(v).toJson(QJsonDocument::Compact),QCryptographicHash::Sha256).toHex());};
+        const auto from=endpoint("conversation-one"),to=endpoint("conversation-two");
+        auto source=live(),producer=live(); producer.name="claude/project/producer"; producer.run="run-two"; producer.conversation="conversation-two";
+        QJsonObject values;
+        for(const auto &row : {source,producer}) {
+            const auto e=row.run==source.run?from:to;
+            values[nodeKey(e)]=item("node",{{"endpoint",e}});
+            values[id("binding",row.run==source.run?'b':'c')]=item("binding",{{"node",nodeKey(e)},{"name",row.name},{"run_id",row.run},{"conversation_id",row.conversation},{"provider",row.provider}});
+        }
+        QJsonObject entry{{"id","44444444-4444-4444-8444-444444444444"},{"state","awaiting_ack"},{"created_at",100},
+            {"waiter",QJsonObject{{"endpoint",from},{"run_id",source.run}}},
+            {"producer",QJsonObject{{"machine",machine},{"provider","claude"},{"run_id",producer.run},{"conversation_id",producer.conversation}}}};
+        QJsonObject wait{{"status","ok"},{"count",1},{"run_id",source.run},{"conversation_id",source.conversation},{"items",QJsonArray{entry}}};
+        source.roles[SessionRoles::CoordinationWait]=wait;
+        SessionGraphStore store; apply(store,values);
+        auto result=GraphProjection::compose(store,{source,producer},{"mac"});
+        QCOMPARE(result.relations.size(),1); QCOMPARE(result.relations[0].line.kind,QString("wait"));
+        QCOMPARE(result.relations[0].line.from,nodeKey(from)); QCOMPARE(result.relations[0].line.to,nodeKey(to));
+        auto changed=entry;changed["state"]="awaiting_result";wait["items"]=QJsonArray{changed};source.roles[SessionRoles::CoordinationWait]=wait;
+        result=GraphProjection::compose(store,{source,producer},{"mac"});QCOMPARE(result.relations.size(),1);QVERIFY(result.relations[0].line.description.contains("result"));
+        changed["state"]="completed";wait["items"]=QJsonArray{changed};source.roles[SessionRoles::CoordinationWait]=wait;
+        QVERIFY(GraphProjection::compose(store,{source,producer},{"mac"}).relations.isEmpty());
+        changed=entry;auto target=changed["producer"].toObject();target["run_id"]="other-run";changed["producer"]=target;
+        wait["items"]=QJsonArray{changed};source.roles[SessionRoles::CoordinationWait]=wait;
+        QVERIFY(GraphProjection::compose(store,{source,producer},{"mac"}).relations.isEmpty());
+        wait["items"]=QJsonArray{entry};wait["run_id"]="other-waiter";source.roles[SessionRoles::CoordinationWait]=wait;
+        QVERIFY(GraphProjection::compose(store,{source,producer},{"mac"}).relations.isEmpty());
+    }
     void currentWorkScopeIsExplicitAndRecordedMetadataCannotImpersonateActivity() {
         SessionGraphStore store;
         apply(store, facts());

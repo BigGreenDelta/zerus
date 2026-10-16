@@ -52,7 +52,39 @@ private slots:
     void gitStatusCardsKeepMetadataAndMachineReadable();
     void optionalQuestionChipFollowsTheStatusBadge();
     void subagentInactivityKeepsConflictingAndUnknownEvidence();
+    void explicitIndependentWaitKeepsNativePriorityAndRejectsStaleInspection();
 };
+
+void TestWorkspace::explicitIndependentWaitKeepsNativePriorityAndRejectsStaleInspection()
+{
+    SessionInfo s; s.state="running"; s.activity="idle"; s.phase="idle"; s.tracked=true;
+    s.runId="run"; s.conversationId="conversation"; s.unreadReply=true;
+    QJsonObject wait{{"schema",1},{"status","ok"},{"revision",2},{"run_id",s.runId},{"conversation_id",s.conversationId},{"count",1},
+        {"items",QJsonArray{QJsonObject{{"state","awaiting_ack"},{"created_at",QDateTime::currentSecsSinceEpoch()-120},
+            {"producer",QJsonObject{{"name","claude/project/worker"},{"host","peer"}}}}}}};
+    s.coordinationWait=wait;
+    QVERIFY(SessionPresentation::active(s)); QVERIFY(!s.visibleUnreadReply()); QVERIFY(!s.needsAction());
+    QVERIFY(SessionPresentation::status(s).contains("Waiting for acceptance from worker on peer"));
+    QVERIFY(SessionPresentation::status(s).contains("2m"));
+    SessionList list;auto *row=new QListWidgetItem(&list);row->setData(SessionRoles::Title,"Coordinator");
+    row->setData(SessionRoles::Agent,"codex");row->setData(SessionRoles::Status,SessionPresentation::status(s));
+    row->setData(SessionRoles::Waiting,true);row->setData(SessionRoles::CoordinationWait,wait);
+    const auto index=list.model()->index(0,0);const auto badge=SessionDelegate::statusOf(index,false);
+    QCOMPARE(badge.kind,SessionStatusBadge::Waiting);QVERIFY(badge.caption.startsWith("Waiting ("));
+    const auto layout=SessionDelegate::titleLayout(QRect(0,0,280,104),list.font(),false,index,badge);
+    QVERIFY(layout.title.width()>=72);QVERIFY(!layout.status.intersects(layout.provider));
+    s.backgroundProcesses=1; QCOMPARE(SessionPresentation::status(s),QString("Background"));
+    s.backgroundProcesses=0; s.phase="approval"; QCOMPARE(SessionPresentation::status(s),QString("Needs approval"));
+    s.phase="tool"; s.activity="busy"; QCOMPARE(SessionPresentation::status(s),QString("Using a tool"));
+    s.phase="idle"; s.activity="idle";
+    QJsonObject details{{"run_id",s.runId},{"conversation_id",s.conversationId}};
+    auto stale=wait; stale["revision"]=1; stale["count"]=0; details["coordination_wait"]=stale;
+    QVERIFY(SessionPresentation::inspected(s,details).hasCoordinationWait());
+    auto settled=wait; settled["revision"]=3; settled["count"]=0; settled["items"]=QJsonArray{}; details["coordination_wait"]=settled;
+    auto done=SessionPresentation::inspected(s,details); QVERIFY(!done.hasCoordinationWait()); QVERIFY(done.visibleUnreadReply());
+    QVERIFY(!SessionPresentation::active(s,false));
+    s.runId="reused"; QVERIFY(!s.hasCoordinationWait()); QCOMPARE(SessionPresentation::status(s),QString("Ready"));
+}
 
 void TestWorkspace::subagentInactivityKeepsConflictingAndUnknownEvidence()
 {

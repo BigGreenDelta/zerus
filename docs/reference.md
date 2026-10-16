@@ -877,6 +877,15 @@ separate fields or slashes, without dot separators.
 Copying keeps the dialog open; restoring never sends anything and replacing an
 existing draft requires confirmation. A source draft remains available after
 copying it to another session.
+
+Independent sessions can explicitly declare **Waiting for acceptance** and
+**Waiting for result** through `hgs wait`. The idle card names the producer and
+computer and shows elapsed time; the session stays in Active. Native work and
+attention take precedence, while reply-only completion badges wait. Graph uses
+a dashed amber dependency arrow. Settlement requires the scoped reply ticket
+and, for a result, a confirmed delivery receipt in the exact waiting conversation.
+The durable journal has bounded previews and stable pages. See
+[Agent coordination](agent-coordination.md).
 Confirmed sends clear the outgoing draft; failures retain it. After an interrupted
 or uncertain send, check Activity or Terminal before explicitly allowing another
 send. Saving failures are shown in the editor and retried locally; sending starts

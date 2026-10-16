@@ -767,6 +767,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     // The pane folders go by the session IDs, which a rename keeps, to the name
     // this inspection reports (zerus-byyw, as in `merge_listing`).
     workspace::enrich(std::slice::from_mut(&mut output), &workspace::snapshot_cwds(&names));
+    waits::decorate(std::slice::from_mut(&mut output));
     Ok(output)
 }
 

@@ -219,6 +219,8 @@ private slots:
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
     void savedDraftsGoToTheirSession_data();
     void savedDraftsGoToTheirSession();
+    void independentWaitRemainsVisibleWithoutExpandingHeader_data();
+    void independentWaitRemainsVisibleWithoutExpandingHeader();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
     void emptyProjectsSettingPreservesArchiveAndProjects();
@@ -731,6 +733,37 @@ void TestSessionsWindow::savedDraftsGoToTheirSession()
     QCOMPARE(window.findChild<SessionList *>("sessionList")->currentItem()->data(SessionRoles::ChildId).toString(), QString("worker"));
     choose(remote, true); QCOMPARE(composer->sessionKey(), remote);
     QVERIFY(window.findChild<SessionList *>("sessionList")->currentItem()->data(SessionRoles::ChildId).toString().isEmpty());
+}
+
+void TestSessionsWindow::independentWaitRemainsVisibleWithoutExpandingHeader_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark")<<QString("dark"); QTest::newRow("light")<<QString("light");
+}
+
+void TestSessionsWindow::independentWaitRemainsVisibleWithoutExpandingHeader()
+{
+    QFETCH(QString,theme); QSettings().setValue("workspace/theme",theme);
+    auto state=fleet(); auto box=state.local(); auto &s=box.sessions[0];
+    s.tracked=true; s.activity="idle"; s.phase="idle"; s.runId="waiting-run";s.conversationId="waiting-conversation";
+    s.backgroundProcesses=0;s.subagentActiveCount=0;s.subagentCount=0;
+    s.coordinationWait=QJsonObject{{"schema",1},{"status","ok"},{"revision",1},{"run_id",s.runId},{"conversation_id",s.conversationId},{"count",1},
+        {"items",QJsonArray{QJsonObject{{"state","awaiting_result"},{"created_at",QDateTime::currentSecsSinceEpoch()-300},
+            {"producer",QJsonObject{{"name","claude/project/worker-"+QString(100,'w')},{"host","peer"}}},{"label","Review the patch"}}}}};
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.resize(1000,800);window.setFleet(state);window.show();window.showSession({},s.name);
+    auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(list->currentItem());
+    QVERIFY(list->currentItem()->data(SessionRoles::Waiting).toBool());
+    QVERIFY(list->currentItem()->data(SessionRoles::Detail).toString().contains("Review the patch"));
+    auto *badge=window.findChild<QLabel *>("badge");QVERIFY(badge);
+    QTRY_VERIFY(badge->text().startsWith("Waiting for result ("));
+    QVERIFY(!badge->text().contains("worker"));
+    QVERIFY(window.width()<=1100);QVERIFY(badge->width()<=300);
+    const auto preview=qEnvironmentVariable("ZERUS_WAIT_QA_DIR");
+    if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(window.grab().save(preview+"/wait-"+theme+".png"));}
+    s.coordinationWait["revision"]=2;s.coordinationWait["count"]=0;s.coordinationWait["items"]=QJsonArray{};
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QVERIFY(!list->currentItem()->data(SessionRoles::Waiting).toBool());
 }
 
 void TestSessionsWindow::workingCardsKeepTurnClockAcrossUpdates()

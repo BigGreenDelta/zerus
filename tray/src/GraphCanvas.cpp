@@ -118,12 +118,13 @@ class GraphRelationItem : public QGraphicsPathItem {
         return QGraphicsPathItem::boundingRect().adjusted(-10, -10, 10, 10);
     }
     void paint(QPainter *p, const QStyleOptionGraphicsItem *, QWidget *) override {
-        const QColor color = isSelected() ? (dark ? QColor("#c7eee0") : QColor("#14664c"))
+        const QColor color = relation.kind == "wait" ? (dark ? QColor("#d4ae65") : QColor("#a37a24"))
+                             : isSelected() ? (dark ? QColor("#c7eee0") : QColor("#14664c"))
                              : relation.kind == "message"
                                  ? (dark ? QColor("#75cbb1") : QColor("#227e61"))
                                  : (dark ? QColor("#71808e") : QColor("#7b8790"));
         p->setPen(QPen(color, isSelected() ? 2.5 : 1.5,
-                       relation.kind == "reference" ? Qt::DotLine : Qt::SolidLine));
+                       relation.kind == "wait" ? Qt::DashLine : relation.kind == "reference" ? Qt::DotLine : Qt::SolidLine));
         p->setBrush(Qt::NoBrush);
         p->drawPath(path());
         const auto end = path().pointAtPercent(1), before = path().pointAtPercent(.97);
