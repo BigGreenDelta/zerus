@@ -282,7 +282,7 @@ final class RecoveryTests: XCTestCase {
 final class ContextCommandTests: XCTestCase {
     private let target = Target(computerId: "computer", session: "codex/project/session", run: "run", conversation: "conversation", connectionId: "workspace")
     private let file = Attachment(id: "10000000-0000-4000-8000-000000000001", name: "synthetic.txt", mime: "text/plain", bytes: 4, sha256: String(repeating: "0", count: 64))
-    private var original: Draft { Draft(target: target, text: "Captured message", attachments: [file], revision: "revision", generation: "generation") }
+    private var original: Draft { Draft(target: target, text: "Captured message", updatedAt: 1_000, attachments: [file], revision: "revision", generation: "generation") }
     private var op: ContextOperation { ContextOperation(requestId: "compact-id", target: target, operation: "compact_context", status: "completed", createdAt: 1) }
     private func native(_ status: String = "completed", _ change: JSONObject = [:], request: JSONObject = [:]) -> JSONObject {
         var compact: JSONObject = ["request_id": "compact-id", "run_id": "run", "conversation_id": "conversation", "status": .string(status)]
