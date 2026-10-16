@@ -116,6 +116,14 @@ processing, one check for confirmed native submission, cancellation, failure or
 unconfirmed delivery. There are no read/completion ticks. An unfamiliar state
 remains unconfirmed. Icon controls retain accessible names and touch targets.
 
+Android round videos sit directly in the conversation with compact duration,
+time and delivery indicators. Their transcript icon opens a text card with a
+small circular poster and the existing seekable derived-audio player; the large
+video is replaced while the exact recognized text is visible. The up-arrow
+returns to the circle. Each message remembers its own disclosure state. Changing
+this view never opens media or submits a message; it stops only that recording's
+current player, preserving playback of other messages.
+
 The visual reference is Telegram Android's
 [ChatMessageCell](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java),
 which groups media time and delivery glyphs. Zerus uses its own UI components

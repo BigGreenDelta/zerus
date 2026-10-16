@@ -48,7 +48,8 @@ internal object VoiceWaveform {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable internal fun VoicePlayer(identity: String, waveform: List<Int>, durationMs: Int,
     positionMs: Int, playing: Boolean, loading: Boolean, onToggle: () -> Unit, onSeek: (Float) -> Unit,
-    status: String? = null, trailing: (@Composable () -> Unit)? = null, metadata: (@Composable () -> Unit)? = null) {
+    status: String? = null, trailing: (@Composable () -> Unit)? = null, metadata: (@Composable () -> Unit)? = null,
+    leading: (@Composable () -> Unit)? = null, endControl: (@Composable () -> Unit)? = null) {
     var seeking by remember(identity, durationMs) { mutableStateOf<Float?>(null) }
     val fraction = seeking ?: VoiceWaveform.progress(positionMs, durationMs)
     val displayedPosition = seeking?.let { VoiceWaveform.seekPosition(it, durationMs) } ?: positionMs
@@ -120,7 +121,7 @@ internal object VoiceWaveform {
         }
     } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        PlayControl(compact = false)
+        if (leading != null) leading() else PlayControl(compact = false)
         Column(Modifier.weight(1f)) {
             Track(Modifier.fillMaxWidth())
             FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
@@ -130,5 +131,6 @@ internal object VoiceWaveform {
                 metadata?.invoke()
             }
         }
+        endControl?.invoke()
     }
 }

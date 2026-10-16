@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -44,26 +45,14 @@ import java.util.Base64
 /** Only an explicit tap creates a decoder; the shared attachment player owns audio focus. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable internal fun VideoCircle(model: ZerusViewModel, target: Target?, video: VideoMessage, diameter: androidx.compose.ui.unit.Dp = 200.dp,
-    metadata: (@Composable () -> Unit)? = null) {
+    metadata: (@Composable () -> Unit)? = null, showFooter: Boolean = true) {
     val viewer = model.attachments
     val key = AttachmentIdentity.playbackKey(target, video.file)
     val active = viewer.playingKey == key
     val row = viewer.state(target, video.file)
-    val poster by produceState<android.graphics.Bitmap?>(null, video.posterBase64) {
-        value = withContext(Dispatchers.Default) {
-            runCatching {
-                val bytes = Base64.getDecoder().decode(video.posterBase64)
-                if (bytes.size !in 4..8192) return@runCatching null
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                if (bounds.outWidth !in 1..512 || bounds.outHeight !in 1..512) return@runCatching null
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            }.getOrNull()
-        }
-    }
     Column {
         Box(Modifier.size(diameter).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)) {
-            poster?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+            VideoPoster(video, Modifier.fillMaxSize())
             if (active) AndroidView(factory = { context -> TextureView(context).apply {
                 var owned: Surface? = null
                 fun crop(width: Int, height: Int) {
@@ -94,11 +83,44 @@ import java.util.Base64
                 else if (!active || !viewer.playing) Icon(Icons.Default.PlayArrow, "Play video message", Modifier.size(48.dp))
             }
         }
-        FlowRow(Modifier.width(diameter), horizontalArrangement = Arrangement.SpaceBetween) {
+        if (showFooter) FlowRow(Modifier.width(diameter), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(VoiceWaveform.time(if (active) viewer.audioPositionMs else video.durationMs),
                 modifier = Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.labelSmall)
             metadata?.invoke()
         }
-        row?.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        if (showFooter) row?.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    }
+}
+
+/** A bounded poster is safe to show without opening the recording or creating a decoder. */
+@Composable private fun VideoPoster(video: VideoMessage, modifier: Modifier = Modifier) {
+    val poster by produceState<android.graphics.Bitmap?>(null, video.posterBase64) {
+        value = withContext(Dispatchers.Default) {
+            runCatching {
+                val bytes = Base64.getDecoder().decode(video.posterBase64)
+                if (bytes.size !in 4..8192) return@runCatching null
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                if (bounds.outWidth !in 1..512 || bounds.outHeight !in 1..512) return@runCatching null
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }.getOrNull()
+        }
+    }
+    Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant)) {
+        poster?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+    }
+}
+
+/** Transcript mode plays the original derived audio through the existing seekable audio player. */
+@Composable internal fun VideoAudioThumbnail(model: ZerusViewModel, target: Target?, voice: VoiceMessage) {
+    val video = checkNotNull(voice.video)
+    val viewer = model.attachments
+    val playing = viewer.playingKey == AttachmentIdentity.playbackKey(target, voice.audio) && viewer.playing
+    IconButton(onClick = { viewer.toggleAudio(target, voice.audio) }, modifier = Modifier.size(48.dp).clip(CircleShape)) {
+        VideoPoster(video, Modifier.fillMaxSize())
+        Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+            if (playing) "Pause video message audio" else "Play video message audio",
+            Modifier.size(28.dp).background(androidx.compose.ui.graphics.Color.Black.copy(alpha = .45f), CircleShape)
+                .padding(2.dp), tint = androidx.compose.ui.graphics.Color.White)
     }
 }

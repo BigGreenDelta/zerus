@@ -53,11 +53,28 @@ class RecordingMessageLayoutSmokeInstrumentation : Instrumentation() {
         await(label) { result = find(label); result != null }; return checkNotNull(result)
     }
     private fun press(label: String) {
+        val deadline = SystemClock.elapsedRealtime() + 15_000
         var owner = node(label)
         while (!owner.isClickable) owner = checkNotNull(owner.parent)
         owner.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
-        waitForIdleSync(); owner.refresh()
-        val rect = Rect().also(owner::getBoundsInScreen); val display = targetContext.resources.displayMetrics
+        var previous: Rect? = null
+        var stable = 0
+        var rect = Rect()
+        // Recomposition/accessibility publication can precede the committed media layout.
+        // Keep the original total deadline and tap only this action's fresh, settled bounds.
+        while (stable < 3) {
+            check(SystemClock.elapsedRealtime() < deadline) { "Unsettled $label" }
+            var current = find(label)
+            while (current != null && !current.isClickable) current = current.parent
+            if (current != null && current.isEnabled) {
+                owner = current
+                rect = Rect().also(current::getBoundsInScreen)
+                stable = if (rect == previous) stable + 1 else 0
+                previous = Rect(rect)
+            } else stable = 0
+            if (stable < 3) SystemClock.sleep(40)
+        }
+        val display = targetContext.resources.displayMetrics
         check(rect.width() >= 48 * display.density - 2 && rect.height() >= 48 * display.density - 2) { "Small $label: $rect" }
         check(rect.left >= 0 && rect.right <= display.widthPixels && rect.top >= 0 && rect.bottom <= display.heightPixels) { "Offscreen $label: $rect" }
         val down = SystemClock.uptimeMillis()

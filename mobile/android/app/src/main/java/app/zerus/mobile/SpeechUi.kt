@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Subject
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ChevronLeft
@@ -467,7 +468,8 @@ import androidx.compose.ui.unit.dp
 
 @Composable internal fun VoiceAudio(model: ZerusViewModel, target: Target?, audio: DisplayedAttachment, durationMs: Int,
     waveform: List<Int> = emptyList(), status: String? = null, trailing: (@Composable () -> Unit)? = null,
-    metadata: (@Composable () -> Unit)? = null) {
+    metadata: (@Composable () -> Unit)? = null, leading: (@Composable () -> Unit)? = null,
+    endControl: (@Composable () -> Unit)? = null) {
     val viewer = model.attachments
     val key = AttachmentIdentity.playbackKey(target, audio)
     val row = viewer.state(target, audio)
@@ -475,23 +477,42 @@ import androidx.compose.ui.unit.dp
     VoicePlayer(key, waveform, durationMs, if (active) viewer.audioPositionMs else 0,
         active && viewer.playing, row?.loading == true,
         onToggle = { viewer.toggleAudio(target, audio) },
-        onSeek = { viewer.seekAudio(target, audio, it, durationMs) }, status = status, trailing = trailing, metadata = metadata)
+        onSeek = { viewer.seekAudio(target, audio, it, durationMs) }, status = status, trailing = trailing,
+        metadata = metadata, leading = leading, endControl = endControl)
     row?.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable internal fun VoiceMessageContent(model: ZerusViewModel, target: Target?, voice: VoiceMessage, at: Double = voice.createdAt) {
+@Composable internal fun VoiceMessageContent(model: ZerusViewModel, target: Target?, voice: VoiceMessage,
+    at: Double = voice.createdAt, videoBubbleColor: Color? = null) {
     var expanded by rememberSaveable(voice.id) { mutableStateOf(false) }
     var actionsOpen by remember(voice.id) { mutableStateOf(false) }
     val local = model.speech.outgoing.find { it.id == voice.id && target?.let(it::belongsTo) == true }
     val delivery = RecordingDelivery.of(voice.state)
     val pending = local != null && voice.state !in setOf("submitted", "failed", "cancelled")
     val restorable = local?.canRestoreUnsent == true
-    val metadata: @Composable () -> Unit = {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (voice.transcript.isNotBlank()) IconToggleButton(checked = expanded, onCheckedChange = { expanded = it }) {
-                Icon(Icons.Default.Subject, if (expanded) "Hide recognized text" else "Show recognized text", Modifier.size(20.dp))
+    val transcriptControl: @Composable () -> Unit = {
+        IconToggleButton(checked = expanded, onCheckedChange = {
+            // A video changes between its circular player and its derived-audio player.
+            // Retire only this recording's decoder; another message keeps its playback.
+            if (voice.video != null && model.attachments.playingKey in listOf(
+                    AttachmentIdentity.playbackKey(target, voice.audio),
+                    AttachmentIdentity.playbackKey(target, voice.video.file))) model.attachments.stopAudio()
+            expanded = it
+        }) {
+            Box(Modifier.size(36.dp).background(
+                if (voice.video != null && !expanded) MaterialTheme.colorScheme.surface else Color.Transparent,
+                CircleShape), contentAlignment = Alignment.Center) {
+                Icon(if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.Subject,
+                    if (expanded) "Hide recognized text" else "Show recognized text", Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.primary)
             }
+        }
+    }
+    val metadata: @Composable () -> Unit = {
+        Row(Modifier.background(if (voice.video != null && !expanded) MaterialTheme.colorScheme.surface.copy(alpha = .92f)
+            else Color.Transparent, RoundedCornerShape(12.dp)), verticalAlignment = Alignment.CenterVertically) {
+            if (voice.video == null && voice.transcript.isNotBlank()) transcriptControl()
             if (pending || restorable) Box {
                 IconButton(onClick = { actionsOpen = true }) { Icon(Icons.Default.MoreVert, "Recording actions", Modifier.size(20.dp)) }
                 DropdownMenu(expanded = actionsOpen, onDismissRequest = { actionsOpen = false }) {
@@ -513,7 +534,7 @@ import androidx.compose.ui.unit.dp
                 tooltip = { PlainTooltip { Text(VoiceProtocol.label(voice.state)) } }, state = rememberTooltipState()) {
                 val color = if (delivery in setOf(RecordingDelivery.Failed, RecordingDelivery.Uncertain)) MaterialTheme.colorScheme.error
                     else MaterialTheme.colorScheme.onSurfaceVariant
-                Box(Modifier.heightIn(min = 48.dp).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.heightIn(min = 24.dp).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
                     if (delivery == RecordingDelivery.Processing) CircularProgressIndicator(Modifier.size(16.dp)
                         .semantics { contentDescription = VoiceProtocol.label(voice.state) }, color = color, strokeWidth = 1.5.dp)
                     else Icon(when (delivery) {
@@ -527,11 +548,48 @@ import androidx.compose.ui.unit.dp
             }
         }
     }
-    if (voice.video != null) VideoCircle(model, target, voice.video, metadata = metadata)
-    else VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform, metadata = metadata)
     val error = local?.error?.ifBlank { voice.error } ?: voice.error
-    if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-    if (expanded && voice.transcript.isNotBlank()) SelectionContainer { Text(voice.transcript) }
+    val video = voice.video
+    if (video == null) {
+        VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform, metadata = metadata)
+        if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        if (expanded && voice.transcript.isNotBlank()) SelectionContainer { Text(voice.transcript) }
+    } else if (expanded && voice.transcript.isNotBlank()) {
+        Surface(color = videoBubbleColor ?: MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(17.dp)) {
+            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform,
+                    leading = { VideoAudioThumbnail(model, target, voice) }, endControl = transcriptControl, metadata = {})
+                SelectionContainer { Text(voice.transcript) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { metadata() }
+                if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    } else Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+        Column(Modifier.widthIn(max = 288.dp).fillMaxWidth()) {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val diameter = (maxWidth - 48.dp).coerceIn(48.dp, 240.dp)
+                Box(Modifier.fillMaxWidth().height(diameter + 8.dp)) {
+                    Box(Modifier.align(Alignment.TopEnd)) { VideoCircle(model, target, video, diameter, showFooter = false) }
+                    Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (voice.transcript.isNotBlank()) transcriptControl()
+                            val viewer = model.attachments
+                            val active = viewer.playingKey == AttachmentIdentity.playbackKey(target, video.file)
+                            Text(VoiceWaveform.time(if (active) viewer.audioPositionMs else video.durationMs),
+                                Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = .9f), RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall)
+                        }
+                        metadata()
+                    }
+                }
+            }
+            model.attachments.state(target, video.file)?.error?.takeIf(String::isNotBlank)?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+            if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+    }
 }
 
 @Composable internal fun VoiceSavedMessages(model: ZerusViewModel) {

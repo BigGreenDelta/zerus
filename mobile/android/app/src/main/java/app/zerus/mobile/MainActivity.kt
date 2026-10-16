@@ -58,6 +58,8 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -1047,23 +1049,29 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         questionDisplay, ::updateQuestionDisplay, onReview)
 }
 
-@Composable private fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
+@Composable internal fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
     model: ZerusViewModel, onReview: (OutgoingMessage) -> Unit) {
     val own = QuestionReplyPresentation.isOwnRole(event.role)
     val parsedReply by produceState<Pair<String, List<PresentedQuestionReply>?>>(event.text to null, event.text, own) {
         value = event.text to if (own) withContext(Dispatchers.Default) { QuestionReplyPresentation.parse(event.text) } else null
     }
     val replies = parsedReply.takeIf { it.first == event.text }?.second
+    val roundVideo = event.voice?.video != null
+    val messageColor = if (roundVideo && own) MaterialTheme.colorScheme.primary.copy(alpha = .14f)
+        .compositeOver(MaterialTheme.colorScheme.surface) else if (own) Color(0xFF203733) else Surface
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (own) Arrangement.End else Arrangement.Start) {
-        Surface(color = if (own) Color(0xFF203733) else Surface, shape = RoundedCornerShape(17.dp),
+        Surface(color = if (roundVideo) Color.Transparent else messageColor,
+            shape = if (roundVideo) RectangleShape else RoundedCornerShape(17.dp),
             modifier = Modifier.fillMaxWidth(if (own) .92f else 1f).semantics {
                 contentDescription = if (own) "You" else agent.ifBlank { "Agent" }
             }) {
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(Modifier.padding(horizontal = if (roundVideo) 0.dp else 12.dp,
+                vertical = if (roundVideo) 0.dp else 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (!own) Text(agent.ifBlank { event.role }, color = Muted, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                 if (replies == null && event.role == "You (answer)") Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                 if (event.voice != null) {
-                    ProvideTextStyle(conversationTextStyle()) { VoiceMessageContent(model, model.selected?.target, event.voice, at = event.at) }
+                    ProvideTextStyle(conversationTextStyle()) { VoiceMessageContent(model, target, event.voice,
+                        at = event.at, videoBubbleColor = messageColor) }
                 } else if (replies != null) {
                     Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
