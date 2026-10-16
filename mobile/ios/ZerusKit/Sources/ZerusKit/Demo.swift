@@ -9,6 +9,7 @@ public enum DemoCatalog {
         Event(id: "1", role: "You", text: "Review the API migration and call out any compatibility risks.", time: "10:42", at: 1_700_000_520,
               attachments: [DisplayedAttachment(name: "orders-traffic.csv", mime: "text/csv", bytes: 48_213,
                                                 messageId: "00000000-0000-4000-8000-0000000000d1", index: 0)]),
+        voice,
         Event(id: "2", role: "Codex", text: """
             I found **two clients** still using the previous endpoint:
 
@@ -35,6 +36,17 @@ public enum DemoCatalog {
             """, time: "10:43", at: 1_700_000_580),
         Event(id: "3", role: "Codex", text: "Should I keep the previous endpoint available during migration?", time: "10:44", at: 1_700_000_640),
     ]
+
+    /// A delivered voice message with its measured waveform and recognized text.
+    static let voice: Event = {
+        let id = "00000000-0000-4000-8000-0000000000d3"
+        let message = VoiceMessage(id: id, runId: "demo-run", conversationId: "demo-conversation", createdAt: 1_700_000_540, revision: 3, state: "submitted",
+                                   audio: DisplayedAttachment(name: "voice.wav", mime: "audio/wav", bytes: 214_444, messageId: id, index: 0), durationMs: 6_700,
+                                   transcript: "Also check who still downloads the CSV export.",
+                                   waveform: (0..<VoiceWaveform.bins).map { Int(110 + 90 * sin(Double($0) / 3)) })
+        return Event(id: "voice:" + id, role: "You", text: message.transcript, time: "10:42", at: 1_700_000_540, requestId: id,
+                     attachments: [message.audio], source: "hgs_voice", outgoingId: id, nativeType: "UserMessage", voice: message)
+    }()
 
     public static func make() -> (projects: [ProjectSummary], sessions: [Session]) {
         let machines = [("demo", "Design workstation"), ("demo-laptop", "Preview laptop"), ("demo-build", "Preview build machine with a long display name")]

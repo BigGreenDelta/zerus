@@ -41,7 +41,7 @@ struct ConversationView: View {
         let session = self.session
         let target = session.target
         let archived = !target.archiveId.isEmpty
-        let events = model.events
+        let events = app.demo ? model.events : VoiceHistory.merge(target, native: model.events, outgoing: app.voice.outgoing)
         let questions = archived || app.demo ? [] : model.questions
         let raw = model.activity
         let warning = app.demo ? "" : (raw?.string("pending_questions_error", "provider_messages_error") ?? "")
@@ -180,6 +180,9 @@ struct ConversationView: View {
         .modifier(ConversationTools(session: session, raw: raw, archived: archived, online: online, terminal: $terminal, terminalOpen: $terminalOpen,
                                     terminalUnavailable: $terminalUnavailable))
         .onChange(of: model.returnToSessions) { dismiss() }
+        .task(id: VoiceObservation(revision: model.revision, verified: model.activityVerified, ready: app.voice.ready)) {
+            if !app.demo && model.activityVerified { app.voice.observe(target, events: model.events) }
+        }
         .onAppear {
             openIfNeeded()
             #if DEBUG
@@ -543,4 +546,11 @@ private struct ConversationTools: ViewModifier {
         let facts = SessionMenuFacts(target: target, row: raw ?? [:], state: SessionFilters.state(session), archived: archived, online: online, supported: supported)
         return SessionActionsMenu.terminalReason(facts).nonEmpty ?? app.conversation.terminalOpenReason(target).nonEmpty
     }
+}
+
+/// Voice rows are observed again whenever verified history publishes.
+private struct VoiceObservation: Equatable {
+    let revision: Int
+    let verified: Bool
+    let ready: Bool
 }

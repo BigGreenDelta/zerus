@@ -20,6 +20,7 @@ extension ConversationModel {
     func attachBlockReason(_ target: Target) -> String {
         if demo { return "Pair to attach files." }
         if !app.storageReady || app.attachmentStore == nil { return "Private storage is not ready." }
+        if app.voice.recording { return "Finish the recording first." }
         if !target.archiveId.isEmpty { return "Archived conversations are read-only." }
         let child = childSendReason(target)
         if !child.isEmpty { return child }
@@ -163,7 +164,7 @@ extension ConversationModel {
         func references(_ state: MessageState) -> [Attachment] {
             state.drafts.flatMap(\.attachments) + state.outgoing.flatMap(\.attachments) + (state.pickerDraft?.attachments ?? [])
         }
-        return Set((references(messageState) + (durable.map(references) ?? [])).map(\.id))
+        return Set((references(messageState) + (durable.map(references) ?? [])).map(\.id)).union(app.voice.protectedIds)
     }
 
     func removeAttachment(_ target: Target, id: String) async {

@@ -44,6 +44,8 @@ struct Composer: View {
             if !model.contextNotice.isEmpty {
                 Text(model.contextNotice).font(.caption).foregroundStyle(Theme.amber)
             }
+            VoiceComposerStatus()
+            RoundVideoRecordingOverlay()
             if !draft.attachments.isEmpty { chips(draft) }
             if model.messageState.pickerDraft?.target == target && model.attachmentImporting {
                 HStack(spacing: 6) {
@@ -55,13 +57,20 @@ struct Composer: View {
             }
             HStack(alignment: .bottom, spacing: 8) {
                 attachMenu(draft)
-                TextField(reason.isEmpty ? "Message" : reason, text: $text, axis: .vertical)
-                    .lineLimit(1...6)
-                    .focused($focused)
-                    .disabled(draft.status != "editing" || app.demo)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 20))
+                if app.voice.recording && (app.voice.touchRecording || app.voice.videoRecorder == nil) {
+                    RecordingRow()
+                } else {
+                    TextField(reason.isEmpty ? "Message" : reason, text: $text, axis: .vertical)
+                        .lineLimit(1...6)
+                        .focused($focused)
+                        .disabled(draft.status != "editing" || app.demo)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 20))
+                }
+                if app.voice.recording || (text.isEmpty && draft.attachments.isEmpty && model.messageState.pickerDraft?.target != target) {
+                    VoiceButton(target: target) { if model.draft(target).text != text { model.edit(target, text: text) } }
+                } else {
                 Button {
                     send(canSend: canSend, reason: reason)
                 } label: {
@@ -74,6 +83,7 @@ struct Composer: View {
                 .background(canSend ? Theme.mint : Color(hex: 0x2B3B3B), in: Circle())
                 .disabled(!canSend && reason.isEmpty)
                 .accessibilityLabel(canSend || reason.isEmpty ? "Send message" : "Why sending is unavailable")
+                }
             }
         }
         .padding(.horizontal, 12)

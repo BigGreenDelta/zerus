@@ -47,7 +47,13 @@ struct DraftsScreen: View {
                         ForEach(actions, id: \.requestId) { action in actionCard(action) }
                     }
                 }
-                if unsent.isEmpty && unresolved.isEmpty && contexts.isEmpty && actions.isEmpty {
+                if app.voice.draft != nil || app.voice.recording || app.voice.savingRecording {
+                    Section("Voice recording") { VoiceComposerStatus() }
+                }
+                if !app.voice.outgoing.isEmpty {
+                    Section("Voice and video messages") { VoiceSavedMessages() }
+                }
+                if unsent.isEmpty && unresolved.isEmpty && contexts.isEmpty && actions.isEmpty && app.voice.outgoing.isEmpty && app.voice.draft == nil {
                     ContentUnavailableView("No saved drafts", systemImage: "square.and.pencil",
                                            description: Text("Your unsent messages will appear here."))
                         .listRowBackground(Color.clear)

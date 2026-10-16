@@ -59,6 +59,11 @@ final class AttachmentViewer {
         }
     }
 
+    /// The verified private copy of one attachment, from this phone's sealed store or the owning computer.
+    func fetch(_ target: Target?, _ file: DisplayedAttachment) async throws -> AttachmentViewCache.Entry {
+        try await load(AttachmentIdentity.rowKey(target, file), target, file)
+    }
+
     private func load(_ key: String, _ target: Target?, _ file: DisplayedAttachment) async throws -> AttachmentViewCache.Entry {
         guard let cache else { throw AttachmentOpenError("Attachment storage on this phone is unavailable.") }
         let name = AttachmentViewing.name(file.name, mime: file.mime)

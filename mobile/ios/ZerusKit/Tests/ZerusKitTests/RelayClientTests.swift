@@ -24,6 +24,35 @@ final class RelayClientTests: XCTestCase {
         XCTAssertEqual(requests[0].json?.string("session"), "native-session")
     }
 
+    func testVoiceEnvelopeTargetsConversationComputerWithExactSessionIdentity() async throws {
+        let id = UUID().uuidString.lowercased()
+        StubProtocol.reset { _ in StubProtocol.json(200, #"{"request_id":"\#(id)","state":"completed","result":{"schema":1}}"#) }
+        let payload = VoiceProtocol.payload(target, requestId: id).putting("speech", ["machine_id": "b4075bf0-9c22-4a67-b768-55af2d2936a4", "profile_id": "ru"])
+        _ = try await StubProtocol.client().voice(connection, target: target, operation: "voice_submit", payload: payload, id: id)
+        let envelope = try XCTUnwrap(StubProtocol.requests.first?.json)
+        XCTAssertEqual("machine", envelope.string("computer_id"))
+        XCTAssertEqual("native-session", envelope.string("session"))
+        XCTAssertEqual(id, envelope["payload"]?.string("request_id"))
+        var other = target
+        other.run = "other"
+        do {
+            _ = try await StubProtocol.client().voice(connection, target: other, operation: "voice_submit", payload: payload, id: id)
+            XCTFail("A payload for another run must not be sent")
+        } catch {}
+        XCTAssertEqual(1, StubProtocol.requests.count)
+    }
+
+    func testSpeechEnvelopeUsesIndependentComputerAndEmptySession() async throws {
+        let id = UUID().uuidString.lowercased()
+        StubProtocol.reset { _ in StubProtocol.json(200, #"{"request_id":"\#(id)","state":"completed","result":{"schema":1}}"#) }
+        _ = try await StubProtocol.client().speech(connection, host: MachineKey(connectionId: "gateway", computerId: "gpu-host"), operation: "speech_stats",
+                                                    payload: [:], id: id, fallback: "Unavailable")
+        let envelope = try XCTUnwrap(StubProtocol.requests.first?.json)
+        XCTAssertEqual("gpu-host", envelope.string("computer_id"))
+        XCTAssertEqual("", envelope.string("session"))
+        XCTAssertEqual(1, StubProtocol.requests.count)
+    }
+
     func testPollingKnownReceiptDoesNotCreateReplacementRequest() async throws {
         StubProtocol.reset { _ in StubProtocol.json(200, #"{"request_id":"known","state":"completed","result":{"status":"submitted"}}"#) }
         let receipt = try await StubProtocol.client().waitForReceipt(connection, initial: ["request_id": "known", "state": "claimed"],

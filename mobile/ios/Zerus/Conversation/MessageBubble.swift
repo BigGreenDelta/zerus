@@ -45,7 +45,7 @@ struct MessageBubble: View {
                         .foregroundStyle(Theme.muted)
                 }
                 content(replies)
-                if !event.attachments.isEmpty { attachments }
+                if !event.attachments.isEmpty && event.voice == nil { attachments }
                 if event.detailTruncated {
                     Text("Message text shortened").font(.caption2).foregroundStyle(Theme.amber)
                 }
@@ -64,12 +64,8 @@ struct MessageBubble: View {
     @ViewBuilder
     private func content(_ replies: [PresentedQuestionReply]?) -> some View {
         if let voice = event.voice {
-            VStack(alignment: .leading, spacing: 4) {
-                Label(voice.video != nil ? "Video message" : "Voice message", systemImage: voice.video != nil ? "video" : "waveform")
-                    .font(.subheadline.weight(.semibold))
-                if !voice.transcript.isEmpty { Text(voice.transcript).textSelection(.enabled) }
-                Text(VoiceProtocol.label(voice.state)).font(.caption).foregroundStyle(Theme.muted)
-            }
+            VoiceMessageContent(target: target, voice: voice)
+                .frame(minWidth: 240)
         } else if let replies {
             VStack(alignment: .leading, spacing: 8) {
                 Text("You (answer)").font(.caption.weight(.semibold)).foregroundStyle(Theme.muted)

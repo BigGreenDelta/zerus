@@ -89,6 +89,12 @@ final class AppModel {
     @ObservationIgnored private(set) var viewer: AttachmentViewer!
     /// Opens Markdown links to files on a conversation's computer.
     @ObservationIgnored private(set) var computerFiles: ComputerFiles!
+    /// Voice and round video messages.
+    @ObservationIgnored private(set) var voice: VoiceController!
+    /// Plays one recording at a time.
+    @ObservationIgnored private(set) var playback: VoicePlayback!
+    /// Speech provider management on processing computers.
+    @ObservationIgnored private(set) var speechProviders: SpeechProviders!
 
     init(client: RelayClient, connectionStore: ConnectionStore, sealedStore: SealedFileStore?,
          cache: ConversationCache? = nil, pages: ConversationPageCache? = nil, attachmentStore: AttachmentStore? = nil,
@@ -105,6 +111,9 @@ final class AppModel {
         launch = LaunchModel(app: self)
         viewer = AttachmentViewer(app: self, store: attachmentStore, cache: attachmentCache)
         computerFiles = ComputerFiles(app: self, cache: computerFileCache)
+        voice = VoiceController(app: self)
+        playback = VoicePlayback(app: self)
+        speechProviders = SpeechProviders(app: self)
     }
 
     static func live() -> AppModel {
@@ -164,6 +173,8 @@ final class AppModel {
         let accounts = OrderedStatePersistence(initial: loaded.1.filter { connected.contains($0.key.connectionId) }) { try sealed.write("account_catalog", $0) }
         accounts.onChange = { [weak self] in self?.accountCatalogs = $0 }
         await conversation.openReadState(sealed)
+        await voice.open(sealed)
+        await speechProviders.open(sealed)
         accounts.onResult = { [weak self] failure in
             self?.accountsError = failure == nil ? "" : "Account snapshots could not be saved. Existing private data is preserved."
         }
@@ -233,7 +244,9 @@ final class AppModel {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active: if storageReady { refresh() }
-        case .background: flushPrivateState()
+        case .background:
+            voice.background()
+            flushPrivateState()
         default: break
         }
     }
@@ -296,8 +309,10 @@ final class AppModel {
             machineOperations = machineOperations.filter { $0.key.connectionId != connection.id }
             machineFeatures = machineFeatures.filter { $0.key.connectionId != connection.id }
             publishSessions()
+            playback.stop()
             viewer.clear()
             computerFiles.clear()
+            await voice.forget(connection: connection.id)
             await conversation.forget(connection: connection.id)
         } catch {
             self.error = "Could not revoke this phone on the gateway. The connection is preserved. \(Self.message(error, fallback: ""))"
