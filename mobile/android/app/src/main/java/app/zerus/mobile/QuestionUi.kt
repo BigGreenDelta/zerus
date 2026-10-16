@@ -12,7 +12,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.*
@@ -24,6 +23,8 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.focus.onFocusChanged
@@ -33,10 +34,12 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -68,7 +71,7 @@ import org.json.JSONObject
             if (question.optional && queue.optional.size > 1) Row(Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { onDisplay { it.copy(chosen = QuestionPolicies.key(queue.optional[queue.index - 1])) } }, enabled = queue.index > 0) { Text("Previous") }
-                Text("Question ${queue.index + 1}/${queue.optional.size}", style = MaterialTheme.typography.labelMedium)
+                Text("Request ${queue.index + 1}/${queue.optional.size}", style = MaterialTheme.typography.labelMedium)
                 TextButton(onClick = { onDisplay { it.copy(chosen = QuestionPolicies.key(queue.optional[queue.index + 1])) } }, enabled = queue.index + 1 < queue.optional.size) { Text("Next") }
             }
             InlineCard(question, available)
@@ -135,6 +138,11 @@ import org.json.JSONObject
         saver = androidx.compose.foundation.ScrollState.Saver) { androidx.compose.foundation.ScrollState(scrollOffset) }
     LaunchedEffect(bodyScroll) { snapshotFlow { bodyScroll.value }.collect { onScroll(it) } }
     fun checkpoint() { onScroll(bodyScroll.value) }
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    fun navigate(next: Int) {
+        checkpoint(); focusManager.clearFocus(); keyboard?.hide(); onPage(next)
+    }
     @Composable fun Content(inDialog: Boolean, contentLimit: Dp) {
     val approvalSupported = QuestionPolicies.approvalSupported(question)
     val window = LocalWindowInfo.current
@@ -157,7 +165,16 @@ import org.json.JSONObject
         }
     }
     val remaining = review.secondsRemaining(reviewNow)
-    val pageIndex = page.coerceIn(0, (question.prompts.size - 1).coerceAtLeast(0))
+    val step = QuestionSteps.current(question.prompts, page, options, texts)
+    val pageIndex = step.page
+    fun primaryAction() {
+        if (step.nextPage != null) {
+            if (editing && !submitPending && step.canAdvance) {
+                persist(); navigate(step.nextPage)
+            }
+        } else submitAnswer()
+    }
+    val primaryEnabled = if (step.nextPage != null) editing && !submitPending && step.canAdvance else sendEnabled
     val currentPrompts = question.prompts.getOrNull(pageIndex)?.let(::listOf).orEmpty()
     val otherPrompts = currentPrompts.filter { it.other && !question.approval }
     val lowerActions = question.prompts.size > 1 || question.canSkip || otherPrompts.isEmpty()
@@ -236,14 +253,14 @@ import org.json.JSONObject
                     if(!focused || event.key !in setOf(Key.Enter,Key.NumPadEnter)) false
                     else {
                         if(event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0 &&
-                            !event.isShiftPressed && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed) submitAnswer()
+                            !event.isShiftPressed && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed) primaryAction()
                         true // Consume key up/repeats too; the field must not generate a second IME action.
                     }
-                }, label = { Text(prompt.otherLabel.ifBlank { if (question.prompts.size > 1) "Other: ${prompt.header.ifBlank { prompt.text }}" else "Other answer" }) },
+                }, label = { Text(prompt.otherLabel.ifBlank { "Other answer" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     singleLine = true, readOnly = !editing,
-                    keyboardOptions = KeyboardOptions.Default.copy(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { if(focused) submitAnswer() }))
-                if(index == otherPrompts.lastIndex) QuestionSendButton(sendEnabled,question.prompts.size > 1,::submitAnswer)
+                    keyboardOptions = KeyboardOptions.Default.copy(imeAction = if(step.nextPage != null) ImeAction.Next else ImeAction.Send),
+                    keyboardActions = KeyboardActions(onNext = { if(focused) primaryAction() }, onSend = { if(focused) primaryAction() }))
+                if(index == otherPrompts.lastIndex) QuestionActionButton(primaryEnabled,step,::primaryAction)
                 }
             }
             if (native != null) {
@@ -271,21 +288,23 @@ import org.json.JSONObject
                     Button(onClick = { submit("allow") }, enabled = reviewEligible && remaining == 0) { Text(if (remaining > 0) "Approve once ($remaining)" else "Approve once") }
                 }
                 Text("Approval applies only to this command. Review it before continuing.", style = MaterialTheme.typography.bodySmall)
-            } else if(lowerActions) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (question.prompts.size > 1) {
-                    IconButton(onClick = { checkpoint(); onPage(pageIndex - 1) }, enabled = pageIndex > 0, modifier = Modifier.size(32.dp)) {
+            } else if(lowerActions) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (question.prompts.size > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { navigate(pageIndex - 1) }, enabled = pageIndex > 0, modifier = Modifier.size(48.dp)) {
                         Icon(Icons.Default.KeyboardArrowLeft, "Previous part")
                     }
-                    Text("${pageIndex + 1}/${question.prompts.size}", style = MaterialTheme.typography.labelMedium)
-                    IconButton(onClick = { checkpoint(); onPage(pageIndex + 1) }, enabled = pageIndex + 1 < question.prompts.size, modifier = Modifier.size(32.dp)) {
+                    Text("Question ${pageIndex + 1}/${question.prompts.size}", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                    IconButton(onClick = { navigate(pageIndex + 1) }, enabled = pageIndex + 1 < question.prompts.size, modifier = Modifier.size(48.dp)) {
                         Icon(Icons.Default.KeyboardArrowRight, "Next part")
                     }
                 }
+                if(question.canSkip || otherPrompts.isEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Spacer(Modifier.weight(1f))
                 if (question.canSkip) TextButton(onClick = { model.send(target, question, JSONArray(question.prompts.map {
                     JSONObject().put("question_id", it.id).put("skip", true).put("selected_option_ids", JSONArray()).put("text", "")
                 })) }, enabled = editing && available, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Skip") }
-                if(otherPrompts.isEmpty()) QuestionSendButton(sendEnabled,question.prompts.size > 1,::submitAnswer)
+                if(otherPrompts.isEmpty()) QuestionActionButton(primaryEnabled,step,::primaryAction)
+                }
             }
             if (!available) Text("Refresh to verify this request. Your answer is kept.", style = MaterialTheme.typography.bodySmall)
             else if (!question.canAnswer) SelectionContainer { Text(question.unavailableReason.ifBlank { "Complete this request on your machine." }, style = MaterialTheme.typography.bodySmall) }
@@ -303,11 +322,16 @@ import org.json.JSONObject
     } else Content(false, maxHeight)
 }
 
-@Composable private fun QuestionSendButton(enabled: Boolean,multiple: Boolean,onClick: () -> Unit) {
-    FilledIconButton(onClick = onClick,enabled = enabled,modifier = Modifier.size(44.dp),shape = CircleShape,
-        colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xFF67E8CB),contentColor = Color(0xFF101517),
+@Composable private fun QuestionActionButton(enabled: Boolean,step: QuestionStep,onClick: () -> Unit) {
+    val label = if(step.reviewing) "Review answers" else if(step.nextPage != null) "Next" else if(step.count > 1) "Send all" else "Send"
+    val description = if(step.reviewing) "Review unanswered questions" else if(step.nextPage != null) "Next question" else if(step.count > 1) "Send all" else "Send answer"
+    Button(onClick = onClick,enabled = enabled,modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = description },
+        contentPadding = PaddingValues(horizontal = 12.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF67E8CB),contentColor = Color(0xFF101517),
             disabledContainerColor = Color(0xFF2B3B3B),disabledContentColor = Color(0xFF9AACB2))) {
-        Icon(Icons.AutoMirrored.Filled.Send,if(multiple) "Send all" else "Send answer",Modifier.size(22.dp))
+        Text(label)
+        Spacer(Modifier.width(6.dp))
+        Icon(if(step.nextPage != null) Icons.Default.KeyboardArrowRight else Icons.AutoMirrored.Filled.Send,null,Modifier.size(20.dp))
     }
 }
 

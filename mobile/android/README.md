@@ -90,7 +90,11 @@ The message composer clears after the text and immutable attachment snapshots
 are atomically saved in the private outgoing queue. It stays editable while the
 previous message is sending. Each bubble shows Sending, Sent, Not sent, or
 Delivery unknown; unknown delivery blocks another send to the same conversation
-until an explicit receipt check or review. Sent means the computer accepted the
+until its exact receipt or native delivery row confirms it, or an explicit review.
+Opening a verified conversation checks an uncertain message's saved receipt once;
+an unavailable receipt leaves it saved and never resends it. The composer identifies
+that original message with **Check delivery** and **Review**, leaving the next
+message's input hint clear. Sent means the computer accepted the
 input, not that the model read or answered it. New text is never cleared by an
 older receipt. Native user delivery rows reconcile bubbles by exact request UUID.
 Without such a row, reconciliation requires an unambiguous exact text/time match
@@ -268,6 +272,9 @@ The conversation keeps a bounded hot window rather than imposing a total chat
 length limit. Nodes advertising canonical history support can fetch older and
 newer pages and restore an opaque saved reading anchor. Native page order and
 exact aliases distinguish repeated messages, even with identical timestamps.
+When a reply read from recent inspection later gains a canonical history ID,
+unambiguous native-provided aliases carry its existing read position forward.
+A later unseen reply remains unread; equal text never establishes this identity.
 Initial indexing keeps the recent inspected conversation visible; incomplete
 sources and shortened message bodies are disclosed. Search covers the loaded
 window. A confirmed own message stays visible when it falls out of the native
@@ -536,6 +543,21 @@ steps. It opens synthetic history with a pending question, measures the inline
 card from a screenshot and checks the card limit, the whole answer field, the
 footer gap, scrolling to the last option and a compact short question. It sends
 no answers.
+
+Multi-part questions show **Question 1/2** and an explicit **Next** action after
+the current answer is valid. Only the final **Send all** submits the complete
+request. The Other field's keyboard action follows the same steps. Earlier
+selections and custom text remain editable while navigating; an incomplete earlier
+answer is offered for review before submission. Existing exact-request, approval
+and cold-context consent checks still apply to the final send.
+
+`QuestionDeliverySmokeInstrumentation` exercises physical Next/Enter/Send all controls,
+retained per-question answers, one complete synthetic answer, confirmed and missing
+receipt recovery, and native-to-canonical read progress with a later unseen reply.
+Use fresh private emulator data and repeat at a narrow width with font scale 1.8.
+The narrow run exercises recovery inline and opens the full-height question editor
+through its physical **Expand** action before answering.
+Its reserved endpoint is intercepted in-process; no agent receives a message.
 
 Private previews may override only their build identity using
 `-PzerusVersionName=0.1.31-voice.245 -PzerusVersionCode=10245`. Choose a code greater

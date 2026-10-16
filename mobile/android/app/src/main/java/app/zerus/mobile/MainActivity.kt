@@ -1051,7 +1051,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             Text("Archived conversation. Read-only.", color = Muted, style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.fillMaxWidth().background(Surface).padding(16.dp))
         }
-        else MessageComposer(model, session, online, onReview, onAttach)
+        else MessageComposer(model, session, online, onReview, onAttach, onReviewOutgoing)
     }
     ExpandedQuestionHost(model, target, questions, online && model.activityVerified && !model.contextBlocked(target),
         questionDisplay, ::updateQuestionDisplay, onReview)
@@ -1127,7 +1127,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
 }
 
 @Composable private fun MessageComposer(model: ZerusViewModel, session: Session, online: Boolean,
-    onReview: (Draft) -> Unit, onAttach: (Target) -> Unit) {
+    onReview: (Draft) -> Unit, onAttach: (Target) -> Unit, onReviewOutgoing: (OutgoingMessage) -> Unit) {
     val target = session.target
     val draft = model.draft(target)
     val recording = model.speech.recording
@@ -1225,8 +1225,10 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
         PendingAttachmentSelection(model, target)
         if (previous?.status == "sending") Text("Sending… You can write the next message.", color = Muted, style = MaterialTheme.typography.labelSmall)
-        else if (previous?.status == "uncertain") Text("Delivery unknown. Check the previous message before sending again.", color = Amber, style = MaterialTheme.typography.labelSmall)
-        CompactMessageInput(state = editor, placeholder = sendReason.ifBlank { "Message" },
+        else if (previous?.status == "uncertain") OutgoingRecovery(previous,
+            "outgoing:${previous.requestId}" in model.receiptFlights,
+            { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) })
+        CompactMessageInput(state = editor, placeholder = if(previous?.status == "uncertain") "Message" else sendReason.ifBlank { "Message" },
             recordingContent = if (recording) ({ SpeechRecordingRow(model.speech) }) else null,
             // Keep an already-open IME session in place during capture. The hidden
             // editor remains locked by the synchronous text-and-selection filter.

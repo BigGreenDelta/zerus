@@ -331,10 +331,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     private fun observeHistoryHead(page:HistoryPage,verified:Boolean=true) {
         if(connections.none { it.id==page.target.connectionId }) return
-        readWriter?.let { readState=it.edit { state ->
-            val next=state.head(page.target,page.epoch,page.latestIncoming,page.totalIncoming,page.complete)
-            next.visible(page.target,page.events.filter { it.id in next.record(page.target)?.seen.orEmpty() })
-        } }
+        readWriter?.let { readState=it.edit { state -> ConversationReadHead.observe(state,page) } }
         if(page.complete && verified) currentHistoryHeads+=ConversationReadPolicies.key(page.target) else currentHistoryHeads-=ConversationReadPolicies.key(page.target)
         refreshReadAttention()
     }
@@ -615,6 +612,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     val drafts get() = messageState.drafts
     val terminalBuffers get()=messageState.terminalBuffers
     private var deliveryFlights by mutableStateOf<Set<String>>(emptySet())
+    private val outgoingReceiptProbe = OutgoingReceiptProbe()
     private var normalizedOutgoing by mutableStateOf<List<OutgoingMessage>>(emptyList())
     val outgoing get() = normalizedOutgoing
     private val emptyDrafts = mutableMapOf<Triple<Target, String, String>, Draft>()
@@ -848,6 +846,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (activityVerified && messages.any { it.requestId in merged.recordedRequestIds && it.status != "recorded" }) {
                 editState { state -> state.copy(outgoing = state.outgoing.map { if (it.requestId in merged.recordedRequestIds && it.status != "reviewed") it.copy(status = "recorded", error = "") else it }) }
+            }
+            if (activityVerified) messages.lastOrNull { it.status == "uncertain" && it.requestId !in merged.recordedRequestIds }?.let { message ->
+                if (outgoingReceiptProbe.claim(target, navigationId, message,
+                    message.requestId in deliveryFlights || "outgoing:${message.requestId}" in receiptFlights)) checkOutgoing(message, automatic = true)
             }
             // Last: opening a child replaces this parent presentation.
             if (activityVerified) openPendingAgent()
@@ -2286,14 +2288,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         } }) } catch (_: Exception) { error = "Could not save the delivery result. Check its receipt; the outgoing message remains recoverable."; return }
         if (selected?.target?.let(message::belongsTo) == true) refreshActivity()
     }
-    fun checkOutgoing(message: OutgoingMessage) = viewModelScope.launch {
+    fun checkOutgoing(message: OutgoingMessage, automatic: Boolean = false) = viewModelScope.launch {
         val connection = connections.find { it.id == message.target.connectionId } ?: return@launch
         val flight = "outgoing:${message.requestId}"
         if (flight in receiptFlights || message.status == "sending") return@launch
         receiptFlights += flight
-        try { settleOutgoing(message, api.await(connection, api.receipt(connection, message.requestId))) }
+        try { kotlinx.coroutines.withTimeout(45_000) { settleOutgoing(message, api.await(connection, api.receipt(connection, message.requestId))) } }
         catch (e: CancellationException) { throw e }
-        catch (_: Exception) { error = "Receipt unavailable. The outgoing message remains saved." }
+        catch (_: Exception) { if (!automatic) error = "Receipt unavailable. The outgoing message remains saved." }
         finally { receiptFlights -= flight }
     }
     fun prepareOutgoing(message: OutgoingMessage) {
