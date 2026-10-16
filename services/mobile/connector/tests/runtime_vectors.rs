@@ -704,6 +704,28 @@ fn receipts_fit_python_and_the_relay() {
     assert_eq!(execute::sanitize(kept.clone(), request_id, true), kept);
 }
 
+/// Route identities phones and relays keep, equal to Python's uuid5.
+#[test]
+fn route_identities_match_the_python_connector() {
+    let identities = document("identities.json");
+    assert_eq!(
+        identities["route_namespace"],
+        zerus_mobile_connector::fleet::ROUTE_NAMESPACE
+    );
+    let routes = identities["route_ids"].as_array().unwrap();
+    assert!(!routes.is_empty());
+    for row in routes {
+        assert_eq!(
+            zerus_mobile_connector::fleet::route_id(
+                row["via"].as_str().unwrap(),
+                row["machine_id"].as_str().unwrap()
+            ),
+            row["route_id"].as_str().unwrap(),
+            "{row}"
+        );
+    }
+}
+
 /// The black-box suites expect `unsupported operation` for exactly the known
 /// operations this build does not implement, from `tests/ported.json`.
 #[test]

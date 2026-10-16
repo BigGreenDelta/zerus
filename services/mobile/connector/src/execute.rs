@@ -9,16 +9,18 @@
 //! becomes a fixed text, and a receipt whose canonical form with its
 //! request_id exceeds 1 MiB becomes a fixed failure without its result.
 use crate::capabilities::Flags;
+use crate::fleet::PeerNative;
 use crate::inspection::bound_inspection;
 use crate::journal::{is_mutation, JournalError, RESTART_ERROR};
 use crate::native::{Call, Native, NativeError};
 use crate::projects::{is_archived, launch_projects};
-use crate::pyvalue::{bounded, canonical_uuid, int_literal, is_str, py_eq, py_len, PyError};
+use crate::pyvalue::{bounded, int_literal, is_str, py_eq, py_len, PyError};
 use crate::request::{self, receipt};
 use crate::runtime::Connector;
 use crate::validate::{self, Validated};
 use serde_json::{json, Map, Value};
 use std::cell::Cell;
+use std::rc::Rc;
 use zerus_relay::{json, protocol};
 
 /// Python's catch-all receipt text for an unexpected exception.
@@ -114,27 +116,11 @@ fn reject(text: &str) -> Outcome {
     Outcome::Rejected(text.into())
 }
 
-/// `fleet.canonical_uuid(value)`.
-fn uuid_value(value: Option<&Value>) -> bool {
-    value.and_then(Value::as_str).is_some_and(canonical_uuid)
-}
-
-/// `Fleet.resolve`: this build has no one-hop gateway, so a valid route is
-/// refused as unavailable.
-fn resolve(route: &Value) -> Result<(), Failure> {
-    let valid = route.as_object().is_some_and(|route| {
-        let mut keys: Vec<&str> = route.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        keys == ["computer_id", "machine_id", "route_id", "schema"]
-            && int_literal(&route["schema"]).as_deref() == Some("1")
-            && uuid_value(route.get("computer_id"))
-            && uuid_value(route.get("machine_id"))
-            && (route["route_id"].is_null() || uuid_value(route.get("route_id")))
-    });
-    if !valid {
-        return Err(Failure::text("invalid immutable gateway route"));
-    }
-    Err(Failure::text("guarded native routing is unavailable"))
+/// Where a routed request runs: on this computer, guarded by its machine
+/// identity, or in a peer's context.
+enum Target {
+    Here(Option<String>),
+    Peer(Rc<Connector<PeerNative>>),
 }
 
 impl<N: Native + 'static> Connector<N> {
@@ -182,26 +168,63 @@ impl<N: Native + 'static> Connector<N> {
                     })
                 });
                 if matches {
-                    resolve(route)
+                    self.resolve(route).await
                 } else {
                     Err(Failure::text(
                         "directory creation computer does not match its immutable route",
                     ))
                 }
             } else if let Some(route) = request.get("gateway_route") {
-                resolve(route)
+                self.resolve(route).await
             } else {
-                Ok(())
+                Ok(Target::Here(None))
             };
-        if let Err(failure) = routed {
-            let response = receipt("failed", Value::Null, Some(failure.message()));
-            self.finish(&request_id, &response)?;
-            return Ok(Outcome::Finished(response));
-        }
-        let response = self.execute_claimed(&request, &request_id).await;
+        let target = match routed {
+            Ok(target) => target,
+            Err(failure) => {
+                let response = receipt("failed", Value::Null, Some(failure.message()));
+                self.finish(&request_id, &response)?;
+                return Ok(Outcome::Finished(response));
+            }
+        };
+        let response = match target {
+            Target::Here(None) => self.execute_claimed(&request, &request_id).await,
+            Target::Here(Some(machine)) => {
+                Connector::<N>::guarded(machine, self.execute_claimed(&request, &request_id)).await
+            }
+            Target::Peer(context) => context.execute_claimed(&request, &request_id).await,
+        };
         let response = sanitize(response, &request_id, is_mutation(&journal_operation));
         self.finish(&request_id, &response)?;
         Ok(Outcome::Finished(response))
+    }
+
+    /// `Fleet.resolve`: an exact route to this computer or a direct peer,
+    /// checked against the current inventory without waiting on any other
+    /// peer.
+    async fn resolve(&self, envelope: &Value) -> Result<Target, Failure> {
+        let (route, machine) = crate::fleet::route_target(envelope).map_err(Failure::text)?;
+        let fleet = match &self.fleet {
+            Some(fleet) if self.gateway_available() => fleet,
+            _ => return Err(Failure::text(crate::fleet::ROUTING_UNAVAILABLE)),
+        };
+        let Some(identity) = route else {
+            if fleet.local_id.borrow().as_deref() != Some(machine.as_str()) {
+                return Err(Failure::text(crate::fleet::LOCAL_CHANGED));
+            }
+            return Ok(Target::Here(Some(machine)));
+        };
+        let current = fleet.routes.borrow().get(&identity).cloned();
+        if !current.is_some_and(|row| row.online && row.machine_id == machine) {
+            return Err(Failure::text(crate::fleet::ROUTE_UNAVAILABLE));
+        }
+        let Some(context) = fleet.contexts.borrow().get(&identity).cloned() else {
+            return Err(Failure::Generic);
+        };
+        if !context.snapshot_ready.is_set() {
+            context.snapshot().await.map_err(Failure::Connector)?;
+        }
+        Ok(Target::Peer(context))
     }
 
     fn finish(&self, request_id: &str, response: &Value) -> Result<(), Fatal> {

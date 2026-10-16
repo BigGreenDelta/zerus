@@ -15,6 +15,7 @@ pub mod config;
 pub mod error;
 pub mod execute;
 pub mod files;
+pub mod fleet;
 pub mod fsguard;
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
@@ -174,7 +175,10 @@ async fn serve(
     relay: &http::Relay,
 ) -> Result<(), execute::Fatal> {
     use futures_util::future::{self, Either};
-    let heartbeat = runtime::until_stopped(&connector.stopping, connector.heartbeats(relay));
+    let heartbeat = runtime::until_stopped(
+        &connector.stopping,
+        future::join(connector.heartbeats(relay), connector.gateway(relay)),
+    );
     let requests = async {
         let result = connector.requests(relay).await;
         // A journal failure ends the heartbeat too.

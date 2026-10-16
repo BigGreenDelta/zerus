@@ -12,6 +12,7 @@
 use crate::accounts::{self, AccountCache, Refresh};
 use crate::capabilities::{Flags, PROBE_TIMEOUT, REPROBE_SECONDS};
 use crate::execute::{Fatal, Outcome};
+use crate::fleet::{DynNative, Fleet, PeerNative};
 use crate::http::{Relay, RelayError, MAX_POLL};
 use crate::journal::{is_mutation, Journal, JournalError};
 use crate::native::{native_argv, Call, Native, NativeError, NativeResult, Output};
@@ -118,6 +119,17 @@ pub struct State {
     pub paged_archives: HashMap<(String, String), f64>,
 }
 
+impl State {
+    /// The caches of a new context: nothing listed and no archive preview.
+    pub fn fresh() -> Self {
+        State {
+            presence: Value::Null,
+            archive_preview_meta: crate::archives::unavailable(),
+            ..State::default()
+        }
+    }
+}
+
 /// Settings fixed at start.
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -131,17 +143,28 @@ pub struct Settings {
 }
 
 pub struct Connector<N: Native> {
-    pub native: N,
-    pub journal: Journal,
+    pub native: Rc<N>,
+    /// One journal for this computer and every peer context.
+    pub journal: Rc<Journal>,
     pub settings: Settings,
     pub flags: Cell<Flags>,
     pub state: RefCell<State>,
     pub snapshot_ready: Event,
     /// The first capability probe has finished (`fleet.probe_complete`).
     pub probed: Event,
-    pub stopping: Event,
+    pub stopping: Rc<Event>,
+    /// The one-hop gateway; only the main connector has one.
+    pub fleet: Option<Fleet>,
+    /// A peer context: its native layer is the gateway's peer envelope.
+    pub peer: bool,
     started: tokio::time::Instant,
-    wall: Box<dyn Fn() -> f64>,
+    wall: Rc<dyn Fn() -> f64>,
+}
+
+tokio::task_local! {
+    /// `LOCAL_MACHINE_GUARD`: while a request routed to this computer runs,
+    /// its native calls go through the guarded local entry point.
+    static LOCAL_MACHINE: String;
 }
 
 /// Why one iteration of the request loop stopped.
@@ -166,22 +189,69 @@ impl<N: Native + 'static> Connector<N> {
         settings: Settings,
         wall: Box<dyn Fn() -> f64>,
     ) -> Self {
+        let native = Rc::new(native);
+        let gateway: Rc<dyn DynNative> = native.clone();
         Connector {
             native,
-            journal,
+            journal: Rc::new(journal),
             settings,
             flags: Cell::new(Flags::default()),
-            state: RefCell::new(State {
-                presence: Value::Null,
-                archive_preview_meta: crate::archives::unavailable(),
-                ..State::default()
-            }),
+            state: RefCell::new(State::fresh()),
             snapshot_ready: Event::default(),
             probed: Event::default(),
-            stopping: Event::default(),
+            stopping: Rc::default(),
+            fleet: Some(Fleet::new(gateway)),
+            peer: false,
             started: tokio::time::Instant::now(),
-            wall,
+            wall: Rc::from(wall),
         }
+    }
+
+    /// `peer_context(machine_id, native)`: a context with its own caches and
+    /// capabilities, the gateway's journal and stop, and no fleet.
+    pub fn peer_context(&self, machine_id: &str, native: PeerNative) -> Connector<PeerNative> {
+        Connector {
+            native: Rc::new(native),
+            journal: self.journal.clone(),
+            settings: Settings {
+                binding: machine_id.to_owned(),
+                ..self.settings.clone()
+            },
+            flags: Cell::new(Flags::default()),
+            state: RefCell::new(State::fresh()),
+            snapshot_ready: Event::default(),
+            probed: Event::default(),
+            stopping: self.stopping.clone(),
+            fleet: None,
+            peer: true,
+            started: self.started,
+            wall: self.wall.clone(),
+        }
+    }
+
+    /// `fleet.available`: peer markers, a relay that took the manifest and
+    /// a verified local machine.
+    pub fn gateway_available(&self) -> bool {
+        self.fleet.as_ref().is_some_and(|fleet| {
+            self.flags.get().peers
+                && self.relay_accepts_manifest(fleet)
+                && fleet.local_id.borrow().is_some()
+        })
+    }
+
+    /// How long a relay that refused the gateway waits for its next try (d),
+    /// shortened by the test-hooks clock scale.
+    fn relay_retry(&self) -> f64 {
+        crate::fleet::RELAY_RETRY / self.settings.clock_scale
+    }
+
+    /// Whether the relay takes the extended heartbeat: after a refusal,
+    /// again once its retry time has come (d).
+    fn relay_accepts_manifest(&self, fleet: &Fleet) -> bool {
+        if !fleet.relay_supported.get() && self.clock() >= fleet.relay_retry_at.get() {
+            fleet.relay_supported.set(true);
+        }
+        fleet.relay_supported.get()
     }
 
     /// Monotonic seconds since start (Python's `time.monotonic()`).
@@ -194,13 +264,31 @@ impl<N: Native + 'static> Connector<N> {
         (self.wall)()
     }
 
-    /// `Connector.native`: no call starts once the connector is stopping.
+    /// `Connector.native`: no call starts once the connector is stopping. A
+    /// peer context calls through its route as it is; a request routed to
+    /// this computer goes through the guarded local entry point.
     pub async fn native(&self, mut call: Call) -> NativeResult {
         if self.stopping.is_set() {
             return Err(NativeError::Stopping);
         }
+        if self.peer {
+            return self.native.call(call).await;
+        }
+        if let Ok(machine) = LOCAL_MACHINE.try_with(Clone::clone) {
+            let envelope = json!({"schema": 1, "target_machine_id": machine,
+                                  "argv": call.argv, "payload": call.payload.take()});
+            call.argv = ["swarm", "__mobile-peer-local", "--json"]
+                .map(String::from)
+                .into();
+            call.payload = Some(envelope);
+        }
         call.argv = native_argv(call.argv);
         self.native.call(call).await
+    }
+
+    /// Runs `future` with this computer's guarded native entry point.
+    pub async fn guarded<T>(machine: String, future: impl Future<Output = T>) -> T {
+        LOCAL_MACHINE.scope(machine, future).await
     }
 
     pub fn context(&self) -> Context {
@@ -331,10 +419,11 @@ impl<N: Native + 'static> Connector<N> {
         let accounts = self.update_accounts().await;
         snapshot.insert("mobile_accounts".into(), accounts);
         self.probe_capabilities().await;
-        snapshot.insert(
-            "mobile_capabilities".into(),
-            self.flags.get().advertised(false),
-        );
+        let capabilities = self
+            .flags
+            .get()
+            .advertised_for(self.fleet.is_some(), self.gateway_available());
+        snapshot.insert("mobile_capabilities".into(), capabilities);
         Ok(Value::Object(snapshot))
     }
 
@@ -536,15 +625,164 @@ impl<N: Native + 'static> Connector<N> {
             .finish_refresh(&refresh, raw.as_ref());
     }
 
-    /// One heartbeat: the projected snapshot with presence beside it.
+    /// One heartbeat: the projected snapshot with presence beside it, and
+    /// with a usable gateway the peer manifest. A relay that refuses the
+    /// manifest with 400, 404 or 422 gets the plain heartbeat, and the
+    /// manifest again after 300 s (d).
     pub async fn heartbeat(self: &Rc<Self>, relay: &Relay) -> Result<(), String> {
         let snapshot = self.snapshot().await?;
         let presence = self.state.borrow().presence.clone();
-        let mut body = Map::new();
-        body.insert("snapshot".into(), snapshot);
-        self.post_with_presence(relay, "/v1/node/heartbeat", body, presence)
+        let available = self.gateway_available();
+        let body = match &self.fleet {
+            Some(fleet) => fleet.heartbeat(snapshot, available),
+            None => Map::from_iter([("snapshot".to_owned(), snapshot)]),
+        };
+        let path = "/v1/node/heartbeat";
+        match self
+            .post_with_presence(relay, path, body.clone(), presence.clone())
             .await
-            .map_err(|error| error.message().to_owned())
+        {
+            Ok(()) => {
+                if let Some(fleet) = &self.fleet {
+                    fleet.confirm_manifest(&body);
+                }
+                Ok(())
+            }
+            Err(RelayError::Status(400 | 404 | 422)) if body.len() > 1 => {
+                if let Some(fleet) = &self.fleet {
+                    fleet.relay_supported.set(false);
+                    fleet.relay_retry_at.set(self.clock() + self.relay_retry());
+                }
+                let mut snapshot = body["snapshot"].clone();
+                if let Some(Value::Array(features)) =
+                    snapshot.pointer_mut("/mobile_capabilities/features")
+                {
+                    features.retain(|feature| feature != "gateway_one_hop");
+                }
+                let plain = Map::from_iter([("snapshot".to_owned(), snapshot)]);
+                self.post_with_presence(relay, path, plain, presence)
+                    .await
+                    .map_err(|error| error.message().to_owned())
+            }
+            Err(error) => Err(error.message().to_owned()),
+        }
+    }
+
+    /// `Fleet.discover`: the native inventory decides the routes; an
+    /// invalid or failed inventory withdraws them all, rather than keep a
+    /// stale alias usable after an outage.
+    pub async fn discover(&self) {
+        let Some(fleet) = &self.fleet else {
+            return;
+        };
+        let _discovery = fleet.discovery.lock().await;
+        if !self.flags.get().peers {
+            return;
+        }
+        let mut call =
+            Call::new(["swarm", "mobile-peers", "--json"]).timeout(crate::fleet::INVENTORY_TIMEOUT);
+        call.max_output_bytes = Some(crate::fleet::INVENTORY_BYTES);
+        let inventory = match self.native(call).await {
+            Ok(output) => crate::fleet::inventory(&output.json()).ok(),
+            Err(_) => None,
+        };
+        let routes = match inventory {
+            Some((local, routes)) => {
+                *fleet.local_id.borrow_mut() = Some(local);
+                routes
+            }
+            None => {
+                log("WARNING", "Direct peer discovery unavailable");
+                Default::default()
+            }
+        };
+        *fleet.routes.borrow_mut() = routes.clone();
+        let mut contexts = fleet.contexts.borrow_mut();
+        contexts.retain(|identity, _| routes.contains_key(identity));
+        for (identity, route) in &routes {
+            if contexts.contains_key(identity) {
+                continue;
+            }
+            let native = PeerNative {
+                gateway: fleet.gateway.clone(),
+                routes: fleet.routes.clone(),
+                slots: fleet.slots.clone(),
+                identity: identity.clone(),
+                machine: route.machine_id.clone(),
+                default_timeout: self.settings.default_timeout,
+            };
+            let context = self.peer_context(&route.machine_id, native);
+            contexts.insert(identity.clone(), Rc::new(context));
+        }
+    }
+
+    /// `Fleet.publish`: every online route the relay accepted gets its
+    /// peer's heartbeat. One unavailable peer never affects another route.
+    pub async fn publish(&self, relay: &Relay) {
+        let Some(fleet) = &self.fleet else {
+            return;
+        };
+        let routes: Vec<(String, crate::fleet::Route)> = fleet
+            .routes
+            .borrow()
+            .iter()
+            .map(|(identity, route)| (identity.clone(), route.clone()))
+            .collect();
+        let peers = routes.into_iter().map(|(identity, route)| async move {
+            let key = (identity.clone(), route.machine_id.clone());
+            if !route.online || !fleet.published.borrow().contains(&key) {
+                return;
+            }
+            let Some(context) = fleet.contexts.borrow().get(&identity).cloned() else {
+                log("WARNING", "Peer route was withdrawn during observation");
+                return;
+            };
+            let Ok(snapshot) = context.snapshot().await else {
+                log("WARNING", "Peer heartbeat unavailable");
+                return;
+            };
+            let body = Map::from_iter([
+                ("machine_id".to_owned(), json!(route.machine_id)),
+                ("snapshot".to_owned(), snapshot),
+            ]);
+            let size = json::python_default_len(&Value::Object(body.clone()), true);
+            if size.is_err() || size.is_ok_and(|size| size > crate::fleet::MAX_PEER_SNAPSHOT) {
+                log("WARNING", "Peer heartbeat unavailable");
+                return;
+            }
+            let current = fleet.routes.borrow().get(&identity).cloned();
+            if current.as_ref() != Some(&route) || !fleet.published.borrow().contains(&key) {
+                return;
+            }
+            let presence = context.state.borrow().presence.clone();
+            let path = format!("/v1/node/peers/{identity}/heartbeat");
+            if let Err(error) = self.post_with_presence(relay, &path, body, presence).await {
+                // Only an unsupported method identifies an incompatible relay.
+                if error.status() == Some(405) {
+                    fleet.relay_supported.set(false);
+                    fleet.relay_retry_at.set(self.clock() + self.relay_retry());
+                    fleet.published.borrow_mut().clear();
+                }
+                log("WARNING", "Peer heartbeat unavailable");
+            }
+        });
+        future::join_all(peers).await;
+    }
+
+    /// `Fleet.run`: discovery and peer heartbeats every interval while the
+    /// CLI and the relay support the gateway.
+    pub async fn gateway(&self, relay: &Relay) {
+        let interval = self.settings.interval;
+        loop {
+            if let Some(fleet) = &self.fleet {
+                if self.flags.get().peers && self.relay_accepts_manifest(fleet) {
+                    self.discover().await;
+                    self.publish(relay).await;
+                }
+            }
+            let pause = Duration::try_from_secs_f64(interval).unwrap_or(Duration::MAX);
+            tokio::time::sleep(pause).await;
+        }
     }
 
     /// Presence beside a snapshot. An older relay refuses the additive field
@@ -698,12 +936,20 @@ impl<N: Native + 'static> Connector<N> {
     async fn poll(&self, relay: &Relay) -> Result<Vec<Value>, LoopError> {
         self.flush(relay).await?;
         self.ready_to_claim().await;
-        let wait = if self.probed.is_set() {
-            self.poll_wait()
+        // A gateway whose machine is not yet verified claims soon again.
+        let pending = !self.probed.is_set()
+            || self.fleet.as_ref().is_some_and(|fleet| {
+                self.flags.get().peers
+                    && self.relay_accepts_manifest(fleet)
+                    && fleet.local_id.borrow().is_none()
+            });
+        let wait = if pending { 1 } else { self.poll_wait() };
+        let one_hop = if self.gateway_available() {
+            "&gateway_one_hop=1"
         } else {
-            1
+            ""
         };
-        let path = format!("/v1/node/requests?wait={wait}");
+        let path = format!("/v1/node/requests?wait={wait}{one_hop}");
         let batch = relay.call(Method::GET, &path, None, MAX_POLL).await?;
         let Some(Value::Object(mut batch)) = batch else {
             return Err(LoopError::Warning(INVALID_LIST.into()));

@@ -43,6 +43,8 @@ bytes = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
 rustls-native-certs = "0.8"
+# SHA-1 for the uuid5 route identities only; ring already backs rustls.
+ring = { version = "0.17", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "test-util"] }
