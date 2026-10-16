@@ -237,6 +237,15 @@ otherwise it offers the [protection](#protect-running-agents) command instead.
 Copied commands require deliberate execution. Wait for active connector requests
 and receipts to drain before restarting it.
 
+While the connector file is missing, the status starts with *not configured* and
+no start or restart command is offered. The panel names the program the service
+runs: the legacy Python connector (a venv's console script, with the migration
+hint), the Rust connector (noting a `zerus-setup --mobile-connector migrate`
+drop-in) or another program, and says when the unit is not enabled at login. On
+macOS it reads the `com.hgdev.zerus-mobile-connector` LaunchAgent with
+`launchctl print`, within the same 3 s and 16 KiB bounds, and offers
+`launchctl kickstart -k` once a configuration exists.
+
 The managed official-relay migration preserves the original binding identity and
 receipt directory. A different relay or replacement computer credential requires
 a new, unused private receipt directory. The panel never copies or deletes old

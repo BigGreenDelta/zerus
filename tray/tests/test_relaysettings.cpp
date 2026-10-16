@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
 #include "RelaySettings.h"
@@ -20,6 +21,20 @@ class TestRelaySettings : public QObject {
         file.setPermissions(QFile::ReadOwner|QFile::WriteOwner);
         return file.write(QJsonDocument(object).toJson())>0;
     }
+    static QString connectorConfig(const QTemporaryDir &dir){
+        const auto path=temporaryRoot(dir)+"/connector.json";
+        return write(path,{{"server_url","https://relay.example.test"},{"node_token","synthetic-node-token"},
+                           {"state_dir",temporaryRoot(dir)+"/state"}})?path:QString();
+    }
+    // A status tool on PATH that answers only the panel's exact read-only probe.
+    static bool fakeTool(const QTemporaryDir &dir,const QString &name,const QByteArray &arguments,const QByteArray &output,int code=0){
+        QFile answer(temporaryRoot(dir)+"/"+name+".answer");if(!answer.open(QIODevice::WriteOnly))return false;answer.write(output);answer.close();
+        QFile program(temporaryRoot(dir)+"/"+name);if(!program.open(QIODevice::WriteOnly))return false;
+        program.write("#!/bin/sh\ncase \"$*\" in '"+arguments+"') ;; *) exit 1 ;; esac\ncat '"+answer.fileName().toUtf8()+"'\nexit "+QByteArray::number(code)+"\n");
+        program.close();
+        return QFile::setPermissions(program.fileName(),QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
+    }
+    static constexpr char Probe[]="--user show zerus-mobile-connector.service --property=LoadState,ActiveState,SubState,KillMode,UnitFileState,FragmentPath,DropInPaths,ExecStart --no-pager";
 private slots:
     void managedMigrationPreservesExactIdentityAndOtherKeys(){
         auto old=original("/fixture/receipts");
@@ -103,14 +118,11 @@ private slots:
     void restartCommandRequiresProcessKillMode(){
 #ifdef Q_OS_LINUX
         QFETCH(QByteArray,output);QFETCH(bool,restart);QFETCH(bool,protect);
-        QTemporaryDir dir;QVERIFY(dir.isValid());const auto executable=temporaryRoot(dir)+"/systemctl";
-        QFile answer(temporaryRoot(dir)+"/answer");QVERIFY(answer.open(QIODevice::WriteOnly));answer.write(output);answer.close();
-        QFile program(executable);QVERIFY(program.open(QIODevice::WriteOnly));
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto config=connectorConfig(dir);QVERIFY(!config.isEmpty());
         // Answer only the read-only probe, and only when it asks for the kill mode.
-        program.write("#!/bin/sh\ncase \"$*\" in '--user show zerus-mobile-connector.service --property=LoadState,ActiveState,SubState,KillMode --no-pager') ;; *) exit 1 ;; esac\nexec cat '"+answer.fileName().toUtf8()+"'\n");program.close();
-        QVERIFY(QFile::setPermissions(executable,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        QVERIFY(fakeTool(dir,"systemctl",Probe,output));
         const auto previous=qgetenv("PATH");qputenv("PATH",temporaryRoot(dir).toUtf8()+":"+previous);
-        RelaySettings::Panel panel(temporaryRoot(dir)+"/connector.json");
+        RelaySettings::Panel panel(config);
         auto *process=panel.findChild<QProcess*>();
         const bool started=process&&process->waitForStarted(1000);qputenv("PATH",previous);QVERIFY(started);
         auto *status=panel.findChild<QLabel*>("connectorServiceStatus");auto *notice=panel.findChild<QLabel*>("connectorKillMode");
@@ -137,13 +149,86 @@ private slots:
         // Reload starts a second probe, which must find the same systemctl.
         const auto previous=qgetenv("PATH");qputenv("PATH",temporaryRoot(dir).toUtf8()+":"+previous);
         const auto restore=qScopeGuard([previous]{qputenv("PATH",previous);});
-        RelaySettings::Panel panel(temporaryRoot(dir)+"/connector.json");
+        const auto config=connectorConfig(dir);QVERIFY(!config.isEmpty());
+        RelaySettings::Panel panel(config);
         auto *restartRow=panel.findChild<QWidget*>("connectorRestartCommand");auto *protectRow=panel.findChild<QWidget*>("connectorProtectCommand");
         auto *reload=panel.findChild<QPushButton*>("reloadRelayConfiguration");QVERIFY(restartRow&&protectRow&&reload);
         QTRY_VERIFY(!protectRow->isHidden());QVERIFY(restartRow->isHidden());
         // The user ran the protection command; Reload configuration probes again.
         QVERIFY(reply("process"));reload->click();
         QTRY_VERIFY(!restartRow->isHidden());QVERIFY(protectRow->isHidden());
+#endif
+    }
+    void missingConfigurationComesFirst(){
+#ifdef Q_OS_LINUX
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        QVERIFY(fakeTool(dir,"systemctl",Probe,"LoadState=loaded\nActiveState=active\nSubState=running\nKillMode=process\nUnitFileState=enabled\n"));
+        const auto previous=qgetenv("PATH");qputenv("PATH",temporaryRoot(dir).toUtf8()+":"+previous);
+        const auto restore=qScopeGuard([previous]{qputenv("PATH",previous);});
+        RelaySettings::Panel panel(temporaryRoot(dir)+"/connector.json");
+        auto *status=panel.findChild<QLabel*>("connectorServiceStatus");QVERIFY(status);
+        QTRY_VERIFY(!status->text().contains(QStringLiteral("checking")));
+        QVERIFY2(status->text().startsWith(QStringLiteral("Connector: not configured.")),qPrintable(status->text()));
+        QVERIFY(status->text().contains(QStringLiteral("running")));
+        // Nothing to start or restart without a configuration; the kill mode still shows.
+        QVERIFY(panel.findChild<QWidget*>("connectorStartCommand")->isHidden());
+        QVERIFY(panel.findChild<QWidget*>("connectorRestartCommand")->isHidden());
+        QVERIFY(!panel.findChild<QLabel*>("connectorKillMode")->isHidden());
+#endif
+    }
+    void implementationFollowsTheRunningProgram_data(){
+        QTest::addColumn<QString>("program");QTest::addColumn<QByteArray>("dropIns");QTest::addColumn<QString>("expected");
+        QTest::newRow("python venv")<<QStringLiteral("venv")<<QByteArray()<<QStringLiteral("legacy Python connector");
+        QTest::newRow("rust package")<<QStringLiteral("/usr/bin/zerus-mobile-connector")<<QByteArray()<<QStringLiteral("Implementation: Rust connector (/usr/bin/zerus-mobile-connector).");
+        QTest::newRow("migrated")<<QStringLiteral("/usr/bin/zerus-mobile-connector")
+            <<QByteArray("/example/zerus-mobile-connector.service.d/50-zerus-killmode.conf /example/zerus-mobile-connector.service.d/60-zerus-rust-connector.conf")
+            <<QStringLiteral("switched by zerus-setup --mobile-connector migrate");
+        QTest::newRow("foreign")<<QStringLiteral("/usr/bin/sleep")<<QByteArray()<<QStringLiteral("not a Zerus connector program");
+    }
+    void implementationFollowsTheRunningProgram(){
+#ifdef Q_OS_LINUX
+        QFETCH(QString,program);QFETCH(QByteArray,dropIns);QFETCH(QString,expected);
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto config=connectorConfig(dir);QVERIFY(!config.isEmpty());
+        if(program==QLatin1String("venv")){
+            QVERIFY(QDir().mkpath(temporaryRoot(dir)+"/venv/bin"));
+            QFile cfg(temporaryRoot(dir)+"/venv/pyvenv.cfg");QVERIFY(cfg.open(QIODevice::WriteOnly));cfg.write("home = /usr/bin\n");cfg.close();
+            program=temporaryRoot(dir)+"/venv/bin/zerus-mobile-connector";
+        }
+        const QByteArray exec="ExecStart={ path="+program.toUtf8()+" ; argv[]="+program.toUtf8()+" --config "+config.toUtf8()+" ; ignore_errors=no ; start_time=[n/a] }\n";
+        QVERIFY(fakeTool(dir,"systemctl",Probe,"LoadState=loaded\nActiveState=inactive\nSubState=dead\nKillMode=process\nUnitFileState=disabled\nDropInPaths="+dropIns+"\n"+exec));
+        const auto previous=qgetenv("PATH");qputenv("PATH",temporaryRoot(dir).toUtf8()+":"+previous);
+        const auto restore=qScopeGuard([previous]{qputenv("PATH",previous);});
+        RelaySettings::Panel panel(config);
+        auto *status=panel.findChild<QLabel*>("connectorServiceStatus");auto *label=panel.findChild<QLabel*>("connectorImplementation");QVERIFY(status&&label);
+        QTRY_VERIFY(!status->text().contains(QStringLiteral("checking")));
+        QVERIFY(status->text().startsWith(QStringLiteral("Connector service: stopped")));
+        QVERIFY(status->text().contains(QStringLiteral("not enabled")));
+        QVERIFY(!label->isHidden());QVERIFY2(label->text().contains(expected),qPrintable(label->text()));
+        if(dropIns.isEmpty())QVERIFY(!label->text().contains(QStringLiteral("switched")));
+#endif
+    }
+    void macLaunchAgentProbe_data(){
+        QTest::addColumn<QByteArray>("output");QTest::addColumn<int>("code");QTest::addColumn<QString>("expected");QTest::addColumn<bool>("restart");
+        QTest::newRow("running")<<QByteArray("gui/501/com.hgdev.zerus-mobile-connector = {\n\tstate = running\n\tprogram = /Applications/Zerus.app/Contents/MacOS/zerus-mobile-connector\n}\n")<<0
+            <<QStringLiteral("Connector service: running")<<true;
+        QTest::newRow("loaded")<<QByteArray("gui/501/com.hgdev.zerus-mobile-connector = {\n\tstate = not running\n}\n")<<0<<QStringLiteral("loaded, not running")<<true;
+        QTest::newRow("absent")<<QByteArray()<<113<<QStringLiteral("not installed")<<false;
+    }
+    void macLaunchAgentProbe(){
+#ifdef Q_OS_MACOS
+        QFETCH(QByteArray,output);QFETCH(int,code);QFETCH(QString,expected);QFETCH(bool,restart);
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto config=connectorConfig(dir);QVERIFY(!config.isEmpty());
+        QVERIFY(fakeTool(dir,"launchctl","print gui/"+QByteArray::number(getuid())+"/com.hgdev.zerus-mobile-connector",output,code));
+        const auto previous=qgetenv("PATH");qputenv("PATH",temporaryRoot(dir).toUtf8()+":"+previous);
+        const auto restore=qScopeGuard([previous]{qputenv("PATH",previous);});
+        RelaySettings::Panel panel(config);
+        auto *status=panel.findChild<QLabel*>("connectorServiceStatus");auto *row=panel.findChild<QWidget*>("connectorRestartCommand");QVERIFY(status&&row);
+        QTRY_VERIFY(!status->text().contains(QStringLiteral("checking")));
+        QVERIFY2(status->text().contains(expected),qPrintable(status->text()));
+        QCOMPARE(!row->isHidden(),restart);
+        QVERIFY(row->findChild<QLabel*>()->text().startsWith(QStringLiteral("launchctl kickstart -k gui/")));
+        if(code==0&&output.contains("program = "))
+            QVERIFY(panel.findChild<QLabel*>("connectorImplementation")->text().contains(QStringLiteral("Rust connector")));
 #endif
     }
     void atomicPrivateSavePreservesUnrelatedConfiguration(){
