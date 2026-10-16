@@ -1298,8 +1298,13 @@ prompt. Ready does not complete a goal.
 
 Subagents open their own Activity and return through **Main activity**, preserving
 the parent's draft. Individual child IDs and profile groups are distinguished;
-unknown counts remain unknown. Ordinary child results/errors stay out of the
-attention count, while explicit input/approval requests remain visible. DeepSeek
+unknown counts remain unknown. An unknown child never keeps its parent from Ready.
+A Claude child that stops on a provider error, such as a usage limit, gets no
+SubagentStop: its StopFailure, or a `failed` entry for its current start in the
+workflow journal with no newer child event, settles it as **Error** with that
+message, and a later event of the same child resumes it. Ordinary child
+results/errors stay out of the attention count, while explicit input/approval
+requests remain visible. DeepSeek
 continuable children can receive messages through the native API with parent
 verification; other adapters and one-shot children may expose history only.
 The expanded session tree hides children whose latest reported turn is finished
