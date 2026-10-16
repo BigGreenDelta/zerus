@@ -105,20 +105,25 @@ fn scratch(label: &str) -> Scratch {
     Scratch::new(label)
 }
 
-fn check(scratch: &Scratch, state: &Path) -> Value {
+/// One `--check --json` run against `state`, unasserted.
+fn run_check(scratch: &Scratch, state: &Path) -> std::process::Output {
     let path = scratch.path("connector.json");
     let config =
         json!({"server_url": RELAY, "node_token": TOKEN, "state_dir": state.display().to_string()});
     std::fs::write(&path, config.to_string()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let output = captured(
+    captured(
         Command::new(BINARY)
             .args(["--check", "--json", "--config"])
             .arg(&path)
             .env_clear()
             .env("HOME", &scratch.root)
             .env("PATH", "/usr/bin:/bin"),
-    );
+    )
+}
+
+fn check(scratch: &Scratch, state: &Path) -> Value {
+    let output = run_check(scratch, state);
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -259,16 +264,22 @@ fn check_never_makes_a_writing_python_journal_fail() {
     );
     // Stop the writer before asserting, so a failed check never removes the
     // scratch directory under a running writer.
-    let reports: Vec<Value> = (0..25).map(|_| check(&scratch, &state)).collect();
+    let outputs: Vec<_> = (0..25).map(|_| run_check(&scratch, &state)).collect();
     std::fs::write(&stop, "").unwrap();
     assert!(
         child.wait().unwrap().success(),
         "the writing Python journal failed"
     );
-    for report in &reports {
+    for output in &outputs {
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["state"]["lock"], "held", "{report}");
-        let status = &report["state"]["journal"]["status"];
-        assert!(status == "readable" || status == "busy", "{report}");
+        // A busy journal is the truthful answer and fails the check.
+        let expected = match report["state"]["journal"]["status"].as_str() {
+            Some("readable") => Some(0),
+            Some("busy") => Some(1),
+            _ => panic!("{report}"),
+        };
+        assert_eq!(output.status.code(), expected, "{report}");
     }
     let mut written = String::new();
     stdout.read_line(&mut written).unwrap();

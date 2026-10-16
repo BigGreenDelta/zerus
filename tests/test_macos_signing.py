@@ -85,7 +85,9 @@ class Signing(unittest.TestCase):
                         if (value := sign.entitlements_for(path, self.app))}
         self.assertEqual(set(entitlements), {"Zerus.app"})
         application = plistlib.loads(Path(entitlements["Zerus.app"]).read_bytes())
-        self.assertEqual(application, {"com.apple.security.automation.apple-events": True, "com.apple.security.device.audio-input": True})
+        self.assertEqual(application, {"com.apple.security.automation.apple-events": True,
+                                       "com.apple.security.device.audio-input": True,
+                                       "com.apple.security.device.camera": True})
 
     def test_codesign_command_uses_hardened_runtime_and_timestamps(self):
         command = sign.codesign_command(self.app, "Developer ID Application: Example (ABCDE12345)", None)

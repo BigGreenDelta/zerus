@@ -160,7 +160,11 @@ It runs three jobs after full CI:
 Only entitlements with a concrete need are granted, and only to the application:
 `com.apple.security.automation.apple-events` with `NSAppleEventsUsageDescription`
 because Terminal integration runs `osascript`, whose Apple Events TCC attributes
-to Zerus. Without Qt WebEngine there is no helper process that would need JIT.
+to Zerus, and `com.apple.security.device.audio-input` and
+`com.apple.security.device.camera` with `NSMicrophoneUsageDescription` and
+`NSCameraUsageDescription` because the hardened runtime blocks voice and video
+message recording without them. Without Qt WebEngine there is no helper process
+that would need JIT.
 
 The Arch assembly job then adds the signed ZIP, DMG and rendered cask through
 `prepare-release.py --macos` (`homebrew/zerus.rb`) or `prepare-nightly.py --macos`

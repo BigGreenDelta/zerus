@@ -60,6 +60,7 @@ fn bounded(value: &Value, max: usize, empty: bool) -> bool {
         (empty || !s.is_empty()) && s.len() <= max && !s.chars().any(char::is_control)
     })
 }
+#[cfg(unix)]
 pub(crate) fn validate_request(value: &Value) -> Result<()> {
     prepare_request(value).map(|_| ())
 }
@@ -243,7 +244,7 @@ impl Store {
         tx.commit().map_err(err)?;
         Ok(n == 1)
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn insert(&mut self, job: &Value, digest: &str, audio: &[u8]) -> Result<Value> {
         self.insert_media(job, digest, audio, &[])
     }
