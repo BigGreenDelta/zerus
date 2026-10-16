@@ -138,6 +138,11 @@ final class ConversationModel {
     var attachmentImporting = false
     @ObservationIgnored var importTask: Task<Void, Never>?
 
+    // MARK: Phone delivery timing
+
+    var mobileDeliveryMessage = ""
+    var mobileDeliveryRequest = ""
+
     // MARK: Terminal
 
     var terminalState: JSONObject?

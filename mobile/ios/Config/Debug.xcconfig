@@ -1,5 +1,8 @@
 #include "Base.xcconfig"
 
+// Development builds register with the APNs sandbox.
+ZERUS_APNS_ENVIRONMENT = development
+
 SWIFT_OPTIMIZATION_LEVEL = -Onone
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG $(inherited)
 GCC_OPTIMIZATION_LEVEL = 0

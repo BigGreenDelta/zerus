@@ -53,6 +53,20 @@ final class RelayClientTests: XCTestCase {
         XCTAssertEqual(1, StubProtocol.requests.count)
     }
 
+    func testPushRegistrationSendsOnlyTheProviderAndToken() async throws {
+        StubProtocol.reset { _ in StubProtocol.json(200, #"{"ok":true}"#) }
+        let token = String(repeating: "ab", count: 32)
+        try await StubProtocol.client().registerPush(connection, provider: "apns_sandbox", token: token)
+        let request = try XCTUnwrap(StubProtocol.requests.first)
+        XCTAssertEqual("/v1/push", request.url.path)
+        XCTAssertEqual(["provider": "apns_sandbox", "token": .string(token)], request.json?.object)
+        do {
+            try await StubProtocol.client().registerPush(connection, provider: "fcm", token: token)
+            XCTFail("Only APNs providers are registered from iOS")
+        } catch {}
+        XCTAssertEqual(1, StubProtocol.requests.count)
+    }
+
     func testPollingKnownReceiptDoesNotCreateReplacementRequest() async throws {
         StubProtocol.reset { _ in StubProtocol.json(200, #"{"request_id":"known","state":"completed","result":{"status":"submitted"}}"#) }
         let receipt = try await StubProtocol.client().waitForReceipt(connection, initial: ["request_id": "known", "state": "claimed"],

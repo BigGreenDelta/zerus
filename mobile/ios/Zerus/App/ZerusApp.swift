@@ -3,8 +3,10 @@ import ZerusKit
 
 @main
 struct ZerusApp: App {
-    @State private var model = AppModel.live()
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @Environment(\.scenePhase) private var scenePhase
+
+    private var model: AppModel { delegate.model }
 
     var body: some Scene {
         WindowGroup {

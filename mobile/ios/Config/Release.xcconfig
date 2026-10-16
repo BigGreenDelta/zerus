@@ -1,5 +1,8 @@
 #include "Base.xcconfig"
 
+// TestFlight and App Store builds register with production APNs.
+ZERUS_APNS_ENVIRONMENT = production
+
 SWIFT_OPTIMIZATION_LEVEL = -O
 SWIFT_COMPILATION_MODE = wholemodule
 GCC_OPTIMIZATION_LEVEL = s

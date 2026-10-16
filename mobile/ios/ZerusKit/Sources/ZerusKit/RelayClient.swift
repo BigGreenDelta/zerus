@@ -119,6 +119,12 @@ public struct RelayClient: Sendable {
         _ = try await call(connection.url, token: connection.token, path: "/v1/device", method: "DELETE")
     }
 
+    /// Registers this phone's APNs device token for generic wakes.
+    public func registerPush(_ connection: Connection, provider: String, token: String) async throws {
+        guard PushRegistration.providers.contains(provider), PushRegistration.validToken(token) else { throw ZerusError.invalid("Invalid push registration.") }
+        _ = try await call(connection.url, token: connection.token, path: "/v1/push", body: ["provider": .string(provider), "token": .string(token)])
+    }
+
     public func events(_ connection: Connection, after: Int64, wait: Int = 25) async throws -> JSONObject {
         try await call(connection.url, token: connection.token, path: "/v1/events?after=\(after)&wait=\(wait)")
     }

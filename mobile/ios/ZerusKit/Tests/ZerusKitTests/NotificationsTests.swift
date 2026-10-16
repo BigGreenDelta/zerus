@@ -713,3 +713,19 @@ final class NotificationCatalogTests: XCTestCase {
         XCTAssertFalse(NotificationCatalogParser.presenceAlerts([:]))
     }
 }
+
+final class PushRegistrationTests: XCTestCase {
+    func testTokensProvidersAndRetriesMatchTheRelayContract() {
+        let token = PushRegistration.token(Data((0..<32).map { UInt8($0 * 7 % 256) }))
+        XCTAssertEqual(64, token.count)
+        XCTAssertTrue(PushRegistration.validToken(token))
+        XCTAssertFalse(PushRegistration.validToken(token.uppercased()))
+        XCTAssertFalse(PushRegistration.validToken("ab"))
+        XCTAssertEqual("apns", PushRegistration.provider(environment: "production"))
+        XCTAssertEqual("apns_sandbox", PushRegistration.provider(environment: "development"))
+        XCTAssertTrue(PushRegistration.needsRegistration("apns:" + token, registered: nil))
+        XCTAssertFalse(PushRegistration.needsRegistration("apns:" + token, registered: "apns:" + token))
+        XCTAssertTrue([408, 429, 500, 503].allSatisfy(PushRegistration.retry))
+        XCTAssertFalse([400, 401, 403, 404, 409].contains(where: PushRegistration.retry))
+    }
+}

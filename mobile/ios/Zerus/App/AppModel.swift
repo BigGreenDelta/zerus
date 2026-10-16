@@ -1,4 +1,5 @@
 import Observation
+import UIKit
 import SwiftUI
 import ZerusKit
 
@@ -95,6 +96,8 @@ final class AppModel {
     @ObservationIgnored private(set) var playback: VoicePlayback!
     /// Speech provider management on processing computers.
     @ObservationIgnored private(set) var speechProviders: SpeechProviders!
+    /// Session alerts and push registration.
+    @ObservationIgnored private(set) var notifications: SessionNotifications!
 
     init(client: RelayClient, connectionStore: ConnectionStore, sealedStore: SealedFileStore?,
          cache: ConversationCache? = nil, pages: ConversationPageCache? = nil, attachmentStore: AttachmentStore? = nil,
@@ -114,6 +117,7 @@ final class AppModel {
         voice = VoiceController(app: self)
         playback = VoicePlayback(app: self)
         speechProviders = SpeechProviders(app: self)
+        notifications = SessionNotifications(app: self)
     }
 
     static func live() -> AppModel {
@@ -144,6 +148,7 @@ final class AppModel {
             connections = try await Task.detached { try store.load() }.value
             try await openPrivateState()
             storageReady = true
+            startNotifications()
             conversation.recoverAttachmentPick()
             let caches = [viewer.cache, computerFiles.cache].compactMap { $0 }
             Task.detached(priority: .utility) { caches.forEach { $0.trim() } }
@@ -175,6 +180,7 @@ final class AppModel {
         await conversation.openReadState(sealed)
         await voice.open(sealed)
         await speechProviders.open(sealed)
+        await notifications.open(sealed)
         accounts.onResult = { [weak self] failure in
             self?.accountsError = failure == nil ? "" : "Account snapshots could not be saved. Existing private data is preserved."
         }
@@ -243,11 +249,56 @@ final class AppModel {
 
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
-        case .active: if storageReady { refresh() }
+        case .active:
+            if storageReady {
+                refresh()
+                startNotifications()
+            }
         case .background:
             voice.background()
+            notifications.setActive(false)
+            AppDelegate.scheduleRefresh()
             flushPrivateState()
         default: break
+        }
+    }
+
+    // MARK: Notifications
+
+    /// Asks once for permission after a workspace exists, registers for wakes and drains events while active.
+    private func startNotifications() {
+        guard storageReady, !demo, !connections.isEmpty else { return }
+        Task {
+            await notifications.refreshAuthorization()
+            if notifications.authorization == .notDetermined && notifications.preferences.master {
+                await notifications.requestAuthorization()
+            } else if notifications.allowed {
+                UIApplication.shared.registerForRemoteNotifications()
+                await notifications.registerAll()
+            }
+            if UIApplication.shared.applicationState == .active { notifications.setActive(true) }
+        }
+    }
+
+    /// Opens the freshly resolved current live session for a tapped card, never an archive.
+    func openNotification(connection: String, computer: String, session: String) {
+        func match() -> Session? {
+            sessions.first { $0.target.connectionId == connection && $0.target.computerId == computer && $0.target.session == session && $0.target.archiveId.isEmpty }
+        }
+        if let found = match() {
+            conversationRequest = found.target
+            return
+        }
+        refresh(explicit: true)
+        Task {
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(250))
+                if let found = match() {
+                    conversationRequest = found.target
+                    return
+                }
+            }
+            notice = "The session is no longer available."
         }
     }
 
@@ -312,6 +363,7 @@ final class AppModel {
             playback.stop()
             viewer.clear()
             computerFiles.clear()
+            notifications.forget(connection: connection.id)
             await voice.forget(connection: connection.id)
             await conversation.forget(connection: connection.id)
         } catch {

@@ -39,7 +39,9 @@ explicit Save to Files. Voice and round video recordings use the same sealed
 store: a stopped recording is a durable preview, nothing is uploaded before an
 explicit Send, and an unconfirmed upload is only ever checked by its original
 identity. Speech provider API keys are entered only in memory and sealed for the
-processing computer before upload. Production builds require HTTPS; the relay client never follows redirects
+processing computer before upload. Notification state (event cursor, posted card
+evidence and preferences) is sealed like other private state; push wakes carry
+no conversation content. Production builds require HTTPS; the relay client never follows redirects
 and keeps no cookies or cached responses.
 
 ## Build and test

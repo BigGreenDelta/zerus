@@ -1077,6 +1077,26 @@ once the gateway confirms it; an unconfirmed change appears in Drafts for a
 receipt check and is never repeated. Older gateways or relays show the value
 read-only with the reason.
 
+iOS uses the same policy, catalog and durable per-workspace state, with these
+paths:
+
+- APNs, when the relay is configured with a private token-signing key. The app
+  registers its device token as `apns` (TestFlight and App Store builds) or
+  `apns_sandbox` (development builds). Each wake is a generic visible alert,
+  "New session activity.", carrying only the wake fields. When iOS lets Zerus run
+  (the alert marks `content-available`), it drains events and replaces that alert
+  with silent session cards; otherwise the cards appear when Zerus next opens.
+- While Zerus is open, each workspace long-polls its events, which also refreshes
+  the visible catalog.
+- A background app refresh task as an opportunistic fallback; iOS decides when it
+  runs.
+
+Session cards use replaceable identifiers per slot; an audible card is
+`active`, and a silent update or replacement of an already announced wake is
+`passive`. A card for the conversation currently on screen is not presented
+again. Machines shows each workspace's push status honestly, including a relay
+without APNs or notifications turned off in iOS Settings.
+
 Android 13 and later require notification permission. Force-stopping the app
 and disabling notifications cannot be bypassed by the relay. Provider status
 must be shown honestly in the app and deployment verification.

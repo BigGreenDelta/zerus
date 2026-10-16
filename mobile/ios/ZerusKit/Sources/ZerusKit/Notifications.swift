@@ -662,3 +662,22 @@ public enum NotificationCatalogParser {
         return events
     }
 }
+
+/// APNs registration with a gateway: the device token, its build environment and when to register again.
+public enum PushRegistration {
+    public static let providers: Set<String> = ["apns", "apns_sandbox"]
+
+    /// Development builds use the APNs sandbox; TestFlight and App Store builds use production.
+    public static func provider(environment: String) -> String { environment == "production" ? "apns" : "apns_sandbox" }
+
+    public static func token(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
+    public static func validToken(_ value: String) -> Bool {
+        (64...200).contains(value.count) && value.count % 2 == 0 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
+    public static func needsRegistration(_ registration: String, registered: String?) -> Bool { !registration.isEmpty && registration != registered }
+
+    /// Transient gateway failures are retried on the next start; a rejection is final until the token changes.
+    public static func retry(_ status: Int) -> Bool { status == 408 || status == 429 || status >= 500 }
+}
