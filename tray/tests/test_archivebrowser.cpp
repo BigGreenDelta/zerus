@@ -5,6 +5,7 @@
 #include <QScreen>
 #include <QScopeGuard>
 #include <QCalendarWidget>
+#include <QStyleHints>
 #include <QDateEdit>
 #include <QLabel>
 #include <QPushButton>
@@ -60,6 +61,11 @@ print(json.dumps(r))
  void themedPopoverGeometry(){
     QFETCH(bool,dark);QFETCH(int,width);QFETCH(double,scale);
     const auto originalFont=qApp->font();const auto restoreFont=qScopeGuard([&]{qApp->setFont(originalFont);});
+    // Cocoa normally tabs only through text/list controls. Qualify the complete
+    // keyboard chain in this process without changing the user's OS preference.
+    const auto originalTabPolicy=qApp->styleHints()->tabFocusBehavior();
+    const auto restoreTabPolicy=qScopeGuard([&]{qApp->styleHints()->setTabFocusBehavior(originalTabPolicy);});
+    qApp->styleHints()->setTabFocusBehavior(Qt::TabFocusAllControls);
     auto font=originalFont;font.setPointSizeF(font.pointSizeF()*scale);qApp->setFont(font);
     QTemporaryDir dir;const auto file=dir.filePath("hgs");
     QVERIFY(FakeCli::install(file,R"(#!/usr/bin/env python3
@@ -73,6 +79,7 @@ print(json.dumps(dict(version=1,sessions=rows,next_cursor='next',previous_cursor
     auto palette=browser.palette();palette.setColor(QPalette::Window,dark?QColor("#161b21"):QColor("#f5f7f9"));browser.setPalette(palette);browser.setAutoFillBackground(true);
     browser.resize(width,browser.sizeHint().height());browser.configure({{"","Fixture computer"}},true);browser.show();
     QTRY_COMPARE(browser.sessions("").size(),50);
+    browser.activateWindow();QVERIFY(QTest::qWaitForWindowActive(&browser));
     auto *period=browser.findChild<QPushButton*>("archivePeriod");QTest::mouseClick(period,Qt::LeftButton);
     auto *panel=browser.findChild<QFrame*>("archiveDatePanel");QVERIFY(panel->isVisible());
     QCOMPARE(panel->font().pointSizeF(),font.pointSizeF());
@@ -80,6 +87,12 @@ print(json.dumps(dict(version=1,sessions=rows,next_cursor='next',previous_cursor
     for(auto *control:panel->findChildren<QWidget*>())if(control->isVisible()&&control->window()==panel)
         QVERIFY2(panel->rect().contains(QRect(control->mapTo(panel,QPoint()),control->size())),qPrintable(control->objectName()));
     auto *from=browser.findChild<QDateEdit*>("archiveFrom");QVERIFY(from->styleSheet().isEmpty());
+    auto *apply=browser.findChild<QPushButton*>("archiveRangeApply");auto *cancel=browser.findChild<QPushButton*>("archiveRangeCancel");
+    QVERIFY(apply->mapTo(panel,QPoint(apply->width(),0)).x()<cancel->mapTo(panel,QPoint()).x());
+    auto *until=browser.findChild<QDateEdit*>("archiveUntil");until->setFocus();until->setSelectedSection(QDateTimeEdit::YearSection);
+    QTRY_VERIFY(until->hasFocus());
+    QTest::keyClick(until,Qt::Key_Tab);QTRY_VERIFY2(apply->hasFocus(),qPrintable(QString("Focus: %1; Tab policy: %2").arg(qApp->focusWidget()?qApp->focusWidget()->objectName():"none").arg(qApp->styleHints()->tabFocusBehavior())));
+    QTest::keyClick(apply,Qt::Key_Tab);QTRY_VERIFY(cancel->hasFocus());
     const auto output=qEnvironmentVariable("ZERUS_ARCHIVE_RASTER_DIR");
     if(!output.isEmpty()){
         QDir().mkpath(output);QVERIFY(browser.grab().save(output+"/"+QTest::currentDataTag()+"-toolbar.png"));

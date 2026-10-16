@@ -45,9 +45,10 @@ ArchiveDatePicker::ArchiveDatePicker(QWidget *parent) : QPushButton(parent)
     m_hint->setMinimumHeight(fontMetrics().height() * 2);
     dates->addWidget(m_hint);
     auto *applyRow = new QHBoxLayout; applyRow->setSpacing(8);
-    auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("archiveRangeCancel");
     m_apply = new QPushButton(tr("Apply range")); m_apply->setObjectName("archiveRangeApply");
-    applyRow->addWidget(cancel); applyRow->addWidget(m_apply, 1); dates->addLayout(applyRow);
+    auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("archiveRangeCancel");
+    applyRow->addWidget(m_apply, 1); applyRow->addWidget(cancel); dates->addLayout(applyRow);
+    setTabOrder(m_from, m_until); setTabOrder(m_until, m_apply); setTabOrder(m_apply, cancel);
     connect(cancel, &QPushButton::clicked, m_panel, &QWidget::hide);
     connect(m_apply, &QPushButton::clicked, this, [this] { apply(4); });
     body->addWidget(custom, 3);

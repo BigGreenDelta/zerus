@@ -87,7 +87,7 @@ class ArchivePagingSmokeInstrumentation:Instrumentation(){
             set(model,"setMachines",listOf(Machine(key.connectionId,key.computerId,"Fixture computer",true)));set(model,"setRelayOperations",mapOf(key.connectionId to setOf("archive_list")));set(model,"setMachineOperations",mapOf(key to setOf("archive_list")))
             set(model,"setSessions",listOf(live,legacy))
             val scheme=Class.forName("app.zerus.mobile.MainActivityKt").getDeclaredField("Scheme").apply{isAccessible=true}.get(null) as androidx.compose.material3.ColorScheme
-            activity.setContent{MaterialTheme(colorScheme=scheme){Surface(modifier=Modifier.systemBarsPadding()){SessionsScreen(model,{})}}}
+            activity.setContent{MaterialTheme(colorScheme=scheme){Surface(color=scheme.background,modifier=Modifier.systemBarsPadding()){SessionsScreen(model,{})}}}
         }
         await("published upgraded catalog excludes legacy preview"){main{model.sessions.any{it.target==live.target} && model.sessions.none{SessionFilters.archived(it)}}}
         main{set(model,"setRelayOperations",mapOf(key.connectionId to emptySet<String>()))}
