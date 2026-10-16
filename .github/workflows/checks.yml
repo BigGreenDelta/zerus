@@ -181,13 +181,16 @@ jobs:
       # Every services/mobile/tests module runs once, and relay fixtures run the
       # Rust process on their own PostgreSQL databases. The speech suites also
       # run against the retained Python reference relay. The black-box connector
-      # suites (test_bb_*) run in the connector job.
+      # suites (test_bb_*) run in the connector job; the end-to-end suites run
+      # here against both connectors, the Rust one built beside the relay.
       - name: Released HTTP and outbound connector compatibility
         env:
           ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           ZERUS_REQUIRE_RELAY_E2E: "1"
         run: |
           cargo +1.85.0 build --locked --bin hgs
+          cargo +1.85.0 build --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir services/mobile/relay/target
+          export ZERUS_CONNECTOR_E2E_COMMAND="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/zerus-mobile-connector"
           python3 -m venv "$RUNNER_TEMP/relay-venv"
           "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile -r services/mobile/tests/requirements.txt
           export ZERUS_RELAY_BINARY="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/zerus-relay"

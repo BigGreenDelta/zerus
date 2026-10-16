@@ -522,6 +522,14 @@ class WorkflowSecurityTests(unittest.TestCase):
             self.assertIn(f"\n          cargo +1.85.0 test --locked{contract}\n", postgres[0])
         self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests'
                       " -p 'test_[!b]*.py' -v\n", postgres[1])
+        # The end-to-end suites also run the Rust connector, built beside the relay.
+        build = ("\n          cargo +1.85.0 build --locked --manifest-path services/mobile/connector/Cargo.toml"
+                 " --target-dir services/mobile/relay/target\n")
+        export = ('\n          export ZERUS_CONNECTOR_E2E_COMMAND="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/'
+                  'zerus-mobile-connector"\n')
+        self.assertIn(build, postgres[1])
+        self.assertLess(postgres[1].index(build), postgres[1].index(export))
+        self.assertLess(postgres[1].index(export), postgres[1].index("-p 'test_[!b]*.py'"))
 
     def test_connector_job_runs_the_black_box_suites_against_both_connectors(self):
         connector = job((ROOT / ".github/workflows/checks.yml").read_text(), "connector")

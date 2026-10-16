@@ -56,7 +56,12 @@ leave some behind. Without the variable the Rust contracts fall back to a
 private SQLite file (`tests/python_receipts.rs`, which has only a PostgreSQL
 database, passes without running) and the connector HTTP suites skip; a local
 SQLite run never stands in for PostgreSQL. CI sets `ZERUS_REQUIRE_RELAY_E2E=1`,
-which turns that fallback and those skips into failures. A one-line server on
+which turns that fallback and those skips into failures. The end-to-end suites
+(`test_end_to_end`, `test_presence_end_to_end` and `test_peer_end_to_end`) run
+each flow against this tree's Python connector in-process and, with
+`ZERUS_CONNECTOR_E2E_COMMAND` naming a built Rust connector
+(`services/mobile/connector`), against that one as its own process with a
+private configuration file; with the requirement set, both must run. A one-line server on
 a random loopback port, whose data, leftovers included, leaves with the
 container:
 
