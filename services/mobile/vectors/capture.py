@@ -312,9 +312,13 @@ def help_text(skip=()) -> str:
     return "\n".join(line for name, line in HELP_LINES if name not in skip) + "\n"
 
 
+PAGED_LISTING = {**LISTING,"archive_revision":"0"*64,"archive_paging":True,"sessions":[r for r in LISTING["sessions"] if r.get("state")!="archived"]}
+EMPTY_ARCHIVES = {"version":1,"sessions":[],"next_cursor":"","total":0,"from":0,"until":253402300800,"query":""}
+
+
 def snapshot_native(help_answer) -> Native:
-    return Native({("ls", "--json", "--local"): LISTING, ("ls", "--json", "--local", "--no-archives"): {**LISTING,"archive_revision":"0"*64,"archive_paging":True,"sessions":[r for r in LISTING["sessions"] if r.get("state")!="archived"]}, ("swarm", "get"): SWARM, ("account", "ls"): ACCOUNTS,
-                   ("archives","--json"): {"version":1,"sessions":[],"next_cursor":"","total":0,"from":0,"until":253402300800,"query":""},
+    return Native({("ls", "--json", "--local"): LISTING, ("ls", "--json", "--local", "--no-archives"): PAGED_LISTING, ("swarm", "get"): SWARM, ("account", "ls"): ACCOUNTS,
+                   ("archives","--json"): EMPTY_ARCHIVES,
                    ("inspect", SESSION): inspection(), ("--help",): help_answer})
 
 
@@ -2290,7 +2294,8 @@ def projection_vectors(runs: dict, executions: list[dict]) -> bytes:
     # Projects and attention run concurrently, so only the set of native calls is a contract.
     calls = sorted(full["calls"], key=compact)
     rows.append({"kind": "snapshot", "id": "heartbeat-snapshot", "native": {
-        "ls --json --local": LISTING, "swarm get": SWARM, "account ls": ACCOUNTS, "inspect " + SESSION: inspection(),
+        "ls --json --local": LISTING, "ls --json --local --no-archives": PAGED_LISTING, "archives --json": EMPTY_ARCHIVES,
+        "swarm get": SWARM, "account ls": ACCOUNTS, "inspect " + SESSION: inspection(),
         "--help": help_text()}, "peers_discovered": True, "expect": {"heartbeat": full["heartbeat"], "calls": calls}})
     rows += executions
     return jsonl(rows)

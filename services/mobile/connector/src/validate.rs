@@ -39,6 +39,20 @@ pub struct Context {
     pub archives: HashSet<(String, String)>,
     /// Seconds since that snapshot (infinite before the first).
     pub snapshot_age: f64,
+    /// Archives a page, read or lookup admitted within the last hour.
+    pub paged: HashSet<(String, String)>,
+    /// The CLI pages archives: any archive passes validation and is checked
+    /// natively before it runs (`archive_preflight`).
+    pub archive_supported: bool,
+}
+
+impl Context {
+    /// `archive_allowed(session, archive_id)`.
+    pub fn admits(&self, session: &str, archive: &str) -> bool {
+        let pair = (session.to_owned(), archive.to_owned());
+        (self.snapshot_age <= ARCHIVE_SNAPSHOT_TTL && self.archives.contains(&pair))
+            || self.paged.contains(&pair)
+    }
 }
 
 /// A validated request: operation, session and the native payload.
@@ -340,6 +354,13 @@ pub fn validate(
         session: session.into(),
         payload,
     };
+    if operation == "archive_list" {
+        if request.get("session").and_then(Value::as_str) != Some("") {
+            return Err(error("archive browsing uses no session target"));
+        }
+        crate::archives::validate(request.get("payload"))?;
+        return Ok(validated("", request.get("payload").cloned()));
+    }
     if crate::capabilities::LAUNCH.contains(&operation) {
         if request.get("session").and_then(Value::as_str) != Some("") {
             return Err(error("catalog/launch use no existing session target"));
@@ -372,12 +393,12 @@ pub fn validate(
         validate_inspect(payload)?;
         if let Some(archive) = payload.get("archive_id") {
             let archive = checked_uuid(Some(archive))?;
-            if context.snapshot_age > ARCHIVE_SNAPSHOT_TTL {
-                return Err(error(
-                    "archive snapshot is stale; refresh before inspection",
-                ));
-            }
-            if !context.archives.contains(&(session.into(), archive)) {
+            if !context.admits(session, &archive) && !context.archive_supported {
+                if context.snapshot_age > ARCHIVE_SNAPSHOT_TTL {
+                    return Err(error(
+                        "archive snapshot is stale; refresh before inspection",
+                    ));
+                }
                 return Err(error("archive must match an exact local snapshot entry"));
             }
             return Ok(validated(session, Some(payload.clone())));
@@ -399,9 +420,7 @@ pub fn validate(
             return Err(error("archived targets support inspection only"));
         }
         let archive = checked_uuid(Some(archive))?;
-        if context.snapshot_age > ARCHIVE_SNAPSHOT_TTL
-            || !context.archives.contains(&(session.into(), archive))
-        {
+        if !context.admits(session, &archive) && !context.archive_supported {
             return Err(error(
                 "archive must match a fresh exact local snapshot entry",
             ));

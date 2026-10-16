@@ -193,9 +193,7 @@ pub fn validate(
             return Err("archived targets support inspection only".into());
         }
         let archive = validate::checked_uuid(Some(archive))?;
-        if context.snapshot_age > validate::ARCHIVE_SNAPSHOT_TTL
-            || !context.archives.contains(&(session.into(), archive))
-        {
+        if !context.admits(session, &archive) && !context.archive_supported {
             return Err("archive must match a fresh exact local snapshot entry".into());
         }
     } else if !context.sessions.contains(session) {

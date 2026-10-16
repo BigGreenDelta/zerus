@@ -7,6 +7,7 @@
 compile_error!("the mobile connector supports only Unix gateways (Linux and macOS)");
 
 pub mod accounts;
+pub mod archives;
 pub mod capabilities;
 pub mod check;
 pub mod cli;

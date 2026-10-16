@@ -15,20 +15,27 @@ their preflight, the DeepSeek child-send preflight, process_stop, lifecycle
 operations, recovery_action and set_mobile_delivery), and the terminal,
 attachment and file reads, voice, speech and speech configuration of
 `src/media.rs`, `src/files.rs` and `src/speech.rs`, and the launch, directory
-and worktree creations of `src/launch.rs` exactly as Python does, journals
-every outcome and uploads it. Every other operation (archive pages and the
-one-hop gateway) is claimed, refused with Python's `unsupported operation`
+and worktree creations of `src/launch.rs`, and the archive pages of
+`src/archives.rs` exactly as Python does, journals every outcome and uploads
+it. Every other operation (the one-hop gateway) is claimed, refused with
+Python's `unsupported operation`
 receipt (which phones show as "update required") and never advertised, until
 its slice implements it (`src/capabilities.rs`, `IMPLEMENTED`;
 `tests/ported.json` lists the same operations for the black-box suites).
 Nothing packages or starts this binary yet; gateways keep running the Python
 connector.
 
-Archive paging is also deferred: `archive_list` is refused and never
-advertised, even when the CLI offers it. Heartbeats retain the legacy listing
-and report `mobile_archive.available=false`. The full legacy heartbeat is
-compared with current Python's captured legacy-native contract in
-`heartbeat-legacy.json`; the paged Python oracle remains separate.
+With a CLI that pages archives (`archives --json` in its help), heartbeats
+list live sessions only (`ls --json --local --no-archives`) plus a bounded
+preview of recent archives, read again when the listing's archive revision
+changes and otherwise every 300 s (15 s after a failure), and `archive_list`
+serves checked pages. An archive a page, a read or `hgs archives lookup`
+admitted stays admitted for an hour, bounded to 2,000; any other archive is
+looked up natively before anything runs for it, and a confirmed restore or
+forget revokes it. Without the marker, heartbeats keep the legacy listing with
+archives and report `mobile_archive.available=false`. The runtime vectors
+compare both heartbeats with Python: `heartbeat-legacy.json` and the paged
+`heartbeat-snapshot` of `projections.jsonl`.
 
 ## Build and test
 
@@ -218,6 +225,10 @@ rollback to Python.
   which stops Python's heartbeat task, the value is treated as absent.
   Account balances and credits accept ASCII digits only, where Python's `\d`
   also matches other decimal digits.
+- An archive page whose integer `archived_at` exceeds the double range is
+  refused with the generic receipt, as Python's OverflowError gives; in the
+  heartbeat preview it reports the preview as unavailable, where Python's
+  heartbeat would fail.
 - An operation of a later slice is refused after its claim, before any
   validation, so its receipt is `unsupported operation` where Python would
   report a validation error or run it.

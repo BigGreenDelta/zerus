@@ -21,6 +21,7 @@ pub const PROBE_TIMEOUT: f64 = 3.0;
 /// [`crate::launch::OPERATIONS`]. Every other known operation is refused
 /// as unsupported and never advertised.
 pub const IMPLEMENTED: &[&str] = &[
+    "archive_list",
     "attachment_read",
     "catalog",
     "dirs",

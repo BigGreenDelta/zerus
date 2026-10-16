@@ -2,11 +2,18 @@
 
 A live session and an archive may share a name. Only an exact archive of the
 latest snapshot is inspected, with its own native argument, and only an answer
-naming that archive is returned; nothing falls back to the live session."""
+naming that archive is returned; nothing falls back to the live session.
+
+A CLI that pages archives lists live sessions only. Heartbeats then carry a
+bounded preview of recent archives, `archive_list` serves checked pages, and an
+archive a page listed stays admitted for an hour; any other archive is looked
+up natively before anything runs for it."""
+import json
 import unittest
 
-from bb_operations import OperationCase, listing, validation_cases
+from bb_operations import OperationCase, help_text, listing, validation_cases
 from connector_harness import BlackBoxCase, default_rules, session_row
+from connector_harness import listing as base_listing
 
 NAME = "codex/project/nested/tag"
 ARCHIVE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -132,6 +139,144 @@ class ArchiveTests(OperationCase, BlackBoxCase):
         rows = [row for row in self.relay.heartbeats()[-1].body["snapshot"]["sessions"] if row["name"] == NAME]
         self.assertEqual([(row.get("archive_id"), row["mobile_project_id"]) for row in rows],
                          [(None, "live-project"), (ARCHIVE, "saved-project")])
+
+
+PAGED = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+PAGE_ARGV = ["archives", "--json"]
+LOOKUP_ARGV = ["archives", "lookup", "--json"]
+PAGED_ARGV = ["inspect", NAME, "--archive", PAGED]
+MAX_DATE = 253402300800
+PREVIEW_ERROR = "Archive preview is unavailable; refresh Archive on an updated client"
+
+
+def archived_row(archive: str, at: float, **changes) -> dict:
+    return session_row(name=NAME, run_id="saved-run", conversation_id="saved-conversation", state="archived",
+                       archive_id=archive, archived_at=at, runtime_state="archived", process_state="stopped",
+                       **changes)
+
+
+def archive_page(*rows: dict, **changes) -> dict:
+    return {"version": 1, "sessions": list(rows), "total": len(rows), "next_cursor": "", "from": 0,
+            "until": MAX_DATE, "query": "", **changes}
+
+
+class ArchivePageTests(OperationCase, BlackBoxCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.script()
+
+    def script(self, *rules, preview=None, revision="revision-1", markers=("archive_list",)):
+        """A paging CLI: live sessions only, `preview` as the recent window."""
+        listed = base_listing(sessions=[LIVE], archive_revision=revision, archive_paging=True)
+        self.hgs.script(list(rules) + [
+            {"argv": PAGE_ARGV, "stdin_fields": {}, "stdout": preview or archive_page()},
+            {"argv": PAGED_ARGV, "stdout": saved_detail(archive_id=PAGED)},
+            {"argv": ARCHIVED_ARGV, "stdout": saved_detail()},
+        ] + default_rules(listed, help_text(*markers)))
+
+    def page(self, **query):
+        return self.operation("archive_list", session="", identity=False, **query)
+
+    def inspect(self, archive=PAGED):
+        return self.operation("inspect", session=NAME, identity=False, archive_id=archive)
+
+    async def test_a_page_admits_its_archives_for_later_reads(self):
+        listed = archive_page(archived_row(PAGED, 20.0), archived_row(ARCHIVE, 10.0), limit=None)
+        listed.pop("limit")
+        self.script({"argv": PAGE_ARGV, "stdin_fields": {"limit": 2}, "stdout": listed})
+        process = await self.launch()
+        mark = self.mark()
+        response = await self.submit(self.page(limit=2), process)
+        self.assertEqual(response["state"], "completed", response)
+        result = response["result"]
+        self.assertEqual([row["archive_id"] for row in result["sessions"]], [PAGED, ARCHIVE])
+        # Only the projects these rows belong to come along, by id, name and colour.
+        used = {row.get("mobile_project_id") for row in result["sessions"]}
+        projects = result["mobile_projects"]["projects"]
+        self.assertLessEqual({project["id"] for project in projects}, used)
+        self.assertTrue(all(set(project) <= {"id", "name", "color"} for project in projects))
+        call = self.work(mark)[0]
+        self.assertEqual((call["argv"], json.loads(call["stdin"])), (PAGE_ARGV, {"limit": 2}))
+        # The listed archive is read without a lookup.
+        mark = self.mark()
+        read = await self.submit(self.inspect(), process)
+        self.assertEqual(read, {"state": "completed", "result": saved_detail(archive_id=PAGED), "error": None})
+        self.assertEqual([call["argv"] for call in self.work(mark)], [PAGED_ARGV])
+
+    async def test_an_archive_no_page_listed_is_looked_up_once(self):
+        found = {"version": 1, "name": NAME, "archive_id": PAGED, "run_id": "saved-run",
+                 "conversation_id": "saved-conversation"}
+        self.script({"argv": LOOKUP_ARGV, "stdout": found})
+        process = await self.launch()
+        mark = self.mark()
+        for _ in range(2):
+            self.assertEqual((await self.submit(self.inspect(), process))["state"], "completed")
+        calls = self.work(mark)
+        self.assertEqual([call["argv"] for call in calls], [LOOKUP_ARGV, PAGED_ARGV, PAGED_ARGV])
+        self.assertEqual(json.loads(calls[0]["stdin"]), {"name": NAME, "archive_id": PAGED})
+
+    async def test_a_lookup_for_another_target_runs_nothing(self):
+        for answer in ({"version": 1, "name": NAME, "archive_id": OTHER},
+                       {"version": 1, "name": "codex/other/name", "archive_id": PAGED},
+                       {"version": 2, "name": NAME, "archive_id": PAGED}):
+            with self.subTest(answer=answer):
+                self.script({"argv": LOOKUP_ARGV, "stdout": answer})
+                process = await self.launch()
+                mark = self.mark()
+                self.assertEqual(await self.submit(self.inspect(), process),
+                                 {"state": "failed", "result": None,
+                                  "error": "fresh native archive identity did not match"})
+                self.assertEqual([call["argv"] for call in self.work(mark)], [LOOKUP_ARGV])
+                process.stop()
+
+    async def test_an_invalid_native_page_fails_as_a_read(self):
+        unordered = archive_page(archived_row(ARCHIVE, 10.0), archived_row(PAGED, 20.0))
+        self.script({"argv": PAGE_ARGV, "stdin_fields": {"query": "x"}, "stdout": {**unordered, "query": "x"}})
+        process = await self.launch()
+        request = self.page(query="x")
+        self.assertEqual(await self.submit(request, process),
+                         {"state": "failed", "result": None, "error": "archive page is out of order"})
+        self.assertEqual(self.journal.row(request["request_id"])["state"], "failed")
+
+    async def test_heartbeats_list_live_sessions_and_a_bounded_preview(self):
+        self.script(preview=archive_page(archived_row(PAGED, 20.0, prompt="p" * 300, private="kept"), total=5))
+        process = await self.launch()
+        await self.until(lambda: len(self.relay.heartbeats()) >= 2, what="two heartbeats", process=process)
+        snapshot = self.relay.heartbeats()[-1].body["snapshot"]
+        self.assertEqual(snapshot["mobile_archive"],
+                         {"schema": 1, "available": True, "total": 5, "loaded": 1, "partial": True})
+        preview = [row for row in snapshot["sessions"] if row.get("archive_id") == PAGED]
+        self.assertEqual(len(preview), 1)
+        self.assertEqual(len(preview[0]["prompt"]), 240)
+        self.assertNotIn("private", preview[0])
+        self.assertIn("archive_list", snapshot["mobile_capabilities"]["operations"])
+        listings = self.since(0, "ls")
+        self.assertTrue(listings and all(call["argv"] == ["ls", "--json", "--local", "--no-archives"]
+                                         for call in listings))
+        # One preview per listing revision within five minutes.
+        self.assertEqual(len(self.since(0, *PAGE_ARGV)), 1)
+
+    async def test_a_failed_preview_is_reported_and_admits_nothing(self):
+        self.script({"argv": PAGE_ARGV, "stdin_fields": {}, "exit": 1})
+        process = await self.launch()
+        await self.until(lambda: self.relay.heartbeats(), what="a heartbeat", process=process)
+        self.assertEqual(self.relay.heartbeats()[-1].body["snapshot"]["mobile_archive"],
+                         {"schema": 1, "available": False, "loaded": 0, "total": None, "partial": False,
+                          "error": PREVIEW_ERROR})
+
+    async def test_a_cli_without_the_marker_keeps_the_legacy_listing(self):
+        self.script(markers=())
+        process = await self.launch()
+        await self.until(lambda: self.relay.heartbeats(), what="a heartbeat", process=process)
+        snapshot = self.relay.heartbeats()[-1].body["snapshot"]
+        self.assertNotIn("archive_list", snapshot["mobile_capabilities"]["operations"])
+        self.assertEqual(snapshot["mobile_archive"],
+                         {"schema": 1, "available": False, "loaded": 0, "total": None, "partial": False})
+        mark = self.mark()
+        self.assertEqual(await self.submit(self.page(), process),
+                         {"state": "failed", "result": None, "error": "Update the computer CLI to browse archive pages"})
+        self.assertEqual(self.work(mark), [])
+        self.assertTrue(all(call["argv"] == ["ls", "--json", "--local"] for call in self.since(0, "ls")))
 
 
 if __name__ == "__main__":
