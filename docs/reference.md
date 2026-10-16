@@ -260,9 +260,11 @@ sessions** replace the current page, retaining at most 50 rows per selected onli
 computer. Only two cursor anchors per computer are kept, without a growing page
 or cursor history; every matching record remains reachable in either direction.
 The compact period button opens quick ranges and a custom From/Through picker.
-Custom dates remain a draft until **Apply range**; Cancel, Escape or dismissing
-the panel keeps the current view. Opening a picker never fetches a page. Quick
-ranges apply immediately. Calendar inputs follow the app's desktop theme.
+Quick ranges fill the From/Through draft and keep the picker open, so either date
+can be adjusted before **Apply range**. Only Apply changes the active date filter;
+opening a picker, choosing a preset, Cancel, Escape or dismissing the panel never
+fetches a page. **All dates** shows **Any date** for both bounds and applies no
+date limits. Calendar inputs follow the app's desktop theme.
 The navigation row shows the current range for one computer or the loaded/matching
 count across computers. Hover the desktop count or expand the mobile count for
 each computer's exact page range. Older/Newer arrows sit beside this summary;

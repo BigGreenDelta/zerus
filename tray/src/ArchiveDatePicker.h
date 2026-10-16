@@ -6,7 +6,7 @@ class QDateEdit;
 class QFrame;
 class QLabel;
 
-// The open panel edits a draft. Only a preset or Apply changes the active query.
+// Presets and calendar edits change only the draft. Apply commits the query.
 class ArchiveDatePicker : public QPushButton {
     Q_OBJECT
 public:
@@ -23,10 +23,13 @@ protected:
     bool eventFilter(QObject *, QEvent *) override;
 private:
     void openPanel();
-    void apply(int period);
+    void stage(int period);
+    void editDraft(QDateEdit *edited);
+    void apply();
     void updateDraft();
     void updateCaption();
     int m_period = 0;
+    int m_draftPeriod = 0;
     QDate m_first = QDate::currentDate().addDays(-29), m_last = QDate::currentDate();
     bool m_dark = true;
     QFrame *m_panel;

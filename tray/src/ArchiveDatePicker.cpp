@@ -11,9 +11,23 @@
 #include <QLocale>
 #include <QPainter>
 #include <QScreen>
+#include <QSignalBlocker>
 #include <QStyleOptionButton>
 #include <QTextCharFormat>
 #include <QToolButton>
+
+namespace {
+class DraftDateEdit final : public QDateEdit {
+public:
+    using QDateEdit::QDateEdit;
+protected:
+    bool focusNextPrevChild(bool next) override {
+        // The unbounded placeholder has no day/month/year sections to traverse.
+        if (!specialValueText().isEmpty() && date() == minimumDate()) return QWidget::focusNextPrevChild(next);
+        return QDateEdit::focusNextPrevChild(next);
+    }
+};
+}
 
 ArchiveDatePicker::ArchiveDatePicker(QWidget *parent) : QPushButton(parent)
 {
@@ -31,7 +45,7 @@ ArchiveDatePicker::ArchiveDatePicker(QWidget *parent) : QPushButton(parent)
     auto *body = new QHBoxLayout; body->setSpacing(20); layout->addLayout(body);
     auto *custom = new QWidget; auto *dates = new QVBoxLayout(custom);
     dates->setContentsMargins(0, 0, 0, 0); dates->setSpacing(8);
-    m_from = new QDateEdit; m_until = new QDateEdit;
+    m_from = new DraftDateEdit; m_until = new DraftDateEdit;
     m_from->setObjectName("archiveFrom"); m_until->setObjectName("archiveUntil");
     for (auto *edit : {m_from, m_until}) {
         edit->setMinimumDate(QDate(1970, 1, 2)); edit->setMaximumDate(QDate(9999, 12, 30));
@@ -39,7 +53,10 @@ ArchiveDatePicker::ArchiveDatePicker(QWidget *parent) : QPushButton(parent)
         edit->setAccessibleName(edit == m_from ? tr("Archived from, inclusive") : tr("Archived through, inclusive"));
         auto *label = new QLabel(edit == m_from ? tr("From") : tr("Through"));
         label->setBuddy(edit); dates->addWidget(label); dates->addWidget(edit);
-        connect(edit, &QDateEdit::dateChanged, this, &ArchiveDatePicker::updateDraft);
+        connect(edit, &QDateEdit::dateChanged, this, [this, edit] { editDraft(edit); });
+        // Also handle explicitly choosing the already selected boundary date.
+        connect(edit->calendarWidget(), &QCalendarWidget::clicked, this, [this, edit] { editDraft(edit); });
+        edit->calendarWidget()->installEventFilter(this);
     }
     m_hint = new QLabel; m_hint->setObjectName("archiveRangeHint"); m_hint->setWordWrap(true);
     m_hint->setMinimumHeight(fontMetrics().height() * 2);
@@ -50,7 +67,7 @@ ArchiveDatePicker::ArchiveDatePicker(QWidget *parent) : QPushButton(parent)
     applyRow->addWidget(m_apply, 1); applyRow->addWidget(cancel); dates->addLayout(applyRow);
     setTabOrder(m_from, m_until); setTabOrder(m_until, m_apply); setTabOrder(m_apply, cancel);
     connect(cancel, &QPushButton::clicked, m_panel, &QWidget::hide);
-    connect(m_apply, &QPushButton::clicked, this, [this] { apply(4); });
+    connect(m_apply, &QPushButton::clicked, this, &ArchiveDatePicker::apply);
     body->addWidget(custom, 3);
     auto *quick = new QWidget; auto *presets = new QVBoxLayout(quick);
     presets->setContentsMargins(0, 0, 0, 0); presets->setSpacing(4);
@@ -62,7 +79,7 @@ ArchiveDatePicker::ArchiveDatePicker(QWidget *parent) : QPushButton(parent)
         button->setObjectName("archivePreset" + QString::number(i));
         button->setProperty("archivePreset", true); button->setCheckable(true);
         presets->addWidget(button);
-        connect(button, &QPushButton::clicked, this, [this, i] { apply(i); });
+        connect(button, &QPushButton::clicked, this, [this, i] { stage(i); });
     }
     presets->addStretch(); body->addWidget(quick, 2);
     connect(this, &QPushButton::clicked, this, [this] { if (m_panel->isVisible()) m_panel->hide(); else openPanel(); });
@@ -74,11 +91,7 @@ void ArchiveDatePicker::openPanel()
     m_panel->setFont(font());
     m_hint->setMinimumHeight(fontMetrics().height() * 2);
     for (auto *edit : {m_from, m_until}) edit->calendarWidget()->setFont(font());
-    const auto today = QDate::currentDate();
-    m_from->setDate(m_period > 0 && m_period < 4 ? today.addDays(m_period == 1 ? 0 : m_period == 2 ? -6 : -29) : m_first);
-    m_until->setDate(m_period > 0 && m_period < 4 ? today : m_last);
-    updateDraft();
-    for (int i = 0; i < 4; ++i) m_panel->findChild<QPushButton *>("archivePreset" + QString::number(i))->setChecked(m_period == i);
+    stage(m_period);
     const auto available = screen()->availableGeometry().adjusted(8, 8, -8, -8);
     auto *body = qobject_cast<QBoxLayout *>(m_panel->layout()->itemAt(1)->layout());
     const int width = qMin(qMax(480, fontMetrics().horizontalAdvance(QString(52, 'x'))), available.width());
@@ -92,8 +105,37 @@ void ArchiveDatePicker::openPanel()
     m_from->setFocus(Qt::PopupFocusReason);
 }
 
-void ArchiveDatePicker::apply(int period)
+void ArchiveDatePicker::stage(int period)
 {
+    m_draftPeriod = period;
+    const auto today = QDate::currentDate();
+    {
+        const QSignalBlocker fromBlocker(m_from), untilBlocker(m_until);
+        for (auto *edit : {m_from, m_until}) edit->setSpecialValueText(period == 0 ? tr("Any date") : QString());
+        m_from->setDate(period == 0 ? m_from->minimumDate() : period < 4 ? today.addDays(period == 1 ? 0 : period == 2 ? -6 : -29) : m_first);
+        m_until->setDate(period == 0 ? m_until->minimumDate() : period < 4 ? today : m_last);
+    }
+    updateDraft();
+}
+
+void ArchiveDatePicker::editDraft(QDateEdit *edited)
+{
+    const bool unbounded = m_draftPeriod == 0;
+    m_draftPeriod = 4;
+    if (unbounded) {
+        const QSignalBlocker fromBlocker(m_from), untilBlocker(m_until);
+        for (auto *edit : {m_from, m_until}) edit->setSpecialValueText({});
+        // Starting a custom range from All dates supplies a finite companion
+        // date without turning a calendar open/cancel into an edit.
+        if (edited != m_from) m_from->setDate(QDate::currentDate().addDays(-29));
+        if (edited != m_until) m_until->setDate(QDate::currentDate());
+    }
+    updateDraft();
+}
+
+void ArchiveDatePicker::apply()
+{
+    const int period = m_draftPeriod;
     if (period == 4 && m_from->date() > m_until->date()) return;
     const bool changed = m_period != period || (period == 4 && (m_first != m_from->date() || m_last != m_until->date()));
     m_period = period;
@@ -104,8 +146,9 @@ void ArchiveDatePicker::apply(int period)
 
 void ArchiveDatePicker::updateDraft()
 {
-    const bool valid = m_from->date() <= m_until->date(); m_apply->setEnabled(valid);
-    m_hint->setText(valid ? tr("Both dates included (local time)") : tr("End date must be on or after the start date."));
+    const bool valid = m_draftPeriod == 0 || m_from->date() <= m_until->date(); m_apply->setEnabled(valid);
+    m_hint->setText(m_draftPeriod == 0 ? tr("All archived dates (no date limits)") : valid ? tr("Both dates included (local time)") : tr("End date must be on or after the start date."));
+    for (int i = 0; i < 4; ++i) m_panel->findChild<QPushButton *>("archivePreset" + QString::number(i))->setChecked(m_draftPeriod == i);
     m_hint->setProperty("invalid", !valid);
     m_hint->style()->unpolish(m_hint); m_hint->style()->polish(m_hint);
 }
@@ -143,6 +186,8 @@ void ArchiveDatePicker::paintEvent(QPaintEvent *)
 void ArchiveDatePicker::hideEvent(QHideEvent *event) { m_panel->hide(); QPushButton::hideEvent(event); }
 bool ArchiveDatePicker::eventFilter(QObject *object, QEvent *event)
 {
+    if (event->type() == QEvent::Show && m_draftPeriod == 0)
+        if (auto *calendar = qobject_cast<QCalendarWidget *>(object)) calendar->setCurrentPage(QDate::currentDate().year(), QDate::currentDate().month());
     if (object == m_panel && event->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) { m_panel->hide(); return true; }
     if (object == m_panel && event->type() == QEvent::Hide) { setChecked(false); if (isVisible()) setFocus(Qt::PopupFocusReason); }
     return QPushButton::eventFilter(object, event);

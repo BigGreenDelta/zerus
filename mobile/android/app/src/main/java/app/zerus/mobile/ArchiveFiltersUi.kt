@@ -99,9 +99,28 @@ private fun rangeCaption(archive: ArchivePaging) = if (archive.period != Archive
     var lastText by rememberSaveable { mutableStateOf((if (archive.period in listOf(ArchivePeriod.Today, ArchivePeriod.Week, ArchivePeriod.Month)) today else archive.last).toString()) }
     val first = LocalDate.parse(firstText)
     val last = LocalDate.parse(lastText)
-    val valid = first <= last && ArchiveRange.days(first, last).valid
+    val valid = period == ArchivePeriod.All || first <= last && ArchiveRange.days(first, last).valid
+    fun stage(preset: ArchivePeriod) {
+        period = preset
+        if (preset != ArchivePeriod.All) {
+            val now = LocalDate.now()
+            firstText = (when (preset) {
+                ArchivePeriod.Today -> now
+                ArchivePeriod.Week -> now.minusDays(6)
+                else -> now.minusDays(29)
+            }).toString()
+            lastText = now.toString()
+        }
+    }
     fun pick(date: LocalDate, apply: (LocalDate) -> Unit) {
-        DatePickerDialog(context, { _, year, month, day -> apply(LocalDate.of(year, month + 1, day)); period = ArchivePeriod.Custom }, date.year, date.monthValue - 1, date.dayOfMonth).apply {
+        val initial = if (period == ArchivePeriod.All) LocalDate.now() else date
+        DatePickerDialog(context, { _, year, month, day ->
+            if (period == ArchivePeriod.All) {
+                firstText = LocalDate.now().minusDays(29).toString()
+                lastText = LocalDate.now().toString()
+            }
+            apply(LocalDate.of(year, month + 1, day)); period = ArchivePeriod.Custom
+        }, initial.year, initial.monthValue - 1, initial.dayOfMonth).apply {
             datePicker.minDate = LocalDate.of(1970, 1, 2).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
         }.show()
     }
@@ -109,30 +128,30 @@ private fun rangeCaption(archive: ArchivePaging) = if (archive.period != Archive
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Quick ranges", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             for (preset in ArchivePeriod.entries.filter { it != ArchivePeriod.Custom }) {
-                FilterChip(selected = period == preset, onClick = { archive.dates(preset); dismiss() },
+                FilterChip(selected = period == preset, onClick = { stage(preset) },
                     label = { Text(periodCaption(preset)) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp))
             }
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("Custom range", style = MaterialTheme.typography.labelMedium)
             OutlinedButton(onClick = { pick(first) { firstText = it.toString() } },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = "From $first" }, shape = RoundedCornerShape(10.dp)) {
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = if (period == ArchivePeriod.All) "From any date" else "From $first" }, shape = RoundedCornerShape(10.dp)) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("From", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(dateCaption(first))
+                    Text(if (period == ArchivePeriod.All) "Any date" else dateCaption(first))
                 }
                 Icon(DesktopIcons.Calendar, null, Modifier.size(20.dp))
             }
             OutlinedButton(onClick = { pick(last) { lastText = it.toString() } },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = "Through $last" }, shape = RoundedCornerShape(10.dp)) {
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = if (period == ArchivePeriod.All) "Through any date" else "Through $last" }, shape = RoundedCornerShape(10.dp)) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("Through", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(dateCaption(last))
+                    Text(if (period == ArchivePeriod.All) "Any date" else dateCaption(last))
                 }
                 Icon(DesktopIcons.Calendar, null, Modifier.size(20.dp))
             }
-            Text(if (valid) "Both dates included (local time)" else "End date must be on or after the start date.",
+            Text(if (period == ArchivePeriod.All) "All archived dates (no date limits)" else if (valid) "Both dates included (local time)" else "End date must be on or after the start date.",
                 style = MaterialTheme.typography.bodySmall, color = if (valid) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
         }
-    }, confirmButton = { Button(onClick = { archive.dates(ArchivePeriod.Custom, first, last); dismiss() }, enabled = valid, modifier = Modifier.heightIn(min = 48.dp)) { Text("Apply range") } },
+    }, confirmButton = { Button(onClick = { archive.dates(period, first, last); dismiss() }, enabled = valid, modifier = Modifier.heightIn(min = 48.dp)) { Text("Apply range") } },
         dismissButton = { TextButton(onClick = dismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text("Cancel") } })
 }

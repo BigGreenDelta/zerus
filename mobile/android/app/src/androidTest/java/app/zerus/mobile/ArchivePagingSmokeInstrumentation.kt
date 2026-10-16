@@ -51,12 +51,14 @@ class ArchivePagingSmokeInstrumentation:Instrumentation(){
         return checkNotNull(label)
     }
     private fun scroll(root:AccessibilityNodeInfo?,action:Int):Boolean{if(root==null)return false;root.refresh();if(root.isVisibleToUser&&root.actionList.any{it.id==action}&&root.performAction(action))return true;return (0 until root.childCount).any{scroll(root.getChild(it),action)}}
-    private fun reveal(label:String){repeat(120){
+    private fun reveal(label:String){var direction=AccessibilityNodeInfo.ACTION_SCROLL_FORWARD;repeat(120){attempt->
         try { uiAutomation.waitForIdle(80,2000) } catch(_:java.util.concurrent.TimeoutException) {}
         uiAutomation.clearCache()
         var n=find(uiAutomation.rootInActiveWindow,label)
         if(n!=null){while(!n!!.isClickable&&n!!.parent!=null)n=n!!.parent;val r=Rect().also(n!!::getBoundsInScreen);if(r.height()>=48*targetContext.resources.displayMetrics.density-1)return}
-        scroll(uiAutomation.rootInActiveWindow,AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);SystemClock.sleep(150)
+        if(!scroll(uiAutomation.rootInActiveWindow,direction)||(attempt+1)%12==0)
+            direction=if(direction==AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD else AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        SystemClock.sleep(150)
     };error("Cannot reveal $label")}
 
     private fun physical(label:String){reveal(label);SystemClock.sleep(250);var n=node(label);while(!n.isClickable&&n.parent!=null)n=n.parent;check(n.isEnabled&&n.isClickable);val r=Rect().also(n::getBoundsInScreen);val dm=targetContext.resources.displayMetrics;check(r.left>=0&&r.right<=dm.widthPixels&&r.height()>=48*dm.density-1){"Bad target $label: $r"};val at=SystemClock.uptimeMillis();for(a in listOf(MotionEvent.ACTION_DOWN,MotionEvent.ACTION_UP)){val e=MotionEvent.obtain(at,SystemClock.uptimeMillis(),a,r.exactCenterX(),r.exactCenterY(),0);try{check(uiAutomation.injectInputEvent(e,true))}finally{e.recycle()}}}
@@ -105,22 +107,40 @@ class ArchivePagingSmokeInstrumentation:Instrumentation(){
             check(last.get().string("cursor")=="page_$start")
         };check(calls.get()==5&&!main{model.archive.hasNewer});shot("newer")
         physical(periodLabel());shot("period-panel");check(calls.get()==5)
-        physical("Today");await("date reset"){calls.get()==6&&main{!model.archive.loading&&model.archive.rows.size==50}&&published(model)};check(last.get().string("cursor").isBlank()&&last.get().getLong("from")>0);shot("today")
-        main{model.archive.dates(ArchivePeriod.Custom)};await("custom range"){calls.get()==7&&main{!model.archive.loading}&&published(model)}
-        val original=main{model.archive.first};val dateLabel="From $original";physical(periodLabel());physical(dateLabel);shot("calendar")
-        var cancel=node("CANCEL");while(!cancel.isClickable&&cancel.parent!=null)cancel=cancel.parent;check(cancel.performAction(AccessibilityNodeInfo.ACTION_CLICK));check(calls.get()==7)
+        val today=java.time.LocalDate.now()
+        fun draftDates(first:String,last:String){reveal("From $first");node("From $first");reveal("Through $last");node("Through $last")}
+        for((label,first) in listOf("Today" to today,"Last 7 days" to today.minusDays(6),"Last 30 days" to today.minusDays(29))){
+            physical(label);draftDates(first.toString(),today.toString())
+            check(calls.get()==5&&main{model.archive.period==ArchivePeriod.All&&model.archive.range.from==0L}){"Preset changed active archive"}
+        }
+        physical("All dates");draftDates("any date","any date");check(calls.get()==5)
+        physical("Cancel");check(calls.get()==5&&main{model.archive.period==ArchivePeriod.All})
+        physical(periodLabel());physical("Today");check(calls.get()==5);physical("Apply range")
+        await("date reset"){calls.get()==6&&main{!model.archive.loading&&model.archive.rows.size==50}&&published(model)};check(last.get().string("cursor").isBlank()&&last.get().getLong("from")>0);shot("today")
+        val committedFirst=main{model.archive.first};val original=today.minusDays(29);val dateLabel="From $original"
+        physical(periodLabel());physical("Last 30 days");reveal(dateLabel);node(dateLabel);check(calls.get()==6)
+        physical(dateLabel);shot("calendar")
+        var cancel=node("CANCEL");while(!cancel.isClickable&&cancel.parent!=null)cancel=cancel.parent;check(cancel.performAction(AccessibilityNodeInfo.ACTION_CLICK));check(calls.get()==6)
         await("calendar dismissed"){uiAutomation.clearCache();find(uiAutomation.rootInActiveWindow,dateLabel)!=null}
         physical(dateLabel);val chosen=original.withDayOfMonth(if(original.dayOfMonth<28)original.dayOfMonth+1 else original.dayOfMonth-1)
         var day=node(chosen.dayOfMonth.toString());while(!day.isClickable&&day.parent!=null)day=day.parent;check(day.performAction(AccessibilityNodeInfo.ACTION_CLICK))
         var okay=node("OK");while(!okay.isClickable&&okay.parent!=null)okay=okay.parent;check(okay.performAction(AccessibilityNodeInfo.ACTION_CLICK))
         await("staged native date"){uiAutomation.clearCache();find(uiAutomation.rootInActiveWindow,"From $chosen")!=null}
-        check(calls.get()==7&&main{model.archive.first==original}){"Draft changed the active query"};shot("staged")
-        physical("Cancel");check(calls.get()==7&&main{model.archive.first==original})
-        physical(periodLabel());physical(dateLabel)
+        check(calls.get()==6&&main{model.archive.first==committedFirst&&model.archive.period==ArchivePeriod.Today}){"Draft changed the active query"};shot("staged")
+        physical("Cancel");check(calls.get()==6&&main{model.archive.first==committedFirst&&model.archive.period==ArchivePeriod.Today})
+        physical(periodLabel());physical("Last 30 days");physical(dateLabel)
         day=node(chosen.dayOfMonth.toString());while(!day.isClickable&&day.parent!=null)day=day.parent;check(day.performAction(AccessibilityNodeInfo.ACTION_CLICK))
         okay=node("OK");while(!okay.isClickable&&okay.parent!=null)okay=okay.parent;check(okay.performAction(AccessibilityNodeInfo.ACTION_CLICK))
         await("restaged native date"){uiAutomation.clearCache();find(uiAutomation.rootInActiveWindow,"From $chosen")!=null}
-        check(calls.get()==7);physical("Apply range")
-        await("applied native date"){calls.get()==8&&main{model.archive.first==chosen&&!model.archive.loading}&&published(model)};check(last.get().string("cursor").isBlank());shot("custom");main{activity.finish()}
+        check(calls.get()==6);physical("Apply range")
+        await("applied native date"){calls.get()==7&&main{model.archive.period==ArchivePeriod.Custom&&model.archive.first==chosen&&!model.archive.loading}&&published(model)};check(last.get().string("cursor").isBlank());shot("custom")
+        physical(periodLabel());physical("All dates");draftDates("any date","any date");check(calls.get()==7&&main{model.archive.period==ArchivePeriod.Custom})
+        physical("Apply range");await("unbounded apply"){calls.get()==8&&main{model.archive.period==ArchivePeriod.All&&!model.archive.loading}&&published(model)}
+        check(last.get().getLong("from")==0L&&last.get().getLong("until")==253402300800L&&last.get().string("cursor").isBlank());shot("all-dates")
+        physical(periodLabel());physical("From any date")
+        cancel=node("CANCEL");while(!cancel.isClickable&&cancel.parent!=null)cancel=cancel.parent;check(cancel.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+        await("unbounded calendar cancelled"){uiAutomation.clearCache();find(uiAutomation.rootInActiveWindow,"From any date")!=null}
+        check(calls.get()==8&&main{model.archive.period==ArchivePeriod.All});physical("Cancel");check(calls.get()==8)
+        main{activity.finish()}
     }
 }

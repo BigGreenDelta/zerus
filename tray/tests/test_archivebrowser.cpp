@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include "ArchiveBrowser.h"
+#include "ArchiveDatePicker.h"
 #include "FakeCli.h"
 class TestArchiveBrowser:public QObject {
  Q_OBJECT
@@ -37,6 +38,12 @@ print(json.dumps(r))
     auto *panel=browser.findChild<QFrame*>("archiveDatePanel");QVERIFY(panel->isVisible());
     const auto before=ready.size();QTest::qWait(200);QCOMPARE(ready.size(),before);
     QTest::mouseClick(browser.findChild<QPushButton*>("archivePreset1"),Qt::LeftButton);
+    QVERIFY(panel->isVisible());QCOMPARE(period->text(),QString("All dates"));QVERIFY(browser.includes(1));
+    QCOMPARE(browser.findChild<QDateEdit*>("archiveFrom")->date(),QDate::currentDate());
+    QCOMPARE(browser.findChild<QDateEdit*>("archiveUntil")->date(),QDate::currentDate());
+    QTest::qWait(200);QCOMPARE(ready.size(),before);
+    QTest::mouseClick(browser.findChild<QPushButton*>("archiveRangeApply"),Qt::LeftButton);
+    QTRY_COMPARE(ready.size(),before+1);
     QTRY_COMPARE(browser.sessions("").size(),1);QVERIFY(!browser.includes(1));
     QTest::mouseClick(period,Qt::LeftButton);auto *from=browser.findChild<QDateEdit*>("archiveFrom");auto *until=browser.findChild<QDateEdit*>("archiveUntil");
     QTRY_VERIFY(from->isVisible());QVERIFY(until->isVisible());
@@ -52,6 +59,39 @@ print(json.dumps(r))
     QTest::mouseClick(apply,Qt::LeftButton);QVERIFY(!panel->isVisible());QTRY_COMPARE(ready.size(),draftRequests+1);
     QVERIFY(browser.includes(QDate(2026,10,15).startOfDay().toSecsSinceEpoch()));QVERIFY(!browser.includes(QDate(2026,10,16).startOfDay().toSecsSinceEpoch()));
     for(auto *control:{period,more,browser.findChild<QPushButton*>("archiveRefresh")})if(control->isVisible())QVERIFY(browser.rect().contains(QRect(control->mapTo(&browser,QPoint()),control->size())));
+ }
+ void quickRangesOnlyStageAndAllowDateEdits(){
+    ArchiveDatePicker picker;picker.resize(350,picker.sizeHint().height());picker.show();
+    QSignalSpy changed(&picker,&ArchiveDatePicker::rangeChanged);
+    auto *panel=picker.findChild<QFrame*>("archiveDatePanel");auto *from=picker.findChild<QDateEdit*>("archiveFrom");auto *until=picker.findChild<QDateEdit*>("archiveUntil");
+    auto *apply=picker.findChild<QPushButton*>("archiveRangeApply");auto *cancel=picker.findChild<QPushButton*>("archiveRangeCancel");
+    const auto all=picker.range();const auto today=QDate::currentDate();
+    for(int i:{1,2,3}){
+        QTest::mouseClick(&picker,Qt::LeftButton);QTest::mouseClick(picker.findChild<QPushButton*>("archivePreset"+QString::number(i)),Qt::LeftButton);
+        QVERIFY(panel->isVisible());QCOMPARE(changed.size(),0);QCOMPARE(picker.range(),all);
+        QCOMPARE(from->date(),today.addDays(i==1?0:i==2?-6:-29));QCOMPARE(until->date(),today);
+        QTest::mouseClick(cancel,Qt::LeftButton);QVERIFY(!panel->isVisible());QCOMPARE(changed.size(),0);
+    }
+    QTest::mouseClick(&picker,Qt::LeftButton);QCOMPARE(from->text(),QString("Any date"));QCOMPARE(until->text(),QString("Any date"));
+    QTest::mouseClick(picker.findChild<QPushButton*>("archivePreset2"),Qt::LeftButton);
+    QTest::mouseClick(apply,Qt::LeftButton);QCOMPARE(changed.size(),1);QCOMPARE(picker.text(),QString("Last 7 days"));
+    const auto week=picker.range();
+    QTest::mouseClick(&picker,Qt::LeftButton);QTest::mouseClick(picker.findChild<QPushButton*>("archivePreset1"),Qt::LeftButton);
+    from->setDate(today.addDays(-10));QVERIFY(!picker.findChild<QPushButton*>("archivePreset1")->isChecked());
+    QCOMPARE(picker.range(),week);QCOMPARE(changed.size(),1);
+    QTest::mouseClick(apply,Qt::LeftButton);QCOMPARE(changed.size(),2);
+    QCOMPARE(picker.range(),qMakePair(today.addDays(-10).startOfDay().toSecsSinceEpoch(),today.addDays(1).startOfDay().toSecsSinceEpoch()));
+    QTest::mouseClick(&picker,Qt::LeftButton);QTest::mouseClick(picker.findChild<QPushButton*>("archivePreset0"),Qt::LeftButton);
+    QCOMPARE(from->text(),QString("Any date"));QCOMPARE(until->text(),QString("Any date"));QVERIFY(panel->isVisible());
+    QVERIFY(picker.range()!=all);QCOMPARE(changed.size(),2);
+    QTest::keyClick(from,Qt::Key_Escape);QVERIFY(!panel->isVisible());QVERIFY(picker.range()!=all);
+    QTest::mouseClick(&picker,Qt::LeftButton);QTest::mouseClick(picker.findChild<QPushButton*>("archivePreset0"),Qt::LeftButton);
+    QTest::mouseClick(apply,Qt::LeftButton);QCOMPARE(changed.size(),3);QCOMPARE(picker.range(),all);
+    // Opening/cancelling the calendar while unbounded is not a date edit.
+    QTest::mouseClick(&picker,Qt::LeftButton);QTest::mouseClick(from,Qt::LeftButton,Qt::NoModifier,QPoint(from->width()-12,from->height()/2));
+    auto *calendar=from->calendarWidget();QTRY_VERIFY(calendar->isVisible());QCOMPARE(calendar->yearShown(),today.year());QCOMPARE(calendar->monthShown(),today.month());
+    QTest::keyClick(calendar,Qt::Key_Escape);QCOMPARE(from->text(),QString("Any date"));QCOMPARE(changed.size(),3);
+    QTest::mouseClick(cancel,Qt::LeftButton);QCOMPARE(picker.range(),all);
  }
  void themedPopoverGeometry_data(){
     QTest::addColumn<bool>("dark");QTest::addColumn<int>("width");QTest::addColumn<double>("scale");
@@ -82,6 +122,15 @@ print(json.dumps(dict(version=1,sessions=rows,next_cursor='next',previous_cursor
     browser.activateWindow();QVERIFY(QTest::qWaitForWindowActive(&browser));
     auto *period=browser.findChild<QPushButton*>("archivePeriod");QTest::mouseClick(period,Qt::LeftButton);
     auto *panel=browser.findChild<QFrame*>("archiveDatePanel");QVERIFY(panel->isVisible());
+    auto *allUntil=browser.findChild<QDateEdit*>("archiveUntil");allUntil->setFocus();QTRY_VERIFY(allUntil->hasFocus());
+    QTest::keyClick(allUntil,Qt::Key_Backtab);QTRY_VERIFY(browser.findChild<QDateEdit*>("archiveFrom")->hasFocus());
+    QTest::keyClick(browser.findChild<QDateEdit*>("archiveFrom"),Qt::Key_Tab);QTRY_VERIFY(allUntil->hasFocus());
+    QTest::keyClick(allUntil,Qt::Key_Tab);
+    QTRY_VERIFY(browser.findChild<QPushButton*>("archiveRangeApply")->hasFocus());
+    QCOMPARE(allUntil->text(),QString("Any date"));
+    // Any date is a special-value display without a selectable Year section.
+    // Stage finite dates before checking native Year -> Apply keyboard order.
+    QTest::mouseClick(browser.findChild<QPushButton*>("archivePreset1"),Qt::LeftButton);
     QCOMPARE(panel->font().pointSizeF(),font.pointSizeF());
     QVERIFY(panel->screen()->availableGeometry().contains(panel->frameGeometry()));
     for(auto *control:panel->findChildren<QWidget*>())if(control->isVisible()&&control->window()==panel)
