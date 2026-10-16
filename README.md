@@ -139,7 +139,7 @@ Pair your phone with a computer to reach it and its directly connected Zerus pee
 through a **self-hostable HTTPS relay**. Notifications use Firebase Cloud Messaging,
 with a foreground live connection for phones without it. **iOS is planned.**
 
-[Download the Android APK](https://github.com/ufna/zerus/releases?q=android-dev-&expanded=true) |
+[Download the Android APK](https://zerus.dev/#download) |
 [Connect your phone](docs/mobile-deployment.md#pair-the-phone) |
 [Architecture and trust model](docs/mobile-architecture.md)
 
@@ -207,7 +207,7 @@ hgs status                            # versions and running services here and t
 hgs a codex/orbit/api                  # attach from any terminal
 ```
 
-**On Android:** [download the APK](https://github.com/ufna/zerus/releases?q=android-dev-&expanded=true),
+**On Android:** [download the APK](https://zerus.dev/#download),
 then [pair your phone](docs/mobile-deployment.md#pair-the-phone).
 **Try demo** lets you explore the interface before connecting a computer.
 
