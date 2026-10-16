@@ -5,6 +5,7 @@
 #include "ExternalFile.h"
 #include "LocalFile.h"
 #include "Shortcuts.h"
+#include "SessionCardDelegate.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
 #include "StatusMessage.h"
@@ -907,13 +908,13 @@ void MessageComposer::updateControls()
 
 void MessageComposer::showSavedDrafts()
 {
-    QDialog dialog(this); dialog.setObjectName("savedDraftsDialog"); dialog.setWindowTitle(tr("Saved drafts")); dialog.resize(720, 520);
+    QDialog dialog(this); dialog.setObjectName("savedDraftsDialog"); dialog.setWindowTitle(tr("Saved drafts")); dialog.resize(720, 640);
     auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
     auto *hint = new QLabel(tr("Drafts stay on this desktop, including those from ended or unavailable sessions. Restoring never sends a message."));
     hint->setWordWrap(true); layout->addWidget(hint);
-    auto *list = new QListWidget; list->setObjectName("savedDraftList"); layout->addWidget(list, 1);
-    // Each row has two lines: the session, then the time and first line.
-    list->setSpacing(3); list->setMouseTracking(true);
+    auto *list = new WorkspaceList; list->setObjectName("savedDraftList"); layout->addWidget(list, 2);
+    list->setProperty("hgsDark",m_dark);list->setProperty("compact",true);list->setProperty("selectionIsInspection",true);
+    list->setItemDelegate(new SessionDelegate(list));list->setMouseTracking(true);
     list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     const auto populate = [this, list](const QHash<QString, ComposerDraftSummary> &index) {
@@ -949,9 +950,29 @@ void MessageComposer::showSavedDrafts()
             if (summary.modified.isValid()) detail << QLocale().toString(summary.modified, QLocale::ShortFormat);
             if (!summary.preview.isEmpty()) detail << summary.preview;
             if (summary.attachments) detail << tr("%n attachment(s)", nullptr, summary.attachments);
-            const auto text = title.join(QStringLiteral(" · ")) + (detail.isEmpty() ? QString() : '\n' + detail.join(QStringLiteral(" · ")));
+            const auto text = title.join(QStringLiteral(" / ")) + (detail.isEmpty() ? QString() : '\n' + detail.join('\n'));
             auto *item = new QListWidgetItem(text, list);
-            item->setData(Qt::UserRole, key); item->setToolTip(text);
+            QString caption=owner.session.section('/',2);
+            if(caption.isEmpty())caption=owner.session.section('/',1,1);
+            if(caption.isEmpty())caption=title.value(0);
+            item->setData(SessionRoles::Title,caption);
+            item->setData(SessionRoles::Agent,owner.kind==ComposerDraftOwner::Kind::Unknown?QString():owner.session.section('/',0,0));
+            const auto machine=owner.machine.isEmpty()?tr("this computer"):owner.machine;
+            item->setData(SessionRoles::Host,machine);item->setData(SessionRoles::MachineName,machine);
+            item->setData(SessionRoles::MachineColor,MachineAppearance::color(machine));
+            item->setData(SessionRoles::Meta,owner.session);
+            if(savedDraftSessionRoles){const auto roles=savedDraftSessionRoles(key);for(auto it=roles.cbegin();it!=roles.cend();++it)item->setData(it.key(),it.value());}
+            QStringList context;
+            if(owner.kind==ComposerDraftOwner::Kind::Subagent){context<<tr("Subagent");item->setData(SessionRoles::Title,item->data(SessionRoles::Title).toString()+" / "+owner.subagent);}
+            else if(owner.kind==ComposerDraftOwner::Kind::Question)context<<tr("Question answer");
+            else if(owner.kind==ComposerDraftOwner::Kind::Voice)context<<tr("Voice message");
+            if(!owner.archive.isEmpty())context<<tr("Archived");
+            if(summary.attachments&&!summary.preview.isEmpty())context<<tr("%n attachment(s)",nullptr,summary.attachments);
+            if(!context.isEmpty()){const auto meta=item->data(SessionRoles::Meta).toString();if(!meta.isEmpty())context.prepend(meta);item->setData(SessionRoles::Meta,context.join(" / "));}
+            item->setData(SessionRoles::Status,tr("Draft"));item->setData(SessionRoles::Draft,true);
+            item->setData(SessionRoles::Detail,summary.preview.isEmpty()&&summary.attachments?tr("%n attachment(s)",nullptr,summary.attachments):summary.preview);
+            if(summary.modified.isValid())item->setData(SessionRoles::ModifiedAt,QLocale().toString(summary.modified,QLocale::ShortFormat));
+            item->setData(Qt::UserRole,key);item->setData(Qt::AccessibleTextRole,text);item->setToolTip({});
         }
         if (list->count()) list->setCurrentRow(0);
     };
@@ -974,7 +995,9 @@ void MessageComposer::showSavedDrafts()
             selected.notice = tr("This message may already have been sent. Check Activity or Terminal before sending again.");
         }
         preview->setPlainText(selected.text);
-        detail->setText(selected.storageError.isEmpty() ? tr("%1 attachment(s). %2").arg(selected.attachments.size()).arg(selected.notice) : selected.storageError);
+        QStringList details{tr("%n attachment(s)", nullptr, selected.attachments.size())};
+        if (!selected.notice.isEmpty()) details << selected.notice;
+        detail->setText(selected.storageError.isEmpty() ? details.join(" / ") : selected.storageError);
         if(selected.storageError.isEmpty() && selected.formState.value("kind")=="voice_message")
             detail->setText(tr("Open the original conversation (%1) to review or check this voice message.").arg(selected.formState.value("session").toString()));
         copy->setEnabled(!selected.text.isEmpty());

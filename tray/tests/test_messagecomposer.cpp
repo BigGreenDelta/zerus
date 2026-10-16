@@ -1,4 +1,5 @@
 #include "MessageComposer.h"
+#include "SessionCardDelegate.h"
 #include "AttachmentViewer.h"
 #include "ComposerToolbar.h"
 #include "Shortcuts.h"
@@ -21,6 +22,7 @@
 #include <QFile>
 #include <QFontInfo>
 #include <QFrame>
+#include <QHelpEvent>
 #include <QImage>
 #include <QKeySequence>
 #include <QInputMethodEvent>
@@ -399,26 +401,42 @@ void TestMessageComposer::savedDraftsNameAndOpenTheirSession()
     QTimer::singleShot(0, &composer, [&] {
         auto *dialog = composer.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
         auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 6);
+        QVERIFY(dynamic_cast<SessionDelegate *>(list->itemDelegate()));
+        QVERIFY(list->property("selectionIsInspection").toBool());
         auto *open = dialog->findChild<QPushButton *>("openSavedDraftSession"); QVERIFY(open);
         QHash<QString, QString> rows; QStringList order;
         for (int i = 0; i < list->count(); ++i) {
-            const auto key = list->item(i)->data(Qt::UserRole).toString(); order << key; rows.insert(key, list->item(i)->text());
+            const auto *item=list->item(i);
+            const auto key = item->data(Qt::UserRole).toString(); order << key; rows.insert(key, item->text());
+            QVERIFY(item->toolTip().isEmpty());QVERIFY(!item->text().contains(QChar(0x00b7)));
+            QVERIFY(!item->data(SessionRoles::ModifiedAt).toString().isEmpty());
+            QVERIFY(!item->data(Qt::AccessibleTextRole).toString().isEmpty());
+            const auto index=list->model()->index(i,0);
+            QCOMPARE(SessionDelegate::statusOf(index,false).kind,SessionStatusBadge::Draft);
+            QCOMPARE(SessionDelegate::statusOf(index,false).caption,QString("Draft"));
+            if(key==local){QCOMPARE(item->data(SessionRoles::Title).toString(),QString("dashboard"));QCOMPARE(item->data(SessionRoles::Agent).toString(),QString("codex"));}
+            if(key==child)QCOMPARE(item->data(SessionRoles::Title).toString(),QString("dashboard / worker"));
+            if(key==remote)QCOMPARE(item->data(SessionRoles::Detail).toString(),QString("Review the deployment"));
         }
         // Stored drafts have an empty label; each row still names its session.
-        QCOMPARE(rows.value(local).section(QChar::LineFeed, 0, 0), QString("codex/hgs/dashboard · this computer"));
-        QVERIFY(rows.value(local).endsWith(" · Local plan"));
-        QCOMPARE(rows.value(remote).section(QChar::LineFeed, 0, 0), QString("claude/infra/review · mac"));
-        QVERIFY(rows.value(remote).endsWith(" · Review the deployment"));
-        QCOMPARE(rows.value(child).section(QChar::LineFeed, 0, 0), QString("codex/hgs/dashboard · arch · subagent"));
-        QCOMPARE(rows.value(question).section(QChar::LineFeed, 0, 0), QString("claude/infra/review · mac · question answer"));
-        QCOMPARE(rows.value("voice-message-draft\n" + remote).section(QChar::LineFeed, 0, 0), QString("claude/infra/review · mac · voice message"));
-        QVERIFY(rows.value("voice-message-draft\n" + remote).endsWith(" · 1 attachment(s)"));
+        QCOMPARE(rows.value(local).section(QChar::LineFeed, 0, 0), QString("codex/hgs/dashboard / this computer"));
+        QVERIFY(rows.value(local).endsWith("\nLocal plan"));
+        QCOMPARE(rows.value(remote).section(QChar::LineFeed, 0, 0), QString("claude/infra/review / mac"));
+        QVERIFY(rows.value(remote).endsWith("\nReview the deployment"));
+        QCOMPARE(rows.value(child).section(QChar::LineFeed, 0, 0), QString("codex/hgs/dashboard / arch / subagent"));
+        QCOMPARE(rows.value(question).section(QChar::LineFeed, 0, 0), QString("claude/infra/review / mac / question answer"));
+        QCOMPARE(rows.value("voice-message-draft\n" + remote).section(QChar::LineFeed, 0, 0), QString("claude/infra/review / mac / voice message"));
+        QVERIFY(rows.value("voice-message-draft\n" + remote).endsWith("\n1 attachment(s)"));
         QCOMPARE(rows.value("legacy").section(QChar::LineFeed, 0, 0), QString("legacy"));
         QCOMPARE(order.last(), remote);
         // An unknown key has no session to open, whatever the window says.
         list->setCurrentRow(order.indexOf("legacy")); QVERIFY(!open->isEnabled());
         list->setCurrentRow(order.indexOf(local)); QVERIFY(!open->isEnabled()); QVERIFY(!open->toolTip().isEmpty());
         list->setCurrentRow(order.indexOf(child)); QVERIFY(open->isEnabled()); QVERIFY(requested.isEmpty());
+        QToolTip::hideText();
+        const auto point=list->visualItemRect(list->currentItem()).center();
+        QHelpEvent hover(QEvent::ToolTip,point,list->viewport()->mapToGlobal(point));
+        QApplication::sendEvent(list->viewport(),&hover);QVERIFY(!QToolTip::isVisible());
         open->click(); QVERIFY(!dialog->isVisible()); QVERIFY(requested.isEmpty());
     });
     composer.showSavedDrafts();

@@ -647,10 +647,19 @@ void TestSessionsWindow::savedDraftsGoToTheirSession()
         QTimer::singleShot(0, &window, [&, key, available] {
             auto *dialog = window.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
             auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 3);
+            QVERIFY(dynamic_cast<SessionDelegate *>(list->itemDelegate()));
             for (int i = 0; i < list->count(); ++i) {
                 const auto *item = list->item(i);
                 QVERIFY(!item->text().section('\n', 0, 0).trimmed().isEmpty());
                 QVERIFY(list->visualItemRect(item).height() >= 2 * list->fontMetrics().height());
+                QVERIFY(item->toolTip().isEmpty());QVERIFY(!item->text().contains(QChar(0x00b7)));
+                QVERIFY(!item->data(SessionRoles::ModifiedAt).toString().isEmpty());
+                if(item->data(Qt::UserRole).toString()==remote){
+                    QCOMPARE(item->data(SessionRoles::Title).toString(),QString("review"));
+                    QCOMPARE(item->data(SessionRoles::Agent).toString(),QString("claude"));
+                    QCOMPARE(item->data(SessionRoles::Host).toString(),QString("mac"));
+                    QCOMPARE(item->data(SessionRoles::Model).toString(),state.peer("mac")->sessions[0].model);
+                }
             }
             list->setFocus(); list->setCurrentRow(0);
             QTest::keyClick(list, Qt::Key_Down); QCOMPARE(list->currentRow(), 1);
@@ -660,10 +669,12 @@ void TestSessionsWindow::savedDraftsGoToTheirSession()
             auto *open = dialog->findChild<QPushButton *>("openSavedDraftSession"); QCOMPARE(open->isEnabled(), available);
             const auto preview = qEnvironmentVariable("HGS_SAVED_DRAFTS_PREVIEW");
             if (key == ended && !preview.isEmpty()) {
+                dialog->setWindowTitle("Saved drafts (synthetic preview)");
                 QTRY_COMPARE(dialog->findChild<QPlainTextEdit *>("savedDraftPreview")->toPlainText(), QString("From an ended session"));
+                list->scrollToItem(list->currentItem());
                 QDir().mkpath(preview); QTest::qWait(50);
                 QVERIFY(dialog->grab().save(preview + "/drafts-" + theme + ".png"));
-                dialog->resize(620, 460); QTest::qWait(50);
+                dialog->resize(620, 460); list->scrollToItem(list->currentItem()); QTest::qWait(50);
                 QVERIFY(dialog->grab().save(preview + "/drafts-narrow-" + theme + ".png"));
             }
             if (available) open->click(); else dialog->reject();

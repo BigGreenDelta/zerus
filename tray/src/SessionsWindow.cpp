@@ -1080,6 +1080,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_subagentComposer, &MessageComposer::draftChanged, this, draftChanged);
     for (auto *composer : {m_composer, m_subagentComposer}) {
         composer->canOpenDraftSession = [this](const QString &key) { return draftOwner(key) != nullptr; };
+        composer->savedDraftSessionRoles = [this](const QString &key) {
+            QMap<int,QVariant> roles;
+            const auto *entry=draftOwner(key);if(!entry)return roles;
+            const auto &session=entry->session;
+            roles={{SessionRoles::Title,sessionLabel(session)},{SessionRoles::Agent,session.cmd},
+                {SessionRoles::Host,entry->machine},{SessionRoles::MachineName,entry->machine},
+                {SessionRoles::MachineColor,MachineAppearance::color(entry->machine)},
+                {SessionRoles::Meta,SessionPresentation::checkoutLine(session)},
+                {SessionRoles::MetaIcon,SessionPresentation::checkoutIcon(session)}};
+            if(ComposerDraftStore::owner(key).kind!=ComposerDraftOwner::Kind::Subagent){roles[SessionRoles::Model]=session.model;roles[SessionRoles::Effort]=session.effort;}
+            return roles;
+        };
         connect(composer, &MessageComposer::draftSessionRequested, this, &SessionsWindow::openDraftSession);
     }
     connect(m_activityView, &ActivityView::messageActionRequested, this, &SessionsWindow::messageAction);
@@ -1616,9 +1628,6 @@ void SessionsWindow::applyTheme()
         QPlainTextEdit#approvalJournalDetail { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:10px; selection-background-color:%10; selection-color:%2; }
         QTableWidget#approvalJournal::item { padding:7px 10px; border-bottom:1px solid %4; }
         QListWidget#savedDraftList { background:%1; color:%2; border:1px solid %4; border-radius:8px; padding:4px; outline:0; }
-        QListWidget#savedDraftList::item { background:%3; color:%2; border:1px solid %4; border-radius:6px; padding:10px 12px; }
-        QListWidget#savedDraftList::item:hover { background:%7; }
-        QListWidget#savedDraftList::item:selected { background:%10; color:%2; border-color:%5; }
         QPlainTextEdit#savedDraftPreview { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:10px; selection-background-color:%10; selection-color:%2; }
         QWidget { font-size:13px; }
         QLabel { color:%2; background:transparent; }

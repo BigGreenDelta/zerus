@@ -455,16 +455,25 @@ private:
             }
         }
         font.setPixelSize(10); p->setFont(font);
+        const QString modified = index.data(SessionRoles::ModifiedAt).toString();
+        const int modifiedWidth = modified.isEmpty() ? 0 : qMin(width / 2, qCeil(CachedText::advance(font, modified)));
+        const int footerWidth = width - (modifiedWidth ? modifiedWidth + 10 : 0) - (childWidth ? childWidth + 10 : 0);
         const QString effort = index.data(SessionRoles::Effort).toString();
-        const bool hasEffort = !effort.isEmpty() && effort != "—";
+        const bool hasEffort = !effort.isEmpty() && effort != "—"
+            && (modified.isEmpty() || CachedText::width(font, effort) + 10 <= footerWidth);
         const int effortWidth = hasEffort ? CachedText::width(font, effort) + 10 : 0;
-        const int modelWidth = qMax(0, width - (childWidth ? childWidth + 10 : 0) - (hasEffort ? effortWidth + 7 : 0));
+        const int modelWidth = qMax(0, footerWidth - (hasEffort ? effortWidth + 7 : 0));
         const QString model = CachedText::elided(font, index.data(SessionRoles::Model).toString(), Qt::ElideMiddle, modelWidth);
         p->setPen(muted); CachedText::draw(p, QRect(textX, modelY, modelWidth, 20), Qt::AlignVCenter, model);
         if (hasEffort) {
             const QRect effortBadge(textX + CachedText::width(font, model) + 7, modelY + 2, effortWidth, 16);
             p->setPen(Qt::NoPen); p->setBrush(QColor(dark ? "#2b343e" : "#e7edf2")); p->drawRoundedRect(effortBadge, 3, 3);
             p->setPen(muted); CachedText::draw(p, effortBadge, Qt::AlignCenter, effort);
+        }
+        if (modifiedWidth) {
+            p->setPen(muted);
+            CachedText::draw(p, QRect(right - modifiedWidth, modelY, modifiedWidth, 20), Qt::AlignVCenter | Qt::AlignRight,
+                CachedText::elided(font, modified, Qt::ElideMiddle, modifiedWidth));
         }
         p->restore();
     }
