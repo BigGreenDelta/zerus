@@ -88,6 +88,7 @@
 #include "WorktreePanel.h"
 #include "AccountUsageStore.h"
 #include "MachinesPage.h"
+#include "WorkspaceColorDialog.h"
 #include "AccountsPage.h"
 #include "FakeCli.h"
 #include "LaunchWarnings.h"
@@ -200,6 +201,8 @@ private slots:
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
     void updatesEntryOpensExactSettingsPage();
     void fileCacheSettingsNavigation();
+    void colorPickerUsesWorkspaceThemeAndCancelsOutside_data();
+    void colorPickerUsesWorkspaceThemeAndCancelsOutside();
     void automaticApprovalSettingsNavigation_data();
     void automaticApprovalSettingsNavigation();
     void mobileConnectionSettingsOfferTheSharedDeliveryChoice();
@@ -618,6 +621,32 @@ void TestSessionsWindow::workspaceRestoresDraftAcrossRestartAndSessionRemoval()
         QVERIFY(!dialog->findChild<QPushButton *>("restoreSavedDraft")->isEnabled()); dialog->reject();
     });
     restored.findChild<QPushButton *>("savedDrafts")->click();
+}
+
+void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark")<<QString("dark");QTest::newRow("light")<<QString("light");
+}
+void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside()
+{
+    QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);
+    SessionsWindow window(program());window.setFleet(fleet());window.resize(1100,760);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    WorkspaceColorDialog picker(QColor("#5c9abf"),&window);picker.setWindowTitle("Color (synthetic preview)");
+    bool expired=false,handled=false;
+    QTimer::singleShot(5000,&picker,[&]{expired=true;picker.reject();});
+    QTimer::singleShot(0,&picker,[&]{
+        QCOMPARE(picker.palette().color(QPalette::Window),QColor(theme=="dark"?"#161b21":"#f5f7f9"));
+        auto *buttons=picker.findChild<QDialogButtonBox *>();QVERIFY(buttons);
+        auto *cancel=buttons->button(QDialogButtonBox::Cancel);QVERIFY(cancel);
+        QTRY_VERIFY(cancel->geometry().left()>buttons->button(QDialogButtonBox::Ok)->geometry().right());
+        const auto previews=qEnvironmentVariable("HGS_COLOR_PICKER_PREVIEW");
+        if(!previews.isEmpty()){QDir().mkpath(previews);QVERIFY(picker.grab().save(previews+"/color-"+theme+".png"));}
+        const QPoint point(window.width()-8,window.height()-8);QVERIFY(!picker.frameGeometry().contains(window.mapToGlobal(point)));
+        QTest::mouseClick(window.windowHandle(),Qt::LeftButton,Qt::NoModifier,point);
+        QTRY_VERIFY(!picker.isVisible());handled=true;
+    });
+    QCOMPARE(picker.exec(),int(QDialog::Rejected));QVERIFY(handled);QVERIFY(!expired);QVERIFY(!picker.selectedColor().isValid());
 }
 
 void TestSessionsWindow::savedDraftsGoToTheirSession_data()

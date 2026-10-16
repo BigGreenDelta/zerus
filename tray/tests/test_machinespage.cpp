@@ -3,6 +3,7 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -38,6 +39,8 @@ private slots:
     void effectiveValuesNeverBecomeOverridesOrReplaceDrafts();
     void staleResolutionCannotPopulateAnotherMachine();
     void colorsWorkForLocalAndPersistWithoutSavingConnection();
+    void colorPickerDismissalKeepsTheSavedColor_data();
+    void colorPickerDismissalKeepsTheSavedColor();
     void dashboardSelectionWaitsForProfiles();
     void controlOnlyComputerIsAConsoleWithoutSessions();
     void countsReadInSingularAndPlural();
@@ -338,8 +341,6 @@ void TestMachinesPage::colorsWorkForLocalAndPersistWithoutSavingConnection()
     QVERIFY(color->isEnabled()); QVERIFY(reset->isEnabled());
     const QColor automatic = MachineAppearance::color("arch");
     QSignalSpy changed(&page, &MachinesPage::appearanceChanged);
-    // The dialog is a real non-native Qt color chooser in this isolated test.
-    QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QTimer::singleShot(0, &page, [&] {
         auto *dialog = page.findChild<QColorDialog *>(); QVERIFY(dialog);
         dialog->setCurrentColor(QColor("#e05999")); dialog->accept();
@@ -361,6 +362,39 @@ void TestMachinesPage::colorsWorkForLocalAndPersistWithoutSavingConnection()
     reset->click(); QCOMPARE(changed.size(), 3); QCOMPARE(MachineAppearance::color("arch"), automatic);
     widget<QPushButton>(page, "addMachine")->click(); QVERIFY(!color->isEnabled());
     for (const auto &call : calls()) QVERIFY(call.toArray().at(1).toString() != "set");
+}
+void TestMachinesPage::colorPickerDismissalKeepsTheSavedColor_data()
+{
+    QTest::addColumn<QString>("action");
+    for (const auto &action : {"outside-left", "outside-right", "escape", "cancel"}) QTest::newRow(action) << QString(action);
+}
+void TestMachinesPage::colorPickerDismissalKeepsTheSavedColor()
+{
+    QFETCH(QString, action);
+    MachinesPage page(FakeCli::program(m_script)); start(page); page.resize(1100,760);QVERIFY(QTest::qWaitForWindowExposed(&page));
+    const auto original=MachineAppearance::color("arch");
+    QSignalSpy changed(&page,&MachinesPage::appearanceChanged);
+    auto *outside=widget<QPushButton>(page,"addMachine");QSignalSpy outsideClicked(outside,&QPushButton::clicked);
+    bool expired=false,handled=false;
+    QTimer::singleShot(0,&page,[&]{
+        auto *dialog=page.findChild<QColorDialog *>();QVERIFY(dialog);
+        QTimer::singleShot(5000,dialog,[&,dialog]{expired=true;dialog->reject();});
+        dialog->setCurrentColor(QColor("#e05999"));
+        QTest::mouseClick(dialog,Qt::LeftButton,Qt::NoModifier,QPoint(8,8));QVERIFY(dialog->isVisible());
+        if(action.startsWith("outside")){
+            const auto global=outside->mapToGlobal(outside->rect().center());QVERIFY(!dialog->frameGeometry().contains(global));
+            QTest::mouseClick(page.windowHandle(),action=="outside-right"?Qt::RightButton:Qt::LeftButton,Qt::NoModifier,page.mapFromGlobal(global));
+        }else if(action=="escape")QTest::keyClick(dialog,Qt::Key_Escape);
+        else dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();
+        QTRY_VERIFY(!dialog->isVisible());handled=true;
+    });
+    widget<QPushButton>(page,"machineColor")->click();
+    QVERIFY(handled);QVERIFY(!expired);QCoreApplication::processEvents();
+    QCOMPARE(MachineAppearance::color("arch"),original);QCOMPARE(changed.size(),0);QCOMPARE(outsideClicked.size(),0);
+    QVERIFY(!QSettings().contains("machines/colors/arch"));
+    QCOMPARE(widget<QLineEdit>(page,"machineAlias")->text(),QString("arch"));
+    QVERIFY(!widget<QPushButton>(page,"saveMachine")->isEnabled());
+    for(const auto &call:calls())QVERIFY(call.toArray().at(1).toString()!="set");
 }
 void TestMachinesPage::dashboardSelectionWaitsForProfiles()
 {

@@ -1773,7 +1773,9 @@ Zerus lists a machine's sessions and connection state under its alias, even when
 that machine calls itself something else (its `HGS_SELF` or host name).
 
 Multiple machine filters narrow both sessions and content search. Label color,
-Bright/Soft mode and appearance previews are local. **All machines** clears the
+Bright/Soft mode and appearance previews are local. Color pickers cancel on an
+outside click or Escape; only explicit confirmation saves a color. Project
+color changes remain staged until **Apply**. **All machines** clears the
 restriction. A temporary connectivity error retains the last snapshot and makes
 unavailable controls explicit.
 
