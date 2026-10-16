@@ -180,7 +180,7 @@ object SessionNotifications {
         val alreadyActive = synchronized(NotificationSettings.deliveryLock) { cards(context).mapNotNull { it.notification.extras.getString("zerus_slot") }.toSet() }
         val overflowKinds = plan.overflowKinds.toMutableSet()
         val ordered = plan.desired.sortedWith(compareByDescending<SessionNotice> { it.current.slot.key in alreadyActive }
-            .thenBy { it.kind == SessionAlertKind.Finished }.thenBy { it.current.slot.key })
+            .thenBy { !it.kind.overflows }.thenBy { it.kind == SessionAlertKind.Finished }.thenBy { it.current.slot.key })
         for (notice in ordered) {
             currentCoroutineContext().ensureActive()
             val record = state.records.find { it.slot == notice.current.slot }
@@ -198,13 +198,15 @@ object SessionNotifications {
             val admitted = synchronized(NotificationSettings.deliveryLock) {
                 val active = cards(context)
                 if (active.any { it.tag == notice.current.slot.tag } || active.size < 24) true
-                else if (notice.kind != SessionAlertKind.Finished) {
-                    active.find { it.notification.extras.getString("zerus_kind") == SessionAlertKind.Finished.name }?.let {
+                else if (notice.kind.overflows) {
+                    // A need replaces a finished turn first, then an optional question.
+                    (active.find { it.notification.extras.getString("zerus_kind") == SessionAlertKind.Finished.name }
+                        ?: active.find { it.notification.extras.getString("zerus_kind") == SessionAlertKind.Optional.name })?.let {
                         manager(context).cancel(it.tag, it.id); true
                     } ?: false
                 } else false
             }
-            if (!admitted) { if (notice.kind != SessionAlertKind.Finished) overflowKinds += notice.kind; continue }
+            if (!admitted) { if (notice.kind.overflows) overflowKinds += notice.kind; continue }
             val elapsed = android.os.SystemClock.elapsedRealtime()
             val audible = notice.fresh && (state.presenceAlerts || record?.postedFingerprint != notice.fingerprint) && !recovering &&
                 NotificationPolicy.canSound(state, elapsed)
