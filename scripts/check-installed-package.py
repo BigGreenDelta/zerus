@@ -33,6 +33,9 @@ def main():
         assert not (home / ".config/systemd").exists(), "setup enabled user services"
         print(run(str(links[0]), "--version").strip())
         print(run(str(links[1]), "--version").strip())
+        # The mobile connector is installed but neither linked nor enabled.
+        assert not (home / ".local/bin/zerus-mobile-connector").exists()
+        print(run("/usr/bin/zerus-mobile-connector", "--version").strip())
         # No native agent is started. The terminal-only fixture uses an ordinary
         # non-Git project and a socket that cannot reach an existing server.
         try:

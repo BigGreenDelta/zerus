@@ -29,8 +29,10 @@ in `tray/resources/icons/github-mark.svg`, including the embedded Qt resource.
 
 ## Dependencies obtained during build
 
-Rust dependencies and versions are locked in `Cargo.lock`. Their license
-expressions and source repositories are recorded in `docs/rust-dependencies.json`.
+Rust dependencies and versions are locked in `Cargo.lock` and, for the mobile
+connector that Linux packages also ship, `services/mobile/connector/Cargo.lock`.
+The license expressions and source repositories of the first are recorded in
+`docs/rust-dependencies.json`; packages carry the notices of both.
 This inventory is metadata, not a replacement for dependency license texts.
 Cargo downloads the corresponding sources and license files from crates.io.
 

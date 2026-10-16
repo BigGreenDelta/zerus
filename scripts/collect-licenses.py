@@ -10,18 +10,26 @@ import subprocess
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
+    # Each locked Cargo project whose binary the distribution ships; the root
+    # workspace (hgs) by default. Linux packages add the mobile connector.
+    parser.add_argument("--manifest-path", type=Path, action="append", dest="manifests")
     args = parser.parse_args()
     target = next(line[6:] for line in subprocess.check_output(["rustc", "-vV"], text=True).splitlines()
                   if line.startswith("host: "))
-    metadata = json.loads(subprocess.check_output(
-        ["cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", target], text=True))
-    resolved = {node["id"] for node in metadata["resolve"]["nodes"]}
+    packages = {}
+    for manifest in args.manifests or [None]:
+        command = ["cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", target]
+        if manifest is not None:
+            command += ["--manifest-path", str(manifest)]
+        metadata = json.loads(subprocess.check_output(command, text=True))
+        resolved = {node["id"] for node in metadata["resolve"]["nodes"]}
+        for package in metadata["packages"]:
+            if package.get("source") and package["id"] in resolved:
+                packages[(package["name"], package["version"])] = package
     destination = args.destination.resolve()
     destination.mkdir(parents=True, exist_ok=True)
     inventory = []
-    for package in sorted(metadata["packages"], key=lambda item: (item["name"], item["version"])):
-        if not package.get("source") or package["id"] not in resolved:
-            continue
+    for _, package in sorted(packages.items()):
         source = Path(package["manifest_path"]).parent
         notices = [path for path in source.rglob("*") if path.is_file()
                    and path.name.upper().startswith(("LICENSE", "COPYING", "NOTICE", "UNLICENSE"))]

@@ -764,7 +764,9 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertIn(f"          key: {family}{identity}${{{{ hashFiles('{lock}') }}}}\n"
                               f"          restore-keys: {family}{identity}\n", restore)
         cargo = self.checks_step("arch-package", "cargo-cache")
-        self.assertIn("          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-${{ hashFiles('Cargo.lock') }}\n"
+        # The package also builds the mobile connector, which has its own lock.
+        self.assertIn("          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-"
+                      "${{ hashFiles('Cargo.lock', 'services/mobile/connector/Cargo.lock') }}\n"
                       "          restore-keys: arch-cargo-v1-${{ steps.epoch.outputs.month }}-\n", cargo)
         for name, step_id in (("quick", "rust-cache"), ("cli", "rust-cache"), ("windows-desktop", "rust-cache"),
                               ("connector", "rust-cache"), ("arch-package", "cargo-cache"),
