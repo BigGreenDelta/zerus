@@ -15,17 +15,6 @@ data class SessionChildCounter(val label: String, val description: String, val e
 data class OptionalQuestionChip(val count: Int, val label: String, val description: String)
 
 /**
- * Chip colours for the app's dark scheme (it has no light scheme). Indigo keeps the chip apart
- * from the mint unread dot, amber attention and the status badges; the count text has at least
- * 4.5:1 contrast on the chip.
- */
-object OptionalQuestionPalette {
-    const val BACKGROUND = 0xFF262A4A
-    const val FOREGROUND = 0xFFB4B9FF
-    const val BORDER = 0xFF4C5394
-}
-
-/**
  * Session card checkout and subagent semantics from the desktop: branchContext, projectContext,
  * childState, inactiveChild, childStatus and childCount in tray/src/SessionPresentation.h, and
  * childRoster, showChild and the child rows in tray/src/SessionsWindow.cpp.

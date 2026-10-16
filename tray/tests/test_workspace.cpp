@@ -10,6 +10,7 @@
 #include "SessionElapsed.h"
 #include "IdentityBadge.h"
 #include "GitStatusBadge.h"
+#include "OptionalQuestionBadge.h"
 #include "SessionPresentation.h"
 #include "WorkspaceIcons.h"
 #include "MessageBoxIcons.h"
@@ -47,6 +48,7 @@ private slots:
     void draftStatusSitsBetweenWorkAndReplies();
     void gitStatusSeparatesEvidenceAndExpires();
     void gitStatusCardsKeepMetadataAndMachineReadable();
+    void optionalQuestionChipFollowsTheStatusBadge();
     void subagentInactivityKeepsConflictingAndUnknownEvidence();
 };
 
@@ -140,6 +142,65 @@ void TestWorkspace::gitStatusCardsKeepMetadataAndMachineReadable()
             if (!destination.isEmpty()) {
                 QDir().mkpath(destination);
                 QVERIFY(list.grab().save(destination + QString("/cards-%1-%2.png").arg(dark ? "dark" : "light").arg(width)));
+            }
+        }
+    }
+}
+
+void TestWorkspace::optionalQuestionChipFollowsTheStatusBadge()
+{
+    // The chip trails the status badge, or a separate new reply badge, in the
+    // title row and has the attention amber; the Git row keeps its room.
+    const QString destination = qEnvironmentVariable("HGS_GIT_STATUS_PREVIEW");
+    for (const bool dark : {true, false}) {
+        ListProbe list; list.setItemDelegate(new SessionDelegate(&list));
+        list.setProperty("hgsDark", dark); list.setProperty("compact", false);
+        list.setStyleSheet(dark ? "QListWidget { background:#171c22; border:0; }" : "QListWidget { background:#f3f6f8; border:0; }");
+        list.setFrameShape(QFrame::NoFrame); list.setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        struct Row { QString title; int questions; bool attention, child; };
+        const QList<Row> rows{{"nebula", 1, false, false}, {"Long session title that has to elide", 120, false, false},
+                              {"needs input", 2, true, false}, {"no questions", 0, false, false}, {"child", 3, false, true}};
+        for (const auto &row : rows) {
+            auto *item = new QListWidgetItem(&list);
+            item->setData(SessionRoles::Title, row.title); item->setData(SessionRoles::Meta, "zerus / main");
+            item->setData(SessionRoles::Host, "arch"); item->setData(SessionRoles::MachineName, "arch");
+            item->setData(SessionRoles::Agent, "codex"); item->setData(SessionRoles::Detail, "Checking the release");
+            item->setData(SessionRoles::Status, row.attention ? "Needs input" : "Working");
+            item->setData(SessionRoles::Working, row.attention ? 0 : 1);
+            item->setData(SessionRoles::WorkingSince, QDateTime::currentSecsSinceEpoch() - 124.0);
+            item->setData(SessionRoles::Attention, row.attention); item->setData(SessionRoles::Unread, row.attention);
+            item->setData(SessionRoles::OptionalQuestions, row.questions);
+            auto git = verifiedGit(); git["changed_files"] = 6; git["behind"] = 1; item->setData(SessionRoles::GitStatus, git);
+            if (row.child) item->setData(SessionRoles::ChildId, "child-1");
+        }
+        for (const int width : {280, 360, 500}) {
+            list.resize(width, rows.size() * 104); list.show(); QTest::qWait(10);
+            const QImage image = list.grab().toImage();
+            for (int i = 0; i < list.count(); ++i) {
+                const auto index = list.model()->index(i, 0);
+                const QRect rowRect = list.visualItemRect(list.item(i));
+                QStyleOptionViewItem option; option.rect = rowRect; option.font = list.font(); option.widget = &list;
+                const auto status = SessionDelegate::statusOf(index, false);
+                const auto title = SessionDelegate::titleLayout(option, index, status);
+                const QRect question = SessionDelegate::optionalQuestionRect(rowRect, index, list.font(), false);
+                QCOMPARE(question, title.question);
+                if (!rows[i].questions || rows[i].child) { QVERIFY(question.isEmpty()); continue; }
+                QVERIFY(!question.isEmpty());
+                QCOMPARE(question.top(), title.status.top()); QCOMPARE(question.height(), title.status.height());
+                QCOMPARE(status.additionalUnread, rows[i].attention);
+                QCOMPARE(question.left(), (status.additionalUnread ? title.unread : title.status).right() + 6);
+                if (!title.provider.isEmpty()) QVERIFY2(question.right() < title.provider.left(), qPrintable(rows[i].title));
+                QVERIFY(question.right() < width);
+                QVERIFY(!question.intersects(SessionDelegate::gitStatusRect(rowRect, index, list.font(), false)));
+                // The fill left of the glyph is the attention amber.
+                const QColor fill = image.pixelColor(question.x() + 2, question.center().y());
+                const QColor amber = OptionalQuestionBadge::fill(dark);
+                QVERIFY2(qAbs(fill.red() - amber.red()) < 12 && qAbs(fill.green() - amber.green()) < 12
+                    && qAbs(fill.blue() - amber.blue()) < 12, qPrintable(fill.name()));
+            }
+            if (!destination.isEmpty()) {
+                QDir().mkpath(destination);
+                QVERIFY(image.save(destination + QString("/questions-%1-%2.png").arg(dark ? "dark" : "light").arg(width)));
             }
         }
     }

@@ -148,7 +148,8 @@ bool SessionList::viewportEvent(QEvent *event)
         const auto *help = static_cast<QHelpEvent *>(event);
         const auto *row = itemAt(help->pos());
         if (row) {
-            const auto question = SessionDelegate::optionalQuestionRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool());
+            const auto question = SessionDelegate::optionalQuestionRect(visualItemRect(row), indexFromItem(row), font(),
+                property("compact").toBool(), row->isSelected());
             if (question.contains(help->pos())) {
                 const auto text = OptionalQuestionBadge::tooltip(row->data(SessionRoles::OptionalQuestions).toInt());
                 QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), question);

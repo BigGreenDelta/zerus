@@ -1543,10 +1543,12 @@ show only their name, preceded by a folder icon. The opened session's header and
 full folder path stays in the header tooltip and **Details**.
 
 A running Codex session with pending optional questions, ones the agent keeps
-working without, shows a question-mark chip with their count beside the machine
-badge (`99+` above 99), on its Sessions and Overview cards; a collapsed strip
-tile shows a small `?` mark. Its tooltip and the card's accessible description
-say how many are waiting. The chip never changes the session's status, the
+working without, shows an amber question-mark chip with their count (`99+`
+above 99) right after its status badge, or after a separate new-reply badge, on
+its Sessions and Overview cards; a collapsed strip tile shows a small amber `?`
+mark. Its tooltip and the card's accessible description say how many
+are waiting. The chip shares the amber of attention but never changes the
+session's status, the
 Needs attention filter, counters or badges, and it is hidden for paused,
 stopped, archived or offline sessions and while the count is unknown. Open the
 session to answer or skip the question in Activity.
