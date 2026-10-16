@@ -163,6 +163,22 @@ public enum AccountSnapshots {
                                refreshError: flag(usage, "refresh_error"), stale: flag(usage, "stale"))
     }
 
+    /// The typed fields of one account, as the connector reports them; anything else is dropped.
+    static func accountJSON(_ a: ReportedAccount) -> JSONObject {
+        func optional(_ value: Double?) -> JSON { value.map(JSON.double) ?? .null }
+        let identity: JSONObject = ["name": .string(a.identity.name), "email": .string(a.identity.email), "organization": .string(a.identity.organization),
+                                    "plan": .string(a.identity.plan), "auth_method": .string(a.identity.authMethod), "account_id": .string(a.identity.accountId)]
+        let windows: [JSON] = a.windows.map { .object(["id": .string($0.id), "label": .string($0.label), "used_percent": optional($0.usedPercent),
+                                                       "window_minutes": optional($0.minutes), "resets_at": optional($0.resetsAt)]) }
+        let balances: [JSON] = a.balances.map { .object(["kind": .string($0.kind), "balance": $0.balance.map(JSON.string) ?? .null, "currency": .string($0.currency)]) }
+        let credits: JSONObject = ["balance": a.creditBalance.map(JSON.string) ?? .null, "unlimited": a.unlimited.map(JSON.bool) ?? .null]
+        let usage: JSONObject = ["status": .string(a.status), "auth_status": .string(a.authStatus), "identity": .object(identity), "windows": .array(windows),
+                                 "credits": .object(credits), "balances": .array(balances), "checked_at": optional(a.checkedAt),
+                                 "identity_cached": .bool(a.identityCached), "refreshing": .bool(a.refreshing), "refresh_error": .bool(a.refreshError), "stale": .bool(a.stale)]
+        return ["id": .string(a.id), "provider": .string(a.provider), "label": .string(a.label), "native": .bool(a.native), "installed": .bool(a.installed),
+                "is_default": .bool(a.isDefault), "usage": .object(usage)]
+    }
+
     /// A successful catalog is authoritative for removals. Failed workspaces keep explicitly stale values.
     public static func merge(_ previous: [AccountCatalog], _ incoming: [AccountCatalog], successful: Set<String>, connected: Set<String>) -> [AccountCatalog] {
         var old: [MachineKey: AccountCatalog] = [:]
