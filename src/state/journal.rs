@@ -841,7 +841,12 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 info["reply_id"] = json!(format!("{timestamp}"));
             }
         }
-        info["state"] = json!(if ["SubagentStop", "SessionEnd", "Stop"].contains(&kind) {
+        // A Claude child's StopFailure ends its turn with a provider error, such
+        // as a usage limit; Claude sends no SubagentStop after it. The child is
+        // settled as an error, which never keeps its parent working. A newer
+        // event of the same child resumes it as usual.
+        let failed = kind == "StopFailure" && string(record, "agent") == "claude";
+        info["state"] = json!(if failed || ["SubagentStop", "SessionEnd", "Stop"].contains(&kind) {
             "finished"
         } else {
             "working"
@@ -850,7 +855,9 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
         if !snippet.is_empty() {
             info["detail"] = json!(snippet);
         }
-        if ["StopFailure", "Interrupt"].contains(&kind) {
+        if failed {
+            info["display_state"] = json!("error");
+        } else if ["StopFailure", "Interrupt"].contains(&kind) {
             info["display_state"] = json!("unknown");
         } else {
             info.as_object_mut().unwrap().remove("display_state");

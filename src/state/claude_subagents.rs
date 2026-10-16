@@ -94,12 +94,17 @@ fn stopped_calls(lines: &[&[u8]], marker: &Value, session: &str, id: &str, at: f
             part["type"] == "tool_result" && !string(part, "tool_use_id").is_empty() && part["is_error"] == true))
 }
 
-fn workflow_result(path: &Path, session: &str, id: &str, result_hash: &str) -> bool {
-    let Some(parent) = path.parent().filter(|p| p.parent().is_some_and(|p| p.ends_with("workflows"))) else { return false; };
-    let Ok(parent) = crate::platform::canonical(parent) else { return false; };
-    let Ok(journal) = crate::platform::canonical(parent.join("journal.jsonl")) else { return false; };
-    if !journal.starts_with(&parent) { return false; }
-    let Some(results) = scan_cache::cached("claude-workflow-results-v1", &journal, session, || {
+/// The workflow journal's outcomes of this conversation's children: `results`
+/// maps an agent to its result hash, `failed` names agents whose current start
+/// failed, and `modified` is the journal's modification time.
+fn workflow_outcomes(path: &Path, session: &str) -> Option<Value> {
+    let parent = path.parent().filter(|p| p.parent().is_some_and(|p| p.ends_with("workflows")))?;
+    let parent = crate::platform::canonical(parent).ok()?;
+    let journal = crate::platform::canonical(parent.join("journal.jsonl")).ok()?;
+    if !journal.starts_with(&parent) { return None; }
+    let modified = fs::metadata(&journal).ok()?.modified().ok()?
+        .duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
+    let mut outcomes = scan_cache::cached("claude-workflow-results-v2", &journal, session, || {
         let mut file = File::open(&journal).ok()?;
         let limit = 256 * 1024;
         let offset = file.metadata().ok()?.len().saturating_sub(limit);
@@ -109,6 +114,7 @@ fn workflow_result(path: &Path, session: &str, id: &str, result_hash: &str) -> b
         if bytes.len() as u64 > limit || !bytes.ends_with(b"\n") { return None; }
         let mut started = BTreeMap::new();
         let mut results = serde_json::Map::new();
+        let mut failed = serde_json::Map::new();
         for (index, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
             if offset > 0 && index == 0 { continue; }
             let row: Value = serde_json::from_slice(line).ok()?;
@@ -118,18 +124,48 @@ fn workflow_result(path: &Path, session: &str, id: &str, result_hash: &str) -> b
             if row["type"] == "started" {
                 started.insert(id.to_owned(), key.to_owned());
                 results.remove(id);
+                failed.remove(id);
             } else if row["type"] == "result" {
                 results.remove(id);
+                failed.remove(id);
                 if started.get(id).is_some_and(|start| start == key) {
                     if let Some(result) = row["result"].as_str() {
                         results.insert(id.to_owned(), json!(format!("{:x}", Sha256::digest(result))));
                     }
                 }
+            } else if row["type"] == "failed" {
+                results.remove(id);
+                if started.get(id).is_some_and(|start| start == key) { failed.insert(id.to_owned(), json!(true)); }
             }
         }
-        Some(Value::Object(results))
-    }) else { return false; };
-    !result_hash.is_empty() && results[id] == result_hash
+        Some(json!({"results":results,"failed":failed}))
+    })?;
+    outcomes["modified"] = json!(modified);
+    Some(outcomes)
+}
+
+fn workflow_result(path: &Path, session: &str, id: &str, result_hash: &str) -> bool {
+    let Some(outcomes) = workflow_outcomes(path, session) else { return false; };
+    !result_hash.is_empty() && outcomes["results"][id] == result_hash
+}
+
+/// The workflow recorded this child's current start as failed after the
+/// child's last recorded event. A later event, such as a resumed turn, is newer
+/// than that record and keeps the hook's state.
+fn workflow_failed(path: &Path, session: &str, id: &str, updated: f64) -> bool {
+    workflow_outcomes(path, session).is_some_and(|outcomes| outcomes["failed"][id] == true
+        && outcomes["modified"].as_f64().is_some_and(|modified| updated <= modified))
+}
+
+/// Claude sends no SubagentStop after a child's StopFailure. An earlier hgs
+/// kept such a child working with an unknown display; the same hook evidence,
+/// with no newer event, settles it as the error it reported.
+fn settle_failure(child: &mut Value, source: &str) {
+    child["state"] = json!("finished");
+    child["display_state"] = json!("error");
+    child["current_tool"] = json!("");
+    child["completion_source"] = json!(source);
+    child.as_object_mut().unwrap().remove("attention_id");
 }
 
 fn native_turn(path: &Path, session: &str, id: &str) -> Option<Value> {
@@ -210,16 +246,29 @@ fn native_turn(path: &Path, session: &str, id: &str) -> Option<Value> {
 
 pub(super) fn reconcile(record: &mut Value) {
     if string(record, "agent") != "claude" { return; }
+    let mut changed = false;
+    for child in record["subagents"].as_object_mut().into_iter().flatten().map(|(_, child)| child) {
+        if child["state"] == "working" && child["display_state"] == "unknown"
+            && child["tracking_evidence"]["source"] == "hook" && child["tracking_evidence"]["kind"] == "StopFailure" {
+            settle_failure(child, "hook_stop_failure");
+            changed = true;
+        }
+    }
     let ids: Vec<_> = record["subagents"].as_object().into_iter().flatten()
         .filter(|(_, child)| child["external"] != true && ["working", "finished"].contains(&string(child,"state")))
         .map(|(id, _)| id.as_str()).collect();
-    if ids.is_empty() { return; }
+    if ids.is_empty() { settle_parent(record, changed); return; }
     let paths = paths(record, &ids);
     let session = string(record, "conversation_id").to_owned();
-    let mut changed = false;
     for (id, path) in paths {
         let child = &mut record["subagents"][&id];
         let Some(updated) = child["updated"].as_f64().filter(|at| *at > 0.0) else { continue; };
+        if child["state"] == "working" && workflow_failed(&path, &session, &id, updated) {
+            settle_failure(child, "claude_workflow_failed");
+            child["tracking_evidence"] = json!({"source":"claude_workflow_journal","kind":"failed","at":updated});
+            changed = true;
+            continue;
+        }
         let Some(evidence) = native_turn(&path, &session, &id) else { continue; };
         let Some(at) = evidence["at"].as_f64() else { continue; };
         let refresh_result = at == updated && child["tracking_evidence"]["source"] == "claude_transcript"
@@ -256,13 +305,19 @@ pub(super) fn reconcile(record: &mut Value) {
         // Reconciliation does not replace the hook's existing reply/read identity.
         changed = true;
     }
-    if changed {
+    settle_parent(record, changed);
+}
+
+fn settle_parent(record: &mut Value, changed: bool) {
+    // An unknown child no longer keeps a finished parent working, including
+    // one an earlier hgs saved while it did.
+    if changed || record["subagents"].as_object().is_some_and(|children| children.values().any(|child| child["display_state"] == "unknown")) {
         journal::settle_children(record);
-        if record["main_done"] == true && ["idle", "working"].contains(&string(record,"phase"))
-            && record["subagents"].as_object().is_some_and(|children| children.values().any(|child| child["state"] == "working")) {
-            record["activity"] = json!("busy");
-            record["phase"] = json!("working");
-        }
+    }
+    if changed && record["main_done"] == true && ["idle", "working"].contains(&string(record,"phase"))
+        && record["subagents"].as_object().is_some_and(|children| children.values().any(|child| telemetry::child_working(record, child))) {
+        record["activity"] = json!("busy");
+        record["phase"] = json!("working");
     }
 }
 
@@ -548,6 +603,80 @@ mod tests {
     fn assistant(at: &str, reason: &str, content: Value) -> Value {
         json!({"type":"assistant","isSidechain":true,"agentId":"worker","sessionId":SESSION,
             "uuid":"native-result","timestamp":at,"message":{"role":"assistant","stop_reason":reason,"content":content}})
+    }
+
+    /// The tail Claude writes when a child stops on a usage limit: a synthetic
+    /// API error, after which no SubagentStop arrives.
+    fn usage_limit() -> Value {
+        json!({"type":"assistant","isSidechain":true,"agentId":"worker","sessionId":SESSION,
+            "timestamp":"2026-10-15T22:19:01.183Z","isApiErrorMessage":true,"error":"rate_limit",
+            "message":{"role":"assistant","model":"<synthetic>","stop_reason":"stop_sequence",
+                "content":[{"type":"text","text":"You've hit your weekly limit"}]}})
+    }
+
+    #[test]
+    fn stop_failure_saved_by_an_earlier_hgs_settles_as_an_error() {
+        let (_temp, mut record, root) = fixture();
+        write(&root.join("agent-worker.jsonl"), &usage_limit());
+        let child = &mut record["subagents"]["worker"];
+        child["display_state"] = json!("unknown");
+        child["current_tool"] = json!("");
+        child["detail"] = json!("You've hit your weekly limit");
+        child["tracking_evidence"] = json!({"source":"hook","kind":"StopFailure","at":2.0});
+        reconcile(&mut record);
+        let child = &record["subagents"]["worker"];
+        assert_eq!(child["state"], "finished");
+        assert_eq!(child["display_state"], "error");
+        assert_eq!(child["completion_source"], "hook_stop_failure");
+        assert_eq!(child["detail"], "You've hit your weekly limit");
+        // An error is a result of the parent, never a new child reply.
+        assert_eq!(child["reply_id"], "earlier-child-reply");
+        assert_eq!(record["phase"], "idle");
+        assert_eq!(record["activity"], "idle");
+        assert!(clear_context::available(&record, true));
+    }
+
+    #[test]
+    fn workflow_failure_settles_only_a_child_without_newer_events() {
+        let (_temp, mut record, root) = fixture();
+        let path = root.join("workflows/wf-fixture/agent-worker.jsonl");
+        write(&path, &usage_limit());
+        let journal = path.parent().unwrap().join("journal.jsonl");
+        let started = json!({"type":"started","agentId":"worker","key":"attempt-one"});
+        let failed = json!({"type":"failed","agentId":"worker","key":"attempt-one"});
+        // A failure of an earlier attempt says nothing about the current one.
+        fs::write(&journal, format!("{started}\n{failed}\n{started}\n")).unwrap();
+        reconcile(&mut record);
+        assert_eq!(record["subagents"]["worker"]["state"], "working");
+        assert_eq!(record["phase"], "working");
+        fs::write(&journal, format!("{started}\n{failed}\n")).unwrap();
+        let mut resumed = record.clone();
+        resumed["subagents"]["worker"]["updated"] = json!(now() + 3600.0);
+        reconcile(&mut resumed);
+        assert_eq!(resumed["subagents"]["worker"]["state"], "working");
+        reconcile(&mut record);
+        let child = &record["subagents"]["worker"];
+        assert_eq!(child["state"], "finished");
+        assert_eq!(child["display_state"], "error");
+        assert_eq!(child["current_tool"], "");
+        assert_eq!(child["tracking_evidence"]["source"], "claude_workflow_journal");
+        assert_eq!(record["phase"], "idle");
+    }
+
+    #[test]
+    fn an_unknown_child_never_keeps_a_finished_parent_working() {
+        let (_temp, mut record, _root) = fixture();
+        record["subagents"]["worker"]["display_state"] = json!("unknown");
+        record["subagents"]["worker"]["tracking_evidence"] = json!({"source":"hook","kind":"Interrupt","at":2.0});
+        reconcile(&mut record);
+        assert_eq!(record["subagents"]["worker"]["state"], "working");
+        assert_eq!(record["subagents"]["worker"]["display_state"], "unknown");
+        assert_eq!(record["phase"], "idle");
+        let (_temp, mut record, _root) = fixture();
+        record["subagents"]["worker"]["display_state"] = json!("unknown");
+        record["main_done"] = json!(false);
+        reconcile(&mut record);
+        assert_eq!(record["phase"], "working");
     }
 
     #[test]
