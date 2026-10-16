@@ -198,6 +198,8 @@ private slots:
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive();
+    void tableReplyScrollingKeepsQueuedInputResponsive_data();
+    void tableReplyScrollingKeepsQueuedInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive_data();
     void staleIdentityAndPresentationResultsAreRejected();
     void streamingSnapshotsMakeProgress();
@@ -360,6 +362,43 @@ void TestActivityView::longUpdatesKeepQueuedEditorInputResponsive()
     // Thread CPU excludes host scheduling stalls. The old GUI import/layout
     // consumes ~600 ms for this history; the commit and first paint are bounded.
     QVERIFY2(bestCpu < 200, qPrintable(QString("GUI CPU including first paint: %1 ms").arg(bestCpu)));
+}
+
+void TestActivityView::tableReplyScrollingKeepsQueuedInputResponsive_data()
+{
+    QTest::addColumn<bool>("dark");QTest::addColumn<double>("scale");
+    for(bool dark:{false,true})for(double scale:{1.,1.25})
+        QTest::newRow(qPrintable(QString("%1-%2").arg(dark?"dark":"light").arg(scale)))<<dark<<scale;
+}
+void TestActivityView::tableReplyScrollingKeepsQueuedInputResponsive()
+{
+    QFETCH(bool,dark);QFETCH(double,scale);
+    ActivityView view;view.setStyleSheet("QTextBrowser { background:transparent; border:0; padding-top:12px; }");
+    view.resize(900,700);view.show();view.setTheme(dark);view.setContentScale(scale);view.setSessionKey("synthetic-table");
+    QString body="## Synthetic comparison\n\nA wrapped table keeps **readable results** and `tool settings`.\n\n"
+        "| Scenario | Result | Notes |\n| --- | --- | --- |\n";
+    for(int i=0;i<32;++i)body+=QString("| Scenario %1 | Preserve `field_%1` and `example/cache/catalog.json` beside wrapped prose. | "
+        "**Reviewed** text with `native value` and a longer explanation. Текст для проверки переноса строк. |\n").arg(i);
+    view.setActivity({}, {journalEvent(1,"Stop",body)});settle(view);
+    auto *browser=view.browser();auto *bar=browser->verticalScrollBar();QVERIFY(bar->maximum()>700);
+    QVERIFY(browser->viewport()->palette().brush(QPalette::Base).isOpaque());
+    auto cursor=browser->document()->find("field_0");QVERIFY(!cursor.isNull());browser->setTextCursor(cursor);
+    const auto selected=cursor.selectedText();
+    const auto previews=qEnvironmentVariable("HGS_ACTIVITY_TABLE_PREVIEW");
+    if(!previews.isEmpty()){QDir().mkpath(previews);QVERIFY(view.grab().save(previews+QString("/table-%1-%2.png").arg(dark?"dark":"light").arg(scale)));}
+    QLineEdit editor;editor.show();qint64 bestCpu=std::numeric_limits<qint64>::max();int delivered=0;
+    for(int run=0;run<3;++run){
+        bar->setValue(bar->maximum()/4);const int before=bar->value();const auto start=threadCpuMs();
+        for(int frame=0;frame<20;++frame){
+            QTimer::singleShot(0,&editor,[&]{QTest::keyClicks(&editor,"x");++delivered;});
+            QWheelEvent wheel(QPointF(40,200),browser->viewport()->mapToGlobal(QPoint(40,200)),{},QPoint(0,-60),Qt::NoButton,Qt::NoModifier,Qt::ScrollUpdate,false);
+            QApplication::sendEvent(browser->viewport(),&wheel);browser->viewport()->repaint();QCoreApplication::processEvents();
+            QCOMPARE(delivered,run*20+frame+1);
+        }
+        bestCpu=std::min(bestCpu,threadCpuMs()-start);QVERIFY(bar->value()>before);
+    }
+    QCOMPARE(browser->textCursor().selectedText(),selected);QCOMPARE(editor.text(),QString(60,'x'));
+    QVERIFY2(bestCpu<1000,qPrintable(QString("%1 ms GUI CPU for 20 table scroll/input frames").arg(bestCpu)));
 }
 
 void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive_data()

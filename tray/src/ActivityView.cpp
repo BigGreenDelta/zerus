@@ -1260,6 +1260,14 @@ void ActivityView::setTheme(bool dark)
     palette.setColor(QPalette::Highlight, QColor(dark ? "#375e54" : "#b6e2d2"));
     palette.setColor(QPalette::HighlightedText, palette.color(QPalette::Text));
     m_browser->setPalette(palette);
+    // The workspace's general QTextBrowser style uses a transparent background.
+    // That gives Qt a NoBrush Base even after setPalette(), disabling the bounded
+    // opaque-canvas chip renderer. Own the same canvas colour here so real
+    // workspace scrolls use the fast path, just like a standalone ActivityView.
+    const QString browserStyle = QString("QTextBrowser { background:%1; %2 }")
+        .arg(dark ? "#1c2229" : "#ffffff", qFuzzyCompare(m_scale, 1.0) ? QString()
+            : QString("font-size:%1px;").arg(ContentScale::px(13, m_scale)));
+    if (m_browser->styleSheet() != browserStyle) m_browser->setStyleSheet(browserStyle);
     m_latest->setStyleSheet(QString("QPushButton { color:%1; background:%2; border:1px solid %3; border-radius:12px; padding:5px 13px; font-size:11px; } QPushButton:hover { border-color:%1; }"
         " QPushButton[compact=\"true\"] { background:transparent; border:0; border-radius:6px; padding:0; min-width:0; min-height:0; }"
         " QPushButton[compact=\"true\"]:hover { background:%2; }"
@@ -1285,10 +1293,8 @@ void ActivityView::setContentScale(double scale)
     scale = ContentScale::clamp(scale);
     if (qFuzzyCompare(scale, m_scale)) return;
     m_scale = scale;
-    // Explicit HTML lengths are scaled while rendering. Markdown headings are
-    // relative to the document's default font, which follows the widget font.
-    m_browser->setStyleSheet(qFuzzyCompare(scale, 1.0) ? QString()
-        : QString("QTextBrowser { font-size:%1px; }").arg(ContentScale::px(13, scale)));
+    // setTheme applies the browser font size together with its opaque canvas;
+    // explicit HTML lengths are scaled by the render worker.
     m_queueText->setMaximumHeight(ContentScale::px(100, scale));
     setTheme(m_dark); updateColumnActions();
 }
