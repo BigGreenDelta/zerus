@@ -1,0 +1,20 @@
+[Unit]
+Description=Zerus mobile computer connector
+After=network-online.target
+# Never enabled by the package. Without a configuration a manual start is
+# skipped instead of failing and restarting every few seconds.
+ConditionPathExists=%E/hgs/mobile/connector.json
+
+[Service]
+Type=simple
+# No Environment=PATH: hgs resolves as it does for the rest of the session.
+ExecStart=/usr/bin/zerus-mobile-connector --config %E/hgs/mobile/connector.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+# Kill only the connector, never the tmux servers and agents it launched.
+KillMode=process
+
+[Install]
+WantedBy=default.target

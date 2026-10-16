@@ -557,7 +557,7 @@ jobs:
           path: |
             /home/user/.cargo/registry
             /home/user/.cargo/git
-          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-${{ hashFiles('Cargo.lock') }}
+          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-${{ hashFiles('Cargo.lock', 'services/mobile/connector/Cargo.lock') }}
           restore-keys: arch-cargo-v1-${{ steps.epoch.outputs.month }}-
       - name: Restore ccache
         id: ccache-restore
