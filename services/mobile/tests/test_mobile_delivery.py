@@ -61,6 +61,7 @@ class MobileDeliveryFixtureTests(unittest.IsolatedAsyncioTestCase):
             connector = Connector({"server_url": "https://relay.example.invalid", "node_token": "fixture-token",
                                    "hgs_path": str(Path(__file__).with_name("fixture_hgs.py")),
                                    "state_dir": str(Path(directory) / "journal")})
+            peer = None
             try:
                 snapshot = await connector.snapshot()
                 self.assertIn("set_mobile_delivery", snapshot["mobile_capabilities"]["operations"])
@@ -70,4 +71,9 @@ class MobileDeliveryFixtureTests(unittest.IsolatedAsyncioTestCase):
                 peer = connector.peer_context(str(uuid.uuid4()), connector.native)
                 self.assertNotIn("set_mobile_delivery", (await peer.snapshot())["mobile_capabilities"]["operations"])
             finally:
+                # Each snapshot starts an account refresh. Stop it as shutdown does,
+                # before the test loop cancels every task at once mid-spawn.
+                if peer is not None:
+                    await peer.accounts.close()
+                await connector.accounts.close()
                 connector.journal.close()
