@@ -285,14 +285,92 @@ jobs:
             ~/.cargo/git
             services/mobile/connector/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      # One venv per commit recorded as a rollback baseline, for the journal
+      # handoff tests (test_bb_handoff.py); none is recorded before a cutover.
+      - name: Rollback baseline Python connectors
+        run: |
+          commands=""
+          for commit in $(python3 -c 'import json, sys; print(*(b["commit"] for b in json.load(open(sys.argv[1]))["baselines"]))' \
+              services/mobile/tests/rollback-baselines.json); do
+            git fetch --no-tags --depth 1 origin "$commit"
+            mkdir "$RUNNER_TEMP/baseline-$commit"
+            git archive "$commit" services/mobile | tar -x -C "$RUNNER_TEMP/baseline-$commit"
+            python3 -m venv "$RUNNER_TEMP/rollback-$commit"
+            "$RUNNER_TEMP/rollback-$commit/bin/pip" install "$RUNNER_TEMP/baseline-$commit/services/mobile"
+            commands="$commands${commands:+:}$RUNNER_TEMP/rollback-$commit/bin/zerus-mobile-connector"
+          done
+          echo "ZERUS_CONNECTOR_ROLLBACK_COMMANDS=$commands" >> "$GITHUB_ENV"
       # The Python run covers every module; the Rust run only those in ported.json,
       # against a build with the test-hooks seams (cargo test rebuilt it without).
-      - name: Black-box suites against the Python and Rust connectors
+      # Both write differential traces, compared at the end, and they run beside
+      # the soak of the Rust build: the connectors' own clocks set their pace.
+      - name: Black-box suites against the Python and Rust connectors, differential traces and soak
         run: |
-          "$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_bb_*.py' -v
           (cd services/mobile/connector && cargo +1.85.0 build --locked --features test-hooks)
+          rust="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/zerus-mobile-connector"
+          traces="$RUNNER_TEMP/traces"
+          ZERUS_CONNECTOR_TRACE_DIR="$traces/python" \
+            "$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_bb_*.py' -v \
+            > "$RUNNER_TEMP/python.log" 2>&1 &
+          python=$!
+          ZERUS_CONNECTOR_TRACE_DIR="$traces/rust" ZERUS_CONNECTOR_COMMAND="$rust" \
+            "$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_bb_*.py' -v \
+            > "$RUNNER_TEMP/rust.log" 2>&1 &
+          rust_suites=$!
+          ZERUS_CONNECTOR_SOAK_SECONDS=300 ZERUS_CONNECTOR_COMMAND="$rust" \
+            "$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests -p test_bb_soak.py -v \
+            > "$RUNNER_TEMP/soak.log" 2>&1 &
+          soak=$!
+          status=0
+          finish() {
+            if wait "$2"; then
+              echo "::group::$1"; cat "$RUNNER_TEMP/$1.log"; echo "::endgroup::"
+            else
+              echo "::error::$1 black-box run failed"; cat "$RUNNER_TEMP/$1.log"; status=1
+            fi
+          }
+          finish python "$python"
+          finish rust "$rust_suites"
+          finish soak "$soak"
+          "$RUNNER_TEMP/connector-venv/bin/python" services/mobile/tests/differential.py compare \
+            "$traces/python" "$traces/rust" || status=1
+          exit "$status"
+
+  # The connector on macOS (design C7): a cold Rust 1.85 build, its unit,
+  # vector and binary tests, and the black-box modules that need no real hgs
+  # against the build with the test seams, with Keychain trust and kqueue. The
+  # journal handoffs run this tree's Python connector beside it.
+  connector-macos:
+    name: Rust mobile connector on macOS (smoke)
+    needs: source
+    if: needs.source.outputs.run_macos == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Python connector for the handoffs
+        run: |
+          python3 -m venv "$RUNNER_TEMP/connector-venv"
+          "$RUNNER_TEMP/connector-venv/bin/pip" install ./services/mobile
+      - name: Unit, vector and binary tests
+        working-directory: services/mobile/connector
+        run: |
+          cargo +1.85.0 test --locked --lib --test config_vectors --test journal_vectors --test runtime_vectors \
+            --test mutations --test launch_runtime --test binary
+      - name: Black-box smoke against the Rust connector
+        working-directory: services/mobile/tests
+        run: |
+          (cd ../connector && cargo +1.85.0 build --locked --features test-hooks)
           ZERUS_CONNECTOR_COMMAND="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/zerus-mobile-connector" \
-            "$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_bb_*.py' -v
+            "$RUNNER_TEMP/connector-venv/bin/python" -m unittest -v test_bb_harness test_bb_startup test_bb_journal \
+            test_bb_requests test_bb_restart test_bb_retention test_bb_heartbeat test_bb_runtime test_bb_send \
+            test_bb_signals test_bb_handoff
 
   # Every run, PRs included, tests and lints the Firebase variant that the signed
   # Dev build ships. A synthetic configuration with placeholder values stands in
@@ -954,7 +1032,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, relay, connector, android, cli, arch, arch-package, mac-desktop, windows-desktop, windows-host]
+    needs: [source, quick, relay, connector, connector-macos, android, cli, arch, arch-package, mac-desktop, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -978,6 +1056,7 @@ jobs:
               'arch': json.loads(os.environ['RUN_ARCH']),
               'arch-package': json.loads(os.environ['RUN_ARCH']),
               'mac-desktop': json.loads(os.environ['RUN_MACOS']),
+              'connector-macos': json.loads(os.environ['RUN_MACOS']),
               'windows-desktop': json.loads(os.environ['RUN_WINDOWS']),
               'windows-host': json.loads(os.environ['RUN_WINDOWS']),
           }

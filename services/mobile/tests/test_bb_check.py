@@ -7,25 +7,10 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 import unittest
 
-from connector_harness import (BlackBoxCase, ConnectorProcess, IMPLEMENTATION, SERVICE, STARTUP_FAILURE,
+from connector_harness import (BlackBoxCase, ConnectorProcess, IMPLEMENTATION, PYTHON_COMMAND, STARTUP_FAILURE,
                                connector_command)
-
-
-class PythonConnector(ConnectorProcess):
-    """The Python connector from this source tree, whichever one is under test."""
-
-    def start(self) -> ConnectorProcess:
-        with open(self.log_path, "wb") as log:
-            self.process = subprocess.Popen(
-                [sys.executable, "-m", "zerus_mobile.connector", *self.args], cwd=self.case.scratch, env=self.env,
-                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        self.case.hgs.parent(self.process.pid)
-        if sys.platform.startswith("linux"):
-            self.guard = asyncio.get_running_loop().create_task(self.watch_sockets())
-        return self
 
 
 def fingerprint(directory):
@@ -43,14 +28,9 @@ class CheckTests(BlackBoxCase):
             self.skipTest("--check is a command of the Rust connector")
         await super().asyncSetUp()
 
-    async def launch_python(self) -> PythonConnector:
-        path = self.write_config(self.config())
-        env = self.environment({"PYTHONPATH": str(SERVICE), "PYTHONDONTWRITEBYTECODE": "1"})
-        process = PythonConnector(self, ["--config", str(path), "--allow-insecure-localhost"], env)
-        self.processes.append(process)
-        process.start()
-        await self.ready(process)
-        return process
+    async def launch_python(self) -> ConnectorProcess:
+        """The Python connector from this source tree, whichever one is under test."""
+        return await self.launch(command=PYTHON_COMMAND)
 
     async def check(self, config=None, code=0, mode=0o600) -> dict:
         path = self.write_config(self.config() if config is None else config)

@@ -362,7 +362,7 @@ impl<N: Native + 'static> Connector<N> {
 
     /// `hgs archives --json` for one query: a checked page with the project
     /// memberships of its rows and only the projects they use.
-    async fn archive_page(&self, payload: &Value) -> Result<Value, Failure> {
+    async fn archive_page(&self, payload: &Value, request_id: &str) -> Result<Value, Failure> {
         let call = Call::new(["archives", "--json"])
             .payload(payload.clone())
             .timeout(30.0);
@@ -415,6 +415,7 @@ impl<N: Native + 'static> Connector<N> {
             .collect();
         projects.insert("projects".into(), Value::Array(listed));
         page["mobile_projects"] = Value::Object(projects);
+        page["request_id"] = json!(request_id);
         Ok(page)
     }
 
@@ -452,7 +453,10 @@ impl<N: Native + 'static> Connector<N> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref();
         match validated.operation.as_str() {
-            "archive_list" => self.archive_page(payload.expect("validated")).await,
+            "archive_list" => {
+                self.archive_page(payload.expect("validated"), request_id)
+                    .await
+            }
             "inspect" => self.inspect(session, payload).await,
             "process_output" => {
                 self.processes("--output", session, payload.expect("validated"), request_id)

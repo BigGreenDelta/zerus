@@ -13,6 +13,7 @@ import uuid
 
 from bb_operations import OperationCase, help_text, listing, real_hgs, size_vector, validation_cases
 from connector_harness import BlackBoxCase, default_rules
+from differential import REAL_HGS, untraced
 
 SPEECH = ["speech", "--json"]
 MACHINE = "00000000-0000-4000-8000-000000000001"
@@ -236,6 +237,7 @@ class SpeechConfigurationTests(SpeechCase):
                 self.assertEqual(self.since(mark, *SPEECH) + self.since(mark, "voice"), [])
                 process.stop()
 
+    @untraced(REAL_HGS)
     async def test_real_cli_manages_a_profile_without_inference(self):
         native = real_hgs()
         if native is None:
