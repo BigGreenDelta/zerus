@@ -20,6 +20,9 @@ LABELS = {
     "tray": "com.hgdev.hgs-tray",
     "recovery": "com.hgdev.hgs-recovery",
     "swarm": "com.hgdev.hgs-swarm",
+    # Opt-in through --mobile-connector install; --remove unloads it, and
+    # AbandonProcessGroup leaves the agents it launched running.
+    "connector": "com.hgdev.zerus-mobile-connector",
 }
 INSTALLERS = {
     "session": "install-macos-session-service.py",
@@ -126,16 +129,24 @@ def main():
     parser.add_argument("--workers", action="store_true", help="install the recovery and swarm workers")
     parser.add_argument("--remove", action="store_true",
                         help="remove only the links and agents that point into this application")
+    parser.add_argument("--mobile-connector", choices=("install",),
+                        help="write the mobile connector's LaunchAgent for this application's connector; "
+                             "it loads and starts nothing")
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error("run this command as the desktop user, without sudo")
-    if args.remove and (args.autostart or args.workers):
+    if args.remove and (args.autostart or args.workers or args.mobile_connector):
         parser.error("--remove cannot be combined with other options")
+    if args.mobile_connector and (args.autostart or args.workers):
+        parser.error("--mobile-connector cannot be combined with other options")
     app = args.app.resolve()
     hgs = app / "Contents/MacOS/hgs"
     setup = app / "Contents/Resources/setup"
     if not (hgs.is_file() and os.access(hgs, os.X_OK)):
         parser.error(f"not a Zerus application: {app}")
+    if args.mobile_connector:
+        return subprocess.run([sys.executable, str(setup / "install-mobile-connector-service.py"), "install",
+                               "--binary", str(app / "Contents/MacOS/zerus-mobile-connector")]).returncode
     directory = Path.home() / ".local/bin"
     links = [(directory / "hgs", hgs), (directory / "hgs_state.py", setup / "hgs_state.py")]
     if args.remove:

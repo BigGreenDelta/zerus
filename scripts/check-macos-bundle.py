@@ -26,7 +26,8 @@ REFERENCES = {"LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LO
 MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
           b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 QT_NOTICES = ("qtbase", "qtsvg", "qtmultimedia")
-EXECUTABLES = ["Contents/MacOS/hgs-tray", "Contents/MacOS/hgs", "Contents/Resources/bin/zerus-setup"]
+CONNECTOR = "Contents/MacOS/zerus-mobile-connector"
+EXECUTABLES = ["Contents/MacOS/hgs-tray", "Contents/MacOS/hgs", CONNECTOR, "Contents/Resources/bin/zerus-setup"]
 REQUIRED_FILES = [
     "Contents/Info.plist", *EXECUTABLES,
     "Contents/Resources/setup/hgs_state.py",
@@ -34,6 +35,7 @@ REQUIRED_FILES = [
     "Contents/Resources/setup/install-recovery-service.py",
     "Contents/Resources/setup/install-swarm-service.py",
     "Contents/Resources/setup/launchd_agent.py",
+    "Contents/Resources/setup/install-mobile-connector-service.py",
     "Contents/Resources/setup/com.hgdev.hgs-tray.plist",
     "Contents/Resources/doc/README.md",
     "Contents/Resources/doc/tmux.conf",
@@ -144,6 +146,9 @@ def bundle_findings(bundle, version, release=None):
     findings += [f"missing {name}" for name in REQUIRED_FILES if not (bundle / name).is_file()]
     findings += [f"not executable: {name}" for name in EXECUTABLES
                  if (bundle / name).is_file() and not os.access(bundle / name, os.X_OK)]
+    # The connector's black-box test seams exist only with the test-hooks feature.
+    if (bundle / CONNECTOR).is_file() and b"ZERUS_CONNECTOR_TEST_" in (bundle / CONNECTOR).read_bytes():
+        findings.append(f"{CONNECTOR} was built with test hooks")
     root = bundle.resolve()
     main = bundle / "Contents/MacOS/hgs-tray"
     main_rpaths = []
@@ -199,7 +204,8 @@ def run_selftest(bundle, version=None, release=None, commit=None):
         environment = {"HOME": scratch, "PATH": f"{binaries}:/usr/bin:/bin", "TMPDIR": scratch,
                        "TMUX_TMPDIR": scratch}
         hgs = bundle / "Contents/MacOS/hgs"
-        for command in ([str(hgs), "--version"], [str(bundle / "Contents/MacOS/hgs-tray"), "--version"],
+        for command in ([str(hgs), "--version"], [str(bundle / CONNECTOR), "--version"],
+                        [str(bundle / "Contents/MacOS/hgs-tray"), "--version"],
                         [str(bundle / "Contents/MacOS/hgs-tray"), "--selftest"]):
             result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=60)
             if result.returncode:
