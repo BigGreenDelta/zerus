@@ -41,6 +41,13 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "sessions" || name == "all") {
             p.drawRoundedRect(QRectF(4, 4, 16, 7), 2, 2); p.drawRoundedRect(QRectF(4, 14, 16, 6), 2, 2);
             p.drawPoint(QPointF(8, 7.5)); p.drawLine(QPointF(12, 7.5), QPointF(16, 7.5));
+        } else if (name == "calendar") {
+            p.drawRoundedRect(QRectF(4, 5, 16, 16), 2, 2); p.drawLine(4, 10, 20, 10);
+            p.drawLine(8, 3, 8, 7); p.drawLine(16, 3, 16, 7);
+            p.drawPoint(QPointF(8, 14)); p.drawPoint(QPointF(12, 14)); p.drawPoint(QPointF(16, 14));
+        } else if (name == "chevron-left" || name == "chevron-right") {
+            const bool right = name == "chevron-right";
+            QPainterPath path; path.moveTo(right ? 9 : 15, 6); path.lineTo(right ? 15 : 9, 12); path.lineTo(right ? 9 : 15, 18); p.drawPath(path);
         } else if (name == "machines") {
             p.drawRoundedRect(QRectF(3, 4, 18, 12), 2, 2); p.drawLine(12, 16, 12, 20); p.drawLine(8, 20, 16, 20);
         } else if (name == "terminal") {

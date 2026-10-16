@@ -1,7 +1,7 @@
 #include "ArchiveBrowser.h"
-#include <QComboBox>
-#include <QDateEdit>
-#include <QDateTime>
+#include "ArchiveDatePicker.h"
+#include "WorkspaceIcons.h"
+#include "WorkspaceStyle.h"
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
@@ -12,19 +12,20 @@ ArchiveBrowser::ArchiveBrowser(HgsClient &client,QWidget *parent):QWidget(parent
     setObjectName("archiveBrowser");
     auto *layout=new QVBoxLayout(this);layout->setContentsMargins(0,0,0,0);layout->setSpacing(6);
     auto *dates=new QHBoxLayout;dates->setSpacing(6);
-    m_period=new QComboBox;m_period->setObjectName("archivePeriod");m_period->setAccessibleName(tr("Archived date"));
-    m_period->addItems({tr("All dates"),tr("Today"),tr("Last 7 days"),tr("Last 30 days"),tr("Date range…")});
-    dates->addWidget(m_period,1);m_refresh=new QPushButton(tr("Refresh"));m_refresh->setObjectName("archiveRefresh");dates->addWidget(m_refresh);layout->addLayout(dates);
-    auto *range=new QWidget;auto *rangeLayout=new QVBoxLayout(range);rangeLayout->setContentsMargins(0,0,0,0);rangeLayout->setSpacing(6);
-    m_from=new QDateEdit(QDate::currentDate().addDays(-29));m_until=new QDateEdit(QDate::currentDate());
-    for(auto *date:{m_from,m_until}){date->setMinimumDate(QDate(1970,1,2));date->setMaximumDate(QDate(9999,12,30));date->setCalendarPopup(true);date->setDisplayFormat("dd MMM yyyy");auto *row=new QHBoxLayout;row->addWidget(new QLabel(date==m_from?tr("From"):tr("Through")));row->addWidget(date,1);rangeLayout->addLayout(row);}
-    m_from->setObjectName("archiveFrom");m_from->setAccessibleName(tr("Archived from, inclusive"));m_until->setObjectName("archiveUntil");m_until->setAccessibleName(tr("Archived through, inclusive"));range->hide();layout->addWidget(range);
-    m_status=new QLabel;m_status->setObjectName("archiveStatus");m_status->setWordWrap(true);layout->addWidget(m_status);
-    m_more=new QPushButton(tr("Load more"));m_more->setObjectName("archiveMore");layout->addWidget(m_more);
-    m_newer=new QPushButton(tr("Newer sessions"));m_newer->setObjectName("archiveNewer");layout->addWidget(m_newer);
-    connect(m_period,qOverload<int>(&QComboBox::currentIndexChanged),this,[this,range](int i){range->setVisible(i==4);refresh();});
-    connect(m_from,&QDateEdit::dateChanged,this,[this]{if(m_period->currentIndex()==4)refresh();});
-    connect(m_until,&QDateEdit::dateChanged,this,[this]{if(m_period->currentIndex()==4)refresh();});
+    m_period=new ArchiveDatePicker;
+    dates->addWidget(m_period,1);
+    m_refresh=new QPushButton;m_refresh->setObjectName("archiveRefresh");
+    m_refresh->setAccessibleName(tr("Refresh archive"));m_refresh->setToolTip(tr("Refresh archive"));
+    dates->addWidget(m_refresh);layout->addLayout(dates);
+    auto *navigation=new QHBoxLayout;navigation->setSpacing(6);
+    m_status=new QLabel;m_status->setObjectName("archiveStatus");
+    m_status->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);navigation->addWidget(m_status,1);
+    m_newer=new QPushButton;m_newer->setObjectName("archiveNewer");
+    m_more=new QPushButton;m_more->setObjectName("archiveMore");
+    for(auto *button:{m_newer,m_more}){button->setAccessibleName(button==m_more?tr("Older sessions"):tr("Newer sessions"));button->setToolTip(button->accessibleName());navigation->addWidget(button);}
+    layout->addLayout(navigation);
+    m_error=new QLabel;m_error->setObjectName("archiveError");m_error->setWordWrap(true);layout->addWidget(m_error);
+    connect(m_period,&ArchiveDatePicker::rangeChanged,this,&ArchiveBrowser::refresh);
     connect(m_refresh,&QPushButton::clicked,this,&ArchiveBrowser::refresh);
     connect(m_more,&QPushButton::clicked,this,&ArchiveBrowser::loadMore);
     connect(m_newer,&QPushButton::clicked,this,[this]{navigate(true);});
@@ -39,14 +40,10 @@ ArchiveBrowser::ArchiveBrowser(HgsClient &client,QWidget *parent):QWidget(parent
         const bool accepted=i->error.isEmpty();updateStatus();emit changed();if(accepted)emit windowChanged();
     });
     m_debounce=new QTimer(this);m_debounce->setSingleShot(true);m_debounce->setInterval(300);connect(m_debounce,&QTimer::timeout,this,&ArchiveBrowser::refresh);
-    hide();
+    setTheme(true);hide();
 }
 QJsonObject ArchiveBrowser::query(const QString &cursor)const {
-    qint64 from=0,until=253402300800LL;const auto today=QDate::currentDate();const int p=m_period->currentIndex();
-    QDate first,last;
-    if(p>0&&p<4){first=today.addDays(p==1?0:p==2?-6:-29);last=today;}
-    if(p==4){first=m_from->date();last=m_until->date();}
-    if(first.isValid()){from=first.startOfDay().toSecsSinceEpoch();until=last.addDays(1).startOfDay().toSecsSinceEpoch();}
+    const auto [from,until]=m_period->range();
     return {{"from",double(from)},{"until",double(until)},{"limit",50},{"cursor",cursor},{"query",m_query}};
 }
 bool ArchiveBrowser::includes(double at)const{const auto q=query({});return at>=q["from"].toDouble()&&at<q["until"].toDouble();}
@@ -69,13 +66,22 @@ void ArchiveBrowser::navigate(bool newer){
     updateStatus();
 }
 void ArchiveBrowser::updateStatus(){
-    bool busy=false,more=false,newer=false;QStringList errors,windows;
+    bool busy=false,more=false,newer=false;QStringList errors,windows;QString singleWindow;
     for(auto i=m_pages.begin();i!=m_pages.end();++i){busy|=i->request!=0;more|=!i->loaded||!i->cursor.isEmpty();newer|=!i->previous.isEmpty();if(!i->error.isEmpty())errors.append(m_hosts.value(i.key())+": "+i->error);
-        if(i->loaded)windows.append(m_hosts.value(i.key())+": "+(i->position>=0&&!i->rows.isEmpty()?tr("%1–%2 of %3").arg(i->position+1).arg(i->position+i->rows.size()).arg(i->total):tr("%1 shown of %2").arg(i->rows.size()).arg(i->total)));}
+        if(i->loaded){singleWindow=i->position>=0&&!i->rows.isEmpty()?tr("%1–%2 of %3").arg(i->position+1).arg(i->position+i->rows.size()).arg(i->total):tr("%1 shown of %2").arg(i->rows.size()).arg(i->total);windows.append(m_hosts.value(i.key())+": "+singleWindow);}}
     const bool valid=query({})["from"].toDouble()<query({})["until"].toDouble();
-    m_status->setText(!valid?tr("Choose an end date on or after the start date."):!errors.isEmpty()?errors.join('\n').left(240):busy?tr("Loading archive…"):m_hosts.isEmpty()?tr("Archived date · loaded sessions"):windows.join('\n'));
-    m_status->setToolTip(errors.join('\n'));
-    m_more->setVisible(!m_hosts.isEmpty()&&(more||busy));m_more->setEnabled(valid&&!busy);m_more->setText(tr("Older sessions"));m_newer->setVisible(newer);m_newer->setEnabled(valid&&!busy);m_refresh->setEnabled(!busy);
+    int shown=0;for(const auto &page:m_pages)shown+=page.rows.size();
+    const auto summary=busy?tr("Loading archive…"):m_hosts.isEmpty()?tr("Loaded sessions"):m_hosts.size()==1&&!singleWindow.isEmpty()?singleWindow:totalsKnown()?tr("%1 loaded of %2").arg(shown).arg(total()):tr("%1 loaded").arg(shown);
+    m_status->setText(summary);m_status->setToolTip(windows.join('\n'));m_status->setAccessibleDescription(windows.join('\n'));
+    m_error->setText(errors.join('\n').left(240));m_error->setToolTip(errors.join('\n'));m_error->setVisible(!errors.isEmpty());
+    m_more->setVisible(!m_hosts.isEmpty()&&(more||busy));m_more->setEnabled(valid&&!busy);m_newer->setVisible(newer);m_newer->setEnabled(valid&&!busy);m_refresh->setEnabled(!busy);
+}
+void ArchiveBrowser::resizeEvent(QResizeEvent *event){QWidget::resizeEvent(event);m_more->setText(width()<310?QString():tr("Older"));m_newer->setText(width()<310?QString():tr("Newer"));}
+void ArchiveBrowser::setTheme(bool dark){
+    m_period->setTheme(dark);const QColor ink(dark?"#a2adbc":"#627082");
+    m_refresh->setIcon(workspaceIcon("refresh",ink));m_more->setIcon(workspaceIcon("chevron-right",ink));m_newer->setIcon(workspaceIcon("chevron-left",ink));
+    m_refresh->setFixedSize(m_period->sizeHint().height(),m_period->sizeHint().height());
+    setWorkspaceStyle(this,QString("QWidget#archiveBrowser QPushButton{background:transparent;color:%1;border:1px solid %2;border-radius:7px;padding:5px 7px;min-height:20px;} QWidget#archiveBrowser QPushButton:hover{background:%3;} QWidget#archiveBrowser QPushButton:focus{border-color:%4;} QLabel#archiveStatus{color:%1;} QLabel#archiveError{color:%5;}").arg(ink.name(),dark?"#333c47":"#dce2e8",dark?"#2b3540":"#edf2f5",dark?"#8bdfc0":"#167357",dark?"#ff9ca8":"#b52d48"));
 }
 QList<SessionInfo> ArchiveBrowser::sessions(const QString&host)const{return m_pages.value(host).rows;}
 int ArchiveBrowser::total()const{int n=0;for(const auto&p:m_pages)n+=p.total;return n;}

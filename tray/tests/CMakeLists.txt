@@ -489,7 +489,7 @@ target_link_libraries(test_machinespage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-
 zerus_add_test(machinespage test_machinespage)
 set_tests_properties(machinespage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-add_executable(test_archivebrowser test_archivebrowser.cpp)
+add_executable(test_archivebrowser test_archivebrowser.cpp ../resources.qrc)
 target_include_directories(test_archivebrowser PRIVATE ../src)
 target_link_libraries(test_archivebrowser PRIVATE Qt6::Test Qt6::Widgets hgs-tray-views)
 zerus_add_test(archivebrowser test_archivebrowser)

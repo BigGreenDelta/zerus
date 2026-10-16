@@ -259,7 +259,14 @@ each project. **Refresh** starts a fresh view. **Older sessions** and **Newer
 sessions** replace the current page, retaining at most 50 rows per selected online
 computer. Only two cursor anchors per computer are kept, without a growing page
 or cursor history; every matching record remains reachable in either direction.
-The date panel reports each computer's current row range and matching total.
+The compact period button opens quick ranges and a custom From/Through picker.
+Custom dates remain a draft until **Apply range**; Cancel, Escape or dismissing
+the panel keeps the current view. Opening a picker never fetches a page. Quick
+ranges apply immediately. Calendar inputs follow the app's desktop theme.
+The navigation row shows the current range for one computer or the loaded/matching
+count across computers. Hover the desktop count or expand the mobile count for
+each computer's exact page range. Older/Newer arrows sit beside this summary;
+their accessible labels describe the direction. Refresh uses the adjacent icon.
 The Archive badge counts rows in the current project/machine scope, with `+` when
 the current window does not contain the whole archive. An unavailable
 computer keeps its own error and retry state; changing dates, search or machines

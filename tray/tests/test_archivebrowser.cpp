@@ -1,7 +1,10 @@
 #include <QtTest>
 #include <QTemporaryDir>
 #include <QFile>
-#include <QComboBox>
+#include <QFrame>
+#include <QScreen>
+#include <QScopeGuard>
+#include <QCalendarWidget>
 #include <QDateEdit>
 #include <QLabel>
 #include <QPushButton>
@@ -29,15 +32,66 @@ print(json.dumps(r))
     QTRY_COMPARE(browser.sessions("").size(),1);QCOMPARE(browser.total(),2);
     auto *more=browser.findChild<QPushButton*>("archiveMore");QVERIFY(more->isVisible());QTest::mouseClick(more,Qt::LeftButton);
     QTRY_VERIFY(browser.sessions("").size()==1 && browser.sessions("").first().name.endsWith("archive2"));QVERIFY(!more->isVisible());
-    auto *period=browser.findChild<QComboBox*>("archivePeriod");period->setCurrentIndex(1);
+    auto *period=browser.findChild<QPushButton*>("archivePeriod");QTest::mouseClick(period,Qt::LeftButton);
+    auto *panel=browser.findChild<QFrame*>("archiveDatePanel");QVERIFY(panel->isVisible());
+    const auto before=ready.size();QTest::qWait(200);QCOMPARE(ready.size(),before);
+    QTest::mouseClick(browser.findChild<QPushButton*>("archivePreset1"),Qt::LeftButton);
     QTRY_COMPARE(browser.sessions("").size(),1);QVERIFY(!browser.includes(1));
-    period->setCurrentIndex(4);auto *from=browser.findChild<QDateEdit*>("archiveFrom");auto *until=browser.findChild<QDateEdit*>("archiveUntil");
+    QTest::mouseClick(period,Qt::LeftButton);auto *from=browser.findChild<QDateEdit*>("archiveFrom");auto *until=browser.findChild<QDateEdit*>("archiveUntil");
     QTRY_VERIFY(from->isVisible());QVERIFY(until->isVisible());
+    const auto draftRequests=ready.size();
     from->setDate(QDate(2026,10,15));until->setDate(QDate(2026,10,14));
-    QVERIFY(browser.findChild<QLabel*>("archiveStatus")->text().contains("end date"));QVERIFY(!more->isEnabled());
-    until->setDate(from->date());QTRY_VERIFY(!browser.sessions("").isEmpty());
+    auto *apply=browser.findChild<QPushButton*>("archiveRangeApply");QVERIFY(!apply->isEnabled());
+    QVERIFY(browser.findChild<QLabel*>("archiveRangeHint")->text().contains("End date"));
+    QTest::qWait(200);QCOMPARE(ready.size(),draftRequests);QVERIFY(!browser.sessions("").isEmpty());
+    QTest::keyClick(from,Qt::Key_Escape);QVERIFY(!panel->isVisible());
+    QTest::mouseClick(period,Qt::LeftButton);QCOMPARE(from->date(),QDate::currentDate());
+    from->setDate(QDate(2026,10,15));until->setDate(from->date());QVERIFY(apply->isEnabled());
+    QTest::qWait(200);QCOMPARE(ready.size(),draftRequests);
+    QTest::mouseClick(apply,Qt::LeftButton);QVERIFY(!panel->isVisible());QTRY_COMPARE(ready.size(),draftRequests+1);
     QVERIFY(browser.includes(QDate(2026,10,15).startOfDay().toSecsSinceEpoch()));QVERIFY(!browser.includes(QDate(2026,10,16).startOfDay().toSecsSinceEpoch()));
-    for(auto *control:{static_cast<QWidget*>(period),static_cast<QWidget*>(from),static_cast<QWidget*>(until),static_cast<QWidget*>(more)})if(control->isVisible())QVERIFY(browser.rect().contains(QRect(control->mapTo(&browser,QPoint()),control->size())));
+    for(auto *control:{period,more,browser.findChild<QPushButton*>("archiveRefresh")})if(control->isVisible())QVERIFY(browser.rect().contains(QRect(control->mapTo(&browser,QPoint()),control->size())));
+ }
+ void themedPopoverGeometry_data(){
+    QTest::addColumn<bool>("dark");QTest::addColumn<int>("width");QTest::addColumn<double>("scale");
+    QTest::newRow("dark")<<true<<390<<1.;QTest::newRow("light")<<false<<390<<1.;
+    QTest::newRow("narrow-large")<<true<<250<<1.5;
+ }
+ void themedPopoverGeometry(){
+    QFETCH(bool,dark);QFETCH(int,width);QFETCH(double,scale);
+    const auto originalFont=qApp->font();const auto restoreFont=qScopeGuard([&]{qApp->setFont(originalFont);});
+    auto font=originalFont;font.setPointSizeF(font.pointSizeF()*scale);qApp->setFont(font);
+    QTemporaryDir dir;const auto file=dir.filePath("hgs");
+    QVERIFY(FakeCli::install(file,R"(#!/usr/bin/env python3
+import json,sys
+assert sys.argv[1:]==['archives','--json']
+q=json.load(sys.stdin)
+rows=[dict(name='codex/example/'+str(i),cmd='codex',state='archived',archive_id='10000000-0000-4000-8000-'+str(i+1).zfill(12),archived_at=q['from']+i+1) for i in range(50)]
+print(json.dumps(dict(version=1,sessions=rows,next_cursor='next',previous_cursor='',position=0,total=2043,**{'from':q['from'],'until':q['until'],'query':q['query']})))
+)"));
+    HgsClient client(FakeCli::program(file));ArchiveBrowser browser(client);browser.setTheme(dark);
+    auto palette=browser.palette();palette.setColor(QPalette::Window,dark?QColor("#161b21"):QColor("#f5f7f9"));browser.setPalette(palette);browser.setAutoFillBackground(true);
+    browser.resize(width,browser.sizeHint().height());browser.configure({{"","Fixture computer"}},true);browser.show();
+    QTRY_COMPARE(browser.sessions("").size(),50);
+    auto *period=browser.findChild<QPushButton*>("archivePeriod");QTest::mouseClick(period,Qt::LeftButton);
+    auto *panel=browser.findChild<QFrame*>("archiveDatePanel");QVERIFY(panel->isVisible());
+    QCOMPARE(panel->font().pointSizeF(),font.pointSizeF());
+    QVERIFY(panel->screen()->availableGeometry().contains(panel->frameGeometry()));
+    for(auto *control:panel->findChildren<QWidget*>())if(control->isVisible()&&control->window()==panel)
+        QVERIFY2(panel->rect().contains(QRect(control->mapTo(panel,QPoint()),control->size())),qPrintable(control->objectName()));
+    auto *from=browser.findChild<QDateEdit*>("archiveFrom");QVERIFY(from->styleSheet().isEmpty());
+    const auto output=qEnvironmentVariable("ZERUS_ARCHIVE_RASTER_DIR");
+    if(!output.isEmpty()){
+        QDir().mkpath(output);QVERIFY(browser.grab().save(output+"/"+QTest::currentDataTag()+"-toolbar.png"));
+        QVERIFY(panel->grab().save(output+"/"+QTest::currentDataTag()+"-panel.png"));
+    }
+    QTest::mouseClick(from,Qt::LeftButton,Qt::NoModifier,QPoint(from->width()-12,from->height()/2));
+    auto *calendar=from->calendarWidget();QTRY_VERIFY(calendar->isVisible());
+    QVERIFY(calendar->screen()->availableGeometry().contains(calendar->window()->frameGeometry()));
+    if(!output.isEmpty())QVERIFY(calendar->window()->grab().save(output+"/"+QTest::currentDataTag()+"-calendar.png"));
+    QTest::keyClick(calendar,Qt::Key_Escape);QTRY_VERIFY(!calendar->isVisible());QVERIFY(panel->isVisible());
+    QTest::mouseClick(browser.findChild<QPushButton*>("archiveRangeCancel"),Qt::LeftButton);QVERIFY(!panel->isVisible());
+    QCOMPARE(period->text(),QString("All dates"));
  }
  void bidirectionalWindowsStayBoundedBeyondTheCap(){
     QTemporaryDir dir;const auto file=dir.filePath("hgs");

@@ -672,7 +672,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             }
         }
         if (projection.visibleCount == 0 && !(model.sessionFilter==SessionFilter.Archive && model.archive.loading)) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else if(model.sessionFilter==SessionFilter.Archive && model.archive.partial) "No sessions in this page match. Browse older/newer sessions or narrow the date range." else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
-        if(model.sessionFilter==SessionFilter.Archive && model.archive.hasMore) item { OutlinedButton(onClick={model.archive.loadMore()},enabled=!model.archive.loading && model.archive.range.valid,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) { Text(if(model.archive.loading) "Loading…" else "Older archived sessions") } }
     }
     sessionActions?.let { SessionActionsSheet(model, it) { sessionActions = null } }
     if (machineDialog) ZerusAlertDialog(onDismissRequest = { machineDialog = false }, title = { Text("Filter machines") },

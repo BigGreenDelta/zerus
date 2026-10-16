@@ -84,6 +84,12 @@ object DesktopIcons {
         moveTo(10f, 12f); lineTo(14f, 12f)
     }
     val Archive get() = Archived
+    val Calendar = stroke("DesktopCalendar") {
+        roundedRectangle(4f, 5f, 16f, 16f)
+        moveTo(4f, 10f); lineTo(20f, 10f)
+        moveTo(8f, 3f); lineTo(8f, 7f); moveTo(16f, 3f); lineTo(16f, 7f)
+        moveTo(8f, 14f); lineTo(8.01f, 14f); moveTo(12f, 14f); lineTo(12.01f, 14f); moveTo(16f, 14f); lineTo(16.01f, 14f)
+    }
     val Machines = stroke("DesktopMachines") {
         roundedRectangle(3f, 4f, 18f, 12f)
         moveTo(12f, 16f); lineTo(12f, 20f); moveTo(8f, 20f); lineTo(16f, 20f)

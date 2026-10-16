@@ -1741,6 +1741,7 @@ void SessionsWindow::applyTheme()
     m_cacheClear->setIcon(workspaceIcon("refresh",QColor(m_muted)));m_cacheClear->setIconSize(QSize(14,14));
     m_fileDrop->setTheme(m_dark);
     m_recovery->setStyleSheet(QStringLiteral("QFrame#recoveryPanel {background:transparent;border:0;} QLabel {border:0;background:transparent;}"));
+    m_archiveBrowser->setTheme(m_dark);
     m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     m_processes->setTheme(m_dark);
