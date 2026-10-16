@@ -205,8 +205,18 @@ value and must print `KillMode=process`. A drop-in that already sets it is enoug
 one that sorts later, such as `override.conf` from `systemctl --user edit`, takes
 precedence over this file.
 
-With the Linux package installed, `zerus-setup --mobile-connector protect` does
-the same: it writes that drop-in only when the unit runs a
+`zerus-setup --mobile-connector install` (or, from a source checkout,
+`python3 scripts/install-mobile-connector-service.py install`) sets up the Rust
+connector's service: with the Linux package it relies on the packaged unit and
+writes nothing; for `~/.local/bin/zerus-mobile-connector` it writes a user unit
+with that absolute path, the session's `PATH` and `KillMode=process`; on macOS it
+writes the `com.hgdev.zerus-mobile-connector` LaunchAgent (`AbandonProcessGroup`,
+`KeepAlive` on failure only, logs in `~/Library/Logs/hgs`). It writes only when
+no definition exists or the existing one is its own, and prints the enable or
+`launchctl bootstrap` command instead of running it.
+
+With the Linux package installed, `zerus-setup --mobile-connector protect` adds
+the protection above: it writes that drop-in only when the unit runs a
 `zerus-mobile-connector` whose effective kill mode is not already `process`,
 reloads the user manager and checks the result, and removes its file again if a
 later drop-in wins. Its `migrate` and `rollback` actions switch an existing

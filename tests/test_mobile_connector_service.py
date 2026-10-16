@@ -59,8 +59,9 @@ elif args[1] == "show":
 '''
 
 
-@unittest.skipUnless(sys.platform.startswith("linux"), "systemd user units")
-class MobileConnectorService(unittest.TestCase):
+class ServiceFixture(unittest.TestCase):
+    """A fake user manager, a Python connector unit and both connector binaries."""
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="zerus-connector-service-")
         self.addCleanup(directory.cleanup)
@@ -130,6 +131,10 @@ class MobileConnectorService(unittest.TestCase):
     def files(self):
         return sorted(str(path.relative_to(self.home)) for path in self.home.rglob("*") if path.is_file())
 
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "systemd user units")
+class MobileConnectorService(ServiceFixture):
     def test_protect_writes_one_drop_in_once_and_reloads(self):
         before = self.files()
         result, calls = self.run_action("protect")
@@ -245,6 +250,121 @@ class MobileConnectorService(unittest.TestCase):
                 result, _ = self.run_action("migrate", code=1)
                 self.assertIn("migrate it by hand", result.stderr)
                 self.assertFalse(self.drop_ins.exists())
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "systemd user units")
+class InstallUnit(ServiceFixture):
+    def setUp(self):
+        super().setUp()
+        (self.units / UNIT).unlink()
+        self.reload()
+
+    def unit_text(self):
+        return (self.units / UNIT).read_text()
+
+    def test_install_writes_the_user_unit_once_and_starts_nothing(self):
+        result, calls = self.run_action("install")
+        self.assertIn("--user daemon-reload", calls)
+        self.assertIn("systemctl --user enable --now", result.stdout)
+        text = self.unit_text()
+        self.assertTrue(text.startswith("# Written by zerus-setup --mobile-connector install"))
+        self.assertIn(f"\nExecStart={self.rust} --config %E/hgs/mobile/connector.json\n", text)
+        self.assertIn("\nKillMode=process\n", text)
+        self.assertIn('\nEnvironment="PATH=', text)
+        self.assertEqual(self.shown()["KillMode"], "process")
+        result, calls = self.run_action("install")
+        self.assertIn("is current", result.stdout)
+        self.assertNotIn("--user daemon-reload", calls)
+
+    def test_install_keeps_a_unit_it_did_not_write(self):
+        self.unit(f"ExecStart={self.python} --config {self.config}\n")
+        before = self.unit_text()
+        result, calls = self.run_action("install", code=1)
+        self.assertIn("was not written by this tool", result.stderr)
+        self.assertEqual(self.unit_text(), before)
+        self.assertNotIn("--user daemon-reload", calls)
+
+    def test_install_updates_its_own_unit_for_another_binary(self):
+        self.run_action("install")
+        other = self.root / "other/zerus-mobile-connector"
+        self.executable(other)
+        result, _ = self.run_action("install", "--binary", str(other))
+        self.assertIn("keeps its previous definition", result.stdout)
+        self.assertIn(f"\nExecStart={other} --config", self.unit_text())
+
+
+LAUNCHCTL = """#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_STATE/launchctl.calls"
+[ "$1" = print ] && [ -e "$FAKE_STATE/loaded" ]
+"""
+
+
+class InstallAgent(unittest.TestCase):
+    """The macOS branch, run here with a fake launchctl and platform darwin."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="zerus-connector-agent-")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home, self.bin, self.state = self.root / "home", self.root / "bin", self.root / "fake"
+        for path in (self.home, self.bin, self.state):
+            path.mkdir()
+        (self.bin / "launchctl").write_text(LAUNCHCTL)
+        (self.bin / "launchctl").chmod(0o755)
+        self.rust = self.home / ".local/bin/zerus-mobile-connector"
+        self.rust.parent.mkdir(parents=True)
+        self.rust.write_text("#!/bin/sh\n")
+        self.rust.chmod(0o755)
+        self.plist = self.home / "Library/LaunchAgents/com.hgdev.zerus-mobile-connector.plist"
+
+    def run_agent(self, *args, code=0):
+        env = {key: value for key, value in os.environ.items() if not key.startswith(("HGS_", "XDG_"))}
+        env.update(HOME=str(self.home), PATH=f"{self.bin}{os.pathsep}/usr/bin{os.pathsep}/bin", FAKE_STATE=str(self.state))
+        runner = ("import importlib.util, sys\n"
+                  f"spec = importlib.util.spec_from_file_location('service', {str(SCRIPT)!r})\n"
+                  "module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)\n"
+                  "sys.exit(module.main(sys.argv[1:], platform='darwin'))\n")
+        result = subprocess.run([sys.executable, "-c", runner, *args], env=env, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+        calls_path = self.state / "launchctl.calls"
+        calls = calls_path.read_text().splitlines() if calls_path.exists() else []
+        calls_path.unlink(missing_ok=True)
+        for call in calls:
+            self.assertTrue(call.startswith("print gui/"), call)
+        return result
+
+    def test_install_writes_an_agent_that_abandons_its_process_group_and_loads_nothing(self):
+        import plistlib
+        result = self.run_agent("install")
+        self.assertIn("nothing was loaded. When ready: launchctl bootstrap gui/", result.stdout)
+        agent = plistlib.loads(self.plist.read_bytes())
+        self.assertEqual(agent["Label"], "com.hgdev.zerus-mobile-connector")
+        self.assertEqual(agent["ProgramArguments"],
+                         [str(self.rust), "--config", str(self.home / ".config/hgs/mobile/connector.json")])
+        self.assertIs(agent["AbandonProcessGroup"], True)
+        self.assertEqual(agent["KeepAlive"], {"SuccessfulExit": False})
+        self.assertIn(str(self.home / ".local/bin"), agent["EnvironmentVariables"]["PATH"].split(os.pathsep))
+        self.assertTrue((self.home / "Library/Logs/hgs").is_dir())
+        self.assertIn("is current", self.run_agent("install").stdout)
+
+    def test_a_loaded_changed_agent_is_rewritten_but_never_reloaded(self):
+        self.run_agent("install")
+        (self.state / "loaded").touch()
+        other = self.root / "Zerus.app/Contents/MacOS/zerus-mobile-connector"
+        other.parent.mkdir(parents=True)
+        other.write_text("#!/bin/sh\n")
+        other.chmod(0o755)
+        result = self.run_agent("install", "--binary", str(other))
+        self.assertIn("The loaded agent keeps its previous definition", result.stdout)
+        self.assertIn("launchctl bootout gui/", result.stdout)
+
+    def test_a_foreign_agent_is_kept(self):
+        self.plist.parent.mkdir(parents=True)
+        self.plist.write_text("not a plist")
+        result = self.run_agent("install", code=1)
+        self.assertIn("is not a zerus-mobile-connector agent", result.stderr)
+        self.assertEqual(self.plist.read_text(), "not a plist")
 
 
 if __name__ == "__main__":
