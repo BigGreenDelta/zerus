@@ -1490,7 +1490,10 @@ sync service. Windows has no service manager for the worker; the desktop app run
 it there ([Windows](#windows)).
 
 **Swarm → Conflicts** explains the affected session, archived session, project or
-folder. Compare the values and the computers that saved them. **Shown now** marks
+folder. Compare the values and the computers that saved them: projects, project
+names and colors appear as the project labels and computers as the machine badges
+used elsewhere, with **this computer** beside this desktop's badge. A computer the
+catalog does not list stays text with its identifier. **Shown now** marks
 the temporary display choice; it does not mean the conflict has been resolved.
 Select a row to preview the result, then use **Keep this project** or the matching
 action. Project assignments change catalog placement without restarting agents

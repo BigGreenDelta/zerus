@@ -417,13 +417,47 @@ print(json.dumps(result))
         QCOMPARE(choices->rowCount(),2);QCOMPARE(choices->item(0,0)->text(),"General");QCOMPARE(choices->item(1,0)->text(),"Work");
         QVERIFY(choices->item(0,1)->text().contains("Desktop (this computer)"));QVERIFY(choices->item(0,1)->text().contains("Laptop"));
         QCOMPARE(choices->item(0,2)->text(),"Shown now");QVERIFY(!button->isEnabled());
-        QVERIFY(review.findChild<QLabel*>("swarmConflictSubject")->text().contains("demo / planning on Desktop"));
+        // Values and computers read as the project labels and machine badges of other views.
+        auto *subject=review.findChild<QLabel*>("swarmConflictSubject");QCOMPARE(subject->text(),"demo / planning");
+        QVERIFY(subject->accessibleName().contains("demo / planning on Desktop"));
+        QCOMPARE(review.findChild<QLabel*>("swarmConflictMachine")->text(),"arch");
+        const auto project=[&](int row){return choices->item(row,0)->data(SwarmConflictReview::PresentationRole).toMap()["project"].toMap();};
+        QCOMPARE(project(0)["name"].toString(),"General");QCOMPARE(project(0)["color"].toString(),"#64b5f6");
+        QCOMPARE(project(1)["name"].toString(),"Work");QCOMPARE(project(1)["color"].toString(),"#123456");
+        const auto origins=choices->item(0,1)->data(SwarmConflictReview::PresentationRole).toMap()["machines"].toList();
+        QCOMPARE(origins.size(),2);QCOMPARE(origins[0].toMap()["alias"].toString(),"arch");QVERIFY(origins[0].toMap()["local"].toBool());
+        QCOMPARE(origins[1].toMap()["alias"].toString(),"mac");QVERIFY(!origins[1].toMap()["local"].toBool());
+        const auto listed=review.conflictPresentation(c,snapshot);
+        QCOMPARE(listed["caption"].toString(),"Session project");QCOMPARE(listed["text"].toString(),"demo / planning");
+        QCOMPARE(listed["machines"].toList().value(0).toMap()["alias"].toString(),"arch");
+        QVERIFY(choices->rowHeight(0)>=40);
         choices->setCurrentCell(1,0);QVERIFY(button->isEnabled());QCOMPARE(button->text(),"Keep this project");
         auto *outcome=review.findChild<QLabel*>("swarmConflictOutcome");QVERIFY(outcome->text().contains("Assign this session to “Work”"));QVERIFY(outcome->text().contains("running agent stay intact"));
         button->click();QCOMPARE(sent.count(),1);const auto payload=sent[0][0].toJsonObject();QCOMPARE(payload["key"],c["key"]);QCOMPARE(payload["value"],QJsonValue("p"));
         QCOMPARE(payload["versions"].toArray(),QJsonArray({"version-a","version-b","version-c"}));
         QTest::qWait(30);
         const auto preview=qEnvironmentVariable("HGS_CONFLICT_PREVIEW");if(!preview.isEmpty())QVERIFY(review.grab().save(preview));
+    }
+    void projectAndFolderChoicesUseTheirLabels() {
+        FleetState fleet;BoxState local;local.host="arch";fleet.setLocal(local,0);
+        SwarmConflictReview review(fleet);review.resize(640,520);review.show();const auto snapshot=conflictSnapshot();
+        auto *choices=review.findChild<QTableWidget*>("swarmConflictChoices");
+        const auto view=[&](int row){return choices->item(row,0)->data(SwarmConflictReview::PresentationRole).toMap();};
+        // Each color reads as the label the project would get.
+        review.setConflict(conflict({{"kind","project"},{"id","p"},{"field","color"}},"#aa3344","#22bb66"),snapshot);
+        QCOMPARE(view(0)["project"].toMap()["name"].toString(),"Work");QCOMPARE(view(0)["project"].toMap()["color"].toString(),"#aa3344");
+        QCOMPARE(view(1)["project"].toMap()["color"].toString(),"#22bb66");QCOMPARE(choices->item(1,0)->text(),"#22bb66");
+        QCOMPARE(review.conflictPresentation(conflict({{"kind","project"},{"id","p"},{"field","color"}},"#aa3344","#22bb66"),snapshot)["project"].toMap()["name"].toString(),"Work");
+        const QJsonObject folder{{"project","p"},{"machine","node-b"},{"path","/workspace/example"}};
+        review.setConflict(conflict({{"kind","folder"},{"id","folder-id"}},folder,QJsonValue::Null),snapshot);
+        QCOMPARE(view(0)["project"].toMap()["name"].toString(),"Work");QCOMPARE(view(0)["text"].toString(),"/workspace/example");
+        QCOMPARE(view(0)["machines"].toList().value(0).toMap()["alias"].toString(),"mac");
+        QVERIFY(choices->item(0,0)->text().contains("Computer: Laptop"));QVERIFY(view(1).isEmpty());
+        // A computer this desktop cannot name stays text, never a guessed badge.
+        auto unknown=conflict({{"kind","session"},{"machine","node-z"},{"session","codex/demo/review"}},"p","ungrouped");
+        review.setConflict(unknown,snapshot);QVERIFY(!review.findChild<QLabel*>("swarmConflictMachine")->isVisibleTo(&review));
+        QVERIFY(review.findChild<QLabel*>("swarmConflictSubject")->text().contains("Unknown computer"));
+        QTest::qWait(30);const auto preview=qEnvironmentVariable("HGS_CONFLICT_PREVIEW");if(!preview.isEmpty())QVERIFY(review.grab().save(preview+"-unknown.png"));
     }
     void wrappedConflictChoicesResizeWithoutLosingSelection() {
         FleetState fleet;SwarmConflictReview review(fleet);review.resize(900,560);review.show();QTest::qWait(30);
