@@ -8,6 +8,7 @@ import signal
 import unittest
 
 from bb_operations import OperationCase, help_text, listing, real_hgs, validation_cases
+from differential import REAL_HGS, untraced
 from connector_harness import RESTART_ERROR, BlackBoxCase, default_rules
 
 PATH = "/alias/new project;$(literal)"
@@ -177,6 +178,7 @@ class DirectoryCatalogTests(DirectoryCase):
         await self.assert_rejections(process, validation_cases("launch", {"dirs"}), [["dirs"]])
 
 
+@untraced(REAL_HGS)
 class NativeDirectoryTests(DirectoryCase):
     """The real hgs answers help and directory commands; nothing else."""
 

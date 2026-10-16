@@ -23,6 +23,9 @@ source tree with the interpreter running the tests, which needs `aiohttp`
 |---|---|
 | `ZERUS_CONNECTOR_COMMAND` | Command line, split like a shell, run in place of the Python connector. Give an absolute program path: the connector's PATH holds only the scripted `hgs` and the system directories. |
 | `ZERUS_CONNECTOR_IMPLEMENTATION` | `python` or `rust`; defaults to `python` without a command and `rust` with one. Assertions on a reviewed divergence depend on it. |
+| `ZERUS_CONNECTOR_TRACE_DIR` | Write one differential trace per test there and seed each test's `uuid4` from its id ([Differential traces](#differential-traces)). |
+| `ZERUS_CONNECTOR_ROLLBACK_COMMANDS` | Console scripts of rollback baseline venvs, separated by `:`, for `test_bb_handoff` ([Journal handoffs](#journal-handoffs)). |
+| `ZERUS_CONNECTOR_SOAK_SECONDS` | Run `test_bb_soak` for that long; it skips without it. |
 
 Outside Python mode only the modules listed under `rust` in `ported.json` run;
 the others skip. Within a ported module, a known operation missing from
@@ -145,6 +148,68 @@ KeyboardInterrupt cancels the request and SIGKILLs the hgs child, which
 amended divergence h does not address. The design's runtime section stops
 the Rust connector on SIGINT as on SIGTERM, which
 `test_bb_runtime.StopTests.test_sigint_stops_like_sigterm` pins with a read.
+
+## Differential traces
+
+The C7 parity gate runs the suites once against each connector with
+`ZERUS_CONNECTOR_TRACE_DIR` set, then compares the two directories:
+
+```sh
+python3 services/mobile/tests/differential.py compare PYTHON_TRACES RUST_TRACES
+```
+
+`differential.py` writes a trace when a test ends: every native `hgs` call
+(argv, parsed stdin and environment keys), every relay exchange (poll query,
+parsed upload or heartbeat, answer status) and the final journal rows, read
+from a copy so a killed connector's write-ahead log does not matter. The test's
+scratch path, relay URL, node token and relay binding become placeholders,
+clock readings (`*_at` numbers) and the live `metrics` of a snapshot become
+markers, and large values a digest. A `request_hash` that equals Python's hash
+of a body the relay handed out is marked as such, so both implementations must
+hash every request as Python does even when the request carries the test's
+clock. Each test seeds `uuid.uuid4` from its id, so both runs use the same
+identities. Heartbeats, polls and the periodic native reads (`PERIODIC`, also
+through a peer envelope) follow each connector's clock and are compared by
+presence; peer refreshes are compared by shape, since the order in which peers
+get the four native slots is scheduling, and a poll still open when a
+connector stopped is left out. Native work, result uploads and journal rows
+must also match in number.
+
+A difference fails unless `differential-allowlist.json` names it. Each entry
+gives a test pattern, the kind (`native`, `relay` or `journal`), the side it
+appears on (`python`, `rust` or `count`), a regular expression for the entry
+and one of the design's divergences a-k with a reason; an entry that matches
+nothing fails too, so the list never outlives a fix. Its `timing` list names
+tests whose clock-driven traffic differs between two runs of the same
+connector, with a reason; for them only native work, result uploads and
+journal rows are compared. Key order and whitespace
+cannot differ (everything is parsed) and logs are not traced. Tests marked
+`@untraced` are reported but not compared: those that run a real `hgs`, whose
+machine ids and paths differ between any two runs. Tests that skip on one side
+(Rust-only tests, the handoffs) are counted, not compared.
+
+## Journal handoffs
+
+`test_bb_handoff` passes one state directory from Python to Rust and back,
+as a cutover and its rollback do, while each implementation holds rows the
+other wrote: a mutation SIGKILLed after its native success (recovered as
+uncertain, replayed, never executed again), delivered replays and conflicting
+redeliveries (no native work, no upload, no journal change), seven-day
+tombstones, undelivered outbox rows (uploaded unchanged) and journals bound to
+other credentials (refused, unchanged). It runs in a Rust run, against this
+tree's Python connector and each venv in `ZERUS_CONNECTOR_ROLLBACK_COMMANDS`.
+CI builds one venv per commit in `rollback-baselines.json`; a gateway's
+recorded pre-cutover commit belongs there before its cutover (design E0 and
+step 2 of the cutover runbook).
+
+## Soak
+
+`test_bb_soak` heartbeats every second while a phone polls one Terminal screen
+four times a second for `ZERUS_CONNECTOR_SOAK_SECONDS`, sampling the
+connector's resident memory and open descriptors from `/proc` after a
+warm-up. The last third of the samples may exceed the first by the allocator
+margin in the module at most. CI soaks the Rust build for 300 s beside the two
+suite runs.
 
 ## Heartbeat key review
 

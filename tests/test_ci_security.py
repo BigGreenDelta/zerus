@@ -391,14 +391,14 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
-        self.assertIn("needs: [source, quick, relay, connector, android, cli, arch, arch-package, mac-desktop, "
-                      "windows-desktop, windows-host]", gate)
+        self.assertIn("needs: [source, quick, relay, connector, connector-macos, android, cli, arch, arch-package, "
+                      "mac-desktop, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         base = {"source": "success", "quick": "success", "relay": "success", "connector": "success",
                 "android": "success", "cli": "success", "arch": "success", "arch-package": "success",
-                "mac-desktop": "success"}
+                "mac-desktop": "success", "connector-macos": "success"}
         # Both Windows jobs are selected together, and each must pass on its own.
         windows = ("windows-desktop", "windows-host")
         for name in windows:
@@ -468,8 +468,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
                      "run: cargo +1.85.0 test --locked"):
             self.assertIn(line, quick)
-        for name in ("quick", "relay", "connector", "android", "cli", "arch", "arch-package", "mac-desktop",
-                     "windows-desktop", "windows-host"):
+        for name in ("quick", "relay", "connector", "connector-macos", "android", "cli", "arch", "arch-package",
+                     "mac-desktop", "windows-desktop", "windows-host"):
             with self.subTest(job=name):
                 self.assertEqual(field(job(checks, name), "needs"), "source")
                 self.assertIn("ref: ${{ needs.source.outputs.commit }}", job(checks, name))
@@ -559,18 +559,72 @@ class WorkflowSecurityTests(unittest.TestCase):
         python = '"$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests'
         black_box = next(step for step in steps(connector) if "name: Black-box suites against the" in step)
         self.assertEqual(re.findall(rf"(?m)^ +(.*){re.escape(python)}(.*)$", black_box),
-                         [("", " -p 'test_bb_*.py' -v"), ("", " -p 'test_bb_*.py' -v")])
-        self.assertIn('ZERUS_CONNECTOR_COMMAND="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/'
-                      'zerus-mobile-connector" \\\n', black_box)
-        # cargo test rebuilt the binary without the test hooks the Rust run needs.
+                         [("", " -p 'test_bb_*.py' -v \\"), ("", " -p 'test_bb_*.py' -v \\"),
+                          ("", " -p test_bb_soak.py -v \\")])
+        # cargo test rebuilt the binary without the test hooks the Rust runs need.
         hooks = "\n          (cd services/mobile/connector && cargo +1.85.0 build --locked --features test-hooks)\n"
-        self.assertIn(hooks, black_box)
-        self.assertLess(black_box.index(python), black_box.index(hooks))
-        self.assertLess(black_box.index(hooks), black_box.index("ZERUS_CONNECTOR_COMMAND="))
+        self.assertTrue(black_box.startswith(f"      - name: Black-box suites against the Python and Rust "
+                                             f"connectors, differential traces and soak\n        run: |{hooks}"))
+        self.assertIn('\n          rust="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/zerus-mobile-connector"\n',
+                      black_box)
+        for run in ('ZERUS_CONNECTOR_TRACE_DIR="$traces/python" \\\n',
+                    'ZERUS_CONNECTOR_TRACE_DIR="$traces/rust" ZERUS_CONNECTOR_COMMAND="$rust" \\\n',
+                    'ZERUS_CONNECTOR_SOAK_SECONDS=300 ZERUS_CONNECTOR_COMMAND="$rust" \\\n'):
+            self.assertEqual(black_box.count(run), 1, run)
+        # Every run is waited for, and the traces are compared after all three.
+        for run in ('finish python "$python"', 'finish rust "$rust_suites"', 'finish soak "$soak"'):
+            self.assertIn(f"\n          {run}\n", black_box)
+            self.assertLess(black_box.index(run), black_box.index("differential.py compare"))
+        self.assertIn('            if wait "$2"; then\n', black_box)
+        self.assertIn('\n            "$traces/python" "$traces/rust" || status=1\n          exit "$status"\n', black_box)
+        baselines = next(step for step in steps(connector) if "name: Rollback baseline Python connectors" in step)
+        self.assertIn('echo "ZERUS_CONNECTOR_ROLLBACK_COMMANDS=$commands" >> "$GITHUB_ENV"', baselines)
+        self.assertLess(connector.index(baselines), connector.index(black_box))
+        recorded = json.loads((ROOT / "services/mobile/tests/rollback-baselines.json").read_text())["baselines"]
+        for baseline in recorded:
+            self.assertRegex(baseline["commit"], r"^[0-9a-f]{40}$")
+        # Every black-box module runs against Rust except the harness self-test,
+        # which runs in every mode anyway.
         ported = json.loads((ROOT / "services/mobile/tests/ported.json").read_text())["rust"]
         self.assertEqual(ported, sorted(set(ported)))
-        for module in ported:
-            self.assertTrue((ROOT / f"services/mobile/tests/{module}.py").is_file(), module)
+        modules = {path.stem for path in (ROOT / "services/mobile/tests").glob("test_bb_*.py")}
+        self.assertEqual(set(ported), modules - {"test_bb_harness"})
+
+    def test_connector_macos_job_is_a_selected_macos_smoke(self):
+        checks = (ROOT / ".github/workflows/checks.yml").read_text()
+        smoke = job(checks, "connector-macos")
+        self.assertEqual(field(smoke, "runs-on"), "macos-15")
+        self.assertEqual(field(smoke, "if"), "needs.source.outputs.run_macos == 'true'")
+        for text in ("secrets", "vars.", "environment:", "permissions", "github.token", "continue-on-error", "cache"):
+            with self.subTest(forbidden=text):
+                self.assertNotIn(text, smoke)
+        self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", smoke), ["actions/checkout"])
+        self.assertIn("persist-credentials: false", smoke)
+        self.assertIn("cargo +1.85.0 test --locked --lib ", smoke)
+        self.assertIn("(cd ../connector && cargo +1.85.0 build --locked --features test-hooks)", smoke)
+        self.assertIn("test_bb_handoff", smoke)
+        self.assertIn("'connector-macos': json.loads(os.environ['RUN_MACOS']),", job(checks, "gate"))
+        # Selected with the other macOS jobs: a failure or a skip fails the gate.
+        gate = job(checks, "gate")
+        script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
+        code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
+        names = ("source", "quick", "relay", "connector", "connector-macos", "android", "cli", "arch", "arch-package",
+                 "mac-desktop", "windows-desktop", "windows-host")
+        for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
+                                                 ("true", "skipped", False), ("false", "skipped", True),
+                                                 ("false", "success", False)]:
+            results = dict.fromkeys(names, "success")
+            if run_macos == "false":
+                results["mac-desktop"] = "skipped"
+            results["connector-macos"] = smoke_result
+            environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
+                           "RUN_CLI": "true", "RUN_ARCH": "true", "RUN_MACOS": run_macos, "RUN_WINDOWS": "true"}
+            with self.subTest(run_macos=run_macos, result=smoke_result), patch.dict(os.environ, environment):
+                if success:
+                    exec(code, {})
+                else:
+                    with self.assertRaises(SystemExit):
+                        exec(code, {})
 
     def test_relay_job_checks_the_protocol_library_alone(self):
         relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
