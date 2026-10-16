@@ -7,6 +7,60 @@ import subprocess
 import tempfile
 
 
+# A user manager for the --mobile-connector actions: it reports a Python
+# connector unit, applies the drop-ins only on daemon-reload and logs every call.
+SYSTEMCTL = """#!/usr/bin/python
+import json, os, sys
+from pathlib import Path
+home = Path(os.environ["HOME"])
+with open(home / "systemctl.calls", "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+drop_ins = home / ".config/systemd/user/zerus-mobile-connector.service.d"
+loaded = home / "loaded.json"
+if sys.argv[2] == "daemon-reload":
+    rust = drop_ins / "60-zerus-rust-connector.conf"
+    program = "/usr/bin/zerus-mobile-connector" if rust.exists() else os.environ["FIXTURE_VENV"] + "/bin/zerus-mobile-connector"
+    command = program + " --config " + os.environ["FIXTURE_CONFIG"]
+    kill = "process" if rust.exists() or (drop_ins / "50-zerus-killmode.conf").exists() else "control-group"
+    loaded.write_text(json.dumps({"LoadState": "loaded", "KillMode": kill,
+                                  "ExecStart": "{ path=%s ; argv[]=%s ; ignore_errors=no }" % (program, command)}))
+elif sys.argv[2] == "show":
+    for key, value in json.loads(loaded.read_text()).items():
+        print(key + "=" + value)
+"""
+
+
+def connector_actions(home, env):
+    """Each --mobile-connector action writes or removes only its drop-in and
+    never enables, starts, stops or restarts a unit."""
+    fake = home / "fake-bin"
+    fake.mkdir()
+    (fake / "systemctl").write_text(SYSTEMCTL)
+    (fake / "systemctl").chmod(0o755)
+    venv = home / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (venv / "bin/zerus-mobile-connector").write_text("#!/bin/sh\n")
+    (venv / "bin/zerus-mobile-connector").chmod(0o755)
+    config = home / ".config/hgs/mobile/connector.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"state_dir": str(home / "connector-state")}))
+    actions = dict(env, PATH=f"{fake}:{env['PATH']}", FIXTURE_VENV=str(venv), FIXTURE_CONFIG=str(config))
+    subprocess.run([str(fake / "systemctl"), "--user", "daemon-reload"], env=actions, check=True)
+    (home / "systemctl.calls").unlink()
+    drop_ins = home / ".config/systemd/user/zerus-mobile-connector.service.d"
+    for action, present in (("protect", ["50-zerus-killmode.conf"]),
+                            ("migrate", ["50-zerus-killmode.conf", "60-zerus-rust-connector.conf"]),
+                            ("rollback", ["50-zerus-killmode.conf"])):
+        subprocess.run(["/usr/bin/zerus-setup", "--mobile-connector", action], env=actions, check=True,
+                       stdin=subprocess.DEVNULL, timeout=30)
+        assert sorted(path.name for path in drop_ins.iterdir()) == present, action
+        assert sorted(path.name for path in (home / ".config/systemd/user").iterdir()) == [drop_ins.name], action
+        calls = (home / "systemctl.calls").read_text().splitlines()
+        assert calls and all(call == "--user daemon-reload" or call.startswith("--user show ") for call in calls), calls
+        (home / "systemctl.calls").unlink()
+
+
 def main():
     if os.geteuid() == 0:
         raise SystemExit("Run the installed-package check as an unprivileged user.")
@@ -36,6 +90,7 @@ def main():
         # The mobile connector is installed but neither linked nor enabled.
         assert not (home / ".local/bin/zerus-mobile-connector").exists()
         print(run("/usr/bin/zerus-mobile-connector", "--version").strip())
+        connector_actions(home, env)
         # No native agent is started. The terminal-only fixture uses an ordinary
         # non-Git project and a socket that cannot reach an existing server.
         try:

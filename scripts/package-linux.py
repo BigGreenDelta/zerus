@@ -43,8 +43,11 @@ def main():
         if not args.native_ui_plugin.is_file():
             parser.error(f"build output missing: {args.native_ui_plugin}")
         install(args.native_ui_plugin, destination / "usr/lib/hgs-tray/plugins/libhgs-tray-native-ui.so", 0o755)
-    for name, source in (("hgs_state.py", ROOT / "hgs_state.py"), ("zerus-setup", ROOT / "packaging/linux/zerus-setup")):
-        installed = destination / "usr/bin" / name
+    for installed, source in ((destination / "usr/bin/hgs_state.py", ROOT / "hgs_state.py"),
+                              (destination / "usr/bin/zerus-setup", ROOT / "packaging/linux/zerus-setup"),
+                              # zerus-setup --mobile-connector runs it.
+                              (destination / "usr/lib/zerus/install-mobile-connector-service.py",
+                               ROOT / "scripts/install-mobile-connector-service.py")):
         install(source, installed, 0o755)
         # Arch owns /usr/bin/python. Make the runtime dependency visible to
         # package tools while retaining portable source shebangs elsewhere.

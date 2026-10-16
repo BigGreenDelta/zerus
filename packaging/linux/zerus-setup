@@ -8,16 +8,35 @@ executables, changing agent state, or starting any service.
 import argparse
 import os
 from pathlib import Path
+import subprocess
 import sys
+
+CONNECTOR_ACTIONS = ("protect", "migrate", "rollback")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", type=Path, default=Path("/usr"),
                         help="system installation prefix (default: /usr)")
+    parser.add_argument("--mobile-connector", choices=CONNECTOR_ACTIONS,
+                        help="protect, migrate or roll back the mobile connector's user service; "
+                             "writes one drop-in and starts or restarts nothing")
+    parser.add_argument("--binary", help="with --mobile-connector migrate: the Rust connector to use "
+                                         "when both /usr/bin and ~/.local/bin copies exist")
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error("run this command as the desktop user, without sudo")
+    if args.binary and args.mobile_connector != "migrate":
+        parser.error("--binary applies to --mobile-connector migrate")
+    if args.mobile_connector:
+        # Only the connector service changes; no compatibility link is made.
+        tool = args.prefix.resolve() / "lib/zerus/install-mobile-connector-service.py"
+        if not tool.is_file():
+            parser.error(f"packaged file is missing: {tool}")
+        command = [sys.executable, str(tool), args.mobile_connector]
+        if args.binary:
+            command += ["--binary", args.binary]
+        return subprocess.run(command, stdin=subprocess.DEVNULL).returncode
     directory = Path.home() / ".local/bin"
     # Check every conflict before making any change. An existing source install
     # may own these stable paths; migration is an explicit user decision.
