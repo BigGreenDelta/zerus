@@ -1,0 +1,13 @@
+CameraX camera-video 1.6.2
+Copyright The Android Open Source Project. Licensed under Apache-2.0.
+
+Modified by Zerus: backport the complete persistent recording Stop/rebind fix
+968a36cef8c813f2f3b2c5f1765d40a0836cdab1 and its future-lifetime prerequisites
+7a2969cbf9b3689d89c4a19117ea9378451c5319 and
+7b541c103f7ff50274cd42f31b96d44d318aaf4b to the original 1.6.2 Recorder.java.
+Retain the original package-local aggregate field ABI and Java 8 syntax.
+This is a Zerus source-built backport, not an official AndroidX release.
+
+Original source/artifact SHA-256 pins, patch, licenses, test provenance and
+rebuild instructions: mobile/android/camera-video-fixed in the corresponding
+Zerus source distribution (https://github.com/ufna/zerus).

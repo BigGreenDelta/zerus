@@ -81,6 +81,74 @@ gradle.taskGraph.whenReady {
     if(allTasks.any { it.name in setOf("packageRelease","signReleaseBundle") })
         require(privateSigningFile.isFile) { "Distributable builds require private development signing configuration." }
 }
+// Replace every transitive camera-video edge too; never package both implementations.
+configurations.configureEach {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("androidx.camera:camera-video")).using(project(":camera-video-fixed"))
+    }
+}
+val verifyCameraVideoGraph by tasks.registering {
+    val report = layout.buildDirectory.file("reports/camera-video-graph/resolved.json")
+    outputs.file(report)
+    outputs.upToDateWhen { false }
+    doLast {
+        val results = linkedMapOf<String, Any>()
+        val names = listOf("debugRuntimeClasspath", "releaseRuntimeClasspath", "debugCompileClasspath", "releaseCompileClasspath")
+        val baselines = names.associateWith { name ->
+            val fixed = configurations.getByName(name)
+            val originalDependencies = fixed.allDependencies.filterNot {
+                it is ProjectDependency && it.dependencyProject.path == ":camera-video-fixed"
+            } + dependencies.create("androidx.camera:camera-video:1.6.2")
+            val original = configurations.detachedConfiguration(*originalDependencies.toTypedArray())
+            fixed.attributes.keySet().forEach { key ->
+                @Suppress("UNCHECKED_CAST") val typed = key as org.gradle.api.attributes.Attribute<Any>
+                original.attributes.attribute(typed, checkNotNull(fixed.attributes.getAttribute(typed)))
+            }
+            original.dependencyConstraints.addAll(fixed.allDependencyConstraints)
+            original
+        }
+        // AGP aligns each compile classpath with its runtime classpath. Preserve that policy in
+        // the detached official baseline too, rather than comparing an unaligned synthetic graph.
+        for (variant in listOf("debug", "release")) {
+            baselines.getValue("${variant}CompileClasspath").shouldResolveConsistentlyWith(baselines.getValue("${variant}RuntimeClasspath"))
+        }
+        for (name in names) {
+            val fixed = configurations.getByName(name)
+            val original = baselines.getValue(name)
+            fun componentId(id: org.gradle.api.artifacts.component.ComponentIdentifier): String = when (id) {
+                is org.gradle.api.artifacts.component.ModuleComponentIdentifier -> "${id.group}:${id.module}:${id.version}"
+                is org.gradle.api.artifacts.component.ProjectComponentIdentifier ->
+                    if (id.projectPath == ":camera-video-fixed") "androidx.camera:camera-video:1.6.2" else "application"
+                else -> error("Unreviewed component: $id")
+            }
+            fun graph(configuration: Configuration): Set<String> = configuration.incoming.resolutionResult.allComponents
+                .flatMap { source -> source.dependencies.map { edge ->
+                    check(edge is org.gradle.api.artifacts.result.ResolvedDependencyResult) { "Unresolved dependency: $edge" }
+                    "${componentId(source.id)} -> ${componentId(edge.selected.id)}; constraint=${edge.isConstraint}"
+                } }.toSortedSet()
+            val selected = fixed.incoming.resolutionResult.allComponents
+            check(selected.count { it.id is org.gradle.api.artifacts.component.ProjectComponentIdentifier &&
+                (it.id as org.gradle.api.artifacts.component.ProjectComponentIdentifier).projectPath == ":camera-video-fixed" } == 1)
+            check(selected.none { it.id is org.gradle.api.artifacts.component.ModuleComponentIdentifier &&
+                (it.id as org.gradle.api.artifacts.component.ModuleComponentIdentifier).let { module ->
+                    module.group == "androidx.camera" && module.module == "camera-video" } })
+            val before = graph(original)
+            val after = graph(fixed)
+            // AGP adds an external version constraint when aligning compile to runtime. A pinned
+            // project replacement has no external version to constrain; all nine upstream
+            // published atomic constraints and all ordinary dependency edges remain compared.
+            val externalPin = "application -> androidx.camera:camera-video:1.6.2; constraint=true"
+            val normalizedBefore = before - externalPin
+            val normalizedAfter = after - externalPin
+            check(normalizedBefore == normalizedAfter) { "$name CameraX replacement changed graph: removed=${normalizedBefore - normalizedAfter}; added=${normalizedAfter - normalizedBefore}" }
+            results[name] = linkedMapOf("equal_after_project_identity_normalization" to true,
+                "original_external_alignment_pin" to (externalPin in before),
+                "rebuilt_implementations" to 1, "original_implementations" to 0, "edges" to after.toList())
+        }
+        report.get().asFile.apply { parentFile.mkdirs();writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(results)) + "\n") }
+    }
+}
+tasks.named("preBuild") { dependsOn(verifyCameraVideoGraph) }
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2025.06.01"))
     implementation("androidx.activity:activity-compose:1.10.1")
@@ -95,7 +163,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.6.2")
     implementation("androidx.camera:camera-lifecycle:1.6.2")
     implementation("androidx.camera:camera-view:1.6.2")
-    implementation("androidx.camera:camera-video:1.6.2")
+    implementation(project(":camera-video-fixed"))
     implementation("com.google.zxing:core:3.5.4")
     implementation("org.commonmark:commonmark:0.30.0")
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.30.0")

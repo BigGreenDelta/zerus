@@ -433,6 +433,9 @@ jobs:
         run: |
           mkdir -p artifacts/test-results
           cp -R mobile/android/app/build/reports artifacts/test-results/android || true
+          mkdir -p artifacts/test-results/camera-video-fixed
+          cp -R mobile/android/camera-video-fixed/build/reports artifacts/test-results/camera-video-fixed/reports || true
+          cp -R mobile/android/camera-video-fixed/build/test-results artifacts/test-results/camera-video-fixed/test-results || true
       - name: Retain Android reports
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
