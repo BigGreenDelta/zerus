@@ -1009,7 +1009,8 @@ optional and detected at runtime. Packaging never enables services.
 Each flavor installs the same ADE bundle:
 
 - `/usr/bin/hgs`, `/usr/bin/hgs-tray`, the `hgs_state.py` compatibility shim and
-  the explicit `zerus-setup` migration helper.
+  the explicit `zerus-setup` migration helper, whose `--mobile-connector
+  {protect,migrate,rollback}` runs `/usr/lib/zerus/install-mobile-connector-service.py`.
 - `/usr/lib/hgs-tray/plugins/libhgs-tray-native-ui.so`, the embedded DeepSeek
   Native UI. It alone links Qt WebEngine and loads only when `qt6-webengine` is
   installed; otherwise Native UI opens in the browser. `check-package.py`

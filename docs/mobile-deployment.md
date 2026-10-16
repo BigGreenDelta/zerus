@@ -205,6 +205,17 @@ value and must print `KillMode=process`. A drop-in that already sets it is enoug
 one that sorts later, such as `override.conf` from `systemctl --user edit`, takes
 precedence over this file.
 
+With the Linux package installed, `zerus-setup --mobile-connector protect` does
+the same: it writes that drop-in only when the unit runs a
+`zerus-mobile-connector` whose effective kill mode is not already `process`,
+reloads the user manager and checks the result, and removes its file again if a
+later drop-in wins. Its `migrate` and `rollback` actions switch an existing
+Python connector unit to the Rust connector and back with a
+`60-zerus-rust-connector.conf` drop-in; they belong to the owner-approved cutover
+in the connector design (`docs/superpowers/specs/2026-10-15-rust-mobile-connector-design.md`),
+refuse while a connector holds the journal, and, like `protect`, never enable,
+start, stop or restart the unit.
+
 Prefer `restart` to `stop`, whatever the kill mode. tmux builds with systemd
 support, such as Arch's, put every pane in a `tmux-spawn-*.scope` unit that is
 `PartOf=` the unit holding the tmux server, whichever client created the pane, so
