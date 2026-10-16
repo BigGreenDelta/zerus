@@ -6,6 +6,7 @@
 #include <QGraphicsSceneMouseEvent>
 #include <QJsonArray>
 #include <QKeyEvent>
+#include <QNativeGestureEvent>
 #include <QPainter>
 #include <QPainterPathStroker>
 #include <QResizeEvent>
@@ -468,13 +469,18 @@ void GraphCanvas::fitGraph() {
     }
 }
 void GraphCanvas::zoomBy(qreal factor) {
-    if (!std::isfinite(factor) || factor <= 0)
+    zoomAt(factor, viewport()->rect().center());
+}
+void GraphCanvas::zoomAt(qreal factor, const QPointF &anchor) {
+    if (!std::isfinite(factor) || factor <= 0 || !finitePoint(anchor))
         return;
     const auto target = qBound(.15, transform().m11() * factor, 2.5);
+    const auto sceneAnchor = mapToScene(anchor.toPoint());
     const bool wasApplying = m_applying;
     m_applying = true;
-    scale(target / transform().m11(), target / transform().m11());
-    rememberCamera();
+    setTransform(QTransform::fromScale(target, target));
+    m_center = sceneAnchor + (QPointF(viewport()->rect().center()) - anchor) / target;
+    m_haveCamera = true;
     updateBounds();
     m_applying = wasApplying;
     if (!wasApplying)
@@ -629,10 +635,36 @@ void GraphCanvas::resizeEvent(QResizeEvent *event) {
 }
 void GraphCanvas::wheelEvent(QWheelEvent *event) {
     if (event->modifiers().testFlag(Qt::ControlModifier)) {
-        zoomBy(std::pow(1.0015, event->angleDelta().y()));
+        const auto delta =
+            event->angleDelta().isNull() ? event->pixelDelta().y() : event->angleDelta().y();
+        zoomAt(std::pow(1.0015, delta), event->position());
         event->accept();
     } else
         QGraphicsView::wheelEvent(event);
+}
+bool GraphCanvas::nativeGesture(QEvent *event) {
+    if (event->type() != QEvent::NativeGesture)
+        return false;
+    auto *gesture = static_cast<QNativeGestureEvent *>(event);
+    switch (gesture->gestureType()) {
+    case Qt::ZoomNativeGesture:
+        // Cocoa and Wayland report incremental magnification, not wheel ticks.
+        zoomAt(1 + gesture->value(), gesture->position());
+        break;
+    case Qt::BeginNativeGesture:
+    case Qt::EndNativeGesture:
+        break;
+    default:
+        return false;
+    }
+    event->accept();
+    return true;
+}
+bool GraphCanvas::event(QEvent *event) {
+    return nativeGesture(event) || QGraphicsView::event(event);
+}
+bool GraphCanvas::viewportEvent(QEvent *event) {
+    return nativeGesture(event) || QGraphicsView::viewportEvent(event);
 }
 void GraphCanvas::keyPressEvent(QKeyEvent *event) {
     if (event->key() == Qt::Key_Escape) {

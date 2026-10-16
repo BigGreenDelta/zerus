@@ -17,6 +17,8 @@ class GraphWorkspace : public QWidget {
     void setContext(const QSet<QString> &routes, const QList<GraphProjection::Binding> &bindings,
                     int omitted = 0, const QJsonObject &context = {});
     void setTheme(bool dark);
+    void setFilterCatalog(const FleetState &fleet,
+                          const QList<SessionOrganization::Group> &projects);
     void focusTarget(const QString &host, const QString &name, const QString &run,
                      const QString &conversation, const QString &archive);
     GraphPage *page() const { return m_page; }

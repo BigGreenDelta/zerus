@@ -65,6 +65,24 @@ class TestGraphProjection : public QObject {
                 true};
     }
   private slots:
+    void currentWorkScopeIsExplicitAndRecordedMetadataCannotImpersonateActivity() {
+        SessionGraphStore store;
+        apply(store, facts());
+        auto active = live();
+        active.active = true;
+        auto result = GraphProjection::compose(store, {active}, {"mac"});
+        QCOMPARE(result.nodes.size(), 1);
+        QVERIFY(result.nodes[0].active);
+        QVERIFY(!result.nodes[0].saved);
+        active.active = false;
+        active.saved = true;
+        result = GraphProjection::compose(store, {active}, {"mac"});
+        QVERIFY(!result.nodes[0].active);
+        QVERIFY(result.nodes[0].saved);
+        result = GraphProjection::compose(store, {}, {"mac"});
+        QVERIFY(!result.nodes[0].active);
+        QVERIFY(!result.nodes[0].saved);
+    }
     void verifiedCrossMachineDeliveriesAggregateDistinctRequestsAndKeepBoundaryIdentity() {
         const auto endpoint = [&](const QString &host, const QString &conversation) {
             return QJsonObject{{"machine", host},

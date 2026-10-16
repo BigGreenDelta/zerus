@@ -50,12 +50,16 @@ class GraphCanvas : public QGraphicsView {
     void pointerInteractionFinished();
 
   protected:
+    bool event(QEvent *event) override;
+    bool viewportEvent(QEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
 
   private:
+    bool nativeGesture(QEvent *event);
+    void zoomAt(qreal factor, const QPointF &anchor);
     friend class GraphNodeItem;
     void moved(const QString &id);
     void updateBounds();

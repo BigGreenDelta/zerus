@@ -2623,6 +2623,7 @@ void SessionsWindow::updateGraph()
     for (const auto &host : m_fleet.peerNames()) routes.insert(host);
     m_graph->setRoutes(routes);
     if (!m_graph->isVisible()) return;
+    m_graph->setFilterCatalog(m_fleet, m_organization.groups());
     QList<GraphProjection::Binding> bindings;
     QJsonObject machineLabels{{QString(),m_fleet.local().host}};
     for(const auto &host:m_fleet.peerNames())machineLabels[host]=host;
@@ -2634,14 +2635,21 @@ void SessionsWindow::updateGraph()
         const auto groupId = m_organization.groupFor(entry.identity);
         const auto *group = m_organization.group(groupId);
         bindings.append({entry.host, s.name, s.runId, s.conversationId, s.cmd, s.archiveId, {},
-            groupId, group ? group->name : QString(), sessionCardRoles(entry), entry.online});
+            groupId, group ? group->name : QString(), sessionCardRoles(entry), entry.online, {}, false,
+            entryNeedsAttention(entry) || SessionPresentation::active(s, entry.online, entryHasDraft(entry)),
+            s.state != "running"});
         const auto roster=childRoster(entry);
         for(auto it=roster.begin();it!=roster.end();++it){
             const auto child=it.value().toObject();if(child["group"].toBool())continue;
             if(bindings.size()>=GraphWorkspace::MaximumBindings){++omitted;continue;}
             const QJsonValue generation=child["started"].toDouble()>0?child["started"]:QJsonValue(s.runId);
+            auto roles = childCardRoles(entry, it.key(), child);
+            const bool draft = m_subagentComposer->hasDraft(entry.machine + '\n' + s.name + '\n' + s.conversationId + '\n' + it.key());
+            roles[SessionRoles::Draft] = draft;
             bindings.append({entry.host,s.name,s.runId,s.conversationId,s.cmd,s.archiveId,it.key(),groupId,group?group->name:QString(),
-                childCardRoles(entry,it.key(),child),entry.online,generation,SessionPresentation::inactiveChild(child,s.subagentCountsComplete)});
+                roles,entry.online,generation,SessionPresentation::inactiveChild(child,s.subagentCountsComplete),
+                roles.value(SessionRoles::Working).toBool() || roles.value(SessionRoles::Attention).toBool() || draft,
+                s.state != "running"});
         }
     }
     m_graph->setContext(routes, bindings, omitted,{{"organization",m_organization.toJson()},{"machines",machineLabels}});

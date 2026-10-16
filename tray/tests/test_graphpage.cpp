@@ -1,5 +1,7 @@
 #include "GraphPage.h"
 #include "GraphViewStateStore.h"
+#include "MachineFilter.h"
+#include "ProjectFilter.h"
 #include "SessionCardDelegate.h"
 #include <QGraphicsItem>
 #include <QGraphicsScene>
@@ -30,6 +32,7 @@ class TestGraphPage : public QObject {
                        {SessionRoles::Meta, "feature/graph"},
                        {SessionRoles::MetaIcon, "git-branch"},
                        {SessionRoles::Detail, project}}};
+        value.active = true; // Ordinary navigation fixtures are in the current-work scope.
         value.project = project;
         value.identity = "Native conversation: " + id;
         value.detail = "Confirmed native binding";
@@ -46,6 +49,207 @@ class TestGraphPage : public QObject {
                  "Verified delivery receipt · submitted, consumption unknown"}};
     }
   private slots:
+    void quickScopesDefaultToActiveAndKeepRecordedChildrenOut() {
+        GraphPage page(nullptr, {});
+        auto working = node("working", "Focus");
+        working.card.roles[SessionRoles::Working] = true;
+        auto ready = node("ready", "Focus");
+        ready.active = false;
+        auto recorded = node("recorded", "Focus");
+        recorded.active = false;
+        recorded.card.roles[SessionRoles::ChildId] = "recorded-child";
+        auto completed = node("completed", "Focus");
+        completed.active = false;
+        completed.completedChild = true;
+        auto draft = node("draft", "Focus");
+        draft.card.roles[SessionRoles::Draft] = true;
+        auto attention = node("attention", "Other");
+        attention.card.roles[SessionRoles::Attention] = true;
+        auto saved = node("saved", "Focus");
+        saved.active = false;
+        saved.saved = true;
+        auto archive = node("archive", "Focus");
+        archive.active = false;
+        archive.archived = true;
+        QVERIFY(page.setProjection(
+            {working, ready, recorded, completed, draft, attention, saved, archive},
+            {{{"parent", "working", "recorded", "parent", "Recorded child"},
+              "Native relationship"}}));
+        QCOMPARE(page.canvas()->nodeCount(), 3);
+        QVERIFY(page.canvas()->nodeRect("recorded").isEmpty());
+        auto filter = [&](const QString &id) {
+            for (auto *b : page.findChildren<QPushButton *>("graphStateFilter"))
+                if (b->property("graphFilter") == id)
+                    return b;
+            return static_cast<QPushButton *>(nullptr);
+        };
+        QVERIFY(filter("active") && filter("active")->isChecked());
+        QVERIFY(!page.findChild<QPushButton *>("graphShowCompleted")->isEnabled());
+        QVERIFY(!filter("active")->icon().isNull());
+        page.focusProject("Focus");
+        QCOMPARE(page.canvas()->nodeCount(),
+                 2); // Project context must not resurrect inactive children.
+        page.focusProject({});
+        filter("attention")->click();
+        QCOMPARE(page.canvas()->nodeCount(), 1);
+        filter("paused")->click();
+        QCOMPARE(page.canvas()->nodeCount(), 1);
+        filter("archived")->click();
+        QCOMPARE(page.canvas()->nodeCount(), 1);
+        filter("all")->click();
+        QCOMPARE(page.canvas()->nodeCount(), 6);
+        page.findChild<QPushButton *>("graphShowCompleted")->click();
+        QCOMPARE(page.canvas()->nodeCount(), 7);
+        filter("active")->click();
+        QCOMPARE(page.canvas()->nodeCount(), 3);
+        QSignalSpy opened(&page, &GraphPage::openRequested);
+        QCOMPARE(opened.size(), 0);
+    }
+    void machineAndProjectIconsUseTheSharedScopeWidgetsAndPersistSelections() {
+        GraphPage page(nullptr, {});
+        FleetState fleet;
+        BoxState local;
+        local.host = "fixture-arch";
+        local.localSessions = true;
+        local.ok = true;
+        fleet.setLocal(local, 1);
+        fleet.registerPeer("fixture-mac");
+        page.setFilterCatalog(fleet, {{"Zerus", "Zerus"}, {"Infrastructure", "Infrastructure"}});
+        QVERIFY(page.setProjection(nodes(), relations()));
+        auto *machines = page.findChild<MachineFilter *>();
+        auto *projects = page.findChild<ProjectFilter *>();
+        QVERIFY(machines && projects);
+        QVERIFY(!machines->button()->icon().isNull() && !projects->button()->icon().isNull());
+        machines->setSelection({"fixture-mac"});
+        QCOMPARE(page.canvas()->nodeCount(), 1);
+        projects->setSelection({"Zerus"});
+        QCOMPARE(page.canvas()->nodeCount(), 0);
+        projects->setSelection({"Infrastructure"});
+        QCOMPARE(page.canvas()->nodeCount(), 1);
+        const auto state = page.viewState();
+        GraphPage reopened(nullptr, {});
+        reopened.setFilterCatalog(fleet,
+                                  {{"Zerus", "Zerus"}, {"Infrastructure", "Infrastructure"}});
+        QVERIFY(reopened.restoreViewState(state));
+        QVERIFY(reopened.setProjection(nodes(), relations()));
+        QCOMPARE(reopened.canvas()->nodeCount(), 1);
+        QCOMPARE(reopened.findChild<MachineFilter *>()->selection(), QSet<QString>{"fixture-mac"});
+        QCOMPARE(reopened.findChild<ProjectFilter *>()->selection(),
+                 QSet<QString>{"Infrastructure"});
+    }
+    void firstVisibleProjectionArrangesAndFitsButExistingPinsNeverRearrange() {
+        GraphPage page(nullptr, {});
+        page.resize(1000, 700);
+        page.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&page));
+        QList<GraphPage::Node> many;
+        for (int i = 0; i < 24; ++i)
+            many.append(node(QString::number(i), "Project"));
+        QVERIFY(page.setProjection(many, {}));
+        const auto viewport =
+            page.canvas()->mapToScene(page.canvas()->viewport()->rect()).boundingRect();
+        for (const auto &n : many)
+            QVERIFY(viewport.contains(page.canvas()->nodeRect(n.card.id)));
+        auto manual = page.viewState();
+        auto canvas = manual["canvas"].toObject();
+        canvas["positions"] = QJsonObject{{"0", QJsonArray{1234, -432}}};
+        canvas["scale"] = .73;
+        manual["canvas"] = canvas;
+        GraphPage reopened(nullptr, {});
+        reopened.resize(1000, 700);
+        reopened.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&reopened));
+        QVERIFY(reopened.restoreViewState(manual));
+        QVERIFY(reopened.setProjection(many, {}));
+        QCOMPARE(reopened.canvas()->nodePosition("0"), QPointF(1234, -432));
+        QCOMPARE(reopened.canvas()->transform().m11(), .73);
+        const auto before = reopened.canvas()->viewState();
+        QVERIFY(reopened.setProjection(many, {}));
+        QCOMPARE(reopened.canvas()->viewState(), before);
+    }
+    void oldDefaultMigratesToActiveWithoutLosingManualPositions() {
+        GraphPage page(nullptr, {});
+        QVERIFY(page.setProjection(nodes(), relations()));
+        auto state = page.viewState();
+        state.remove("filter");
+        state.remove("projects");
+        state.remove("hosts");
+        auto canvas = state["canvas"].toObject();
+        canvas["positions"] = QJsonObject{{"review", QJsonArray{888, 999}}};
+        state["canvas"] = canvas;
+        auto ready = node("inactive", "Zerus");
+        ready.active = false;
+        GraphPage reopened(nullptr, {});
+        QVERIFY(reopened.restoreViewState(state));
+        auto values = nodes();
+        values.append(ready);
+        QVERIFY(reopened.setProjection(values, relations()));
+        QCOMPARE(reopened.viewState()["filter"].toString(), QString("active"));
+        QCOMPARE(reopened.canvas()->nodeCount(), 3);
+        QCOMPARE(reopened.canvas()->nodePosition("review"), QPointF(888, 999));
+    }
+    void quickFilterGeometryAndRaster_data() {
+        QTest::addColumn<bool>("dark");
+        QTest::addColumn<int>("width");
+        QTest::addColumn<int>("font");
+        QTest::newRow("dark") << true << 1400 << 13;
+        QTest::newRow("light") << false << 1400 << 13;
+        QTest::newRow("narrow-large") << true << 800 << 18;
+    }
+    void quickFilterGeometryAndRaster() {
+        QFETCH(bool, dark);
+        QFETCH(int, width);
+        QFETCH(int, font);
+        GraphPage page(nullptr, {});
+        QFont face = page.font();
+        face.setPixelSize(font);
+        page.setFont(face);
+        page.resize(width, 760);
+        page.setTheme(dark);
+        page.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&page));
+        FleetState fleet;
+        BoxState local;
+        local.host = "fixture-arch";
+        local.localSessions = true;
+        local.ok = true;
+        fleet.setLocal(local, 1);
+        fleet.registerPeer("fixture-mac");
+        page.setFilterCatalog(fleet, {{"Zerus", "Zerus"}, {"Infrastructure", "Infrastructure"}});
+        auto values = nodes();
+        values[0].card.roles[SessionRoles::Working] = true;
+        values[0].card.roles[SessionRoles::Status] = "Working";
+        values[1].card.roles[SessionRoles::Attention] = true;
+        values[1].card.roles[SessionRoles::Status] = "Needs input";
+        values[2].card.roles[SessionRoles::Draft] = true;
+        for (int i = 0; i < 50; ++i) {
+            auto recorded = node(QString("recorded-%1").arg(i), "Zerus");
+            recorded.active = false;
+            recorded.card.roles[SessionRoles::Status] = "Recorded";
+            recorded.card.roles[SessionRoles::ChildId] = "old-child";
+            values.append(recorded);
+        }
+        QVERIFY(page.setProjection(values, relations()));
+        QCoreApplication::processEvents();
+        QCOMPARE(page.canvas()->nodeCount(), 3);
+        const auto buttons = page.findChildren<QPushButton *>("graphStateFilter");
+        QCOMPARE(buttons.size(), 5);
+        QRect previous;
+        for (auto *button : buttons) {
+            const QRect bounds(button->mapTo(&page, QPoint()), button->size());
+            QVERIFY(page.rect().contains(bounds));
+            QVERIFY(!previous.intersects(bounds));
+            QVERIFY(button->width() >= 40 && button->height() >= 28);
+            QVERIFY(!button->icon().isNull());
+            previous = bounds;
+        }
+        QVERIFY(page.canvas()->height() >= 450);
+        const auto directory = qEnvironmentVariable("ZERUS_GRAPH_FOCUS_RASTERS");
+        if (!directory.isEmpty()) {
+            QDir().mkpath(directory);
+            QVERIFY(page.grab().save(directory + '/' + QTest::currentDataTag() + ".png"));
+        }
+    }
     void deliveryEvidenceIsPagedAndExplicitlyOpensOneExactReceipt() {
         GraphPage page(nullptr, {});
         page.resize(1400, 900);
@@ -366,6 +570,7 @@ class TestGraphPage : public QObject {
             QVERIFY(page.setProjection(nodes(), relations()));
             auto state = page.canvas()->viewState();
             state["positions"] = QJsonObject{{"review", QJsonArray{765, -432}}};
+            state["scale"] = 1.; // Set an absolute baseline after first-use Fit.
             QVERIFY(page.canvas()->restoreViewState(state));
             page.canvas()->zoomBy(.75);
             return; // Destruction and application exit flush the pending change.

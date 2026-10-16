@@ -1,5 +1,7 @@
 #pragma once
 #include "GraphCanvas.h"
+#include "FleetState.h"
+#include "SessionOrganization.h"
 #include <QJsonArray>
 #include <QWidget>
 #include <optional>
@@ -14,6 +16,8 @@ class QStackedWidget;
 class QMenu;
 class GraphSummary;
 class GraphViewStateStore;
+class MachineFilter;
+class ProjectFilter;
 
 // Inspection only. The owner must revalidate an exact target before navigating;
 // this page never reads/answers a conversation or starts a native operation.
@@ -30,7 +34,7 @@ class GraphPage : public QWidget {
         GraphCanvas::Node card;
         QString project, identity, detail;
         QList<Target> targets;
-        bool archived = false, completedChild = false;
+        bool archived = false, completedChild = false, active = false, saved = false;
     };
     struct Relation {
         GraphCanvas::Relation line;
@@ -44,6 +48,8 @@ class GraphPage : public QWidget {
     bool setProjection(const QList<Node> &nodes, const QList<Relation> &relations,
                        const QHash<QString, QString> &aliases = {});
     void setTheme(bool dark);
+    void setFilterCatalog(const FleetState &fleet,
+                          const QList<SessionOrganization::Group> &projects);
     void setFreshness(const QString &summary, const QString &details = {});
     void focusNode(const QString &id);
     bool focusTarget(const QString &host, const QString &name, const QString &run,
@@ -74,7 +80,11 @@ class GraphPage : public QWidget {
     void inspectSelection();
     void arrangeInspector();
     void revealInspectedNode();
-    void rebuildFilters();
+    void updateFilters();
+    bool matchesState(const Node &node, const QString &filter) const;
+    bool matchesMachine(const Node &node) const;
+    void changeScope();
+    void arrangeInitially();
     void saveView();
     void arrangeVisible();
     void undoArrange();
@@ -88,7 +98,10 @@ class GraphPage : public QWidget {
     GraphCanvas *m_canvas;
     QLineEdit *m_search;
     QLabel *m_count, *m_freshness, *m_title, *m_details;
-    QPushButton *m_refresh, *m_filters, *m_listToggle, *m_open, *m_focus;
+    QPushButton *m_refresh, *m_listToggle, *m_open, *m_focus, *m_completed, *m_leaveFocus;
+    QList<QPushButton *> m_filters;
+    MachineFilter *m_machineFilter;
+    ProjectFilter *m_projectFilter;
     QPushButton *m_arrange, *m_undo;
     GraphViewStateStore *m_viewStore = nullptr;
     QJsonObject m_beforeArrange;
@@ -96,7 +109,7 @@ class GraphPage : public QWidget {
     bool m_restoring = false, m_arranging = false, m_viewTouched = false;
     bool m_inspectorWanted = false;
     bool m_deferredInspector = false;
-    bool m_viewLoaded = false, m_haveProjection = false;
+    bool m_viewLoaded = false, m_haveProjection = false, m_layoutReady = false;
     QWidget *m_inspector;
     GraphSummary *m_summary;
     QListView *m_list;
@@ -109,10 +122,11 @@ class GraphPage : public QWidget {
     int m_evidenceOffset = 0;
     QSplitter *m_splitter;
     QStackedWidget *m_views;
-    QMenu *m_filterMenu;
     QByteArray m_inspectionSignature;
-    QString m_selectedNode, m_selectedRelation, m_project, m_neighborhood;
+    QString m_selectedNode, m_selectedRelation, m_neighborhood;
+    QString m_filter = QStringLiteral("active");
+    QSet<QString> m_projects, m_hosts;
     QString m_pendingReveal;
-    bool m_attentionOnly = false, m_showArchives = false, m_showCompleted = false;
+    bool m_showCompleted = false, m_fitMigratedScope = false;
     bool m_dark = true, m_overlay = false, m_rendering = false;
 };

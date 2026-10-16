@@ -14,6 +14,7 @@ struct Binding {
     bool available = false;
     QJsonValue generation;
     bool completed = false;
+    bool active = false, saved = false;
 };
 struct Result {
     QList<GraphPage::Node> nodes;

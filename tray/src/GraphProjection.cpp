@@ -152,14 +152,20 @@ GraphProjection::Result GraphProjection::compose(const SessionGraphStore &store,
         const auto matches = current.value(key(it->route, it->value));
         if (matches.size() == 1) {
             const auto &live = *matches.first();
-            if (!presented.contains(id) || (node->archived && live.archive.isEmpty())) {
+            if (!presented.contains(id) || (node->archived && live.archive.isEmpty()) ||
+                (node->saved && !live.saved)) {
                 node->card.roles = live.roles;
                 node->card.group = live.project;
                 node->project = live.projectLabel;
                 node->detail =
                     QObject::tr("Exact native conversation and run matched to Sessions.");
                 node->archived = !live.archive.isEmpty();
+                node->active = live.active;
+                node->saved = live.saved;
                 presented.insert(id);
+            } else {
+                node->active |= live.active;
+                node->saved &= live.saved;
             }
             projects[id].insert(live.project);
             node->targets.append({live.route,
@@ -339,6 +345,7 @@ GraphProjection::Result GraphProjection::compose(const SessionGraphStore &store,
         child.detail = QObject::tr("Recorded native child relationship. Current "
                                    "child state is not verified.");
         child.archived = nodes[parent].archived;
+        child.saved = nodes[parent].saved;
         child.completedChild = it->value["state"] == "finished";
         for (const auto &target : nodes[parent].targets)
             if (target.run == binding->value["run_id"].toString() &&
@@ -352,6 +359,8 @@ GraphProjection::Result GraphProjection::compose(const SessionGraphStore &store,
                 b.generation == generation) {
                 child.card.roles = b.roles;
                 child.completedChild = b.completed;
+                child.active = b.active;
+                child.saved = b.saved;
                 child.archived = !b.archive.isEmpty();
                 child.detail =
                     QObject::tr("Exact parent conversation and native child matched to Sessions.");
@@ -388,6 +397,8 @@ GraphProjection::Result GraphProjection::compose(const SessionGraphStore &store,
         node.project = b.projectLabel;
         node.archived = !b.archive.isEmpty();
         node.completedChild = b.completed;
+        node.active = b.active;
+        node.saved = b.saved;
         node.identity = QObject::tr("Native child: %1\nParent: %2").arg(b.agent, parent);
         node.detail = QObject::tr("Native child from the current exact parent snapshot.");
         node.targets.append({b.route,

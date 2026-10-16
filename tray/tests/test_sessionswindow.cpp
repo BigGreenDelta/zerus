@@ -734,7 +734,7 @@ void TestSessionsWindow::machineChooserCountsFollowStateScopeWithoutMachineOrTex
     local.sessions.append(archive); state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     BoxState empty; empty.host="empty"; empty.ok=true; state.setPeer(empty,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(state); window.show();
-    auto *filter=window.findChild<MachineFilter *>(); auto *menu=filter->button()->menu();
+    auto *filter=window.findChild<MachineFilter *>("machineFilterChips"); auto *menu=filter->button()->menu();
     menu->popup(window.mapToGlobal(QPoint(100,100))); QTRY_VERIFY(menu->isVisible());
     const auto count=[&](const QString &host) {
         for (auto *choice : menu->findChildren<QCheckBox *>("machineFilterChoice"))
@@ -801,6 +801,15 @@ void TestSessionsWindow::graphNavigationKeepsSharedCardsAndRejectsReusedRun()
         if (button->property("glyph")=="graph") nav=button;
     QVERIFY(nav); nav->click(); QTRY_VERIFY(graph->isVisible());
     QTRY_COMPARE_WITH_TIMEOUT(graph->page()->canvas()->nodeCount(),1,10000);
+    auto *mainMachines = window.findChild<MachineFilter *>("machineFilterChips");
+    auto *graphMachines = graph->page()->findChild<MachineFilter *>();
+    QVERIFY(mainMachines && graphMachines && mainMachines != graphMachines);
+    const auto mainScope = mainMachines->selection();
+    graphMachines->setSelection({"missing-fixture-machine"});
+    QCOMPARE(graph->page()->canvas()->nodeCount(), 0);
+    QCOMPARE(mainMachines->selection(), mainScope);
+    graphMachines->setSelection({});
+    QCOMPARE(graph->page()->canvas()->nodeCount(), 1);
     auto *model = graph->page()->canvas()->nodeModel();
     for (auto it=roles.cbegin();it!=roles.cend();++it) QCOMPARE(model->index(0,0).data(it.key()),it.value());
     QSignalSpy read(&window,&SessionsWindow::replyViewed);
@@ -893,7 +902,7 @@ else:print('{}')
 )PY"));
     auto state=fleet();auto local=state.local();local.archivePaging=true;local.sessions[0].runId="live-run";local.sessions[0].prompt.clear();state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(FakeCli::program(cli));keepDetailsPollsOut(window);window.setFleet(state);window.resize(1100,760);window.show();
-    auto *projects=window.findChild<ProjectFilter *>();QVERIFY(projects);projects->setSelection({first});
+    auto *projects=window.findChild<ProjectFilter *>("projectFilterChips");QVERIFY(projects);projects->setSelection({first});
     auto *query=window.findChild<QLineEdit*>("search");auto *results=window.findChild<QListWidget*>("searchResults");QVERIFY(query&&results);query->setText("needle");
     QTRY_COMPARE(results->count(),1);QVERIFY(SessionSearch::sessionKey(results->item(0)).endsWith(a));
     for(auto *filter:window.findChildren<QPushButton*>("sessionFilter"))if(filter->property("filter")=="archived"){QCOMPARE(filter->property("count").toInt(),1);QVERIFY(filter->text().startsWith("1"));}
@@ -910,7 +919,7 @@ void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
     org.moveSession(org.observe("arch", "codex/website/navigation", ""), saved);
     QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.resize(1100,760); window.show();
-    auto *projects = window.findChild<ProjectFilter *>(); auto *machines = window.findChild<MachineFilter *>();
+    auto *projects = window.findChild<ProjectFilter *>("projectFilterChips"); auto *machines = window.findChild<MachineFilter *>("machineFilterChips");
     auto *list = window.findChild<SessionList *>("sessionList");
     const auto parents = [&] { int count=0; for(int i=0;i<list->count();++i) if(!list->item(i)->data(SessionRoles::Header).toBool()) ++count; return count; };
     projects->setSelection({work}); QCOMPARE(parents(),2);
@@ -962,7 +971,7 @@ void TestSessionsWindow::projectHeaderFiltersOnlyThisProject()
     org.moveSession(org.observe("arch","codex/hgs/dashboard",""),work); org.moveSession(org.observe("mac","claude/infra/review",""),docs);
     QSettings().setValue("workspace/organization",QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
-    auto *list=window.findChild<SessionList *>("sessionList"); auto *projects=window.findChild<ProjectFilter *>();
+    auto *list=window.findChild<SessionList *>("sessionList"); auto *projects=window.findChild<ProjectFilter *>("projectFilterChips");
     const auto openMenu=[&](const QString &id) -> QMenu * {
         for(int i=0;i<list->count();++i) if(list->item(i)->data(SessionRoles::Header).toBool()&&list->item(i)->data(SessionRoles::Group)==id) {
             list->scrollToItem(list->item(i)); list->customContextMenuRequested(list->visualItemRect(list->item(i)).center());
@@ -990,7 +999,7 @@ void TestSessionsWindow::dashboardAndMultiMachineNavigation()
 {
     SessionsWindow window(program()); auto state=fleet(); auto third=state.local(); third.host="build"; state.setPeer(third,0);
     window.setFleet(state); window.show();
-    auto *filter=window.findChild<MachineFilter *>(); auto *list=window.findChild<SessionList *>("sessionList");
+    auto *filter=window.findChild<MachineFilter *>("machineFilterChips"); auto *list=window.findChild<SessionList *>("sessionList");
     QVERIFY(filter); QVERIFY(list); filter->setSelection({"mac","build"}); QCOMPARE(list->count(),5);
     for(int i=0;i<list->count();++i) QVERIFY(!list->item(i)->data(SessionRoles::Identity).toString().startsWith("arch\n"));
     auto *brand=window.findChild<QPushButton *>("brandMark"); QVERIFY(brand); brand->click();
@@ -1195,8 +1204,8 @@ void TestSessionsWindow::clearArchiveKeepsLiveAndNewEntries()
         QMetaObject::invokeMethod(batch,"aboutToShow");QVERIFY(batch->actions().contains(clear));
     }
     window.showSession({},box.sessions.first().name);
-    window.findChild<MachineFilter *>()->setSelection({"mac"});QVERIFY(clear->isVisible());QVERIFY(!clear->isEnabled());
-    window.findChild<MachineFilter *>()->setSelection({});QVERIFY(clear->isEnabled());
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({"mac"});QVERIFY(clear->isVisible());QVERIFY(!clear->isEnabled());
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({});QVERIFY(clear->isEnabled());
     auto *client=window.findChild<HgsClient *>();QSignalSpy writes(client,&HgsClient::writeDone);
     QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("confirmSelectionAction");QVERIFY(dialog);dialog->reject();});clear->trigger();QCOMPARE(writes.size(),0);
     QTimer::singleShot(0,&window,[&]{
@@ -1709,9 +1718,9 @@ void TestSessionsWindow::unsentDraftBecomesARowStatus()
     window.showSession({}, box.sessions[1].name);
     window.setFleet(state);   // rows are refreshed in place; the draft stays marked
     QVERIFY(draft(box.sessions[0].name)); QVERIFY(!draft(box.sessions[1].name));
-    window.findChild<MachineFilter *>()->setSelection({"@local"});   // other rows go: the list is rebuilt from scratch
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({"@local"});   // other rows go: the list is rebuilt from scratch
     QVERIFY(draft(box.sessions[0].name));
-    window.findChild<MachineFilter *>()->setSelection({});
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({});
     window.showSession({}, box.sessions[0].name); composer->editor()->clear();
     QVERIFY(!draft(box.sessions[0].name));
 }
@@ -1730,7 +1739,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     org.moveSession(org.observe("arch", box.sessions[1].name, box.sessions[1].runId), group); org.setCollapsed(group, true);
     QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
     SessionsWindow window(program()); window.setFleet(state); window.show(); window.showSession({}, box.sessions[0].name);
-    window.findChild<MachineFilter *>()->setSelection({"@local"});
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({"@local"});
     for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "attention") button->click();
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Keep this draft");
     auto *list = window.findChild<SessionList *>("sessionList"); const auto selectedKey = composer->sessionKey();
@@ -1758,7 +1767,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     // Overview renders when shown.
     window.findChild<QPushButton *>("brandMark")->click();
     QVERIFY(window.findChild<DashboardPage *>()->findChild<QPushButton *>("dashboardAttention")->text().startsWith("1"));
-    window.showSessionList(); window.findChild<MachineFilter *>()->setSelection({});
+    window.showSessionList(); window.findChild<MachineFilter *>("machineFilterChips")->setSelection({});
     window.findChild<QLineEdit *>("search")->setText("review");
     QCOMPARE(window.findChild<QListWidget *>("searchResults")->count(), 1); // The real approval still needs attention.
     FleetState restarted; restarted.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
@@ -3213,7 +3222,7 @@ void TestSessionsWindow::listFiltersKeepTheOpenConversation()
     auto cursor = composer->editor()->textCursor(); cursor.setPosition(qMin(5, int(draft.size())));
     cursor.setPosition(qMin(12, int(draft.size())), QTextCursor::KeepAnchor); composer->editor()->setTextCursor(cursor);
     const auto selection = cursor.selectedText();
-    auto *machines = window.findChild<MachineFilter *>(); auto *projects = window.findChild<ProjectFilter *>();
+    auto *machines = window.findChild<MachineFilter *>("machineFilterChips"); auto *projects = window.findChild<ProjectFilter *>("projectFilterChips");
     QHash<QString, QPushButton *> filters;
     for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) filters[button->property("filter").toString()] = button;
     const auto applyScope = [&] {
@@ -3375,8 +3384,8 @@ void TestSessionsWindow::activeFilterDraftsRestoreOfflineAndFollowEditsAndDelive
     for (int i = 0; i < list->count(); ++i)
         if (list->item(i)->data(SessionRoles::ChildId).toString().isEmpty()) keys.insert(list->item(i)->data(SessionRoles::Key).toString());
     QCOMPARE(keys, QSet<QString>({"\n" + box.sessions[2].name, "\n" + parent.name, "mac\n" + peer.sessions[0].name}));
-    window.findChild<MachineFilter *>()->setSelection({"@local"}); QCOMPARE(active->property("count").toInt(), 2);
-    window.findChild<MachineFilter *>()->setSelection({}); QCOMPARE(active->property("count").toInt(), 3);
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({"@local"}); QCOMPARE(active->property("count").toInt(), 2);
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({}); QCOMPARE(active->property("count").toInt(), 3);
     window.showSession({}, staleParent.name); QTest::qWait(50);
     QCOMPARE(active->property("count").toInt(), 3); // An older inspection cannot bind a child draft to a new parent conversation.
     window.showSession({}, box.sessions[1].name);
@@ -6872,7 +6881,7 @@ void TestSessionsWindow::blankListContextMenu()
 void TestSessionsWindow::contextMenuAcrossSessionPanelBackground()
 {
     SessionsWindow window(program()); window.setFleet(fleet()); window.resize(1000, 750); window.show();
-    auto *filter = window.findChild<MachineFilter *>(); filter->setSelection({"mac"});
+    auto *filter = window.findChild<MachineFilter *>("machineFilterChips"); filter->setSelection({"mac"});
     QTest::qWait(20);
     auto *list = window.findChild<SessionList *>("sessionList");
     auto *panel = window.findChild<QWidget *>("sessionListPanel");
@@ -7054,8 +7063,8 @@ void TestSessionsWindow::collapsingKeepsRowsInPlace()
     SessionsWindow window(program()); window.resize(1280, 860); window.setFleet(fleet()); window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     auto *panel = window.findChild<QWidget *>("sessionListPanel"); auto *list = window.findChild<SessionList *>("sessionList");
-    auto *toggle = window.findChild<QPushButton *>("sessionPanelToggle"); auto *chips = window.findChild<MachineFilter *>();
-    auto *projects = window.findChild<ProjectFilter *>();
+    auto *toggle = window.findChild<QPushButton *>("sessionPanelToggle"); auto *chips = window.findChild<MachineFilter *>("machineFilterChips");
+    auto *projects = window.findChild<ProjectFilter *>("projectFilterChips");
     const auto top = [&] { return list->mapTo(panel, QPoint()).y(); };
     for (bool filtered : {false, true}) {
         if (filtered) { chips->setSelection({"mac"}); projects->setSelection({"ungrouped"}); QVERIFY(chips->isVisible()); QVERIFY(projects->isVisible()); }

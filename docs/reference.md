@@ -2534,6 +2534,19 @@ project/machine filters keep cross-project neighbors visible as context. Archive
 sessions and completed children have explicit filters. A list provides the same
 inspection and exact-target actions without using the canvas.
 
+Graph opens in **Active**, using the same current-work membership as Sessions.
+The compact icon strip exposes All, Needs attention, Active, Saved sessions and
+Archive with scoped counts, plus the shared machine/project selectors and an
+explicit completed-agent toggle. Recorded children without current activity are
+available in All rather than filling the initial view. Cross-project context
+respects the selected state and machine scope. Changing scope fits its results;
+it does not rearrange saved positions. macOS/Wayland native pinch magnifies around
+the gesture position; ordinary two-finger scrolling still pans.
+
+The first nonempty view without saved positions runs Arrange and Fit once.
+Restored positions, camera and explicit filter choices remain authoritative;
+legacy default scope upgrades to Active without replacing its saved pins.
+
 Dragging a node immediately resizes its project's region; overlap never changes
 project membership. Positions and camera are saved locally per device, including
 when a provisional native identity becomes confirmed. Refresh, filters and reopen

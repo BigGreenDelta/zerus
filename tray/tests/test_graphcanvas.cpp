@@ -4,9 +4,13 @@
 #include <QGraphicsScene>
 #include <QJsonArray>
 #include <QMouseEvent>
+#include <QNativeGestureEvent>
+#include <QPointingDevice>
+#include <QWheelEvent>
 #include <QScrollBar>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <limits>
 
 class TestGraphCanvas : public QObject {
     Q_OBJECT
@@ -33,6 +37,51 @@ class TestGraphCanvas : public QObject {
         QCoreApplication::setApplicationName("GraphCanvas");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, home.path());
+    }
+    void nativePinchUsesTheGestureAnchorAndPreservesPins_data() {
+        QTest::addColumn<bool>("viewport");
+        QTest::newRow("viewport-route") << true;
+        QTest::newRow("widget-route") << false;
+    }
+    void nativePinchUsesTheGestureAnchorAndPreservesPins() {
+        QFETCH(bool, viewport);
+        GraphCanvas view;
+        view.resize(1000, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        QVERIFY(view.setGraph({node("one"), node("two")}, {}));
+        view.fitGraph();
+        const auto pins = view.viewState().value("positions");
+        const QPointF anchor(210, 180);
+        const auto before = view.mapToScene(anchor.toPoint());
+        const auto old = view.transform().m11();
+        QSignalSpy changed(&view, &GraphCanvas::viewStateChanged);
+        auto send = [&](Qt::NativeGestureType type, qreal value) {
+            QNativeGestureEvent event(type, QPointingDevice::primaryPointingDevice(), 2, anchor,
+                                      anchor, view.viewport()->mapToGlobal(anchor.toPoint()), value,
+                                      {});
+            QApplication::sendEvent(viewport ? view.viewport() : static_cast<QWidget *>(&view),
+                                    &event);
+            QVERIFY(event.isAccepted());
+        };
+        send(Qt::BeginNativeGesture, 0);
+        send(Qt::ZoomNativeGesture, .25);
+        send(Qt::EndNativeGesture, 0);
+        QVERIFY(qAbs(view.transform().m11() - old * 1.25) < .00001);
+        QVERIFY(QLineF(before, view.mapToScene(anchor.toPoint())).length() < 3);
+        QCOMPARE(view.viewState()["positions"], pins);
+        QCOMPARE(changed.size(), 1);
+        send(Qt::ZoomNativeGesture, -.2);
+        QVERIFY(qAbs(view.transform().m11() - old) < .00001);
+        send(Qt::ZoomNativeGesture, 100);
+        QCOMPARE(view.transform().m11(), 2.5);
+        send(Qt::ZoomNativeGesture, -.9999);
+        QCOMPARE(view.transform().m11(), .15);
+        const auto stable = view.viewState();
+        send(Qt::ZoomNativeGesture, -2);
+        QCOMPARE(view.viewState(), stable);
+        send(Qt::ZoomNativeGesture, std::numeric_limits<qreal>::quiet_NaN());
+        QCOMPARE(view.viewState(), stable);
     }
     void boundedLargeGraphKeepsManualPinsAndReportsInteractionCost_data() {
         QTest::addColumn<int>("count");

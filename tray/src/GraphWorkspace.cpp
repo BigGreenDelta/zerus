@@ -80,6 +80,10 @@ void GraphWorkspace::setContext(const QSet<QString> &routes,
     project();
 }
 void GraphWorkspace::setTheme(bool dark) { m_page->setTheme(dark); }
+void GraphWorkspace::setFilterCatalog(const FleetState &fleet,
+                                      const QList<SessionOrganization::Group> &projects) {
+    m_page->setFilterCatalog(fleet, projects);
+}
 void GraphWorkspace::focusTarget(const QString &host, const QString &name, const QString &run,
                                  const QString &conversation, const QString &archive) {
     m_focusTarget = {{"host", host},
@@ -147,9 +151,9 @@ void GraphWorkspace::status() {
     auto summary = m_controller->summary();
     auto details = m_controller->details();
     if (m_omitted)
-        summary += tr(" · %1 outside this view").arg(m_omitted);
+        summary += tr(" / %1 outside this view").arg(m_omitted);
     if (m_bindingOmitted)
-        summary += tr(" · %1 current bindings outside this view").arg(m_bindingOmitted);
+        summary += tr(" / %1 current bindings outside this view").arg(m_bindingOmitted);
     if (m_unresolved)
         details += tr("\n%1 records lack a verified endpoint or relationship.").arg(m_unresolved);
     m_page->setFreshness(summary, details);

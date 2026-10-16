@@ -1,5 +1,7 @@
 #include "GraphPage.h"
 #include "GraphViewStateStore.h"
+#include "MachineFilter.h"
+#include "ProjectFilter.h"
 #include "SessionCardDelegate.h"
 #include "WorkspacePageHeader.h"
 #include "WorkspaceStyle.h"
@@ -90,6 +92,7 @@ class GraphConnections final : public QListWidget {
 
 GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(parent) {
     setObjectName("graphPage");
+    m_viewLoaded = viewStateKey.isEmpty();
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(20, 16, 20, 12);
     root->setSpacing(12);
@@ -103,11 +106,6 @@ GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(par
     m_search->setPlaceholderText(tr("Search sessions, projects, computers…"));
     m_search->setClearButtonEnabled(true);
     header->addWidget(m_search, 1);
-    m_filters = new QPushButton(tr("Filters"));
-    m_filters->setObjectName("graphFilters");
-    m_filterMenu = new QMenu(m_filters);
-    m_filters->setMenu(m_filterMenu);
-    header->addWidget(m_filters);
     m_listToggle = new QPushButton(tr("List"));
     m_listToggle->setCheckable(true);
     m_listToggle->setObjectName("graphListToggle");
@@ -115,6 +113,76 @@ GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(par
     m_refresh = new QPushButton;
     header->addWidget(m_refresh);
     root->addLayout(header);
+    auto *filters = new QHBoxLayout;
+    filters->setSpacing(3);
+    const QList<QPair<QString, QString>> scopes{{"all", tr("All sessions")},
+                                                {"attention", tr("Needs attention")},
+                                                {"active", tr("Active")},
+                                                {"paused", tr("Saved sessions")},
+                                                {"archived", tr("Archive")}};
+    for (const auto &scope : scopes) {
+        auto *button = new QPushButton;
+        button->setObjectName("graphStateFilter");
+        button->setProperty("graphFilter", scope.first);
+        button->setProperty("glyph", scope.first);
+        button->setProperty("caption", scope.second);
+        button->setAccessibleName(scope.second);
+        button->setCheckable(true);
+        button->setIconSize(QSize(16, 16));
+        button->setMinimumWidth(44);
+        filters->addWidget(button);
+        m_filters.append(button);
+        connect(button, &QPushButton::clicked, this, [this, id = scope.first] {
+            m_filter = id;
+            m_neighborhood.clear();
+            changeScope();
+        });
+    }
+    m_completed = new QPushButton;
+    m_completed->setObjectName("graphShowCompleted");
+    m_completed->setProperty("glyph", "graph");
+    m_completed->setAccessibleName(tr("Include completed agents"));
+    m_completed->setCheckable(true);
+    m_completed->setIconSize(QSize(16, 16));
+    filters->addWidget(m_completed);
+    connect(m_completed, &QPushButton::clicked, this, [this](bool on) {
+        m_showCompleted = on;
+        changeScope();
+    });
+    m_machineFilter = new MachineFilter;
+    m_projectFilter = new ProjectFilter;
+    m_machineFilter->setObjectName("graphMachineFilterChips");
+    m_projectFilter->setObjectName("graphProjectFilterChips");
+    m_machineFilter->button()->setObjectName("graphMachineFilter");
+    m_projectFilter->button()->setObjectName("graphProjectFilter");
+    m_machineFilter->button()->menu()->setObjectName("graphMachineFilterMenu");
+    m_projectFilter->button()->menu()->setObjectName("graphProjectFilterMenu");
+    filters->addWidget(m_machineFilter->button());
+    filters->addWidget(m_projectFilter->button());
+    connect(m_machineFilter, &MachineFilter::selectionChanged, this,
+            [this](const QSet<QString> &hosts) {
+                m_hosts = hosts;
+                changeScope();
+            });
+    connect(m_projectFilter, &ProjectFilter::selectionChanged, this,
+            [this](const QSet<QString> &projects) {
+                m_projects = projects;
+                changeScope();
+            });
+    m_leaveFocus = new QPushButton;
+    m_leaveFocus->setObjectName("graphLeaveFocus");
+    m_leaveFocus->setProperty("glyph", "close");
+    m_leaveFocus->setAccessibleName(tr("Leave focused neighborhood"));
+    m_leaveFocus->setToolTip(m_leaveFocus->accessibleName());
+    filters->addWidget(m_leaveFocus);
+    connect(m_leaveFocus, &QPushButton::clicked, this, [this] {
+        m_neighborhood.clear();
+        changeScope();
+    });
+    filters->addStretch();
+    root->addLayout(filters);
+    root->addWidget(m_machineFilter);
+    root->addWidget(m_projectFilter);
     m_count = plain();
     m_count->setObjectName("graphScope");
     m_count->setMinimumHeight(20);
@@ -298,7 +366,7 @@ GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(par
     searchDelay->setInterval(150);
     connect(m_search, &QLineEdit::textChanged, searchDelay, qOverload<>(&QTimer::start));
     connect(m_search, &QLineEdit::textChanged, this, &GraphPage::saveView);
-    connect(searchDelay, &QTimer::timeout, this, &GraphPage::render);
+    connect(searchDelay, &QTimer::timeout, this, &GraphPage::changeScope);
     connect(m_refresh, &QPushButton::clicked, this, &GraphPage::refreshRequested);
     connect(m_listToggle, &QPushButton::toggled, this, [this](bool list) {
         m_views->setCurrentIndex(list ? 1 : 0);
@@ -331,8 +399,9 @@ GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(par
     });
     connect(m_focus, &QPushButton::clicked, this, [this] {
         m_neighborhood = m_selectedNode;
-        render();
-        saveView();
+        m_filter = "all";
+        m_showCompleted = true;
+        changeScope();
     });
     connect(m_connections, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
         if (!item->data(Qt::UserRole).toString().isEmpty())
@@ -359,7 +428,6 @@ GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(par
         emit openRequested(target.host, target.name, target.run, target.conversation,
                            target.archive, target.agent);
     });
-    connect(m_filterMenu, &QMenu::aboutToShow, this, &GraphPage::rebuildFilters);
     setTheme(true);
     render();
     if (!viewStateKey.isEmpty()) {
@@ -367,11 +435,12 @@ GraphPage::GraphPage(QWidget *parent, const QString &viewStateKey) : QWidget(par
         connect(m_viewStore, &GraphViewStateStore::loaded, this,
                 [this](const QJsonObject &state, const QString &error) {
                     m_viewError = error;
+                    m_viewLoaded = true;
                     // A late settings read cannot override an interaction that
                     // already happened in this window.
                     if (!m_viewTouched && !state.isEmpty() && !restoreViewState(state))
                         m_viewError = tr("Saved layout could not be loaded");
-                    m_viewLoaded = true;
+                    arrangeInitially();
                     if (m_haveProjection && m_viewError.isEmpty())
                         m_viewStore->save(viewState());
                     updateFreshness();
@@ -393,6 +462,8 @@ void GraphPage::saveView() {
     if (m_restoring || m_rendering || m_arranging)
         return;
     m_viewTouched = true;
+    if (m_canvas->nodeCount())
+        m_layoutReady = true;
     if (m_viewStore)
         m_viewStore->save(viewState());
 }
@@ -459,13 +530,57 @@ bool GraphPage::setProjection(const QList<Node> &nodes, const QList<Relation> &r
         m_viewStore->save(viewState());
     return true;
 }
+bool GraphPage::matchesState(const Node &node, const QString &filter) const {
+    if (filter == "archived")
+        return node.archived;
+    if (node.archived)
+        return false;
+    if (filter == "active")
+        return node.active;
+    if (filter == "paused")
+        return node.saved;
+    if (filter == "attention")
+        return node.card.roles.value(SessionRoles::Attention).toBool() ||
+               node.card.roles.value(SessionRoles::Unread).toBool() ||
+               node.card.roles.value(SessionRoles::ReviewLater).toBool();
+    return true;
+}
+bool GraphPage::matchesMachine(const Node &node) const {
+    if (m_hosts.isEmpty())
+        return true;
+    for (const auto &target : node.targets)
+        if (m_hosts.contains(target.host.isEmpty() ? QStringLiteral("@local") : target.host))
+            return true;
+    return false;
+}
+void GraphPage::changeScope() {
+    render();
+    m_canvas->fitGraph();
+    saveView();
+}
+void GraphPage::arrangeInitially() {
+    if (m_layoutReady || !m_viewLoaded || !m_viewError.isEmpty() || m_restoring ||
+        !m_canvas->nodeCount())
+        return;
+    m_arranging = true;
+    m_canvas->resetLayout();
+    m_canvas->fitGraph();
+    m_arranging = false;
+    m_layoutReady = true;
+    if (m_viewStore)
+        m_viewStore->save(viewState());
+}
 void GraphPage::render() {
     const auto query = m_search->text().trimmed();
-    QSet<QString> visible, primary, archives;
+    QSet<QString> visible, primary, eligible;
     for (const auto &node : m_nodes) {
-        if (node.archived)
-            archives.insert(node.card.id);
         const auto &roles = node.card.roles;
+        if (!matchesState(node, m_filter) || !matchesMachine(node) ||
+            (!m_showCompleted && node.completedChild &&
+             !roles.value(SessionRoles::Attention).toBool() &&
+             !roles.value(SessionRoles::Draft).toBool()))
+            continue;
+        eligible.insert(node.card.id);
         const QString text = QStringList{roles.value(SessionRoles::Title).toString(),
                                          roles.value(SessionRoles::Host).toString(),
                                          roles.value(SessionRoles::Agent).toString(),
@@ -474,32 +589,22 @@ void GraphPage::render() {
                                          node.identity,
                                          node.card.id}
                                  .join(' ');
-        if ((m_showArchives || !node.archived) &&
-            (m_showCompleted || !node.completedChild ||
-             roles.value(SessionRoles::Attention).toBool() ||
-             roles.value(SessionRoles::Draft).toBool()) &&
-            (m_project.isEmpty() || (node.card.group.isEmpty() ? QStringLiteral("@unassigned")
-                                                               : node.card.group) == m_project) &&
-            (!m_attentionOnly || roles.value(SessionRoles::Attention).toBool() ||
-             roles.value(SessionRoles::Unread).toBool()) &&
+        const auto project =
+            node.card.group.isEmpty() ? QStringLiteral("@unassigned") : node.card.group;
+        if ((m_projects.isEmpty() || m_projects.contains(project)) &&
             (query.isEmpty() || text.contains(query, Qt::CaseInsensitive)))
             primary.insert(node.card.id);
     }
     visible = primary;
-    // An archived endpoint remains useful context for a visible current
-    // conversation; unrelated archives remain opt-in.
-    for (const auto &edge : m_relations)
-        if (primary.contains(edge.line.from) || primary.contains(edge.line.to)) {
-            if (archives.contains(edge.line.from))
-                visible.insert(edge.line.from);
-            if (archives.contains(edge.line.to))
-                visible.insert(edge.line.to);
-        }
-    if (!m_project.isEmpty())
+    // Keep cross-project collaborators within the explicitly selected state and
+    // machine scope. A project filter must not resurrect inactive child rosters.
+    if (!m_projects.isEmpty())
         for (const auto &edge : m_relations)
             if (primary.contains(edge.line.from) || primary.contains(edge.line.to)) {
-                visible.insert(edge.line.from);
-                visible.insert(edge.line.to);
+                if (eligible.contains(edge.line.from))
+                    visible.insert(edge.line.from);
+                if (eligible.contains(edge.line.to))
+                    visible.insert(edge.line.to);
             }
     if (!m_neighborhood.isEmpty()) {
         QSet<QString> neighborhood{m_neighborhood};
@@ -526,20 +631,19 @@ void GraphPage::render() {
     m_canvas->setGroupLabels(groups);
     m_canvas->setGraph(nodes, edges);
     m_rendering = false;
+    arrangeInitially();
+    if (m_fitMigratedScope && !nodes.isEmpty()) {
+        m_canvas->fitGraph();
+        m_fitMigratedScope = false;
+    }
     m_arrange->setEnabled(!nodes.isEmpty());
     m_count->setText(
-        tr("%1 of %2 sessions and agents · %3 connections%4")
+        tr("%1 of %2 sessions and agents / %3 connections%4")
             .arg(nodes.size())
             .arg(m_nodes.size())
             .arg(edges.size())
-            .arg(m_neighborhood.isEmpty() ? QString() : tr(" · Focused neighborhood")));
-    m_filters->setText(m_project.isEmpty() && !m_attentionOnly && m_neighborhood.isEmpty() &&
-                               !m_showArchives && !m_showCompleted
-                           ? tr("Filters")
-                           : tr("Filters (%1)")
-                                 .arg(int(!m_project.isEmpty()) + int(m_attentionOnly) +
-                                      int(!m_neighborhood.isEmpty()) + int(m_showArchives) +
-                                      int(m_showCompleted)));
+            .arg(m_neighborhood.isEmpty() ? QString() : tr(" / Focused neighborhood")));
+    updateFilters();
     if (m_inspectorWanted)
         inspectSelection();
 }
@@ -820,12 +924,22 @@ bool GraphPage::focusTarget(const QString &host, const QString &name, const QStr
 void GraphPage::focusNode(const QString &id) {
     for (const auto &node : m_nodes)
         if (node.card.id == id) {
-            m_showArchives |= node.archived;
+            m_filter = node.archived ? QStringLiteral("archived")
+                       : node.active ? QStringLiteral("active")
+                                     : QStringLiteral("all");
             m_showCompleted |= node.completedChild;
             break;
         }
-    m_project.clear();
-    m_attentionOnly = false;
+    m_projects.clear();
+    m_hosts.clear();
+    {
+        const QSignalBlocker block(m_projectFilter);
+        m_projectFilter->setSelection({});
+    }
+    {
+        const QSignalBlocker block(m_machineFilter);
+        m_machineFilter->setSelection({});
+    }
     m_neighborhood.clear();
     m_search->clear();
     render();
@@ -833,10 +947,22 @@ void GraphPage::focusNode(const QString &id) {
     inspectNode(id);
 }
 void GraphPage::focusProject(const QString &id) {
-    m_project = id;
+    m_projects = id.isEmpty() ? QSet<QString>() : QSet<QString>{id};
+    {
+        const QSignalBlocker block(m_projectFilter);
+        m_projectFilter->setSelection(m_projects);
+    }
     m_neighborhood.clear();
-    render();
-    saveView();
+    changeScope();
+}
+void GraphPage::setFilterCatalog(const FleetState &fleet,
+                                 const QList<SessionOrganization::Group> &projects) {
+    m_machineFilter->setFleet(fleet);
+    auto groups = projects;
+    if (std::none_of(groups.cbegin(), groups.cend(),
+                     [](const auto &group) { return group.id == "@unassigned"; }))
+        groups.append({"@unassigned", tr("Unassigned")});
+    m_projectFilter->setProjects(groups);
 }
 void GraphPage::setFreshness(const QString &summary, const QString &details) {
     m_freshnessSummary = summary;
@@ -846,72 +972,68 @@ void GraphPage::setFreshness(const QString &summary, const QString &details) {
 void GraphPage::updateFreshness() {
     const QString summary = m_viewError.isEmpty()
                                 ? m_freshnessSummary
-                                : m_viewError + tr(" · changes kept in this window");
+                                : m_viewError + tr(" / changes kept in this window");
     m_freshness->setText(summary);
     m_freshness->setToolTip(m_freshnessDetails + "\n" +
                             tr("Positions, zoom and camera are saved on this "
                                "device. Refresh keeps your layout."));
     m_freshness->setAccessibleName(summary);
 }
-void GraphPage::rebuildFilters() {
-    m_filterMenu->clear();
-    auto *all = m_filterMenu->addAction(tr("All current sessions"));
-    connect(all, &QAction::triggered, this, [this] {
-        m_project.clear();
-        m_neighborhood.clear();
-        m_attentionOnly = false;
-        m_showArchives = false;
-        m_showCompleted = false;
-        m_search->clear();
-        render();
-        saveView();
-    });
-    auto *attention = m_filterMenu->addAction(tr("Needs attention"));
-    attention->setCheckable(true);
-    attention->setChecked(m_attentionOnly);
-    connect(attention, &QAction::toggled, this, [this](bool enabled) {
-        m_attentionOnly = enabled;
-        render();
-        saveView();
-    });
-    auto *archives = m_filterMenu->addAction(tr("Archived sessions"));
-    archives->setObjectName("graphShowArchives");
-    archives->setCheckable(true);
-    archives->setChecked(m_showArchives);
-    connect(archives, &QAction::toggled, this, [this](bool on) {
-        m_showArchives = on;
-        render();
-        saveView();
-    });
-    auto *completed = m_filterMenu->addAction(tr("Completed agents"));
-    completed->setObjectName("graphShowCompleted");
-    completed->setCheckable(true);
-    completed->setChecked(m_showCompleted);
-    connect(completed, &QAction::toggled, this, [this](bool on) {
-        m_showCompleted = on;
-        render();
-        saveView();
-    });
-    auto *projects = m_filterMenu->addMenu(tr("Project"));
-    QMap<QString, QString> groups;
-    for (const auto &node : m_nodes)
-        groups[node.card.group] = node.project;
-    for (auto it = groups.cbegin(); it != groups.cend(); ++it) {
-        auto *action = projects->addAction(it.value().isEmpty() ? tr("Unassigned") : it.value());
-        action->setCheckable(true);
-        action->setChecked(m_project == it.key());
-        connect(action, &QAction::triggered, this, [this, id = it.key()] {
-            focusProject(id.isEmpty() ? QStringLiteral("@unassigned") : id);
-        });
+void GraphPage::updateFilters() {
+    QString caption;
+    const auto accent = QColor(m_dark ? "#8bdfc0" : "#167357");
+    const auto muted = QColor(m_dark ? "#a2adbc" : "#627082");
+    for (auto *button : m_filters) {
+        const auto id = button->property("graphFilter").toString();
+        int count = 0;
+        for (const auto &node : m_nodes)
+            if (matchesState(node, id) && matchesMachine(node) &&
+                (m_projects.isEmpty() ||
+                 m_projects.contains(node.card.group.isEmpty() ? QStringLiteral("@unassigned")
+                                                               : node.card.group)) &&
+                (m_showCompleted || !node.completedChild ||
+                 node.card.roles.value(SessionRoles::Attention).toBool() ||
+                 node.card.roles.value(SessionRoles::Draft).toBool()))
+                ++count;
+        button->setChecked(id == m_filter);
+        button->setText(QString::number(count));
+        button->setProperty("count", count);
+        button->setToolTip(tr("%1 / %2 sessions and agents")
+                               .arg(button->property("caption").toString())
+                               .arg(count));
+        button->setIcon(workspaceIcon(id, id == "attention" && count
+                                              ? QColor(m_dark ? "#f0c77b" : "#885400")
+                                          : id == m_filter ? accent
+                                                           : muted));
+        if (id == m_filter)
+            caption = button->property("caption").toString();
     }
-    if (!m_neighborhood.isEmpty()) {
-        auto *exit = m_filterMenu->addAction(tr("Leave focused neighborhood"));
-        connect(exit, &QAction::triggered, this, [this] {
-            m_neighborhood.clear();
-            render();
-            saveView();
-        });
+    m_completed->setEnabled(m_filter == "all" || m_filter == "paused" || m_filter == "archived");
+    m_completed->setChecked(m_showCompleted && m_completed->isEnabled());
+    m_completed->setIcon(workspaceIcon("graph", m_showCompleted ? accent : muted));
+    m_completed->setToolTip(tr("Include completed agents in All, Saved sessions or Archive"));
+    m_leaveFocus->setVisible(!m_neighborhood.isEmpty());
+    QMap<QString, int> machines, projects;
+    for (const auto &node : m_nodes) {
+        if (!matchesState(node, m_filter) ||
+            (!m_showCompleted && node.completedChild &&
+             !node.card.roles.value(SessionRoles::Attention).toBool() &&
+             !node.card.roles.value(SessionRoles::Draft).toBool()))
+            continue;
+        const auto project =
+            node.card.group.isEmpty() ? QStringLiteral("@unassigned") : node.card.group;
+        if (matchesMachine(node))
+            ++projects[project];
+        if (!m_projects.isEmpty() && !m_projects.contains(project))
+            continue;
+        QSet<QString> hosts;
+        for (const auto &target : node.targets)
+            hosts.insert(target.host.isEmpty() ? QStringLiteral("@local") : target.host);
+        for (const auto &host : hosts)
+            ++machines[host];
     }
+    m_machineFilter->setSessionCounts(machines, caption);
+    m_projectFilter->setSessionCounts(projects, caption);
 }
 void GraphPage::arrangeInspector() {
     const bool overlay = width() < 1000;
@@ -945,41 +1067,66 @@ void GraphPage::setTheme(bool dark) {
     m_list->setProperty("hgsDark", dark);
     m_list->viewport()->update();
     WorkspacePageHeader::theme(m_refresh, nullptr, tr("Refresh graph"), dark);
-    setStyleSheet(QString("#graphPage {background:%4;color:%5;} #graphPage QLabel "
-                          "{color:%5;} #graphPage "
-                          "QLineEdit,#graphPage QListView "
-                          "{background:%1;color:%5;border:1px solid "
-                          "%2;border-radius:5px;padding:5px;} #graphPage "
-                          "QListView::item:selected "
-                          "{background:%6;color:%5;} #graphPage QPushButton "
-                          "{background:%1;color:%5;border:1px solid "
-                          "%2;border-radius:6px;padding:6px "
-                          "10px;min-height:20px;} #graphPage QPushButton:disabled "
-                          "{color:%3;} #graphPage "
-                          "QPushButton:hover {border-color:%3;} #graphInspectorContent "
-                          "{background:%1;} "
-                          "#graphPage QScrollArea {background:transparent;border:0;} "
-                          "#graphInspector "
-                          "{background:%1;border:1px solid %2;border-radius:8px;} "
-                          "#graphInspectorTitle "
-                          "{font-size:15px;font-weight:600;} #graphScope,#graphFreshness "
-                          "{color:%3;}")
-                      .arg(dark ? "#1c2229" : "#ffffff", dark ? "#333c47" : "#dce2e8",
-                           dark ? "#a2adbc" : "#627082", dark ? "#171d24" : "#f2f5f6",
-                           dark ? "#e8edf4" : "#1a2733", dark ? "#303b47" : "#dde7ef") +
-                  workspaceScrollbars(dark));
+    setStyleSheet(
+        QString("#graphPage {background:%4;color:%5;} #graphPage QLabel "
+                "{color:%5;} #graphPage "
+                "QLineEdit,#graphPage QListView "
+                "{background:%1;color:%5;border:1px solid "
+                "%2;border-radius:5px;padding:5px;} #graphPage "
+                "QListView::item:selected "
+                "{background:%6;color:%5;} #graphPage QPushButton "
+                "{background:%1;color:%5;border:1px solid "
+                "%2;border-radius:6px;padding:6px "
+                "10px;min-height:20px;} #graphPage QPushButton:disabled "
+                "{color:%3;} #graphPage "
+                "QPushButton:hover {border-color:%3;} #graphInspectorContent "
+                "{background:%1;} "
+                "#graphPage QScrollArea {background:transparent;border:0;} "
+                "#graphInspector "
+                "{background:%1;border:1px solid %2;border-radius:8px;} "
+                "#graphInspectorTitle "
+                "{font-size:15px;font-weight:600;} #graphScope,#graphFreshness "
+                "{color:%3;}")
+            .arg(dark ? "#1c2229" : "#ffffff", dark ? "#333c47" : "#dce2e8",
+                 dark ? "#a2adbc" : "#627082", dark ? "#171d24" : "#f2f5f6",
+                 dark ? "#e8edf4" : "#1a2733", dark ? "#303b47" : "#dde7ef") +
+        workspaceScrollbars(dark) +
+        QString(
+            " #graphPage QPushButton#graphStateFilter {padding:4px "
+            "6px;min-height:22px;font-size:11px;background:transparent;border-color:transparent;}"
+            " #graphPage QPushButton#graphStateFilter:checked "
+            "{background:%1;border-color:%2;color:%2;}"
+            " #graphPage QPushButton#graphMachineFilter,#graphPage QPushButton#graphProjectFilter {padding:0 "
+            "6px;min-height:0;}"
+            " #graphPage QPushButton#graphShowCompleted {padding:4px 6px;min-height:22px;}"
+            " #graphPage QPushButton#graphShowCompleted:checked {border-color:%2;}")
+            .arg(dark ? "#263c35" : "#dcefe6", dark ? "#8bdfc0" : "#167357"));
+    m_machineFilter->setTheme(dark);
+    m_projectFilter->setTheme(dark);
     for (auto *button : findChildren<QPushButton *>())
         if (button->property("glyph").isValid())
             button->setIcon(workspaceIcon(button->property("glyph").toString(),
                                           QColor(dark ? "#a2adbc" : "#627082")));
+    updateFilters();
 }
 QJsonObject GraphPage::viewState() const {
     return {{"schema", 1},
             {"canvas", m_canvas->viewState()},
-            {"project", m_project},
+            {"project", m_projects.size() == 1 ? *m_projects.cbegin() : QString()},
+            {"projects", QJsonArray::fromStringList([this] {
+                 QStringList ids(m_projects.cbegin(), m_projects.cend());
+                 ids.sort();
+                 return ids;
+             }())},
+            {"hosts", QJsonArray::fromStringList([this] {
+                 QStringList ids(m_hosts.cbegin(), m_hosts.cend());
+                 ids.sort();
+                 return ids;
+             }())},
+            {"filter", m_filter},
             {"query", m_search->text()},
-            {"attention", m_attentionOnly},
-            {"archives", m_showArchives},
+            {"attention", m_filter == "attention"},
+            {"archives", m_filter == "archived"},
             {"completed", m_showCompleted},
             {"neighborhood", m_neighborhood},
             {"selectedNode", m_selectedNode},
@@ -1016,11 +1163,37 @@ bool GraphPage::restoreViewState(const QJsonObject &rawState) {
         m_restoring = false;
         return false;
     }
-    m_project = state["project"].toString().left(160);
+    const auto selection = [](const QJsonValue &value) {
+        QSet<QString> ids;
+        const auto values = value.toArray();
+        for (qsizetype i = 0; i < qMin(values.size(), qsizetype(128)); ++i) {
+            const auto entry = values[i];
+            if (entry.isString() && !entry.toString().isEmpty() && entry.toString().size() <= 160)
+                ids.insert(entry.toString());
+        }
+        return ids;
+    };
+    m_projects = selection(state["projects"]);
+    if (!state.contains("projects") && !state["project"].toString().isEmpty())
+        m_projects.insert(state["project"].toString().left(160));
+    m_hosts = selection(state["hosts"]);
+    {
+        const QSignalBlocker block(m_projectFilter);
+        m_projectFilter->setSelection(m_projects);
+    }
+    {
+        const QSignalBlocker block(m_machineFilter);
+        m_machineFilter->setSelection(m_hosts);
+    }
+    m_fitMigratedScope = !state.contains("filter") && !state["attention"].toBool() && !state["archives"].toBool();
+    m_filter = state["filter"].toString();
+    if (!QStringList{"all", "attention", "active", "paused", "archived"}.contains(m_filter))
+        m_filter = state["attention"].toBool()  ? QStringLiteral("attention")
+                   : state["archives"].toBool() ? QStringLiteral("archived")
+                                                : QStringLiteral("active");
+    m_layoutReady = !state["canvas"].toObject()["positions"].toObject().isEmpty();
     m_neighborhood = state["neighborhood"].toString().left(512);
     m_search->setText(state["query"].toString().left(512));
-    m_attentionOnly = state["attention"].toBool();
-    m_showArchives = state["archives"].toBool();
     m_showCompleted = state["completed"].toBool();
     m_selectedNode = state["selectedNode"].toString().left(512);
     m_selectedRelation = state["selectedRelation"].toString().left(512);
@@ -1030,5 +1203,6 @@ bool GraphPage::restoreViewState(const QJsonObject &rawState) {
     if (!m_inspectorWanted)
         m_inspector->hide();
     m_restoring = false;
+    arrangeInitially();
     return true;
 }
