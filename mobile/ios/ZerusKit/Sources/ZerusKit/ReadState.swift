@@ -1,0 +1,543 @@
+import Foundation
+
+public struct SavedConversationViewport: Codable, Hashable, Sendable {
+    public var eventId: String
+    public var offset: Int
+    public var cursor: String
+    public var epoch: String
+    public init(eventId: String, offset: Int, cursor: String = "", epoch: String = "") {
+        self.eventId = eventId
+        self.offset = offset
+        self.cursor = cursor
+        self.epoch = epoch
+    }
+}
+
+/// Private read progress for one exact conversation, ported from Android `ConversationReadRecord`.
+public struct ConversationReadRecord: Codable, Hashable, Sendable {
+    public var target: Target
+    public var seen: [String] = []
+    public var viewport: SavedConversationViewport?
+    public var incomplete = false
+    public var epoch = ""
+    public var readThrough: Int64 = 0
+    public var headIncoming: Int64?
+    public var headTotal: Int64?
+    public var headComplete = false
+    public var reviewLater = false
+    public var established = false
+
+    public init(target: Target, seen: [String] = [], viewport: SavedConversationViewport? = nil, incomplete: Bool = false, epoch: String = "",
+                readThrough: Int64 = 0, headIncoming: Int64? = nil, headTotal: Int64? = nil, headComplete: Bool = false,
+                reviewLater: Bool = false, established: Bool = false) {
+        self.target = target
+        self.seen = seen
+        self.viewport = viewport
+        self.incomplete = incomplete
+        self.epoch = epoch
+        self.readThrough = readThrough
+        self.headIncoming = headIncoming
+        self.headTotal = headTotal
+        self.headComplete = headComplete
+        self.reviewLater = reviewLater
+        self.established = established
+    }
+}
+
+public struct ConversationReadState: Codable, Hashable, Sendable {
+    public var records: [ConversationReadRecord] = []
+    public init(records: [ConversationReadRecord] = []) { self.records = records }
+
+    public func record(_ target: Target) -> ConversationReadRecord? {
+        let key = ConversationReadPolicies.key(target)
+        return records.first { ConversationReadPolicies.key($0.target) == key }
+    }
+
+    func put(_ next: ConversationReadRecord) -> ConversationReadState {
+        if records.count >= 500 && record(next.target) == nil { return self }
+        let key = ConversationReadPolicies.key(next.target)
+        return ConversationReadState(records: records.filter { ConversationReadPolicies.key($0.target) != key } + [next])
+    }
+
+    public func viewed(_ target: Target, _ ids: Set<String>) -> ConversationReadState {
+        var previous = record(target) ?? ConversationReadRecord(target: target)
+        let additions = ids.sorted().filter { !previous.seen.contains($0) }
+        let used = records.reduce(0) { $0 + $1.seen.count }
+        let available = min(max(50_000 - used, 0), max(5000 - previous.seen.count, 0))
+        // Legacy exact IDs are never silently evicted. Native canonical epochs use a watermark.
+        previous.seen += additions.prefix(available)
+        previous.incomplete = previous.incomplete || additions.count > available
+        previous.established = previous.established || !ids.isEmpty
+        return put(previous)
+    }
+
+    public func visible(_ target: Target, _ events: [Event]) -> ConversationReadState {
+        let incoming = events.filter(ConversationReadPolicies.incoming)
+        let previous = record(target)
+        let canonical = incoming.filter { previous?.epoch.isEmpty == false && $0.historyEpoch == previous?.epoch && $0.incomingSeq != nil }
+        var next = self
+        if let sequence = canonical.compactMap(\.incomingSeq).max(), var updated = previous {
+            updated.readThrough = max(updated.readThrough, sequence)
+            updated.established = true
+            next = put(updated)
+        }
+        return next.viewed(target, Set(incoming.filter { $0.incomingSeq == nil || $0.historyEpoch != previous?.epoch }.map(\.id)))
+    }
+
+    public func head(_ target: Target, epoch: String, latest: Int64?, total: Int64?, complete: Bool) -> ConversationReadState {
+        if epoch.isEmpty || epoch.count > 512 || (latest.map { $0 < 0 } ?? false) || (total.map { $0 < 0 } ?? false) { return self }
+        var old = record(target) ?? ConversationReadRecord(target: target)
+        let same = old.epoch == epoch
+        old.readThrough = same ? old.readThrough : 0
+        old.headIncoming = same ? (latest.map { max(old.headIncoming ?? 0, $0) } ?? old.headIncoming) : latest
+        old.headTotal = same ? (total.map { max(old.headTotal ?? 0, $0) } ?? old.headTotal) : total
+        old.headComplete = complete && latest != nil && total != nil
+        old.epoch = epoch
+        return put(old)
+    }
+
+    public func review(_ target: Target, _ value: Bool) -> ConversationReadState {
+        var record = record(target) ?? ConversationReadRecord(target: target)
+        record.reviewLater = value
+        return put(record)
+    }
+
+    public func supersede(_ target: Target, _ aliases: [String: String]) -> ConversationReadState {
+        guard let old = record(target) else { return self }
+        var next = viewed(target, Set(aliases.filter { old.seen.contains($0.key) }.values))
+        if let anchor = old.viewport, let alias = aliases[anchor.eventId] {
+            next = next.viewport(target, eventId: alias, offset: anchor.offset, cursor: anchor.cursor, epoch: anchor.epoch)
+        }
+        return next
+    }
+
+    public func viewport(_ target: Target, eventId: String, offset: Int, cursor: String = "", epoch: String = "") -> ConversationReadState {
+        if eventId.isEmpty || eventId.count > 2048 || offset < 0 || cursor.count > 8192 || epoch.count > 512 { return self }
+        var previous = record(target) ?? ConversationReadRecord(target: target)
+        previous.viewport = SavedConversationViewport(eventId: eventId, offset: offset, cursor: cursor, epoch: epoch)
+        previous.established = true
+        return put(previous)
+    }
+
+    public func promote(_ action: SessionAction) -> ConversationReadState {
+        guard let destination = action.resultTarget, ActionDraftPolicies.proof(action, action.target, destination), record(destination) == nil,
+              var previous = record(action.target) else { return self }
+        previous.target = destination
+        return put(previous)
+    }
+
+    /// Bounded state as loaded from storage.
+    public func validated() -> ConversationReadState {
+        var total = 0
+        var rows: [ConversationReadRecord] = []
+        for record in records.prefix(500) {
+            guard record.seen.count <= 5000, record.seen.allSatisfy({ $0.count <= 2048 }), record.epoch.count <= 512, record.readThrough >= 0 else { continue }
+            total += record.seen.count
+            if total > 50_000 { break }
+            rows.append(record)
+        }
+        return ConversationReadState(records: rows)
+    }
+}
+
+public enum ConversationReadPolicies {
+    public static func key(_ target: Target) -> String {
+        JSON([target.connectionId, target.computerId, target.session, target.conversation, target.archiveId, target.agentId, target.parentConversation]).compact
+    }
+
+    public static func incoming(_ event: Event) -> Bool {
+        ["AgentMessage", "Stop"].contains(event.nativeType) && event.role != "You" && event.role != "You (answer)" && event.outgoingId.isEmpty
+    }
+
+    /// Canonical order proves the incoming prefix before a visible message position, including an own row.
+    public static func incomingThroughPosition(_ epoch: String, _ ordered: [Event], _ visible: [Event]) -> [Event] {
+        let incomingVisible = visible.filter(incoming)
+        if epoch.isEmpty { return incomingVisible }
+        func canonical(_ row: Event) -> Bool { row.historyEpoch == epoch && !row.historyId.isEmpty && !row.historyCursor.isEmpty }
+        func position(_ row: Event) -> Bool {
+            incoming(row) || ["You", "You (answer)"].contains(row.role) &&
+                ["UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted", "QuestionAnswered"].contains(row.nativeType)
+        }
+        let positions = visible.filter { canonical($0) && position($0) }.compactMap { shown -> Int? in
+            let matches = ordered.indices.filter { index in
+                let row = ordered[index]
+                return canonical(row) && row.historyId == shown.historyId && row.historyCursor == shown.historyCursor &&
+                    row.role == shown.role && row.nativeType == shown.nativeType && row.source == shown.source
+            }
+            return matches.count == 1 ? matches[0] : nil
+        }
+        guard let through = positions.max() else { return incomingVisible }
+        let prefix = ordered.prefix(through + 1).filter { canonical($0) && incoming($0) && $0.incomingSeq != nil }
+        var seen = Set<String>()
+        return (prefix + incomingVisible).filter { seen.insert($0.id).inserted }
+    }
+
+    public struct Visibility: Hashable, Sendable {
+        public let id: String
+        public let epoch: String
+        public let sequence: Int64?
+    }
+
+    /// Resample visible content when canonical read evidence changes, independently of its text or geometry.
+    public static func visibilityEvidence(_ rows: [Event]) -> [Visibility] {
+        rows.filter(incoming).map { Visibility(id: $0.id, epoch: $0.historyEpoch, sequence: $0.incomingSeq) }
+    }
+
+    public static func unread(_ record: ConversationReadRecord?, _ event: Event) -> Bool {
+        guard incoming(event) else { return false }
+        if let record, !record.epoch.isEmpty, record.epoch == event.historyEpoch, let sequence = event.incomingSeq {
+            return sequence > record.readThrough
+        }
+        return !(record?.seen.contains(event.id) ?? false)
+    }
+
+    public static func lowerBound(_ record: ConversationReadRecord?, _ rows: [Event]?) -> Int? {
+        var known: Int?
+        if let record, !record.epoch.isEmpty, let head = record.headIncoming { known = Int(clamping: max(0, head - record.readThrough)) }
+        if rows == nil && known == nil { return nil }
+        let loaded = rows?.filter { unread(record, $0) }.count ?? 0
+        return max(loaded, known ?? 0)
+    }
+}
+
+/// A device-local review choice captures evidence; it never answers native questions.
+public struct ReadAttentionEvidence: Hashable, Sendable {
+    public var target: Target
+    public var fingerprint: String
+    public var epoch: String
+    public var head: Int64?
+    public var authoritative: Bool
+    public var loadedIds: Set<String>
+    public var loadedThrough: Int64?
+
+    public init(target: Target, fingerprint: String, epoch: String, head: Int64?, authoritative: Bool, loadedIds: Set<String>, loadedThrough: Int64? = nil) {
+        self.target = target
+        self.fingerprint = fingerprint
+        self.epoch = epoch
+        self.head = head
+        self.authoritative = authoritative
+        self.loadedIds = loadedIds
+        self.loadedThrough = loadedThrough
+    }
+}
+
+public enum ReadAttentionPolicies {
+    public static func mark(_ state: ConversationReadState, _ evidence: ReadAttentionEvidence) -> ConversationReadState {
+        let old = state.record(evidence.target)
+        let key = ConversationReadPolicies.key(evidence.target)
+        if evidence.authoritative {
+            guard let old, old.headComplete, old.epoch == evidence.epoch, old.headIncoming == evidence.head, let head = evidence.head else { return state }
+            _ = old
+            return ConversationReadState(records: state.records.map { record in
+                guard ConversationReadPolicies.key(record.target) == key else { return record }
+                var copy = record
+                copy.readThrough = max(copy.readThrough, head)
+                copy.reviewLater = false
+                copy.established = true
+                return copy
+            })
+        }
+        var loaded = state.viewed(evidence.target, evidence.loadedIds).review(evidence.target, false)
+        if !evidence.loadedIds.isEmpty, let through = evidence.loadedThrough, through >= 0, let old, !old.epoch.isEmpty, old.epoch == evidence.epoch {
+            loaded = ConversationReadState(records: loaded.records.map { record in
+                guard ConversationReadPolicies.key(record.target) == key else { return record }
+                var copy = record
+                copy.readThrough = max(copy.readThrough, through)
+                copy.established = true
+                return copy
+            })
+        }
+        return loaded
+    }
+}
+
+/// Opening may know unread exists before its canonical page is loaded.
+public enum OpeningUnreadBoundary {
+    public struct Decision: Hashable, Sendable {
+        public let captured: Bool
+        public let eventId: String
+    }
+
+    public static func decide(ready: Bool, record: ConversationReadRecord?, rows: [Event]) -> Decision {
+        if !ready { return Decision(captured: false, eventId: "") }
+        guard let record, record.established, !record.incomplete else { return Decision(captured: true, eventId: "") }
+        if let candidate = rows.first(where: { ConversationReadPolicies.unread(record, $0) }) { return Decision(captured: true, eventId: candidate.id) }
+        if !record.epoch.isEmpty && (record.headIncoming ?? 0) > record.readThrough { return Decision(captured: false, eventId: "") }
+        return Decision(captured: true, eventId: "")
+    }
+}
+
+public struct ReadAllResult: Hashable, Sendable {
+    public var marked = 0
+    public var skipped = 0
+    public var partial = 0
+    public init(marked: Int = 0, skipped: Int = 0, partial: Int = 0) {
+        self.marked = marked
+        self.skipped = skipped
+        self.partial = partial
+    }
+}
+
+public struct ReadAllCapture: Hashable, Sendable {
+    public var target: Target
+    public var evidence: ReadAttentionEvidence?
+    public init(target: Target, evidence: ReadAttentionEvidence?) {
+        self.target = target
+        self.evidence = evidence
+    }
+}
+
+public enum ReadAllPolicies {
+    /// List-level Read all follows visible reply badges; an explicit review reminder stays actionable.
+    public static func listCandidate(_ session: Session, online: Bool, reviewLater: Bool = false) -> Bool {
+        !SessionFilters.archived(session) && (reviewLater || session.raw.bool("review_later") || session.raw.bool("mobile_review_later") ||
+            !SharedReadPolicies.replyRead(session) && !SessionFilters.replyInProgress(session, online))
+    }
+
+    public static func available(_ evidence: ReadAttentionEvidence?) -> Bool {
+        guard let evidence else { return false }
+        return evidence.authoritative && !evidence.epoch.isEmpty && evidence.head != nil || !evidence.loadedIds.isEmpty
+    }
+
+    /// A known head past the watermark, or a loaded reply this phone counts as unread.
+    public static func unreadReplies(_ record: ConversationReadRecord?, _ rows: [Event]) -> Bool {
+        (record.map { !$0.epoch.isEmpty && ($0.headIncoming ?? 0) > $0.readThrough } ?? false) || rows.contains { ConversationReadPolicies.unread(record, $0) }
+    }
+
+    /// Cheap check before capturing evidence: a local reminder or replies counted unread.
+    public static func pending(_ record: ConversationReadRecord?, _ rows: [Event]) -> Bool { record?.reviewLater == true || unreadReplies(record, rows) }
+
+    /// Whether `apply` with this evidence would clear something this phone shows.
+    public static func changes(_ record: ConversationReadRecord?, _ evidence: ReadAttentionEvidence?, _ rows: [Event], full: Bool = false) -> Bool {
+        guard available(evidence), let evidence, !(record == nil && full), (record?.epoch ?? "") == evidence.epoch, record?.headIncoming == evidence.head,
+              !evidence.authoritative || record?.headComplete == true else { return false }
+        if record?.reviewLater == true { return true }
+        if evidence.authoritative { return (evidence.head ?? 0) > (record?.readThrough ?? 0) }
+        return rows.contains { evidence.loadedIds.contains($0.id) && ConversationReadPolicies.unread(record, $0) }
+    }
+
+    /// All evidence is captured before the single ordered edit; reducers never fetch or inspect UI state.
+    public static func apply(_ state: ConversationReadState, captured: [ReadAllCapture], current: [ReadAllCapture])
+        -> (state: ConversationReadState, result: ReadAllResult) {
+        var next = state
+        var result = ReadAllResult()
+        var seen = Set<String>()
+        for capture in captured where seen.insert(ConversationReadPolicies.key(capture.target)).inserted {
+            let matching = current.first { $0.target == capture.target }?.evidence
+            let old = next.record(capture.target)
+            guard let evidence = capture.evidence, available(evidence), evidence.target == capture.target, evidence == matching,
+                  (old?.epoch ?? "") == evidence.epoch, old?.headIncoming == evidence.head, !evidence.authoritative || old?.headComplete == true else {
+                result.skipped += 1
+                continue
+            }
+            let updated = ReadAttentionPolicies.mark(next, evidence)
+            guard let record = updated.record(capture.target) else { result.skipped += 1; continue }
+            next = updated
+            result.marked += 1
+            if !evidence.authoritative || record.incomplete { result.partial += 1 }
+        }
+        return (next, result)
+    }
+}
+
+/// Seed metadata heads without opening chats, retaining bounded storage and scheduler ownership.
+public enum ReadAllHeadCandidates {
+    public static func candidates(_ sessions: [Session], _ state: ConversationReadState) -> [Session] {
+        var slots = max(500 - state.records.count, 0)
+        let recorded = Set(state.records.map { ConversationReadPolicies.key($0.target) })
+        var seen = Set<String>()
+        return sessions.filter { seen.insert(ConversationReadPolicies.key($0.target)).inserted }.filter { row in
+            let target = row.target
+            if SessionFilters.archived(row) || target.run.isEmpty || target.conversation.isEmpty { return false }
+            if recorded.contains(ConversationReadPolicies.key(target)) { return true }
+            if slots > 0 && (!row.raw.string("reply_id").isEmpty || row.raw.double("reply_at", default: 0) > 0 ||
+                row.raw.bool("unread_reply") || row.raw.bool("mobile_unread_reply")) {
+                slots -= 1
+                return true
+            }
+            return false
+        }
+    }
+
+    public static func hint(_ row: Session) -> String {
+        JSON.array([.string(row.target.key), .string(HistoryHeadHints.signature(row.preview, row.raw)), .string(row.raw.string("reply_id")),
+                    HistoryHeadHints.value(row.raw, "reply_at")]).compact
+    }
+}
+
+public enum HistoryHeadHints {
+    /// Numbers compare by value, so a copy that normalizes 1.0 to 1 is no native change.
+    public static func value(_ raw: JSONObject?, _ key: String) -> JSON {
+        guard let value = raw?[key] else { return .null }
+        if let number = value.numberValue { return number == number.rounded() && abs(number) < 1e15 ? .int(Int64(number)) : .double(number) }
+        return value
+    }
+
+    public static func signature(_ preview: String, _ raw: JSONObject) -> String {
+        JSON.array([.string(preview), value(raw, "last_event_at"), value(raw, "turn_started"), value(raw, "last_response_at")]).compact
+    }
+
+    public static func readFingerprint(_ target: Target, _ raw: JSONObject?, _ record: ConversationReadRecord?) -> String {
+        JSON.array([.string(target.key), raw.map { .string($0.string("phase")) } ?? .null, value(raw, "last_event_at"), value(raw, "last_response_at"),
+                    raw.map { .string($0.string("prompt")) } ?? .null, raw?["mobile_attention"] ?? .null,
+                    record.map { .string($0.epoch) } ?? .null, record?.headIncoming.map { .int($0) } ?? .null]).compact
+    }
+}
+
+/// Fair bounded reads: an unavailable or indexing source cannot starve later chats.
+public final class HistoryHeadScheduler {
+    struct Attempt { var at: Double; var failures = 0; var next: Double = 0 }
+    var attempts: [String: Attempt] = [:]
+    public init() {}
+
+    /// `now` is monotonic seconds.
+    public func choose(_ targets: [Target], now: Double, limit: Int = 2) -> [Target] {
+        var seen = Set<String>()
+        let chosen = targets.filter { seen.insert(ConversationReadPolicies.key($0)).inserted }
+            .filter { (attempts[ConversationReadPolicies.key($0)]?.next ?? 0) <= now }
+            .enumerated()
+            .sorted { (attempts[ConversationReadPolicies.key($0.element)]?.at ?? -.infinity, $0.offset) < (attempts[ConversationReadPolicies.key($1.element)]?.at ?? -.infinity, $1.offset) }
+            .prefix(limit).map(\.element)
+        for target in chosen {
+            let key = ConversationReadPolicies.key(target)
+            attempts[key] = Attempt(at: now, failures: attempts[key]?.failures ?? 0, next: now + 5)
+        }
+        return chosen
+    }
+
+    public func result(_ target: Target, now: Double, success: Bool) {
+        let key = ConversationReadPolicies.key(target)
+        guard let previous = attempts[key] else { return }
+        let failures = success ? 0 : min(previous.failures + 1, 5)
+        attempts[key] = Attempt(at: previous.at, failures: failures, next: now + (success ? 5 : min(5 * pow(2, Double(failures)), 120)))
+    }
+}
+
+/// Read marks shared through the session's computer (`mark_read`). The computer applies a
+/// field only while it is current, so marks never hide newer work.
+public enum SharedReadPolicies {
+    public static func mark(_ row: Session) -> JSONObject? {
+        guard let read = row.raw.object("read"), !row.target.conversation.isEmpty, read.string("conversation_id") == row.target.conversation else { return nil }
+        return read
+    }
+
+    public static func replyRead(_ row: Session) -> Bool {
+        let reply = row.raw.string("reply_id")
+        return !reply.isEmpty && mark(row)?.string("reply_id") == reply
+    }
+
+    public static func attentionAcknowledged(_ row: Session) -> Bool {
+        let signature = row.raw.string("attention_signature")
+        return !signature.isEmpty && mark(row)?.string("attention_signature") == signature
+    }
+
+    /// The `mark_read` payload once this phone has shown the current reply; nil when nothing is new.
+    public static func payload(_ row: Session, freshHead: Bool, localUnread: Int?, acknowledge: Bool = true) -> JSONObject? {
+        let target = row.target
+        guard freshHead, localUnread == 0, target.archiveId.isEmpty, target.agentId.isEmpty, !target.run.isEmpty, !target.conversation.isEmpty,
+              row.raw.string("run_id") == target.run, row.raw.string("conversation_id") == target.conversation, !SessionFilters.archived(row) else { return nil }
+        let replyValue = row.raw.string("reply_id")
+        let reply = !replyValue.isEmpty && !replyRead(row) ? replyValue : nil
+        let signature = row.raw.string("attention_signature")
+        let valid = signature.count == 64 && signature.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+        let attention = acknowledge && valid && !attentionAcknowledged(row) ? signature : nil
+        if reply == nil && attention == nil { return nil }
+        return ["run_id": .string(target.run), "conversation_id": .string(target.conversation),
+                "reply_id": reply.map(JSON.string) ?? .null, "attention_signature": attention.map(JSON.string) ?? .null]
+    }
+}
+
+/// Read-state decoration over the whole catalog; prepared off the main actor.
+public enum SessionReadAttention {
+    public static func prepare(_ sessions: [Session], _ state: ConversationReadState, ready: Bool, heads: Set<String>,
+                               loaded: [Target: [Event]]) -> [Session] {
+        var records: [String: ConversationReadRecord] = [:]
+        for record in state.records where records[ConversationReadPolicies.key(record.target)] == nil {
+            records[ConversationReadPolicies.key(record.target)] = record
+        }
+        return sessions.map { row in
+            let key = ConversationReadPolicies.key(row.target)
+            let record = records[key]
+            var unreadCount: Int?
+            if ready, let record, record.headComplete, heads.contains(key), let head = record.headIncoming {
+                unreadCount = Int(clamping: max(0, head - record.readThrough))
+            }
+            let loadedCount = !ready || record?.incomplete == true || (state.records.count >= 500 && record == nil)
+                ? nil : ConversationReadPolicies.lowerBound(record, loaded[row.target])
+            let later = record?.reviewLater == true
+            let unread = !SharedReadPolicies.replyRead(row) && (unreadCount ?? loadedCount ?? 0) > 0
+            let acknowledged = SharedReadPolicies.attentionAcknowledged(row)
+            if row.raw.bool("mobile_review_later") == later && row.raw.bool("mobile_unread_reply") == unread &&
+                row.raw.bool("attention_acknowledged") == acknowledged { return row }
+            var copy = row
+            copy.raw["mobile_review_later"] = .bool(later)
+            copy.raw["mobile_unread_reply"] = .bool(unread)
+            copy.raw["attention_acknowledged"] = .bool(acknowledged)
+            return copy
+        }
+    }
+}
+
+public struct UnreadBadge: Hashable, Sendable {
+    public let text: String
+    public let description: String
+}
+
+public enum UnreadPresentation {
+    public static func badge(total: Int?, loaded: Int?, nativeUnread: Bool = false) -> UnreadBadge? {
+        if let total, total > 0 { return UnreadBadge(text: "\(total)", description: "\(total) unread messages") }
+        if total != nil { return nil }
+        if let loaded, loaded > 0 { return UnreadBadge(text: "\(loaded)+", description: "At least \(loaded) unread messages; the total is not reported") }
+        if nativeUnread { return UnreadBadge(text: "?", description: "The computer reports an unread reply; the total is not reported") }
+        return nil
+    }
+}
+
+/// Read-operation ownership and delayed presentation, using an injected monotonic clock.
+public final class LoadingGate {
+    public struct Operation: Hashable, Sendable {
+        public let id: Int64
+        public let scope: String
+        public let startedAt: Double
+        public var explicit: Bool
+    }
+    public struct Start: Sendable {
+        public let operation: Operation
+        public let newRequest: Bool
+    }
+
+    private let now: () -> Double
+    private let delay: Double
+    private var sequence: Int64 = 0
+    public private(set) var current: Operation?
+
+    public init(now: @escaping () -> Double, delay: Double = 5) {
+        self.now = now
+        self.delay = delay
+    }
+
+    public func begin(_ scope: String, explicit: Bool = false) -> Start {
+        if var existing = current, existing.scope == scope {
+            existing.explicit = existing.explicit || explicit
+            current = existing
+            return Start(operation: existing, newRequest: false)
+        }
+        sequence += 1
+        let operation = Operation(id: sequence, scope: scope, startedAt: now(), explicit: explicit)
+        current = operation
+        return Start(operation: operation, newRequest: true)
+    }
+
+    public func owns(_ id: Int64) -> Bool { current?.id == id }
+    public func visible() -> Bool { current.map { $0.explicit || now() - $0.startedAt >= delay } ?? false }
+    public func remaining(_ id: Int64) -> Double {
+        guard let current, current.id == id else { return 0 }
+        return current.explicit ? 0 : max(0, delay - (now() - current.startedAt))
+    }
+    @discardableResult public func finish(_ id: Int64) -> Bool {
+        guard owns(id) else { return false }
+        current = nil
+        return true
+    }
+    public func cancel() { current = nil }
+}
