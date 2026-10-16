@@ -175,6 +175,59 @@ public struct RelayClient: Sendable {
         return result
     }
 
+    // MARK: Conversations
+
+    /// Reads one native conversation and verifies that the computer answered for this exact target.
+    public func inspect(_ connection: Connection, target: Target) async throws -> JSONObject {
+        var payload: JSONObject = [:]
+        if !target.archiveId.isEmpty { payload["archive_id"] = .string(target.archiveId) }
+        if !target.agentId.isEmpty {
+            payload["agent_id"] = .string(target.agentId)
+            payload["expected_run_id"] = .string(target.run)
+            payload["expected_conversation_id"] = .string(target.parentConversation)
+        }
+        let activity = try await completed(connection, target: target, operation: "inspect", payload: payload,
+                                           fallback: "Computer has not returned its activity yet. Refresh to check again.")
+        if !target.agentId.isEmpty {
+            guard activity.string("agent_id") == target.agentId, activity.string("parent_conversation_id") == target.parentConversation,
+                  activity.string("run_id") == target.run, activity.string("name") == target.session else {
+                throw ZerusError.mismatch("Computer returned a different child conversation.")
+            }
+        } else if !activity.string("agent_id").isEmpty {
+            throw ZerusError.mismatch("Computer returned a child conversation for the parent.")
+        }
+        if !target.archiveId.isEmpty {
+            guard activity.string("archive_id") == target.archiveId, activity.string("name") == target.session else {
+                throw ZerusError.mismatch("Computer returned a different archived conversation.")
+            }
+        } else {
+            let name = activity.string("name")
+            guard activity.string("archive_id").isEmpty, activity.string("state") != "archived", name.isEmpty || name == target.session else {
+                throw ZerusError.mismatch("Computer returned a different conversation for this session.")
+            }
+        }
+        return activity
+    }
+
+    /// One canonical history page; its receipt must echo this exact request and conversation.
+    public func history(_ connection: Connection, target: Target, direction: String = "", cursor: String = "", limit: Int = 100) async throws -> HistoryPage {
+        let id = UUID().uuidString.lowercased()
+        let payload = try HistoryRequests.payload(target, id: id, direction: direction, cursor: cursor, limit: limit)
+        let receipt = try await waitForReceipt(connection, initial: submit(connection, target: target, operation: "history", payload: payload, id: id))
+        guard receipt.string("state") == "completed", let result = receipt.object("result") else {
+            let message = receipt.string("error")
+            throw ZerusError(.unavailable, message.isEmpty ? "History is not available yet. Try again." : message)
+        }
+        return try await Task.detached(priority: .userInitiated) { try HistoryPage.parse(target: target, id: id, raw: result) }.value
+    }
+
+    /// Shared read mark; the computer applies only current values, so each attempt has its own request.
+    public func markRead(_ connection: Connection, target: Target, payload: JSONObject) async throws -> JSONObject {
+        guard target.archiveId.isEmpty, target.agentId.isEmpty else { throw ZerusError.invalid("Read marks belong to the live parent conversation.") }
+        let id = UUID().uuidString.lowercased()
+        return try await waitForReceipt(connection, initial: submit(connection, target: target, operation: "mark_read", payload: payload, id: id))
+    }
+
     /// Submits and waits; a request that does not complete reports its error.
     public func completed(_ connection: Connection, target: Target, operation: String, payload: JSONObject,
                           id: String = UUID().uuidString.lowercased(), fallback: String) async throws -> JSONObject {

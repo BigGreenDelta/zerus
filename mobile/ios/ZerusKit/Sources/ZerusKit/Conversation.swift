@@ -506,3 +506,97 @@ public enum MessageChanges {
         return copy
     }
 }
+
+// MARK: - Viewport
+
+/// UI-only reading position. Message keys survive incoming rows and transcript windows.
+public struct ConversationAnchor: Hashable, Sendable {
+    public let itemKey: String
+    public let offset: Int
+    public let following: Bool
+    public init(itemKey: String, offset: Int, following: Bool) {
+        self.itemKey = itemKey
+        self.offset = offset
+        self.following = following
+    }
+}
+
+public struct ConversationFollowState: Hashable, Sendable {
+    public var opened = false
+    public var following = true
+    public var ownSendId = ""
+    public var anchor: ConversationAnchor?
+    public init(opened: Bool = false, following: Bool = true, ownSendId: String = "", anchor: ConversationAnchor? = nil) {
+        self.opened = opened
+        self.following = following
+        self.ownSendId = ownSendId
+        self.anchor = anchor
+    }
+}
+
+public struct ConversationScroll: Hashable, Sendable {
+    public var state: ConversationFollowState
+    public var index: Int?
+    public var offset = 0
+    public var failure = ""
+}
+
+public enum ConversationViewport {
+    public static func content(_ state: ConversationFollowState, keys: [String], ownSendId: String, ownItemKey: String?) -> ConversationScroll {
+        guard let last = keys.indices.last else { return ConversationScroll(state: state) }
+        if !ownSendId.isEmpty, ownSendId != state.ownSendId, let ownItemKey, let ownIndex = keys.firstIndex(of: ownItemKey) {
+            return ConversationScroll(state: ConversationFollowState(opened: true, following: true, ownSendId: ownSendId), index: ownIndex)
+        }
+        if !state.opened {
+            if let anchor = state.anchor, !anchor.following, let index = keys.firstIndex(of: anchor.itemKey) {
+                return ConversationScroll(state: ConversationFollowState(opened: true, following: false, ownSendId: ownSendId, anchor: anchor),
+                                          index: index, offset: anchor.offset)
+            }
+            return ConversationScroll(state: ConversationFollowState(opened: true, following: true, ownSendId: ownSendId), index: last)
+        }
+        return ConversationScroll(state: state, index: state.following ? last : nil)
+    }
+
+    public static func userScrolled(_ state: ConversationFollowState, atEnd: Bool) -> ConversationFollowState {
+        var copy = state
+        copy.following = atEnd
+        return copy
+    }
+
+    public static func settled(_ state: ConversationFollowState, atEnd: Bool, hasNewer: Bool) -> ConversationFollowState {
+        guard state.opened, atEnd, !hasNewer else { return state }
+        return latest(state)
+    }
+
+    public static func latest(_ state: ConversationFollowState) -> ConversationFollowState {
+        var copy = state
+        copy.following = true
+        copy.anchor = nil
+        return copy
+    }
+
+    /// An explicit jump consumes its own read result, even when no message key changed.
+    public static func loadedLatest(_ state: ConversationFollowState, keys: [String], hasNewer: Bool, error: String) -> ConversationScroll {
+        if !error.isEmpty { return ConversationScroll(state: state, failure: "Could not reach the latest messages. \(error)") }
+        if hasNewer { return ConversationScroll(state: state, failure: "The latest messages are not available in the loaded history. Refresh to try again.") }
+        guard let last = keys.indices.last else {
+            return ConversationScroll(state: state, failure: "No messages are available to jump to. Refresh to try again.")
+        }
+        var next = latest(state)
+        next.opened = true
+        return ConversationScroll(state: next, index: last)
+    }
+}
+
+/// Persistence echoes never edit an active text buffer. Only a new composition
+/// generation (send clear, restore or explicit replacement) owns a text reset.
+public struct ComposerUpdate: Hashable, Sendable {
+    public let generation: String
+    public let replacement: String?
+}
+
+public enum ComposerReconciler {
+    public static func external(current: String, generation: String, text: String) -> ComposerUpdate {
+        current == generation ? ComposerUpdate(generation: current, replacement: nil) : ComposerUpdate(generation: generation, replacement: text)
+    }
+}

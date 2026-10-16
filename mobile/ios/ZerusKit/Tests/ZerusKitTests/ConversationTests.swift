@@ -571,3 +571,90 @@ final class SessionDetailsTests: XCTestCase {
         XCTAssertEqual("blocked", SessionDetailsPresentation.taskStatus("blocked"))
     }
 }
+
+/// Ported from Android ConversationViewportTest and ComposerReconcilerTest.
+final class ConversationViewportTests: XCTestCase {
+    private let keys = ["status", "event:first", "event:last", "tail"]
+
+    func testFirstOpenGoesDirectlyToTail() {
+        let request = ConversationViewport.content(ConversationFollowState(), keys: keys, ownSendId: "", ownItemKey: nil)
+        XCTAssertEqual(3, request.index)
+        XCTAssertTrue(request.state.opened)
+        XCTAssertTrue(request.state.following)
+    }
+
+    func testReopeningRestoresExactMessageAndOffsetAcrossPrependedRows() {
+        let anchor = ConversationAnchor(itemKey: "event:first", offset: 42, following: false)
+        let request = ConversationViewport.content(ConversationFollowState(following: false, anchor: anchor),
+                                                   keys: ["earlier"] + keys, ownSendId: "", ownItemKey: nil)
+        XCTAssertEqual(2, request.index)
+        XCTAssertEqual(42, request.offset)
+        XCTAssertFalse(request.state.following)
+    }
+
+    func testMissingAnchorFallsBackToLatest() {
+        let request = ConversationViewport.content(ConversationFollowState(anchor: ConversationAnchor(itemKey: "expired", offset: 42, following: false)),
+                                                   keys: keys, ownSendId: "", ownItemKey: nil)
+        XCTAssertEqual(3, request.index)
+        XCTAssertEqual(0, request.offset)
+        XCTAssertTrue(request.state.following)
+    }
+
+    func testIncomingMessagesDoNotMoveUserReadingOlderHistory() {
+        let reading = ConversationFollowState(opened: true, following: false)
+        XCTAssertNil(ConversationViewport.content(reading, keys: keys + ["new-tail"], ownSendId: "", ownItemKey: nil).index)
+        XCTAssertEqual(reading, ConversationViewport.content(reading, keys: keys, ownSendId: "", ownItemKey: nil).state)
+    }
+
+    func testOwnSendForcesItsMessageIntoViewOnceItsRowExists() {
+        let reading = ConversationFollowState(opened: true, following: false, ownSendId: "old")
+        let request = ConversationViewport.content(reading, keys: keys, ownSendId: "new", ownItemKey: "event:last")
+        XCTAssertEqual(2, request.index)
+        XCTAssertTrue(request.state.following)
+        XCTAssertEqual("new", request.state.ownSendId)
+        let pending = ConversationViewport.content(reading, keys: keys, ownSendId: "new", ownItemKey: "not-yet-present")
+        XCTAssertNil(pending.index)
+        XCTAssertEqual("old", pending.state.ownSendId)
+        XCTAssertNotNil(ConversationViewport.content(pending.state, keys: keys + ["not-yet-present"], ownSendId: "new", ownItemKey: "not-yet-present").index)
+    }
+
+    func testJumpScrollAndSettledFollowing() {
+        let following = ConversationViewport.latest(ConversationFollowState(opened: true, following: false))
+        XCTAssertEqual(3, ConversationViewport.content(following, keys: keys, ownSendId: "", ownItemKey: nil).index)
+        XCTAssertFalse(ConversationViewport.userScrolled(following, atEnd: false).following)
+        let reading = ConversationFollowState(opened: true, following: false)
+        XCTAssertTrue(ConversationViewport.settled(reading, atEnd: true, hasNewer: false).following)
+        XCTAssertFalse(ConversationViewport.settled(reading, atEnd: true, hasNewer: true).following)
+        XCTAssertFalse(ConversationViewport.settled(ConversationFollowState(opened: false, following: false), atEnd: true, hasNewer: false).following)
+        XCTAssertEqual(ConversationScroll(state: ConversationFollowState()), ConversationViewport.content(ConversationFollowState(), keys: [], ownSendId: "new", ownItemKey: "new"))
+    }
+
+    func testExplicitLatestReadOutcomes() {
+        let reading = ConversationFollowState(opened: true, following: false, ownSendId: "retained-send",
+                                              anchor: ConversationAnchor(itemKey: "event:first", offset: 42, following: false))
+        let result = ConversationViewport.loadedLatest(reading, keys: keys, hasNewer: false, error: "")
+        XCTAssertEqual(3, result.index)
+        XCTAssertTrue(result.state.following)
+        XCTAssertNil(result.state.anchor)
+        XCTAssertEqual("retained-send", result.state.ownSendId)
+        let middle = ConversationViewport.loadedLatest(reading, keys: keys, hasNewer: true, error: "")
+        XCTAssertNil(middle.index)
+        XCTAssertEqual(reading, middle.state)
+        XCTAssertTrue(middle.failure.contains("Refresh"))
+        let failed = ConversationViewport.loadedLatest(reading, keys: keys, hasNewer: true, error: "Message history is still indexing. Try again shortly.")
+        XCTAssertTrue(failed.failure.hasSuffix("Try again shortly."))
+        let empty = ConversationViewport.loadedLatest(ConversationFollowState(), keys: [], hasNewer: false, error: "")
+        XCTAssertTrue(empty.failure.contains("No messages"))
+        XCTAssertEqual(ConversationFollowState(), empty.state)
+    }
+
+    func testComposerEchoesNeverReplaceTheEditor() {
+        for echo in ["", "w", "wo", "working"] {
+            XCTAssertNil(ComposerReconciler.external(current: "composition", generation: "composition", text: echo).replacement)
+        }
+        let clear = ComposerReconciler.external(current: "sent", generation: "next", text: "")
+        XCTAssertEqual("", clear.replacement)
+        XCTAssertNil(ComposerReconciler.external(current: clear.generation, generation: "next", text: "Future typing echo").replacement)
+        XCTAssertEqual("Saved\ncomposition", ComposerReconciler.external(current: "empty", generation: "restored", text: "Saved\ncomposition").replacement)
+    }
+}
