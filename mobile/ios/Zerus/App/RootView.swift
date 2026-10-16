@@ -44,6 +44,10 @@ struct RootView: View {
         }
         .minimizingTabBarOnScroll()
         .sheet(isPresented: $settings) { SettingsView() }
+        .sheet(isPresented: $model.choosingLaunchMachine) { NewSessionMachineSheet() }
+        .fullScreenCover(isPresented: Binding(get: { model.launch.visible }, set: { if !$0 { model.launch.close() } })) {
+            if let machine = model.launch.machine { LaunchForm(machine: machine).environment(model) }
+        }
         .sheet(item: $pairing) { request in PairingSheet(request: request) }
         .onChange(of: model.conversationRequest) { _, target in
             guard let target else { return }
@@ -153,6 +157,11 @@ struct MainToolbar: ToolbarContent {
         if model.demo {
             ToolbarItem(placement: .topBarLeading) { Tag(text: "PREVIEW", color: Theme.amber) }
                 .withoutGlassBackground()
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button { model.choosingLaunchMachine = true } label: { Image(systemName: "plus") }
+                .disabled(model.demo || model.connections.isEmpty)
+                .accessibilityLabel("New session")
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button { settings = true } label: { Image(systemName: "gearshape") }

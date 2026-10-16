@@ -191,3 +191,217 @@ final class DirectoryCreationTests: XCTestCase {
         for bad in ["", "..", ".", "nested/name", "bad\nname"] { XCTAssertEqual("", DirectoryCreation.child("/fixture", bad)) }
     }
 }
+
+/// Ported from Android LaunchProjectTest and LaunchFormTest.
+final class LaunchProjectTests: XCTestCase {
+    private func account(_ id: String, _ isDefault: Bool = false) -> JSON {
+        ["id": .string(id), "provider": "claude", "label": "Same label", "native": false, "installed": true, "is_default": .bool(isDefault), "auth_status": "signed_in"]
+    }
+    private func catalog() -> JSONObject {
+        ["agents": ["claude"], "accounts": [account("profile-one"), account("profile-two", true)], "project_launch_supported": true,
+         "swarm_id": "swarm-exact", "default_project": "project-one",
+         "projects": [["id": "project-one", "name": "Work", "accessible": true, "folders": [["id": "folder-one", "name": "Source", "path": "/example/source"]]],
+                      ["id": "hidden", "name": "Unavailable", "accessible": false]]]
+    }
+
+    func testDistinctSameLabelProfilesHaveConcreteDefaultAndExactIdentifiers() {
+        let accounts = LaunchPresentation.accounts(catalog(), "claude")
+        XCTAssertEqual(["profile-one", "profile-two"], accounts.map(\.id))
+        XCTAssertEqual("profile-two", LaunchPresentation.defaultAccount(accounts))
+        XCTAssertEqual("profile-one", LaunchPresentation.defaultAccount(accounts, selected: "profile-one"))
+        XCTAssertEqual(["Same label", "Same label"], accounts.map(LaunchPresentation.accountTitle))
+    }
+
+    func testDefaultAbsentOrGoneStillChoosesAnExplicitOfferedProfile() {
+        let accounts = LaunchPresentation.accounts(catalog(), "claude").map { account -> LaunchAccount in
+            var copy = account
+            copy.isDefault = false
+            return copy
+        }
+        XCTAssertEqual("profile-one", LaunchPresentation.defaultAccount(accounts, selected: "removed"))
+        XCTAssertEqual("", LaunchPresentation.defaultAccount([]))
+        XCTAssertTrue(LaunchPresentation.accounts(catalog(), "codex").isEmpty)
+    }
+
+    func testSanitizationPreservesOnlyBoundedLaunchMetadataAndCurrentLocalProjects() {
+        var raw = catalog()
+        var rows = raw.array("accounts")!
+        var first = rows[0].object!
+        first["home"] = "/private"
+        first["identity"] = ["email": "private@example.test"]
+        first["credentials"] = "private-token"
+        rows[0] = .object(first)
+        raw["accounts"] = .array(rows)
+        let sanitized = LaunchPresentation.sanitizeCatalog(raw)
+        XCTAssertFalse(JSON.object(sanitized).compact.contains("private"))
+        XCTAssertEqual("profile-two", LaunchPresentation.defaultAccount(LaunchPresentation.accounts(sanitized, "claude")))
+        XCTAssertEqual(["project-one"], LaunchPresentation.projects(sanitized).map(\.id))
+        XCTAssertEqual("/example/source", LaunchPresentation.projects(sanitized).first?.folders.first?.path)
+        XCTAssertEqual("project-one", sanitized.string("default_project"))
+    }
+
+    func testProjectFolderIsExactAndOutsideFolderAdditionIsExplicit() throws {
+        let raw = catalog()
+        let existing = try LaunchPresentation.projectArguments(raw, projectId: "project-one", directory: "/example/source")
+        XCTAssertEqual("swarm-exact", existing.string("swarm_id"))
+        XCTAssertEqual("folder-one", existing.string("project_folder_id"))
+        XCTAssertEqual(.bool(false), existing["add_folder"])
+        let outside = try LaunchPresentation.projectArguments(raw, projectId: "project-one", directory: "/example/outside")
+        XCTAssertEqual(.bool(true), outside["add_folder"])
+        XCTAssertFalse(outside.has("project_folder_id"))
+        XCTAssertThrowsError(try LaunchPresentation.projectArguments(raw, projectId: "hidden", directory: "/example/source"))
+        var unsupported = raw
+        unsupported["project_launch_supported"] = false
+        XCTAssertTrue(LaunchPresentation.projects(unsupported).isEmpty)
+    }
+
+    func testVerifiedBrowserAcceptsSelectedSymlinkPathWithoutInventingAnotherPath() {
+        let browser: JSONObject = ["path": "/example/canonical", "requested_path": "/example/symlink"]
+        XCTAssertTrue(LaunchPresentation.selectedFolder(browser, "/example/symlink"))
+        XCTAssertFalse(LaunchPresentation.selectedFolder(browser, "/example/other"))
+    }
+
+    func testCreatedSessionWithMissingAssignmentRemainsCompletedAndDurablyReviewable() throws {
+        let target = Target(computerId: "computer", session: "", run: "", conversation: "", connectionId: "workspace")
+        let args: JSONObject = ["agent": "claude", "directory": "/example/source", "tag": "new session", "account_id": "profile-two", "swarm_id": "swarm-exact",
+                                "project_id": "project-one", "project_folder_id": "folder-one", "add_folder": false]
+        XCTAssertNoThrow(try SessionActionPolicies.arguments("launch", args))
+        let action = SessionAction(requestId: "request", target: target, operation: "launch", arguments: args)
+        var native: JSONObject = ["request_id": "request", "status": "created",
+                                  "result_target": ["name": "claude/source/new session", "run_id": "new-run", "conversation_id": "new-conversation"]]
+        func receipt() -> JSONObject { ["request_id": "request", "state": "completed", "result": .object(native)] }
+        let completed = SessionActionPolicies.result(action, receipt())
+        XCTAssertEqual("completed", completed.status)
+        XCTAssertFalse(completed.blocksSending)
+        XCTAssertTrue(completed.needsProjectReview)
+        XCTAssertEqual("new-run", completed.resultTarget?.run)
+        var state = MessageState().action(completed)
+        for index in 0..<150 {
+            var other = action
+            other.requestId = "other-\(index)"
+            other.status = "completed"
+            other.arguments = [:]
+            state = state.action(other)
+        }
+        let restored = try JSONDecoder().decode(MessageState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(true, restored.sessionActions.first { $0.requestId == "request" }?.needsProjectReview)
+        var reviewedAction = completed
+        reviewedAction.status = "reviewed"
+        XCTAssertNotEqual(true, state.action(reviewedAction).sessionActions.first { $0.requestId == "request" }?.needsProjectReview)
+        native["project_assignment"] = ["status": "assigned", "swarm_id": "wrong", "project_id": "project-one"]
+        XCTAssertTrue(SessionActionPolicies.result(action, receipt()).needsProjectReview)
+        native["project_assignment"] = ["status": "assigned", "swarm_id": "swarm-exact", "project_id": "project-one"]
+        XCTAssertFalse(SessionActionPolicies.result(action, receipt()).needsProjectReview)
+    }
+}
+
+final class LaunchFormTests: XCTestCase {
+    private let projects = [
+        LaunchProject(id: "p1", name: "Zerus", color: "#67e8cb", folders: []),
+        LaunchProject(id: "p2", name: "Infra", color: "#ffcb7d", folders: [LaunchProjectFolder(id: "f1", path: "/srv/deploy/terraform", name: "Terraform")]),
+        LaunchProject(id: "p3", name: "Website", color: "", folders: [LaunchProjectFolder(id: "f2", path: "/example/site", name: "Site"),
+                                                                      LaunchProjectFolder(id: "f3", path: "/example/site-docs", name: "Docs")]),
+    ]
+    private func entry(_ path: String, _ kind: String = "linked", _ available: Bool = true) -> JSON {
+        ["path": .string(path), "kind": .string(kind), "available": .bool(available)]
+    }
+    private func catalog(_ requested: String = "/repo", _ path: String? = nil, _ change: JSONObject = [:]) -> JSONObject {
+        var raw: JSONObject = ["state": "ok", "stale": false, "partial": false, "path": .string(path ?? requested), "requested_path": .string(requested),
+                               "selected_root": "/repo", "common_dir": "/repo/.git", "worktrees": [entry("/repo", "main"), entry("/repo-feature")]]
+        for key in change.keys { raw[key] = change[key] }
+        return raw
+    }
+
+    func testProjectSearchKeepsCatalogOrderAndMatchesNamesFoldersAndPaths() {
+        XCTAssertEqual(["p1", "p2", "p3"], LaunchPresentation.filterProjects(projects, "  ").map(\.id))
+        XCTAssertEqual(["p1"], LaunchPresentation.filterProjects(projects, "zer").map(\.id))
+        XCTAssertEqual(["p2"], LaunchPresentation.filterProjects(projects, "TERRAFORM").map(\.id))
+        XCTAssertEqual(["p2"], LaunchPresentation.filterProjects(projects, "/srv/deploy").map(\.id))
+        XCTAssertEqual(["p3"], LaunchPresentation.filterProjects(projects, " docs ").map(\.id))
+        XCTAssertEqual(["p1", "p2"], LaunchPresentation.filterProjects(projects, "r").map(\.id))
+        XCTAssertTrue(LaunchPresentation.filterProjects(projects, "absent").isEmpty)
+    }
+
+    func testProjectSubtitleNamesThisComputersFolders() {
+        XCTAssertEqual(["No folder on this computer", "/srv/deploy/terraform", "2 folders"], projects.map(LaunchPresentation.folderSummary))
+    }
+
+    func testAutomaticWorktreeNeedsAFreshCompleteCatalogOfTheSelectedCheckout() {
+        XCTAssertTrue(WorktreePresentation.automaticAvailable(catalog(), "/repo"))
+        XCTAssertTrue(WorktreePresentation.automaticAvailable(catalog("/repo/app"), "/repo/app"))
+        XCTAssertTrue(WorktreePresentation.automaticAvailable(catalog("~/repo", "/repo"), "/repo"))
+        XCTAssertFalse(WorktreePresentation.automaticAvailable(catalog(), "/other"))
+        XCTAssertFalse(WorktreePresentation.automaticAvailable(nil, "/repo"))
+        let failing: [JSONObject] = [["state": "not_repo"], ["stale": true], ["partial": true], ["common_dir": ""], ["selected_root": "/"], ["selected_root": "relative"],
+                                     ["worktrees": [entry("/repo", "bare")]], ["worktrees": [entry("/repo", "main", false)]]]
+        for change in failing { XCTAssertFalse(WorktreePresentation.automaticAvailable(catalog("/repo", nil, change), "/repo"), "\(change)") }
+        XCTAssertFalse(WorktreePresentation.automaticAvailable(catalog("/repository", nil, ["worktrees": [entry("/repo", "main")]]), "/repository"))
+    }
+
+    func testAutomaticPathIsTheGeneratedSiblingOfTheSelectedRoot() {
+        XCTAssertEqual("/repo-work-1a2b3c4d", WorktreePresentation.automaticPath(catalog(), branch: "work-1a2b3c4d"))
+        XCTAssertEqual("/srv/app-work-1a2b3c4d", WorktreePresentation.automaticPath(catalog("/repo", nil, ["selected_root": "/srv/app/"]), branch: "work-1a2b3c4d"))
+        XCTAssertEqual("", WorktreePresentation.automaticPath(catalog("/repo", nil, ["selected_root": ""]), branch: "work-1a2b3c4d"))
+        XCTAssertEqual("", WorktreePresentation.automaticPath(catalog(), branch: ""))
+        XCTAssertNotNil(LaunchPresentation.generatedName().range(of: "^work-[0-9a-f]{8}$", options: .regularExpression))
+    }
+
+    func testAutomaticNotesExplainTheDirectFolderFallback() {
+        XCTAssertEqual("", WorktreePresentation.automaticNote(catalog(), folder: "/repo", supported: true, loading: false))
+        XCTAssertEqual("", WorktreePresentation.automaticNote(nil, folder: "", supported: true, loading: false))
+        XCTAssertEqual("Checking repository…", WorktreePresentation.automaticNote(nil, folder: "/repo", supported: true, loading: true))
+        XCTAssertTrue(WorktreePresentation.automaticNote(catalog(), folder: "/repo", supported: false, loading: false).hasPrefix("Update Zerus"))
+        XCTAssertTrue(WorktreePresentation.automaticNote(catalog("/repo", nil, ["state": "not_repo"]), folder: "/repo", supported: true, loading: false).hasPrefix("Not a Git repository"))
+        XCTAssertTrue(WorktreePresentation.automaticNote(catalog("/repo", nil, ["stale": true]), folder: "/repo", supported: true, loading: false).hasPrefix("Repository details are unavailable"))
+    }
+
+    func testCreatedCheckoutIsRelatedThroughRetainedEvidenceOnlyWhenFreshEvidenceCannotProveIt() throws {
+        let project = LaunchProject(id: "p", name: "Repo", color: "", folders: [LaunchProjectFolder(id: "main", path: "/repo", name: "Repo")])
+        let source = catalog()
+        let created = WorktreePresentation.withCreated(source, path: "/repo-work-1a2b3c4d")
+        XCTAssertEqual(3, created.array("worktrees")?.count)
+        XCTAssertEqual(3, WorktreePresentation.withCreated(created, path: "/repo-work-1a2b3c4d").array("worktrees")?.count)
+        XCTAssertEqual(2, source.array("worktrees")?.count)
+        XCTAssertEqual("main", WorktreePresentation.anchor(created, project, "/repo-work-1a2b3c4d")?.id)
+        XCTAssertNil(WorktreePresentation.anchor(catalog(), project, "/repo-work-1a2b3c4d"))
+        XCTAssertEqual(created, WorktreePresentation.placement(fresh: nil, created: created, project: project, directory: "/repo-work-1a2b3c4d"))
+        let fresh = catalog("/repo-work-1a2b3c4d", nil, ["worktrees": [entry("/repo", "main"), entry("/repo-work-1a2b3c4d")]])
+        XCTAssertEqual(fresh, WorktreePresentation.placement(fresh: fresh, created: created, project: project, directory: "/repo-work-1a2b3c4d"))
+        let unrelated = LaunchProject(id: "u", name: "Other", color: "", folders: [LaunchProjectFolder(id: "x", path: "/elsewhere", name: "Else")])
+        XCTAssertEqual(fresh, WorktreePresentation.placement(fresh: fresh, created: created, project: unrelated, directory: "/repo-work-1a2b3c4d"))
+        let raw: JSONObject = ["project_launch_supported": true, "worktree_supported": true, "swarm_id": "swarm",
+                               "projects": [["id": "p", "name": "Repo", "folders": [["id": "main", "path": "/repo"]]]]]
+        let related = try LaunchPresentation.projectArguments(raw, projectId: "p", directory: "/repo-work-1a2b3c4d", worktrees: created)
+        XCTAssertEqual(.bool(false), related["add_folder"])
+        XCTAssertEqual("main", related.string("worktree_folder_id"))
+        XCTAssertEqual("/repo/.git", related.string("worktree_common_dir"))
+        XCTAssertEqual(.bool(true), try LaunchPresentation.projectArguments(raw, projectId: "p", directory: "/repo-work-1a2b3c4d", worktrees: nil)["add_folder"])
+    }
+
+    private func reason(_ change: (inout LaunchReadiness) -> Void) -> String {
+        var readiness = LaunchReadiness()
+        change(&readiness)
+        return LaunchPresentation.disabledReason(readiness)
+    }
+
+    func testDisabledCreateExplainsTheFirstProblem() {
+        XCTAssertEqual("", reason { _ in })
+        XCTAssertEqual("This session was already created.", reason { $0.confirmed = true; $0.catalogLoading = true })
+        XCTAssertEqual("Refresh the computer list.", reason { $0.machineReason = "Refresh the computer list."; $0.folderChosen = false })
+        XCTAssertEqual("Loading agents and projects…", reason { $0.catalogLoading = true; $0.catalogAvailable = false })
+        XCTAssertEqual("Choose a project.", reason { $0.projectRequired = true; $0.projectChosen = false; $0.folderChosen = false })
+        XCTAssertEqual("Browse to choose a folder.", reason { $0.projectHasFolder = false; $0.folderChosen = false })
+        XCTAssertEqual("Choose a folder.", reason { $0.folderChosen = false })
+        XCTAssertEqual("Checking folder…", reason { $0.folderLoading = true; $0.folderVerified = false })
+        XCTAssertEqual("Check this folder again or browse to it.", reason { $0.folderVerified = false })
+        XCTAssertEqual("Checking repository…", reason { $0.repositoryLoading = true })
+        XCTAssertEqual("No agents are installed on this computer.", reason { $0.providers = 0; $0.providerChosen = false })
+        XCTAssertEqual("Choose an account.", reason { $0.accountChosen = false })
+        XCTAssertEqual("Enter a session name.", reason { $0.nameError = LaunchPresentation.nameError("") })
+        XCTAssertEqual("", reason { $0.worktreeReason = "Check the previous worktree creation receipt."; $0.automaticFailed = true })
+        XCTAssertEqual("Check the previous worktree creation receipt.", reason { $0.automatic = true; $0.worktreeReason = "Check the previous worktree creation receipt." })
+        XCTAssertTrue(reason { $0.automatic = true; $0.automaticFailed = true }.hasPrefix("Automatic worktree creation failed"))
+        XCTAssertTrue(reason { $0.automatic = true; $0.automaticUsed = true }.hasPrefix("This form already created its worktree"))
+        XCTAssertEqual("", reason { $0.automaticUsed = true })
+    }
+}

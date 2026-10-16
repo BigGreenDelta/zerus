@@ -360,7 +360,7 @@ public enum LaunchPresentation {
         return ""
     }
 
-    static func leaf(_ path: String) -> String { path.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? path }
+    public static func leaf(_ path: String) -> String { path.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? path }
 }
 
 public struct LaunchWorktree: Hashable, Sendable {
