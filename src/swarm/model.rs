@@ -111,6 +111,11 @@ impl Store {
                 }
             }
         }
+        // Only desktops that know the shared order send it; an older desktop's
+        // local order stays local and never overrides the swarm's.
+        if let Some(order) = organization.get("project_order") {
+            fields.insert(Key::project_order(), order.clone());
+        }
         Ok(fields)
     }
 
@@ -290,9 +295,9 @@ impl Store {
             .catalog
             .heads()
             .into_iter()
-            // Concurrent preference edits resolve to the newest head and the
-            // next choice on any device supersedes them; nothing to review.
-            .filter(|(key, _)| !matches!(key, Key::Preference { .. }))
+            // Concurrent preference and order edits resolve to the newest head
+            // and the next choice on any device supersedes them; nothing to review.
+            .filter(|(key, _)| !matches!(key, Key::Preference { .. } | Key::Order { .. }))
             .filter_map(|(key, heads)| {
                 let variants: BTreeSet<_> = heads.iter().map(|o| o.value.to_string()).collect();
                 if variants.len() <= 1 {
@@ -307,8 +312,23 @@ impl Store {
             if field != "name" || canonical(id) != *id { return None; }
             Some(json!({"id":id,"name":name(id),"connection":aliases.get(id),"local":id == &self.node_id}))
         }).collect();
+        // The shared order first, then projects it does not name yet, by ID.
+        let order = values.get(&Key::project_order());
+        let mut ordered = Vec::with_capacity(projects.len());
+        for id in order.and_then(Value::as_array).into_iter().flatten() {
+            if let Some(project) = id.as_str().and_then(|id| projects.remove(id)) {
+                ordered.push(project);
+            }
+        }
+        ordered.extend(projects.into_values());
+        let ids: Vec<Value> = ordered.iter().map(|p| p["id"].clone()).collect();
+        let mut organization =
+            json!({"version":2,"default_project":"ungrouped","projects":ordered});
+        if order.is_some() {
+            organization["project_order"] = Value::Array(ids);
+        }
         json!({"schema":1,"node_id":self.node_id,"swarm_id":self.catalog.swarm_id,"digest":self.catalog.digest(),"initialized":self.imported,
-            "organization":{"version":2,"default_project":"ungrouped","projects":projects.into_values().collect::<Vec<_>>()},
+            "organization":organization,
             "versions":self.catalog.versions(),"conflicts":conflicts,"preferences":self.catalog.preferences(),"machines":machines,"peers":self.peers})
     }
 }
@@ -592,5 +612,124 @@ mod tests {
         a.bind("peer", &real).unwrap();
         assert_eq!(a.catalog.machine(&placeholder), real);
         assert!(a.bind("peer", &new_id()).is_err());
+    }
+    fn config() -> Config {
+        Config {
+            home: "/home/example".into(),
+            dir: "/home/example/.config/hgs".into(),
+            state: "/home/example/.local/state/hgs".into(),
+            selves: vec!["local".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        }
+    }
+    fn projects(ids: &[&str]) -> Value {
+        let projects: Vec<_> = ids
+            .iter()
+            .map(|id| json!({"id":id,"name":id.to_uppercase(),"color":"#123456","folders":[],"sessions":[]}))
+            .collect();
+        json!({ "projects": projects })
+    }
+    fn shown(store: &Store) -> (Vec<String>, Option<Value>) {
+        let organization = store.snapshot(&config())["organization"].clone();
+        let ids = organization["projects"].as_array().unwrap().iter();
+        let ids = ids.map(|p| p["id"].as_str().unwrap().to_owned()).collect();
+        (ids, organization.get("project_order").cloned())
+    }
+    #[test]
+    fn the_shared_project_order_orders_snapshots_and_unnamed_projects_follow_by_id() {
+        let mut a = store();
+        a.initialize(&projects(&["b", "c", "a"])).unwrap();
+        // Without a shared order the snapshot keeps its ID order and says so.
+        assert_eq!(shown(&a), (vec!["a".into(), "b".into(), "c".into()], None));
+        let before = a.snapshot(&config());
+        let mut desired = projects(&["c", "a", "b"]);
+        desired["project_order"] = json!(["c", "a", "b"]);
+        a.apply(Patch {
+            base: before["organization"].clone(),
+            desired,
+            versions: a.catalog.versions(),
+        })
+        .unwrap();
+        let order = |ids: &[&str]| {
+            (
+                ids.iter().map(|id| id.to_string()).collect(),
+                Some(json!(ids)),
+            )
+        };
+        assert_eq!(shown(&a), order(&["c", "a", "b"]));
+        // A project the order does not name yet follows it; a removed one leaves it.
+        a.catalog
+            .set(&a.node_id.clone(), Key::project("0", "alive"), json!(true))
+            .unwrap();
+        a.catalog
+            .set(&a.node_id.clone(), Key::project("a", "alive"), json!(false))
+            .unwrap();
+        assert_eq!(shown(&a), order(&["c", "b", "0"]));
+        // Republishing the same order writes nothing.
+        let before = a.snapshot(&config());
+        let operations = a.catalog.operations.len();
+        a.apply(Patch {
+            base: before["organization"].clone(),
+            desired: before["organization"].clone(),
+            versions: a.catalog.versions(),
+        })
+        .unwrap();
+        assert_eq!(a.catalog.operations.len(), operations);
+    }
+    #[test]
+    fn a_desktop_without_the_shared_order_never_changes_it() {
+        let mut a = store();
+        let mut initial = projects(&["a", "b"]);
+        initial["project_order"] = json!(["b", "a"]);
+        a.initialize(&initial).unwrap();
+        assert_eq!(shown(&a).1, Some(json!(["b", "a"])));
+        // An older desktop keeps the snapshot's field in its base and drops it
+        // from its desired local order, or omits it from both.
+        let before = a.snapshot(&config());
+        let base = before["organization"].clone();
+        for (base, desired) in [
+            (base.clone(), projects(&["a", "b"])),
+            (projects(&["b", "a"]), projects(&["a", "b"])),
+        ] {
+            a.apply(Patch {
+                base,
+                desired,
+                versions: a.catalog.versions(),
+            })
+            .unwrap();
+            assert_eq!(shown(&a).1, Some(json!(["b", "a"])));
+        }
+        assert_eq!(a.catalog.heads()[&Key::project_order()].len(), 1);
+    }
+    #[test]
+    fn concurrent_project_orders_settle_on_the_newest_without_a_review() {
+        let mut a = store();
+        a.initialize(&projects(&["a", "b", "c"])).unwrap();
+        let mut b = a.clone();
+        b.node_id = new_id();
+        let base = a.snapshot(&config())["organization"].clone();
+        for (store, order) in [(&mut a, ["c", "b", "a"]), (&mut b, ["b", "a", "c"])] {
+            let mut desired = projects(&order);
+            desired["project_order"] = json!(order);
+            store
+                .apply(Patch {
+                    base: base.clone(),
+                    desired,
+                    versions: store.catalog.versions(),
+                })
+                .unwrap();
+        }
+        let operations: Vec<_> = b.catalog.operations.values().cloned().collect();
+        a.catalog.merge(&b.catalog.swarm_id, operations).unwrap();
+        let operations: Vec<_> = a.catalog.operations.values().cloned().collect();
+        b.catalog.merge(&a.catalog.swarm_id, operations).unwrap();
+        assert_eq!(a.catalog.heads()[&Key::project_order()].len(), 2);
+        assert_eq!(shown(&a), shown(&b));
+        assert_eq!(a.snapshot(&config())["conflicts"], json!([]));
     }
 }

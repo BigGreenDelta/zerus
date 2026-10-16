@@ -1361,8 +1361,12 @@ The child ID is confirmed by the agent's own event; the source session stays int
 
 A project has a stable ID, name, color, folders on multiple computers and session
 membership. Drag sessions between projects without moving folders or replacing
-agent processes. Drag headers, use the context menu or Alt-Up/Down to change local
-order. Empty-project visibility, collapse state and default project are local.
+agent processes. Drag headers, use the context menu or Alt-Up/Down to reorder
+projects. The project order is shared: every computer in the swarm and the
+Android app show the same order, and the latest change from any desktop replaces
+the others without a review. Until someone reorders, each desktop keeps its own
+order and Android lists projects by ID. Empty-project visibility, collapse state,
+session order within a project and default project are local.
 **All swarm projects** explicitly shows the full shared catalog.
 
 A newly discovered session appears in the local default project until a shared
@@ -1515,7 +1519,8 @@ adopts the swarm's existing choice. Without a swarm the local catalog keeps it t
 same way.
 
 Members running an older hgs keep synchronizing projects, folders and sessions but
-do not receive this choice; Settings → Mobile connection names the computers this
+do not receive this choice or the shared project order (they keep their own
+order); Settings → Mobile connection names the computers this
 one synchronizes with directly until they are updated. A member reached only
 through another computer is named in Settings on the computer that connects to it.
 An older machine cannot preview or join a swarm whose catalog already contains the

@@ -366,8 +366,11 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
         local.data.catalog = catalog;
         let mut existing = local.data.catalog.values();
         for (mut key, mut value) in old {
-            // The swarm's delivery choice wins over the joining machine's own.
-            if matches!(key, Key::Preference { .. }) && existing.contains_key(&key) {
+            // The swarm's delivery choice and project order win over the
+            // joining machine's own.
+            if matches!(key, Key::Preference { .. } | Key::Order { .. })
+                && existing.contains_key(&key)
+            {
                 continue;
             }
             if request.prefer_peer_memberships
@@ -395,6 +398,21 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
                     {
                         value = json!(target);
                     }
+                }
+                Key::Order { .. } => {
+                    // Mapped projects are already in the swarm's catalog; keep
+                    // the first place of each.
+                    let mut seen = BTreeSet::new();
+                    let ids = value
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str);
+                    value = ids
+                        .map(|id| request.project_map.get(id).map_or(id, String::as_str))
+                        .filter(|id| seen.insert(id.to_owned()))
+                        .map(|id| json!(id))
+                        .collect();
                 }
                 _ => {}
             }

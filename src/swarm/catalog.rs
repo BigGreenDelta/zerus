@@ -15,6 +15,7 @@ pub enum Key {
     Session { machine: String, session: String },
     Machine { id: String, field: String },
     Preference { field: String },
+    Order { field: String },
 }
 
 impl Key {
@@ -38,6 +39,12 @@ impl Key {
             field: field.into(),
         }
     }
+    /// The shared display order of the projects, as one list of project IDs.
+    pub fn project_order() -> Self {
+        Self::Order {
+            field: "projects".into(),
+        }
+    }
     /// The serde tag. Exchanges use it to omit kinds an older member rejects.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -46,6 +53,7 @@ impl Key {
             Self::Session { .. } => "session",
             Self::Machine { .. } => "machine",
             Self::Preference { .. } => "preference",
+            Self::Order { .. } => "order",
         }
     }
     fn validate(&self, value: &Value) -> Result<()> {
@@ -113,6 +121,20 @@ impl Key {
                     "invalid shared preference"
                 );
             }
+            Self::Order { field } => {
+                ensure!(field == "projects", "invalid shared order");
+                let ids: Vec<_> = value
+                    .as_array()
+                    .map(|ids| ids.iter().filter_map(|id| id.as_str()).collect())
+                    .unwrap_or_default();
+                ensure!(
+                    value.as_array().is_some_and(|all| all.len() == ids.len())
+                        && ids.len() <= 5000
+                        && ids.iter().all(|id| label(id, 128))
+                        && ids.iter().collect::<BTreeSet<_>>().len() == ids.len(),
+                    "invalid shared project order"
+                );
+            }
         }
         Ok(())
     }
@@ -139,13 +161,21 @@ pub fn default_preferences() -> Value {
     json!({"mobile_delivery": DEFAULT_MOBILE_DELIVERY})
 }
 /// Key kinds every member parses. Members from before shared preferences reject
-/// any other kind, so exchanges with them omit newer kinds.
+/// any other kind, so exchanges with them omit newer kinds; members that list
+/// kinds receive only the kinds they list (`order` came after `preference`).
 pub const LEGACY_KINDS: [&str; 4] = ["project", "folder", "session", "machine"];
 pub fn kinds() -> BTreeSet<String> {
-    ["project", "folder", "session", "machine", "preference"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+    [
+        "project",
+        "folder",
+        "session",
+        "machine",
+        "preference",
+        "order",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 /// Whether a member advertising `kinds` (or nothing, if older) accepts `key`.
 pub fn accepted(kinds: Option<&BTreeSet<String>>, key: &Key) -> bool {
@@ -537,9 +567,14 @@ mod tests {
             },
             Key::machine(&new_id(), "name"),
             key,
+            Key::project_order(),
         ] {
             assert_eq!(serde_json::to_value(&key).unwrap()["kind"], key.kind());
         }
+        assert_eq!(
+            serde_json::to_value(Key::project_order()).unwrap(),
+            json!({"kind": "order", "field": "projects"})
+        );
     }
     #[test]
     fn legacy_members_receive_only_kinds_they_parse() {
@@ -550,6 +585,39 @@ mod tests {
         assert!(accepted(Some(&kinds()), &preference));
         let older: BTreeSet<String> = LEGACY_KINDS.iter().map(|k| (*k).to_owned()).collect();
         assert!(!accepted(Some(&older), &preference));
+        // A member from before the shared order lists preferences but not orders.
+        let preferences: BTreeSet<String> = LEGACY_KINDS
+            .iter()
+            .chain(&["preference"])
+            .map(|k| (*k).to_owned())
+            .collect();
+        assert!(accepted(Some(&preferences), &preference));
+        assert!(!accepted(Some(&preferences), &Key::project_order()));
+        assert!(!accepted(None, &Key::project_order()));
+        assert!(accepted(Some(&kinds()), &Key::project_order()));
+    }
+    #[test]
+    fn project_order_is_a_bounded_list_of_distinct_project_ids() {
+        let key = Key::project_order();
+        assert!(key.validate(&json!([])).is_ok());
+        assert!(key.validate(&json!(["a", "ungrouped"])).is_ok());
+        for invalid in [
+            json!("a"),
+            json!(["a", "a"]),
+            json!(["a", 1]),
+            json!([""]),
+            json!(["a\nb"]),
+            json!(["x".repeat(129)]),
+            json!((0..5001).map(|i| i.to_string()).collect::<Vec<_>>()),
+        ] {
+            assert!(key.validate(&invalid).is_err(), "{invalid}");
+        }
+        let many: Vec<String> = (0..5000).map(|i| i.to_string()).collect();
+        assert!(key.validate(&json!(many)).is_ok());
+        let other = Key::Order {
+            field: "folders".into(),
+        };
+        assert!(other.validate(&json!([])).is_err());
     }
     #[test]
     fn preferences_report_the_default_for_an_unvalidated_invalid_choice() {

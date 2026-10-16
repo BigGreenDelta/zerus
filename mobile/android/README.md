@@ -173,7 +173,8 @@ sessions are paused or stopped; Archive contains immutable archived histories.
 
 The computer filter supports several machines across workspaces. Counts and
 cards use the same computer, project, and search scope. Results form collapsible
-project groups; empty groups are hidden in Sessions. Filter, query, collapsed
+project groups in the swarm's shared project order, the order desktops show;
+empty groups are hidden in Sessions. Filter, query, collapsed
 groups, and list position survive opening a conversation and background polling.
 Provider badges match the desktop identity motifs.
 
