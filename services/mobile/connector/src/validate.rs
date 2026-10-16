@@ -261,13 +261,16 @@ fn absolute(value: Option<&Value>, message: &str) -> Result<String, String> {
     Ok(value)
 }
 
-/// `launch.validate` for the catalog reads, and `worktrees.validate` for
-/// the worktree listing.
+/// `launch.validate` for the catalog reads and the creations, and
+/// `worktrees.validate` for the worktree listing.
 pub fn validate_launch(
     operation: &str,
     payload: Option<&Value>,
     request_id: &str,
 ) -> Result<(), String> {
+    if crate::launch::handles(operation) {
+        return crate::launch::validate(operation, payload, request_id).map_err(from_py);
+    }
     let object = payload.and_then(Value::as_object);
     if operation == "worktrees" {
         let exact = object.is_some_and(|payload| {
@@ -337,7 +340,7 @@ pub fn validate(
         session: session.into(),
         payload,
     };
-    if matches!(operation, "catalog" | "dirs" | "worktrees") {
+    if crate::capabilities::LAUNCH.contains(&operation) {
         if request.get("session").and_then(Value::as_str) != Some("") {
             return Err(error("catalog/launch use no existing session target"));
         }

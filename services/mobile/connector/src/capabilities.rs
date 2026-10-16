@@ -17,7 +17,8 @@ pub const REPROBE_SECONDS: f64 = 300.0;
 pub const PROBE_TIMEOUT: f64 = 3.0;
 
 /// Operations this connector executes, with the session mutations of
-/// [`crate::mutations::OPERATIONS`]. Every other known operation is refused
+/// [`crate::mutations::OPERATIONS`] and the creations of
+/// [`crate::launch::OPERATIONS`]. Every other known operation is refused
 /// as unsupported and never advertised.
 pub const IMPLEMENTED: &[&str] = &[
     "attachment_read",
@@ -48,7 +49,9 @@ pub const IMPLEMENTED: &[&str] = &[
 ];
 
 pub fn implemented(operation: &str) -> bool {
-    IMPLEMENTED.contains(&operation) || crate::mutations::handles(operation)
+    IMPLEMENTED.contains(&operation)
+        || crate::mutations::handles(operation)
+        || crate::launch::handles(operation)
 }
 
 /// Python's `FEATURES | {"accounts_snapshot"}` and the conditional features,
@@ -274,12 +277,14 @@ mod tests {
                 "catalog",
                 "clear_context",
                 "compact_context",
+                "directory_create",
                 "dirs",
                 "forget",
                 "fork",
                 "history",
                 "inspect",
                 "interrupt",
+                "launch",
                 "mark_read",
                 "pause",
                 "process_output",
@@ -293,6 +298,7 @@ mod tests {
                 "terminal_input",
                 "terminal_snapshot",
                 "terminate",
+                "worktree_create",
                 "worktrees"
             ])
         );
@@ -300,6 +306,7 @@ mod tests {
             advertised["features"],
             json!([
                 "accounts_snapshot",
+                "directory_create_v1",
                 "inspect_after",
                 "inspect_agent",
                 "send_agent"
