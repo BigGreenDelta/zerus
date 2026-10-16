@@ -18,6 +18,7 @@ use crate::request::{self, receipt};
 use crate::runtime::Connector;
 use crate::validate::{self, Validated};
 use serde_json::{json, Map, Value};
+use std::cell::Cell;
 use zerus_relay::{json, protocol};
 
 /// Python's catch-all receipt text for an unexpected exception.
@@ -211,18 +212,26 @@ impl<N: Native + 'static> Connector<N> {
 
     /// `_execute_claimed`: the receipt of a claimed request.
     async fn execute_claimed(&self, request: &Map<String, Value>, request_id: &str) -> Value {
-        // No implemented operation is a mutation; later slices set this
-        // once their native write starts.
-        let mutation_started = false;
+        // A mutation that failed once its native write may have begun is
+        // uncertain.
+        let mutation_started = Cell::new(false);
         let outcome = async {
-            let validated = validate::validate(request, request_id, &self.context())
+            let validated = self
+                .validated(request, request_id)
+                .await
                 .map_err(Failure::Connector)?;
             self.gate(&validated.operation, self.flags.get())?;
-            self.run(&validated, request_id).await
+            let result = if crate::mutations::handles(&validated.operation) {
+                self.mutate(&validated, request_id, &mutation_started)
+                    .await?
+            } else {
+                self.run(&validated, request_id).await?
+            };
+            Ok(receipt_of(&validated.operation, result))
         }
         .await;
         let failed = |failure: Failure| {
-            let state = if mutation_started {
+            let state = if mutation_started.get() {
                 "uncertain"
             } else {
                 "failed"
@@ -230,8 +239,7 @@ impl<N: Native + 'static> Connector<N> {
             receipt(state, Value::Null, Some(failure.message()))
         };
         match outcome {
-            Ok(result) => {
-                let response = json!({"state": "completed", "result": result, "error": null});
+            Ok(response) => {
                 match json::python_default_len(&response, true) {
                     Ok(size) if size <= MAX_RESULT => response,
                     Ok(_) => failed(Failure::text(TOO_LARGE)),
@@ -242,6 +250,20 @@ impl<N: Native + 'static> Connector<N> {
             }
             Err(failure) => failed(failure),
         }
+    }
+
+    /// `await asyncio.to_thread(self.validate, request)`: a send of
+    /// megabytes is checked off the runtime thread.
+    async fn validated(
+        &self,
+        request: &Map<String, Value>,
+        request_id: &str,
+    ) -> Result<Validated, String> {
+        let (request, request_id, context) =
+            (request.clone(), request_id.to_owned(), self.context());
+        tokio::task::spawn_blocking(move || validate::validate(&request, &request_id, &context))
+            .await
+            .unwrap_or_else(|_| Err(GENERIC.into()))
     }
 
     /// The capability checks of `_execute_claimed`, in Python's order.
@@ -271,7 +293,7 @@ impl<N: Native + 'static> Connector<N> {
         match validated.operation.as_str() {
             "inspect" => self.inspect(session, payload).await,
             "process_output" => {
-                self.process_output(session, payload.expect("validated"), request_id)
+                self.processes("--output", session, payload.expect("validated"), request_id)
                     .await
             }
             "mark_read" => {
@@ -440,8 +462,10 @@ impl<N: Native + 'static> Connector<N> {
         Ok(Value::Object(bounded))
     }
 
-    async fn process_output(
+    /// `hgs processes` with `--output` or `--stop` and the exact identity.
+    pub(crate) async fn processes(
         &self,
+        option: &str,
         session: &str,
         payload: &Value,
         request_id: &str,
@@ -451,7 +475,7 @@ impl<N: Native + 'static> Connector<N> {
         let mut argv = vec![
             "processes".to_owned(),
             session.into(),
-            "--output".into(),
+            option.into(),
             process.clone(),
             "--run".into(),
             text("expected_run_id"),
@@ -603,6 +627,31 @@ impl<N: Native + 'static> Connector<N> {
         result["request_id"] = json!(request_id);
         Ok(result)
     }
+}
+
+/// The receipt of a native result: the native status decides the state of
+/// a session action, a recovery action and a Terminal input, and a failed or
+/// uncertain one carries the native error.
+pub fn receipt_of(operation: &str, result: Value) -> Value {
+    let by_status = crate::capabilities::LIFECYCLE.contains(&operation)
+        || matches!(operation, "terminal_input" | "recovery_action");
+    if !by_status {
+        return json!({"state": "completed", "result": result, "error": null});
+    }
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let state = match status.as_str() {
+        "submitted" | "scheduled" | "cancelled" => "completed",
+        other => other,
+    };
+    let error = match status.as_str() {
+        "failed" | "uncertain" => result.get("error").cloned().unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+    json!({"state": state, "result": result, "error": error})
 }
 
 /// `x != payload[key]` with a string on the payload side.

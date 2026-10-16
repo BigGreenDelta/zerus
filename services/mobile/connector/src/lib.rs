@@ -19,6 +19,7 @@ pub mod hooks;
 pub mod http;
 pub mod inspection;
 pub mod journal;
+pub mod mutations;
 pub mod native;
 pub mod projects;
 pub mod pyjson;
