@@ -47,9 +47,18 @@ fn connector_with_state(
     args: &[String],
     state: &Path,
 ) -> (Option<i32>, String, String) {
+    connector_with_command(scratch, args, state, Command::new(BINARY))
+}
+
+fn connector_with_command(
+    scratch: &Scratch,
+    args: &[String],
+    state: &Path,
+    mut command: Command,
+) -> (Option<i32>, String, String) {
     let empty = scratch.path("empty-path");
     let mut child = spawn(
-        Command::new(BINARY)
+        command
             .args(args)
             .env_clear()
             .env("HOME", scratch.path("home"))
@@ -59,8 +68,16 @@ fn connector_with_state(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
     );
+    // Reports exit by themselves. An existing binding does not prove that a
+    // freshly spawned --check has completed its read-only inspection.
+    let reporting = args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--check" | "--help" | "--version"));
     let deadline = Instant::now() + Duration::from_secs(10);
-    while child.try_wait().unwrap().is_none() && Instant::now() < deadline && !bound(state) {
+    while child.try_wait().unwrap().is_none()
+        && Instant::now() < deadline
+        && (reporting || !bound(state))
+    {
         std::thread::sleep(Duration::from_millis(10));
     }
     // The binding is written before the runtime starts; give it a moment to
@@ -287,6 +304,36 @@ fn check(scratch: &Scratch, config: &str) -> (i32, Value) {
         code.unwrap(),
         serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("{stdout}")),
     )
+}
+
+/// A report may start after an existing binding was written. Runtime readiness
+/// must not turn that short report into a process we kill before it answers.
+#[test]
+fn delayed_check_finishes_with_an_already_bound_journal() {
+    let scratch = scratch("delayed-check");
+    let state = scratch.path("state");
+    let binding = zerus_relay::json::digest(format!("{RELAY}\0{TOKEN}"));
+    let held = Journal::open(&state, &binding, EPOCH).unwrap();
+    let config = write_config(&scratch, &valid(&scratch).to_string(), 0o600);
+    let before = fingerprint(&state);
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "/bin/sleep 0.35; exec \"$@\"", "delayed-report"])
+        .arg(BINARY);
+    let (code, stdout, stderr) = connector_with_command(
+        &scratch,
+        &["--check".into(), "--json".into(), "--config".into(), config],
+        &state,
+        command,
+    );
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stderr, "");
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["ok"], true, "{report}");
+    assert_eq!(report["state"]["lock"], "held");
+    assert_eq!(report["state"]["journal"]["binding"], "matches");
+    assert_eq!(fingerprint(&state), before, "report changed the journal");
+    close(held);
 }
 
 /// Bytes, modification time and inode of every file below a directory.
