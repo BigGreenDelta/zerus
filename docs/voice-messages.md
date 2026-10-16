@@ -89,6 +89,24 @@ stops into the preview. A permission result requires a fresh recording action. L
 the pointer or leaving the composer must end capture without submission; a late
 release or permission callback must never start another recording or affect a
 newer one. Capture stays pinned to its original conversation and provider.
+Canceled or claimed Android pointer input cannot send or switch modes; canceling
+a second click on a locked recording leaves that capture running.
+
+Round-video capture opens a large live circular preview over the conversation,
+with a progress ring and remaining-time countdown. The timer follows captured
+media statistics and the camera's actual 59-second recording limit; a file-size
+limit can finish earlier. The preview adapts to the available viewport above
+the retained composer and keyboard. Locked recording exposes camera switching,
+Cancel, Stop and, when preview-before-send is off, Send. Stop always retains the
+preview. The same-window layer preserves the held pointer and window focus;
+release or cancellation starts a short fade and shrink without delaying camera
+Finalize or cleanup. Covered history stays out of accessibility and does not
+accrue visible-read progress until the closing animation has finished.
+
+The recording-screen behavior was inspected in Telegram Android's
+[InstantCameraView](https://github.com/DrKLO/Telegram/blob/f32ffeec763f0bdbf4bec25b52d654f77bff733d/TMessagesProj/src/main/java/org/telegram/ui/Components/InstantCameraView.java#L620-L635)
+and its [opening/closing animation](https://github.com/DrKLO/Telegram/blob/f32ffeec763f0bdbf4bec25b52d654f77bff733d/TMessagesProj/src/main/java/org/telegram/ui/Components/InstantCameraView.java#L881-L943).
+The Compose implementation is original Zerus code; no Telegram source is copied.
 
 With a narrow screen, large system text and an expanded editor, the open keyboard
 can leave no space for the retained preview. Close the keyboard to reach its

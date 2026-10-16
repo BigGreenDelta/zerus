@@ -269,6 +269,8 @@ import androidx.compose.ui.unit.dp
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         val pointer = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (event.changes.any { it.id != down.id && it.pressed }) break
+                        // Compose cancellation synthesizes an already-consumed up; it cannot Send.
+                        if (pointer.isConsumed) break
                         pointer.consume()
                         if (!pointer.pressed) {
                             if (speech.recordingLocked && pointer.position.x in 0f..size.width.toFloat() &&
@@ -289,6 +291,8 @@ import androidx.compose.ui.unit.dp
                         if (event == null) { waiting = false; apply(gesture.hold()); continue }
                         val pointer = event.changes.firstOrNull { it.id == down.id }
                         if (pointer == null || event.changes.any { it.id != down.id && it.pressed }) break
+                        // Test incoming consumption before our own consume/move/release handling.
+                        if (pointer.isConsumed) break
                         apply(gesture.move(pointer.position.x - down.position.x, pointer.position.y - down.position.y))
                         ownedCapture?.let { speech.moveGesture(it, gesture.progress, gesture.lockProgress) }
                         pointer.consume()
@@ -374,8 +378,9 @@ import androidx.compose.ui.unit.dp
     var providerSettings by remember { mutableStateOf<VoiceDraft?>(null) }
     if (!speech.recording && !speech.savingRecording && draft == null) return
     if (speech.touchRecording && speech.videoRecorder == null) return
+    // The live camera has a dedicated layer above history, beside the unchanged pointer owner.
+    if (speech.recording && speech.videoRecorder != null) return
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        speech.videoRecorder?.let { LiveVideoCircle(it) }
         when {
             speech.recording -> {
                 val recordingId = speech.activeCaptureId

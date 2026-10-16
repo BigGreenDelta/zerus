@@ -32,6 +32,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.material.icons.Icons
@@ -902,8 +903,10 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LaunchedEffect(settledAtTail,listState.isScrollInProgress,programmatic,follow.opened,follow.following,follow.anchor,model.hasNewer) {
         if(!listState.isScrollInProgress && !programmatic) follow = ConversationViewport.settled(follow,settledAtTail,model.hasNewer)
     }
+    val videoCapture = model.speech.recording && model.speech.videoRecorder != null
+    var videoOverlayVisible by remember { mutableStateOf(false) }
     val readable = foreground && window.isWindowFocused && follow.opened && readReady &&
-        !obscured
+        !obscured && !videoCapture && !videoOverlayVisible
     LaunchedEffect(target.key,listState,readable,model.hasOlder,model.olderLoading,model.olderError) {
         if(!readable || !model.hasOlder || model.olderLoading || model.olderError.isNotBlank()) return@LaunchedEffect
         snapshotFlow { listState.isScrollInProgress && !programmatic && listState.firstVisibleItemIndex <= 3 }
@@ -962,6 +965,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
         Box(Modifier.weight(1f).fillMaxWidth().onSizeChanged { viewportHeight = it.height }
             .onGloballyPositioned { viewportBounds = it.boundsInWindow() }) {
+            Box(Modifier.fillMaxSize().semantics { if (videoCapture || videoOverlayVisible) hideFromAccessibility() }) {
             // The tail item already adds one item gap above the composer.
             LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1037,6 +1041,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     Text(if(latestPending) "Loading latest…" else unread?.let { "${it.text} unread" } ?: "Latest",
                         Modifier.padding(start = 4.dp),style = MaterialTheme.typography.labelMedium)
                 }
+            }
+            RoundVideoRecordingOverlay(model.speech, Modifier.matchParentSize()) { videoOverlayVisible = it }
         }
         if (archived) {
             ContextFooter(model, session)

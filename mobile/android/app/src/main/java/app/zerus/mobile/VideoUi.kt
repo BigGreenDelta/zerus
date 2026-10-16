@@ -28,15 +28,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Base64
 
-@Composable internal fun LiveVideoCircle(recorder: RoundVideoRecorder) {
+@Composable internal fun LiveVideoCircle(recorder: RoundVideoRecorder, diameter: androidx.compose.ui.unit.Dp = 200.dp,
+    enabled: Boolean = true) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         AndroidView(factory = { context -> PreviewView(context).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FILL_CENTER
             recorder.previewSurface(surfaceProvider)
         } }, onRelease = { recorder.previewSurface(null) },
-            modifier = Modifier.size(200.dp).clip(CircleShape))
-        IconButton(onClick = { recorder.switchCamera() }, modifier = Modifier.align(Alignment.BottomEnd)) {
+            modifier = Modifier.size(diameter).clip(CircleShape))
+        IconButton(onClick = { recorder.switchCamera() }, enabled = enabled, modifier = Modifier.align(Alignment.BottomEnd)) {
             Icon(Icons.Default.FlipCameraAndroid, "Switch camera")
         }
     }
