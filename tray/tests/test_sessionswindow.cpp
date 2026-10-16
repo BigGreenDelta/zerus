@@ -224,6 +224,8 @@ private slots:
     void emptyProjectsSettingPreservesArchiveAndProjects();
     void contentScaleLeavesWorkspaceChrome();
     void activityReadingColumnFollowsSettingsAndEdges();
+    void activitySurfaceRemainsOpaque_data();
+    void activitySurfaceRemainsOpaque();
     void settingsSlidersResetToDefaults();
     void projectSwarmFollowsWorkspaceTheme();
     void alwaysOnTopSettingKeepsWindowAbove();
@@ -1372,6 +1374,29 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     window.findChild<QPushButton *>("workspaceSettings")->click(); slider->setValue(20);
     QTRY_COMPARE(editorPixels(), 13);
     QCOMPARE(pixels("activity"), 13); QCOMPARE(pixels("terminalScreen"), 13);
+}
+
+void TestSessionsWindow::activitySurfaceRemainsOpaque_data()
+{
+    QTest::addColumn<QString>("theme"); QTest::addColumn<double>("scale");
+    for (const QString theme : {QString("dark"), QString("light")})
+        for (double scale : {1.0, 1.25})
+            QTest::newRow(qPrintable(theme+QString::number(scale))) << theme << scale;
+}
+
+void TestSessionsWindow::activitySurfaceRemainsOpaque()
+{
+    QFETCH(QString,theme); QFETCH(double,scale);
+    QSettings().setValue("workspace/theme",theme); QSettings().setValue("workspace/contentScale",scale);
+    SessionsWindow window(program()); window.resize(1180,820); window.setFleet(fleet()); window.show();
+    window.showSession({},"codex/hgs/dashboard");
+    const auto views=window.findChildren<ActivityView *>(); QVERIFY(views.size()>=2);
+    for (auto *view : views) {
+        auto *browser=view->browser(); browser->ensurePolished(); browser->viewport()->ensurePolished();
+        const auto base=browser->viewport()->palette().brush(QPalette::Base);
+        QVERIFY2(base.isOpaque(),"Workspace CSS disabled the fast Activity canvas renderer");
+        QCOMPARE(base.color(),view->palette().color(QPalette::Window));
+    }
 }
 
 void TestSessionsWindow::activityReadingColumnFollowsSettingsAndEdges()

@@ -404,14 +404,21 @@ void TestActivityView::tableReplyScrollingKeepsQueuedInputResponsive()
 void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive_data()
 {
     QTest::addColumn<bool>("paragraph");
-    QTest::newRow("bullets") << false;
-    QTest::newRow("dense-paragraph") << true;
+    QTest::addColumn<bool>("workspaceStyle");
+    QTest::newRow("bullets") << false << false;
+    QTest::newRow("dense-paragraph") << true << false;
+    QTest::newRow("styled-bullets") << false << true;
+    QTest::newRow("styled-dense-paragraph") << true << true;
 }
 
 void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive()
 {
-    QFETCH(bool, paragraph);
-    ActivityView view; view.resize(900, 700); view.show(); view.setSessionKey("rich-scroll"); view.setTheme(true);
+    QFETCH(bool, paragraph); QFETCH(bool, workspaceStyle);
+    ActivityView view;
+    // SessionsWindow's general browser style must not disable Activity's
+    // opaque-canvas painting path (Qt gives transparent CSS a NoBrush base).
+    if (workspaceStyle) view.setStyleSheet("QTextBrowser { background:transparent; border:0; padding-top:12px; }");
+    view.resize(900, 700); view.show(); view.setSessionKey("rich-scroll"); view.setTheme(true);
     QString body = "## Configuration example\n\nReadable `tool settings` for the `current_session`.\n\n";
     for (int i = 0; i < 18; ++i)
         body += QString("- Preserve `option_%1` and `example/cache/model-catalog/long-catalog-file.json` beside longer prose "
@@ -421,6 +428,7 @@ void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive()
     for (int i = 0; i < 50; ++i) events.append(journalEvent(i + 1, "Stop", QString("Reply %1\n\n").arg(i) + body));
     view.setActivity({}, events); settle(view);
     auto *browser = view.browser(); auto *bar = browser->verticalScrollBar();
+    QVERIFY(browser->viewport()->palette().brush(QPalette::Base).isOpaque());
     bar->setValue(bar->maximum() / 2); browser->viewport()->repaint();
     auto cursor = browser->cursorForPosition(QPoint(80, 150));
     cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 5);
