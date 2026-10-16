@@ -4,8 +4,9 @@ Status: Android app, protocol version 1; a native iOS client with the same
 safety rules is in development in `mobile/ios`. The clients,
 relay and computer connector live in this repository under the MIT license,
 except for attributed Apache-2.0 terminal adaptations from MuxPod. Their source
-headers identify the upstream revision, and the APK includes the complete
-license in `assets/licenses/mux-pod.txt`.
+headers identify the upstream revision, and the APK and the iOS app include the
+complete license (`assets/licenses/mux-pod.txt` and
+`mobile/ios/Zerus/Licenses/mux-pod.txt`).
 The existing `hgs` CLI remains the authority for native session identity and input.
 
 ## Product boundary

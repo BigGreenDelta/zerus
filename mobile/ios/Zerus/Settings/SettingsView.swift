@@ -36,6 +36,9 @@ struct SettingsView: View {
                     Text("Zerus for iOS sends no analytics or crash reports of its own. Session content travels only between this phone, your gateway and your computers.")
                         .font(.footnote).foregroundStyle(Theme.muted)
                 }
+                Section {
+                    NavigationLink("Third-party notices") { ThirdPartyNotices() }
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -50,5 +53,31 @@ struct SettingsView: View {
             return machine.online ? "version unavailable" : "version unavailable while offline"
         }
         return machine.online && !machine.lastKnown ? machine.hgsVersion : "\(machine.hgsVersion) · last known"
+    }
+}
+
+/// Notices for adapted third-party code bundled with the app.
+struct ThirdPartyNotices: View {
+    @State private var license = "Loading license…"
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("MuxPod — Copyright 2025 mox").font(.headline)
+                Text("Terminal ANSI colors, styles, and selection behavior adapted to Swift and SwiftUI from MuxPod (Apache License 2.0). Zerus adds bounded control suppression and explicit relay input.")
+                Text("Source: github.com/moezakura/mux-pod\nCommit c33d0fdeb66ca7bbdf4745203578088961982c13").font(.footnote).foregroundStyle(Theme.muted)
+                Text(license).font(.caption.monospaced()).foregroundStyle(Theme.muted)
+            }
+            .textSelection(.enabled)
+            .padding()
+        }
+        .navigationTitle("Third-party notices")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            let text = await Task.detached {
+                Bundle.main.url(forResource: "mux-pod", withExtension: "txt").flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+            }.value
+            license = text ?? "License text is unavailable."
+        }
     }
 }

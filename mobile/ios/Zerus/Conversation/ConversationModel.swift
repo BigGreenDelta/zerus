@@ -137,6 +137,17 @@ final class ConversationModel {
     var attachmentPreparing = false
     var attachmentImporting = false
     @ObservationIgnored var importTask: Task<Void, Never>?
+
+    // MARK: Terminal
+
+    var terminalState: JSONObject?
+    var terminalLoading = false
+    var terminalError = ""
+    var terminalVisible = false
+    @ObservationIgnored var terminalVerified = false
+    @ObservationIgnored var terminalReceivedAt: TimeInterval = 0
+    @ObservationIgnored var terminalTask: Task<Void, Never>?
+    @ObservationIgnored var emptyTerminalBuffers: [String: TerminalBuffer] = [:]
     var deliveryFlights: Set<String> = []
     /// Outbox rows, with interrupted sends shown as unconfirmed.
     var normalizedOutgoing: [OutgoingMessage] = []
@@ -338,12 +349,17 @@ final class ConversationModel {
         processOutputLoading = false
         processOutputResult = nil
         processOutputError = ""
+        terminalTask?.cancel()
+        terminalVisible = false
+        terminalLoading = false
+        terminalVerified = false
+        terminalState = nil
     }
 
     // MARK: Inspection
 
     func refreshActivity(explicit: Bool = false) {
-        guard !demo, let original = selected else { return }
+        guard !demo, !terminalVisible, let original = selected else { return }
         if let action = pendingActionResult(original.target) {
             openSessionActionResult(action)
             return
@@ -620,7 +636,7 @@ final class ConversationModel {
 
     /// Only a verified inspection of this exact live conversation authorizes a native action.
     func fresh(_ target: Target) -> Bool {
-        guard let raw = activity, activityVerified, selected?.target == target, target.archiveId.isEmpty else { return false }
+        guard let raw = activity, !terminalVisible, activityVerified, selected?.target == target, target.archiveId.isEmpty else { return false }
         let name = raw.string("name")
         return raw.string("run_id") == target.run && raw.string("conversation_id") == target.conversation && raw.string("archive_id").isEmpty &&
             raw.string("state") != "archived" && raw.string("agent_id") == target.agentId &&
