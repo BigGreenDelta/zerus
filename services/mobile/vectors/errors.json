@@ -134,6 +134,7 @@
   {"android":{"update_required":true},"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native speech profile management ABI is unavailable","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native subagent inspection identity did not match","module":"connector"},
   {"android":{"update_required":true},"count":1,"exception":"ValueError","function":"Connector._execute_claimed","message":"native verified worktree placement is unavailable","module":"connector"},
+  {"android":{"update_required":true},"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native video message ABI is unavailable","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native voice acknowledgement did not match","module":"connector"},
   {"android":{"update_required":true},"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native voice message ABI is unavailable","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"repository changed; refresh worktrees before creation","module":"connector"},
