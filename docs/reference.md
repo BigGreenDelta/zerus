@@ -603,7 +603,7 @@ active offline; stale work alone does not. Archives stay in Archive. Active also
 applies to desktop content search, and the Dashboard's Active counter opens this
 same filter. Creating, clearing or sending a draft updates the filter and count.
 Cards with an unsent draft have a blue edge in the Draft color, including the
-open conversation, offline sessions and Graph inspection. Collapsed tiles use
+open conversation, offline sessions and Saved drafts inspection. Collapsed tiles use
 the same color around their frame. Attention and errors retain their warning
 colors; working indicators and unread identity remain unchanged.
 
@@ -884,8 +884,7 @@ copying it to another session.
 Independent sessions can explicitly declare **Waiting for acceptance** and
 **Waiting for result** through `hgs wait`. The idle card names the producer and
 computer and shows elapsed time; the session stays in Active. Native work and
-attention take precedence, while reply-only completion badges wait. Graph uses
-a dashed amber dependency arrow. Settlement requires the scoped reply ticket
+attention take precedence, while reply-only completion badges wait. Settlement requires the scoped reply ticket
 and, for a result, a confirmed delivery receipt in the exact waiting conversation.
 The durable journal has bounded previews and stable pages. See
 [Agent coordination](agent-coordination.md).
@@ -2561,44 +2560,17 @@ and the v2 Dev catalogs have no Windows artifact.
 
 ## JSON and external clients
 
-### Session and agent Graph
+### Retained session metadata API
 
-`hgs [@host] graph snapshot --json` reads a derived, host-owned metadata index.
-The desktop Graph destination combines saved conversation/run identities,
-archived bindings, persisted native child rosters, current native API children,
-confirmed forks and verified Zerus submission receipts. Cards reuse Sessions'
-status, provider, computer, branch, Draft and unread presentation. Search and
-project/machine filters keep cross-project neighbors visible as context. Archived
-sessions and completed children have explicit filters. A list provides the same
-inspection and exact-target actions without using the canvas.
+The desktop Graph destination has been [retired](retired-features/session-graph.md).
+Its last implementation is preserved by a named Git tag for a separate future
+iteration. The desktop no longer collects or renders Graph data.
 
-Graph opens in **Active**, using the same current-work membership as Sessions.
-The compact icon strip exposes All, Needs attention, Active, Saved sessions and
-Archive with scoped counts, plus the shared machine/project selectors and an
-explicit completed-agent toggle. Recorded children without current activity are
-available in All rather than filling the initial view. Cross-project context
-respects the selected state and machine scope. Changing scope fits its results;
-it does not rearrange saved positions. macOS/Wayland native pinch magnifies around
-the gesture position; ordinary two-finger scrolling still pans.
-
-The first nonempty view without saved positions runs Arrange and Fit once.
-Restored positions, camera and explicit filter choices remain authoritative;
-legacy default scope upgrades to Active without replacing its saved pins.
-
-Dragging a node immediately resizes its project's region; overlap never changes
-project membership. Positions and camera are saved locally per device, including
-when a provisional native identity becomes confirmed. Refresh, filters and reopen
-do not rearrange manual positions. New nodes use free space among visible cards.
-Fit changes only the camera; Arrange visible is explicit and has Undo. It packs
-only visible cards using their actual heights. Hidden positions remain saved but
-do not reserve space or enlarge the current project regions.
-
-The collector reads metadata rather than prompt bodies or provider transcripts.
-It never launches an agent, sends input or changes read marks. Source bindings are
-unchanged. Selection only inspects Graph. Open Activity performs a fresh native
-identity read before opening the exact current run, archive or child; old hosts
-without that read fail visibly. Graph can open an archive outside the currently
-loaded Archive page without listing the whole archive catalog.
+`hgs [@host] graph snapshot --json`, `graph changes --json` and `graph receipt
+--json` remain bounded native compatibility APIs for released clients. The
+host-owned metadata index covers exact saved conversation/run identities,
+archives, native children, confirmed forks and verified submission receipts.
+It does not change source bindings, send input or change read marks.
 
 Each call reads at most 32 new or changed metadata records and checks at most
 512 cached stamps, with a 2 MiB ordinary input budget and a
@@ -2628,19 +2600,13 @@ stores no message or attachment bodies, retains 30 days and cannot replay input.
 Old, uncertain or unattributed attempts remain explicit coverage gaps. Existing
 quoted message envelopes are not retrospectively treated as verified edges.
 
-One directed line aggregates distinct confirmed submissions between its endpoints;
-its inspector pages 50 receipts at a time. Submission does not imply a reply or
-completed work, and local timestamps do not establish cross-computer causal order.
-Unavailable computers remain boundary nodes with no borrowed actions. Explicit
-Open delivered message reads only the selected native receipt, not the transcript:
 `hgs [@host] graph receipt --json` accepts JSON stdin with `name`,
 `expected_run_id`, `expected_conversation_id`, `message_request_id` and optional
 `archive_id`. Every identity is checked again; the response contains one bounded
-public delivery event. Graph metadata polling never fetches message bodies.
-
-Desktop transport uses configured native hosts directly. The first desktop
-preview does not add an Android Graph destination or a mobile relay operation.
-
+public delivery event. Metadata reads never fetch provider transcript bodies.
+Submission does not imply a reply or completed work, and local timestamps do not
+establish cross-computer causal order. Independent-agent waits remain a separate
+explicit protocol; see [Agent coordination](agent-coordination.md).
 
 ### Existing session snapshots
 

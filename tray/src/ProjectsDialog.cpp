@@ -133,11 +133,6 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
         auto *item=m_list->itemAt(position);if(item)m_list->setCurrentItem(item);
         auto *menu=new QMenu(this);menu->setObjectName("projectListMenu");
         auto *add=menu->addAction(tr("New project…"),this,&ProjectsDialog::addProject);add->setObjectName("addProjectAction");
-        if (item) {
-            const auto id = item->data(Qt::UserRole).toString();
-            auto *graph = menu->addAction(tr("Show in Graph")); graph->setObjectName("projectShowInGraph");
-            connect(graph, &QAction::triggered, this, [this, id] { emit graphRequested(id); });
-        }
         if(item){menu->addSeparator();menu->addAction(m_moveUp);menu->addAction(m_moveDown);}
         connect(menu,&QMenu::aboutToHide,menu,&QObject::deleteLater);menu->popup(m_list->viewport()->mapToGlobal(position));
     });

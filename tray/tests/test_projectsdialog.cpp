@@ -412,9 +412,8 @@ void TestProjectsDialog::emptyListContextCreatesProject()
     QVERIFY(std::any_of(projects.groups().cbegin(),projects.groups().cend(),[](const auto &p){return p.name=="Created from empty space";}));
     auto *item=list->currentItem();QVERIFY(item);list->customContextMenuRequested(list->visualItemRect(item).center());
     menu=qobject_cast<QMenu*>(QApplication::activePopupWidget());QVERIFY(menu);QCOMPARE(menu->actions().first()->objectName(),"addProjectAction");
-    QVERIFY(menu->findChild<QAction*>("addProjectAction"));QCOMPARE(menu->actions().size(),5);
-    auto *graph=menu->findChild<QAction*>("projectShowInGraph");QVERIFY(graph);QSignalSpy showGraph(&dialog,&ProjectsDialog::graphRequested);
-    graph->trigger();QCOMPARE(showGraph.size(),1);QCOMPARE(showGraph[0][0].toString(),item->data(Qt::UserRole).toString());menu->close();
+    QVERIFY(menu->findChild<QAction*>("addProjectAction"));QCOMPARE(menu->actions().size(),4);
+    QVERIFY(!menu->findChild<QAction*>("projectShowInGraph")); menu->close();
 }
 
 void TestProjectsDialog::acceptsPlainName()

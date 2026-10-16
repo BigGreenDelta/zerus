@@ -137,7 +137,7 @@ if(LINUX)
     target_link_libraries(hgs-tray-gui PRIVATE Qt6::DBus)
 endif()
 
-add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp src/GraphCanvas.cpp src/GraphPage.cpp src/GraphController.cpp src/SessionGraphStore.cpp src/GraphViewStateStore.cpp src/GraphProjection.cpp src/GraphWorkspace.cpp
+add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp
     src/MachineFilter.cpp src/ProjectFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp

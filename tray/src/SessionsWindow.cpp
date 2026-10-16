@@ -1,7 +1,6 @@
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
-#include "GraphWorkspace.h"
 #include <QStandardPaths>
 #include "WorktreeBatchCleanupDialog.h"
 #include "DownloadCache.h"
@@ -309,13 +308,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     create->setFixedSize(42,44);create->setIconSize(QSize(24,24));side->addWidget(create);
     connect(create, &QPushButton::clicked, this, [this]() { showNewSession({}, {}, selectedHostTarget()); });
     m_sessionsNav = iconButton("sessions", tr("Sessions"), "railButton"); m_sessionsNav->setCheckable(true); m_sessionsNav->setChecked(true);
-    m_graphNav = iconButton("graph", tr("Graph"), "railButton"); m_graphNav->setCheckable(true);
-    connect(m_graphNav, &QPushButton::clicked, this, [this] { m_pages->setCurrentWidget(m_graph); });
     m_projectsNav = iconButton("projects", tr("Projects"), "railButton"); m_projectsNav->setCheckable(true);
     m_machinesNav = iconButton("machines", tr("Machines and connection status"), "railButton"); m_machinesNav->setCheckable(true);
     m_accountsNav = iconButton("accounts", tr("Agent accounts"), "railButton"); m_accountsNav->setCheckable(true);
     connect(m_accountsNav, &QPushButton::clicked, this, [this] { m_pages->setCurrentIndex(4); m_accountsNav->setChecked(true); });
-    for (auto *button : {m_sessionsNav, m_graphNav, m_projectsNav, m_machinesNav, m_accountsNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
+    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
     m_attentionBadge = new QLabel(m_sessionsNav); m_attentionBadge->setObjectName("railAttentionBadge");
     m_attentionBadge->setAlignment(Qt::AlignCenter); m_attentionBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_attentionBadge->setGeometry(24, 3, 17, 16); m_attentionBadge->hide();
@@ -1308,34 +1305,6 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_accountsPage = new AccountsPage(hgsPath,nullptr,m_usageStore); m_pages->addWidget(m_accountsPage);
     m_settingsPage=new SettingsPage(hgsPath);m_pages->addWidget(m_settingsPage);
-    m_graph = new GraphWorkspace(hgsPath, QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/session-graph.json", this);
-    m_pages->addWidget(m_graph);
-    connect(m_graph, &GraphWorkspace::openRequested, this, &SessionsWindow::openGraphTarget);
-    connect(m_projectsPage, &ProjectsDialog::graphRequested, this, [this](const QString &id) { m_pages->setCurrentWidget(m_graph); m_graph->page()->focusProject(id); });
-    connect(m_graph->page(),&GraphPage::evidenceRequested,this,[this](const QString &host,const QString &name,const QString &run,const QString &conversation,const QString &archive,const QString &message){requestGraphOpen(host,name,run,conversation,archive,{},message);});
-    connect(&m_client,&HgsClient::graphTargetFailed,this,[this](quint64 id,const QString &error){
-        if(id!=m_graphOpenRequest)return;m_graphOpenRequest=0;
-        if(m_graph->isVisible())m_graph->page()->setFreshness(tr("Could not open this Graph target"),error);
-    });
-    connect(&m_client,&HgsClient::graphTargetReady,this,[this](quint64 id,const QJsonObject &data){
-        if(id!=m_graphOpenRequest)return;m_graphOpenRequest=0;
-        const auto scope=m_graphOpenScope;const auto state=m_graph->page()->viewState();
-        if(!m_graph->isVisible()||state["selectedNode"]!=scope["selectedNode"]||state["selectedRelation"]!=scope["selectedRelation"])return;
-        const auto host=scope["host"].toString(),name=scope["name"].toString(),run=scope["run"].toString(),conversation=scope["conversation"].toString(),archive=scope["archive"].toString(),agent=scope["agent"].toString();
-        const auto target=m_graph->page()->target(host,name,run,conversation,archive,agent);if(!target)return;
-        const bool listed=std::any_of(m_entries.cbegin(),m_entries.cend(),[&](const Entry&e){return e.host==host&&e.session.name==name&&e.session.runId==run&&e.session.conversationId==conversation&&e.session.archiveId==archive;});
-        if(!archive.isEmpty()&&!listed){
-            const auto rows=HgsClient::parseSessions(QJsonArray{target->metadata});
-            if(rows.size()!=1||rows[0].archiveId!=archive||rows[0].name!=name||rows[0].runId!=run||rows[0].conversationId!=conversation)return;
-            m_graphArchiveRows[host]=rows[0];rebuild();
-        }
-        const Entry *match=nullptr;
-        for(const auto &entry:m_entries)if(entry.host==host&&entry.session.name==name&&entry.session.runId==run&&entry.session.conversationId==conversation&&entry.session.archiveId==archive&&entry.online){if(match)return;match=&entry;}
-        if(!match||(!agent.isEmpty()&&!childRoster(*match).contains(agent)))return;
-        m_detailTabs->setCurrentIndex(0);openRelatedSession(host,name,archive);
-        if(!agent.isEmpty())openSubagent(agent);
-        if(!scope["message"].toString().isEmpty())m_activityView->showSearchResult(data["event"].toObject(),{});
-    });
     connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);});
     m_settingsPage->pollingChanged=[this]{
         const bool enabled=ProcessSettings::enabled();
@@ -1377,8 +1346,6 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_machinesPage,&MachinesPage::appearanceChanged,this,[this] { m_machineFilter->refreshColors(); m_accountsPage->refreshAppearance(); rebuild(); updateDashboard(); });
     connect(m_pages,&QStackedWidget::currentChanged,this,[this](int index) {
         m_sessionsNav->setChecked(index==0); m_projectsNav->setChecked(index==1); m_machinesNav->setChecked(index==2); m_brand->setChecked(index==3); m_accountsNav->setChecked(index==4); m_settingsNav->setChecked(index==5);
-        m_graphNav->setChecked(m_pages->currentWidget()==m_graph);
-        if (m_graphNav->isChecked()) updateGraph();
         renderAccountUsage();if(index==3)updateDashboardAccounts(true);updateInspectorMinimum();
         if (index == 3 && m_dashboardStale) updateDashboard();
         // Callers that show Sessions rebuild right away; this covers any other switch.
@@ -1774,7 +1741,6 @@ void SessionsWindow::applyTheme()
         m_attentionCount > 0, QSettings().value("workspace/reduceMotion", false).toBool());
     m_sessions->setProperty("hgsDark", m_dark);
     m_sessions->setActivityAnimationEnabled(QSettings().value("workspace/animateActivity", true).toBool());
-    m_graph->setTheme(m_dark);
     m_projectsPage->setTheme(m_dark); m_accountsPage->setTheme(m_dark); m_machinesPage->setTheme(m_dark); m_providerBadge->setTheme(m_dark); m_machineBadge->setTheme(m_dark);
     m_accountUsage->setTheme(m_dark);
     m_usageWarning->setStyleSheet(QString("QLabel{color:%1;}").arg(m_dark?"#ffabab":"#a42330"));
@@ -2042,9 +2008,6 @@ void SessionsWindow::showGroupMenu(const QString &id, const QPoint &position)
     menu->addSeparator();
     auto *only = menu->addAction(workspaceIcon("projects", QColor(m_muted)), tr("Filter this project")); only->setObjectName("filterOnlyProject");
     connect(only, &QAction::triggered, this, [this,id] { if (m_organization.group(id)) m_projectFilter->setSelection({id}); });
-    auto *graphAction = menu->addAction(workspaceIcon("graph", QColor(m_muted)), tr("Show in Graph"));
-    graphAction->setObjectName("showProjectInGraph");
-    connect(graphAction, &QAction::triggered, this, [this, id] { m_pages->setCurrentWidget(m_graph); m_graph->page()->focusProject(id); });
     menu->addSeparator();
     const bool collapsed = group->collapsed;
     connect(menu->addAction(collapsed ? tr("Expand project") : tr("Collapse project")), &QAction::triggered, this, [this, id, collapsed]() {
@@ -2628,64 +2591,6 @@ QMap<int,QVariant> SessionsWindow::childCardRoles(const Entry &e,const QString &
         {SessionRoles::MachineName,e.machine},{SessionRoles::MachineColor,MachineAppearance::color(e.machine)},{HostRole,e.machine}};
 }
 
-void SessionsWindow::updateGraph()
-{
-    QSet<QString> routes;
-    if (m_fleet.local().localSessions) routes.insert({});
-    for (const auto &host : m_fleet.peerNames()) routes.insert(host);
-    m_graph->setRoutes(routes);
-    if (!m_graph->isVisible()) return;
-    m_graph->setFilterCatalog(m_fleet, m_organization.groups());
-    QList<GraphProjection::Binding> bindings;
-    QJsonObject machineLabels{{QString(),m_fleet.local().host}};
-    for(const auto &host:m_fleet.peerNames())machineLabels[host]=host;
-    int omitted = 0;
-    for (const auto &entry : m_entries) {
-        const auto &s = entry.session;
-        if (s.runId.isEmpty()) continue;
-        if (bindings.size() >= GraphWorkspace::MaximumBindings) { ++omitted; continue; }
-        const auto groupId = m_organization.groupFor(entry.identity);
-        const auto *group = m_organization.group(groupId);
-        bindings.append({entry.host, s.name, s.runId, s.conversationId, s.cmd, s.archiveId, {},
-            groupId, group ? group->name : QString(), sessionCardRoles(entry), entry.online, {}, false,
-            entryNeedsAttention(entry) || SessionPresentation::active(s, entry.online, entryHasDraft(entry)),
-            s.state != "running"});
-        const auto roster=childRoster(entry);
-        for(auto it=roster.begin();it!=roster.end();++it){
-            const auto child=it.value().toObject();if(child["group"].toBool())continue;
-            if(bindings.size()>=GraphWorkspace::MaximumBindings){++omitted;continue;}
-            const QJsonValue generation=child["started"].toDouble()>0?child["started"]:QJsonValue(s.runId);
-            auto roles = childCardRoles(entry, it.key(), child);
-            const bool draft = m_subagentComposer->hasDraft(entry.machine + '\n' + s.name + '\n' + s.conversationId + '\n' + it.key());
-            roles[SessionRoles::Draft] = draft;
-            bindings.append({entry.host,s.name,s.runId,s.conversationId,s.cmd,s.archiveId,it.key(),groupId,group?group->name:QString(),
-                roles,entry.online,generation,SessionPresentation::inactiveChild(child,s.subagentCountsComplete),
-                roles.value(SessionRoles::Working).toBool() || roles.value(SessionRoles::Attention).toBool() || draft,
-                s.state != "running"});
-        }
-    }
-    m_graph->setContext(routes, bindings, omitted,{{"organization",m_organization.toJson()},{"machines",machineLabels}});
-}
-
-void SessionsWindow::openGraphTarget(const QString &host, const QString &name, const QString &run,
-    const QString &conversation, const QString &archive, const QString &agent)
-{
-    requestGraphOpen(host,name,run,conversation,archive,agent);
-}
-void SessionsWindow::requestGraphOpen(const QString &host,const QString &name,const QString &run,const QString &conversation,
-    const QString &archive,const QString &agent,const QString &message)
-{
-    const auto target=m_graph->page()->target(host,name,run,conversation,archive,agent);
-    if (!m_graph->isVisible()||!target||run.isEmpty()) {
-        m_graph->page()->setFreshness(tr("This session changed. Refresh Graph before opening it."));
-        return;
-    }
-    const auto state=m_graph->page()->viewState();
-    m_graphOpenScope={{"host",host},{"name",name},{"run",run},{"conversation",conversation},{"archive",archive},{"agent",agent},{"message",message},
-        {"selectedNode",state["selectedNode"]},{"selectedRelation",state["selectedRelation"]}};
-    m_graphOpenRequest=m_client.requestGraphTarget(host,name,run,conversation,archive,agent,target->machine,message);
-}
-
 void SessionsWindow::rebuild()
 {
     if (m_sessions->dragging()) return;
@@ -2719,7 +2624,6 @@ void SessionsWindow::rebuild()
             if(box.ok&&scope)archiveHosts[host]=host.isEmpty()?box.host:host;
             view.sessions.append(m_archiveBrowser->sessions(host));
             for(const auto &row:m_archiveSearchRows.value(host)){bool duplicate=false;for(const auto &old:view.sessions)if(old.archiveId==row.archiveId){duplicate=true;break;}if(!duplicate)view.sessions.append(row);}
-            if(m_graphArchiveRows.contains(host)){const auto &row=m_graphArchiveRows[host];bool duplicate=false;for(const auto &old:view.sessions)if(old.archiveId==row.archiveId){duplicate=true;break;}if(!duplicate)view.sessions.append(row);}
         }
         append(host,view);
     };
@@ -2736,7 +2640,6 @@ void SessionsWindow::rebuild()
     for (auto &entry : m_entries) entry.identity = m_organization.observe(entry.machine, entry.session.name, entry.session.runId, entry.session.archiveId);
     placeLaunchedSessions();
     saveOrganization();
-    updateGraph();
     // Entries, attention and the organization above stay current for other pages.
     // A hidden Sessions list and its details render once, when the page is shown.
     if (m_pages->currentIndex() != 0 && m_forkKey.isEmpty() && m_restoreKey.isEmpty() && m_renameKey.isEmpty()) {
@@ -4654,13 +4557,6 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     };
     qDeleteAll(m_sessionMenu->findChildren<QMenu *>(QString(), Qt::FindDirectChildrenOnly));
     m_sessionMenu->clear();
-    auto *graphAction = m_sessionMenu->addAction(workspaceIcon("graph", QColor(m_muted)), tr("Show in Graph"));
-    graphAction->setObjectName("contextShowInGraph"); graphAction->setEnabled(!target.runId.isEmpty());
-    connect(graphAction, &QAction::triggered, this, [this, original] {
-        m_pages->setCurrentWidget(m_graph);
-        m_graph->focusTarget(original.host, original.session.name, original.session.runId, original.session.conversationId, original.session.archiveId);
-    });
-    m_sessionMenu->addSeparator();
     if (!archived) add(original.session.cmd == "dsh" ? tr("Open native DeepSeek UI") : tr("Open terminal"), "contextOpenTerminal", SessionMenuAction::OpenTerminal, available && (target.cmd=="dsh"||NativeSessionCapabilities::terminal(target,selectedTarget?m_details:QJsonObject())),
         NativeSessionCapabilities::terminal(target,selectedTarget?m_details:QJsonObject())||target.cmd=="dsh"?QString():NativeSessionCapabilities::terminalReason(target,selectedTarget?m_details:QJsonObject()));
     if (!archived && SessionPresentation::backgroundIdle(original.session))

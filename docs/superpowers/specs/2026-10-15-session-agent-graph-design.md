@@ -1,5 +1,9 @@
 # Session and agent graph
 
+> Archived experiment: the desktop Graph was retired on 2026-10-16. See the
+> [retirement record](../../retired-features/session-graph.md) and preserved Git tag.
+> This document records the historical design, not the current product.
+
 Date: 2026-10-15. Desktop shipped in Dev 773; owner usability revision 2026-10-16 follows below.
 Design task: zerus-4rkz. Source audit: `669101d2`.
 Interactive, synthetic preview: [Graph workspace](../../../design/session-graph/index.html).

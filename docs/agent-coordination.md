@@ -12,13 +12,11 @@ Progress replies retain their unread identity while reply-only completion badges
 and notifications wait. The composer stays available. Offline, stopped, archived
 and reused identities never establish current waiting work.
 
-Graph shows a dashed amber arrow from waiter to producer, with exact native
-identities at both ends. Ambiguous accounts or runs remain unresolved. A producer
-that is Ready remains visible as dependency context in the Active graph without
-changing its own Active membership or bypassing the selected machine scope. A producer
-reference without a run names that exact conversation across its runs. Snapshots
-supply four open-dependency previews per waiter; additional relations contribute
-to Graph's omitted count. No message body is parsed to infer a dependency.
+Dependencies retain exact native identities at both ends. A producer reference
+without a run names that exact conversation across its runs. Snapshots supply
+four open-dependency previews per waiter; the durable journal provides bounded
+pages for the complete record. No message body is parsed to infer a dependency.
+The former desktop Graph visualization is [retired](retired-features/session-graph.md).
 
 ## Declare and hand off
 
@@ -55,7 +53,7 @@ never resend automatically. Cancel an abandoned declaration explicitly.
 
 The ticket authorizes acknowledgement and completion of this one dependency.
 It grants no native input or permission change. Share it with the intended
-producer. Snapshots, Graph, journal pages and public receipts never contain it.
+producer. Snapshots, metadata indexes, journal pages and public receipts never contain it.
 An idempotent `begin` can recover its own ticket.
 
 ## Acknowledge, deliver and finish

@@ -63,15 +63,6 @@ inline QStringList twoLines(const QString &text, const QFontMetrics &metrics, in
 class SessionDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
-    // Standalone graph cards need an opaque surface over connecting lines.
-    // Content, status/identity badges and selection remain the list renderer.
-    void paintStandalone(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const {
-        const bool dark = !option.widget || option.widget->property("hgsDark").toBool();
-        p->save(); p->setPen(QPen(QColor(dark ? "#29313a" : "#dfe5eb"), 1));
-        p->setBrush(SessionStrip::surface(dark));
-        p->drawRoundedRect(QRectF(sessionCardRect(option.rect)).adjusted(.5,.5,-.5,-.5),8,8);p->restore();
-        paint(p,option,index);
-    }
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
         // List rows are as wide as the view but never narrower than the hint.
         const int width = SessionStrip::expansion(option.widget) < 1 ? 1 : 280;
@@ -141,7 +132,7 @@ public:
         s.additionalUnread = s.unread && (s.working || s.attention || s.draft);
         return s;
     }
-    // Selecting a graph/list inspection row does not open its composer. Keep
+    // Selecting a list inspection row does not open its composer. Keep
     // its draft badge until the ordinary Sessions editor actually owns it.
     static CardStatus statusForView(const QStyleOptionViewItem &option, const QModelIndex &index) {
         const bool opensEditor = !option.widget || !option.widget->property("selectionIsInspection").toBool();

@@ -56,7 +56,6 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
-#include "GraphWorkspace.h"
 #include "ProcessView.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
@@ -253,8 +252,7 @@ private slots:
     void projectFilterCombinesScopesCountsAndNavigation();
     void pagedArchiveSearchJoinsExactProjectBeforeFiltering();
     void projectHeaderFiltersOnlyThisProject();
-    void graphNavigationKeepsSharedCardsAndRejectsReusedRun();
-    void graphOpensExactArchiveOutsideLoadedPageAndPreservesLiveDraft();
+    void retiredGraphHasNoNavigationOrContextActions();
     void hiddenPagesRenderWhenShown();
     void pollsKeepUnchangedActivity();
     void multiSelectionKeepsConversationAndGroupMenu_data();
@@ -840,126 +838,29 @@ void TestSessionsWindow::machineChooserCountsFollowStateScopeWithoutMachineOrTex
     QCOMPARE(count("@local"),3); QCOMPARE(count("mac"),1); QVERIFY(menu->isVisible()); menu->hide();
 }
 
-void TestSessionsWindow::graphNavigationKeepsSharedCardsAndRejectsReusedRun()
+void TestSessionsWindow::retiredGraphHasNoNavigationOrContextActions()
 {
-    FleetState state; auto local = fleet().local();
-    auto &session = local.sessions[0]; session.runId = "graph-run"; session.conversationId = "conversation-one";
-    session.gitBranch = "feat/graph"; session.cwd = "/work/project";
-    state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
-    const QString node = "node:" + QString(64, 'a'), binding = "binding:" + QString(64, 'b');
-    const QString machine = "11111111-1111-4111-8111-111111111111";
-    QJsonObject page{{"schema",1},{"machine_id",machine},
-        {"epoch",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"revision",2},{"cursor","end"},
-        {"has_more",false},{"reset_required",false},{"coverage",QJsonObject{{"bindings_complete",true}}},
-        {"items",QJsonArray{
-            QJsonObject{{"id",node},{"revision",1},{"deleted",false},{"item",QJsonObject{{"kind","node"},{"value",QJsonObject{
-                {"endpoint",QJsonObject{{"machine",machine},{"provider",session.cmd},{"namespace","default"},
-                    {"conversation",session.conversationId},{"provisional_run",""}}}}}}}},
-            QJsonObject{{"id",binding},{"revision",2},{"deleted",false},{"item",QJsonObject{{"kind","binding"},{"value",QJsonObject{
-                {"node",node},{"name",session.name},{"run_id",session.runId},{"conversation_id",session.conversationId},{"provider",session.cmd}}}}}}
-        }}};
-    QMap<QString,QJsonObject> sorted;
-    for (const auto &row : page["items"].toArray()) sorted[row.toObject()["id"].toString()]=row.toObject();
-    QJsonArray ordered; for (const auto &row : sorted) ordered.append(row); page["items"]=ordered;
-    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
-    const auto fixture = m_dir->filePath("graph-navigation");
-    const QByteArray answer = "elif c in ('graph','reference') and sys.argv[1].startswith('@'):\n sys.exit(1)\n"
-        "elif c=='graph':\n open(__file__+'.calls','a').write(json.dumps(sys.argv[1:])+'\\n')\n print(" +
-        FakeCli::pythonString(QString::fromUtf8(QJsonDocument(page).toJson(QJsonDocument::Compact))) + ")\n"+
-        "elif c=='reference':\n print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(QJsonObject{{"schema",1},{"machine_id",machine},{"name",session.name},{"run_id",session.runId},{"conversation_id",session.conversationId},{"archive_id",""},{"agent_id",""}}).toJson(QJsonDocument::Compact)))+")\n";
-    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
-    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window);
-    window.setFleet(state); window.resize(1100,760); window.show(); window.showSession({},session.name);
-    auto *list = window.findChild<SessionList *>("sessionList");
-    QVERIFY(list->currentItem());
+    SessionsWindow window(script()); keepDetailsPollsOut(window);
+    window.setFleet(fleet()); window.resize(1100,760); window.show();
+    const auto name=fleet().local().sessions[0].name; window.showSession({},name);
+    auto *list=window.findChild<SessionList *>("sessionList"); QVERIFY(list && list->currentItem());
     auto *composer=window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
-    setComposerText(composer,"Keep my graph draft");
-    QTRY_VERIFY(list->currentItem()->data(SessionRoles::Draft).toBool());
-    QMap<int,QVariant> roles;
-    for (const int role : {SessionRoles::Title,SessionRoles::Agent,SessionRoles::Host,SessionRoles::Status,
-            SessionRoles::Meta,SessionRoles::MetaIcon,SessionRoles::MachineColor,SessionRoles::Working,
-            SessionRoles::Unread,SessionRoles::Scheduled,SessionRoles::Draft}) roles[role]=list->currentItem()->data(role);
-    QVERIFY(!QFile::exists(fixture+".calls"));
-    auto *graph = window.findChild<GraphWorkspace *>(); QVERIFY(graph);
-    QPushButton *nav = nullptr;
-    for (auto *button : window.findChildren<QPushButton *>("railButton"))
-        if (button->property("glyph")=="graph") nav=button;
-    QVERIFY(nav); nav->click(); QTRY_VERIFY(graph->isVisible());
-    QTRY_COMPARE_WITH_TIMEOUT(graph->page()->canvas()->nodeCount(),1,10000);
-    auto *mainMachines = window.findChild<MachineFilter *>("machineFilterChips");
-    auto *graphMachines = graph->page()->findChild<MachineFilter *>();
-    QVERIFY(mainMachines && graphMachines && mainMachines != graphMachines);
-    const auto mainScope = mainMachines->selection();
-    graphMachines->setSelection({"missing-fixture-machine"});
-    QCOMPARE(graph->page()->canvas()->nodeCount(), 0);
-    QCOMPARE(mainMachines->selection(), mainScope);
-    graphMachines->setSelection({});
-    QCOMPARE(graph->page()->canvas()->nodeCount(), 1);
-    auto *model = graph->page()->canvas()->nodeModel();
-    for (auto it=roles.cbegin();it!=roles.cend();++it) QCOMPARE(model->index(0,0).data(it.key()),it.value());
-    QSignalSpy read(&window,&SessionsWindow::replyViewed);
-    graph->page()->focusNode(node); QCoreApplication::processEvents(); QCOMPARE(read.size(),0);
-    if (qEnvironmentVariableIsSet("ZERUS_GRAPH_WORKSPACE_PREVIEW")) {
-        QTest::qWait(100);
-        QVERIFY(window.grab().save(qEnvironmentVariable("ZERUS_GRAPH_WORKSPACE_PREVIEW")+"-current.png"));
-    }
-    QVERIFY(graph->isVisible());
-    graph->openRequested({},session.name,"stale-run",session.conversationId,{},{});
-    QVERIFY(graph->isVisible());
-    auto *open = graph->findChild<QPushButton *>("graphOpenActivity"); QVERIFY(open);
-    QTRY_VERIFY(open->isEnabled()); QTest::mouseClick(open,Qt::LeftButton);
-    QTRY_VERIFY(!graph->isVisible()); QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(),'\n'+session.name);
-    QCOMPARE(composer->editor()->toPlainText(),QString("Keep my graph draft"));
-    nav->click(); QTRY_VERIFY(graph->isVisible());
-    local.sessions[0].runId="replacement"; state.setLocal(local,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
-    graph->openRequested({},session.name,"graph-run",session.conversationId,{},{});
-    QVERIFY(graph->isVisible()); // Exact same name and conversation are not enough.
-    if (qEnvironmentVariableIsSet("ZERUS_GRAPH_WORKSPACE_PREVIEW")) {
-        graph->page()->focusNode(node);
-        QTest::qWait(100);
-        QVERIFY(window.grab().save(qEnvironmentVariable("ZERUS_GRAPH_WORKSPACE_PREVIEW")));
-    }
-}
-
-void TestSessionsWindow::graphOpensExactArchiveOutsideLoadedPageAndPreservesLiveDraft()
-{
-    auto state=fleet();auto local=state.local();local.archivePaging=true;
-    auto &live=local.sessions[0];live.runId="current-run";live.conversationId="current-native";
-    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
-    const QString machine="11111111-1111-4111-8111-111111111111",archive="33333333-3333-4333-8333-333333333333";
-    const QString node="node:"+QString(64,'a'),binding="binding:"+QString(64,'b');
-    QJsonObject summary{{"name",live.name},{"cmd",live.cmd},{"run_id","archived-run"},{"conversation_id","archived-native"},
-        {"state","archived"},{"archive_id",archive},{"archived_at",100},{"tracked",true},{"resumable",false},{"title","Retained archive"}};
-    QJsonObject graph{{"schema",1},{"machine_id",machine},{"epoch",QUuid::createUuid().toString(QUuid::WithoutBraces)},
-        {"revision",2},{"cursor","end"},{"has_more",false},{"reset_required",false},{"coverage",QJsonObject()},
-        {"items",QJsonArray{
-            QJsonObject{{"id",binding},{"revision",1},{"deleted",false},{"item",QJsonObject{{"kind","binding"},{"value",QJsonObject{
-                {"node",node},{"name",live.name},{"provider",live.cmd},{"run_id","archived-run"},{"conversation_id","archived-native"},
-                {"archived",true},{"archive_id",archive},{"summary",summary}}}}}},
-            QJsonObject{{"id",node},{"revision",2},{"deleted",false},{"item",QJsonObject{{"kind","node"},{"value",QJsonObject{{"endpoint",QJsonObject{
-                {"machine",machine},{"provider",live.cmd},{"namespace","fixture"},{"conversation","archived-native"},{"provisional_run",""}}}}}}}}
-        }}};
-    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));const auto fixture=m_dir->filePath("graph-archive");
-    const QJsonObject reference{{"schema",1},{"machine_id",machine},{"name",live.name},{"run_id","archived-run"},
-        {"conversation_id","archived-native"},{"archive_id",archive},{"agent_id",""}};
-    const QByteArray branch="elif c in ('graph','reference') and sys.argv[1].startswith('@'):\n sys.exit(1)\n"
-        "elif c=='graph':\n print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(graph).toJson(QJsonDocument::Compact)))+")\n"+
-        "elif c=='reference':\n open(__file__+'.reference','w').write(json.dumps(sys.argv[1:]))\n print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(reference).toJson(QJsonDocument::Compact)))+")\n";
-    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+branch)));
-    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.resize(1100,760);window.show();window.showSession({},live.name);
-    auto *composer=window.findChild<MessageComposer*>("messageComposer");setComposerText(composer,"Keep the current run draft");
-    auto *workspace=window.findChild<GraphWorkspace*>();
-    QSignalSpy targetRead(window.findChild<HgsClient*>(),&HgsClient::graphTargetReady);
-    for(auto *button:window.findChildren<QPushButton*>("railButton"))if(button->property("glyph")=="graph")button->click();
-    QTRY_VERIFY_WITH_TIMEOUT(workspace->page()->target({},live.name,"archived-run","archived-native",archive,{}).has_value(),10000);
-    QVERIFY(!QFile::exists(fixture+".reference"));workspace->page()->focusNode(node);
-    auto *open=workspace->findChild<QPushButton*>("graphOpenActivity");QTRY_VERIFY(open->isEnabled());QTest::mouseClick(open,Qt::LeftButton);
-    QTRY_VERIFY_WITH_TIMEOUT(targetRead.size()>0,5000);
-    QTRY_VERIFY(!workspace->isVisible());auto *list=window.findChild<SessionList*>("sessionList");
-    QTRY_VERIFY(list->currentItem());QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(),'\n'+live.name+'\n'+archive);
-    QFile calls(fixture+".reference");QVERIFY(calls.open(QIODevice::ReadOnly));const auto args=QJsonDocument::fromJson(calls.readAll()).array();
-    QVERIFY(args.contains(archive));QVERIFY(args.contains("archived-run"));QVERIFY(args.contains("archived-native"));
-    window.showSession({},live.name);QTRY_COMPARE(composer->editor()->toPlainText(),QString("Keep the current run draft"));
+    setComposerText(composer,"Keep the current conversation draft");
+    for(auto *button:window.findChildren<QPushButton *>("railButton"))
+        QVERIFY(button->property("glyph")!="graph");
+    auto *dashboard=window.findChild<DashboardPage *>(); QVERIFY(dashboard);
+    auto *pages=qobject_cast<QStackedWidget *>(dashboard->parentWidget()); QVERIFY(pages);
+    QCOMPARE(pages->count(),6);
+    list->customContextMenuRequested(list->visualItemRect(list->currentItem()).center());
+    auto *menu=window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
+    QVERIFY(!menu->findChild<QAction *>("contextShowInGraph"));
+    QVERIFY(menu->findChild<QAction *>("contextCopyCommand")); menu->close();
+    auto *projects=window.findChild<ProjectsDialog *>(); QVERIFY(projects);
+    for(auto *button:window.findChildren<QPushButton *>("railButton"))
+        if(button->property("glyph")=="projects") button->click();
+    QTRY_VERIFY(projects->isVisible());
+    window.showSession({},name);
+    QTRY_COMPARE(composer->editor()->toPlainText(),QString("Keep the current conversation draft"));
 }
 
 void TestSessionsWindow::pagedArchiveSearchJoinsExactProjectBeforeFiltering()
