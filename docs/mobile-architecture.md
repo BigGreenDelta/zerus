@@ -31,7 +31,7 @@ flowchart LR
     C[Computer connector] -->|Outbound HTTPS, node credential| R
     C -->|Fixed argv and JSON stdin| H[hgs]
     H --> N[Existing native sessions]
-    R -->|Generic wake notification| P[FCM]
+    R -->|Generic wake notification| P[FCM / APNs]
     P --> A
 ```
 
@@ -868,7 +868,7 @@ API errors carry an `error` string. Relay health reports the protocol version.
 | `POST /v1/requests` | Device | `{request_id, computer_id, operation, session, payload}` → request envelope |
 | `GET /v1/requests/{id}` | Owning device | Request envelope |
 | `GET /v1/events?after=N&wait=25` | Device | `{events: [...], cursor}` |
-| `POST /v1/push` | Device | `{provider: "fcm", token}`; other providers return 400 |
+| `POST /v1/push` | Device | `{provider: "fcm" \| "apns" \| "apns_sandbox", token}`; an unconfigured provider returns 503, others 400 |
 | `DELETE /v1/push` | Device | Remove this device's push registration |
 | `DELETE /v1/device` | Device | Revoke this device, its queued requests and push registration |
 | `POST /v1/node/heartbeat` | Computer | `{snapshot, presence?}` using local `hgs ls --json --local` output; its `desktop_presence` travels as `presence` beside the snapshot |

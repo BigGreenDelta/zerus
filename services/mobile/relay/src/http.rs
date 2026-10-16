@@ -602,6 +602,14 @@ impl App {
                         protocol::fields(&b, &["provider", "token"], &[])?;
                         protocol::text(&b["token"], 4096, false)?
                     }
+                    "apns" | "apns_sandbox" => {
+                        if !self.push.apns_enabled() {
+                            return Err(Error::UNAVAILABLE);
+                        }
+                        protocol::fields(&b, &["provider", "token"], &[])?;
+                        &crate::push::apns_token(protocol::text(&b["token"], 200, false)?)
+                            .ok_or(Error::BAD)?
+                    }
                     _ => return Err(Error::BAD),
                 };
                 self.store.register_push(&c, provider, target).await?;
