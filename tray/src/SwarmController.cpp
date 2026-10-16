@@ -180,7 +180,9 @@ QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJson
         QStringList ids(retained.cbegin(),retained.cend());ids.sort();
         result.insert("unassigned_sessions",QJsonArray::fromStringList(ids));
     }
-    for(const auto &key:{"default_project","runs","imported_machines"})if(local.contains(key))result.insert(key,local.value(key));
+    // Local fields the catalog never returns. Dropping one would make the next
+    // save differ from what this controller observed and write again.
+    for(const auto &key:{"default_project","runs","run_groups","imported_machines"})if(local.contains(key))result.insert(key,local.value(key));
     return result;
 }
 void SwarmController::received(quint64 id,const QJsonObject &result)

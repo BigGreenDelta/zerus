@@ -79,10 +79,11 @@ print(json.dumps(result))
         write("hgs",script);QVERIFY(FakeCli::makeRunnable(m_program));response("Original");
     }
     void localPresentationSurvivesRemoteMembership() {
-        auto local=organization("Old");auto project=local["projects"].toArray()[0].toObject();project["collapsed"]=true;project["sessions"]=QJsonArray{"b","a","removed"};local["projects"]=QJsonArray{project};local["runs"]=QJsonObject{{"run","a"}};
+        auto local=organization("Old");auto project=local["projects"].toArray()[0].toObject();project["collapsed"]=true;project["sessions"]=QJsonArray{"b","a","removed"};local["projects"]=QJsonArray{project};local["runs"]=QJsonObject{{"run","a"}};local["run_groups"]=QJsonObject{{"arch\nrun","p"}};
         auto remote=organization("Renamed");project=remote["projects"].toArray()[0].toObject();project["sessions"]=QJsonArray{"a","new","b"};remote["projects"]=QJsonArray{project};
         const auto result=SwarmController::presentation(remote,local);const auto p=result["projects"].toArray()[0].toObject();
         QCOMPARE(p["name"].toString(),"Renamed");QVERIFY(p["collapsed"].toBool());QCOMPARE(p["sessions"].toArray(),QJsonArray({"b","a","new"}));QCOMPARE(result["runs"],local["runs"]);
+        QCOMPARE(result["run_groups"],local["run_groups"]);
     }
     void presentationRestoresOnlyThisMachinesWindowsFolders() {
         // Local Windows folders (D15) are not in the catalog. A read restores those of
@@ -331,6 +332,29 @@ print(json.dumps(result))
         QVERIFY(SessionOrganization(patch["base"].toObject()).group("p")->sessions.isEmpty());
         QCOMPARE(SessionOrganization(patch["desired"].toObject()).group("p")->sessions,QStringList{session});
         QVERIFY(local.toJson()["unassigned_sessions"].toArray().isEmpty());
+    }
+    void runPlacementSurvivesTheCatalogRoundTrip() {
+        // The Sessions window reacts to each catalog result as below: it adopts
+        // a different organization, observes its live runs again and saves.
+        SessionOrganization local(organization("Original"));
+        const auto session=local.observe("arch","codex/example/review","run-one");local.moveSession(session,"p");
+        QCOMPARE(local.toJson()["run_groups"].toObject()["arch\nrun-one"].toString(),"p");
+        // The CLI returns only the shared catalog, which has no run placement.
+        auto shared=local.toJson();for(const auto *key:{"runs","run_groups","unassigned_sessions"})shared.remove(key);
+        write("response",QJsonDocument(QJsonObject{{"schema",1},{"organization",shared},{"versions",QJsonObject{}},{"peers",QJsonObject{}},{"conflicts",QJsonArray{}}}).toJson());
+        HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
+        int adopted=0;
+        connect(&controller,&SwarmController::organizationReady,this,[&](const QJsonObject &value){
+            const SessionOrganization updated(value);if(updated.toJson()==local.toJson())return;
+            ++adopted;local=updated;local.observe("arch","codex/example/review","run-one");controller.edit(local.toJson());
+        });
+        controller.start(local.toJson()); QTRY_VERIFY(controller.settled());
+        controller.refresh(); QTRY_COMPARE(requests().size(),2); QTRY_VERIFY(controller.settled());
+        // Settled, it only reads: nothing differs that a write would change.
+        const auto sent=requests().size(); QTest::qWait(400);
+        QVERIFY(controller.settled()); QCOMPARE(requests().size(),sent); QCOMPARE(adopted,0);
+        QCOMPARE(local.toJson()["run_groups"].toObject()["arch\nrun-one"].toString(),"p");
+        for(const auto &request:requests())QVERIFY(request.toObject()["action"]!="apply");
     }
     void unchangedRefreshDoesNotRewriteSettings() {
         HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
