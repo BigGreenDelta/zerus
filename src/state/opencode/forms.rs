@@ -350,7 +350,8 @@ mod tests {
                 assert!(case["card"]["can_answer"] == false, "{name}");
                 continue;
             }
-            for check in [case] {
+            {
+                let check = case;
                 let answers = check["answers"].as_array().unwrap();
                 let result = if permission {
                     permission_decision(answers).map(|d| json!({"decision": d}))
