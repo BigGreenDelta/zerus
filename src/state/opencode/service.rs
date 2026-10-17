@@ -626,18 +626,18 @@ mod tests {
 
     #[test]
     fn registration_follows_xdg_state_home() {
-        let home = Path::new("/private/fixture/home");
+        let home = Path::new("/home/example");
         assert_eq!(
             registration_path_from(Some("/private/fixture/state"), home),
             PathBuf::from("/private/fixture/state/opencode/service.json")
         );
         assert_eq!(
             registration_path_from(None, home),
-            PathBuf::from("/private/fixture/home/.local/state/opencode/service.json")
+            PathBuf::from("/home/example/.local/state/opencode/service.json")
         );
         assert_eq!(
             registration_path_from(Some(""), home),
-            PathBuf::from("/private/fixture/home/.local/state/opencode/service.json")
+            PathBuf::from("/home/example/.local/state/opencode/service.json")
         );
     }
 
@@ -820,5 +820,15 @@ mod tests {
         let clipped = clipped_version(&long);
         assert_eq!(clipped.chars().count(), 64);
         assert!(!clipped.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn real_opencode_2_0_32_description_passes_the_gate() {
+        let openapi: Value = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/opencode2/openapi-2.0.32.json"
+        ))
+        .unwrap();
+        assert_eq!(missing_operations(&openapi), Vec::<String>::new());
+        assert!(verdict(&openapi).unwrap().is_empty());
     }
 }
