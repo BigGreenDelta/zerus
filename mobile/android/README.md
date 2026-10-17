@@ -359,13 +359,26 @@ request identity.
 ## Voice and video messages
 
 Settings includes **Voice messages**, with an independently selected transcription
-computer and host-configured profile. Open a conversation to discover the computers
-reachable from its owner. An unavailable saved selection never silently switches
-providers. Both the relay and conversation computer must advertise `voice_profiles`,
+computer and host-configured profile. Global settings lists verified online computers
+and reads the selected computer's `speech_profiles` directly, without opening a
+conversation. **Refresh voice profiles** reloads those profiles and reports progress
+or a read failure. Computer choices are scoped to their workspace; their searchable
+picker shows at most 100 matches. Choosing a default affects new recordings only.
+Existing recordings retain their computer, profile and reviewed revision.
+
+Inside a conversation, discovery still comes from its owner and lists the computers
+it can reach. An unavailable saved selection never silently switches providers.
+Both the relay and conversation computer must advertise `voice_profiles`,
 `voice_submit`, `voice_status` and `voice_cancel`. When supported, `speech_stats`
 displays the selected processing computer's aggregate local counts. Audio and
 transcription are excluded from Firebase events. See [mobile architecture](../../docs/mobile-architecture.md#voice-input)
 and [analytics](../../docs/analytics.md).
+
+`DefaultVoiceProvidersSmokeInstrumentation` exercises the real settings controls
+without a selected conversation: initial discovery, Refresh, computer/profile
+selection, explicit revision changes, failed reads and retry, and stale response
+rejection. A retained recording keeps its original route throughout. It uses only
+computer-scoped reads intercepted at a reserved synthetic endpoint.
 
 **Manage speech providers** works without an open conversation. Choose the processing
 computer, then add or edit **Local GigaAM** or an **OpenAI-compatible server**. Local

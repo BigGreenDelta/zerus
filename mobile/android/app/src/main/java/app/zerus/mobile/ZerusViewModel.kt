@@ -31,6 +31,16 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
     private val api = RelayApi()
     internal val speech by lazy { SpeechController(application, this, viewModelScope, api) }
+    internal val defaultVoiceProviders by lazy { DefaultVoiceProviders(this, viewModelScope, api) }
+    internal fun defaultVoiceProfilesReason(host: SpeechConfigHost): String = when {
+        demo || !storageReady -> "Connect a computer to load its voice profiles."
+        connections.none { it.id == host.key.connectionId } -> "The voice workspace is disconnected."
+        DefaultVoiceRoutes.resolve(MachineKey(host.key.connectionId, host.machineId), machines, connections) != host ->
+            "The voice computer is unavailable or its identity changed. Refresh Machines and try again."
+        "speech_profiles" !in relayOperations[host.key.connectionId].orEmpty() -> "Update this gateway to load voice profiles."
+        "speech_profiles" !in machineOperations[host.key].orEmpty() -> "Update Zerus on this computer to load voice profiles."
+        else -> ""
+    }
     internal val speechConfiguration by lazy { SpeechConfigurationController(application, this, viewModelScope, api) }
     internal fun speechConfigurationReason(host: SpeechConfigHost): String = when {
         demo || !storageReady -> "Connect a computer to manage its speech providers."
