@@ -51,6 +51,14 @@ const CLAUDE_MODEL_SWITCH: Version = (2, 1, 296);
 /// (`prune_json`). `PreModelSwitch` stays
 /// unregistered: its allow would also skip Claude's cache-miss confirmation
 /// for the user.
+/// The oldest Claude Code whose `PermissionRequest` hook answers AskUserQuestion
+/// with `updatedInput.answers` beside its open panel (verified 2026-10-17).
+const CLAUDE_ANSWER_CHANNEL: Version = (2, 1, 296);
+/// The arguments with which the answer channel runs hgs.
+const CHANNEL_ARGS: [&str; 2] = ["__state", "answer-channel"];
+/// Long enough for a person to answer: the channel ends itself sooner.
+const CHANNEL_TIMEOUT: u64 = 86_400;
+
 fn versioned_events(agent: &str) -> &'static [(&'static str, Version)] {
     match agent {
         "claude" => &[("PostModelSwitch", CLAUDE_MODEL_SWITCH)],
@@ -78,6 +86,21 @@ fn owns_hook(command: &str) -> bool {
             .and_then(|name| name.to_str())
             .map(|name| name == "hgs" || name == "hgs.exe")
             .unwrap_or(false)
+}
+
+/// Whether `hook`, one item of a matcher group's `hooks`, is hgs's answer
+/// channel: `hgs __state answer-channel` as a command line or in exec form.
+fn owns_channel(hook: &Value) -> bool {
+    let Some(command) = hook.get("command").and_then(Value::as_str) else {
+        return false;
+    };
+    if let Some(args) = hook.get("args").and_then(Value::as_array) {
+        return names_hgs(command) && args.iter().map(Value::as_str).eq(CHANNEL_ARGS.map(Some));
+    }
+    let Ok(argv) = shell_words::split(command) else {
+        return false;
+    };
+    argv.len() >= 3 && argv[argv.len() - 2..] == CHANNEL_ARGS && names_hgs(&argv[argv.len() - 3])
 }
 
 fn resolved_target(path: &Path) -> Result<PathBuf> {
@@ -167,6 +190,33 @@ impl Entry {
             hook["commandWindows"] = json!(command);
         }
         json!({"hooks": [hook]})
+    }
+
+    /// The answer channel beside this hgs entry: the same program with
+    /// `answer-channel` in place of `hook`. A legacy `hgs_state.py` has none.
+    fn channel(&self) -> Option<Self> {
+        if let Some(args) = &self.args {
+            return args.iter().map(String::as_str).eq(HOOK_ARGS).then(|| Self {
+                args: Some(CHANNEL_ARGS.map(str::to_owned).to_vec()),
+                command_windows: None,
+                ..self.clone()
+            });
+        }
+        let argv = shell_words::split(&self.command).ok()?;
+        if argv.len() < 3 || argv[argv.len() - 2..] != HOOK_ARGS || !names_hgs(&argv[argv.len() - 3]) {
+            return None;
+        }
+        let program = self.command.strip_suffix("hook")?.trim_end();
+        Some(Self::shell(format!("{program} answer-channel")))
+    }
+
+    /// The matcher group of the answer channel: AskUserQuestion only, with a
+    /// timeout long enough for a person.
+    fn channel_group(&self) -> Value {
+        let mut group = self.group();
+        group["matcher"] = json!("AskUserQuestion");
+        group["hooks"][0]["timeout"] = json!(CHANNEL_TIMEOUT);
+        group
     }
 
     /// The hgs entry that `hook`, one item of a matcher group's `hooks`, is:
@@ -339,6 +389,9 @@ fn merge_json(
         .flatten()
         .find_map(|hook| Entry::owned(hook, windows));
     let mut changed = false;
+    // One version reading serves every versioned entry.
+    let mut known = None;
+    let mut version = || *known.get_or_insert_with(|| version());
     let versioned = versioned_events(agent)
         .iter()
         .map(|&(event, oldest)| (event, Some(oldest)));
@@ -378,6 +431,32 @@ fn merge_json(
             .push(group);
         changed = true;
     }
+    let channel_installed = hooks
+        .get("PermissionRequest")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .any(owns_channel);
+    if agent == "claude"
+        && !channel_installed
+        && version().is_some_and(|version| version >= CLAUDE_ANSWER_CHANNEL)
+    {
+        let base = match &entry {
+            Some(entry) => entry.clone(),
+            None => fresh()?,
+        };
+        if let Some(channel) = base.channel() {
+            hooks
+                .entry("PermissionRequest")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .ok_or("hook event must be an array")?
+                .push(channel.channel_group());
+            changed = true;
+        }
+    }
     if !changed {
         return Ok(None);
     }
@@ -405,6 +484,8 @@ fn prune_json(
     let hooks = document.get_mut("hooks")?.as_object_mut()?;
     let owned = |hook: &Value| Entry::owned(hook, windows).is_some();
     let mut changed = false;
+    let mut known = None;
+    let mut version = || *known.get_or_insert_with(|| version());
     for &(event, oldest) in versioned_events(agent) {
         let Some(groups) = hooks.get_mut(event).and_then(Value::as_array_mut) else {
             continue;
@@ -430,6 +511,30 @@ fn prune_json(
             hooks.remove(event);
         }
         changed = true;
+    }
+    if agent == "claude" {
+        if let Some(groups) = hooks.get_mut("PermissionRequest").and_then(Value::as_array_mut) {
+            let installed = groups
+                .iter()
+                .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+                .flatten()
+                .any(owns_channel);
+            // A version that cannot be read keeps a working channel.
+            if installed && version().is_some_and(|version| version < CLAUDE_ANSWER_CHANNEL) {
+                groups.retain_mut(|group| {
+                    let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                        return true;
+                    };
+                    let before = entries.len();
+                    entries.retain(|hook| !owns_channel(hook));
+                    entries.len() == before || !entries.is_empty()
+                });
+                if groups.is_empty() {
+                    hooks.remove("PermissionRequest");
+                }
+                changed = true;
+            }
+        }
     }
     if !changed {
         return None;
@@ -1643,6 +1748,8 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .remove("PostModelSwitch");
+            // The same versions also get the answer channel beside it.
+            without_channel(&mut document);
             assert_eq!(document, serde_json::from_str::<Value>(&older).unwrap());
             assert!(document["hooks"].get("PreModelSwitch").is_none());
             // Once it is there, the version is never read again.
@@ -1657,7 +1764,7 @@ mod tests {
         let fresh = fresh.unwrap();
         for event in events("claude").into_iter().chain(["PostModelSwitch"]) {
             assert_eq!(
-                hook_entries(&fresh, event),
+                journal_entries(&fresh, event),
                 [json!({"type": "command", "command": UNIX, "timeout": 5})]
             );
         }
@@ -1704,6 +1811,105 @@ mod tests {
             Entry::owned(&hook_entries(&settings, "PostModelSwitch")[0], true),
             Some(exec)
         );
+    }
+
+    /// The hook entries of `event` other than hgs's answer channel.
+    fn journal_entries(text: &str, event: &str) -> Vec<Value> {
+        hook_entries(text, event).into_iter().filter(|hook| !owns_channel(hook)).collect()
+    }
+
+    /// `document` without hgs's answer channel groups.
+    fn without_channel(document: &mut Value) {
+        if let Some(groups) = document["hooks"]["PermissionRequest"].as_array_mut() {
+            groups.retain(|group| !group["hooks"].as_array().unwrap().iter().any(owns_channel));
+        }
+    }
+
+    /// hgs's answer channel groups of a settings text.
+    fn channel_groups(text: &str) -> Vec<Value> {
+        let document: Value = serde_json::from_str(text).unwrap();
+        document["hooks"]["PermissionRequest"]
+            .as_array()
+            .map(|groups| {
+                groups.iter().filter(|group| group["hooks"].as_array().unwrap().iter().any(owns_channel)).cloned().collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn answer_channel_is_registered_only_for_qualified_claude() {
+        let unix = Entry::shell(UNIX.into());
+        let older = json_merge(r#"{"model": "opus"}"#, "claude", false, unix.clone()).unwrap();
+        assert!(channel_groups(&older).is_empty());
+        for version in [None, Some((2, 1, 295)), Some((2, 0, 9))] {
+            assert_eq!(versioned_merge(&older, "claude", false, unix.clone(), version), (None, 1), "{version:?}");
+        }
+        let (merged, asked) =
+            versioned_merge(&older, "claude", false, unix.clone(), Some(CLAUDE_ANSWER_CHANNEL));
+        assert_eq!(asked, 1, "one version reading serves every versioned entry");
+        let merged = merged.unwrap();
+        assert_eq!(
+            channel_groups(&merged),
+            [json!({"matcher": "AskUserQuestion", "hooks": [{"type": "command",
+                "command": "'/opt/hgs dir/hgs' __state answer-channel", "timeout": 86400}]})]
+        );
+        // The journaling entry keeps its own group and short timeout.
+        assert!(hook_entries(&merged, "PermissionRequest")
+            .contains(&json!({"type": "command", "command": UNIX, "timeout": 5})));
+        assert_eq!(versioned_merge(&merged, "claude", false, unix.clone(), None), (None, 0));
+        // Windows repeats Claude's exec form with the channel's arguments.
+        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
+        let (settings, _) = versioned_merge("", "claude", true, exec.clone(), Some(CLAUDE_ANSWER_CHANNEL));
+        let channel = channel_groups(&settings.unwrap());
+        assert_eq!(channel.len(), 1);
+        assert_eq!(channel[0]["hooks"][0]["command"], json!(exec.command));
+        assert_eq!(channel[0]["hooks"][0]["args"], json!(["__state", "answer-channel"]));
+        // A legacy hgs_state.py entry has no channel to offer.
+        let legacy = Entry::shell("python3 /opt/hgs_state.py hook".into());
+        let (legacy, _) = versioned_merge("", "claude", false, legacy, Some(CLAUDE_ANSWER_CHANNEL));
+        assert!(channel_groups(&legacy.unwrap()).is_empty());
+    }
+
+    #[test]
+    fn answer_channel_entry_goes_for_an_older_version() {
+        let unix = Entry::shell(UNIX.into());
+        let older = json_merge(r#"{"model": "opus"}"#, "claude", false, unix.clone()).unwrap();
+        let (registered, _) =
+            versioned_merge(&older, "claude", false, unix.clone(), Some(CLAUDE_ANSWER_CHANNEL));
+        let registered = registered.unwrap();
+        for version in [None, Some(CLAUDE_ANSWER_CHANNEL), Some((2, 2, 0))] {
+            assert_eq!(versioned_prune(&registered, "claude", false, version), (None, 1), "{version:?}");
+        }
+        let (pruned, asked) = versioned_prune(&registered, "claude", false, Some((2, 1, 295)));
+        assert_eq!(asked, 1);
+        let pruned = pruned.unwrap();
+        assert!(channel_groups(&pruned).is_empty());
+        assert_eq!(serde_json::from_str::<Value>(&pruned).unwrap(), serde_json::from_str::<Value>(&older).unwrap());
+    }
+
+    #[test]
+    fn answer_channel_keeps_user_hooks() {
+        let unix = Entry::shell(UNIX.into());
+        let user = json!({"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "notify-send asked"}]});
+        let mut document: Value =
+            serde_json::from_str(&json_merge("", "claude", false, unix.clone()).unwrap()).unwrap();
+        document["hooks"]["PermissionRequest"].as_array_mut().unwrap().push(user.clone());
+        let (merged, _) = versioned_merge(&document.to_string(), "claude", false, unix.clone(), Some(CLAUDE_ANSWER_CHANNEL));
+        let merged = merged.unwrap();
+        let groups: Value = serde_json::from_str::<Value>(&merged).unwrap()["hooks"]["PermissionRequest"].clone();
+        assert!(groups.as_array().unwrap().contains(&user));
+        assert_eq!(channel_groups(&merged).len(), 1);
+        let (pruned, _) = versioned_prune(&merged, "claude", false, Some((2, 1, 200)));
+        let groups: Value = serde_json::from_str::<Value>(&pruned.unwrap()).unwrap()["hooks"]["PermissionRequest"].clone();
+        assert!(groups.as_array().unwrap().contains(&user));
+    }
+
+    #[test]
+    fn codex_and_kimi_get_no_answer_channel() {
+        let unix = Entry::shell(UNIX.into());
+        let (codex, asked) = versioned_merge("", "codex", false, unix.clone(), Some((9, 9, 9)));
+        assert_eq!(asked, 0);
+        assert!(channel_groups(&codex.unwrap()).is_empty());
     }
 
     #[cfg(unix)]
@@ -1809,6 +2015,7 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .remove("PostModelSwitch");
+            without_channel(document);
         }
         assert_eq!(pruned, document);
         // Without an hgs entry there, nothing asks for the version.
@@ -1846,7 +2053,7 @@ mod tests {
         let hooks: Value = serde_json::from_str(&pruned).unwrap();
         assert!(hooks["hooks"].get("PostModelSwitch").is_none());
         for event in events("claude") {
-            assert_eq!(hook_entries(&pruned, event), hook_entries(&settings, event));
+            assert_eq!(hook_entries(&pruned, event), journal_entries(&settings, event));
         }
     }
 
