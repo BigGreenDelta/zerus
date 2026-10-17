@@ -93,3 +93,36 @@ jobs:
       - name: Remove temporary identities
         if: always()
         run: rm -f "$RUNNER_TEMP/zerus-aur-key" "$RUNNER_TEMP/zerus-tap-key"
+
+  winget:
+    # Its own job: "Re-run failed jobs" retries only the submission, which never
+    # proposes a version twice, and never touches the published release.
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Require upstream main
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+        run: |
+          test "$WORKFLOW_REF" = refs/heads/main
+          test "$WORKFLOW_REPOSITORY" = ufna/zerus
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run local winget contract checks
+        run: python3 -m unittest discover -s tests -p test_winget_publication.py
+      - name: Propose the Windows zip to winget
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -z "$WINGET_TOKEN" ]; then
+            echo "::warning::release/WINGET_TOKEN is not configured; winget was not updated (docs/public-distribution.md#winget)."
+            exit 0
+          fi
+          python3 scripts/publish-winget.py --version "$RELEASE_VERSION"

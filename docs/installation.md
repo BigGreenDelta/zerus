@@ -391,9 +391,9 @@ stops an idle session host without disabling anything.
   sessions appear only in Zerus on that computer, and its folders in Projects are
   not shared with other machines.
 - No installer, code signing, autostart or self-update. **Settings → Updates**
-  starts on the Nightly channel; choose Stable to hear only about stable
-  releases. It reports a release with a newer product version than the running
-  zip, with a link to its release page. Stable 0.42.2 and earlier have no
+  starts on the Stable channel; choose Nightly to hear about nightly builds too.
+  It reports a release with a newer product version than the running zip, with
+  a link to its release page. Stable 0.42.2 and earlier have no
   Windows build, so they are never reported; Dev has none either, so on that
   channel it says so and reports no update. To update, quit Zerus from the
   tray menu and replace the folder with the new one; configuration and state
