@@ -69,6 +69,16 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
         for _ in range(12):
             self.hgs('pause',source); self.resume(source)
 
+    def test_zz_signal_timing_samples(self):
+        # Temporary diagnostics for zerus-d84a: SIGTERM right after each resume.
+        source=self.start('claude','one','--new')
+        for _ in range(25):
+            self.hgs('pause',source); self.resume(source)
+            os.kill(self.binding(source)['pid'],15)
+            self.wait(lambda:subprocess.run([str(self.bin/'tmux'),'has-session','-t','='+source],env=self.env,capture_output=True).returncode!=0)
+            previous=self.binding(source)['run_id']; self.hgs('resume',source,'-d')
+            self.wait(lambda:self.binding(source).get('run_id')!=previous and self.binding(source).get('activity')=='idle' and not self.binding(source).get('expected_id'))
+
     def test_default_changes_only_new_launches_not_existing_resume_or_fork(self):
         for id in ('work','next'):self.hgs('account','add',id,'--provider','claude')
         self.hgs('account','default','work')

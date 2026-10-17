@@ -92,6 +92,8 @@ def stop(*args):
         while delay.exists():
             time.sleep(0.01)
     event("SessionEnd", reason="exit" if agent == "kimi" else "other")
+    with open(home / "term-trace.jsonl", "a") as trace:
+        trace.write(json.dumps({"pid": os.getpid(), "sid": sid, "exiting": time.time()}) + "\n")
     sys.exit(143)
 signal.signal(signal.SIGTERM, stop)
 if (home / "record-interrupts").exists():
@@ -235,6 +237,8 @@ class Harness(unittest.TestCase):
                   "bindings": {n: {k: self.binding(n).get(k) for k in ("pid", "supervisor", "session_end", "exited_at", "completion_reason", "updated", "activity")} for n in names},
                   "term": [t for t in lines("term-trace.jsonl") if t["term"] >= started - 1],
                   "hooks": [h for h in lines("hook-trace.jsonl") if h["end"] >= started - 1]}
+        if p.returncode and "did not exit" in p.stderr:
+            report["hang"] = self.hang_report("pause")
         if p.returncode or ended - started > 1:
             report["ps"] = [l for l in subprocess.run(["ps", "-axo", "pid=,ppid=,stat=,etime=,command="], capture_output=True, text=True).stdout.splitlines() if str(self.root) in l][:40]
             report["panes"] = subprocess.run([str(self.bin / "tmux"), "list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid} #{pane_dead}"], env=self.env, capture_output=True, text=True).stdout
@@ -271,9 +275,45 @@ class Harness(unittest.TestCase):
             if predicate():
                 return
             time.sleep(0.05)
+        print("HANG-DIAG " + json.dumps(self.hang_report("wait")), file=sys.stderr, flush=True)
         self.fail("timeout; state=" + str(list((self.root / "state").glob("*"))) +
                   "\n" + subprocess.run([str(self.bin / "tmux"), "capture-pane", "-p"],
                     env=self.env, capture_output=True, text=True).stdout)
+
+    def hang_report(self, kind):
+        # Temporary diagnostics for zerus-d84a: who still runs, and where.
+        def lines(name):
+            path = self.root / name
+            return [json.loads(line) for line in path.read_text().splitlines() if line.endswith("}")] if path.exists() else []
+        table = subprocess.run(["ps", "-axo", "pid=,ppid=,stat=,etime=,command="], capture_output=True, text=True).stdout.splitlines()
+        panes = subprocess.run([str(self.bin / "tmux"), "list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid} #{pane_dead}"], env=self.env, capture_output=True, text=True).stdout
+        roots = {int(l.split()[2]) for l in panes.splitlines() if len(l.split()) == 4 and l.split()[2].isdigit()}
+        rows = [l.split(None, 4) for l in table if len(l.split(None, 4)) == 5]
+        children = {}
+        for pid, ppid, *_ in rows:
+            children.setdefault(int(ppid), []).append(int(pid))
+        owned, todo = set(), list(roots)
+        while todo:
+            pid = todo.pop()
+            if pid not in owned:
+                owned.add(pid); todo += children.get(pid, [])
+        owned |= {int(r[0]) for r in rows if str(self.root) in r[4]}
+        mine = [r for r in rows if int(r[0]) in owned]
+        samples = {}
+        if sys.platform == "darwin":
+            for r in mine[:8]:
+                out = subprocess.run(["sample", r[0], "1", "-mayDie"], capture_output=True, text=True).stdout
+                graph = out.split("Call graph:", 1)[-1].split("Total number in stack", 1)[0].splitlines()
+                threads, current = [], None
+                for line in graph:
+                    if line.startswith("    ") and not line.startswith("     ") and "Thread_" in line:
+                        current = [line.strip()]; threads.append(current)
+                    elif current is not None and line.strip():
+                        current.append(line.strip())
+                samples[r[0]] = [thread[:1] + thread[-12:] for thread in threads[:6]]
+        return {"kind": kind, "test": self.id(), "panes": panes, "ps": [" ".join(r) for r in mine],
+                "bindings": [json.loads(p.read_text()) for p in (self.root / "state").glob("*.json")][:3],
+                "term": lines("term-trace.jsonl")[-5:], "hooks": lines("hook-trace.jsonl")[-8:], "samples": samples}
 
     def start(self, agent="claude", tag="one", *extra):
         name = f"{agent}/p/{tag}"
