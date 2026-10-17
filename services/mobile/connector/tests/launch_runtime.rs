@@ -996,3 +996,54 @@ fn opencode_account_rows_keep_effort_free_and_catalog_fields_within_the_bound() 
     );
     assert!(accounts::catalog(&wide).is_ok());
 }
+
+#[test]
+fn an_oversized_opencode_projection_degrades_before_it_fails() {
+    // 160-character labels and 64-character variants: the full projection is
+    // over 128 KiB, the labels-free one is not.
+    let efforts: Vec<String> = (0..8).map(|i| format!("{i}{}", "v".repeat(63))).collect();
+    let models: Vec<Value> = (0..200)
+        .map(|index| {
+            json!({"id": format!("p/m{index:03}"), "value": format!("p/m{index:03}"),
+                   "label": "l".repeat(160), "provider": "p", "provider_label": "P", "free": false,
+                   "effort_options": efforts, "effort_labels": efforts.iter().map(|_| "L".repeat(40)).collect::<Vec<_>>()})
+        })
+        .collect();
+    let raw = json!({"profiles": [{"id": "native-opencode", "provider": "opencode",
+        "label": "OpenCode", "installed": true, "catalog_state": "ready", "model_options": models}]});
+    let launch = accounts::launch_catalog(&raw).unwrap();
+    let option = &launch["accounts"][0]["model_options"][0];
+    assert!(option.get("effort_labels").is_none());
+    assert_eq!(option["effort_options"].as_array().unwrap().len(), 8);
+    let entries = accounts::catalog(&raw).unwrap();
+    assert!(entries[0].1.public["model_options"][0]
+        .get("effort_labels")
+        .is_none());
+    assert!(entries[0].1.public["model_options"][0]
+        .get("effort_options")
+        .is_some());
+    let mut cache = AccountCache::default();
+    cache.apply_catalog(Ok(entries), 1000.0);
+    assert_eq!(cache.view(1000.0)["available"], true);
+    // Variants go too when labels alone are not enough.
+    let models: Vec<Value> = (0..256)
+        .map(|index| {
+            json!({"id": format!("p/m{index:03}"), "value": format!("p/m{index:03}"),
+                   "label": "l".repeat(160), "provider": "p", "provider_label": "P", "free": false,
+                   "effort_options": efforts, "effort_labels": efforts})
+        })
+        .collect();
+    let raw = json!({"profiles": [{"id": "native-opencode", "provider": "opencode",
+        "label": "OpenCode", "installed": true, "model_options": models}]});
+    let launch = accounts::launch_catalog(&raw).unwrap();
+    assert!(launch["accounts"][0]["model_options"][0]
+        .get("effort_options")
+        .is_none());
+    assert_eq!(
+        launch["accounts"][0]["model_options"]
+            .as_array()
+            .unwrap()
+            .len(),
+        256
+    );
+}

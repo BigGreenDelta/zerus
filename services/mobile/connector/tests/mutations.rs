@@ -306,3 +306,27 @@ async fn an_opencode_settings_effort_must_be_offered_for_the_model() {
     let applied = run("38eafb0c-1d2e-5f34-8051-627384950617", "high").await;
     assert_eq!(applied["state"], "completed", "{applied}");
 }
+
+#[test]
+fn an_in_flight_remove_queued_recovers_as_uncertain_after_a_restart() {
+    umask();
+    let scratch = Scratch::new("mutation-remove-queued-restart");
+    let state = scratch.path("state");
+    let journal = Journal::open(&state, "fixture-binding", EPOCH).unwrap();
+    let removal = "28d9eafb-0c1d-5e23-9f40-516273849507";
+    let read = "39eafb0c-1d2e-5f34-8051-627384950618";
+    assert!(journal
+        .claim(removal, "remove_queued", None, EPOCH)
+        .unwrap());
+    assert!(journal.claim(read, "no_such_read", None, EPOCH).unwrap());
+    journal.close();
+    // The connector restarted while both were running.
+    let journal = Journal::open(&state, "fixture-binding", EPOCH + 1.0).unwrap();
+    let stored =
+        |id: &str| -> Value { serde_json::from_str(&journal.replay(id).unwrap()).unwrap() };
+    assert_eq!(stored(removal), receipt("uncertain", RESTART_ERROR));
+    assert_eq!(stored(read), receipt("failed", RESTART_ERROR));
+    assert!(zerus_mobile_connector::journal::is_mutation(
+        "remove_queued"
+    ));
+}

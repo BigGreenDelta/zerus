@@ -123,10 +123,16 @@ fn refused(text: &str) -> JournalError {
 }
 
 /// `operation in MUTATIONS`: a known operation that is not a read. Unknown
-/// operations recover as failed reads do, as in Python.
+/// operations recover as failed reads do, as in Python. Operations only this
+/// connector implements (`remove_queued`, not in the relay's operation set)
+/// are mutations too, so an in-flight one recovers as uncertain.
 pub fn is_mutation(operation: &str) -> bool {
-    OPERATIONS.contains(&operation) && !READS.contains(&operation)
+    (OPERATIONS.contains(&operation) || CONNECTOR_MUTATIONS.contains(&operation))
+        && !READS.contains(&operation)
 }
+
+/// Mutations the connector executes that the relay crate does not list.
+const CONNECTOR_MUTATIONS: &[&str] = &["remove_queued"];
 
 pub struct Journal {
     // Declared first, so the connection closes before the lock is released.

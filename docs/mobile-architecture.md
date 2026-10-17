@@ -571,7 +571,8 @@ OpenCode rows add `catalog_state` (`ready`, `loading`, `not_running`,
 when it is not installed, `install_reason`. Each OpenCode `model_options` entry
 may add `provider_label`, `free`, and up to eight `effort_options` with
 `effort_labels` in the same order. All fields are additive and appear only when
-the computer reports them; the whole projection stays within 128 KiB.
+the computer reports them; the whole projection stays within 128 KiB (over the bound, `effort_labels` and
+then `effort_options` are dropped before the projection is refused).
 An unavailable catalog can indicate an older native CLI; it is not an empty
 list of verified accounts.
 
@@ -943,8 +944,10 @@ an `opencode/` session is checked the same way against the target model's
 `effort_options` in the session's own inspection instead of the fixed list.
 The connector also accepts a `remove_queued` session action carrying an exact
 `msg_` `message_id`, run and conversation identity and journals it like other
-session actions; phones do not offer it in phase 1, and it is advertised only once
-the relay operation set lists it.
+session actions, and an in-flight one recovers as uncertain after a restart.
+It is currently unreachable from phones and relay clients: the relay operation
+set does not list it, so the relay rejects it and the connector does not
+advertise it. Phones do not offer it in phase 1.
 
 Legacy live `inspect` accepts an empty payload; an archive supplies its canonical
 `archive_id`. The `inspect_after` and `inspect_agent` features add a journal

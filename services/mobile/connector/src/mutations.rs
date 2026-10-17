@@ -224,22 +224,23 @@ pub fn opencode_effort_offered(
         .or_else(|| detail.get("settings_model"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let offered = detail
-        .get("model_options")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|option| {
-            ["id", "value"]
-                .iter()
-                .any(|key| option.get(*key).and_then(Value::as_str) == Some(model))
-        })
-        .filter_map(|option| option.get("effort_options").and_then(Value::as_array))
-        .any(|efforts| {
-            efforts
-                .iter()
-                .any(|offered| offered.as_str() == Some(effort))
-        });
+    let offered = !model.is_empty()
+        && detail
+            .get("model_options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|option| {
+                ["id", "value"]
+                    .iter()
+                    .any(|key| option.get(*key).and_then(Value::as_str) == Some(model))
+            })
+            .filter_map(|option| option.get("effort_options").and_then(Value::as_array))
+            .any(|efforts| {
+                efforts
+                    .iter()
+                    .any(|offered| offered.as_str() == Some(effort))
+            });
     if offered {
         Ok(())
     } else {
@@ -938,6 +939,10 @@ impl<N: Native + 'static> Connector<N> {
         {
             return Err(Failure::text(LIFECYCLE_MISMATCH));
         }
+        // An acknowledgement without `message_id` is accepted: hgs echoes it
+        // only for actions that carry one, and the request, name, run and
+        // conversation identity above already bind the receipt. A present
+        // but different `message_id` is refused.
         if let Some(message) = payload.get("message_id") {
             if !py_eq(result.get("message_id").unwrap_or(message), message) {
                 return Err(Failure::text(
@@ -1277,6 +1282,21 @@ mod tests {
         assert!(offered(json!({"model": "fixture/local", "effort": "low"})).is_ok());
         assert!(offered(json!({"effort": ""})).is_ok());
         assert!(offered(json!({"model": "fixture/local"})).is_ok());
+        // No current model and no model in the request: nothing is offered.
+        let bare = json!({"settings_model": "", "model_options": [
+            {"id": "", "effort_options": ["high"]}]});
+        assert!(opencode_effort_offered(
+            bare.as_object().unwrap(),
+            &scoped_payload(json!({"effort": "high"}))
+        )
+        .is_err());
+        let missing =
+            json!({"model_options": [{"id": "fixture/local", "effort_options": ["high"]}]});
+        assert!(opencode_effort_offered(
+            missing.as_object().unwrap(),
+            &scoped_payload(json!({"effort": "high"}))
+        )
+        .is_err());
         for bad in [
             json!({"effort": "ultra"}),
             json!({"model": "fixture/other", "effort": "low"}),

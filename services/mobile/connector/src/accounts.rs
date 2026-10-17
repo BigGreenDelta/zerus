@@ -124,6 +124,41 @@ fn decimal(text: &str, whole: Option<usize>, fraction: Option<usize>) -> bool {
         })
 }
 
+/// Removes `key` from every OpenCode model entry of one account row.
+fn strip_model_key(row: &mut Value, key: &str) {
+    if let Some(Value::Array(options)) = row.get_mut("model_options") {
+        for option in options {
+            if let Some(option) = option.as_object_mut() {
+                option.remove(key);
+            }
+        }
+    }
+}
+
+/// The optional OpenCode model details, least valuable first: a projection
+/// over the bound loses these before it is refused.
+const DEGRADE_KEYS: [&str; 2] = ["effort_labels", "effort_options"];
+
+/// Drops the optional model details, one kind at a time, until the document
+/// built from `rows` fits the bound. Returns whether it fits.
+fn fit_rows(rows: &mut [Value], document: impl Fn(&[Value]) -> Value) -> bool {
+    let fits = |rows: &[Value]| {
+        json::python_default_len(&document(rows), true).unwrap_or(usize::MAX) <= MAX_CATALOG_BYTES
+    };
+    if fits(rows) {
+        return true;
+    }
+    for key in DEGRADE_KEYS {
+        for row in rows.iter_mut() {
+            strip_model_key(row, key);
+        }
+        if fits(rows) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Variants one model offers: at most 8 bounded identifiers and, in the same
 /// order, their labels. Anything malformed drops the entry, never the model.
 fn effort_options(row: &Map<String, Value>) -> Option<(Value, Value)> {
@@ -464,17 +499,36 @@ pub fn catalog(raw: &Value) -> PyResult<Vec<(String, Entry)>> {
             },
         ));
     }
-    let projected: Vec<Value> = entries
-        .iter()
-        .map(|(_, entry)| {
-            let mut row = entry.public.clone();
-            row.insert("usage".into(), entry.usage.clone());
-            Value::Object(row)
-        })
-        .collect();
-    if json::python_default_len(&Value::Array(projected), true).unwrap_or(usize::MAX)
-        > MAX_CATALOG_BYTES
-    {
+    let projected = |entries: &[(String, Entry)]| -> Vec<Value> {
+        entries
+            .iter()
+            .map(|(_, entry)| {
+                let mut row = entry.public.clone();
+                row.insert("usage".into(), entry.usage.clone());
+                Value::Object(row)
+            })
+            .collect()
+    };
+    let size = |rows: &[Value]| {
+        json::python_default_len(&Value::Array(rows.to_vec()), true).unwrap_or(usize::MAX)
+    };
+    let mut rows = projected(&entries);
+    if size(&rows) > MAX_CATALOG_BYTES {
+        for key in DEGRADE_KEYS {
+            for (_, entry) in &mut entries {
+                let mut model_options = Value::Object(std::mem::take(&mut entry.public));
+                strip_model_key(&mut model_options, key);
+                if let Value::Object(public) = model_options {
+                    entry.public = public;
+                }
+            }
+            rows = projected(&entries);
+            if size(&rows) <= MAX_CATALOG_BYTES {
+                break;
+            }
+        }
+    }
+    if size(&rows) > MAX_CATALOG_BYTES {
         return Err(PyError::value(
             "native account projection exceeds size limit",
         ));
@@ -637,16 +691,20 @@ impl AccountCache {
             row.insert("usage".into(), data);
             rows.push(Value::Object(row));
         }
-        let mut result = json!({"schema": 1, "available": self.available, "stale": self.stale,
-                                "refresh_interval_seconds": 300, "accounts": rows});
-        if let Some(checked) = self.checked_at {
-            result["checked_at"] = number(checked);
-        }
-        if json::python_default_len(&result, true).unwrap_or(usize::MAX) > MAX_CATALOG_BYTES {
+        let document = |rows: &[Value]| {
+            let mut result = json!({"schema": 1, "available": self.available,
+                                    "stale": self.stale,
+                                    "refresh_interval_seconds": 300, "accounts": rows});
+            if let Some(checked) = self.checked_at {
+                result["checked_at"] = number(checked);
+            }
+            result
+        };
+        if !fit_rows(&mut rows, document) {
             return json!({"schema": 1, "available": false, "stale": true,
                           "refresh_interval_seconds": 300, "accounts": []});
         }
-        result
+        document(&rows)
     }
 }
 
@@ -716,13 +774,13 @@ pub fn launch_catalog(raw: &Value) -> PyResult<Value> {
         }
     }
     agents.sort();
-    let result = json!({"accounts": accounts, "agents": agents});
-    if json::python_default_len(&result, true).unwrap_or(usize::MAX) > MAX_CATALOG_BYTES {
+    let document = |accounts: &[Value]| json!({"accounts": accounts, "agents": agents});
+    if !fit_rows(&mut accounts, document) {
         return Err(PyError::value(
             "native launch account projection exceeds size limit",
         ));
     }
-    Ok(result)
+    Ok(document(&accounts))
 }
 
 #[cfg(test)]
