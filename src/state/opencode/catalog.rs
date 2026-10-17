@@ -304,9 +304,32 @@ pub(crate) fn installed_version() -> Option<String> {
     if !status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&stdout);
-    let version = text.lines().next()?.trim().trim_start_matches('v').trim();
-    (!version.is_empty() && version.len() <= 64).then(|| version.to_owned())
+    version_from_output(&String::from_utf8_lossy(&stdout))
+}
+
+/// The version in `opencode --version` output, which OpenCode 2 prints as
+/// `opencode v2.0.32`: the first whitespace-separated token that is
+/// `MAJOR.MINOR.PATCH` after an optional leading `v`, optionally with a
+/// `-prerelease` suffix (which `version_at_least` rejects), without the `v`.
+fn version_from_output(text: &str) -> Option<String> {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    text.split_whitespace().find_map(|token| {
+        let version = token.strip_prefix('v').unwrap_or(token);
+        let (core, prerelease) = match version.split_once('-') {
+            Some((core, prerelease)) => (core, Some(prerelease)),
+            None => (version, None),
+        };
+        let parts: Vec<&str> = core.split('.').collect();
+        let valid = version.len() <= 64
+            && parts.len() == 3
+            && parts.iter().all(|part| digits(part))
+            && prerelease.is_none_or(|p| {
+                !p.is_empty()
+                    && p.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            });
+        valid.then(|| version.to_owned())
+    })
 }
 
 /// Install row state for the account: `(installed, reason)`.
@@ -334,6 +357,33 @@ mod tests {
             "../../../tests/fixtures/opencode2/models.json"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn the_version_is_read_from_opencode_version_output() {
+        for (output, expected) in [
+            ("opencode v2.0.32\n", Some("2.0.32")),
+            ("v2.0.32", Some("2.0.32")),
+            ("2.0.32", Some("2.0.32")),
+            ("opencode v2.0.33-beta.1", Some("2.0.33-beta.1")),
+            ("garbage", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                version_from_output(output).as_deref(),
+                expected,
+                "{output:?}"
+            );
+        }
+        // A prerelease is read, then refused as unsupported.
+        assert!(!version_at_least(
+            &version_from_output("opencode v2.0.33-beta.1").unwrap(),
+            MINIMUM
+        ));
+        assert!(version_at_least(
+            &version_from_output("opencode v2.0.32").unwrap(),
+            MINIMUM
+        ));
     }
 
     #[test]

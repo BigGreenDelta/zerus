@@ -223,7 +223,7 @@ class OpenCodeNative(unittest.TestCase):
         found = shutil.which('opencode', path=cls.env['PATH'])
         if not found or not os.path.samefile(found, native):
             raise RuntimeError('hgs would not start the OpenCode under test: ' + str(found))
-        version = cls.version_output = cls.opencode('--version').stdout.strip()
+        version = cls.opencode('--version').stdout.strip()
         match = re.fullmatch(r'(?:opencode )?v?(\d+)\.(\d+)\.(\d+)', version)
         parts = tuple(int(part) for part in match.groups()) if match else None
         if not parts or parts[0] != MINIMUM[0] or parts < MINIMUM:
@@ -765,9 +765,8 @@ class OpenCodeNative(unittest.TestCase):
         self.assertEqual(options['fixture/local']['provider_label'], 'Private keyless fixture')
         self.assertNotIn(f'127.0.0.1:{self.model.server_port}', json.dumps(account))
         self.assert_private(started, account)
-        if not account['installed']:
-            self.fail('hgs reports the installed OpenCode %s as not installed (%r); `opencode --version` prints %r'
-                      % (self.version, account.get('install_reason'), self.version_output))
+        self.assertTrue(account['installed'], account.get('install_reason'))
+        self.assertNotIn('install_reason', account)
 
 
 if __name__ == '__main__':
