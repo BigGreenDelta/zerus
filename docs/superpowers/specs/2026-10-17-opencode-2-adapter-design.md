@@ -1,6 +1,7 @@
 # OpenCode 2 native adapter design
 
-Date: 2026-10-17. Beads epic: `zerus-pl2u`. Follow-up feature: `zerus-dg1g`
+Date: 2026-10-17, revised 2026-10-18 after independent review. Beads epic:
+`zerus-pl2u`. Follow-up feature: `zerus-dg1g`
 ([providers and models](2026-10-17-opencode-providers-design.md)).
 
 ## Goal
@@ -16,10 +17,11 @@ separate design that builds on this adapter.
 
 Success means: on a computer with OpenCode 2, New session (desktop, Android,
 iOS) and `hgs opencode` start a native OpenCode conversation with any model the
-local OpenCode service offers; Activity shows its history and live state; Stop,
-messages, voice transcripts, attachments, model and effort changes, forms
-(questions), permissions, child sessions, compaction, fork, rename and Forget
-work; and the conversation stays usable from the OpenCode TUI at the same time.
+local OpenCode service offers for that project; Activity shows its history and
+live state; Stop, messages, voice transcripts, model and effort changes and
+OpenCode questions work in phase 1; attachments, live child sessions,
+compaction, fork and permission modes follow in phase 2; and the conversation
+stays usable from the OpenCode TUI at the same time.
 
 ## Owner decisions (2026-10-17)
 
@@ -37,132 +39,213 @@ work; and the conversation stays usable from the OpenCode TUI at the same time.
 
 ## Verified facts
 
-Probed on 2026-10-17 with isolated homes and fixture credentials only.
+Probed on 2026-10-17 and 2026-10-18 with isolated homes and fixture
+credentials only, and checked against upstream source at tag `v2.0.32`.
 
 OpenCode 1.18.35:
 
 - A running host keeps the models.dev catalog and configuration for the life of
-  the process. `opencode models --refresh`, configuration edits,
-  `POST /instance/dispose` and `POST /global/dispose` do not expose new models
-  or providers; only a process restart does.
-- Credentials written through `PUT /auth/{id}` reach `auth.json` and appear
-  after an instance dispose. The v2-style `/api/integration/{id}/connect/key`
-  stores credentials in `opencode.db`, which providers ignore.
+  the process; only a restart exposes new models or providers.
+- Credentials written through `PUT /auth/{id}` reach `auth.json`; the v2-style
+  `/api/integration/{id}/connect/key` stores credentials that providers ignore.
 
-OpenCode 2.0.32 (`opencode serve`, OpenAPI at `/openapi.json`, 119 paths):
+OpenCode 2.0.32 (`/openapi.json`, 119 paths):
 
 - Removed: `/global/health`, `/api/session/{id}/history`,
   `/api/session/{id}/question`, `/permission`, `/question` and every legacy
-  `/session/...` route, including children and messages.
-- Present: `/api/info` (health and version), `/api/event` (server-sent
-  events), `/api/session` (list with `parentID`, `directory`, `cursor`,
-  `limit`, `order`), `POST /api/session` with optional client `id`
-  (pattern `^ses`), `parentID`, `title`, `agent`, `model`, `location`,
-  `metadata` and `permissions`; `/api/session/active`; `/api/session/{id}`
-  (`GET`, `PATCH` title/metadata/permissions, `DELETE`); `/prompt` with
-  optional client message `id` (pattern `^msg_`), `text`, `files`
-  (`uri`, `name`, `description`), `delivery` (`steer` or `queue`) and
-  `resume`; `/message` (cursor pages) and `/message/{messageID}`;
-  `/interrupt`; `/model` (`Model.Ref` with `providerID`, `id`, optional
-  `variant`); `/compact`; `/fork`; `/form` and `/form/{id}/reply`;
-  `/permission` and `/permission/{id}/reply` (`once`, `always`, `reject`);
-  `/inbox`; `/api/model`, `/api/model/default`, `/api/provider`,
-  `/api/integration`, `/api/credential`, `/api/location/reload`.
-- Forms replace questions. Field types: `string` (format, length, pattern),
-  `number`, `integer` (minimum, maximum), `boolean` (default), `multiselect`
-  (options with value/label/description, min and max items) and `external`
-  (URL). Fields can be `required`, `hidden` and conditional (`when`: key,
-  `eq`/`neq`, value).
+  `/session/...` route.
+- Sessions: `GET /api/session` (`parentID`, `directory`, `cursor`, `limit`,
+  `order`); `POST /api/session` with optional client `id` (`^ses`; posting
+  the same ID again returns the existing session), `parentID`, `title`,
+  `agent`, `model`, `location`, `metadata`, `permissions`;
+  `GET|PATCH|DELETE /api/session/{id}` (`PATCH` replaces the whole
+  `metadata` object and the whole `permissions` list);
+  `/api/session/active`.
+- Messages: `POST /prompt` with optional client message `id` (`^msg_`;
+  posting the same ID again returns the original admission), `text`, `files`
+  (`uri`, `name`; at most 20 MiB each), `delivery` (`steer` or `queue`;
+  `steer` when omitted) and `resume`. A queued prompt is listed in `/inbox`
+  and `GET /message/{id}` returns 404 until OpenCode runs it; queued items
+  stay pending after `/interrupt`. `/message` pages by cursor.
+- `/interrupt`; `/model` (`Model.Ref`: `providerID`, `id`, optional
+  `variant`); `/compact` (client ID); `/fork` (only `before`; no client ID;
+  400 for an empty session); `/form`, `/form/{id}/reply`
+  (`{"answer": {<key>: value}}`); `/permission`, `/permission/{id}/reply`
+  (`once`, `always`, `reject`; a reject rejects every pending request of that
+  session); `/inbox` and `DELETE /inbox/{id}`.
+- Catalog routes (`/api/model`, `/api/provider`, `/api/integration`) take a
+  `location`; a project `opencode.json` adds providers for that folder only.
+  Their responses include provider `settings`, `headers` and `body`, which can
+  contain API keys and authorization headers; `/api/credential` returns raw
+  keys and OAuth tokens.
+- Forms replace questions. Field types: `string` (format, length, pattern,
+  and `options` with `custom` for OpenCode's question tool), `number`,
+  `integer`, `boolean`, `multiselect` (options, `custom`, min and max
+  items) and `external` (URL). Fields can be `required`, `hidden` and
+  conditional (`when`: a list of key/`eq`|`neq`/value conditions).
+- Permission rules merge agent rules and then session rules; the last matching
+  rule wins, so a session `*` allow overrides configured denies.
+- Subagents run in foreground or background child sessions of the same
+  service.
+- The background service registers in
+  `$XDG_STATE_HOME/opencode/service.json` (default `~/.local/state`, also on
+  macOS; `service-<channel>.json` for channels other than latest, dev, beta
+  and next). The file holds `id`, `version`, `url`, `pid` and an optional
+  `password` (basic user `opencode`), mode 0600. Readiness is HTTP 200 from
+  `GET /api/info`. A service configuration can be `disabled`.
+- Every OpenCode CLI command that uses the service (including
+  `opencode service start`, `opencode models` and `opencode auth export`
+  without `--standalone`) runs upstream `Service.ensure`, which terminates a
+  registered service after three 2-second `/api/info` timeouts and starts the
+  new service with the caller's environment, in the caller's process group
+  and cgroup.
+- OpenCode 2 migrates OpenCode 1 sessions, including the 1.x native-API store
+  the current adapter used, into its own store with the same session IDs;
+  `/api/experimental/migration/v1` reports progress.
 - Connecting a key through `/api/integration/{id}/connect/key` exposed the
-  provider's models immediately. Configuration file edits appeared without a
+  provider's models immediately; configuration file edits appeared without a
   restart. Keyless OpenCode free models include `glm-5.3-flash-free`.
-- The background service registers itself in
-  `$XDG_STATE_HOME/opencode/service.json` (default
-  `~/.local/state/opencode/service.json`, also on macOS) with `url`, `pid`,
-  `version` and a private `password`, mode 0600. Upstream's client treats that
-  file as the complete discovery contract and authenticates with HTTP basic
-  user `opencode`. A client of another version replaces a mismatched service.
 - On the real arch and mac upgrades, the existing Z.AI Coding Plan key from
   OpenCode 1 remained available to OpenCode 2.
 
 ## Non-goals
 
-- OpenCode 1 compatibility. Saved OpenCode 1 bindings stay listed only so they
-  can be forgotten.
-- Starting, stopping, restarting or upgrading the OpenCode service on the
-  owner's behalf, except starting it for an explicit user action.
+- OpenCode 1 compatibility beyond adopting migrated sessions.
+- Stopping, restarting, replacing or upgrading the OpenCode service.
 - Provider connection, model favorites and catalog search
   ([providers design](2026-10-17-opencode-providers-design.md)).
 - Embedding OpenCode's web interface as Native UI, Terminal, Pause/Resume,
-  archive and the `Background` state for OpenCode.
+  archive, and sending messages to child sessions.
 - Windows hosts. OpenCode remains unavailable on Windows computers as today.
+
+## Phases
+
+- Phase 1: service connection and compatibility gate, OpenCode 1 removal and
+  migration, launch, send (text and voice), history, status, Stop, model and
+  effort (desktop, Android, iOS), OpenCode questions and permissions.
+  This alone lets the owner start `opencode/glm-5.3-flash-free` from Zerus.
+- Phase 2: live child sessions and `Background`, attachments, compaction,
+  fork, permission modes, forms beyond question-tool fields.
+
+Each phase ships as its own pull request with native qualification.
 
 ## Architecture
 
 The adapter stays a Rust module of `hgs` (`src/state/opencode.rs`, split into
-focused files where it grows) with a small blocking HTTP client, as today.
-Alternatives were rejected: calling `opencode api` for each request costs a
-process per call and is too slow for polling; a Node sidecar using
+focused files as it grows) with a small blocking HTTP client, as today.
+Calling `opencode api` per request was rejected (a process per call and it
+ensures the service, see Service lifecycle); a Node sidecar using
 `@opencode/client` adds a runtime dependency on every host.
 
 ### Service connection
 
-1. Read the registration file. `XDG_STATE_HOME` follows the same environment
-   as the agent home; `OPENCODE_*` selectors that change the data or state
-   directory are honored the way OpenCode does.
-2. Require `state` ready, a loopback `url`, a live `pid`, and a password when
-   the file has one. Never log or forward the password, URL or file.
-3. Call `GET /api/info` with basic authentication. Its version must be at or
-   above `OPENCODE_MINIMUM` (2.0.32 initially).
+1. Locate the registration file as upstream does: `XDG_STATE_HOME` (default
+   `~/.local/state`) plus `opencode/service.json`, or
+   `service-<channel>.json` for the channel the installed CLI reports.
+2. Parse `id`, `version`, `url`, `pid` and optional `password`. Require a
+   loopback HTTP `url` and a live `pid`. Never log or forward the password,
+   URL or file contents.
+3. `GET /api/info` with basic authentication within 2 seconds. Readiness is
+   HTTP 200 with a version at or above `OPENCODE_MINIMUM` (2.0.32).
 4. Fetch `/openapi.json` once per service identity (`id`, `pid`, `version`,
-   `url`) and check the required operation table (method, path, required
-   request fields, response fields Zerus reads). Cache the verdict in memory
-   and in private state keyed by that identity. A missing entry produces
+   `url`) and check the required operation table: method, path, the request
+   fields Zerus sends and the response fields it reads. Cache the verdict in
+   memory and in private state keyed by that identity. A missing entry reports
    `OpenCode <version> lacks <method> <path>; update OpenCode or Zerus`.
-5. Reuse one connection verdict per `hgs` invocation.
+5. Reuse one verdict per `hgs` invocation.
+6. Report a disabled service configuration as `The OpenCode background
+   service is disabled on <computer>`.
 
-Service lifecycle:
+### Service lifecycle
 
-- Background inspection, catalog polling and snapshots never start the
-  service. When it is not running they report `OpenCode service is not
-  running` and keep the last known state as unknown, not stopped.
-- Explicit actions (launch, send, answer, model change, compact, fork, rename,
-  opening a session's details) start it with `opencode service start` when no
-  compatible registration exists, unless the user's service configuration is
-  disabled, then wait for a compatible registration within a bounded time.
-- Zerus never stops, restarts or replaces the service. If OpenCode replaces it
-  (for example after an upgrade) during a turn, Zerus treats the result like a
-  native stop: it reads the session state again and never resubmits.
+- Zerus never runs an OpenCode CLI command that ensures the service:
+  `opencode service`, `opencode models`, `opencode auth` and `opencode run`
+  are not used without `--standalone`, and `--standalone` commands are not
+  used against the user's data either, because they open a second server on
+  the same database.
+- Inspection, catalog polling, snapshots, connector refreshes and opening a
+  session's details never start the service. When it is not running they
+  report `OpenCode is not running on <computer>` and keep native state
+  unknown, not stopped.
+- `Start OpenCode` is an explicit action (Accounts, New session, a session's
+  unavailable banner) and launch implicitly starts it. Start runs only when no
+  registration file exists or its `pid` is not alive; it never runs while a
+  registered process is alive, however slow. It starts
+  `opencode service start` with `HGS_*`, `OPENCODE_SERVER_*` and the
+  connector's own variables removed, detached from `hgs`, and on Linux in its
+  own transient user scope (`systemd-run --user --scope`) as tmux servers
+  are, so restarting the GUI or connector unit never takes the service with
+  it. It then waits up to 20 seconds for a compatible registration.
+- If OpenCode replaces the service during a turn (for example after an
+  upgrade), Zerus treats the result like a native stop: it reads state again
+  and never resubmits.
+- Any OpenCode 1.18.35 hosts that Zerus started earlier are reported in the
+  account status and never killed automatically.
+
+### Locations
+
+Catalog and session requests carry `location.directory`. Session operations use
+the binding's directory. Machine-level summaries use the home directory.
+New session and launch validation use the selected project folder.
 
 ### Identity, launch and delivery
 
-- Launch generates a session ID with the `ses_` prefix and a random suffix and
-  creates the session with that `id`, the project `location.directory`, the
-  chosen `model` (with `variant` for effort), `title` from the Zerus name,
-  `permissions` from the permission mode, and `metadata`
-  `{"zerus": {"run_id", "launch_id"}}`. Metadata never contains secrets.
-- The binding stores run ID, session ID, directory and name. It does not store
-  the service URL or password; those come from the registration file.
-- A lost launch response is reconciled with `GET /api/session/{id}` for the
-  pre-generated ID. Zerus never creates a second session for one launch.
-- Each message gets a pre-generated `msg_` ID, recorded in the durable request
-  journal before `POST /prompt`. A lost response is reconciled with
-  `GET /message/{id}`; when neither confirmation nor rejection is available,
-  the result stays uncertain for explicit inspection, as today.
-- Messages sent while the session works use `delivery: queue`. Zerus does not
-  use `steer`.
+- Launch generates a session ID matching `^ses_[0-9A-Za-z]{26}` (validated by
+  Zerus), records it in the launch journal, and creates the session with that
+  `id`, `location.directory`, the chosen `model` (with `variant` for effort),
+  `title` from the Zerus name, `permissions` from the permission mode (phase
+  2), and `metadata` `{"zerus": {"run_id", "launch_id"}}`. Metadata never
+  contains secrets.
+- A lost launch response is reconciled by `GET /api/session/{id}`, or by
+  posting the same ID again, which returns the existing session. Zerus never
+  creates two sessions for one launch.
+- Bindings store run ID, session ID, directory and name. The service URL and
+  password come only from the registration file.
+- Each message gets a pre-generated `msg_` ID recorded in the durable request
+  journal before `POST /prompt` with `delivery: queue` always. A lost
+  response is reconciled with `GET /message/{id}`, then `GET /inbox`, then by
+  posting the same ID again, which returns the original admission without a
+  second message. Only when the service stays unreachable does the result
+  remain uncertain for explicit inspection, as today.
+- Pending inbox items appear in Activity as queued. After Stop they stay
+  visible as not delivered, with Remove (`DELETE /inbox/{id}`) behind a
+  confirmation.
 - Voice transcripts use the same guarded text path.
+- Every `PATCH` reads the session first and writes back the complete
+  `metadata` object or `permissions` list, so the `zerus` metadata key and
+  other clients' fields survive.
+
+### OpenCode 1 removal and migration
+
+- Delete the OpenCode 1 host management, legacy routes, JSONC catalog parser
+  and classic child roster.
+- An existing OpenCode 1 binding is adopted when
+  `/api/experimental/migration/v1` reports completed and
+  `GET /api/session/{id}` returns the binding's session in the binding's
+  directory. It then behaves like any OpenCode 2 binding.
+- Otherwise it is listed as stopped with `This conversation belongs to
+  OpenCode 1, which Zerus no longer supports`, and only Forget is allowed.
+- A paused flag from OpenCode 1 bindings is ignored.
+- Forget removes only the Zerus binding and never calls
+  `DELETE /api/session`. Native data is never modified.
+- `docs/opencode.md`, `docs/reference.md` and `docs/local-models.md` describe
+  OpenCode 2. The account row reports `installed` only for OpenCode 2 and the
+  minimum version in its reason otherwise.
 
 ### History and status
 
 - History reads `/message` in cursor pages, newest window first, with the
-  existing event and byte budgets; message IDs are the stable Activity IDs.
+  existing event and byte budgets; message IDs are stable Activity IDs.
   Reaching a budget reports truncated history.
-- Status: `Working` when the session is in `/api/session/active`; `Needs
-  attention` when it has pending forms or permission requests; `Error` when
-  the newest assistant message ended with a provider error; otherwise
-  `Ready`. An unreachable or incompatible service makes state unknown with
-  its reason.
+- Status:
+  - `Working`: the session is in `/api/session/active`;
+  - `Needs attention`: it has pending forms or permission requests;
+  - `Error`: the newest assistant message ended with a provider error;
+  - `Background` (phase 2): idle, with a confirmed live child session (a child
+    in `/api/session/active` with this `parentID`), following the existing
+    status contract, including deferred reply-only notifications;
+  - `Ready` otherwise.
+  An unreachable or incompatible service makes state unknown with its reason.
 - The adapter polls, as today. `/api/event` is a later optimization.
 
 ### Forms and permissions
@@ -172,139 +255,147 @@ desktop, Android, iOS and the connector keep one card type:
 
 | Form field | Question item |
 | --- | --- |
-| `multiselect` | options from `value`/`label`/`description`; `multi_select` when `maxItems` is not 1 |
+| `string` with `options` | options from `value`/`label`/`description`; `allow_other` = `custom` |
+| `multiselect` | options; `multi_select` unless `maxItems` is 1; `allow_other` = `custom`; `min_items`, `max_items` |
 | `boolean` | two options, Yes and No; default preselected |
-| `string` | free text (`input_kind: "text"`, `format`, `min_length`, `max_length`, `pattern`) |
-| `number`, `integer` | free text (`input_kind: "number"` or `"integer"`, `minimum`, `maximum`) |
-| `external` | `input_kind: "external"` with its URL; answered by opening it |
-| `hidden` | omitted; its default (when any) is submitted |
-| `when` | `visible_when` conditions on the item |
+| `string` without options | `input_kind: "text"`, `format`, `min_length`, `max_length`, `pattern` |
+| `number`, `integer` | `input_kind: "number"` or `"integer"`, `minimum`, `maximum` |
+| `external` | `input_kind: "external"` with its URL |
+| `hidden` | omitted; its default, if any, is submitted |
+| `when` | `visible_when`: the list of conditions |
 
+- Phase 1 covers option fields, booleans and plain text, which is everything
+  OpenCode's question tool produces. Other fields arrive in phase 2. Until a
+  client renders a form, the card is `can_answer: false` with the reason
+  `Answer this form in OpenCode`, the mechanism clients already honor.
 - `hgs` validates every answer against the original form (types, bounds,
   required fields, conditions), drops answers for fields whose conditions are
-  false, and submits `Form.Reply` with values keyed by field key.
+  false, and submits `{"answer": {<key>: value}}`.
 - Bounds: at most 32 fields, 64 options per field and 16 KiB of text per form;
-  a larger form is shown read-only with `Answer this form in OpenCode`.
-- Clients render `input_kind`, `visible_when` and bounds. An older client that
-  does not know `input_kind` shows a text field, and `hgs` still validates. A
-  form containing `external` fields is marked `requires_client_feature:
-  "opencode_forms"`; older Android and iOS builds show `Answer on the desktop`.
+  a larger form is `can_answer: false` with the same reason.
 - Permission requests keep the existing permission card: Allow once, Always
-  allow, Reject.
+  allow, Reject. Reject warns that it rejects every pending request of that
+  session.
 - Answers keep the existing answer journal, question hash and exact
   run/conversation identity. A settled or changed form returns an explicit
   error and never retries.
 
-### Child sessions
+### Child sessions (phase 2)
 
-- Children are `GET /api/session?parentID=<id>` (bounded to the 64 newest).
-- Each child reports live state from the same service (`Working`, `Needs
-  attention`, `Ready`, `Error`); unknown remains only for an unreachable
-  service.
+- Children are `GET /api/session?parentID=<id>` (the 64 newest).
+- Each child reports live state from the same service; unknown remains only
+  for an unreachable service.
 - Child forms and permission requests are answerable from Zerus with the
   child's exact session identity. Sending messages to children stays in the
   OpenCode client.
-- Parent and child states stay independent, as in the existing contract.
+- A child never takes its parent's state; the parent's `Background` comes only
+  from confirmed live children.
 
 ### Models and effort
 
-- New session and model change offer the models the service reports through
-  `/api/model` for connected providers, with labels from the service, bounded
-  to 256 entries in service order; the selected model is always present. The
-  providers design later replaces this order with its short list.
-- Effort options are the selected model's variants; changing model drops an
-  unsupported effort.
-- When the service is not running, the New session form runs
-  `opencode models --standalone` once to list models and otherwise shows the
-  last known list. Background account polling uses the last known list.
+- New session and model change list the models the service reports through
+  `/api/model` for the selected folder, projected through the catalog
+  allowlist (below), bounded to 256 entries in service order, with the
+  selected model always present. The providers design replaces this order with
+  its short list.
+- An empty list right after the service starts is shown as loading.
+- When the service is not running, New session offers `Start OpenCode` and
+  shows the last known list.
+- Effort options are the selected model's variant IDs. Changing the model drops
+  an unsupported effort.
 - Model change uses `POST /model` and verifies the session's model afterwards.
+- Phones launch with effort through an additive `effort` field on the
+  connector's launch request, accepted only when the connector advertises
+  `opencode_launch_effort` and validated against that model's
+  `effort_options` instead of the fixed effort name list.
 
-### Attachments
+### Catalog allowlist
+
+Every projection of `/api/model`, `/api/provider` and `/api/integration`
+copies only: IDs, names, labels, provider ID and name, integration ID, status,
+`enabled`, cost numbers, limits, `capabilities`, variant IDs and method
+types and labels. `settings`, `headers`, `body`, `options`, URLs and
+credential values are dropped in memory and never cached, logged, journaled
+or returned. Zerus never calls `/api/credential` in this adapter.
+
+### Attachments (phase 2)
 
 Attachments are files already staged on the agent computer by the existing
 attachment path. The prompt passes them as `files` with a `file://` URI and
-the original name, within the existing size and count limits. Unsupported
-media types are rejected before submission, keeping the draft.
+the original name (no description), within 20 MiB per file and the existing
+count limit. Unsupported media types are rejected before submission, keeping
+the draft.
 
-### Compaction and fork
+### Compaction and fork (phase 2)
 
-- Compact context calls `POST /compact` with the existing confirmation and
-  journal.
-- Fork calls `POST /fork` and creates a new Zerus binding for the returned
-  session with a derived name; the original stays unchanged.
+- Compact context calls `POST /compact` with a client ID, the existing
+  confirmation and journal.
+- Fork is journaled before `POST /fork`. A lost response is reconciled by
+  listing sessions whose fork source is the original session, created after the
+  journal entry. Fork is unavailable for an empty session. The new session gets
+  a new Zerus binding with a derived name; the original stays unchanged.
 
-### Permission modes
+### Permission modes (phase 2)
 
-- `Default` (provider settings) adds no session rules; OpenCode's own
-  configuration applies.
-- `Bypass` sets a session ruleset that allows every action not explicitly
-  denied by configuration, equivalent to OpenCode's `--auto`. Qualification
-  pins the exact ruleset against the running service.
+- `Default` adds no session rules; OpenCode's configuration applies.
+- `Bypass` sets a session ruleset that allows every action and then re-appends
+  the deny rules of the session's agent (`GET /api/agent/{id}`), so configured
+  denies still win. Selecting it requires the existing confirmation.
 - Other Zerus modes are offered only where an equivalent ruleset exists;
   otherwise they stay unavailable with a reason.
-- Changing the mode on an existing session uses `PATCH /api/session/{id}`.
+- Changing the mode uses a read-modify-write `PATCH`.
 - Automatic tool approvals remain a separate, manual opt-in and are not part
   of this adapter.
 
 ### Actions
 
-The adapter reports `allowed_actions` and `action_reasons` explicitly:
-send, stop, answer, rename, forget, model, effort, compact and fork are
-allowed when the service is compatible and the state permits them; pause,
-resume, terminate, archive, restore and Terminal are unavailable with reasons.
-
-### OpenCode 1 removal
-
-- Delete the OpenCode 1 host management, legacy routes, JSONC catalog parser
-  and classic child roster.
-- Existing OpenCode 1 bindings are listed as stopped with `This conversation
-  belongs to OpenCode 1, which Zerus no longer supports`; only Forget is
-  allowed. Native OpenCode 1 data is never modified.
-- `docs/opencode.md`, `docs/reference.md` and the local model guide describe
-  OpenCode 2. The account row reports `installed` only for OpenCode 2.
+The adapter reports `allowed_actions` and `action_reasons` explicitly. Phase 1
+allows send, stop, answer, rename, forget, model and effort when the service is
+compatible and the state permits them; phase 2 adds compact, fork and
+permission mode. Pause, resume, terminate, archive, restore and Terminal are
+unavailable with reasons.
 
 ### Connector and mobile
 
-- The connector forwards the additive question item fields unchanged and
-  keeps API v1 compatible; bounds match `hgs`.
-- Android and iOS render the new item kinds and conditions, the effort row for
-  OpenCode models, and the allowed actions the session reports.
+- The connector forwards the additive question item fields unchanged and keeps
+  API v1 compatible; bounds match `hgs`.
+- Android and iOS render effort for OpenCode models and the allowed actions the
+  session reports in phase 1, and the new item kinds and conditions in phase 2.
 
 ### Security and privacy
 
 - The service password, URL and registration file never leave the agent
   computer and never enter logs, journals, receipts, relay payloads or errors.
-- Provider credentials are never read by this adapter.
+- Catalog projections follow the allowlist; credential routes are not used.
 - Metadata written to sessions contains only Zerus identifiers.
 
 ## Testing and qualification
 
-- Rust unit tests: registration parsing and rejection, version comparison,
-  OpenAPI requirement checks, ID generation, form mapping and answer
-  validation, permission rulesets, bounds.
+- Rust unit tests: registration parsing (no `state` field, channel file
+  names, dead `pid`), version comparison, OpenAPI requirement checks, ID
+  formats, the catalog allowlist against fixtures carrying keys and headers,
+  form mapping and answer validation, permission rulesets, inbox
+  reconciliation, bounds.
 - Native qualification (`tests/test_opencode_native.py`) against the actual
-  minimum OpenCode with private `XDG_*` directories, its own service
-  registration and a keyless local model fixture: launch with own IDs, lost
-  launch and message responses, queued delivery, history pages, Stop, model
-  and variant, forms and permissions (fixture tools), children, compaction,
-  fork, attachments, Bypass rules, incompatible version and missing operation.
-- Qt tests for form items, effort and allowed actions; Android and iOS tests
-  from shared fixtures (`opencode-form-contract.json`).
-- CI: the full matrix runs the pinned minimum on Linux and macOS; a daily
-  canary runs the native suite with the newest `@opencode/cli` and reports
-  incompatibilities without changing the minimum.
-
-## Verification items for the plan's first task
-
-Each is checked against the real service before code depends on it:
-client `ses_`/`msg_` ID formats accepted; Bypass ruleset shape; `file://`
-attachments; `Form.Reply` value shape; how subagent children appear;
-`/compact` and `/fork` responses; `opencode service start` behavior without a
-terminal on Linux and macOS; registration file location with custom
-`XDG_STATE_HOME`.
+  minimum OpenCode with private `XDG_*` directories, a private service port
+  and an offline catalog, its own service registration and a keyless local
+  model fixture. Phase 1: launch with own IDs, lost launch and message
+  responses (including a queued message), Stop with a pending queue item,
+  history pages, model and variant, question-tool forms and permissions,
+  OpenCode 1 binding adoption and refusal, service not running, start only
+  with a dead registration, incompatible version and missing operation.
+  Phase 2: children and `Background`, compaction, fork reconciliation,
+  attachments, Bypass with a configured deny.
+- Qt tests for effort, forms and allowed actions; Android and iOS tests from
+  shared fixtures (`opencode-form-contract.json`); connector tests for the
+  effort launch flag and bounds.
+- CI installs the minimum `@opencode/cli` pinned by integrity hash, like
+  `dsh`, and runs the native suite in the full Linux and macOS matrix; a
+  daily canary runs it with the newest release and reports incompatibilities
+  without changing the minimum.
 
 ## Rollout
 
-Merge after CI and native qualification pass, then install Zerus on arch and
-mac through the normal installers. OpenCode itself is already 2.0.32 on both
-computers.
+Merge each phase after CI and native qualification pass, then install Zerus on
+arch and mac through the normal installers. OpenCode itself is already 2.0.32
+on both computers.
