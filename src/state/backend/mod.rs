@@ -379,6 +379,13 @@ pub(crate) trait TerminalBackend: Sync {
     fn capture(&self, _pane: &str, _mode: Capture) -> Result<Vec<u8>> {
         Err(UNSUPPORTED.into())
     }
+    /// Make the window of `pane` `rows` tall, keeping its width, only while no
+    /// client views it and no window option of its own fixes its size. The
+    /// window still takes the size of the next client that attaches. False when
+    /// the size stays as it was.
+    fn grow_unviewed(&self, _pane: &str, _rows: u16) -> Result<bool> {
+        Ok(false)
+    }
     /// Send keys in order. An empty list still checks that the pane exists.
     fn send(&self, _pane: &str, _keys: &[Key]) -> Result<()> {
         Err(UNSUPPORTED.into())

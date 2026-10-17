@@ -465,6 +465,41 @@ impl TerminalBackend for Tmux {
         };
         Ok(tmux(&arguments, true)?.stdout)
     }
+    fn grow_unviewed(&self, pane: &str, rows: u16) -> Result<bool> {
+        let size = tmux(
+            &owned(&[
+                "display-message",
+                "-p",
+                "-t",
+                pane,
+                "#{session_attached}\t#{window_height}",
+            ]),
+            true,
+        )?;
+        let size = String::from_utf8_lossy(&size.stdout);
+        let height = match size.trim_end().split_once('\t') {
+            Some(("0", height)) => height.parse::<u16>().ok(),
+            _ => None,
+        };
+        let local = tmux(
+            &owned(&["show-options", "-w", "-v", "-t", pane, "window-size"]),
+            true,
+        )?;
+        if height.is_none_or(|height| height >= rows) || !local.stdout.trim_ascii().is_empty() {
+            return Ok(false);
+        }
+        // resize-window sets the window's own window-size to manual; removing
+        // it again lets a client that attaches later size the window.
+        let resized = tmux(
+            &owned(&["resize-window", "-t", pane, "-y", &rows.to_string()]),
+            true,
+        );
+        tmux(
+            &owned(&["set-option", "-w", "-u", "-t", pane, "window-size"]),
+            true,
+        )?;
+        resized.map(|_| true)
+    }
     fn send(&self, pane: &str, keys: &[Key]) -> Result<()> {
         for arguments in send_args(pane, keys) {
             tmux(&arguments, true)?;
