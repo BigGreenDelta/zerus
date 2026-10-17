@@ -147,15 +147,22 @@ Closing or updating Zerus does not stop the service.
 ## Qualification
 
 The ordinary CLI suite covers parsing and projections. The native adapter suite
-runs against the actual OpenCode 2 binary with private synthetic state and keyless
-models; it does not contact paid model APIs. Run it explicitly with OpenCode
-installed:
+runs against the actual OpenCode 2 binary with private HOME and XDG folders, its
+own service on a private port and a keyless local model; it never touches the
+service, settings or sessions of the person running it and does not contact paid
+model APIs. Full Linux and macOS CI run it with the reviewed minimum, and a daily
+canary runs it with the newest release
+([native agent compatibility](ci-and-aur.md#native-agent-compatibility-and-upstream-review)).
+Run it explicitly with OpenCode installed:
 
 ```sh
 cargo build --locked
 ZERUS_TEST_OPENCODE_NATIVE=1 HGS_TEST_BIN="$PWD/target/debug/hgs" \
   PYTHONPATH=tests python3 -m unittest test_opencode_native -v
 ```
+
+With `ZERUS_TEST_OPENCODE_NATIVE=1`, a missing OpenCode or one older than the
+minimum fails the suite; `ZERUS_TEST_OPENCODE_BIN` selects another executable.
 
 See [contributing](../CONTRIBUTING.md) for the common CLI, Qt and Android
 gates. A skipped suite is not compatibility evidence.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keyless released Codex and Claude Code contracts and read-only upstream capability reports."""
+"""Keyless released Codex, Claude Code and OpenCode contracts and read-only upstream capability reports."""
 import argparse
 import base64
 import datetime
@@ -29,6 +29,8 @@ HOST_COVERAGE = ('tracked launch, hooks, exact input, input keys (Esc, Ctrl+C, C
 # Official npm packages per target. Only the native executable that `members` names
 # is extracted, under its own name. On Windows the agents run in the session host,
 # where the suite, timeout and coverage of `windows` replace the tmux suites'.
+# `targets` maps a host to another package target, `environment` adds suite inputs,
+# and `private_xdg` gives the runner's own probes private XDG folders as well.
 AGENTS = {
     'codex': dict(
         name='Codex', variable='HGS_CODEX_TEST_BIN', version_output='codex-cli {}',
@@ -57,6 +59,23 @@ AGENTS = {
                 'test_claude_trust_native', 'test_claude_resume_native', 'test_claude_usage_limit_native', 'test_clear_context_native.NativeClearContext',
                 'test_compact_context_native', 'test_claude_settings_native', 'test_claude_statusline_native'],
         windows=dict(suites=['test_windows_native_agents.NativeWindowsClaude'], timeout=1200, coverage=HOST_COVERAGE)),
+    # OpenCode 2 is accepted at or above a reviewed minimum (the pin); the canary
+    # qualifies its newest release without moving the pin. Its x86_64 Linux package
+    # without AVX2 requirements is named `baseline` and runs on every x86_64 host.
+    # The suite owns its private homes, service port and keyless model.
+    'opencode': dict(
+        name='OpenCode', variable='ZERUS_TEST_OPENCODE_BIN', version_output='opencode v{}',
+        tarball='https://registry.npmjs.org/@opencode/cli-{target}/-/cli-{target}-{version}.tgz',
+        metadata='https://registry.npmjs.org/@opencode/cli-{target}/{version}', published='{version}',
+        members={'linux-x64-baseline': 'package/bin/opencode', 'darwin-arm64': 'package/bin/opencode'},
+        targets={'linux-x64': 'linux-x64-baseline'},
+        environment={'ZERUS_TEST_OPENCODE_NATIVE': '1'},
+        private_xdg=True,
+        coverage='private service start and port, own session IDs, lost launch and message responses, queue, Stop, '
+                 'history, question forms, permissions, model and effort, provider errors, OpenCode 1 bindings and '
+                 'incompatible or unresponsive services',
+        timeout=600,
+        suites=['test_opencode_native']),
 }
 # Suite inputs taken from the caller; every other HGS_ variable is dropped.
 FORWARDED = ('HGS_TEST_CONPTY_DIR',)
@@ -73,6 +92,11 @@ def host_target():
     system = {'Linux': 'linux', 'Darwin': 'darwin', 'Windows': 'win32'}.get(platform.system())
     machine = {'x86_64': 'x64', 'amd64': 'x64', 'arm64': 'arm64', 'aarch64': 'arm64'}.get(platform.machine().lower())
     return system + '-' + machine if system and machine else None
+
+
+def agent_target(agent, target):
+    """The package target of `agent` for a host target."""
+    return AGENTS[agent].get('targets', {}).get(target, target)
 
 
 def target_spec(agent, target):
@@ -133,7 +157,13 @@ def discover_upstream(manifest):
             for key in source['version_path']:
                 value = value[key]
             row['version'] = version_text(value)
-            row['review'] = 'reviewed pin' if value in source['reviewed_versions'] else 'needs review'
+            if value in source['reviewed_versions']:
+                row['review'] = 'reviewed pin'
+            elif source.get('policy') == 'minimum':
+                # Accepted at or above the reviewed minimum once its canary passes.
+                row['review'] = 'newer than the reviewed minimum; see its canary'
+            else:
+                row['review'] = 'needs review'
         except Exception as error:
             row['error'] = str(error)
         rows.append(row)
@@ -207,7 +237,7 @@ def fixture_environment(home):
     # Windows spells every inherited name in upper case, so the prefixes match there
     # too, and SYSTEMROOT, PATHEXT, TEMP and the like pass through unchanged.
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith(('HGS_', 'OPENAI_', 'ANTHROPIC_', 'CODEX_', 'CLAUDE', 'DEEPSEEK_', 'KIMI_'))}
+           if not key.startswith(('HGS_', 'OPENAI_', 'ANTHROPIC_', 'CODEX_', 'CLAUDE', 'DEEPSEEK_', 'KIMI_', 'OPENCODE_'))}
     env.update({key: os.environ[key] for key in FORWARDED if key in os.environ})
     home.mkdir(parents=True, exist_ok=True)
     (home / '.codex').mkdir(exist_ok=True)
@@ -227,6 +257,16 @@ def private_profile(env, home):
                       ('LOCALAPPDATA', home / 'AppData' / 'Local')):
         path.mkdir(parents=True, exist_ok=True)
         env[key] = str(path)
+    return env
+
+
+def private_xdg(env, home):
+    """`env` with every XDG data folder in `home`, so a probe never writes the caller's."""
+    env = dict(env)
+    for key, path in (('XDG_CONFIG_HOME', '.config'), ('XDG_DATA_HOME', '.local/share'),
+                      ('XDG_CACHE_HOME', '.cache'), ('XDG_STATE_HOME', '.local/state')):
+        (home / path).mkdir(parents=True, exist_ok=True)
+        env[key] = str(home / path)
     return env
 
 
@@ -312,6 +352,8 @@ def qualify(agent, package, work, results, hgs):
         # Codex prints folders relative to the real one, which a suite reads from
         # USERPROFILE to place its projects.
         probes = private_profile(env, home) if target == WINDOWS else env
+        if spec.get('private_xdg'):
+            probes = private_xdg(probes, home)
         actual = probe(native, ['--version'], probes).strip()
         if actual != spec['version_output'].format(version):
             raise ValueError('Native executable version mismatch: ' + actual)
@@ -331,7 +373,8 @@ def qualify(agent, package, work, results, hgs):
                          for mode, animations in (('animated', 'true'), ('reduced', 'false'))}
         row['cases'] = {}
         for case, settings in cases.items():
-            test_env = dict(env, HGS_TEST_BIN=str(hgs), **{spec['variable']: str(native)}, **settings)
+            test_env = dict(env, HGS_TEST_BIN=str(hgs), **{spec['variable']: str(native)},
+                            **spec.get('environment', {}), **settings)
             status, stdout = run_suites(spec['suites'], test_env, spec['timeout'], work / agent / version,
                                         directory / (case + '.log'))
             marker = next((line.removeprefix('ZERUS_NATIVE_RESULT=') for line in stdout.splitlines()
@@ -381,7 +424,8 @@ def write_report(report, results):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--latest', action='store_true', help='Discover agent releases and qualify latest Codex and Claude Code as canaries')
+    parser.add_argument('--latest', action='store_true',
+                        help='Discover agent releases and qualify latest Codex, Claude Code and OpenCode as canaries')
     parser.add_argument('--agent', choices=sorted(AGENTS), action='append',
                         help='Qualify only this agent (repeatable); default: every agent pinned for this host')
     parser.add_argument('--results', type=Path, default=ROOT / 'artifacts/test-results/agent-compatibility')
@@ -397,13 +441,14 @@ def main():
     results = args.results.resolve()
     results.mkdir(parents=True, exist_ok=True)
     target = host_target()
-    agents = args.agent or [agent for agent, spec in AGENTS.items() if target in spec['members']]
-    unsupported = [agent for agent in agents if target not in AGENTS[agent]['members']]
+    agents = args.agent or [agent for agent, spec in AGENTS.items() if agent_target(agent, target) in spec['members']]
+    unsupported = [agent for agent in agents if agent_target(agent, target) not in AGENTS[agent]['members']]
     if not agents or unsupported:
         parser.error('No reviewed native packages for ' + str(target) + ': ' + ', '.join(unsupported or AGENTS))
     report = {'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'target': target,
               'contracts': [], 'errors': []}
-    packages = {agent: [package for package in manifest[agent] if package['target'] == target] for agent in agents}
+    packages = {agent: [package for package in manifest[agent] if package['target'] == agent_target(agent, target)]
+                for agent in agents}
     if args.latest:
         report['upstream'] = discover_upstream(manifest)
         report['errors'].extend(row['name'] + ': ' + row['error'] for row in report['upstream'] if 'error' in row)
@@ -413,10 +458,11 @@ def main():
             try:
                 latest = next(row['version'] for row in report['upstream'] if row['name'] == spec['name'])
                 if latest not in {package['version'] for package in packages[agent]}:
-                    data = fetch_json(spec['metadata'].format(version=latest, target=target))
-                    if data['version'] != spec['published'].format(version=latest, target=target):
+                    package_target = agent_target(agent, target)
+                    data = fetch_json(spec['metadata'].format(version=latest, target=package_target))
+                    if data['version'] != spec['published'].format(version=latest, target=package_target):
                         raise ValueError('Latest native package version mismatch')
-                    packages[agent].append({'version': latest, 'target': target, 'url': data['dist']['tarball'],
+                    packages[agent].append({'version': latest, 'target': package_target, 'url': data['dist']['tarball'],
                                             'integrity': data['dist']['integrity']})
                 report['canary_versions'][agent] = latest
             except Exception as error:
@@ -429,7 +475,7 @@ def main():
     for agent in agents:
         rows = {row['version']: row for row in report['contracts'] if row['agent'] == agent}
         current = rows.get(next((package['version'] for package in reversed(manifest[agent])
-                                 if package['target'] == target), None))
+                                 if package['target'] == agent_target(agent, target)), None))
         latest = rows.get(report.get('canary_versions', {}).get(agent))
         if not (current and latest):
             continue

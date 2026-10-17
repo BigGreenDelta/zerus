@@ -97,8 +97,9 @@ read each suite's setup before running it. Do not run tests against live agent s
 Some platform tests only exist on macOS, Linux or Windows. Record any unavailable
 checks.
 
-The OpenCode 2 native suite needs an installed OpenCode 2.0.32 or newer 2.x and
-runs only on request; see [OpenCode qualification](docs/opencode.md#qualification).
+The OpenCode 2 native suite needs an installed OpenCode 2.0.32 or newer 2.x. Run it
+locally on request; full Linux and macOS CI run it with the pinned minimum. See
+[OpenCode qualification](docs/opencode.md#qualification).
 
 Color-popup dismissal also needs Cocoa qualification on macOS. These cases post
 mouse events through the fixture's native Cocoa window; Qt-injected window events
