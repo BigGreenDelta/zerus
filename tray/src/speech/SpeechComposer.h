@@ -5,7 +5,6 @@
 
 class RoundVideoView;
 class RoundVideoRecorder;
-class QTimer;
 class SpeechClient;
 class SpeechRecorder;
 class ToolbarChip;
@@ -65,15 +64,13 @@ private:
     SpeechRecorder *m_recorder;
     RoundVideoView *m_videoView;
     RoundVideoRecorder *m_videoRecorder;
-    QTimer *m_holdTimer;
     QPushButton *m_stopPreview;
     bool m_videoMode=false, m_captureVideo=false, m_videoSupported=false;
-    bool m_pressed=false, m_locked=true, m_sendAfterSaved=false, m_pressStartedLocked=false;
+    bool m_sendAfterSaved=false;
     bool m_previewBeforeSend=false;
-    QPoint m_pressPosition;
     QByteArray m_video;
     QJsonObject m_videoMeta;
-    ToolbarChip *m_voice, *m_cancel, *m_result;
+    ToolbarChip *m_voice, *m_mode, *m_cancel, *m_result;
     QWidget *m_preview;
     QLabel *m_previewLabel, *m_recordingHint;
     QPushButton *m_play, *m_send, *m_discard, *m_refresh;

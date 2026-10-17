@@ -89,7 +89,7 @@ private:
 class ComposerToolbar : public QWidget {
     Q_OBJECT
 public:
-    enum class Slot { Attachments, Voice, VoiceCancel, VoiceResult, Latest, MarkRead, Compaction, CompactionCancel, UsageLimit, Recovery, Cache, Context };
+    enum class Slot { Attachments, Voice, VoiceMode, VoiceCancel, VoiceResult, Latest, MarkRead, Compaction, CompactionCancel, UsageLimit, Recovery, Cache, Context };
     static constexpr int RowHeight = 34;
     explicit ComposerToolbar(QWidget *parent = nullptr);
     void add(Slot slot, QWidget *item);
