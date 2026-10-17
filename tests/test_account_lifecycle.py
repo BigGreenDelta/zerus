@@ -69,10 +69,17 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
         for _ in range(12):
             self.hgs('pause',source); self.resume(source)
 
+    def test_zz_pause_right_after_start_samples(self):
+        # Temporary diagnostics for zerus-d84a: pause each fresh Claude session at once.
+        self.hgs('account','add','work','--provider','claude','--label','Work')
+        for index in range(40):
+            name=self.start('claude','fresh%d'%index,'--account','work','--new')
+            self.hgs('pause',name)
+
     def test_zz_signal_timing_samples(self):
         # Temporary diagnostics for zerus-d84a: SIGTERM right after each resume.
         source=self.start('claude','one','--new')
-        for _ in range(25):
+        for _ in range(100):
             self.hgs('pause',source); self.resume(source)
             os.kill(self.binding(source)['pid'],15)
             self.wait(lambda:subprocess.run([str(self.bin/'tmux'),'has-session','-t','='+source],env=self.env,capture_output=True).returncode!=0)
