@@ -67,6 +67,7 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = app.
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$version"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = "$BUILD_NUMBER"
 test "$(/usr/libexec/PlistBuddy -c 'Print :ZerusBuildChannel' "$plist")" = "$CHANNEL"
+test "$(/usr/libexec/PlistBuddy -c 'Print :ZerusApnsEnvironment' "$plist")" = production
 
 echo "Uploading to App Store Connect…"
 xcodebuild -exportArchive -archivePath "$work/Zerus.xcarchive" -exportOptionsPlist "$work/ExportOptions.plist" \
