@@ -6,7 +6,7 @@ internal enum class RecordingDelivery(val description: String) {
     Failed("Recording failed"), Cancelled("Not sent"), Uncertain("Delivery unconfirmed");
 
     val explanation get() = when (this) {
-        Uploading -> "Your recording is being uploaded. Its recognized text has not been sent to the agent yet."
+        Uploading -> "Your recording is being uploaded. Its recognized text is not confirmed as sent to the agent yet."
         Processing -> "Your recording is being processed. Its recognized text is not confirmed as sent to the agent yet."
         Sent -> "The recognized text was sent to the agent. The original recording stays in this conversation."
         Failed -> "The recording could not be sent. Your recording and any recognized text are kept for review."
