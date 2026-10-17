@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -212,12 +213,26 @@ def publish_github(candidate, info, sums, nightly=False):
                       f"remote Linux and macOS machines over OpenSSH; enabling local sessions in Machines "
                       f"also runs agents on the Windows computer itself. Extract it and run `hgs-tray.exe`. "
                       f"It is unsigned and has no installer or automatic updates.\n")
+        title = f"Zerus {'nightly ' if nightly else ''}{version}"
+        flags = ["--prerelease", "--latest=false"] if nightly else []
         with tempfile.TemporaryDirectory(prefix="zerus-notes-") as temporary:
             path = Path(temporary) / "notes.md"
             path.write_text(notes)
-            gh("release", "create", tag, "--repo", REPOSITORY, "--draft", "--target", commit,
-               "--title", f"Zerus {'nightly ' if nightly else ''}{version}", "--notes-file", str(path),
-               *(["--prerelease", "--latest=false"] if nightly else []))
+            try:
+                gh("release", "create", tag, "--repo", REPOSITORY, "--draft", "--target", commit,
+                   "--title", title, "--notes-file", str(path), *flags)
+            except subprocess.CalledProcessError as error:
+                # GitHub once refused the job token here (HTTP 403, zerus-ktg3) although
+                # it held contents: write. Nothing public exists yet: the owner creates
+                # the draft, and this same candidate then resumes it.
+                print(notes, file=sys.stderr)
+                raise ValueError(
+                    f"GitHub refused to create the {tag} draft (exit {error.returncode}). Check that no "
+                    f"{tag} release exists, then create the draft as the owner with the notes printed "
+                    f"above saved as notes.md: gh release create {tag} --repo {REPOSITORY} --draft "
+                    f"--target {commit} --title '{title}' --notes-file notes.md {' '.join(flags)}".rstrip()
+                    + ". Rerun this publisher for the same candidate: it verifies the draft's target "
+                    "and uploads only the verified candidate assets.") from error
         release = wait_for_created_draft(tag)
     if release["draft"]:
         require(release["target_commitish"] == commit, "Existing draft targets another commit or a moving branch.")
