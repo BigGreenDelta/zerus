@@ -33,6 +33,7 @@ mod input_queue;
 mod journal;
 mod kimi_cache_hint;
 mod kimi_messages;
+mod kimi_plan;
 mod kimi_trust;
 mod kimi_tui_choice;
 mod lifecycle;

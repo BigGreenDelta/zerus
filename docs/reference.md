@@ -1098,6 +1098,16 @@ if its limit is exceeded, approvals remain in Terminal until the next native
 session starts. Read-only native choices are visibly disabled, with **Open
 Terminal** as their action.
 
+Kimi plan approval (ExitPlanMode) keeps the session at **Needs approval** and
+shows the complete plan from Kimi's own request in Activity, rendered as Markdown,
+with Kimi's choices: **Approve** (or the two or three approaches the agent
+proposed), **Reject** and **Revise** with a one-line feedback field. A plan longer
+than 8,000 characters is shortened and names its saved plan file. Zerus answers
+only while Terminal shows exactly that chooser, using its number key and, for
+Revise, pasting the feedback before Enter; Kimi's recorded decision, including
+the exact feedback, confirms delivery. A clipped or different chooser, or one
+already in Revise feedback mode, stays read-only with **Open Terminal**.
+
 Claude Code can also ask its own questions without an agent tool call, such as
 whether to switch models after a safeguard stop. Activity shows the question and
 its options verbatim with **Open Terminal** while Terminal still shows them: no

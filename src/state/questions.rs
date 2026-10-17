@@ -318,6 +318,7 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
         by_tool.insert(string(&card, "tool_call_id").into(), card);
     }
     let mut cards: Vec<_> = by_tool.into_values().collect();
+    cards.extend(kimi_plan::recover(record, &events));
     match deadline {
         None => cards.extend(codex_questions::current(record)?),
         Some(deadline) => match codex_questions::current_until(record, deadline)? {
@@ -397,6 +398,16 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
                     match claude_question::available(record,card) {
                         Ok(()) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_tui"); card["answer_unavailable_reason"]=json!(""); }
                         Err(error) => card["answer_unavailable_reason"]=json!(error),
+                    }
+                }
+                if string(record, "agent") == "kimi" && string(card, "source") == kimi_plan::SOURCE {
+                    match kimi_plan::available(record, card) {
+                        Ok(()) => {
+                            card["can_answer"] = json!(true);
+                            card["answer_transport"] = json!("kimi_tui");
+                            card["answer_unavailable_reason"] = json!("");
+                        }
+                        Err(error) => card["answer_unavailable_reason"] = json!(error),
                     }
                 }
                 if string(record, "agent") == "kimi" && string(card, "source") == "kimi_wire" {
@@ -528,6 +539,9 @@ fn matching_record(name: &str, request: &AnswerRequest) -> Result<Value> {
 }
 
 fn response_matches(question: &Value, answers: &Value, event: &Value) -> bool {
+    if string(question, "source") == kimi_plan::SOURCE {
+        return kimi_plan::response_matches(question, answers, event);
+    }
     if string(event, "type") != "interaction.resolved" {
         return false;
     }
@@ -659,7 +673,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         if string(&question, "question_hash") != request.expected_question_hash {
             return Err("question changed; refresh before answering".into());
         }
-        if !(["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_folder_trust", "codex_async", "kimi_wire", "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_usage_limit", "claude_tool_approval"]
+        if !(["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_folder_trust", "codex_async", "kimi_wire", kimi_plan::SOURCE, "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_usage_limit", "claude_tool_approval"]
             .contains(&string(&question, "source"))
             || string(&record,"agent")=="claude" && string(&question,"source")=="hook")
         {
@@ -695,6 +709,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             kimi_trust::available(&record, &question)?;
         } else if string(&question, "source") == "kimi_cache_hint" {
             kimi_cache_hint::available(&record, &question)?;
+        } else if string(&question, "source") == kimi_plan::SOURCE {
+            kimi_plan::available(&record, &question)?;
         } else {
             super::question_terminal::available(&record, &question)?;
         }
@@ -746,6 +762,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         kimi_trust::answer(&record, &question, &answers)
     } else if string(&question, "source") == "kimi_cache_hint" {
         kimi_cache_hint::answer(&record, &question, &answers)
+    } else if string(&question, "source") == kimi_plan::SOURCE {
+        kimi_plan::answer(&record, &question, &answers)
     } else {
         super::question_terminal::answer(&record, &question, &answers)
     };
@@ -800,6 +818,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             if !response_matches(&question, &answers, &response) {
                 return Err("delivery uncertain: provider resolved this question with a different answer; inspect Terminal".into());
             }
+            let response = if string(&question, "source") == kimi_plan::SOURCE {
+                kimi_plan::journal_response(&question, &response)
+            } else {
+                response
+            };
             log_answer(&record, &question, &response).map_err(|error| {
                 format!(
                     "delivery uncertain: answer confirmed but journal could not be saved: {error}"
