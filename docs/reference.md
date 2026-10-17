@@ -1040,6 +1040,25 @@ draft with the form answer, including clearing it for a preset-only answer.
 Polling and inspection never edit native drafts. The exact form payload and
 matching native acknowledgement determine delivery; uncertain attempts are
 never replayed automatically.
+
+With Claude Code 2.1.296 or later on Linux and macOS, hgs also registers its
+own `PermissionRequest` hook for AskUserQuestion, `hgs __state answer-channel`,
+beside its usual hooks.
+- It waits next to Claude's question panel and is bound to the one exact
+  pending question. **Submit** hands the answer to Claude through this hook
+  instead of the terminal, so the question can be answered at any terminal
+  size. `hgs answer` receipts then report `transport` `claude_hook`.
+- If the hook does not take an answer within three seconds, or provably never
+  printed it, delivery falls back to the verified Terminal path (`claude_tui`).
+- If the hook handed an answer over but Claude has not confirmed it, delivery is
+  uncertain and the answer is never resent.
+- An answer, decline or cancellation in Terminal ends the hook, and so do a run
+  change and its one-day deadline.
+- Sessions started before the hook was registered, Windows and other agents keep
+  Terminal delivery.
+
+A disabled **Submit** always shows why, including while a saved answer is still
+loading.
 Desktop question submissions, including skips and approval choices, require
 **Submit with full context** confirmation when the prompt cache is cold or its
 estimated lifetime has expired. Resuming with the full conversation can increase
