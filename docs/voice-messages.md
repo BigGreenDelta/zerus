@@ -230,6 +230,17 @@ inside the existing relay envelope. `computer_id` identifies the conversation
 computer; `session` is its exact session name. The envelope's `payload` is the
 native request without `action`. Its `request_id` matches the outer request UUID.
 
+Canonical history reconciles older voice provenance with a separate durable
+metadata cursor, independent of the newest 100-message inspection preview and
+the voice change-feed import cursor. Each pass reads at most 100 metadata rows
+and 512 KiB, checkpoints progress, and revisits older rows when outgoing native
+evidence or the history source generation changes. Index recreation starts a
+fresh sweep. Candidate lookups use indexed time or exact binding keys, stop at
+65 rows, and refuse over-budget or ambiguous matches across batch boundaries.
+Existing transcript, source-file identity and exact native binding proofs remain
+required; neither journal files nor complete provider transcripts are rescanned
+for this voice reconciliation pass.
+
 Message responses have `schema: 1` and `message`, containing `id`, `run_id`,
 `conversation_id`, `created_at`, monotonic `revision`, `state`, and `audio`.
 Optional fields are `transcript`, `error_code`, `error` and `video`. Audio metadata uses

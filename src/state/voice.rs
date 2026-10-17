@@ -202,6 +202,9 @@ impl Store {
         }
         db.execute_batch("CREATE INDEX IF NOT EXISTS voice_waveform_pending ON messages(id) WHERE waveform_version=0;")
             .map_err(err)?;
+        db.execute_batch("CREATE INDEX IF NOT EXISTS voice_native_time ON messages(conversation,json_extract(body,'$.native_submitted_at')) WHERE state='submitted';
+            CREATE INDEX IF NOT EXISTS voice_native_provider ON messages(conversation,json_extract(body,'$.native_binding.provider_source'),json_extract(body,'$.native_binding.provider_message_id')) WHERE state='submitted';
+            CREATE INDEX IF NOT EXISTS voice_native_journal ON messages(conversation,json_extract(body,'$.native_binding.journal_seq')) WHERE state='submitted';").map_err(err)?;
         Ok(Self { db })
     }
     fn open() -> Result<Self> {
@@ -684,9 +687,65 @@ pub(super) fn correlation(record: &Value, message_id: &str) -> Option<Value> {
     if !belongs(&job, record) {
         return None;
     }
-    Some(
-        json!({"native_request_id":job["id"],"native_payload_sha256":job["native_payload_sha256"],"native_submitted_at":job["native_submitted_at"],"boundary":job["boundary"],"native_receipt_status":job["native_receipt_status"],"native_binding":job["native_binding"],"state":job["state"]}),
-    )
+    Some(correlation_value(&job))
+}
+
+fn correlation_value(job: &Value) -> Value {
+    json!({"native_request_id":job["id"],"native_payload_sha256":job["native_payload_sha256"],"native_submitted_at":job["native_submitted_at"],"boundary":job["boundary"],"native_receipt_status":job["native_receipt_status"],"native_binding":job["native_binding"],"state":job["state"]})
+}
+
+/// Independent from the client preview and history-import cursors. The existing
+/// indexed change sequence covers old rows and later native-binding revisions.
+pub(super) type ReconciliationRows = Vec<(Value, Value)>;
+pub(super) fn reconciliation_page(record: &Value, after: i64) -> Result<(ReconciliationRows, i64, bool)> {
+    if !root().join("voice/messages.sqlite3").exists() { return Ok((vec![],after,true)); }
+    let (jobs,next,complete) = Store::open()?.changes(string(record,"conversation_id"),after)?;
+    Ok((jobs.iter().filter(|job| belongs(job,record)).map(|job| (message_row(job),correlation_value(job))).collect(),next,complete))
+}
+
+/// Find potential competing voices across every batch using native time or an
+/// exact saved binding. Over-budget metadata refuses correlation, never guesses.
+pub(super) fn reconciliation_candidates(record: &Value, native: &Value) -> Result<Option<Vec<(Value,Value)>>> {
+    let store = Store::open()?;
+    let conversation = string(record,"conversation_id");
+    let mut bodies = std::collections::BTreeMap::new();
+    let mut bytes = 0usize;
+    let mut collect = |query: &str, values: &[&dyn rusqlite::ToSql]| -> Result<bool> {
+        let mut statement = store.db.prepare(query).map_err(err)?;
+        let rows = statement.query_map(values,|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).map_err(err)?;
+        for row in rows {
+            let (id,body) = row.map_err(err)?;
+            if bodies.contains_key(&id) { continue; }
+            bytes += body.len();
+            if bodies.len() >= 64 || bytes > 512*1024 { return Ok(false); }
+            bodies.insert(id,body);
+        }
+        Ok(true)
+    };
+    let at = native["at"].as_f64().unwrap_or(0.);
+    if !collect("SELECT id,body FROM messages WHERE state='submitted' AND conversation=? AND json_extract(body,'$.native_submitted_at') BETWEEN ? AND ? LIMIT 65",
+        &[&conversation,&(at-30.),&(at+1.)])? { return Ok(None); }
+    if !string(native,"message_id").is_empty() && !collect(
+        "SELECT id,body FROM messages WHERE state='submitted' AND conversation=? AND json_extract(body,'$.native_binding.provider_source')=? AND json_extract(body,'$.native_binding.provider_message_id')=? LIMIT 65",
+        &[&conversation,&string(native,"source"),&string(native,"message_id")])? { return Ok(None); }
+    let mut sequences = Vec::new();
+    if let Some(seq) = native["seq"].as_i64() { sequences.push(seq); }
+    for alias in native["original_ids"].as_array().into_iter().flatten().filter_map(Value::as_str).take(8) {
+        if alias.starts_with("journal:") {
+            if let Some(seq) = alias.rsplit_once(":native:").and_then(|(_,seq)|seq.parse::<i64>().ok()) { sequences.push(seq); }
+        }
+    }
+    sequences.sort_unstable(); sequences.dedup();
+    for seq in sequences {
+        if !collect("SELECT id,body FROM messages WHERE state='submitted' AND conversation=? AND json_extract(body,'$.native_binding.journal_seq')=? LIMIT 65",
+            &[&conversation,&seq])? { return Ok(None); }
+    }
+    let mut candidates = Vec::new();
+    for body in bodies.into_values() {
+        let job:Value = serde_json::from_str(&body).map_err(err)?;
+        if belongs(&job,record) { candidates.push((message_row(&job),correlation_value(&job))); }
+    }
+    Ok(Some(candidates))
 }
 
 pub(super) fn bind_native(record: &Value, message_id: &str, binding: &Value) -> Result<bool> {

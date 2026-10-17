@@ -342,9 +342,9 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
             .map_err(|e| e.to_string())?;
         if (owner == "voice" && stream != "voice") || (owner == "attachment" && stream != "attachment") { return Ok(()); }
         if stream == "provider" || stream == "attachment" || stream == "voice" {
-            let old: usize = db
+            let old_body: String = db
                 .query_row(
-                    "SELECT length(CAST(body AS BLOB)) FROM messages WHERE id=?",
+                    "SELECT body FROM messages WHERE id=?",
                     [&id],
                     |r| r.get(0),
                 )
@@ -353,7 +353,7 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
             let used = get(db, "bytes")?
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(0);
-            let updated = used.saturating_sub(old) + encoded.len();
+            let updated = used.saturating_sub(old_body.len()) + encoded.len();
             if updated > 512 * 1024 * 1024 {
                 set(db, "gap", "index_budget_exhausted")?;
                 return Ok(());
@@ -364,6 +364,11 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
                 params![row.to_string(), string(&row, "type"), id],
             )
             .map_err(|e| e.to_string())?;
+            if stream != "voice" && role == "outgoing" && old_body != encoded {
+                // Revisit old unbound voices when native evidence changes.
+                // Repeated unchanged provider windows must not starve a sweep.
+                advance_voice_generation(db)?;
+            }
             queue(db, &id, at_of(&row))?;
         }
         return Ok(());
@@ -413,7 +418,13 @@ fn add(db: &Connection, canonical: &str, mut row: Value, stream: &str) -> Result
     )
     .map_err(|e| e.to_string())?;
     set(db, "bytes", &(used + cost).to_string())?;
+    if stream != "voice" && role == "outgoing" { advance_voice_generation(db)?; }
     queue(db, &id, at)?;
+    Ok(())
+}
+fn advance_voice_generation(db: &Connection) -> Result<()> {
+    db.execute("INSERT INTO meta(key,value) VALUES('voice_native_generation','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",[])
+        .map_err(|e|e.to_string())?;
     Ok(())
 }
 fn at_of(value: &Value) -> f64 {
@@ -1184,14 +1195,18 @@ fn bound_opencode_row(db: &Connection, binding: &Value) -> Result<Option<(String
     Ok(found.and_then(|(id, body)| serde_json::from_str::<Value>(&body).ok().map(|v| (id, v))))
 }
 
-fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result<()> {
-    if request.agent_id.as_deref().is_some_and(|id| !id.is_empty()) { return Ok(()); }
+fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result<bool> {
+    if request.agent_id.as_deref().is_some_and(|id| !id.is_empty()) { return Ok(true); }
     let sources: Value = get(db,"sources")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!([]));
-    let voices = voice::messages(parent, None);
+    let generation = hash(&json!([get(db,"epoch")?,sources,get(db,"voice_native_generation")?]).to_string());
+    if get(db,"voice_reconcile_generation")?.as_deref() != Some(&generation) {
+        set(db,"voice_reconcile_after","0")?;
+        set(db,"voice_reconcile_generation",&generation)?;
+    }
+    let after = get(db,"voice_reconcile_after")?.and_then(|value|value.parse::<i64>().ok()).unwrap_or(0);
+    let (voices,next,complete) = voice::reconciliation_page(parent,after)?;
     let mut possible = Vec::new();
-    for row in voices {
-        let message_id = string(&row,"message_id");
-        let Some(correlation) = voice::correlation(parent,message_id) else { continue; };
+    for (row,correlation) in voices {
         if correlation["state"] != "submitted" { continue; }
         let binding = &correlation["native_binding"];
         let Some(at) = correlation["native_submitted_at"].as_f64() else { continue; };
@@ -1244,6 +1259,17 @@ fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result
     }
     for (voice_row, native_rows, binding) in &possible {
         if native_rows.iter().any(|(id,_)| possible.iter().filter(|(_,others,_)|others.iter().any(|(other,_)|other==id)).count()!=1) {continue;}
+        let mut unique = true;
+        for (_,native) in native_rows {
+            let Some(candidates) = voice::reconciliation_candidates(parent,native)? else { unique=false;break; };
+            if candidates.iter().filter(|(other,correlation)|
+                string(other,"detail").trim() == string(voice_row,"detail").trim()
+                && (voice_binding_matches(native,&correlation["native_binding"],correlation,&sources)
+                    || voice_after_boundary(native,correlation,&sources))).count() != 1 {
+                unique=false;break;
+            }
+        }
+        if !unique {continue;}
         let mut row = voice_row.clone();
         let message_id = string(&row,"message_id").to_owned();
         if !voice::bind_native(parent,&message_id,binding)? {continue;}
@@ -1256,7 +1282,8 @@ fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result
             queue(db,&id,at_of(native))?;
         }
     }
-    Ok(())
+    set(db,"voice_reconcile_after",&next.to_string())?;
+    Ok(complete)
 }
 fn page(
     db: &Connection,
@@ -1470,11 +1497,13 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     status["voice"] = json!(if voice_complete {"complete"} else {"indexing"});
     let source_complete = provider_complete && journal_complete && receipts_complete && voice_complete;
     let upgrade_scan_done = advance_reconcile_upgrade(&db)?;
+    let mut voice_reconcile_complete = false;
     if source_complete {
         reconcile(&db)?;
-        reconcile_voice(&db, &parent, &request)?;
+        voice_reconcile_complete = reconcile_voice(&db, &parent, &request)?;
         reconcile(&db)?;
     }
+    status["voice_reconciliation"] = json!(if voice_reconcile_complete {"complete"} else {"indexing"});
     let upgrade_done = finish_reconcile_upgrade(&db, upgrade_scan_done)?;
     if let Some(reset) = get(&db, "order_reset")? {
         status["canonical_order_reset"] = json!(reset);
@@ -1512,11 +1541,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     status["progress"] = json!({"source_bytes":source_bytes,"known_source_bytes":known_bytes,"journal_seq":get(&db,"journal_seq")?,"receipt_files":db.query_row("SELECT count(*) FROM receipt_seen",[],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?,"canonical_pending":db.query_row("SELECT count(*) FROM reconcile_work",[],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?,"assigned_incoming":db.query_row("SELECT count(*) FROM messages WHERE incoming IS NOT NULL",[],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?,"reconcile_upgrade_after":get(&db,"reconcile_upgrade_after")?,"reconcile_version":get(&db,"reconcile_version")?});
     let mut complete = source_complete
+        && voice_reconcile_complete
         && upgrade_done
         && get(&db, "reconciled")?.as_deref() == Some("1")
         && gap.is_none();
     status["canonical"] = json!(if !upgrade_scan_done
-        || (source_complete && (!upgrade_done || get(&db, "reconciled")?.as_deref() != Some("1")))
+        || (source_complete && (!voice_reconcile_complete || !upgrade_done || get(&db, "reconciled")?.as_deref() != Some("1")))
     {
         "indexing"
     } else {

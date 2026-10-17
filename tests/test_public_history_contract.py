@@ -83,6 +83,116 @@ class PublicHistoryContract(unittest.TestCase):
         return {"request_id": str(uuid.uuid4()), "expected_run_id": self.run,
                 "expected_conversation_id": self.conversation, "limit": 100, **updates}
 
+    def seed_voice_metadata(self, count, repeated=()):
+        """Synthetic accepted metadata only: no worker, ASR, media or native input."""
+        directory = self.state / "voice"
+        directory.mkdir(mode=0o700)
+        path = directory / "messages.sqlite3"
+        source = self.transcript.stat()
+        ids = []
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("CREATE TABLE messages(id TEXT PRIMARY KEY,digest TEXT NOT NULL,state TEXT NOT NULL,"
+                       "created REAL NOT NULL,revision INTEGER NOT NULL,conversation TEXT NOT NULL,body TEXT NOT NULL,"
+                       "audio BLOB NOT NULL,change_seq INTEGER NOT NULL,waveform_version INTEGER NOT NULL,video BLOB NOT NULL)")
+            for index in range(count):
+                identity = str(uuid.uuid4())
+                ids.append(identity)
+                at = 1_700_000_000 + (0 if index in repeated else index) * 60
+                job = dict(id=identity, name=self.name, run_id=self.run, conversation_id=self.conversation,
+                    agent="codex", account_id="synthetic", agent_home=self.binding["agent_home"],
+                    created_at=1_700_000_000 + index * 60, revision=1, state="submitted",
+                    transcript="repeated voice" if index in repeated else f"voice transcript {index}",
+                    audio=dict(request_id=identity, index=0, name="voice.wav", mime="audio/wav", bytes=44,
+                               duration_ms=1, waveform=[0] * 64),
+                    native_submitted_at=at, native_receipt_status="submitted",
+                    boundary=dict(transcript=str(self.transcript), source_device=source.st_dev,
+                                  source_inode=source.st_ino, source_bytes=0, journal_seq=0))
+                db.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
+                    identity, "synthetic", "submitted", job["created_at"], 1, self.conversation,
+                    json.dumps(job), b"", index + 1, 1, b""))
+        path.chmod(0o600)
+        return ids
+
+    def voice_metadata(self, identity):
+        with closing(sqlite3.connect(self.state / "voice/messages.sqlite3")) as db:
+            return json.loads(db.execute("SELECT body FROM messages WHERE id=?", (identity,)).fetchone()[0])
+
+    def test_old_voice_provenance_beyond_newest100_is_reconciled(self):
+        self.write_source([self.message(0, incoming=False, at=1_700_000_000,
+                                        text="voice transcript 0", message_id="old-native")])
+        ids = self.seed_voice_metadata(250)
+        head = self.complete()
+        self.assertEqual(self.voice_metadata(ids[0]).get("native_binding", {}).get("provider_message_id"), "old-native")
+        rows = self.all_older(head)
+        self.assertEqual(len(rows), 250)
+        self.assertNotIn("old-native", [row.get("message_id") for row in rows])
+
+    def test_cross_batch_repeated_voice_text_does_not_establish_unique_proof(self):
+        self.write_source([self.message(0, incoming=False, at=1_700_000_000,
+                                        text="repeated voice", message_id="ambiguous-native")])
+        ids = self.seed_voice_metadata(250, repeated=(0, 200))
+        rows = self.all_older(self.complete())
+        for index in (0, 200):
+            self.assertNotIn("native_binding", self.voice_metadata(ids[index]))
+        self.assertEqual(len(rows), 251)
+
+    def test_old_unbound_voice_is_revisited_when_native_evidence_arrives(self):
+        ids = self.seed_voice_metadata(250)
+        self.complete()
+        self.assertNotIn("native_binding", self.voice_metadata(ids[0]))
+        self.append_source([self.message(0, incoming=False, at=1_700_000_000,
+                                         text="voice transcript 0", message_id="late-old-native")])
+        self.complete()
+        self.assertEqual(self.voice_metadata(ids[0])["native_binding"]["provider_message_id"], "late-old-native")
+
+    def test_old_voice_reconciliation_survives_index_recreation_and_source_replacement(self):
+        original = self.message(0, incoming=False, at=1_700_000_000,
+                                text="voice transcript 0", message_id="retained-native-id")
+        self.write_source([original])
+        ids = self.seed_voice_metadata(250)
+        self.complete()
+        self.assertEqual(self.voice_metadata(ids[0])["native_binding"]["provider_message_id"], "retained-native-id")
+        indexes = list((self.state / "public_history").glob("*.sqlite3"))
+        self.assertEqual(len(indexes), 1)
+        indexes[0].unlink()
+        rows = self.all_older(self.complete())
+        self.assertEqual(len(rows), 250)
+        # Same retained native identity in a replaced file is still authoritative;
+        # the old offset alone must not authorize a different native message.
+        retired = self.transcript.with_suffix(".old")
+        self.transcript.rename(retired)
+        self.write_source([original, self.message(1, incoming=False, at=1_700_000_000,
+                            text="voice transcript 0", message_id="replacement-other-id")])
+        rows = self.all_older(self.complete())
+        self.assertEqual(len(rows), 251)
+        self.assertIn("replacement-other-id", [row.get("message_id") for row in rows])
+        self.assertEqual(self.voice_metadata(ids[0])["native_binding"]["provider_message_id"], "retained-native-id")
+
+    def test_voice_reconciliation_checkpoint_and_candidate_queries_are_bounded(self):
+        self.seed_voice_metadata(350)
+        positions = []
+        for _ in range(15):
+            page = self.history()
+            index = next((self.state / "public_history").glob("*.sqlite3"))
+            with closing(sqlite3.connect(index)) as db:
+                entry = db.execute("SELECT value FROM meta WHERE key='voice_reconcile_after'").fetchone()
+                positions.append(int(entry[0]) if entry else 0)
+            if page["head"]["complete"]:
+                break
+        else:
+            self.fail("bounded metadata reconciliation did not finish")
+        self.assertEqual(positions[-1], 350)
+        self.assertTrue(all(0 <= second-first <= 100 for first, second in zip([0]+positions, positions)))
+        with closing(sqlite3.connect(self.state / "voice/messages.sqlite3")) as db:
+            for name, clause, params in [
+                ("voice_native_time", "json_extract(body,'$.native_submitted_at') BETWEEN ? AND ?", (0, 1)),
+                ("voice_native_provider", "json_extract(body,'$.native_binding.provider_source')=? AND json_extract(body,'$.native_binding.provider_message_id')=?", ("source", "id")),
+                ("voice_native_journal", "json_extract(body,'$.native_binding.journal_seq')=?", (1,)),
+            ]:
+                plan = db.execute("EXPLAIN QUERY PLAN SELECT id,body FROM messages WHERE state='submitted' "
+                                  "AND conversation=? AND " + clause + " LIMIT 65", (self.conversation, *params)).fetchall()
+                self.assertIn(name, repr(plan))
+
     def history(self, payload=None, reject=False, name=None, **updates):
         payload = payload or self.request(**updates)
         result = subprocess.run([str(HGS), "history", name or self.name, "--json"],
