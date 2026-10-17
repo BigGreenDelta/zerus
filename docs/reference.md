@@ -1062,10 +1062,13 @@ beside its usual hooks.
   pending question. **Submit** hands the answer to Claude through this hook
   instead of the terminal, so the question can be answered at any terminal
   size. `hgs answer` receipts then report `transport` `claude_hook`.
-- If the hook does not take an answer within three seconds, or provably never
-  printed it, delivery falls back to the verified Terminal path (`claude_tui`).
-- If the hook handed an answer over but Claude has not confirmed it, delivery is
-  uncertain and the answer is never resent.
+- It answers only for the saved conversation, and one hook process owns each
+  question.
+- If the hook does not take an answer within three seconds, delivery falls back
+  to the verified Terminal path (`claude_tui`).
+- Once the hook has taken an answer, that answer is never sent another way. If
+  Claude does not confirm it, delivery is uncertain, the card stays locked and
+  further answers are refused until the question is resolved in Terminal.
 - An answer, decline or cancellation in Terminal ends the hook, and so do a run
   change and its one-day deadline.
 - Sessions started before the hook was registered, Windows and other agents keep

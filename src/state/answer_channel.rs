@@ -99,10 +99,6 @@ fn live_in(dir: &Path, record: &Value, card: &Value) -> Option<Waiting> {
     waiting.serves(record, card).then_some(waiting)
 }
 
-pub(super) fn live(record: &Value, card: &Value) -> Option<Waiting> {
-    live_in(&directory(record, card).ok()?, record, card)
-}
-
 /// Offer an answer. Only one offer ever exists per channel.
 pub(super) fn offer(dir: &Path, offer: &Value) -> Result<()> {
     if [ANSWER, CLAIMED, RETRACTED, EMITTED]
@@ -175,7 +171,8 @@ fn close(dir: &Path, reason: &str) {
     );
 }
 
-pub(super) fn closed(dir: &Path) -> Option<Value> {
+#[cfg(test)]
+fn closed(dir: &Path) -> Option<Value> {
     read(dir, CLOSED)
 }
 
@@ -202,19 +199,12 @@ pub(super) fn native_answers(card: &Value, answers: &Value) -> Value {
 }
 
 /// Whether the waiting process recorded in `dir` still runs.
-fn waiting_runs(dir: &Path) -> bool {
-    read(dir, WAITING)
-        .and_then(|value| serde_json::from_value::<Waiting>(value).ok())
-        .is_some_and(|waiting| {
-            !waiting.process_start.is_empty() && process_start(waiting.pid) == waiting.process_start
-        })
-}
-
 /// Deliver `offer` through the live channel in `dir`. Returns the transport
-/// that carried it. An offer that the channel did not take within `claim_wait`,
-/// or a claim it closed (or died) before writing emitted.json, never reached
-/// Claude, so `screen` delivers instead. A claim with no outcome within
-/// `handover` may have reached Claude: that is uncertain and never resent.
+/// that carried it. Only an offer the channel never claimed (retracted after
+/// `claim_wait`) goes to `screen`. Once claimed, the answer belongs to the
+/// channel: emitted.json within `handover` means it was handed to Claude, and
+/// anything else is uncertain. A claimed answer is never resent, and no other
+/// worker's close or a dead claimant changes that.
 pub(super) fn deliver(
     dir: &Path,
     offer: &Value,
@@ -233,18 +223,53 @@ pub(super) fn deliver(
         if emitted(dir) {
             return Ok("claude_hook");
         }
-        if closed(dir).is_some() || !waiting_runs(dir) {
-            // emitted.json precedes any output; re-read it after the close.
-            if emitted(dir) {
-                return Ok("claude_hook");
-            }
-            return screen().map(|()| "claude_tui");
-        }
         if Instant::now() >= deadline {
             return Err("delivery uncertain: Claude's answer channel took the answer but did not report handing it over; inspect Terminal before retrying".into());
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// Where an answer to `card` may go.
+#[derive(Debug, PartialEq)]
+pub(super) enum Route {
+    /// A live channel waits for an offer in this directory.
+    Channel(PathBuf),
+    /// An answer was offered to, claimed by or handed over through the channel:
+    /// it must never be sent again, through any transport.
+    Locked,
+    /// No answer reached the channel; the verified screen may deliver.
+    Screen,
+}
+
+fn route_in(dir: &Path, record: &Value, card: &Value) -> Route {
+    if [ANSWER, CLAIMED, EMITTED].iter().any(|stage| dir.join(stage).exists()) {
+        Route::Locked
+    } else if live_in(dir, record, card).is_some() {
+        Route::Channel(dir.to_owned())
+    } else {
+        Route::Screen
+    }
+}
+
+pub(super) fn route(record: &Value, card: &Value) -> Result<Route> {
+    Ok(route_in(&directory(record, card)?, record, card))
+}
+
+/// Why a locked answer cannot be sent again.
+pub(super) const LOCKED: &str = "An answer was already handed to Claude's answer channel and is not confirmed yet. Check Terminal before answering again.";
+
+/// Take sole ownership of the channel in `dir` for this worker's lifetime: the
+/// lock ends with the process. None when another worker owns it, or when an
+/// earlier worker already used it; that channel is never taken over.
+fn own(dir: &Path) -> Result<Option<Guard>> {
+    let Some(owner) = lock_until(&dir.join("owner.lock"), Instant::now())? else {
+        return Ok(None);
+    };
+    let used = [ANSWER, CLAIMED, RETRACTED, EMITTED, CLOSED]
+        .iter()
+        .any(|stage| dir.join(stage).exists());
+    Ok((!used).then_some(owner))
 }
 
 /// How long a waiting process accepts an answer. Shorter than the hook timeout
@@ -265,7 +290,11 @@ fn asks(event: &Value) -> bool {
 /// for AskUserQuestion asks about. It has no tool_use_id: identical requests
 /// waiting at once are ambiguous and stay with the terminal.
 fn bind(record: &Value, event: &Value) -> Option<Value> {
-    if !asks(event) {
+    // Claude names its conversation in every hook event. A Claude of another
+    // conversation that inherited this session's variables, or an event
+    // without one, never binds to this session's question.
+    let conversation = string(record, "conversation_id");
+    if !asks(event) || conversation.is_empty() || string(event, "session_id") != conversation {
         return None;
     }
     let asked = questions::normalize(&event["tool_input"]["questions"]).ok()?;
@@ -444,6 +473,10 @@ fn wait() -> Result<()> {
     let root = absolute_root()?;
     prune(&root.join("native_answers"), Duration::from_secs(30 * 86_400), 64);
     let dir = directory_in(&root, &record, &card);
+    // One worker per question: a second PermissionRequest worker leaves it.
+    let Some(_owner) = own(&dir)? else {
+        return Ok(());
+    };
     let lifetime = nonempty_env("HGS_ANSWER_CHANNEL_SECONDS")
         .and_then(|seconds| seconds.parse::<f64>().ok())
         .filter(|seconds| *seconds > 0. && *seconds <= LIFETIME)
@@ -630,7 +663,7 @@ mod tests {
             "question_hash":"hash-1","questions":questions::normalize(&items()).unwrap()})
     }
     fn event() -> Value {
-        json!({"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion",
+        json!({"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","session_id":"conversation-1",
             "tool_input":{"questions":items(),"metadata":{"source":"model"}}})
     }
     fn live_record() -> Value {
@@ -663,6 +696,26 @@ mod tests {
         assert!(bind(&record, &event()).is_none(), "identical requests are ambiguous");
         record["pending_questions"] = json!({});
         assert!(bind(&record, &event()).is_none());
+    }
+
+    #[test]
+    fn bind_requires_the_saved_conversation() {
+        let record = live_record();
+        assert!(bind(&record, &event()).is_some());
+        // A Claude of another conversation that inherited this session's
+        // variables must never bind to its question.
+        let mut foreign = event();
+        foreign["session_id"] = json!("another-conversation");
+        assert!(bind(&record, &foreign).is_none());
+        let mut missing = event();
+        missing.as_object_mut().unwrap().remove("session_id");
+        assert!(bind(&record, &missing).is_none());
+        let mut empty = event();
+        empty["session_id"] = json!("");
+        assert!(bind(&record, &empty).is_none());
+        let mut unsaved = live_record();
+        unsaved["conversation_id"] = json!("");
+        assert!(bind(&unsaved, &empty).is_none());
     }
 
     #[test]
@@ -786,19 +839,20 @@ mod tests {
     }
 
     #[test]
-    fn channel_closed_before_emitting_uses_screen() {
+    fn channel_closed_before_emitting_is_uncertain_without_screen() {
         let (temp, waiting) = channel(|dir| {
             while claim(dir).unwrap().is_none() { std::thread::sleep(Duration::from_millis(10)); }
             close(dir, "question changed before delivery");
         });
         let screen = std::cell::Cell::new(0);
-        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_tui");
-        assert_eq!(screen.get(), 1);
+        let error = delivered(temp.path(), &screen).unwrap_err();
+        assert!(error.contains("delivery uncertain"), "{error}");
+        assert_eq!(screen.get(), 0, "a claimed answer never goes to the screen");
         waiting.join().unwrap();
     }
 
     #[test]
-    fn dead_channel_uses_screen() {
+    fn dead_channel_after_claim_is_uncertain_without_screen() {
         let (temp, waiting) = channel(|dir| {
             while claim(dir).unwrap().is_none() { std::thread::sleep(Duration::from_millis(10)); }
             let mut gone = Waiting::new(&record(), &card(), std::process::id(), 60.);
@@ -806,9 +860,80 @@ mod tests {
             write(dir, WAITING, &json!(gone)).unwrap();
         });
         let screen = std::cell::Cell::new(0);
-        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_tui");
-        assert_eq!(screen.get(), 1);
+        assert!(delivered(temp.path(), &screen).unwrap_err().contains("delivery uncertain"));
+        assert_eq!(screen.get(), 0);
         waiting.join().unwrap();
+    }
+
+    #[test]
+    fn old_worker_close_after_claim_waits_for_the_claimant() {
+        // Another worker's close must not decide for the one that claimed.
+        let (temp, waiting) = channel(|dir| {
+            while claim(dir).unwrap().is_none() { std::thread::sleep(Duration::from_millis(10)); }
+            close(dir, "deadline");
+            std::thread::sleep(Duration::from_millis(100));
+            write(dir, EMITTED, &json!({"request_id":"one"})).unwrap();
+        });
+        let screen = std::cell::Cell::new(0);
+        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_hook");
+        assert_eq!(screen.get(), 0);
+        waiting.join().unwrap();
+    }
+
+    #[test]
+    fn delayed_emit_beyond_the_handover_is_uncertain_without_screen() {
+        let (temp, waiting) = channel(|dir| {
+            while claim(dir).unwrap().is_none() { std::thread::sleep(Duration::from_millis(10)); }
+            close(dir, "deadline");
+            std::thread::sleep(Duration::from_millis(600));
+            write(dir, EMITTED, &json!({"request_id":"one"})).unwrap();
+        });
+        let screen = std::cell::Cell::new(0);
+        assert!(delivered(temp.path(), &screen).unwrap_err().contains("delivery uncertain"));
+        assert_eq!(screen.get(), 0);
+        waiting.join().unwrap();
+        assert!(temp.path().join(EMITTED).exists());
+    }
+
+    #[test]
+    fn only_one_worker_owns_a_channel() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let first = own(dir).unwrap();
+        assert!(first.is_some());
+        assert!(own(dir).unwrap().is_none(), "a second worker leaves the channel to the first");
+        drop(first);
+        assert!(own(dir).unwrap().is_some(), "a channel nobody used is free again");
+        // A channel an earlier worker used is never taken over.
+        for stage in [ANSWER, CLAIMED, RETRACTED, EMITTED, CLOSED] {
+            write(dir, stage, &json!({})).unwrap();
+            assert!(own(dir).unwrap().is_none(), "{stage}");
+            fs::remove_file(dir.join(stage)).unwrap();
+        }
+    }
+
+    #[test]
+    fn routes_keep_a_handed_over_answer_away_from_the_screen() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        assert_eq!(route_in(dir, &record(), &card()), Route::Screen);
+        write(dir, WAITING, &json!(Waiting::new(&record(), &card(), std::process::id(), 60.))).unwrap();
+        assert_eq!(route_in(dir, &record(), &card()), Route::Channel(dir.to_owned()));
+        for stage in [ANSWER, CLAIMED, EMITTED] {
+            write(dir, stage, &json!({})).unwrap();
+            assert_eq!(route_in(dir, &record(), &card()), Route::Locked, "{stage}");
+            fs::remove_file(dir.join(stage)).unwrap();
+        }
+        // Unclaimed outcomes leave the screen path available.
+        for stage in [RETRACTED, CLOSED] {
+            write(dir, stage, &json!({})).unwrap();
+            assert_eq!(route_in(dir, &record(), &card()), Route::Screen, "{stage}");
+            fs::remove_file(dir.join(stage)).unwrap();
+        }
+        let mut gone = Waiting::new(&record(), &card(), std::process::id(), 60.);
+        gone.process_start = "not this process".into();
+        write(dir, WAITING, &json!(gone)).unwrap();
+        assert_eq!(route_in(dir, &record(), &card()), Route::Screen);
     }
 
     #[test]

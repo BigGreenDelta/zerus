@@ -151,12 +151,19 @@ question_hash)`.
 
 The channel process:
 
-1. Binds the request. `PermissionRequest` carries no `tool_use_id`. The
-   process selects the single pending main-agent `hook` card of this run whose
-   recorded `tool_input` equals the event's `tool_input` exactly. With zero or
-   several candidates it exits silently, and screen delivery remains.
-2. Writes `waiting.json` with protocol version, pid, process start time, run,
-   conversation, question id and hash, `started_at` and its own deadline.
+1. Binds the request. The event's `session_id` must equal the saved
+   conversation; a Claude of another conversation that inherited the session's
+   variables, or an event without one, never binds. `PermissionRequest`
+   carries no `tool_use_id`, so the process selects the single pending
+   main-agent `hook` card of this run whose recorded `tool_input` equals the
+   event's `tool_input` exactly. With zero or several candidates it exits
+   silently, and screen delivery remains.
+2. Takes sole ownership of the channel directory with `owner.lock`, held until
+   it exits. A second worker for the same question, or a channel an earlier
+   worker already used, exits silently without writing anything. Only the
+   owner writes `waiting.json` (protocol version, pid, process start time, run,
+   conversation, question id and hash, `started_at` and its own deadline) and
+   `closed.json`.
 3. Polls every 100-200 ms (no sockets, so it is portable to Windows) and exits
    silently when any of these holds:
    - the card is no longer pending, or a transcript `tool_result` exists for
@@ -184,17 +191,19 @@ The channel process:
    `retracted.json`. Exactly one of claim or retract can succeed. After a
    successful retract it falls back to screen delivery, if the screen
    verifies.
-3. After a claim it waits for confirmation: `PostToolUse` or
-   `QuestionAnswered` for the bound `tool_use_id`, whose transcript
-   `tool_result` matches the delivered answers. Then the receipt becomes
-   `answered`.
-   - `emitted.json` is written before the decision is printed. So a channel
-     that closed after the claim without `emitted.json` never printed
-     anything, and the answer may use the screen.
-   - Once `emitted.json` exists, an answer without confirmation within the
-     existing delivery budget becomes `uncertain`. It is never retried and
-     never sent through the screen.
-4. The same `request_id` returns the stored receipt, as today.
+3. A claimed answer belongs to the channel and never goes to the screen.
+   `emitted.json` (written before the decision is printed) within 3 s leads to
+   the confirmation wait: `PostToolUse` or `QuestionAnswered` for the bound
+   `tool_use_id`, whose transcript `tool_result` matches the delivered
+   answers, makes the receipt `answered`. Anything else after a claim, such as
+   a close, a dead claimant or no confirmation within the delivery budget, is
+   `uncertain`; it is never retried and never sent through another transport.
+4. While `answer.json`, `claimed.json` or `emitted.json` exists, the question
+   is locked: inspection reports it unanswerable with that reason, and any new
+   `hgs answer` request is refused without sending anything. Only an unclaimed
+   (retracted) offer or a channel closed without a claim leaves the screen
+   path open.
+5. The same `request_id` returns the stored receipt, as today.
 
 ### Answer mapping
 

@@ -453,6 +453,24 @@ sys.exit(result.returncode)
   self.assertFalse((folder/'emitted.json').exists())
   # Before Claude writes its transcript the panel is simply gone; either way nothing is sent.
   self.assertRegex(self.answer(success=False),'already answered|rejected the question response|not fully visible')
+ def test_channel_single_second_worker_leaves_the_owner(self):
+  self.channel_card();waiting,folder=self.channel()
+  event=dict(hook_event_name='PermissionRequest',tool_name='AskUserQuestion',session_id=self.conversation_id,tool_input=dict(questions=self.items))
+  env=dict(self.env,HGS_SESSION=self.name,HGS_RUN_ID=self.run_id)
+  started=time.monotonic()
+  second=subprocess.run([str(fixtures.HGS),'__state','answer-channel'],input=json.dumps(event),text=True,capture_output=True,env=env,timeout=30)
+  self.assertEqual((second.returncode,second.stdout,second.stderr),(0,'',''));self.assertLess(time.monotonic()-started,8)
+  self.assertEqual(json.loads((folder/'waiting.json').read_text()),waiting);self.assertFalse((folder/'closed.json').exists())
+  receipt=self.answer();self.assertEqual((receipt['status'],receipt['transport']),('answered','claude_hook'))
+ def test_channel_single_claimed_answer_is_never_sent_again(self):
+  self.channel_card();waiting,folder=self.channel();os.kill(waiting['pid'],signal.SIGKILL)
+  self.wait_for(lambda:not self.running(waiting['pid']))
+  # An answer the channel had claimed may still reach Claude: no transport sends another.
+  (folder/'claimed.json').write_text(json.dumps(dict(request_id=str(uuid.uuid4()),answers={})))
+  card=self.inspect()['pending_questions'][0]
+  self.assertFalse(card['can_answer']);self.assertIn("Claude's answer channel",card['answer_unavailable_reason'])
+  before=self.screen();self.assertIn("Claude's answer channel",self.answer(success=False))
+  self.assertEqual(self.screen(),before);self.assertIn('Which release should we prepare?',self.screen())
  def test_channel_single_killed_falls_back_to_screen(self):
   self.channel_card();waiting,folder=self.channel();os.kill(waiting['pid'],signal.SIGKILL)
   self.wait_for(lambda:not self.running(waiting['pid']))

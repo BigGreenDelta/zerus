@@ -396,15 +396,19 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
                         Err(error)=>card["answer_unavailable_reason"]=json!(error),
                     }
                 }
-                if string(record,"agent")=="claude" && string(card,"source")=="hook"
-                    && answer_channel::live(record, card).is_some()
-                {
-                    // Claude's own hook waits beside the panel; the screen is not needed.
-                    card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_hook"); card["answer_unavailable_reason"]=json!("");
-                } else if string(record,"agent")=="claude" && string(card,"source")=="hook" {
-                    claude_question::fit(record, card);
-                    match claude_question::available(record,card) {
-                        Ok(()) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_tui"); card["answer_unavailable_reason"]=json!(""); }
+                if string(record,"agent")=="claude" && string(card,"source")=="hook" {
+                    match answer_channel::route(record, card) {
+                        // Claude's own hook waits beside the panel; the screen is not needed.
+                        Ok(answer_channel::Route::Channel(_)) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_hook"); card["answer_unavailable_reason"]=json!(""); }
+                        // An answer already belongs to the channel: never offer a second one.
+                        Ok(answer_channel::Route::Locked) => { card["can_answer"]=json!(false); card["answer_transport"]=json!(""); card["answer_unavailable_reason"]=json!(answer_channel::LOCKED); }
+                        Ok(answer_channel::Route::Screen) => {
+                            claude_question::fit(record, card);
+                            match claude_question::available(record,card) {
+                                Ok(()) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_tui"); card["answer_unavailable_reason"]=json!(""); }
+                                Err(error) => card["answer_unavailable_reason"]=json!(error),
+                            }
+                        }
                         Err(error) => card["answer_unavailable_reason"]=json!(error),
                     }
                 }
@@ -700,8 +704,10 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             }
             if answers[0]["skip"]!=true {codex_questions::available(&record,&question)?;}
         } else if string(&record,"agent")=="claude" && string(&question,"source")=="hook" {
-            if answer_channel::live(&record, &question).is_none() {
-                claude_question::available(&record,&question)?;
+            match answer_channel::route(&record, &question)? {
+                answer_channel::Route::Channel(_) => {}
+                answer_channel::Route::Locked => return Err(answer_channel::LOCKED.into()),
+                answer_channel::Route::Screen => claude_question::available(&record,&question)?,
             }
         } else if string(&question, "source") == "claude_tool_approval" {
             claude_approval::available(&record,&question)?;
@@ -759,14 +765,16 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             claude_question::available(&record, &question)?;
             claude_question::answer(&record, &question, &answers)
         };
-        match answer_channel::live(&record, &question) {
-            Some(_) => {
+        match answer_channel::route(&record, &question) {
+            Ok(answer_channel::Route::Channel(dir)) => {
                 let offer = json!({"request_id":request_id,"answers":answer_channel::native_answers(&question,&answers)});
-                answer_channel::deliver(&answer_channel::directory(&record, &question)?, &offer,
-                    Duration::from_secs(3), Duration::from_secs(3), screen)
+                answer_channel::deliver(&dir, &offer, Duration::from_secs(3), Duration::from_secs(3), screen)
                     .map(|transport| receipt["transport"] = json!(transport))
             }
-            None => screen().map(|()| receipt["transport"] = json!("claude_tui")),
+            // Another request's answer reached the channel since preparation: nothing was sent.
+            Ok(answer_channel::Route::Locked) => Err(answer_channel::LOCKED.into()),
+            Ok(answer_channel::Route::Screen) => screen().map(|()| receipt["transport"] = json!("claude_tui")),
+            Err(error) => Err(error),
         }
     } else if string(&question, "source") == "claude_tool_approval" {
         claude_approval::answer(&record,&question,&answers)
