@@ -76,12 +76,6 @@ fn session_path(record: &Value, suffix: &str) -> String {
 }
 use service::Response;
 
-/// OpenCode 1 launch and settings still call this until Task 9 rewrites them.
-/// Remove in Task 9: this shim has no place in the OpenCode 2 adapter.
-fn legacy_offered_model(location: &Path, value: &str) -> Result<Value> {
-    let service = service::connect().map_err(|why| why.reason(&crate::platform::hostname()))?;
-    catalog::offered_model(&service, location, value, "")
-}
 pub(crate) fn account_context(name: &str) -> Result<Value> {
     let record = binding(name)?;
     Ok(
@@ -448,11 +442,8 @@ fn finish_creation(service: &service::Service, mut record: Value, first: bool) -
         Err(Refusal::Other(reason)) => Err(reason),
     }
 }
-fn verify_session(service: &service::Service, record: &Value) -> Result<Value> {
-    exact_session(
-        record,
-        service.call("GET", &session_path(record, ""), None)?,
-    )
+fn verify_session(native: &dyn Native, record: &Value) -> Result<Value> {
+    exact_session(record, get(native, &session_path(record, ""))?)
 }
 /// The session object of a `GET /api/session/{id}` answer, only when it is
 /// exactly this binding's session in this binding's directory.
@@ -1289,20 +1280,108 @@ pub(crate) fn interrupt(record: &Value) -> Result<()> {
     if current["interrupt_supported"] != true || current["turn_started"] != record["turn_started"] {
         return Err("OpenCode turn changed before interruption".into());
     }
-    running_service()?.call(
-        "POST",
-        &session_path(&original, "/interrupt"),
-        Some(&json!({})),
-    )?;
+    interrupt_with(&running_service()?, &original)
+}
+/// Core of `interrupt`: success when OpenCode says it interrupted the turn or
+/// the session is no longer running.
+fn interrupt_with(native: &dyn Native, record: &Value) -> Result<()> {
+    let reply = native.raw("POST", &session_path(record, "/interrupt"), Some(&json!({})))?;
+    let said = reply.body["interrupted"] == true || reply.body["data"]["interrupted"] == true;
+    if successful(&reply) && said {
+        return Ok(());
+    }
+    if !session_active(native, record) {
+        return Ok(());
+    }
+    Err(format!(
+        "OpenCode did not confirm the interruption ({})",
+        refusal_reason(&reply)
+    ))
+}
+const NOT_QUEUED: &str = "This message is no longer queued";
+/// The exact native message ID of a `remove_queued` request.
+fn queued_id(request: &Value) -> Result<String> {
+    let id = string(request, "message_id");
+    if !native_id(id, "msg_") {
+        return Err("Choose the exact queued OpenCode message".into());
+    }
+    Ok(id.to_owned())
+}
+/// Core of `remove_queued`: a message can be removed only while it sits in
+/// the inbox of a session that is not running; it is then not delivered.
+fn remove_queued_with(native: &dyn Native, record: &Value, id: &str) -> Result<()> {
+    let inbox = get(native, &session_path(record, "/inbox"))?;
+    if !inbox["data"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["id"] == id))
+    {
+        return Err(NOT_QUEUED.into());
+    }
+    let active = active_sessions(native)?;
+    if active.get(string(record, "conversation_id")).is_some() {
+        return Err(NOT_QUEUED.into());
+    }
+    let reply = native.raw("DELETE", &session_path(record, &format!("/inbox/{id}")), None)?;
+    if reply.status == 404 {
+        return Err(NOT_QUEUED.into());
+    }
+    if !successful(&reply) {
+        return Err(format!("OpenCode could not remove this message ({})", refusal_reason(&reply)));
+    }
     Ok(())
 }
+/// Core of a model change: set the exact model, then read it back.
+fn change_model(native: &dyn Native, record: &Value, model: &Value) -> Result<()> {
+    let reply = native.raw(
+        "POST",
+        &session_path(record, "/model"),
+        Some(&json!({"model": model})),
+    )?;
+    if !successful(&reply) {
+        return Err(format!("OpenCode refused this model change ({})", refusal_reason(&reply)));
+    }
+    let seen = verify_session(native, record)?["model"].clone();
+    // A model without an explicit variant reports "default".
+    let variant_ok = match model["variant"].as_str() {
+        Some(variant) => seen["variant"] == variant,
+        None => true,
+    };
+    if seen["id"] != model["id"] || seen["providerID"] != model["providerID"] || !variant_ok {
+        return Err(
+            "Native OpenCode model change was not confirmed; inspect before retrying".into(),
+        );
+    }
+    Ok(())
+}
+/// Core of rename: set only the title, then read it back.
+fn change_title(native: &dyn Native, record: &Value, title: &str) -> Result<()> {
+    let reply = native.raw(
+        "PATCH",
+        &session_path(record, ""),
+        Some(&json!({"title": title})),
+    )?;
+    if !successful(&reply) {
+        return Err(format!("OpenCode refused this rename ({})", refusal_reason(&reply)));
+    }
+    if verify_session(native, record)?["title"] != title {
+        return Err(
+            "Native OpenCode rename acknowledgement did not match; inspect before retrying".into(),
+        );
+    }
+    Ok(())
+}
+const NO_PROCESS: &str = "OpenCode sessions have no separate process to pause";
 fn action(
     record: &mut Value,
     action: &str,
     new_name: Option<&str>,
+    message_id: Option<&str>,
     scope: Option<&session_action::Scope>,
 ) -> Result<()> {
-    if !["pause", "resume", "rename", "forget"].contains(&action) {
+    if ["pause", "resume"].contains(&action) {
+        return Err(NO_PROCESS.into());
+    }
+    if !["rename", "forget", "remove_queued"].contains(&action) {
         return Err("This OpenCode lifecycle action is not supported".into());
     }
     if let Some(scope) = scope {
@@ -1316,6 +1395,17 @@ fn action(
         return Err("This action is unavailable for the exact OpenCode session".into());
     }
     let old = string(record, "name").to_owned();
+    if action == "remove_queued" {
+        let id = queued_id(&json!({"message_id": message_id}))?;
+        if let Some(scope) = scope {
+            scope.changing();
+        }
+        remove_queued_with(&running_service()?, record, &id)?;
+        if let Some(scope) = scope {
+            scope.result_record(record);
+        }
+        return Ok(());
+    }
     if action == "rename" {
         let new = new_name.ok_or("Choose a new OpenCode name")?;
         let a = old.split('/').collect::<Vec<_>>();
@@ -1338,35 +1428,14 @@ fn action(
         if let Some(scope) = scope {
             scope.changing();
         }
-        // OpenCode 2 answers 204; the title is verified by reading it back.
-        let service = running_service()?;
-        service.call(
-            "PATCH",
-            &session_path(record, ""),
-            Some(&json!({"title":b[2]})),
-        )?;
-        if verify_session(&service, record)?["title"] != b[2] {
-            return Err(
-                "Native OpenCode rename acknowledgement did not match; inspect before retrying"
-                    .into(),
-            );
-        }
+        change_title(&running_service()?, record, b[2])?;
         record["name"] = json!(new);
     } else if let Some(scope) = scope {
         scope.changing();
     }
-    match action {
-        "pause" => record["paused"] = json!(true),
-        "resume" => {
-            record["paused"] = json!(false);
-            record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
-            record.as_object_mut().unwrap().remove("creation_pending");
-        }
-        "forget" => {
-            archive::remove_synced(&binding_path(&old))?;
-            return Ok(());
-        }
-        _ => {}
+    if action == "forget" {
+        archive::remove_synced(&binding_path(&old))?;
+        return Ok(());
     }
     save(record)?;
     if action == "rename" && new_name != Some(old.as_str()) {
@@ -1381,11 +1450,12 @@ pub(super) fn session_action(
     name: &str,
     kind: &str,
     new_name: Option<&str>,
+    message_id: Option<&str>,
     scope: &session_action::Scope,
 ) -> Result<()> {
     let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
     let mut record = binding(name)?;
-    action(&mut record, kind, new_name, Some(scope))
+    action(&mut record, kind, new_name, message_id, Some(scope))
 }
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose an OpenCode session")?;
@@ -1424,10 +1494,13 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if own_state(name)?["settings_change_supported"] != true {
                 return Err("OpenCode must be live and idle before changing its model".into());
             }
-            if !string(&request, "effort").is_empty() {
-                return Err("OpenCode effort controls are not yet qualified".into());
-            }
-            let model = legacy_offered_model(&home(), string(&request, "model"))?;
+            let service = running_service()?;
+            let model = catalog::offered_model(
+                &service,
+                Path::new(string(&record, "cwd")),
+                string(&request, "model"),
+                string(&request, "effort"),
+            )?;
             let path = root()
                 .join("opencode/settings")
                 .join(format!("{}.json", string(&request, "request_id")));
@@ -1437,27 +1510,25 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 );
             }
             atomic(&path, &json!({"status":"pending"}).to_string())?;
-            let service = running_service()?;
-            service.call(
-                "POST",
-                &session_path(&record, "/model"),
-                Some(&json!({"model":model})),
-            )?;
-            let verified_model = verify_session(&service, &record)?["model"].clone();
-            if verified_model["id"] != model["id"]
-                || verified_model["providerID"] != model["providerID"]
-            {
-                return Err(
-                    "Native OpenCode model change was not confirmed; inspect before retrying"
-                        .into(),
-                );
-            }
+            change_model(&service, &record, &model)?;
             println!(
                 "{}",
-                json!({"status":"applied","scope":"session","request_id":request["request_id"],"name":name,"run_id":record["run_id"],"conversation_id":record["conversation_id"],"model":request["model"]})
+                json!({"status":"applied","scope":"session","request_id":request["request_id"],"name":name,"run_id":record["run_id"],"conversation_id":record["conversation_id"],"model":request["model"],"effort":request["effort"]})
             );
         }
-        "pause" | "resume" | "rename" | "forget" => {
+        "remove_queued" => {
+            let id = queued_id(&json!({"message_id": args.get(1)}))?;
+            if own_state(name)?["allowed_actions"]
+                .as_array()
+                .is_none_or(|values| values.iter().all(|v| v != "remove_queued"))
+            {
+                return Err(NOT_QUEUED.into());
+            }
+            remove_queued_with(&running_service()?, &record, &id)?;
+            println!("{}", own_state(name)?);
+        }
+        "pause" | "resume" => return Err(NO_PROCESS.into()),
+        "rename" | "forget" => {
             if args.iter().any(|v| v == "--dry-run") {
                 println!("{command} native OpenCode {name}");
                 return Ok(0);
@@ -1471,6 +1542,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 args.get(1)
                     .filter(|v| !v.starts_with('-'))
                     .map(String::as_str),
+                None,
                 None,
             )?;
         }
@@ -2363,5 +2435,169 @@ mod tests {
             active_sessions(&refused).unwrap_err(),
             "OpenCode HTTP 500: busy"
         );
+    }
+
+    /// Scripted answers that also record every request body.
+    struct Seen {
+        script: std::cell::RefCell<Vec<(String, u16, Value)>>,
+        bodies: std::cell::RefCell<Vec<(String, Option<Value>)>>,
+    }
+    impl Native for Seen {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            let (expected, status, reply) = self.script.borrow_mut().remove(0);
+            assert_eq!(expected, format!("{method} {path}"));
+            self.bodies
+                .borrow_mut()
+                .push((expected, body.cloned()));
+            Ok(Response { status, body: reply })
+        }
+    }
+    fn seen(steps: Vec<(&str, u16, Value)>) -> Seen {
+        Seen {
+            script: std::cell::RefCell::new(
+                steps.into_iter().map(|(p, s, b)| (p.to_owned(), s, b)).collect(),
+            ),
+            bodies: Default::default(),
+        }
+    }
+    fn bound() -> Value {
+        json!({"name":"opencode/p/t","conversation_id":"ses_A","cwd":"/x"})
+    }
+    fn session_with(model: Value, title: &str) -> Value {
+        json!({"data":{"id":"ses_A","location":{"directory":"/x"},"model":model,"title":title}})
+    }
+    #[test]
+    fn settings_validate_effort_against_the_model_variants() {
+        let rows = catalog::project(&fixture(include_bytes!(
+            "../../tests/fixtures/opencode2/models.json"
+        )));
+        assert_eq!(
+            catalog::model_ref(&rows, "fixture/local", "high").unwrap(),
+            json!({"providerID": "fixture", "id": "local", "variant": "high"})
+        );
+        assert_eq!(
+            catalog::model_ref(&rows, "fixture/local", "").unwrap(),
+            json!({"providerID": "fixture", "id": "local"})
+        );
+        assert!(catalog::model_ref(&rows, "fixture/local", "ultra").is_err());
+        assert!(catalog::model_ref(&rows, "fixture/missing", "").is_err());
+    }
+    #[test]
+    fn remove_queued_requires_an_exact_message_id() {
+        assert!(queued_id(&json!({"message_id": "msg_gVmstesSuU81H2vTHdmxp65tNI"})).is_ok());
+        assert!(queued_id(&json!({"message_id": "../x"})).is_err());
+        assert!(queued_id(&json!({})).is_err());
+    }
+    #[test]
+    fn interrupt_succeeds_when_acknowledged_or_already_stopped() {
+        let ok = seen(vec![(
+            "POST /api/session/ses_A/interrupt",
+            200,
+            json!({"interrupted": true}),
+        )]);
+        interrupt_with(&ok, &bound()).unwrap();
+        let idle = seen(vec![
+            ("POST /api/session/ses_A/interrupt", 200, json!({"interrupted": false})),
+            ("GET /api/session/active", 200, json!({"data": {}})),
+        ]);
+        interrupt_with(&idle, &bound()).unwrap();
+        let running = seen(vec![
+            ("POST /api/session/ses_A/interrupt", 200, json!({"interrupted": false})),
+            ("GET /api/session/active", 200, json!({"data": {"ses_A": {}}})),
+        ]);
+        assert!(interrupt_with(&running, &bound()).is_err());
+    }
+    #[test]
+    fn a_queued_message_is_removed_only_while_stopped_and_still_queued() {
+        let inbox = json!({"data":[{"id":"msg_A","type":"user","payload":{"text":"x"}}]});
+        let ok = seen(vec![
+            ("GET /api/session/ses_A/inbox", 200, inbox.clone()),
+            ("GET /api/session/active", 200, json!({"data": {}})),
+            ("DELETE /api/session/ses_A/inbox/msg_A", 204, Value::Null),
+        ]);
+        remove_queued_with(&ok, &bound(), "msg_A").unwrap();
+        assert!(ok.script.borrow().is_empty());
+        let gone = seen(vec![("GET /api/session/ses_A/inbox", 200, json!({"data":[]}))]);
+        assert_eq!(
+            remove_queued_with(&gone, &bound(), "msg_A").unwrap_err(),
+            NOT_QUEUED
+        );
+        let active = seen(vec![
+            ("GET /api/session/ses_A/inbox", 200, inbox),
+            ("GET /api/session/active", 200, json!({"data": {"ses_A": {}}})),
+        ]);
+        assert_eq!(
+            remove_queued_with(&active, &bound(), "msg_A").unwrap_err(),
+            NOT_QUEUED
+        );
+    }
+    #[test]
+    fn a_model_variant_is_sent_and_verified() {
+        let model = json!({"providerID":"fixture","id":"local","variant":"high"});
+        let ok = seen(vec![
+            ("POST /api/session/ses_A/model", 204, Value::Null),
+            ("GET /api/session/ses_A", 200, session_with(model.clone(), "t")),
+        ]);
+        change_model(&ok, &bound(), &model).unwrap();
+        assert_eq!(ok.bodies.borrow()[0].1, Some(json!({"model": model})));
+        let wrong = seen(vec![
+            ("POST /api/session/ses_A/model", 204, Value::Null),
+            (
+                "GET /api/session/ses_A",
+                200,
+                session_with(json!({"providerID":"fixture","id":"local","variant":"low"}), "t"),
+            ),
+        ]);
+        assert_eq!(
+            change_model(&wrong, &bound(), &model).unwrap_err(),
+            "Native OpenCode model change was not confirmed; inspect before retrying"
+        );
+    }
+    #[test]
+    fn the_default_effort_sends_no_variant_and_accepts_default() {
+        let model = json!({"providerID":"fixture","id":"local"});
+        let ok = seen(vec![
+            ("POST /api/session/ses_A/model", 204, Value::Null),
+            (
+                "GET /api/session/ses_A",
+                200,
+                session_with(json!({"providerID":"fixture","id":"local","variant":"default"}), "t"),
+            ),
+        ]);
+        change_model(&ok, &bound(), &model).unwrap();
+        assert_eq!(ok.bodies.borrow()[0].1, Some(json!({"model": model})));
+        let other = seen(vec![
+            ("POST /api/session/ses_A/model", 204, Value::Null),
+            (
+                "GET /api/session/ses_A",
+                200,
+                session_with(json!({"providerID":"fixture","id":"other"}), "t"),
+            ),
+        ]);
+        assert!(change_model(&other, &bound(), &model).is_err());
+    }
+    #[test]
+    fn rename_sends_only_the_title_and_verifies_it() {
+        let ok = seen(vec![
+            ("PATCH /api/session/ses_A", 204, Value::Null),
+            ("GET /api/session/ses_A", 200, session_with(json!({}), "new")),
+        ]);
+        change_title(&ok, &bound(), "new").unwrap();
+        assert_eq!(ok.bodies.borrow()[0].1, Some(json!({"title": "new"})));
+        let stale = seen(vec![
+            ("PATCH /api/session/ses_A", 204, Value::Null),
+            ("GET /api/session/ses_A", 200, session_with(json!({}), "old")),
+        ]);
+        assert!(change_title(&stale, &bound(), "new").is_err());
+    }
+    #[test]
+    fn pause_and_resume_explain_that_there_is_no_process() {
+        let mut record = bound();
+        for kind in ["pause", "resume"] {
+            assert_eq!(
+                action(&mut record, kind, None, None, None).unwrap_err(),
+                NO_PROCESS
+            );
+        }
     }
 }

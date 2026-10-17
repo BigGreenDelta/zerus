@@ -19,6 +19,8 @@ struct Request {
     new_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
 }
 
 pub(super) struct Scope {
@@ -153,11 +155,20 @@ fn validate(request: &Request, name: &str) -> Result<()> {
     );
     if !matches!(
         request.action.as_str(),
-        "pause" | "resume" | "archive" | "rename" | "fork" | "terminate" | "restore" | "forget"
+        "pause"
+            | "resume"
+            | "archive"
+            | "rename"
+            | "fork"
+            | "terminate"
+            | "restore"
+            | "forget"
+            | "remove_queued"
     ) || (request.archive_id.is_some() && !archived)
         || (request.action == "restore" && request.archive_id.is_none())
         || (request.new_name.is_some() != (request.action == "rename"))
         || (request.tag.is_some() && request.action != "fork")
+        || (request.message_id.is_some() != (request.action == "remove_queued"))
     {
         return Err("Unsupported action or unexpected action argument".into());
     }
@@ -174,6 +185,13 @@ fn validate(request: &Request, name: &str) -> Result<()> {
             return Err("Invalid bounded action name".into());
         }
     }
+    if request
+        .message_id
+        .as_deref()
+        .is_some_and(|id| !opencode::native_id(id, "msg_"))
+    {
+        return Err("Invalid queued message identity".into());
+    }
     if let Some(id) = &request.archive_id {
         let uuid = uuid::Uuid::parse_str(id).map_err(|_| "Invalid archive UUID")?;
         if uuid.is_nil() || uuid.to_string() != *id {
@@ -184,7 +202,12 @@ fn validate(request: &Request, name: &str) -> Result<()> {
 }
 
 fn perform(request: &Request, name: &str, scope: &Scope) -> Result<()> {
-    if opencode::exists(name) { return opencode::session_action(name,&request.action,request.new_name.as_deref(),scope); }
+    if opencode::exists(name) {
+        return opencode::session_action(name, &request.action, request.new_name.as_deref(), request.message_id.as_deref(), scope);
+    }
+    if request.action == "remove_queued" {
+        return Err("Only OpenCode sessions have removable queued messages".into());
+    }
     if dsh::exists(name) {
         if request.action == "fork" {
             return dsh::fork(name, request.tag.as_deref(), Some(&request.expected_run_id),
@@ -358,6 +381,19 @@ mod tests {
         let mut invalid = request();
         invalid.archive_id = Some("11111111-1111-4111-8111-111111111111".into());
         assert!(validate(&invalid, "session").is_err());
+    }
+    #[test]
+    fn remove_queued_needs_exactly_one_message_id() {
+        let mut r = request();
+        r.action = "remove_queued".into();
+        assert!(validate(&r, "opencode/p/t").is_err());
+        r.message_id = Some("msg_gVmstesSuU81H2vTHdmxp65tNI".into());
+        validate(&r, "opencode/p/t").unwrap();
+        r.message_id = Some("../x".into());
+        assert!(validate(&r, "opencode/p/t").is_err());
+        r.action = "forget".into();
+        r.message_id = Some("msg_A".into());
+        assert!(validate(&r, "opencode/p/t").is_err());
     }
     #[test]
     fn duplicate_and_abandoned_claim_never_repeat_handoff() {
