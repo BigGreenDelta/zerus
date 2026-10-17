@@ -88,8 +88,9 @@ class SessionCardPresentationTest {
     }
 
     @Test fun inactiveChildrenFollowExplicitEvidenceAndCompleteGroupCounts() {
-        listOf("finished", "idle", "ready").forEach { assertTrue(SessionCardPresentation.inactiveChild(JSONObject().put("state", it))) }
-        listOf("working", "error", "paused", "input", "unknown", "").forEach { assertFalse(it, SessionCardPresentation.inactiveChild(JSONObject().put("state", it))) }
+        listOf("finished", "idle", "ready", "error").forEach { assertTrue(SessionCardPresentation.inactiveChild(JSONObject().put("state", it))) }
+        assertTrue(SessionCardPresentation.inactiveChild(JSONObject("""{"state":"finished","display_state":"error"}""")))
+        listOf("working", "paused", "input", "unknown", "").forEach { assertFalse(it, SessionCardPresentation.inactiveChild(JSONObject().put("state", it))) }
         assertFalse(SessionCardPresentation.inactiveChild(JSONObject("""{"state":"finished","display_state":"unknown"}""")))
         val group = JSONObject("""{"group":true,"active_count":0}""")
         assertTrue(SessionCardPresentation.inactiveChild(group, countsComplete = true))
@@ -105,15 +106,18 @@ class SessionCardPresentationTest {
             "b-working":{"label":"Explorer","name":"ignored","state":"working","task":"Search the code"},
             "d-paused":{"state":"paused","detail":null,"task":"Resume later"},
             "e-error":{"name":"Builder","state":"error"}}""")
+        // Finished and failed turns are both complete.
         val rows = SessionCardPresentation.children(item, true)
-        assertEquals(listOf("a-input", "b-working", "d-paused", "e-error"), rows.map { it.id })
+        assertEquals(listOf("a-input", "b-working", "d-paused"), rows.map { it.id })
         assertEquals(SessionCardChild("a-input", "Reviewer", "Needs input", "Approve the plan", "codex", DesktopBadgeKind.Attention, false), rows[0])
         assertEquals(SessionCardChild("b-working", "Explorer", "Working", "Search the code", "claude", DesktopBadgeKind.Working, false), rows[1])
         assertEquals(SessionCardChild("d-paused", "d-paused", "Paused", "Resume later", "claude", DesktopBadgeKind.Paused, false), rows[2])
-        assertEquals(DesktopBadgeKind.Neutral, rows[3].kind); assertEquals("Error", rows[3].status)
         assertEquals("Subagent Reviewer, Needs input", rows[0].description)
-        assertEquals(listOf("a-input", "b-working", "c-ready", "d-paused", "e-error"), SessionCardPresentation.children(item, true, includeCompleted = true).map { it.id })
-        assertEquals(listOf("a-input", "b-working", "c-ready", "d-paused", "e-error"), SessionCardPresentation.children(item, true, drafted = setOf("c-ready")).map { it.id })
+        val all = SessionCardPresentation.children(item, true, includeCompleted = true)
+        assertEquals(listOf("a-input", "b-working", "c-ready", "d-paused", "e-error"), all.map { it.id })
+        assertEquals(DesktopBadgeKind.Neutral, all[4].kind); assertEquals("Error", all[4].status)
+        assertEquals(listOf("a-input", "b-working", "c-ready", "d-paused"), SessionCardPresentation.children(item, true, drafted = setOf("c-ready")).map { it.id })
+        assertEquals(listOf("a-input", "b-working", "d-paused", "e-error"), SessionCardPresentation.children(item, true, drafted = setOf("e-error")).map { it.id })
     }
 
     @Test fun rowsOfAnUnavailableOrArchivedParentAreRecorded() {

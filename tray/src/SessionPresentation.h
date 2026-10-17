@@ -14,7 +14,8 @@ inline QString childState(const QJsonObject &child) {
 }
 inline bool inactiveChild(const QJsonObject &child, bool countsComplete = false) {
     const auto state = childState(child);
-    const bool inactive = state == "finished" || state == "idle" || state == "ready";
+    // A failed turn has ended too; its error belongs to the parent's result.
+    const bool inactive = state == "finished" || state == "idle" || state == "ready" || state == "error";
     // Explicit display evidence wins over an older raw turn state or count.
     if (!state.isEmpty() && !inactive) return false;
     if (child.value("group").toBool())

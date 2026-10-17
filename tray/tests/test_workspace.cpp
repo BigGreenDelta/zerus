@@ -93,10 +93,13 @@ void TestWorkspace::subagentInactivityKeepsConflictingAndUnknownEvidence()
         QVERIFY(inactiveChild({{"state", state}}));
         QVERIFY(inactiveChild({{"state", state}, {"display_state", ""}}));
         QVERIFY(inactiveChild({{"state", state}, {"display_state", QJsonValue::Null}}));
-        for (const auto &display : {"working", "input", "approval", "attention", "error", "paused", "unknown", "future-state"})
+        for (const auto &display : {"working", "input", "approval", "attention", "paused", "unknown", "future-state"})
             QVERIFY(!inactiveChild({{"state", state}, {"display_state", display}}));
     }
     QVERIFY(inactiveChild({{"state", "working"}, {"display_state", "idle"}}));
+    // A failed child turn has ended and hides with completed turns.
+    QVERIFY(inactiveChild({{"state", "finished"}, {"display_state", "error"}}));
+    QVERIFY(inactiveChild({{"state", "error"}}));
     QVERIFY(!inactiveChild({})); QVERIFY(!inactiveChild({{"state", "unknown"}}));
     const QJsonObject group{{"group", true}, {"active_count", 0}, {"total_count", 9}};
     QVERIFY(inactiveChild(group, true)); QVERIFY(!inactiveChild(group, false));

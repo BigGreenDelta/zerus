@@ -6295,6 +6295,13 @@ void TestSessionsWindow::inactiveSubagentsStayInInspectorAndOutOfSessionCounts()
     QCOMPARE(list->count(), 1); QVERIFY(list->item(0)->data(SessionRoles::Children).toString().isEmpty());
     QVERIFY(!list->item(0)->data(SessionRoles::HasChildren).toBool());
     QVERIFY(roster->toPlainText().contains("Completed child 174"));
+    // A failed turn has ended too: the inspector keeps its error, the tree hides it.
+    child["display_state"] = "error"; child["detail"] = "Usage limit reached"; session.subagents["child-000"] = child;
+    save(); window.setFleet(state); client->inspectionReady({}, session.name, snapshot());
+    QCOMPARE(list->count(), 1); QVERIFY(!list->item(0)->data(SessionRoles::HasChildren).toBool());
+    QVERIFY(roster->toPlainText().contains("Error")); QVERIFY(roster->toPlainText().contains("Usage limit reached"));
+    check->setChecked(true); QCOMPARE(list->count(), 176);
+    check->setChecked(false); QCOMPARE(list->count(), 1);
     // Unknown evidence remains explicit; an incomplete hook roster cannot claim zero active.
     session.subagentCountsComplete = false; save(); window.setFleet(state); client->inspectionReady({}, session.name, snapshot());
     QCOMPARE(list->item(0)->data(SessionRoles::Children).toString(), QString("0+"));

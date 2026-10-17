@@ -227,8 +227,8 @@ Session cards follow the desktop cards. A checkout line shows a small Git branch
 mark and `folder / branch` (or detached HEAD); a linked worktree names its main
 checkout folder, and ordinary folders show only their name with a folder mark. A subagent counter uses
 the desktop's compact active count, such as `3`, `2+` or `?`. Tapping it lists
-the children that are working, waiting for input, paused, failed or unknown,
-in stable ID order. Finished turns stay hidden, as with the desktop default,
+the children that are working, waiting for input, paused or unknown,
+in stable ID order. Finished and failed turns stay hidden, as with the desktop default,
 unless the child has an unsent draft on this phone. Profile groups are counted
 but not listed. Tapping a child opens its session and then the child's activity
 once that conversation is verified; Back returns to the session. Open subagent
