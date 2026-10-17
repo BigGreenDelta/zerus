@@ -12,7 +12,7 @@ import unittest
 import uuid
 
 from bb_operations import OperationCase, help_text, listing, real_hgs, size_vector, validation_cases
-from connector_harness import BlackBoxCase, default_rules
+from connector_harness import BlackBoxCase, default_rules, journal_bytes
 from differential import REAL_HGS, untraced
 
 SPEECH = ["speech", "--json"]
@@ -75,7 +75,7 @@ class SpeechCase(OperationCase, BlackBoxCase):
                              profile=profile(), credential=credential or {"mode": "replace", "sealed_value": sealed()})
 
     def journal_text(self) -> bytes:
-        return b"".join(path.read_bytes() for path in self.state_dir.iterdir() if path.name.startswith("journal"))
+        return journal_bytes(self.state_dir)
 
 
 class SpeechJobTests(SpeechCase):
