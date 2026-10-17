@@ -847,8 +847,9 @@ Claude Code and OpenCode as additional canaries. OpenCode follows a minimum vers
 policy: Zerus accepts any 2.x at or above the reviewed minimum whose service offers
 every operation it uses, so its pin is that minimum, and the canary qualifies the
 newest `@opencode/cli` release each day and reports an incompatibility without
-changing the pin. The report marks a newer OpenCode as newer than the reviewed
-minimum rather than as needing review. It does not advance reviewed pins or install
+changing the pin. The report labels the newest OpenCode as newer than, the same as
+or older than the reviewed minimum, and flags another major version or a prerelease
+for review. It does not advance reviewed pins or install
 anything on development machines. Its hosted job has read-only repository
 access, no cache access and no publication credentials. Reports, native logs
 and public protocol schemas expire after three days. A discovery or

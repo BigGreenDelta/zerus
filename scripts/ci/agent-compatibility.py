@@ -148,6 +148,27 @@ def version_text(value):
     return value
 
 
+def release(version):
+    """(major, minor, patch) of a plain release version, else None."""
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', version)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def minimum_review(version, minimum):
+    """How a published version relates to the reviewed minimum of an agent that is
+    accepted at or above it within one major version."""
+    found, floor = release(version), release(minimum)
+    if not found or not floor:
+        return 'needs review'
+    if found[0] != floor[0]:
+        return 'another major version than the reviewed minimum; needs review'
+    if found < floor:
+        return 'older than the reviewed minimum'
+    if found == floor:
+        return 'same as the reviewed minimum'
+    return 'newer than the reviewed minimum; see its canary'
+
+
 def discover_upstream(manifest):
     rows = []
     for source in manifest['upstream']:
@@ -157,11 +178,11 @@ def discover_upstream(manifest):
             for key in source['version_path']:
                 value = value[key]
             row['version'] = version_text(value)
-            if value in source['reviewed_versions']:
-                row['review'] = 'reviewed pin'
-            elif source.get('policy') == 'minimum':
+            if source.get('policy') == 'minimum':
                 # Accepted at or above the reviewed minimum once its canary passes.
-                row['review'] = 'newer than the reviewed minimum; see its canary'
+                row['review'] = minimum_review(value, source['reviewed_versions'][-1])
+            elif value in source['reviewed_versions']:
+                row['review'] = 'reviewed pin'
             else:
                 row['review'] = 'needs review'
         except Exception as error:

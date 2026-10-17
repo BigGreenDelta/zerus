@@ -308,12 +308,20 @@ pub(crate) fn installed_version() -> Option<String> {
 }
 
 /// The version in `opencode --version` output, which OpenCode 2 prints as
-/// `opencode v2.0.32`: the first whitespace-separated token that is
-/// `MAJOR.MINOR.PATCH` after an optional leading `v`, optionally with a
-/// `-prerelease` suffix (which `version_at_least` rejects), without the `v`.
+/// `opencode v2.0.32`: the first version-shaped token of the first line, or
+/// of a later line only when the first has none (a warning printed first).
 fn version_from_output(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    let first = lines.next()?;
+    version_token(first).or_else(|| lines.find_map(version_token))
+}
+
+/// The first whitespace-separated token of `line` that is `MAJOR.MINOR.PATCH`
+/// after an optional leading `v`, optionally with a `-prerelease` suffix
+/// (which `version_at_least` rejects), without the `v`.
+fn version_token(line: &str) -> Option<String> {
     let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
-    text.split_whitespace().find_map(|token| {
+    line.split_whitespace().find_map(|token| {
         let version = token.strip_prefix('v').unwrap_or(token);
         let (core, prerelease) = match version.split_once('-') {
             Some((core, prerelease)) => (core, Some(prerelease)),
@@ -368,6 +376,16 @@ mod tests {
             ("opencode v2.0.33-beta.1", Some("2.0.33-beta.1")),
             ("garbage", None),
             ("", None),
+            // A warning printed before the version line.
+            (
+                "Warning: could not write the log file\nopencode v2.0.32\n",
+                Some("2.0.32"),
+            ),
+            // The first line's version wins over later version-shaped text.
+            (
+                "opencode v2.0.32\nlatest 2.0.40 available\n",
+                Some("2.0.32"),
+            ),
         ] {
             assert_eq!(
                 version_from_output(output).as_deref(),

@@ -65,11 +65,11 @@ def owned_processes(marker):
                 continue
             try:
                 command = (entry / 'cmdline').read_bytes()
-                environment = (entry / 'environ').read_bytes()
+                if needle not in command and needle not in (entry / 'environ').read_bytes():
+                    continue
             except OSError:
                 continue
-            if needle in command or needle in environment:
-                found.append((int(entry.name), command.replace(b'\0', b' ').decode(errors='replace').strip()))
+            found.append((int(entry.name), command.replace(b'\0', b' ').decode(errors='replace').strip()))
         return found
     # macOS: BSD ps shows the environment of the user's own processes with -E.
     listing = subprocess.run(['ps', '-E', '-ww', '-x', '-o', 'pid=,command='], capture_output=True,
@@ -148,7 +148,7 @@ class Model(http.server.BaseHTTPRequestHandler):
             pass
 
 
-def stub_service(version, openapi=None):
+def stub_service(version, pid, openapi=None):
     """A loopback HTTP stub that answers like an OpenCode service of `version`."""
     class Stub(http.server.BaseHTTPRequestHandler):
         seen = []
@@ -167,7 +167,7 @@ def stub_service(version, openapi=None):
         def do_GET(self):
             Stub.seen.append(('GET', self.path))
             if self.path == '/api/info':
-                self.answer(200, {'version': version, 'pid': os.getpid(), 'urls': []})
+                self.answer(200, {'version': version, 'pid': pid, 'urls': []})
             elif self.path == '/openapi.json' and openapi is not None:
                 self.answer(200, openapi)
             else:
@@ -201,6 +201,8 @@ class OpenCodeNative(unittest.TestCase):
     @classmethod
     def prepare(cls):
         root = cls.root
+        # Registration files this suite wrote itself, byte for byte.
+        cls.fake_registrations = set()
         cls.workspace = root / 'workspace'
         cls.state = root / 'hgs-state'
         for path in ['home', 'xdg-config/opencode', 'xdg-data', 'xdg-cache', 'xdg-state', 'workspace',
@@ -266,41 +268,45 @@ class OpenCodeNative(unittest.TestCase):
 
     @classmethod
     def stop_service(cls):
-        """Stop the private service and wait until its process is gone."""
+        """Stop the service OpenCode registered privately and wait until no process
+        carries the private root. A registration this suite wrote itself (a stub, a hung
+        port or an exited process) is deleted, never handed to `opencode service stop`."""
         registration = cls.registration_path()
         try:
-            pid = json.loads(registration.read_text()).get('pid')
-        except (OSError, ValueError):
-            pid = None
-        if pid == os.getpid():
-            # A stub registration names this test process; never hand it to OpenCode.
+            written = registration.read_bytes()
+        except OSError:
+            written = None
+        if written in cls.fake_registrations:
             registration.unlink()
-        elif registration.exists():
+        elif written is not None:
             cls.opencode('service', 'stop')
         until = time.monotonic() + 15
-        while cls.native_processes() and time.monotonic() < until:
+        while owned_processes(str(cls.root)) and time.monotonic() < until:
             time.sleep(.2)
 
     @classmethod
+    def reap(cls):
+        """Stop whatever still carries the private root, only this suite's processes;
+        returns what was found."""
+        leftovers = owned_processes(str(cls.root))
+        for sig in (signal.SIGTERM, signal.SIGKILL) if leftovers else ():
+            for pid, _ in owned_processes(str(cls.root)):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    pass
+            time.sleep(1)
+        return leftovers
+
+    @classmethod
     def cleanup(cls):
-        leftovers = []
         try:
             if cls.model:
                 cls.model.release.set()
             if hasattr(cls, 'env'):
                 cls.stop_service()
         finally:
-            until = time.monotonic() + 10
-            while (leftovers := owned_processes(str(cls.root))) and time.monotonic() < until:
-                time.sleep(.2)
-            # Only processes carrying this suite's private root remain to stop.
-            for sig in (signal.SIGTERM, signal.SIGKILL) if leftovers else ():
-                for pid, _ in owned_processes(str(cls.root)):
-                    try:
-                        os.kill(pid, sig)
-                    except ProcessLookupError:
-                        pass
-                time.sleep(1)
+            leftovers = cls.reap()
             if cls.model:
                 cls.model.shutdown()
                 cls.model.server_close()
@@ -316,8 +322,14 @@ class OpenCodeNative(unittest.TestCase):
         self.model.holding.clear()
         self.model.release.clear()
         self.model.requests.clear()
-        self.addCleanup(self.stop_service)
+        self.addCleanup(self.stop_and_check)
         self.addCleanup(self.model.release.set)
+
+    def stop_and_check(self):
+        """Each test ends with its private service stopped and nothing left behind, so a
+        leak is reported by the test that caused it."""
+        self.stop_service()
+        self.assertEqual(self.reap(), [], 'processes outlived this test')
 
     def hgs(self, args, payload=None, success=True):
         run = subprocess.run([str(HGS), *args], env=self.env, cwd=self.workspace, text=True, capture_output=True,
@@ -380,10 +392,12 @@ class OpenCodeNative(unittest.TestCase):
     def write_registration(self, value):
         path = self.registration_path()
         path.parent.mkdir(parents=True, exist_ok=True)
+        written = json.dumps(value).encode()
+        self.fake_registrations.add(written)
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, 'w') as file:
-            file.write(json.dumps(value))
-        return path.read_bytes()
+        with os.fdopen(descriptor, 'wb') as file:
+            file.write(written)
+        return written
 
     def api(self, method, path, body=None):
         """This test's own request to its private service, authenticated as hgs is."""
@@ -692,8 +706,17 @@ class OpenCodeNative(unittest.TestCase):
         self.assertEqual(set(self.listing()) & {refused['name'], migrated['name']}, set())
         self.assertEqual(self.hgs(['inspect', current['name']])['phase'], 'idle')
 
-    def assert_never_started(self, registration):
+    def live_stand_in(self):
+        """A disposable live process to register as the service: if hgs ever ran OpenCode's
+        own start here, OpenCode could stop that process, never this test runner."""
+        child = subprocess.Popen(['sleep', '600'], stdin=subprocess.DEVNULL)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        return child
+
+    def assert_never_started(self, registration, stand_in):
         self.assertEqual(self.registration_path().read_bytes(), registration)
+        self.assertIsNone(stand_in.poll(), 'the registered process was stopped')
         self.assertEqual(self.native_processes(), [])
 
     def test_07_incompatible_service(self):
@@ -701,13 +724,14 @@ class OpenCodeNative(unittest.TestCase):
         saved = self.save_binding('incompatible-' + uuid.uuid4().hex[:8], service='opencode2')
         openapi = json.loads((REPO / 'tests/fixtures/opencode2/openapi-2.0.32.json').read_text())
         del openapi['paths']['/api/session/{sessionID}/inbox']
+        stand_in = self.live_stand_in()
         for version, reason in [('2.0.31', 'OpenCode 2.0.31 is not supported; install OpenCode 2.0.32 or newer 2.x'),
                                 ('2.0.40', 'OpenCode 2.0.40 lacks GET /api/session/{sessionID}/inbox; update OpenCode or Zerus')]:
             with self.subTest(version=version):
-                server, seen = stub_service(version, openapi)
+                server, seen = stub_service(version, stand_in.pid, openapi)
                 try:
                     registration = self.write_registration({
-                        'id': 'svc_stub_' + uuid.uuid4().hex[:8], 'version': version, 'pid': os.getpid(),
+                        'id': 'svc_stub_' + uuid.uuid4().hex[:8], 'version': version, 'pid': stand_in.pid,
                         'url': f'http://127.0.0.1:{server.server_port}', 'password': 'stub-password'})
                     row = self.hgs(['inspect', saved['name']])
                     self.assertTrue(row['inspection_unavailable'])
@@ -718,34 +742,31 @@ class OpenCodeNative(unittest.TestCase):
                     self.assertIn(reason, self.launch(tag, '--model', 'fixture/local', success=False).stderr)
                     self.assertFalse(self.binding_path('opencode/workspace/' + tag).exists())
                     self.assertIn(reason, self.hgs(['account', 'start', 'native-opencode'], success=False).stderr)
-                    self.assert_never_started(registration)
+                    self.assert_never_started(registration, stand_in)
                     self.assertEqual({method for method, _ in seen}, {'GET'})
                     self.assertTrue({path for _, path in seen} <= {'/api/info', '/openapi.json'}, seen)
                 finally:
-                    self.registration_path().unlink(missing_ok=True)
                     server.shutdown()
                     server.server_close()
 
     def test_08_never_replaces_a_live_registration(self):
         self.stop_service()
         # A live registered process whose port accepts connections but never answers.
+        stand_in = self.live_stand_in()
         with socket.socket() as hung:
             hung.bind(('127.0.0.1', 0))
             hung.listen(16)
-            try:
-                registration = self.write_registration({
-                    'id': 'svc_hung', 'version': self.version, 'pid': os.getpid(),
-                    'url': f'http://127.0.0.1:{hung.getsockname()[1]}', 'password': 'hung-password'})
-                tag = 'hung-' + uuid.uuid4().hex[:8]
-                failure = self.launch(tag, '--model', 'fixture/local', success=False)
-                self.assertRegex(failure.stderr, 'OpenCode is (not responding|starting)')
-                self.assertFalse(self.binding_path('opencode/workspace/' + tag).exists())
-                failure = self.hgs(['account', 'start', 'native-opencode'], success=False)
-                self.assertRegex(failure.stderr, 'OpenCode is (not responding|starting)')
-                self.assertEqual(self.account()['catalog_state'], 'unreachable')
-                self.assert_never_started(registration)
-            finally:
-                self.registration_path().unlink(missing_ok=True)
+            registration = self.write_registration({
+                'id': 'svc_hung', 'version': self.version, 'pid': stand_in.pid,
+                'url': f'http://127.0.0.1:{hung.getsockname()[1]}', 'password': 'hung-password'})
+            tag = 'hung-' + uuid.uuid4().hex[:8]
+            failure = self.launch(tag, '--model', 'fixture/local', success=False)
+            self.assertRegex(failure.stderr, 'OpenCode is (not responding|starting)')
+            self.assertFalse(self.binding_path('opencode/workspace/' + tag).exists())
+            failure = self.hgs(['account', 'start', 'native-opencode'], success=False)
+            self.assertRegex(failure.stderr, 'OpenCode is (not responding|starting)')
+            self.assertEqual(self.account()['catalog_state'], 'unreachable')
+            self.assert_never_started(registration, stand_in)
 
     def test_09_explicit_start_and_account_catalog(self):
         self.stop_service()

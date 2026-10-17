@@ -206,6 +206,18 @@ class AgentCompatibility(unittest.TestCase):
         self.assertEqual(rows[0]['reviewed_versions'], ['0.160.1', '0.162.0'])
         self.assertEqual(rows[1]['error'], 'fixture unavailable')
 
+    def test_opencode_releases_are_labelled_against_the_reviewed_minimum(self):
+        [source] = [row for row in json.loads(compat.MANIFEST.read_text())['upstream'] if row['name'] == 'OpenCode']
+        for published, review in [('2.0.32', 'same as the reviewed minimum'),
+                                  ('2.1.0', 'newer than the reviewed minimum; see its canary'),
+                                  ('2.0.9', 'older than the reviewed minimum'),
+                                  ('3.0.0', 'another major version than the reviewed minimum; needs review'),
+                                  ('1.18.35', 'another major version than the reviewed minimum; needs review'),
+                                  ('2.0.33-beta.1', 'needs review')]:
+            with self.subTest(published), patch.object(compat, 'fetch_json', return_value={'version': published}):
+                [row] = compat.discover_upstream({'upstream': [source]})
+                self.assertEqual(row['review'], review)
+
     def test_latest_claude_canary_uses_the_official_platform_package(self):
         manifest = json.loads(compat.MANIFEST.read_text())
         pinned = next(package['version'] for package in reversed(manifest['claude']) if package['target'] == 'linux-x64')
