@@ -37,12 +37,13 @@ reference <session> --json`. Before sending an assignment, run `hgs wait begin
 ```
 
 Use a new canonical UUID per declaration and retain it for a deliberate retry.
-Normally hgs proves the caller against its native process ancestry. An operator
-or API-host agent adds its copied `waiter_reference`; hgs verifies the local
-computer, provider, saved run and conversation. This is an explicitly authored
-dependency, not observed native work. Archives, children, unconfirmed identities
-and self-waits are rejected. Renames retain the dependency; a new waiter run or
-cleared conversation does not inherit it.
+Normally hgs proves the caller against its native process ancestry; `hgs self
+--json` returns that proven reference. An operator or API-host agent adds its
+copied `waiter_reference`; hgs verifies the local computer, provider, saved run
+and conversation. This is an explicitly authored dependency, not observed native
+work. Archives, children, unconfirmed identities and self-waits are rejected.
+Renames retain the dependency; a new waiter run or cleared conversation does not
+inherit it.
 
 The response contains public `wait` metadata, a `reply_host` routing hint and a private `reply_ticket` with
 `wait_id`, `waiter_machine`, `expected_run_id`, `expected_conversation_id` and
