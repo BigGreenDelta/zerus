@@ -109,6 +109,23 @@ socket. The hook script was throwaway.
    also answers. It runs before anyone sees the question, so it cannot carry a
    human answer.
 
+The agent-approval session's approval spike (`zerus-pdmm`, same setup) adds the
+following:
+
+6. When the hook times out, and when the person declines in Terminal (Esc or
+   No) while the hook waits, Claude sends the hook SIGTERM. A Terminal Yes
+   sends no signal. A Terminal decline writes an `is_error` `tool_result` ("The
+   user doesn't want to proceed with this tool use...") for the same
+   `tool_use_id`. Every Terminal outcome therefore leaves a transcript
+   `tool_result` for the bound tool use.
+7. A silent journaling hook next to the deciding hook does not interfere; the
+   decision applies.
+8. `PermissionRequest` carries `cwd`, `effort`, `hook_event_name`,
+   `permission_mode`, `permission_suggestions`, `prompt_id`, `session_id`,
+   `tool_input`, `tool_name`, `transcript_path`, and `agent_id` for children.
+   It has no `tool_use_id`. `prompt_id` covers the whole user prompt and is
+   shared by concurrent requests, so it is not an identity.
+
 ### Hook registration
 
 - hgs adds a second `PermissionRequest` entry to the account settings it
@@ -143,7 +160,7 @@ The channel process:
 3. Polls every 100-200 ms (no sockets, so it is portable to Windows) and exits
    silently when any of these holds:
    - the card is no longer pending, or a transcript `tool_result` exists for
-     the bound `tool_use_id` (answered in Terminal, cancelled, interrupted);
+     the bound `tool_use_id` (answered, declined or cancelled in Terminal);
    - the run or conversation changed, the record says the session ended, or
      the parent Claude process is gone;
    - its deadline passed.
@@ -151,6 +168,10 @@ The channel process:
 4. Claims an answer by atomically renaming `answer.json` to `claimed.json`.
    Then it re-checks steps 1 and 3, writes `emitted.json` (with the answer
    `request_id`) and only after that prints the decision and exits.
+5. Handles SIGTERM (hook timeout, Terminal decline) by writing `closed.json`
+   with the reason and whether `emitted.json` exists, then exiting. Its own
+   deadline is shorter than the configured hook timeout, so Windows, which
+   sends no SIGTERM, closes the same way.
 
 `hgs answer` for a `hook` card, under the existing per-run question lock and
 `question_receipts/<request_id>.json`:
@@ -166,9 +187,13 @@ The channel process:
 3. After a claim it waits for confirmation: `PostToolUse` or
    `QuestionAnswered` for the bound `tool_use_id`, whose transcript
    `tool_result` matches the delivered answers. Then the receipt becomes
-   `answered`. A claimed answer without confirmation within the existing
-   delivery budget becomes `uncertain`. It is never retried and never sent
-   through the screen.
+   `answered`.
+   - `emitted.json` is written before the decision is printed. So a channel
+     that closed after the claim without `emitted.json` never printed
+     anything, and the answer may use the screen.
+   - Once `emitted.json` exists, an answer without confirmation within the
+     existing delivery budget becomes `uncertain`. It is never retried and
+     never sent through the screen.
 4. The same `request_id` returns the stored receipt, as today.
 
 ### Answer mapping
@@ -198,15 +223,30 @@ The channel process:
 
 ## C for Claude approvals
 
-The same channel answers `claude_tool_approval` with `behavior: "allow"` (one
-time, never `updatedPermissions`) or `behavior: "deny"` with a message. The
-agent-approval session owns this adapter and verifies on its native harness:
+The same channel answers `claude_tool_approval`. The agent-approval session
+owns this adapter (`zerus-pdmm`). Its spike verified the following on Claude
+2.1.296:
 
-- allow once and deny with a message;
-- whether Claude's terminal safety confirmation (for example a dangerous `rm`)
-  emits `PermissionRequest` at all; if not, it stays on the A path;
-- binding when several `PermissionRequest` events are pending at once;
-- the orphaned hook after a Terminal answer.
+- Allow maps to `behavior: "allow"` without `updatedPermissions`. The tool
+  runs once and no settings file changes.
+- No maps to `behavior: "deny"` with `interrupt: true`. This matches the TUI
+  No: "Interrupted · What should Claude do instead?", with no `tool_result`
+  and no Stop hook.
+- "No, and tell Claude what to do differently" maps to `behavior: "deny"` with
+  the person's message and without `interrupt`. The model receives it as an
+  `is_error` `tool_result`, and the turn continues.
+- A dangerous `rm` in the main agent under `bypassPermissions` also emits
+  `PermissionRequest`, so safety confirmations use C. Only a
+  `claude_terminal_safety` panel without any hook stays on the A path.
+- Binding uses the active `PreToolUse` (no `PostToolUse` yet) with exactly
+  equal `tool_name` and `tool_input`; its `tool_use_id` becomes the identity.
+  Identical inputs waiting at the same time are ambiguous: the channel exits
+  silently and the screen remains. Children also match `agent_id`.
+- Claude runs two Bash calls from one message sequentially. Two Reads outside
+  the project give two concurrent `PermissionRequest` events ("1 of 2"), and
+  each hook process's decision reaches its own `tool_use_id`.
+- A Terminal answer neither kills the hook nor signals it; a late decision is
+  ignored.
 
 Automatic approvals keep their durable private audit reservation before
 delivery. The channel is only another transport.
