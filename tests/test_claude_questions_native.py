@@ -2,7 +2,7 @@
 """Real Claude TUI against a localhost-only API fixture, never a user's account.
 Run with HGS_CLAUDE_TEST_BIN=/absolute/path/to/claude (otherwise skipped).
 """
-import hashlib,json,os,re,shlex,shutil,subprocess,sys,tempfile,threading,time,unittest,uuid
+import hashlib,json,os,re,shlex,shutil,signal,subprocess,sys,tempfile,threading,time,unittest,uuid
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 import test_input as fixtures
@@ -19,6 +19,14 @@ ITEMS=[dict(question='Which release should we prepare?',header='Release',options
 WRAPPED_ITEMS=[dict(ITEMS[0],options=[dict(label='Stable',description='Use stable build from the release branch of the example repository, then run step 2. Verify the signed tag.'),
    dict(label='Preview',description='Use preview build 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')]),ITEMS[1],
  dict(ITEMS[2],question='What else should we know? Compare /work/example/projects/a-really-long-directory-name/contracts/template-with-a-long-name.html after step 1. review.'),ITEMS[3]]
+
+# A single multi-select question with long Cyrillic descriptions: taller than
+# the 24 rows of a pane no client has attached to (tmux's default-size).
+TALL_ITEMS=[dict(question='Which release should we prepare?',header='Провайдер',multiSelect=True,options=[
+ dict(label='API-ключи',description='Любой провайдер из списка (Z.AI, OpenRouter, DeepSeek и другие): ввести, заменить или удалить ключ на выбранной машине. Дополнительные поля провайдер описывает сам.'),
+ dict(label='Вход через браузер',description='Подписки: показываем ссылку и код, вход выполняется в своём браузере, даже если машина удалённая. Для этого нужен запущенный сервер на той машине.'),
+ dict(label='Свои адреса',description='Свой совместимый адрес (локальная модель, корпоративный прокси): URL, ключ и список моделей, которые появятся в выборе модели.'),
+ dict(label='Копировать на другую машину',description='Перенести уже настроенного провайдера с одной машины на другую без повторного ввода ключа, с подтверждением на обеих сторонах.')])]
 
 def shows_prefix(rows,text):
  """Whether Other editor rows show exactly text. A row ends at a hard newline
@@ -58,11 +66,15 @@ class NativeClaudeQuestions(unittest.TestCase):
   work=self.root/'work';work.mkdir();(self.root/'.claude').mkdir()
   self.tool_name=getattr(self,'tool_name','AskUserQuestion');self.tool_input=self.native_tool_input(work) if hasattr(self,'native_tool_input') else getattr(self,'tool_input',None);self.message_fixture=getattr(self,'message_fixture',False);self.approval_fixture=self.tool_name!='AskUserQuestion' and not self.message_fixture
   wrapped=self._testMethodName.startswith('test_wrapped_')
-  self.items=ITEMS[:1] if self._testMethodName.startswith('test_single_') else WRAPPED_ITEMS if wrapped else ITEMS
+  # Claude's own PermissionRequest hook answers test_channel_* questions.
+  channel=self._testMethodName.startswith('test_channel_');tall=self._testMethodName.startswith('test_channel_tall_')
+  if self._testMethodName.startswith('test_channel_single_deadline_'):self.channel_seconds=4
+  self.items=TALL_ITEMS if tall else ITEMS[:1] if self._testMethodName.startswith(('test_single_','test_channel_single_')) else WRAPPED_ITEMS if wrapped else ITEMS
   (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
   permission_mode=getattr(self,'native_permission_mode','default' if self.approval_fixture or self.message_fixture else 'bypassPermissions')
   settings={'permissions':{'defaultMode':permission_mode}}
   if hasattr(self,'native_settings'):settings.update(self.native_settings(work))
+  if channel:settings.setdefault('hooks',{})['PermissionRequest']=[{'matcher':'AskUserQuestion','hooks':[{'type':'command','command':shlex.quote(str(fixtures.HGS))+' __state answer-channel','timeout':86400}]}]
   (self.root/'.claude/settings.json').write_text(json.dumps(settings))
   fixture=self;self.native_requests=[]
   class Server(BaseHTTPRequestHandler):
@@ -98,10 +110,11 @@ class NativeClaudeQuestions(unittest.TestCase):
   # its owned process has exited. This also runs when native startup fails.
   self.addCleanup(lambda:fixtures.InputTransport.tearDown(self))
   # tmux's default size for a session no client has attached to yet.
-  columns,rows=('80','24') if '_80x24' in self._testMethodName else ('87' if wrapped else '120','45')
-  self.tmux('new-session','-d','-s',self.name,'-x',columns,'-y',rows,'-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),CLAUDE,*(['--dangerously-skip-permissions'] if permission_mode=='bypassPermissions' else []),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
+  columns,rows=('80','24') if tall or '_80x24' in self._testMethodName else ('87' if wrapped else '120','45')
+  hgs_env=['HGS_SESSION='+self.name,'HGS_RUN_ID='+self.run_id,'HGS_STATE_DIR='+str(self.state),'HGS_CONFIG_DIR='+str(self.root/'config')]+(['HGS_ANSWER_CHANNEL_SECONDS='+str(self.channel_seconds)] if hasattr(self,'channel_seconds') else [])
+  self.tmux('new-session','-d','-s',self.name,'-x',columns,'-y',rows,'-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),*(hgs_env if channel else []),CLAUDE,*(['--dangerously-skip-permissions'] if permission_mode=='bypassPermissions' else []),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
   self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
-  self.wait_for(lambda:('Fixture complete.' if self.message_fixture else getattr(self,'panel_question','Do you want to proceed?') if self.approval_fixture else 'Which release should we prepare?') in self.screen())
+  self.wait_for(lambda:('Fixture complete.' if self.message_fixture else getattr(self,'panel_question','Do you want to proceed?') if self.approval_fixture else 'Enter to select' if tall else 'Which release should we prepare?') in self.screen())
   transcript=next((self.root/'.claude/projects').glob('*/*.jsonl'));self.conversation_id=transcript.stem
   pid=int(self.tmux('display-message','-p','-t',self.pane,'#{pane_pid}'))
   start=subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
@@ -401,6 +414,58 @@ sys.exit(result.returncode)
   self.assertEqual(self.answer(payload)['status'],'answered');self.assert_native_answer(payload)
   self.assert_pastes([])
   self.assertIn('C-u',[event[-1] for event in self.events() if event[0]=='send-keys'])
+ def channel(self):
+  path=self.wait_for(lambda:next(iter(self.state.glob('native_answers/*/*/waiting.json')),None))
+  return json.loads(path.read_text()),path.parent
+ def channel_card(self):
+  return self.wait_for(lambda:next((card for card in self.inspect()['pending_questions'] if card.get('answer_transport')=='claude_hook'),None))
+ def height(self):return self.tmux('display-message','-p','-t',self.pane,'#{window_height}').strip()
+ def running(self,pid):
+  try:os.kill(pid,0);return True
+  except ProcessLookupError:return False
+ def test_channel_tall_question_answered_at_80x24_without_growth(self):
+  card=self.channel_card();self.assertTrue(card['can_answer']);self.assertEqual(self.height(),'24')
+  payload=self.payload(answers=[dict(question_id='q_0',selected_option_ids=['opt_0_0','opt_0_2'],text='')])
+  receipt=self.answer(payload);self.assertEqual((receipt['status'],receipt['transport']),('answered','claude_hook'))
+  self.assert_native_answer(payload);self.assertEqual(self.height(),'24');self.assertEqual(self.answer(payload),receipt)
+  waiting,folder=self.channel();self.assertEqual(json.loads((folder/'closed.json').read_text())['emitted'],True)
+ def test_channel_multi_and_other(self):
+  self.channel_card();payload=self.payload();payload['answers'][2]=dict(question_id='q_2',selected_option_ids=[],text='Later, after review | Привет')
+  receipt=self.answer(payload);self.assertEqual((receipt['status'],receipt['transport']),('answered','claude_hook'))
+  self.assert_native_answer(payload)
+  self.assertIn('Fixture complete.',self.wait_for(lambda:self.screen() if 'Fixture complete.' in self.screen() else ''))
+ def test_channel_single_terminal_answer_first(self):
+  self.channel_card();waiting,folder=self.channel();self.assertTrue(self.running(waiting['pid']))
+  self.key('Enter')
+  self.wait_for(lambda:not self.running(waiting['pid']))
+  self.assertIn(json.loads((folder/'closed.json').read_text())['reason'],['answered in Terminal','question resolved'])
+  self.assertFalse((folder/'emitted.json').exists())
+  # The fixture records no PostToolUse; Claude's transcript already has the answer.
+  self.assertIn('already answered',self.answer(success=False))
+ def test_channel_single_killed_falls_back_to_screen(self):
+  self.channel_card();waiting,folder=self.channel();os.kill(waiting['pid'],signal.SIGKILL)
+  self.wait_for(lambda:not self.running(waiting['pid']))
+  card=self.wait_for(lambda:next((card for card in self.inspect()['pending_questions'] if card.get('answer_transport')=='claude_tui' and card['can_answer']),None))
+  receipt=self.answer();self.assertEqual((receipt['status'],receipt['transport']),('answered','claude_tui'))
+  self.assert_native_answer(self.payload())
+ def test_channel_single_double_submit_answers_once(self):
+  self.channel_card();first,second=self.payload(),self.payload(answers=[dict(question_id='q_0',selected_option_ids=['opt_0_0'],text='')])
+  results={}
+  def run(name,payload):results[name]=subprocess.run([str(fixtures.HGS),'answer',self.name,'--json'],input=json.dumps(payload),text=True,capture_output=True,env=self.env,timeout=60)
+  threads=[threading.Thread(target=run,args=item) for item in (('first',first),('second',second))]
+  for thread in threads:thread.start()
+  for thread in threads:thread.join()
+  self.assertEqual(sorted(result.returncode==0 for result in results.values()),[False,True],{k:(v.returncode,v.stdout,v.stderr) for k,v in results.items()})
+  winner=next(name for name,result in results.items() if result.returncode==0)
+  self.assert_native_answer(first if winner=='first' else second)
+ def test_channel_single_deadline_leaves_the_panel(self):
+  self.channel_card();waiting,folder=self.channel()
+  self.wait_for(lambda:(folder/'closed.json').exists() and not self.running(waiting['pid']))
+  self.assertEqual(json.loads((folder/'closed.json').read_text())['reason'],'deadline')
+  card=self.wait_for(lambda:next((card for card in self.inspect()['pending_questions'] if card['can_answer']),None))
+  self.assertEqual(card['answer_transport'],'claude_tui')
+  receipt=self.answer();self.assertEqual((receipt['status'],receipt['transport']),('answered','claude_tui'))
+  self.assert_native_answer(self.payload())
  def test_missing_native_receipt_is_uncertain_and_never_retried(self):
   self.enable_gutter_capture(False)
   other=self.root/'unconfirmed';other.mkdir();path=other/(self.conversation_id+'.jsonl');path.write_text('')

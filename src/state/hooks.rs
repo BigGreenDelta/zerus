@@ -439,7 +439,9 @@ fn merge_json(
         .filter_map(|group| group.get("hooks").and_then(Value::as_array))
         .flatten()
         .any(owns_channel);
+    // Windows keeps the terminal path until its native qualification.
     if agent == "claude"
+        && !windows
         && !channel_installed
         && version().is_some_and(|version| version >= CLAUDE_ANSWER_CHANNEL)
     {
@@ -1857,13 +1859,15 @@ mod tests {
         assert!(hook_entries(&merged, "PermissionRequest")
             .contains(&json!({"type": "command", "command": UNIX, "timeout": 5})));
         assert_eq!(versioned_merge(&merged, "claude", false, unix.clone(), None), (None, 0));
-        // Windows repeats Claude's exec form with the channel's arguments.
+        // Windows keeps the terminal path until the channel is qualified there.
         let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
         let (settings, _) = versioned_merge("", "claude", true, exec.clone(), Some(CLAUDE_ANSWER_CHANNEL));
-        let channel = channel_groups(&settings.unwrap());
-        assert_eq!(channel.len(), 1);
-        assert_eq!(channel[0]["hooks"][0]["command"], json!(exec.command));
-        assert_eq!(channel[0]["hooks"][0]["args"], json!(["__state", "answer-channel"]));
+        assert!(channel_groups(&settings.unwrap()).is_empty());
+        // Claude's exec form derives the channel's arguments.
+        let channel = exec.channel().unwrap().channel_group();
+        assert_eq!(channel["hooks"][0]["command"], json!(exec.command));
+        assert_eq!(channel["hooks"][0]["args"], json!(["__state", "answer-channel"]));
+        assert!(owns_channel(&channel["hooks"][0]));
         // A legacy hgs_state.py entry has no channel to offer.
         let legacy = Entry::shell("python3 /opt/hgs_state.py hook".into());
         let (legacy, _) = versioned_merge("", "claude", false, legacy, Some(CLAUDE_ANSWER_CHANNEL));

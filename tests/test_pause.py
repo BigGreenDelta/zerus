@@ -697,7 +697,12 @@ class Lifecycle(Harness):
         data = json.loads(settings.read_text())
         entry = data["hooks"]["Stop"]
         self.assertEqual(data["hooks"]["PostModelSwitch"], entry)
-        others = lambda hooks: {event: groups for event, groups in hooks.items() if event != "PostModelSwitch"}
+        # The answer channel is versioned the same way (Claude Code 2.1.296).
+        channel = lambda hooks: [group for group in hooks.get("PermissionRequest", [])
+                                 if any(hook["command"].endswith("__state answer-channel") for hook in group["hooks"])]
+        others = lambda hooks: {event: [group for group in groups if group not in channel(hooks)]
+                                for event, groups in hooks.items() if event != "PostModelSwitch"}
+        self.assertEqual(len(channel(data["hooks"])), 1)
         # The user's own hook for the event, beside hgs's.
         user = {"matcher": "opus", "hooks": [{"type": "command", "command": "true"}]}
         data["hooks"]["PostModelSwitch"].append(user)
@@ -715,6 +720,7 @@ class Lifecycle(Harness):
         self.resume(name)
         hooks = json.loads(settings.read_text())["hooks"]
         self.assertEqual(hooks["PostModelSwitch"], [user])
+        self.assertEqual(channel(hooks), [])
         self.assertEqual(others(hooks), others(data["hooks"]))
         self.assertEqual(len(reads.read_text().splitlines()), asked + 1)
         # A current version again gets the entry back, beside the user's.
@@ -724,6 +730,7 @@ class Lifecycle(Harness):
         self.resume(name)
         data = json.loads(settings.read_text())
         self.assertEqual(data["hooks"]["PostModelSwitch"], [user] + entry)
+        self.assertEqual(len(channel(data["hooks"])), 1)
         # Without the user's hook, an older version loses the event itself
         # and starts without a settings warning.
         data["hooks"]["PostModelSwitch"] = entry
