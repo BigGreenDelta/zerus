@@ -642,6 +642,31 @@ class PublicationTests(unittest.TestCase):
                     publish.publish_github(directory, info, sums)
                     self.assertEqual(commands, [])
 
+    def test_a_refused_draft_names_the_owner_path_and_writes_nothing(self):
+        # zerus-ktg3: GitHub once refused the job token's draft (HTTP 403).
+        directory = self.candidate(windows=True, name="refused")
+        info, sums = common.validate_candidate(directory, VERSION)
+        commands = []
+        def gh(*args):
+            commands.append(args)
+            if args[1] == "create":
+                raise subprocess.CalledProcessError(1, ["gh", *args])
+            self.fail("Unexpected GitHub mutation: " + str(args))
+        with patch.object(publish, "release_for_tag", return_value=None), \
+                patch.object(publish, "verify_tag", return_value=True), \
+                patch.object(publish, "gh", side_effect=gh), \
+                patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(ValueError) as raised:
+                publish.publish_github(directory, info, sums)
+        message = str(raised.exception)
+        self.assertIn(f"gh release create v{VERSION} --repo {common.REPOSITORY} --draft --target {COMMIT}", message)
+        self.assertIn(f"--title 'Zerus {VERSION}'", message)
+        self.assertIn("Rerun this publisher for the same candidate", message)
+        self.assertEqual([args[1] for args in commands], ["create"])
+        # The printed notes are the ones the draft would have carried.
+        self.assertIn(f"Source commit: `{COMMIT}`", stderr.getvalue())
+        self.assertIn("hgs-tray.exe", stderr.getvalue())
+
     def test_new_draft_visibility_delay_retries_reads_without_recreating(self):
         directory = self.candidate()
         info, sums = common.validate_candidate(directory, VERSION)

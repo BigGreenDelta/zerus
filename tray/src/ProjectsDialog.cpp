@@ -199,7 +199,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     m_worktrees->sessionRequested=[this](const QString &name,const QString &archive){const auto folder=selectedFolder();emit relatedSessionRequested(folder.machine==m_fleet.local().host?QString():folder.machine,name,archive);};
     m_worktrees->launchRequested=[this](const QString &path){const auto folder=selectedFolder();if(folderLaunchProblem(folder).isEmpty())emit newPathSessionRequested(currentId(),folder.machine==m_fleet.local().host?QString():folder.machine,path);};
     auto *foot = new QHBoxLayout; m_remove = new QPushButton(tr("Delete project…")); foot->addWidget(m_remove); foot->addStretch(); form->addLayout(foot); split->addWidget(right); split->setSizes({230,600});
-    m_status = new QLabel; m_status->setTextFormat(Qt::PlainText); m_status->setMinimumHeight(22); root->addWidget(m_status);
+    m_status = new QLabel; m_status->setObjectName("projectsStatus"); m_status->setTextFormat(Qt::PlainText); m_status->setMinimumHeight(22); root->addWidget(m_status);
     if (!embedded) { auto *close = new QDialogButtonBox(QDialogButtonBox::Close); connect(close,&QDialogButtonBox::rejected,this,&QDialog::accept); root->addWidget(close); }
     connect(add,&QPushButton::clicked,this,&ProjectsDialog::addProject);
     connect(m_remove,&QPushButton::clicked,this,&ProjectsDialog::removeProject);
@@ -293,7 +293,8 @@ void ProjectsDialog::setFleet(const FleetState &fleet)
     if (m_worktreeOverview) m_worktreeOverview->setContext(*m_projects, m_fleet, m_allProjects->isChecked());
     updateFolderActions();
     const auto request=[this](const QString &host,const QString &machine,bool online){
-        if (!online || machine.isEmpty() || m_projects->hasImported(machine) || m_importing.contains(host)) return;
+        if (!online || machine.isEmpty() || m_projects->hasImported(machine) || m_importing.contains(host)
+            || m_importDeferred.contains(machine)) return;
         m_importing.insert(host);m_client->requestProjects(host);
     };
     // A control-only computer (hgs.exe on Windows) has no project folders of its own.
@@ -305,13 +306,21 @@ void ProjectsDialog::importLegacy(const QString &host,const QList<ProjectInfo> &
     if (!m_importing.remove(host)) return;
     const auto machine=host.isEmpty()?m_fleet.local().host:host;
     if (machine.isEmpty() || m_projects->hasImported(machine)) return;
+    const auto style=folderStyle(machine);
+    QStringList rejected;
     for (const auto &legacy:projects) {
         if (legacy.fromAnsible) continue;
+        // A folder this computer's form does not take never creates its project.
+        if (!MachinePlatform::absolute(legacy.dir,style) || legacy.dir.contains('\n')) {rejected << legacy.name+" ("+legacy.dir+")";continue;}
         QString id; for(const auto &project:m_projects->groups()) if(project.name==legacy.name){id=project.id;break;}
         if(id.isEmpty()) id=m_projects->createGroup(legacy.name);
-        m_projects->addFolder(id,machine,legacy.dir,{},folderStyle(machine));
+        if(m_projects->addFolder(id,machine,legacy.dir,{},style).isEmpty()) rejected << legacy.name+" ("+legacy.dir+")";
     }
-    m_projects->markImported(machine);changed();
+    if (rejected.isEmpty()) m_projects->markImported(machine);
+    else m_importDeferred.insert(machine);
+    changed();
+    if (!rejected.isEmpty())
+        m_status->setText(tr("Could not add %n hgs project folder(s) of %1: %2","",rejected.size()).arg(machine,rejected.join(QStringLiteral(", "))));
 }
 void ProjectsDialog::setProjects(const QList<ProjectInfo> &projects) { importLegacy(m_host,projects); }
 void ProjectsDialog::addProject()

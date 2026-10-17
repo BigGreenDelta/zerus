@@ -23,6 +23,13 @@ pub(crate) fn target_receipt(record: &Value) -> Option<Value> {
 }
 
 pub(crate) fn send_origin() -> Option<Value> {
+    target_receipt(&owned_record()?)
+}
+
+/// The live binding whose native agent is an actual ancestor of this CLI.
+/// Its name may be a rename shadow's: hooks and agents keep the environment
+/// they started with.
+fn owned_record() -> Option<Value> {
     let name = nonempty_env("HGS_SESSION")?;
     let run = nonempty_env("HGS_RUN_ID")?;
     let record = read_run(&name, &run).ok()??;
@@ -34,7 +41,7 @@ pub(crate) fn send_origin() -> Option<Value> {
     for _ in 0..64 {
         let process = crate::platform::process_identity(pid)?;
         if pid == owner {
-            return target_receipt(&record);
+            return Some(record);
         }
         if process.parent == 0 || process.parent == pid {
             break;
@@ -42,6 +49,18 @@ pub(crate) fn send_origin() -> Option<Value> {
         pid = process.parent;
     }
     None
+}
+
+/// The calling agent's own binding under its current name, proven like a
+/// send's origin.
+pub(crate) fn caller_record() -> Option<Value> {
+    let record = owned_record()?;
+    if record["rename_shadow"] != true {
+        return Some(record);
+    }
+    read_run(string(&record, "rename_target"), string(&record, "run_id"))
+        .ok()?
+        .filter(|current| current["rename_shadow"] != true)
 }
 
 fn path() -> PathBuf {
