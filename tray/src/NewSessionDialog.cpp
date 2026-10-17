@@ -330,7 +330,7 @@ void NewSessionDialog::updateForm()
     m_refreshAccounts->setEnabled(!busy&&!noMachine&&!m_accountRequest);
     m_autoWorktree->setEnabled(!busy&&automaticWorktreeAvailable());m_plainFolder->setEnabled(!busy);m_cancel->setEnabled(!m_creation);
     m_autoWorktree->setChecked(automatic);m_plainFolder->setChecked(!automatic);
-    m_worktreeTarget->setText(automatic?automaticWorktreePath():QString());m_worktreeTarget->setToolTip(automatic?tr("New branch: %1\nStart from: HEAD").arg(m_generatedBranch):QString());
+    m_worktreeTarget->setText(automatic?MachinePlatform::native(automaticWorktreePath(),folderStyle(m_fleet,host())):QString());m_worktreeTarget->setToolTip(automatic?tr("New branch: %1\nStart from: HEAD").arg(m_generatedBranch):QString());
     m_worktreeTarget->ensurePolished();m_worktreeTarget->setFixedHeight(2*m_worktreeTarget->fontMetrics().lineSpacing());
     const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
     m_browse->setEnabled(!busy&&!noMachine&&machine&&machine->ok);

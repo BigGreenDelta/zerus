@@ -20,6 +20,9 @@ public:
     }
     void paint(QPainter *p,const QStyleOptionViewItem &option,const QModelIndex &index) const override {
         auto background=option;initStyleOption(&background,index);background.text.clear();background.icon={};
+        // The selection marks the current row. A native focus frame (Windows 11) would
+        // outline only the base item's text area, beside the logo and inside the row.
+        background.state&=~QStyle::State_HasFocus;
         const auto *widget=option.widget;auto *style=widget?widget->style():QApplication::style();
         style->drawControl(QStyle::CE_ItemViewItem,&background,p,widget);
         p->save();p->setClipRect(option.rect);
