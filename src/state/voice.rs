@@ -806,8 +806,14 @@ fn receipt(job: &Value) -> Result<Option<Value>> {
     {
         return Err("Native request UUID conflicts with this voice message".into());
     }
-    if job["agent"]=="opencode" || job["backend"]=="opencode" {
-        let record=current(job)?; opencode::reconcile_receipt(&record,&mut value)?;
+    if job["agent"] == "opencode" || job["backend"] == "opencode" {
+        let record = current(job)?;
+        // A definite refusal is an answer for settle, not an identity error.
+        if let Err(error) = opencode::reconcile_receipt(&record, &mut value) {
+            if value["status"] != "refused" {
+                return Err(error);
+            }
+        }
     }
     Ok(Some(value))
 }
@@ -817,6 +823,15 @@ fn settle(job: &mut Value, receipt: Option<&Value>, interrupted: bool) {
         job["native_submitted_at"] = receipt["submitted_at"].clone();
         if receipt["status"] == "submitted" {
             job["state"] = json!("submitted");
+            return;
+        }
+        // OpenCode records a definite 4xx refusal; it was never admitted.
+        if receipt["status"] == "refused" {
+            let reason = receipt["reason"]
+                .as_str()
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("OpenCode refused this message");
+            failure(job, "delivery_refused", reason);
             return;
         }
     }
@@ -1446,6 +1461,24 @@ mod tests {
         let mut refused = job();
         settle(&mut refused, None, false);
         assert_eq!(refused["state"], "waiting_agent");
+    }
+    #[test]
+    fn a_refused_opencode_receipt_fails_the_job_definitely() {
+        let mut refused = job();
+        refused["agent"] = json!("opencode");
+        settle(
+            &mut refused,
+            Some(&json!({"status":"refused","reason":"HTTP 400: bad","submitted_at":2.})),
+            true,
+        );
+        assert_eq!(refused["state"], "failed");
+        assert_eq!(refused["error_code"], "delivery_refused");
+        assert_eq!(refused["error"], "HTTP 400: bad");
+        assert_eq!(refused["native_receipt_status"], "refused");
+        let mut bare = job();
+        settle(&mut bare, Some(&json!({"status":"refused"})), false);
+        assert_eq!(bare["state"], "failed");
+        assert_eq!(bare["error"], "OpenCode refused this message");
     }
     #[test]
     fn restart_keeps_exact_native_payload_and_audio() {
