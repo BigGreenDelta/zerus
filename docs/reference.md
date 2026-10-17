@@ -93,7 +93,8 @@ Pause preserves an exact native conversation binding. It does not preserve open
 network connections, child processes or an unsent native terminal draft. Supported
 integrations include Claude Code, Codex, Kimi Code, the official DeepSeek Harness
 and OpenCode. DeepSeek and OpenCode use their native engines instead of a
-terminal-agent process. [OpenCode controls and limits](opencode.md).
+terminal-agent process. OpenCode sessions have no separate process to pause
+([OpenCode controls and limits](opencode.md#controls-and-limits)).
 
 For terminal agents, pause verifies the live pane, run and conversation identity,
 native history, supported resume arguments and an idle state. It sends SIGTERM only
@@ -1366,11 +1367,8 @@ entry becomes unknown rather than a fabricated completed result.
 DeepSeek uses each child's exact native API entry within one host generation.
 A child never inherits its parent's running status. Missing, contradictory or
 cross-generation observations remain unknown; desktop and Android counters
-retain the `+` uncertainty marker. OpenCode lists the native sessions whose
-recorded parent is the exact conversation and reads each child's own newest
-message: a recorded turn end is finished, anything else stays unknown, because
-another OpenCode process runs those children
-([OpenCode children](opencode.md#child-sessions)). Inspection reports native
+retain the `+` uncertainty marker. OpenCode child sessions are not shown in this
+version ([OpenCode controls](opencode.md#controls-and-limits)). Inspection reports native
 tracking evidence without changing reply/read identities or restarting agents.
 
 **Fork session…** creates an independent native conversation in the same folder,
@@ -1945,14 +1943,14 @@ Ollama runs model inference on the chosen agent computer. The native harness
 owns tools, permissions and conversation state. Codex can use a local Ollama
 model with its existing adapter; see the [qualified local-model example](local-models.md).
 
-Choose **OpenCode** in New session to use its separate native API adapter.
-Select its native account and an offered `provider/model`, or retain the native
-model default. The initial adapter supports text/voice conversations, native
-questions and permissions, status/history, Stop, model selection, pause/resume,
-rename and forgetting a saved binding. Child sessions are read-only. Terminal,
-attachments, child messages, archive/fork and context reset/compaction remain
-unavailable with explicit capabilities. See
-[OpenCode setup and reviewed version](opencode.md).
+Choose **OpenCode** in New session to use OpenCode 2 through its shared
+background service. Select an offered `provider/model` (keyless free models are
+listed when the service offers them) and, where the model has variants, an
+effort, or retain the default model. Supported: text and voice conversations,
+queued messages, Stop, native questions and permissions, status and history,
+model and effort change, rename and forgetting the Zerus binding. Pause/resume,
+Terminal, attachments, compaction, fork and child sessions are unavailable.
+See [OpenCode versions, service and controls](opencode.md).
 
 <a id="deepseek"></a>
 
