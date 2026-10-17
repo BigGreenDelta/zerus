@@ -230,3 +230,79 @@ async fn only_a_live_action_target_becomes_inspectable_at_once() {
         assert_eq!(sessions(), [SESSION.to_owned()].into(), "{status}");
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn remove_queued_is_a_journaled_session_action_with_exact_identity() {
+    let harness = Harness::new("mutation-remove-queued");
+    let id = "f5a6b7c8-d9ea-5fb0-8c1d-2e3f40516273";
+    let mut acknowledged = ack(id, json!("completed"));
+    acknowledged["message_id"] = json!("msg_01");
+    harness.answer(&["session-action", SESSION, "--json"], acknowledged);
+    let mut payload = identity();
+    payload["message_id"] = json!("msg_01");
+    let result = harness.run("remove_queued", id, payload.clone()).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(result["result"]["message_id"], "msg_01");
+    assert_eq!(harness.calls(), [["session-action", SESSION, "--json"]]);
+    // An acknowledgement for another message is not the removal asked for.
+    let other = "06b7c8d9-eafb-5c01-9d2e-3f4051627384";
+    let mut wrong = ack(other, json!("completed"));
+    wrong["message_id"] = json!("msg_02");
+    harness.answer(&["session-action", SESSION, "--json"], wrong);
+    let result = harness.run("remove_queued", other, payload).await;
+    assert_eq!(result["state"], "uncertain", "{result}");
+    // A malformed message identity never reaches native hgs.
+    let before = harness.calls().len();
+    let bad = "17c8d9ea-fb0c-5d12-8e3f-405162738495";
+    let mut payload = identity();
+    payload["message_id"] = json!("not-a-message");
+    let result = harness.run("remove_queued", bad, payload).await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(harness.calls().len(), before);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_opencode_settings_effort_must_be_offered_for_the_model() {
+    let harness = Harness::new("mutation-opencode-settings");
+    const OPENCODE: &str = "opencode/example/session";
+    harness
+        .connector
+        .state
+        .borrow_mut()
+        .sessions
+        .insert(OPENCODE.into());
+    harness.answer(
+        &["inspect", OPENCODE],
+        json!({"name": OPENCODE, "run_id": RUN, "conversation_id": CONVERSATION,
+               "settings_change_supported": true, "settings_model": "fixture/local",
+               "model_options": [{"id": "fixture/local", "effort_options": ["low", "high"]}]}),
+    );
+    let run = |id: &'static str, effort: &'static str| {
+        let harness = &harness;
+        async move {
+            let mut payload = identity();
+            payload["effort"] = json!(effort);
+            payload["request_id"] = json!(id);
+            let request = json!({"request_id": id, "operation": "settings",
+                                 "session": OPENCODE, "payload": payload});
+            match harness.connector.execute(request).await.unwrap() {
+                Outcome::Finished(receipt) => receipt,
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    let refused = run("27d9eafb-0c1d-5e23-9f40-516273849506", "ultra").await;
+    assert_eq!(
+        refused,
+        receipt("failed", "effort is not offered for this model")
+    );
+    assert_eq!(harness.calls().len(), 1);
+    harness.answer(
+        &["settings", OPENCODE, "--json"],
+        json!({"request_id": "38eafb0c-1d2e-5f34-8051-627384950617", "name": OPENCODE,
+               "run_id": RUN, "conversation_id": CONVERSATION, "status": "applied",
+               "effort": "high"}),
+    );
+    let applied = run("38eafb0c-1d2e-5f34-8051-627384950617", "high").await;
+    assert_eq!(applied["state"], "completed", "{applied}");
+}

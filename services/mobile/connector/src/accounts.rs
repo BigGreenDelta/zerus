@@ -124,6 +124,62 @@ fn decimal(text: &str, whole: Option<usize>, fraction: Option<usize>) -> bool {
         })
 }
 
+/// Variants one model offers: at most 8 bounded identifiers and, in the same
+/// order, their labels. Anything malformed drops the entry, never the model.
+fn effort_options(row: &Map<String, Value>) -> Option<(Value, Value)> {
+    let efforts = row.get("effort_options")?.as_array()?;
+    let labels = row.get("effort_labels").and_then(Value::as_array);
+    let mut ids: Vec<Value> = Vec::new();
+    let mut shown: Vec<Value> = Vec::new();
+    for (index, effort) in efforts.iter().enumerate() {
+        let Some(id) = effort.as_str().filter(|id| {
+            !id.is_empty()
+                && id.len() <= 64
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+        }) else {
+            continue;
+        };
+        if ids.iter().any(|known| known == id) {
+            continue;
+        }
+        if ids.len() == 8 {
+            break;
+        }
+        let label = labels
+            .and_then(|labels| labels.get(index))
+            .and_then(|label| text(Some(label), 40))
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| id.into());
+        ids.push(json!(id));
+        shown.push(json!(label));
+    }
+    (!ids.is_empty()).then_some((Value::Array(ids), Value::Array(shown)))
+}
+
+/// OpenCode catalog state and reasons, bounded and only when present.
+fn opencode_status(profile: &Map<String, Value>, public: &mut Map<String, Value>) {
+    if let Some(state) = member(
+        profile.get("catalog_state"),
+        &[
+            "ready",
+            "loading",
+            "not_running",
+            "disabled",
+            "incompatible",
+            "unreachable",
+        ],
+    ) {
+        public.insert("catalog_state".into(), json!(state));
+    }
+    for key in ["catalog_reason", "install_reason"] {
+        if let Some(reason) = text(profile.get(key), 200).filter(|reason| !reason.is_empty()) {
+            public.insert(key.into(), json!(reason));
+        }
+    }
+}
+
 /// `accounts.model_options(profile)`: configured IDs and labels only.
 pub fn model_options(profile: &Map<String, Value>) -> Value {
     let rows = match profile.get("model_options") {
@@ -164,7 +220,22 @@ pub fn model_options(profile: &Map<String, Value>) -> Value {
         let label = text(row.get("label"), 160)
             .filter(|label| !label.is_empty())
             .unwrap_or_else(|| value.into());
-        result.push(json!({"value": value, "label": label, "provider": provider}));
+        let mut option = Map::new();
+        option.insert("value".into(), json!(value));
+        option.insert("label".into(), json!(label));
+        option.insert("provider".into(), json!(provider));
+        if let Some(label) = text(row.get("provider_label"), 160).filter(|label| !label.is_empty())
+        {
+            option.insert("provider_label".into(), json!(label));
+        }
+        if let Some(Value::Bool(free)) = row.get("free") {
+            option.insert("free".into(), json!(free));
+        }
+        if let Some((efforts, labels)) = effort_options(row) {
+            option.insert("effort_options".into(), efforts);
+            option.insert("effort_labels".into(), labels);
+        }
+        result.push(Value::Object(option));
     }
     Value::Array(result)
 }
@@ -358,6 +429,7 @@ pub fn catalog(raw: &Value) -> PyResult<Vec<(String, Entry)>> {
         }
         if provider == "opencode" {
             public.insert("model_options".into(), model_options(profile));
+            opencode_status(profile, &mut public);
         }
         let seed = usage(profile.get("account_status").unwrap_or(&Value::Null));
         let auth_revision = match profile.get("auth_revision") {
@@ -633,6 +705,7 @@ pub fn launch_catalog(raw: &Value) -> PyResult<Value> {
         account.insert("auth_status".into(), json!(status));
         if provider == "opencode" {
             account.insert("model_options".into(), model_options(row));
+            opencode_status(row, &mut account);
         }
         if !cached.is_empty() {
             account.insert("usage".into(), usage(&Value::Object(cached.clone())));
