@@ -10,7 +10,7 @@ on:
   workflow_call:
     inputs:
       channel:
-        description: dev (TestFlight internal testing) or stable (App Store candidate)
+        description: dev (TestFlight internal testers and promoted public beta) or stable (App Store candidate)
         type: string
         required: true
     secrets:

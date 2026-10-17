@@ -3,7 +3,7 @@
 # workflow ios-testflight.yml; it can also run on a maintainer's Mac.
 #
 # Environment:
-#   CHANNEL        dev (TestFlight internal testing only) or stable (App Store candidate)
+#   CHANNEL        dev (TestFlight; internal testers, public beta once promoted) or stable (App Store candidate)
 #   BUILD_NUMBER   unique increasing build number (the CI sequence for dev)
 #   SOURCE_COMMIT  the exact source revision being archived
 #   TEAM_ID        Apple Developer team ID
@@ -17,10 +17,10 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=${RUNNER_TEMP:-$(mktemp -d)}/app-store-connect
 case "${CHANNEL:-}" in
-    dev) version=$(tr -d '[:space:]' < "$root/DEV_VERSION"); internal=true ;;
+    dev) version=$(tr -d '[:space:]' < "$root/DEV_VERSION") ;;
     stable)
         [ -f "$root/VERSION" ] || { echo "Add mobile/ios/VERSION with the stable release version first." >&2; exit 2; }
-        version=$(tr -d '[:space:]' < "$root/VERSION"); internal=false ;;
+        version=$(tr -d '[:space:]' < "$root/VERSION") ;;
     *) echo "CHANNEL must be dev or stable." >&2; exit 2 ;;
 esac
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid marketing version." >&2; exit 2; }
@@ -51,7 +51,6 @@ cat > "$work/ExportOptions.plist" <<PLIST
 	<key>signingStyle</key><string>automatic</string>
 	<key>uploadSymbols</key><true/>
 	<key>manageAppVersionAndBuildNumber</key><false/>
-	<key>testFlightInternalTestingOnly</key><$internal/>
 </dict>
 </plist>
 PLIST

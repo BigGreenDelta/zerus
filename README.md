@@ -11,9 +11,9 @@
 <p align="center">
   <a href="docs/installation.md">Install</a> &nbsp; | &nbsp;
   <a href="#features">Features</a> &nbsp; | &nbsp;
-  <a href="#your-fleet-from-your-phone">Android</a> &nbsp; | &nbsp;
+  <a href="#your-fleet-from-your-phone">Android and iOS</a> &nbsp; | &nbsp;
   <a href="docs/reference.md">Reference</a><br />
-  <sub>Linux and macOS &nbsp; | &nbsp; Android &nbsp; | &nbsp; Windows &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
+  <sub>Linux and macOS &nbsp; | &nbsp; Android and iOS &nbsp; | &nbsp; Windows &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
 </p>
 
 <p align="center">
@@ -122,7 +122,7 @@ to run the model. Agent choice and speech provider choice are independent.
 
 ### Your fleet from your phone
 
-The **Android app** brings your projects and agents to your phone:
+The **Android and iOS apps** bring your projects and agents to your phone:
 
 - **Conversations and tasks.** Read replies, follow goals, task lists and subagents,
   answer questions and approvals, and send messages with files and images.
@@ -136,11 +136,14 @@ The **Android app** brings your projects and agents to your phone:
   check account limits. Private drafts and cached conversations stay available offline.
 
 Pair your phone with a computer to reach it and its directly connected Zerus peers
-through a **self-hostable HTTPS relay**. Notifications use Firebase Cloud Messaging,
-with a foreground live connection for phones without it. A native **iOS app** with
-the same features is in development ([mobile/ios](mobile/ios/README.md)).
+through a **self-hostable HTTPS relay**. Notifications use Firebase Cloud Messaging
+on Android, with a foreground live connection for phones without it, and Apple Push
+Notifications on iPhone. The native **iOS app** (SwiftUI, iOS 18 or later) has the
+same features as Android and is open to everyone through the TestFlight public beta
+until its App Store release.
 
 [Download the Android APK](https://zerus.dev/#download) |
+[Join the iOS beta on TestFlight](https://testflight.apple.com/join/fywRuW6y) |
 [Connect your phone](docs/mobile-deployment.md#pair-the-phone) |
 [Architecture and trust model](docs/mobile-architecture.md)
 
@@ -154,6 +157,16 @@ the same features is in development ([mobile/ios](mobile/ios/README.md)).
     <td><a href="docs/assets/readme/android-sessions.webp"><img src="docs/assets/readme/android-sessions.webp" alt="Android session overview with agents on a workstation, MacBook and build server" width="280" /></a></td>
     <td><a href="docs/assets/readme/android-conversation.webp"><img src="docs/assets/readme/android-conversation.webp" alt="A conversation with Codex in the Android client" width="280" /></a></td>
     <td><a href="docs/assets/readme/android-accounts.webp"><img src="docs/assets/readme/android-accounts.webp" alt="Shared Codex, Claude and Kimi accounts with usage limits across machines" width="280" /></a></td>
+  </tr>
+  <tr>
+    <th>Sessions on iPhone</th>
+    <th>Conversations on iPhone</th>
+    <th>Projects on iPhone</th>
+  </tr>
+  <tr>
+    <td><a href="docs/assets/readme/ios-sessions.webp"><img src="docs/assets/readme/ios-sessions.webp" alt="iPhone session overview with Codex, Claude and Kimi sessions on a design workstation" width="280" /></a></td>
+    <td><a href="docs/assets/readme/ios-conversation.webp"><img src="docs/assets/readme/ios-conversation.webp" alt="A Codex conversation with a table, code and a task list in the iOS client" width="280" /></a></td>
+    <td><a href="docs/assets/readme/ios-projects.webp"><img src="docs/assets/readme/ios-projects.webp" alt="A project with folders on two machines in the iOS client" width="280" /></a></td>
   </tr>
 </table>
 
@@ -210,6 +223,8 @@ hgs a codex/orbit/api                  # attach from any terminal
 
 **On Android:** [download the APK](https://zerus.dev/#download),
 then [pair your phone](docs/mobile-deployment.md#pair-the-phone).
+**On iPhone:** [join the TestFlight beta](https://testflight.apple.com/join/fywRuW6y),
+then pair it the same way, from **Pair a phone…** in Machines on a computer.
 **Try demo** lets you explore the interface before connecting a computer.
 
 ## Other platforms
