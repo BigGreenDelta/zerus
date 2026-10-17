@@ -445,6 +445,13 @@ sys.exit(result.returncode)
   self.assertFalse((folder/'emitted.json').exists())
   # The fixture records no PostToolUse; Claude's transcript already has the answer.
   self.assertIn('already answered',self.answer(success=False))
+ def test_channel_single_terminal_decline_ends_the_channel(self):
+  self.channel_card();waiting,folder=self.channel();self.key('Escape')
+  self.wait_for(lambda:not self.running(waiting['pid']))
+  closed=json.loads((folder/'closed.json').read_text())
+  self.assertIn(closed['reason'],['terminated','answered in Terminal','question resolved']);self.assertFalse(closed['emitted'])
+  self.assertFalse((folder/'emitted.json').exists())
+  self.assertRegex(self.answer(success=False),'already answered|rejected the question response')
  def test_channel_single_killed_falls_back_to_screen(self):
   self.channel_card();waiting,folder=self.channel();os.kill(waiting['pid'],signal.SIGKILL)
   self.wait_for(lambda:not self.running(waiting['pid']))

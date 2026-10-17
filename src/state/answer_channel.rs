@@ -401,15 +401,21 @@ extern "C" fn terminate(_: libc::c_int) {
 /// AskUserQuestion. It waits beside the native panel for an answer offered
 /// through `hgs answer` and prints Claude's allow with those answers. Anything
 /// else (another session, no exact card, an answer in Terminal, a timeout)
-/// ends it without output, and the panel stays.
+/// ends it without output, and the panel stays. So does any error: nothing was
+/// printed before emitted.json, so `hgs answer` uses the screen instead.
 pub(super) fn run() -> Result<i32> {
+    let _ = wait();
+    Ok(0)
+}
+
+fn wait() -> Result<()> {
     let (Some(name), Some(token)) = (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID"))
     else {
-        return Ok(0);
+        return Ok(());
     };
     let event = stdin_json()?;
     if !asks(&event) {
-        return Ok(0);
+        return Ok(());
     }
     #[cfg(unix)]
     unsafe {
@@ -423,7 +429,7 @@ pub(super) fn run() -> Result<i32> {
             }
         }
         if Instant::now() >= until || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(0);
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     };
@@ -442,22 +448,22 @@ pub(super) fn run() -> Result<i32> {
     loop {
         if TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
             close(&dir, "terminated");
-            return Ok(0);
+            return Ok(());
         }
         if now() >= waiting.deadline {
             close(&dir, "deadline");
-            return Ok(0);
+            return Ok(());
         }
         let current = read_run(&name, &token)?;
         if let Some(reason) = should_close(current.as_ref(), &record, &card) {
             close(&dir, reason);
-            return Ok(0);
+            return Ok(());
         }
         if looked.elapsed() >= Duration::from_secs(1) {
             looked = Instant::now();
             if transcript.answered(current.as_ref().unwrap_or(&record), &tool) {
                 close(&dir, "answered in Terminal");
-                return Ok(0);
+                return Ok(());
             }
         }
         if let Some(offer) = claim(&dir)? {
@@ -469,12 +475,12 @@ pub(super) fn run() -> Result<i32> {
             let output = decision(&event, &card, &offer);
             if !unchanged || output.is_err() || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
                 close(&dir, if unchanged { "invalid answer" } else { "question changed before delivery" });
-                return Ok(0);
+                return Ok(());
             }
             write(&dir, EMITTED, &json!({"request_id":offer["request_id"],"at":now()}))?;
             println!("{}", output?);
             close(&dir, "emitted");
-            return Ok(0);
+            return Ok(());
         }
         std::thread::sleep(POLL);
     }
