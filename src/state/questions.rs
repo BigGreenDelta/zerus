@@ -562,26 +562,28 @@ fn response_matches(question: &Value, answers: &Value, event: &Value) -> bool {
         return false;
     }
     items.iter().zip(answers).all(|(question, answer)| {
-        let mut labels: Vec<String> = question["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|option| {
-                answer["selected_option_ids"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&option["id"])
-            })
-            .map(|option| string(option, "label").to_owned())
-            .collect();
-        if !string(answer, "text").is_empty() {
-            labels.push(string(answer, "text").into());
-        }
         actual
             .get(string(question, "question"))
             .and_then(Value::as_str)
-            == Some(labels.join(", ").as_str())
+            == Some(answer_text(question, answer).as_str())
     })
+}
+
+/// The text Claude records for one validated answer: the chosen labels in
+/// source option order, then any Other text, joined by ", ".
+pub(super) fn answer_text(question: &Value, answer: &Value) -> String {
+    let selected = answer["selected_option_ids"].as_array();
+    let mut labels: Vec<&str> = question["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|option| selected.is_some_and(|ids| ids.contains(&option["id"])))
+        .map(|option| string(option, "label"))
+        .collect();
+    if !string(answer, "text").is_empty() {
+        labels.push(string(answer, "text"));
+    }
+    labels.join(", ")
 }
 
 fn log_answer(record: &Value, question: &Value, response: &Value) -> Result<()> {
@@ -851,6 +853,24 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answer_text_matches_response_format() {
+        let card = json!({"questions": normalize(&json!([
+            {"question":"Which checks?","header":"Checks","multiSelect":true,
+                "options":[{"label":"Unit"},{"label":"Integration"},{"label":"UI"}]},
+            {"question":"Anything else?","header":"Notes","options":[{"label":"Nothing"},{"label":"Later"}]}])).unwrap()});
+        let answers = json!([
+            {"question_id":"q_0","selected_option_ids":["opt_0_2","opt_0_0"],"text":"Lint, quickly"},
+            {"question_id":"q_1","selected_option_ids":[],"text":"Ship it"}]);
+        let items = card["questions"].as_array().unwrap();
+        // Source option order, then Other: what Claude's own panel records.
+        assert_eq!(answer_text(&items[0], &answers[0]), "Unit, UI, Lint, quickly");
+        assert_eq!(answer_text(&items[1], &answers[1]), "Ship it");
+        let event = json!({"type":"interaction.resolved","response":{"answers":{
+            "Which checks?":answer_text(&items[0], &answers[0]),"Anything else?":answer_text(&items[1], &answers[1])}}});
+        assert!(response_matches(&card, &answers, &event));
+    }
     fn record() -> Value {
         json!({"agent":"kimi","run_id":"run","conversation_id":"session_test","active_tools":{"tool_test":{"name":"AskUserQuestion"}}})
     }

@@ -175,6 +175,247 @@ pub(super) fn emitted(dir: &Path) -> bool {
     dir.join(EMITTED).exists()
 }
 
+/// How long a waiting process accepts an answer. Shorter than the hook timeout
+/// hgs registers, so it closes itself where no SIGTERM arrives (Windows).
+const LIFETIME: f64 = 86_000.;
+/// The PreToolUse hook records the card just before Claude asks for permission.
+const BIND: Duration = Duration::from_secs(5);
+const POLL: Duration = Duration::from_millis(150);
+
+/// The main agent's `PermissionRequest` for AskUserQuestion.
+fn asks(event: &Value) -> bool {
+    string(event, "hook_event_name") == "PermissionRequest"
+        && string(event, "tool_name") == "AskUserQuestion"
+        && string(event, "agent_id").is_empty()
+}
+
+/// The one pending main-agent question card that a Claude `PermissionRequest`
+/// for AskUserQuestion asks about. It has no tool_use_id: identical requests
+/// waiting at once are ambiguous and stay with the terminal.
+fn bind(record: &Value, event: &Value) -> Option<Value> {
+    if !asks(event) {
+        return None;
+    }
+    let asked = questions::normalize(&event["tool_input"]["questions"]).ok()?;
+    let mut cards = record["pending_questions"]
+        .as_object()?
+        .values()
+        .filter(|card| {
+            string(card, "source") == "hook"
+                && string(card, "agent_id") == "main"
+                && card["questions"] == asked
+        });
+    let card = cards.next()?.clone();
+    cards.next().is_none().then_some(card)
+}
+
+/// Claude's allow for the pending AskUserQuestion with the offered answers,
+/// keyed by each exact question text of `card`.
+fn decision(event: &Value, card: &Value, offer: &Value) -> Result<Value> {
+    let answers = offer["answers"]
+        .as_object()
+        .ok_or("the offered answer has no answers")?;
+    let texts: Vec<&str> = card["questions"]
+        .as_array()
+        .ok_or("invalid pending question")?
+        .iter()
+        .map(|question| string(question, "question"))
+        .collect();
+    if answers.len() != texts.len()
+        || !texts
+            .iter()
+            .all(|text| answers.get(*text).is_some_and(Value::is_string))
+    {
+        return Err("the offered answer does not match the pending question".into());
+    }
+    let mut input = event["tool_input"].clone();
+    input["answers"] = json!(answers);
+    Ok(json!({"hookSpecificOutput":{"hookEventName":"PermissionRequest",
+        "decision":{"behavior":"allow","updatedInput":input}}}))
+}
+
+/// Why a waiting process must stop, given the current record of its session.
+fn should_close(current: Option<&Value>, bound: &Value, card: &Value) -> Option<&'static str> {
+    let Some(current) = current else {
+        return Some("session ended");
+    };
+    if string(current, "run_id") != string(bound, "run_id") {
+        return Some("run changed");
+    }
+    if string(current, "conversation_id") != string(bound, "conversation_id") {
+        return Some("conversation changed");
+    }
+    let pending = &current["pending_questions"][string(card, "tool_call_id")];
+    if pending["question_hash"] != card["question_hash"] {
+        return Some("question resolved");
+    }
+    if !process_alive(current) {
+        return Some("agent exited");
+    }
+    None
+}
+
+/// Notices a transcript `tool_result` for the bound tool use: an answer, a
+/// decline or a cancellation in Terminal. It reads only bytes added since its
+/// last look, so a long wait stays cheap.
+#[derive(Default)]
+struct TranscriptWatch {
+    offset: u64,
+}
+
+impl TranscriptWatch {
+    fn answered(&mut self, record: &Value, tool_use_id: &str) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+        let conversation = string(record, "conversation_id");
+        let path = PathBuf::from(string(record, "transcript"));
+        if conversation.is_empty()
+            || !path.is_absolute()
+            || path.file_name().is_none_or(|name| {
+                name.to_string_lossy() != format!("{conversation}.jsonl")
+            })
+        {
+            return false;
+        }
+        let Ok(mut file) = fs::File::open(&path) else {
+            return false;
+        };
+        let length = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        if length < self.offset {
+            self.offset = 0;
+        }
+        // Start at most 8 MiB back, as the acknowledgement reader does.
+        let start = self.offset.max(length.saturating_sub(8 * 1024 * 1024));
+        let mut bytes = Vec::new();
+        if file.seek(SeekFrom::Start(start)).is_err()
+            || file.take(length - start).read_to_end(&mut bytes).is_err()
+        {
+            return false;
+        }
+        // Only complete lines count; a partial last line is read again later.
+        let complete = bytes.iter().rposition(|byte| *byte == b'\n').map_or(0, |end| end + 1);
+        self.offset = start + complete as u64;
+        bytes[..complete]
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .filter(|event| string(event, "sessionId") == conversation && event["isSidechain"] != true)
+            .any(|event| {
+                event["message"]["content"].as_array().is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part["type"] == "tool_result" && part["tool_use_id"] == tool_use_id
+                    })
+                })
+            })
+    }
+}
+
+/// Remove channel directories of runs untouched for `age`, looking at no more
+/// than `limit` entries per call.
+fn prune(root: &Path, age: Duration, limit: usize) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now() - age;
+    for entry in entries.flatten().take(limit) {
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| modified < cutoff);
+        if old && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+static TERMINATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn terminate(_: libc::c_int) {
+    TERMINATED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// `hgs __state answer-channel`: Claude's `PermissionRequest` hook for
+/// AskUserQuestion. It waits beside the native panel for an answer offered
+/// through `hgs answer` and prints Claude's allow with those answers. Anything
+/// else (another session, no exact card, an answer in Terminal, a timeout)
+/// ends it without output, and the panel stays.
+pub(super) fn run() -> Result<i32> {
+    let (Some(name), Some(token)) = (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID"))
+    else {
+        return Ok(0);
+    };
+    let event = stdin_json()?;
+    if !asks(&event) {
+        return Ok(0);
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t);
+    }
+    let until = Instant::now() + BIND;
+    let (record, card) = loop {
+        if let Some(record) = read_run(&name, &token)? {
+            if let Some(card) = bind(&record, &event) {
+                break (record, card);
+            }
+        }
+        if Instant::now() >= until || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(0);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let root = absolute_root()?;
+    prune(&root.join("native_answers"), Duration::from_secs(30 * 86_400), 64);
+    let dir = directory_in(&root, &record, &card);
+    let lifetime = nonempty_env("HGS_ANSWER_CHANNEL_SECONDS")
+        .and_then(|seconds| seconds.parse::<f64>().ok())
+        .filter(|seconds| *seconds > 0. && *seconds <= LIFETIME)
+        .unwrap_or(LIFETIME);
+    let waiting = Waiting::new(&record, &card, std::process::id(), lifetime);
+    write(&dir, WAITING, &json!(waiting))?;
+    let tool = string(&card, "tool_call_id").to_owned();
+    let mut transcript = TranscriptWatch::default();
+    let mut looked = Instant::now() - Duration::from_secs(1);
+    loop {
+        if TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
+            close(&dir, "terminated");
+            return Ok(0);
+        }
+        if now() >= waiting.deadline {
+            close(&dir, "deadline");
+            return Ok(0);
+        }
+        let current = read_run(&name, &token)?;
+        if let Some(reason) = should_close(current.as_ref(), &record, &card) {
+            close(&dir, reason);
+            return Ok(0);
+        }
+        if looked.elapsed() >= Duration::from_secs(1) {
+            looked = Instant::now();
+            if transcript.answered(current.as_ref().unwrap_or(&record), &tool) {
+                close(&dir, "answered in Terminal");
+                return Ok(0);
+            }
+        }
+        if let Some(offer) = claim(&dir)? {
+            // The question must still be the bound one when its answer goes out.
+            let current = read_run(&name, &token)?;
+            let unchanged = should_close(current.as_ref(), &record, &card).is_none()
+                && current.as_ref().and_then(|record| bind(record, &event)).as_ref() == Some(&card)
+                && !transcript.answered(current.as_ref().unwrap_or(&record), &tool);
+            let output = decision(&event, &card, &offer);
+            if !unchanged || output.is_err() || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
+                close(&dir, if unchanged { "invalid answer" } else { "question changed before delivery" });
+                return Ok(0);
+            }
+            write(&dir, EMITTED, &json!({"request_id":offer["request_id"],"at":now()}))?;
+            println!("{}", output?);
+            close(&dir, "emitted");
+            return Ok(0);
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +541,126 @@ mod tests {
         close(dir, "terminated");
         assert_eq!(closed(dir).unwrap()["emitted"], true);
         assert!(emitted(dir));
+    }
+
+    fn items() -> Value {
+        json!([{"question":"Which release should we prepare?","header":"Release","options":[
+            {"label":"Stable","description":"Use stable build"},{"label":"Preview","description":"Use preview build"}]}])
+    }
+    fn hook_card(tool: &str) -> Value {
+        json!({"question_id":format!("tool:{tool}"),"tool_call_id":tool,"agent_id":"main","source":"hook",
+            "question_hash":"hash-1","questions":questions::normalize(&items()).unwrap()})
+    }
+    fn event() -> Value {
+        json!({"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion",
+            "tool_input":{"questions":items(),"metadata":{"source":"model"}}})
+    }
+    fn live_record() -> Value {
+        let pid = std::process::id();
+        json!({"run_id":"run-1","conversation_id":"conversation-1","pid":pid,"process_start":process_start(pid),
+            "pending_questions":{"toolu_1":hook_card("toolu_1")}})
+    }
+
+    #[test]
+    fn bind_needs_exactly_one_matching_card() {
+        let mut record = live_record();
+        assert_eq!(bind(&record, &event()).unwrap()["tool_call_id"], "toolu_1");
+        let mut child = event();
+        child["agent_id"] = json!("agent-7");
+        assert!(bind(&record, &child).is_none());
+        let mut other_tool = event();
+        other_tool["tool_name"] = json!("Bash");
+        assert!(bind(&record, &other_tool).is_none());
+        let mut other_event = event();
+        other_event["hook_event_name"] = json!("PreToolUse");
+        assert!(bind(&record, &other_event).is_none());
+        let mut changed = event();
+        changed["tool_input"]["questions"][0]["question"] = json!("Something else?");
+        assert!(bind(&record, &changed).is_none());
+        let mut terminal_only = hook_card("toolu_1");
+        terminal_only["source"] = json!("claude_native_question");
+        record["pending_questions"]["toolu_1"] = terminal_only;
+        assert!(bind(&record, &event()).is_none());
+        record["pending_questions"] = json!({"toolu_1":hook_card("toolu_1"),"toolu_2":hook_card("toolu_2")});
+        assert!(bind(&record, &event()).is_none(), "identical requests are ambiguous");
+        record["pending_questions"] = json!({});
+        assert!(bind(&record, &event()).is_none());
+    }
+
+    #[test]
+    fn decision_passes_the_original_input_with_answers() {
+        let card = hook_card("toolu_1");
+        let offer = json!({"request_id":"one","answers":{"Which release should we prepare?":"Preview"}});
+        let output = decision(&event(), &card, &offer).unwrap();
+        let allowed = &output["hookSpecificOutput"]["decision"];
+        assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        assert_eq!(allowed["behavior"], "allow");
+        let mut expected = event()["tool_input"].clone();
+        expected["answers"] = offer["answers"].clone();
+        assert_eq!(allowed["updatedInput"], expected);
+        assert!(allowed.get("updatedPermissions").is_none());
+        for answers in [json!({}), json!({"Another question?":"Preview"}), json!({"Which release should we prepare?":7}),
+            json!({"Which release should we prepare?":"Preview","Extra?":"x"})] {
+            assert!(decision(&event(), &card, &json!({"request_id":"one","answers":answers})).is_err());
+        }
+    }
+
+    #[test]
+    fn channel_exits_when_card_or_run_changes() {
+        let bound = live_record();
+        let card = hook_card("toolu_1");
+        assert_eq!(should_close(Some(&bound), &bound, &card), None);
+        assert_eq!(should_close(None, &bound, &card), Some("session ended"));
+        let mut run = bound.clone();
+        run["run_id"] = json!("run-2");
+        assert_eq!(should_close(Some(&run), &bound, &card), Some("run changed"));
+        let mut conversation = bound.clone();
+        conversation["conversation_id"] = json!("other");
+        assert_eq!(should_close(Some(&conversation), &bound, &card), Some("conversation changed"));
+        let mut resolved = bound.clone();
+        resolved["pending_questions"] = json!({});
+        assert_eq!(should_close(Some(&resolved), &bound, &card), Some("question resolved"));
+        let mut replaced = bound.clone();
+        replaced["pending_questions"]["toolu_1"]["question_hash"] = json!("hash-2");
+        assert_eq!(should_close(Some(&replaced), &bound, &card), Some("question resolved"));
+        let mut exited = bound.clone();
+        exited["process_start"] = json!("not this process");
+        assert_eq!(should_close(Some(&exited), &bound, &card), Some("agent exited"));
+    }
+
+    #[test]
+    fn transcript_watch_sees_only_results_for_the_bound_tool() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = "6f1f6a3e-6c55-4c55-9a55-1c2b3d4e5f60";
+        let path = temp.path().join(format!("{conversation}.jsonl"));
+        let line = |tool: &str, error: bool| {
+            format!("{}\n", json!({"sessionId":conversation,"message":{"content":[
+                {"type":"tool_result","tool_use_id":tool,"is_error":error,"content":"x"}]}}))
+        };
+        fs::write(&path, line("toolu_other", false)).unwrap();
+        let record = json!({"conversation_id":conversation,"transcript":path});
+        let mut watch = TranscriptWatch::default();
+        assert!(!watch.answered(&record, "toolu_1"));
+        assert!(!watch.answered(&record, "toolu_1"), "unchanged file");
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut file, line("toolu_1", true).as_bytes()).unwrap();
+        assert!(watch.answered(&record, "toolu_1"), "a Terminal decline also resolves it");
+        let mut wrong = record.clone();
+        wrong["transcript"] = json!(temp.path().join("other.jsonl"));
+        assert!(!TranscriptWatch::default().answered(&wrong, "toolu_1"));
+    }
+
+    #[test]
+    fn prune_removes_only_old_run_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("native_answers");
+        for name in ["old", "new"] {
+            fs::create_dir_all(root.join(name).join("question")).unwrap();
+        }
+        let old = std::time::SystemTime::now() - Duration::from_secs(40 * 86400);
+        fs::File::open(root.join("old")).unwrap().set_modified(old).unwrap();
+        prune(&root, Duration::from_secs(30 * 86400), 64);
+        assert!(!root.join("old").exists());
+        assert!(root.join("new").exists());
     }
 }

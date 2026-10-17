@@ -659,6 +659,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "hook" {
         return hooks::hook();
     }
+    if command == "answer-channel" {
+        return answer_channel::run();
+    }
     if command == "graph" { return session_graph::dispatch(args); }
     if command == "statusline" {
         return claude_statusline::run();
