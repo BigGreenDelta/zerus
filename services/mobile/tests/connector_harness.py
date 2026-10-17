@@ -41,10 +41,13 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from urllib.parse import parse_qsl, urlsplit
 import uuid
 
 from aiohttp import web
+
+import differential
 
 TESTS = Path(__file__).resolve().parent
 SERVICE = TESTS.parent
@@ -78,19 +81,48 @@ CONVERSATION_ID = "bb-conversation-1"
 HELP_TEXT = "Usage: hgs [@host] <command> [options]\n"
 
 
+# The Python connector of this source tree.
+PYTHON_COMMAND = [sys.executable, "-m", "zerus_mobile.connector"]
+
+
 def connector_command() -> list[str]:
     configured = os.environ.get("ZERUS_CONNECTOR_COMMAND")
     if configured:
         return shlex.split(configured)
-    return [sys.executable, "-m", "zerus_mobile.connector"]
+    return PYTHON_COMMAND
 
 
 IMPLEMENTATION = os.environ.get("ZERUS_CONNECTOR_IMPLEMENTATION") or (
     "rust" if os.environ.get("ZERUS_CONNECTOR_COMMAND") else "python")
 
 
+# Settings a Rust build reads only with its non-default `test-hooks` feature,
+# which packages never enable: the default native timeout in seconds (Python's
+# is 45) and a factor that divides the connector's own retry spacing (30 s
+# between attempts under divergence b). Python ignores both, so a test that
+# needs one runs only against Rust.
+NATIVE_TIMEOUT_HOOK = "ZERUS_CONNECTOR_TEST_NATIVE_TIMEOUT"
+CLOCK_SCALE_HOOK = "ZERUS_CONNECTOR_TEST_CLOCK_SCALE"
+# Where each case writes its differential trace (differential.py), if anywhere.
+TRACE_DIR = os.environ.get("ZERUS_CONNECTOR_TRACE_DIR")
+
+# A shell without job control starts background commands with SIGINT ignored,
+# and an ignored signal stays ignored across exec: a Python connector would
+# never see Ctrl+C. Connectors start with the default disposition, as under
+# systemd or launchd, however these suites were started.
+if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
 def ported_modules() -> set[str]:
     return set(json.loads((TESTS / "ported.json").read_text())["rust"])
+
+
+def implemented(operation) -> bool:
+    """Whether the connector under test executes this known operation. A Rust
+    build refuses the others as unsupported (`rust_operations` in ported.json,
+    checked against the build by its runtime_vectors test)."""
+    return IMPLEMENTATION == "python" or operation in json.loads((TESTS / "ported.json").read_text())["rust_operations"]
 
 
 def canonical(value) -> str:
@@ -184,12 +216,18 @@ def default_rules(listing_value: dict | None = None, help_text: str = HELP_TEXT)
     return [
         {"argv": ["--help"], "stdout_text": help_text},
         {"argv": ["ls", "--json", "--local"], "stdout": listing() if listing_value is None else listing_value},
+        {"argv": ["ls", "--json", "--local", "--no-archives"], "stdout": listing() if listing_value is None else listing_value},
         {"argv": ["swarm", "get"], "stdout": {"schema": 1, "initialized": False, "organization": {"projects": []}}},
         {"argv": ["account", "ls"], "stdout": {"profiles": []}},
         {"argv": ["inspect", SESSION], "stdout": inspection()},
         {"argv": ["send", SESSION, "--json"], "stdout": acknowledgement(text="{{stdin.text}}")},
         {"argv": ["interrupt", SESSION, "--json"], "stdout": acknowledgement()},
     ]
+
+
+# Every rule key scripted_hgs.py reads.
+RULE_KEYS = frozenset({"id", "argv", "prefix", "stdin_fields", "times", "stdout", "stdout_text", "stdout_path",
+                       "stderr", "exit", "exec", "delay", "kill_parent", "fill"})
 
 
 class ScriptedHgs:
@@ -209,7 +247,15 @@ class ScriptedHgs:
 
     def script(self, rules: list[dict]) -> None:
         """Replace the script; the next call reads it. A rule without an `id`
-        gets a fresh one, so its `times` counts only calls answered since."""
+        gets a fresh one, so its `times` counts only calls answered since. A
+        key scripted_hgs.py does not know is refused here, since it would
+        otherwise be ignored and widen the rule."""
+        for rule in rules:
+            unknown = set(rule) - RULE_KEYS
+            if unknown:
+                raise ValueError(f"scripted hgs rule has unknown keys {sorted(unknown)}: {rule}")
+            if not isinstance(rule.get("stdin_fields", {}), dict):
+                raise ValueError(f"scripted hgs `stdin_fields` must be an object: {rule}")
         self.rules = []
         for rule in rules:
             self._ids += 1
@@ -283,7 +329,11 @@ class FakeRelay:
     parameters, an unknown endpoint) is answered as the relay or nginx would and
     also recorded in `violations`, which BlackBoxCase fails on. Requests are
     queued as phones submit them and handed out one per long poll in the
-    relay's batch envelope; results follow the relay's claim rules.
+    relay's batch envelope; results follow the relay's claim rules. As the
+    relay does, it answers a peer heartbeat with 404 when its route is not in
+    the last heartbeat manifest it accepted, and with 409 when that route is
+    offline or names another machine, or when that heartbeat's snapshot did
+    not offer `gateway_one_hop` (the relay keeps such routes unguarded).
     """
 
     def __init__(self, token: str | None = None):
@@ -296,6 +346,8 @@ class FakeRelay:
         self.pending: collections.deque[str] = collections.deque()
         self.result_posts: list[tuple[str, object, int]] = []
         self.deliveries: list[tuple[str, int]] = []  # (request_id, index in exchanges)
+        self.manifest: dict[str, dict] = {}  # route_id -> peer row of the last accepted heartbeat
+        self.guarded = False  # whether that heartbeat's snapshot offered gateway_one_hop
         self.active_polls = 0
         self.max_polls = 2  # max_polls_per_credential
         self.url = ""
@@ -364,10 +416,28 @@ class FakeRelay:
         return [exchange for exchange in self.exchanges if exchange.method == "POST"
                 and exchange.path == "/v1/node/heartbeat" and exchange.status == 200]
 
+    def peer_heartbeats(self, route_id: str | None = None) -> list[Exchange]:
+        """Accepted peer heartbeats, for one route or all of them."""
+        return [exchange for exchange in self.exchanges if exchange.method == "POST" and exchange.status == 200
+                and re.fullmatch(r"/v1/node/peers/[^/]+/heartbeat", exchange.path)
+                and (route_id is None or exchange.path == f"/v1/node/peers/{route_id}/heartbeat")]
+
     def delivered_since(self, request_id: str, mark: int) -> int | None:
         """Index in `exchanges` of the poll that handed this identity out in
         delivery `mark` or later (`mark` is a length of `deliveries`)."""
         return next((index for identity, index in self.deliveries[mark:] if identity == request_id), None)
+
+    async def inject(self, delivered) -> str:
+        """Hand out `delivered` exactly as given, in its own batch, although no
+        relay would queue it (a non-canonical identity, a malformed envelope or
+        a non-object). Returns its key in `entries`: its request_id when that
+        is a new string, under which a result can then be uploaded."""
+        request_id = delivered.get("request_id") if isinstance(delivered, dict) else None
+        key = request_id if isinstance(request_id, str) and request_id not in self.entries else f"injected-{len(self.entries)}"
+        self.entries[key] = {"state": "queued", "delivered": delivered, "result": None}
+        self.pending.append(key)
+        await self.notify()
+        return key
 
     async def claimed(self, request: dict) -> None:
         """Register a submission an earlier connector process already claimed."""
@@ -437,11 +507,21 @@ class FakeRelay:
             problem = heartbeat_problem(exchange.body)
             if problem:
                 return self.refuse(exchange, 400, "invalid request", problem)
+            # A heartbeat without a machine_id withdraws every route, and one
+            # whose snapshot lacks gateway_one_hop leaves its routes unguarded
+            # (relay store/snapshots.rs and registry.rs).
+            self.manifest = {row["route_id"]: row for row in exchange.body.get("peers", [])}
+            self.guarded = supports(exchange.body["snapshot"], "gateway_one_hop")
             return 200, {"ok": True}
         if exchange.method == "POST" and len(parts) == 5 and parts[:3] == ["v1", "node", "peers"] and parts[4] == "heartbeat":
             problem = peer_heartbeat_problem(parts[3], exchange.body)
             if problem:
                 return self.refuse(exchange, 400, "invalid request", problem)
+            route = self.manifest.get(parts[3])
+            if route is None:
+                return 404, {"error": "not found"}
+            if not (route["online"] and self.guarded) or route["machine_id"] != exchange.body["machine_id"]:
+                return 409, {"error": "request identity or route conflicts"}
             return 200, {"ok": True}
         if exchange.method == "POST" and len(parts) == 5 and parts[:3] == ["v1", "node", "requests"] and parts[4] == "result":
             return self.result(exchange, parts[3])
@@ -474,7 +554,8 @@ class FakeRelay:
     def claimable(self, one_hop: bool) -> str | None:
         for request_id in self.pending:
             entry = self.entries[request_id]
-            if entry["state"] == "queued" and (one_hop or "gateway_route" not in entry["delivered"]):
+            routed = isinstance(entry["delivered"], dict) and "gateway_route" in entry["delivered"]
+            if entry["state"] == "queued" and (one_hop or not routed):
                 return request_id
         return None
 
@@ -536,6 +617,14 @@ def snapshot_problem(snapshot) -> str | None:
         if not isinstance(row, dict) or ("name" in row and not text_field(row["name"], 1024)):
             return "invalid snapshot session"
     return None
+
+
+def supports(snapshot, feature: str) -> bool:
+    """The relay's `protocol::supports` for a snapshot's features."""
+    capabilities = snapshot.get("mobile_capabilities") if isinstance(snapshot, dict) else None
+    return (isinstance(capabilities, dict) and type(capabilities.get("protocol_version")) is int
+            and capabilities["protocol_version"] == 1
+            and isinstance(capabilities.get("features"), list) and feature in capabilities["features"])
 
 
 def presence_problem(body) -> str | None:
@@ -670,8 +759,8 @@ def stopped_journal(state_dir: Path):
 
 
 class ConnectorProcess:
-    def __init__(self, case: BlackBoxCase, args: list[str], env: dict):
-        self.case, self.args, self.env = case, args, env
+    def __init__(self, case: BlackBoxCase, args: list[str], env: dict, command: list[str]):
+        self.case, self.args, self.env, self.command = case, args, env, command
         self.index = len(case.processes)
         self.log_path = case.scratch / f"connector-{self.index}.log"
         self.process: subprocess.Popen | None = None
@@ -680,7 +769,7 @@ class ConnectorProcess:
     def start(self) -> ConnectorProcess:
         with open(self.log_path, "wb") as log:
             self.process = subprocess.Popen(
-                [*connector_command(), *self.args], cwd=self.case.scratch, env=self.env,
+                [*self.command, *self.args], cwd=self.case.scratch, env=self.env,
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         self.case.hgs.parent(self.process.pid)
         if sys.platform.startswith("linux"):
@@ -738,6 +827,11 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         if self.tests_connector and IMPLEMENTATION != "python" and type(self).__module__ not in ported_modules():
             self.skipTest(f"{type(self).__module__} is not ported to {IMPLEMENTATION} (ported.json)")
+        if TRACE_DIR:
+            # Both runs of a traced case then use the same identities.
+            identities = mock.patch.object(uuid, "uuid4", differential.seeded_uuid4(self.id()))
+            identities.start()
+            self.addCleanup(identities.stop)
         self.scratch = Path(tempfile.mkdtemp(prefix="zerus-bb-")).resolve()
         self.addCleanup(shutil.rmtree, self.scratch, ignore_errors=True)
         for name in ("home", "tmp", "hgs-config", "hgs-state"):
@@ -756,6 +850,8 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
         for process in self.processes:
             process.stop()
         await self.relay.stop()
+        if TRACE_DIR:
+            differential.record(self, TRACE_DIR)
         findings = self.findings + self.relay.violations
         for process in self.processes:
             if self.relay.token in process.output():
@@ -777,14 +873,14 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
                 config[key] = value
         return config
 
-    def environment(self, extra: dict | None = None) -> dict:
+    def environment(self, extra: dict | None = None, command: list[str] | None = None) -> dict:
         home = self.home
         env = {"HOME": str(home), "PATH": os.pathsep.join([str(self.hgs.bin), "/usr/bin", "/bin"]),
                "TMPDIR": str(self.scratch / "tmp"), "XDG_CONFIG_HOME": str(home / ".config"),
                "XDG_STATE_HOME": str(home / ".local/state"), "XDG_DATA_HOME": str(home / ".local/share"),
                "XDG_CACHE_HOME": str(home / ".cache"), "HGS_CONFIG_DIR": str(self.scratch / "hgs-config"),
                "HGS_STATE_DIR": str(self.scratch / "hgs-state")}
-        if not os.environ.get("ZERUS_CONNECTOR_COMMAND"):
+        if (command or connector_command()) == PYTHON_COMMAND:
             env.update(PYTHONPATH=str(SERVICE), PYTHONDONTWRITEBYTECODE="1")
         env.update(extra or {})
         return env
@@ -806,17 +902,19 @@ class BlackBoxCase(unittest.IsolatedAsyncioTestCase):
         return path
 
     async def launch(self, config: dict | None = None, *, text: str | None = None, args=("--allow-insecure-localhost",),
-                     env: dict | None = None, ready: bool = True) -> ConnectorProcess:
-        """Start a connector; with `ready`, wait until it heartbeats and polls."""
+                     env: dict | None = None, ready: bool = True, command: list[str] | None = None) -> ConnectorProcess:
+        """Start a connector (by default the one under test); with `ready`,
+        wait until it heartbeats and polls."""
         path = self.write_config(self.config() if config is None and text is None else config, text=text)
-        process = self.spawn(["--config", str(path), *args], env)
+        process = self.spawn(["--config", str(path), *args], env, command)
         if ready:
             await self.ready(process)
         return process
 
-    def spawn(self, args: list[str], env: dict | None = None) -> ConnectorProcess:
+    def spawn(self, args: list[str], env: dict | None = None, command: list[str] | None = None) -> ConnectorProcess:
         """Start a connector with exactly these arguments."""
-        process = ConnectorProcess(self, list(args), self.environment(env))
+        command = command or connector_command()
+        process = ConnectorProcess(self, list(args), self.environment(env, command), command)
         self.processes.append(process)
         return process.start()
 

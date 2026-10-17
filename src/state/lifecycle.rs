@@ -230,6 +230,15 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let permission_mode = crate::accounts::permission_mode(&crate::config::Config::load().map_err(|e|e.message)?,
         &nonempty_env("HGS_ACCOUNT_ID").unwrap_or_default(), &agent).map_err(|e|e.message)?;
     for argv in [&mut base, &mut first] { crate::accounts::apply_permissions(&agent, &permission_mode, argv); }
+    // Claude Code reports its context window only to a status line command.
+    // The saved base stays as launched; resume adds the settings again.
+    if agent == "claude" {
+        if let Some(settings) = claude_statusline::launch_settings(&base[0], &cwd, &[&base, &first]) {
+            for argv in [&mut base, &mut first] {
+                claude_statusline::add_settings(argv, &settings);
+            }
+        }
+    }
     if agent == "codex" {
         for argv in [&mut base, &mut first] {
             let delimiter = argv

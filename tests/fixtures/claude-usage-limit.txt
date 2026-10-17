@@ -1,0 +1,12 @@
+You've hit your weekly limit · resets Oct 20, 1pm (UTC)
+Use your limit reset to reset it now: claude/reset
+
+✻ Cogitated for 3h · 1 shell still running
+────────────────────────────────────────
+What do you want to do?
+
+❯ 1. Stop and wait for limit to reset
+  2. Wait here, then continue automatically at Oct 20, 1pm
+  3. Switch to usage credits
+
+Enter to confirm · Esc to cancel

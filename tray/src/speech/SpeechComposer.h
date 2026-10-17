@@ -3,6 +3,9 @@
 #include <QObject>
 #include <QUrl>
 
+class RoundVideoView;
+class RoundVideoRecorder;
+class QTimer;
 class SpeechClient;
 class SpeechRecorder;
 class ToolbarChip;
@@ -26,7 +29,8 @@ public:
     };
     explicit SpeechComposer(const QString &executable, MessageComposer *composer,
                             std::function<Target()> target, SpeechRecorder *recorder = nullptr,
-                            std::function<bool(const QUrl &)> openSettings = {});
+                            std::function<bool(const QUrl &)> openSettings = {},
+                            RoundVideoRecorder *videoRecorder = nullptr);
     static QUrl microphoneSettingsUrl();
 signals:
     void messageChanged(const QString &sessionKey, const QJsonObject &message);
@@ -36,6 +40,7 @@ private:
     enum class State { Idle, Starting, Recording, Saving, Preview, Submitting, Uncertain };
     enum class Notice { General, MicrophonePermission };
     void start();
+    void requestSendRecording();
     void stopRecording();
     void recorded(const QByteArray &base64);
     void send();
@@ -58,6 +63,16 @@ private:
     MessageComposer *m_composer;
     SpeechClient *m_client;
     SpeechRecorder *m_recorder;
+    RoundVideoView *m_videoView;
+    RoundVideoRecorder *m_videoRecorder;
+    QTimer *m_holdTimer;
+    QPushButton *m_stopPreview;
+    bool m_videoMode=false, m_captureVideo=false, m_videoSupported=false;
+    bool m_pressed=false, m_locked=true, m_sendAfterSaved=false, m_pressStartedLocked=false;
+    bool m_previewBeforeSend=false;
+    QPoint m_pressPosition;
+    QByteArray m_video;
+    QJsonObject m_videoMeta;
     ToolbarChip *m_voice, *m_cancel, *m_result;
     QWidget *m_preview;
     QLabel *m_previewLabel, *m_recordingHint;

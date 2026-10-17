@@ -97,6 +97,32 @@ class NotificationCatalogTest {
         assertFalse(later.desired.single().fresh)
     }
 
+    @Test fun optionalOnlyQuestionsAreTheirOwnKindAndNeverChangeARequest() {
+        fun item(id: String, optional: Boolean? = true) = JSONObject().put("question_id", id).put("question_hash", "h-$id")
+            .apply { optional?.let { put("optional", it) } }
+        fun parsed(phase: String, vararg items: JSONObject, extra: (JSONObject) -> Unit = {}) =
+            parse(listOf(machine(listOf(session().put("phase", phase).put("mobile_attention", JSONArray(items.toList())).also(extra))))).sessions.single()
+        val optional = parsed("tool", item("codex-async:b:0"), item("codex-async:a:0"), item("codex-async:a:0"))
+        assertEquals(SessionAlertKind.Optional, optional.kind)
+        assertEquals(listOf("codex-async:a:0", "codex-async:b:0"), optional.optional)
+        assertEquals("conversation", optional.conversation)
+        assertEquals("Optional question on QA laptop", SessionNotice(optional, SessionAlertKind.Optional, "fingerprint", false).body)
+        // Connectors without the marker: only hgs's async IDs are optional.
+        assertEquals(SessionAlertKind.Optional, parsed("tool", item("codex-async:a:0", null)).kind)
+        assertEquals(SessionAlertKind.Input, parsed("tool", item("tool-1", null)).kind)
+        assertEquals(SessionAlertKind.Input, parsed("tool", item("codex-async:a:0", false)).kind)
+        assertEquals(SessionAlertKind.Input, parsed("tool", item("codex-async:a:0"), item("tool-1", null)).kind)
+        assertEquals(SessionAlertKind.Input, parsed("input", item("codex-async:a:0")).kind)
+        assertEquals(SessionAlertKind.Input, parsed("tool", item("codex-async:a:0")) { it.put("pending_question_count", 1) }.kind)
+        assertEquals(SessionAlertKind.Error, parsed("error", item("codex-async:a:0")).kind)
+        assertNull(parsed("tool").kind)
+        // A new optional question does not make a pending request look new.
+        val request = parsed("input", item("tool-1", null))
+        val withOptional = parsed("input", item("tool-1", null), item("codex-async:a:0"))
+        assertEquals(request.identity, withOptional.identity)
+        assertEquals(listOf("codex-async:a:0"), withOptional.optional)
+    }
+
     @Test fun displayTextIsBoundedAndControlsCannotSpoofNotificationLines() {
         val row = session().put("tag", "Review\n\u202erequested" + "x".repeat(300))
         val current = parse(listOf(machine(listOf(row)))).sessions.single()

@@ -9,7 +9,7 @@
 #include "DirectoryDialog.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceList.h"
-#include <QColorDialog>
+#include "WorkspaceColorDialog.h"
 #include <QCollator>
 #include <QApplication>
 #include <QClipboard>
@@ -551,7 +551,7 @@ void ProjectsDialog::chooseColor()
 {
     const auto id=currentId();const auto *project=m_projects->group(id);if(!project)return;
     const auto title=project->name;QColor chosen(project->color);
-    QDialog dialog(this);dialog.setObjectName("projectColorDialog");dialog.setWindowTitle(tr("Project color"));dialog.setMinimumWidth(390);
+    QDialog dialog(this,Qt::Popup);dialog.setAttribute(Qt::WA_NoMouseReplay);dialog.setObjectName("projectColorDialog");dialog.setWindowTitle(tr("Project color"));dialog.setMinimumWidth(390);
     auto *layout=new QVBoxLayout(&dialog);layout->setContentsMargins(22,20,22,20);layout->setSpacing(16);
     auto *preview=new ProjectPreview;preview->setObjectName("projectFillPreview");preview->setTheme(m_dark);layout->addWidget(preview);
     auto *palette=new QGridLayout;palette->setSpacing(8);layout->addLayout(palette);
@@ -559,13 +559,13 @@ void ProjectsDialog::chooseColor()
     auto *hex=new QLineEdit(chosen.name());hex->setObjectName("projectColorHex");hex->setMaxLength(7);
     auto *style=new QComboBox;style->setObjectName("projectColorStyle");style->addItem(tr("Soft fill"),false);style->addItem(tr("Bright fill"),true);style->setCurrentIndex(style->findData(project->vivid));
     auto *form=new QFormLayout;form->addRow(tr("Color"),hex);form->addRow(tr("Style"),style);layout->addLayout(form);
-    auto *custom=new QPushButton(tr("More colors…"));layout->addWidget(custom,0,Qt::AlignLeft);
+    auto *custom=new QPushButton(tr("More colors…"));custom->setObjectName("projectCustomColor");layout->addWidget(custom,0,Qt::AlignLeft);
     auto *buttons=new QDialogButtonBox(QDialogButtonBox::Apply|QDialogButtonBox::Cancel);layout->addWidget(buttons);
     const auto update=[&]{const QColor value(hex->text());const bool valid=value.isValid()&&hex->text().size()==7&&hex->text().startsWith('#');buttons->button(QDialogButtonBox::Apply)->setEnabled(valid);if(valid){chosen=value;preview->setProject(title,chosen,style->currentData().toBool(),id==m_projects->defaultProject());}};
     for(int i=0;i<colors.size();++i){auto *swatch=new QPushButton;swatch->setFixedSize(44,32);swatch->setAccessibleName(colors[i]);swatch->setToolTip(colors[i]);swatch->setStyleSheet(QString("QPushButton {background:%1;border:1px solid %2;border-radius:6px;padding:0;} QPushButton:hover {border:2px solid %2;}").arg(colors[i],m_dark?"#ffffff":"#17212b"));palette->addWidget(swatch,i/6,i%6);connect(swatch,&QPushButton::clicked,&dialog,[=]{hex->setText(colors[i]);});}
     connect(hex,&QLineEdit::textChanged,&dialog,update);connect(style,&QComboBox::currentIndexChanged,&dialog,update);update();
-    connect(custom,&QPushButton::clicked,&dialog,[&]{QColorDialog picker(chosen,&dialog);connect(&picker,&QColorDialog::currentColorChanged,&dialog,[&](const QColor &c){preview->setProject(title,c,style->currentData().toBool(),id==m_projects->defaultProject());});if(picker.exec()==QDialog::Accepted)hex->setText(picker.selectedColor().name());update();});
+    connect(custom,&QPushButton::clicked,&dialog,[&]{WorkspaceColorDialog picker(chosen,&dialog);connect(&picker,&QColorDialog::currentColorChanged,&dialog,[&](const QColor &c){preview->setProject(title,c,style->currentData().toBool(),id==m_projects->defaultProject());});if(picker.exec()==QDialog::Accepted)hex->setText(picker.selectedColor().name());update();});
     connect(buttons->button(QDialogButtonBox::Apply),&QPushButton::clicked,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
-    if(dialog.exec()!=QDialog::Accepted)return;
+    if(execWorkspaceColorPopup(dialog)!=QDialog::Accepted)return;
     m_projects->setColor(id,chosen.name());m_projects->setVivid(id,style->currentData().toBool());changed();
 }

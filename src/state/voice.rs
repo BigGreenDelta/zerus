@@ -9,6 +9,8 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
+#[path = "../../services/mobile/relay/src/voice_video.rs"]
+mod video;
 
 /// Voice messages need the speech service, the peer transport and a detached
 /// worker, which Phase 2 leaves out on Windows; `dispatch` refuses there.
@@ -22,7 +24,7 @@ mod speech {
     use super::{Result, Value, UNSUPPORTED};
     use crate::config::Config;
     use std::time::Duration;
-    pub(super) use crate::speech::{validate_request, MAX_REQUEST_BYTES};
+    pub(super) use crate::speech::validate_request;
 
     pub(super) fn voice_computers(_: &Config) -> Result<Value> {
         Err(UNSUPPORTED.into())
@@ -58,7 +60,11 @@ fn bounded(value: &Value, max: usize, empty: bool) -> bool {
         (empty || !s.is_empty()) && s.len() <= max && !s.chars().any(char::is_control)
     })
 }
+#[cfg(unix)]
 pub(crate) fn validate_request(value: &Value) -> Result<()> {
+    prepare_request(value).map(|_| ())
+}
+fn prepare_request(value: &Value) -> Result<Option<video::Video>> {
     let object = value.as_object().ok_or("Invalid voice request")?;
     let mut fields = vec![
         "action",
@@ -67,7 +73,7 @@ pub(crate) fn validate_request(value: &Value) -> Result<()> {
         "expected_conversation_id",
     ];
     match string(value, "action") {
-        "submit" => fields.extend(["speech", "audio"]),
+        "submit" => { fields.extend(["speech", "audio"]); if object.contains_key("video") { fields.push("video"); } },
         "status" | "cancel" => fields.push("message_id"),
         "profiles" => (),
         _ => return Err("Unknown voice action".into()),
@@ -100,8 +106,12 @@ pub(crate) fn validate_request(value: &Value) -> Result<()> {
             asr["profile_revision"] = revision.clone();
         }
         speech::validate_request(&asr).map_err(err)?;
+        if let Some(media) = value.get("video") {
+            let pcm = STANDARD.decode(string(&value["audio"], "data_base64")).map_err(err)?;
+            return video::parse(media, string(value, "request_id"), pcm.len()).map(Some);
+        }
     }
-    Ok(())
+    Ok(None)
 }
 
 struct Store {
@@ -184,6 +194,12 @@ impl Store {
             }
             tx.commit().map_err(err)?;
         }
+        if !columns.iter().any(|name| name == "video") {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(err)?;
+            let migrated: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name='video')", [], |row| row.get(0)).map_err(err)?;
+            if !migrated { tx.execute_batch("ALTER TABLE messages ADD COLUMN video BLOB NOT NULL DEFAULT X'';").map_err(err)?; }
+            tx.commit().map_err(err)?;
+        }
         db.execute_batch("CREATE INDEX IF NOT EXISTS voice_waveform_pending ON messages(id) WHERE waveform_version=0;")
             .map_err(err)?;
         Ok(Self { db })
@@ -228,7 +244,11 @@ impl Store {
         tx.commit().map_err(err)?;
         Ok(n == 1)
     }
+    #[cfg(all(test, unix))]
     fn insert(&mut self, job: &Value, digest: &str, audio: &[u8]) -> Result<Value> {
+        self.insert_media(job, digest, audio, &[])
+    }
+    fn insert_media(&mut self, job: &Value, digest: &str, audio: &[u8], video: &[u8]) -> Result<Value> {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -249,12 +269,12 @@ impl Store {
         }
         let (count, size): (i64, i64) = tx
             .query_row(
-                "SELECT count(*),COALESCE(sum(length(audio)),0) FROM messages",
+                "SELECT count(*),COALESCE(sum(length(audio)+length(video)),0) FROM messages",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(err)?;
-        if count >= MAX_JOBS || size + audio.len() as i64 > MAX_AUDIO {
+        if count >= MAX_JOBS || size + audio.len() as i64 + video.len() as i64 > MAX_AUDIO {
             return Err("Voice storage is full on this conversation computer".into());
         }
         let pending:i64=tx.query_row("SELECT count(*) FROM messages WHERE state NOT IN ('submitted','failed','cancelled','uncertain')",[],|r|r.get(0)).map_err(err)?;
@@ -269,7 +289,7 @@ impl Store {
             )
             .map_err(err)?;
         tx.execute(
-            "INSERT INTO messages(id,digest,state,created,revision,conversation,body,audio,change_seq,waveform_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO messages(id,digest,state,created,revision,conversation,body,audio,change_seq,waveform_version,video) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 string(job, "id"),
                 digest,
@@ -280,7 +300,8 @@ impl Store {
                 job.to_string(),
                 audio,
                 sequence,
-                waveform_version(job)
+                waveform_version(job),
+                video
             ],
         )
         .map_err(err)?;
@@ -291,6 +312,9 @@ impl Store {
         self.db
             .query_row("SELECT audio FROM messages WHERE id=?", [id], |r| r.get(0))
             .map_err(err)
+    }
+    fn video(&self, id: &str) -> Result<Vec<u8>> {
+        self.db.query_row("SELECT video FROM messages WHERE id=?", [id], |r| r.get(0)).map_err(err)
     }
     fn backfill_waveforms(&self) -> Result<usize> {
         // The partial index bounds every idle pass, including after completion.
@@ -457,6 +481,7 @@ fn public(job: &Value) -> Value {
         "revision",
         "state",
         "audio",
+        "video",
         "transcript",
         "transcript_truncated",
         "error_code",
@@ -518,18 +543,20 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let mut bytes = Vec::new();
     io::stdin()
-        .take((speech::MAX_REQUEST_BYTES + 1) as u64)
+        .take((video::MAX_REQUEST_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(err)?;
-    if bytes.len() > speech::MAX_REQUEST_BYTES {
+    if bytes.len() > video::MAX_REQUEST_BYTES {
         return Err("Voice request is too large".into());
     }
     let request: Value = serde_json::from_slice(&bytes).map_err(err)?;
-    validate_request(&request)?;
+    let video = prepare_request(&request)?;
     let target = checked(&args[0], &request)?;
     let config = crate::config::Config::load().map_err(|e| e.message)?;
     if request["action"] == "profiles" {
-        println!("{}", speech::voice_computers(&config)?);
+        let mut profiles = speech::voice_computers(&config)?;
+        profiles["features"] = json!(["voice_video"]);
+        println!("{}", profiles);
         return Ok(0);
     }
     let mut store = Store::open()?;
@@ -552,10 +579,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             )
         );
         let id = string(&request, "request_id");
-        let job = json!({"id":id,"name":args[0],"run_id":target["run_id"],"conversation_id":target["conversation_id"],"agent":target["agent"],"backend":target["backend"],"agent_home":target["agent_home"],"account_id":target["account_id"],
+        let mut job = json!({"id":id,"name":args[0],"run_id":target["run_id"],"conversation_id":target["conversation_id"],"agent":target["agent"],"backend":target["backend"],"agent_home":target["agent_home"],"account_id":target["account_id"],
             "created_at":now(),"revision":1,"state":"queued","speech":request["speech"],"attempt":0,
             "audio":{"request_id":id,"index":0,"name":"voice.wav","mime":"audio/wav","bytes":audio.len(),"duration_ms":(pcm.len()*1000/32000).max(1),"waveform":waveform(&pcm)}});
-        let accepted = store.insert(&job, &digest, &audio)?;
+        if let Some(video) = &video { job["video"] = video.metadata.clone(); }
+        let accepted = store.insert_media(&job, &digest, &audio, video.as_ref().map_or(&[], |v| v.bytes.as_slice()))?;
         // Failure to start a worker must not hide an accepted durable message.
         if ensure_worker().is_err() {
             eprintln!("hgs: voice message saved; worker startup is pending");
@@ -602,7 +630,13 @@ pub(super) fn messages(record: &Value, agent: Option<&str>) -> Vec<Value> {
     rows
 }
 fn message_row(job: &Value) -> Value {
-    json!({"source":"hgs_voice","type":"UserMessage","message_id":job["id"],"request_id":job["id"],"at":job["created_at"],"detail":job.get("transcript").cloned().unwrap_or(json!("")),"voice":public(job),"attachments":[job["audio"]]})
+    let mut attachments = vec![job["audio"].clone()];
+    if let Some(video) = job.get("video") {
+        let mut file = video.clone();
+        if let Some(object) = file.as_object_mut() { object.remove("poster_base64"); }
+        attachments.push(file);
+    }
+    json!({"source":"hgs_voice","type":"UserMessage","message_id":job["id"],"request_id":job["id"],"at":job["created_at"],"detail":job.get("transcript").cloned().unwrap_or(json!("")),"voice":public(job),"attachments":attachments})
 }
 /// Incremental private history source; bool means the current page is complete.
 /// Updates receive a fresh global sequence so an already indexed pending row
@@ -642,11 +676,11 @@ pub(super) fn read_attachment(
     let Some(job) = store.get(message_id)? else {
         return Ok(None);
     };
-    if index != 0 || !belongs(&job, record) {
+    if index > 1 || index == 1 && job.get("video").is_none() || !belongs(&job, record) {
         return Err("This voice recording belongs to another conversation".into());
     }
-    let mut result = job["audio"].clone();
-    result["data_base64"] = json!(STANDARD.encode(store.audio(message_id)?));
+    let mut result = job[if index == 0 { "audio" } else { "video" }].clone();
+    result["data_base64"] = json!(STANDARD.encode(if index == 0 { store.audio(message_id)? } else { store.video(message_id)? }));
     Ok(Some(result))
 }
 pub(super) fn correlation(record: &Value, message_id: &str) -> Option<Value> {
@@ -1144,6 +1178,68 @@ fn ensure_worker() -> Result<()> {
 mod tests {
     use super::*;
     const ID: &str = "11111111-1111-4111-8111-111111111111";
+    #[test]
+    fn video_acceptance_keeps_one_durable_media_identity_and_audio_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private");
+        let media = video::parse(&video::tests::request(), ID, 32_000).unwrap();
+        let audio = wav(&vec![0; 32_000]);
+        let mut original = job();
+        original["video"] = media.metadata.clone();
+        {
+            let mut store = Store::open_at(&path).unwrap();
+            store.insert_media(&original, "video-and-audio-digest", &audio, &media.bytes).unwrap();
+            assert_eq!(store.insert_media(&original, "video-and-audio-digest", &audio, &media.bytes).unwrap(), original);
+            assert!(store.insert_media(&original, "different-video", &audio, &media.bytes).is_err());
+        }
+        let store = Store::open_at(&path).unwrap();
+        assert_eq!(store.audio(ID).unwrap(), audio);
+        assert_eq!(store.video(ID).unwrap(), media.bytes);
+        let restored = store.get(ID).unwrap().unwrap();
+        let public = public(&restored);
+        assert_eq!(public["video"], media.metadata);
+        assert_eq!(public["audio"]["index"], 0);
+        assert!(public.get("data_base64").is_none());
+        let history = message_row(&restored);
+        assert_eq!(history["message_id"], ID);
+        assert_eq!(history["attachments"].as_array().unwrap().len(), 2);
+        assert_eq!(history["attachments"][1]["request_id"], ID);
+        assert_eq!(history["attachments"][1]["index"], 1);
+        assert_eq!(history["voice"]["video"], media.metadata);
+    }
+    #[test]
+    fn video_payload_is_additive_and_does_not_change_the_speech_route() {
+        let mut value = request();
+        assert!(validate_request(&value).is_ok());
+        value["audio"]["data_base64"] = json!(STANDARD.encode(vec![0; 32_000]));
+        value["video"] = video::tests::request();
+        assert!(validate_request(&value).is_ok());
+        value["video"]["duration_ms"] = json!(60_001);
+        assert!(validate_request(&value).is_err());
+        value["action"] = json!("status");
+        assert!(validate_request(&value).is_err());
+    }
+    #[test]
+    fn video_schema_upgrade_preserves_audio_during_concurrent_openers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private");
+        let audio = wav(&[1, 0]);
+        {
+            let mut store = Store::open_at(&path).unwrap();
+            store.insert(&job(), "old-audio", &audio).unwrap();
+            store.db.execute_batch("ALTER TABLE messages DROP COLUMN video;").unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let openers: Vec<_> = (0..2).map(|_| {
+            let path = path.clone(); let barrier = barrier.clone();
+            std::thread::spawn(move || { barrier.wait(); Store::open_at(&path).unwrap(); })
+        }).collect();
+        for opener in openers { opener.join().unwrap(); }
+        let store = Store::open_at(&path).unwrap();
+        assert_eq!(store.audio(ID).unwrap(), audio);
+        assert!(store.video(ID).unwrap().is_empty());
+        assert_eq!(store.get(ID).unwrap().unwrap(), job());
+    }
 
     #[test]
     fn waveform_is_exact_rms_envelope_and_handles_silence_and_short_audio() {

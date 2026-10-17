@@ -74,13 +74,10 @@ pub(super) fn remove_synced(path: &Path) -> Result<()> {
 /// The caller holds the state writer lock. Write the durable copy before
 /// releasing its old name; a crash between the two operations cannot lose it.
 pub(super) fn save(record: &Value) -> Result<String> {
-    let existing = records()?.into_iter().find(|archived| {
-        archived["name"] == record["name"]
-            && archived["run_id"] == record["run_id"]
-            && archived["conversation_id"] == record["conversation_id"]
-    });
+    let db=archive_catalog::catalog()?;
+    let existing=archive_catalog::find(&db,record)?;
     let id = if let Some(existing) = existing {
-        string(&existing, "archive_id").to_owned()
+        existing
     } else {
         let id = uuid::Uuid::new_v4().to_string();
         let mut archived = record.clone();
@@ -118,36 +115,72 @@ pub(super) fn reconcile() -> Result<()> {
         return Ok(());
     }
     let _guard = lock(None)?;
-    let snapshot = live()?;
+    reconcile_locked(&live()?).map(drop)
+}
+
+/// `reconcile` for a caller that holds the state lock and read `snapshot`
+/// under it. Returns the archives and the bindings as it leaves them.
+pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<Value>)> {
     let archived = records()?;
-    for record in super::storage::records()? {
-        if snapshot.contains_key(string(&record, "name"))
-            || process_alive(&record)
+    let bindings = super::storage::records()?;
+    let mut saved = false;
+    for record in &bindings {
+        if snapshot.contains_key(string(record, "name"))
+            || process_alive(record)
             || record.get("pausing").is_some()
             || record["paused"].as_bool().unwrap_or(false)
-            || !string(&record, "expected_id").is_empty()
+            || !string(record, "expected_id").is_empty()
         {
             continue;
         }
-        if equivalent(&record, &archived) {
-            save(&record)?;
+        if equivalent(record, &archived) {
+            save(record)?;
+            saved = true;
             continue;
         }
-        let explicit_claude = string(&record, "agent") == "claude"
+        let explicit_claude = string(record, "agent") == "claude"
             && record.get("supervisor").is_none()
             && record["termination_signal"].is_null()
-            && string(&record, "error").is_empty()
-            && known_exit(&record);
-        let confirmed_supervisor = string(&record, "completion_source") == "supervisor"
-            && string(&record, "completion_reason") == "clean_exit"
+            && string(record, "error").is_empty()
+            && known_exit(record);
+        let confirmed_supervisor = string(record, "completion_source") == "supervisor"
+            && string(record, "completion_reason") == "clean_exit"
             && record["exit_code"] == 0
             && record["termination_signal"].is_null()
-            && known_exit(&record);
+            && known_exit(record);
         if explicit_claude || confirmed_supervisor {
-            save(&record)?;
+            save(record)?;
+            saved = true;
         }
     }
-    Ok(())
+    if saved {
+        return Ok((records()?, super::storage::records()?));
+    }
+    Ok((archived, bindings))
+}
+
+/// Active polling never opens every archived record or its conversation journal.
+/// Only bindings that might need reconciliation consult the metadata index.
+pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>> {
+    let bindings = super::storage::records()?;
+    let mut result = Vec::new();
+    let mut catalog=None;
+    for record in bindings {
+        // A live exact binding cannot be the crash-left copy of a completed run.
+        if matches(&record,snapshot.get(string(&record,"name"))) || process_alive(&record) { result.push(record);continue; }
+        if catalog.is_none(){catalog=Some(archive_catalog::catalog()?);}
+        if archive_catalog::contains(catalog.as_ref().unwrap(), &record)? { save(&record)?; continue; }
+        if snapshot.contains_key(string(&record, "name")) || process_alive(&record)
+            || record.get("pausing").is_some() || record["paused"].as_bool().unwrap_or(false)
+            || !string(&record, "expected_id").is_empty() {
+            result.push(record); continue;
+        }
+        let clean = record["termination_signal"].is_null() && known_exit(&record) &&
+            ((string(&record,"agent")=="claude" && record.get("supervisor").is_none() && string(&record,"error").is_empty()) ||
+             (string(&record,"completion_source")=="supervisor" && string(&record,"completion_reason")=="clean_exit" && record["exit_code"]==0));
+        if clean { save(&record)?; } else { result.push(record); }
+    }
+    Ok(result)
 }
 
 pub(super) fn manual(name: &str, dry: bool) -> Result<i32> { manual_scoped(name,dry,None) }

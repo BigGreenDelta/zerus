@@ -20,9 +20,13 @@ public:
     AttentionChanges observe(const QString &host, const BoxState &box, qint64 now = QDateTime::currentSecsSinceEpoch());
     AttentionChanges observe(const QString &host, const BoxState &box, qint64 now, bool applicationFocused);
     void deliveryFailed(const QString &token, qint64 now = QDateTime::currentSecsSinceEpoch());
+    // Banners for new optional questions (off by default). Without them their
+    // IDs are still recorded, so turning them on announces only later ones.
+    void setOptionalQuestions(bool on) { m_optionalQuestions = on; }
     QJsonObject state() const { return m_hosts; }
     static QJsonObject target(const QString &token);
     static bool matches(const QJsonObject &target, const SessionInfo &session);
 private:
     QJsonObject m_hosts;
+    bool m_optionalQuestions = false;
 };

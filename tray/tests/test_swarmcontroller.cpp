@@ -55,6 +55,8 @@ private slots:
     void initTestCase() {
         QVERIFY(m_directory.isValid());QCoreApplication::setOrganizationName("hgs-swarm-test");QCoreApplication::setApplicationName("controller");
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_directory.path());
+        // Each case counts its requests; a background read on a slow runner would add one.
+        SwarmController::setPollInterval(60 * 60 * 1000);
     }
     void init() {
         QSettings().clear();m_root=m_directory.path()+"/case-"+QString::number(QDateTime::currentMSecsSinceEpoch());QDir().mkpath(m_root);m_program=m_root+"/hgs";
@@ -77,10 +79,11 @@ print(json.dumps(result))
         write("hgs",script);QVERIFY(FakeCli::makeRunnable(m_program));response("Original");
     }
     void localPresentationSurvivesRemoteMembership() {
-        auto local=organization("Old");auto project=local["projects"].toArray()[0].toObject();project["collapsed"]=true;project["sessions"]=QJsonArray{"b","a","removed"};local["projects"]=QJsonArray{project};local["runs"]=QJsonObject{{"run","a"}};
+        auto local=organization("Old");auto project=local["projects"].toArray()[0].toObject();project["collapsed"]=true;project["sessions"]=QJsonArray{"b","a","removed"};local["projects"]=QJsonArray{project};local["runs"]=QJsonObject{{"run","a"}};local["run_groups"]=QJsonObject{{"arch\nrun","p"}};
         auto remote=organization("Renamed");project=remote["projects"].toArray()[0].toObject();project["sessions"]=QJsonArray{"a","new","b"};remote["projects"]=QJsonArray{project};
         const auto result=SwarmController::presentation(remote,local);const auto p=result["projects"].toArray()[0].toObject();
         QCOMPARE(p["name"].toString(),"Renamed");QVERIFY(p["collapsed"].toBool());QCOMPARE(p["sessions"].toArray(),QJsonArray({"b","a","new"}));QCOMPARE(result["runs"],local["runs"]);
+        QCOMPARE(result["run_groups"],local["run_groups"]);
     }
     void presentationRestoresOnlyThisMachinesWindowsFolders() {
         // Local Windows folders (D15) are not in the catalog. A read restores those of
@@ -110,6 +113,48 @@ print(json.dumps(result))
         // Without local Windows folders a read presents the catalog's folders as before.
         project=local["projects"].toArray()[0].toObject();project["folders"]=QJsonArray{posix,stale};local["projects"]=QJsonArray{project};
         QCOMPARE(SwarmController::presentation(shared,local,"node-a")["projects"].toArray()[0].toObject()["folders"],shared["projects"].toArray()[0].toObject()["folders"]);
+    }
+    static QJsonObject orderedProject(const QString &id) {
+        return {{"id",id},{"name",id},{"color","#123456"},{"vivid",false},{"folders",QJsonArray{}},{"sessions",QJsonArray{}}};
+    }
+    static QStringList projectIds(const QJsonObject &organization) {
+        QStringList result;for(const auto &p:organization["projects"].toArray())result<<p.toObject()["id"].toString();return result;
+    }
+    void presentationFollowsTheSharedProjectOrder() {
+        auto local=organization("Local");auto a=orderedProject("a");a["collapsed"]=true;
+        local["projects"]=QJsonArray{a,orderedProject("b"),orderedProject("c")};
+        QJsonObject shared{{"version",2},{"projects",QJsonArray{orderedProject("c"),orderedProject("a"),orderedProject("new"),orderedProject("b")}}};
+        // Without a shared order (an older CLI, or nobody reordered) this desktop keeps its own.
+        QCOMPARE(projectIds(SwarmController::presentation(shared,local)),QStringList({"a","b","c","new"}));
+        shared["project_order"]=QJsonArray{"c","a","new","b"};
+        const auto result=SwarmController::presentation(shared,local);
+        QCOMPARE(projectIds(result),QStringList({"c","a","new","b"}));
+        // Collapse state stays local, and the order is derived again when sent.
+        QVERIFY(result["projects"].toArray()[1].toObject()["collapsed"].toBool());
+        QVERIFY(!result.contains("project_order"));
+    }
+    void reorderingPublishesTheSharedProjectOrder() {
+        auto initial=organization("Original");initial["projects"]=QJsonArray{orderedProject("a"),orderedProject("b")};
+        write("response",QJsonDocument(QJsonObject{{"schema",1},{"organization",initial},{"versions",QJsonObject{}},{"peers",QJsonObject{}},{"conflicts",QJsonArray{}}}).toJson());
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);
+        QJsonObject ready;connect(&controller,&SwarmController::organizationReady,this,[&](const QJsonObject &value){ready=value;});
+        controller.start(initial);QTRY_VERIFY(controller.settled());
+        QCOMPARE(requests()[0].toObject()["input"].toObject()["project_order"],QJsonValue(QJsonArray{"a","b"}));
+        const auto order=[&](int request,const char *field)->QJsonValue{return requests()[request].toObject()["input"].toObject()[field].toObject()["project_order"];};
+        // An unrelated edit sends the unchanged order, which the CLI does not rewrite.
+        SessionOrganization model(ready);model.renameGroup("a","Renamed");controller.edit(model.toJson());
+        QTRY_COMPARE(requests().size(),2);QTRY_VERIFY(controller.settled());
+        QCOMPARE(order(1,"base"),QJsonValue(QJsonArray{"a","b"}));QCOMPARE(order(1,"desired"),QJsonValue(QJsonArray{"a","b"}));
+        model.moveGroup("b","a");controller.edit(model.toJson());
+        QTRY_COMPARE(requests().size(),3);QTRY_VERIFY(controller.settled());
+        QCOMPARE(order(2,"base"),QJsonValue(QJsonArray{"a","b"}));QCOMPARE(order(2,"desired"),QJsonValue(QJsonArray{"b","a"}));
+        // The CLI lists projects in the written order, which this desktop keeps showing.
+        QCOMPARE(projectIds(ready),QStringList({"b","a"}));
+        // Another computer's order replaces this one at the next read.
+        auto remote=initial;remote["projects"]=QJsonArray{orderedProject("a"),orderedProject("b")};remote["project_order"]=QJsonArray{"a","b"};
+        write("response",QJsonDocument(QJsonObject{{"schema",1},{"organization",remote},{"versions",QJsonObject{}},{"peers",QJsonObject{}},{"conflicts",QJsonArray{}}}).toJson());
+        controller.refresh();QTRY_COMPARE(requests().size(),4);QTRY_VERIFY(controller.settled());
+        QCOMPARE(requests()[3].toObject()["action"].toString(),QString("get"));QCOMPARE(projectIds(ready),QStringList({"a","b"}));
     }
     void localWindowsFoldersNeverReachTheCatalog() {
         const QJsonObject posix{{"id","posix"},{"machine","desktop"},{"path","/work"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
@@ -196,8 +241,9 @@ print(json.dumps(result))
     }
     void posixRequestsKeepTheirForm() {
         // Without local Windows folders a request is the former shared organization:
-        // fallback rows removed, the explicit hint added, folders as they were, before
-        // and after a snapshot names this computer. Unix GUIs store nothing else.
+        // fallback rows removed, the explicit hint and the shown project order added,
+        // folders as they were, before and after a snapshot names this computer. Unix
+        // GUIs store nothing else.
         auto local=organization("Original");auto project=local["projects"].toArray()[0].toObject();
         project["folders"]=QJsonArray{QJsonObject{{"id","posix"},{"machine","desktop"},{"path","/work/C:/x"},{"name",""}},
                                       QJsonObject{{"id","root"},{"machine","mac"},{"path","/"},{"name","Root"}},
@@ -213,6 +259,7 @@ print(json.dumps(result))
         controller.start(local);QTRY_VERIFY(controller.settled());
         auto expected=local;expected.remove("unassigned_sessions");expected["session_assignments_explicit"]=true;
         project["sessions"]=QJsonArray{"desktop\nseen"};expected["projects"]=QJsonArray{project,bare};
+        expected["project_order"]=QJsonArray{"p","bare"};
         const auto input=requests().first().toObject()["input"].toObject();
         QCOMPARE(input,expected);QCOMPARE(QJsonDocument(input).toJson(QJsonDocument::Compact),QJsonDocument(expected).toJson(QJsonDocument::Compact));
         controller.edit(local);QTRY_COMPARE(requests().size(),2);QTRY_VERIFY(controller.settled());
@@ -286,6 +333,29 @@ print(json.dumps(result))
         QCOMPARE(SessionOrganization(patch["desired"].toObject()).group("p")->sessions,QStringList{session});
         QVERIFY(local.toJson()["unassigned_sessions"].toArray().isEmpty());
     }
+    void runPlacementSurvivesTheCatalogRoundTrip() {
+        // The Sessions window reacts to each catalog result as below: it adopts
+        // a different organization, observes its live runs again and saves.
+        SessionOrganization local(organization("Original"));
+        const auto session=local.observe("arch","codex/example/review","run-one");local.moveSession(session,"p");
+        QCOMPARE(local.toJson()["run_groups"].toObject()["arch\nrun-one"].toString(),"p");
+        // The CLI returns only the shared catalog, which has no run placement.
+        auto shared=local.toJson();for(const auto *key:{"runs","run_groups","unassigned_sessions"})shared.remove(key);
+        write("response",QJsonDocument(QJsonObject{{"schema",1},{"organization",shared},{"versions",QJsonObject{}},{"peers",QJsonObject{}},{"conflicts",QJsonArray{}}}).toJson());
+        HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
+        int adopted=0;
+        connect(&controller,&SwarmController::organizationReady,this,[&](const QJsonObject &value){
+            const SessionOrganization updated(value);if(updated.toJson()==local.toJson())return;
+            ++adopted;local=updated;local.observe("arch","codex/example/review","run-one");controller.edit(local.toJson());
+        });
+        controller.start(local.toJson()); QTRY_VERIFY(controller.settled());
+        controller.refresh(); QTRY_COMPARE(requests().size(),2); QTRY_VERIFY(controller.settled());
+        // Settled, it only reads: nothing differs that a write would change.
+        const auto sent=requests().size(); QTest::qWait(400);
+        QVERIFY(controller.settled()); QCOMPARE(requests().size(),sent); QCOMPARE(adopted,0);
+        QCOMPARE(local.toJson()["run_groups"].toObject()["arch\nrun-one"].toString(),"p");
+        for(const auto &request:requests())QVERIFY(request.toObject()["action"]!="apply");
+    }
     void unchangedRefreshDoesNotRewriteSettings() {
         HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
         controller.start(organization("Original")); QTRY_VERIFY(controller.settled());
@@ -347,13 +417,47 @@ print(json.dumps(result))
         QCOMPARE(choices->rowCount(),2);QCOMPARE(choices->item(0,0)->text(),"General");QCOMPARE(choices->item(1,0)->text(),"Work");
         QVERIFY(choices->item(0,1)->text().contains("Desktop (this computer)"));QVERIFY(choices->item(0,1)->text().contains("Laptop"));
         QCOMPARE(choices->item(0,2)->text(),"Shown now");QVERIFY(!button->isEnabled());
-        QVERIFY(review.findChild<QLabel*>("swarmConflictSubject")->text().contains("demo / planning on Desktop"));
+        // Values and computers read as the project labels and machine badges of other views.
+        auto *subject=review.findChild<QLabel*>("swarmConflictSubject");QCOMPARE(subject->text(),"demo / planning");
+        QVERIFY(subject->accessibleName().contains("demo / planning on Desktop"));
+        QCOMPARE(review.findChild<QLabel*>("swarmConflictMachine")->text(),"arch");
+        const auto project=[&](int row){return choices->item(row,0)->data(SwarmConflictReview::PresentationRole).toMap()["project"].toMap();};
+        QCOMPARE(project(0)["name"].toString(),"General");QCOMPARE(project(0)["color"].toString(),"#64b5f6");
+        QCOMPARE(project(1)["name"].toString(),"Work");QCOMPARE(project(1)["color"].toString(),"#123456");
+        const auto origins=choices->item(0,1)->data(SwarmConflictReview::PresentationRole).toMap()["machines"].toList();
+        QCOMPARE(origins.size(),2);QCOMPARE(origins[0].toMap()["alias"].toString(),"arch");QVERIFY(origins[0].toMap()["local"].toBool());
+        QCOMPARE(origins[1].toMap()["alias"].toString(),"mac");QVERIFY(!origins[1].toMap()["local"].toBool());
+        const auto listed=review.conflictPresentation(c,snapshot);
+        QCOMPARE(listed["caption"].toString(),"Session project");QCOMPARE(listed["text"].toString(),"demo / planning");
+        QCOMPARE(listed["machines"].toList().value(0).toMap()["alias"].toString(),"arch");
+        QVERIFY(choices->rowHeight(0)>=40);
         choices->setCurrentCell(1,0);QVERIFY(button->isEnabled());QCOMPARE(button->text(),"Keep this project");
         auto *outcome=review.findChild<QLabel*>("swarmConflictOutcome");QVERIFY(outcome->text().contains("Assign this session to “Work”"));QVERIFY(outcome->text().contains("running agent stay intact"));
         button->click();QCOMPARE(sent.count(),1);const auto payload=sent[0][0].toJsonObject();QCOMPARE(payload["key"],c["key"]);QCOMPARE(payload["value"],QJsonValue("p"));
         QCOMPARE(payload["versions"].toArray(),QJsonArray({"version-a","version-b","version-c"}));
         QTest::qWait(30);
         const auto preview=qEnvironmentVariable("HGS_CONFLICT_PREVIEW");if(!preview.isEmpty())QVERIFY(review.grab().save(preview));
+    }
+    void projectAndFolderChoicesUseTheirLabels() {
+        FleetState fleet;BoxState local;local.host="arch";fleet.setLocal(local,0);
+        SwarmConflictReview review(fleet);review.resize(640,520);review.show();const auto snapshot=conflictSnapshot();
+        auto *choices=review.findChild<QTableWidget*>("swarmConflictChoices");
+        const auto view=[&](int row){return choices->item(row,0)->data(SwarmConflictReview::PresentationRole).toMap();};
+        // Each color reads as the label the project would get.
+        review.setConflict(conflict({{"kind","project"},{"id","p"},{"field","color"}},"#aa3344","#22bb66"),snapshot);
+        QCOMPARE(view(0)["project"].toMap()["name"].toString(),"Work");QCOMPARE(view(0)["project"].toMap()["color"].toString(),"#aa3344");
+        QCOMPARE(view(1)["project"].toMap()["color"].toString(),"#22bb66");QCOMPARE(choices->item(1,0)->text(),"#22bb66");
+        QCOMPARE(review.conflictPresentation(conflict({{"kind","project"},{"id","p"},{"field","color"}},"#aa3344","#22bb66"),snapshot)["project"].toMap()["name"].toString(),"Work");
+        const QJsonObject folder{{"project","p"},{"machine","node-b"},{"path","/workspace/example"}};
+        review.setConflict(conflict({{"kind","folder"},{"id","folder-id"}},folder,QJsonValue::Null),snapshot);
+        QCOMPARE(view(0)["project"].toMap()["name"].toString(),"Work");QCOMPARE(view(0)["text"].toString(),"/workspace/example");
+        QCOMPARE(view(0)["machines"].toList().value(0).toMap()["alias"].toString(),"mac");
+        QVERIFY(choices->item(0,0)->text().contains("Computer: Laptop"));QVERIFY(view(1).isEmpty());
+        // A computer this desktop cannot name stays text, never a guessed badge.
+        auto unknown=conflict({{"kind","session"},{"machine","node-z"},{"session","codex/demo/review"}},"p","ungrouped");
+        review.setConflict(unknown,snapshot);QVERIFY(!review.findChild<QLabel*>("swarmConflictMachine")->isVisibleTo(&review));
+        QVERIFY(review.findChild<QLabel*>("swarmConflictSubject")->text().contains("Unknown computer"));
+        QTest::qWait(30);const auto preview=qEnvironmentVariable("HGS_CONFLICT_PREVIEW");if(!preview.isEmpty())QVERIFY(review.grab().save(preview+"-unknown.png"));
     }
     void wrappedConflictChoicesResizeWithoutLosingSelection() {
         FleetState fleet;SwarmConflictReview review(fleet);review.resize(900,560);review.show();QTest::qWait(30);

@@ -159,7 +159,6 @@ fn arguments(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn the_server_unit_is_the_first_unit_below_the_user_manager() {
@@ -272,8 +271,7 @@ mod tests {
         } else {
             "echo 'Failed to start transient scope unit: fixture' >&2\nexit 1\n"
         };
-        fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        platform::write_script(&path, &format!("#!/bin/sh\n{body}"));
         path.to_str().unwrap().to_owned()
     }
 

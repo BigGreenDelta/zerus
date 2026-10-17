@@ -119,17 +119,49 @@ jobs:
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       ANDROID_GOOGLE_SERVICES_JSON: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}
+  dev-macos:
+    name: Signed macOS dev candidate
+    needs: [gate, automatic]
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' && vars.MACOS_CASKS_ENABLED == 'true'
+    uses: ./.github/workflows/macos-cask.yml
+    with:
+      channel: dev
+    secrets:
+      MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+      MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+      APPLE_NOTARY_API_KEY_P8: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
+      APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
+      APPLE_NOTARY_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
+  dev-ios:
+    name: iOS TestFlight Dev build
+    # Independent of the zerus.dev Dev catalog: TestFlight delivers it to internal testers.
+    needs: [gate, automatic]
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.IOS_TESTFLIGHT_ENABLED == 'true'
+    uses: ./.github/workflows/ios-testflight.yml
+    with:
+      channel: dev
+    secrets:
+      APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
   dev:
     name: Verified main dev candidates
-    needs: [gate, automatic, dev-android]
+    needs: [gate, automatic, dev-android, dev-macos]
     # The PR/manual branch is intentionally skipped on main. An explicit status
     # check avoids inheriting success() over that transitive skipped dependency.
     if: >-
       !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' && needs.dev-android.result == 'success' &&
+      (needs.dev-macos.result == 'success' || vars.MACOS_CASKS_ENABLED != 'true' && needs.dev-macos.result == 'skipped') &&
       github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
     permissions:
       contents: write
     uses: ./.github/workflows/dev.yml
+    with:
+      macos: ${{ vars.MACOS_CASKS_ENABLED == 'true' }}
   cache-trim:
     name: Trim superseded caches
     needs: [automatic]

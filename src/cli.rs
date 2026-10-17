@@ -46,8 +46,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
+       hgs approval-log begin|finish|list|detail  local automatic-approval journal (JSON stdin)
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
-       hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin)
+       hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
        Speech profile management v1
        hgs [@host] a <session>        attach by full name (see hgs ls)
@@ -64,6 +65,8 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
        hgs [@host] recovery action --scoped-json exact waiting-job control
        hgs [@host] history <session> --json bounded exact public history
+       hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
+       hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
        hgs [@host] terminal <session> --json scoped terminal screen/input
        hgs [@host] AGENT DIRECTORY --new -n TAG -d --launch-id UUID
        hgs [@host] session-action <session> --json scoped native lifecycle action
@@ -80,6 +83,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] settings <session> --json model and effort for this session (JSON stdin)
        hgs [@host] recovery get | set | action   automatic recovery policy (JSON stdin for writes)
        hgs [@host] search --query <text> [--limit N]   search saved session contents
+       hgs [@host] schedules <session> [--json]   native DeepSeek Schedule tasks (JSON stdin changes)
        hgs machine ls | set <alias> --json <profile> | remove <alias> | reset <alias>
        hgs machine resolve <alias>          effective SSH settings (no connection)
        hgs swarm get | preview PEER | join PEER | sync | worker   shared project catalog
@@ -106,6 +110,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
        hgs [@host] kill <session> [--archive <id>]
        hgs [@host] rename <session> <new-full-name> [--archive <id>]
+       hgs [@host] archives --json           date-filtered archive pages (JSON stdin)
        hgs [@host] archive <session>          move a stopped conversation to Archive
        hgs [@host] pause <session>|--all       save and gracefully close idle agents
        hgs [@host] resume <session>|--all [-d] [--archive <id>]   restore exact conversations
@@ -492,6 +497,9 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     if command == "download" {
         return crate::download::dispatch(&config, &target, args, dry);
     }
+    if command == "approval-log" {
+        return crate::approval_log::dispatch(&config, &target, args, dry);
+    }
     // Windows only, before local sessions are enabled, and never forwarded: it
     // enables them on this computer (spec D2). On Unix the word stays a program.
     #[cfg(windows)]
@@ -504,12 +512,17 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
         return crate::host::admin::dispatch(&config, args, dry);
     }
+    if command == "send" && args.len() == 2 && args[1] == "--json" && !dry {
+        if let Some(origin) = state::session_graph::send_origin() {
+            return state::session_graph::forward_send(&target, args, origin);
+        }
+    }
     if !target.is_empty() && !config.is_self(&target) {
         return remote(&config, &target, command, args, dry);
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
-    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech") {
+    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "graph" | "wait") {
         local_sessions()?;
     }
     // Only Unix has arms for these below; elsewhere they would reach the launch arm.
@@ -523,6 +536,14 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             Ok(0)
         }
         "ls" => list(&config, args, dry),
+        "archives" => {
+            if (args != ["--json"] && args != ["lookup","--json"]) || dry { return Err(Error::new(1,"usage: hgs archives [lookup] --json (JSON query on stdin)")); }
+            let query = state::archive_catalog::read_query().map_err(|e| Error::new(1,e))?;
+            let result = if args.first().map(String::as_str) == Some("lookup") {
+                state::archive_catalog::lookup(&query)
+            } else { state::archive_catalog::page(&query) }.map_err(|e| Error::new(1,e))?;
+            println!("{result}"); Ok(0)
+        },
         "reference" => {
             if dry { return Err(Error::new(1,"Session references do not support --dry-run")); }
             crate::session_reference::create(&config,args)
@@ -538,14 +559,16 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read"
-        | "attachment" | "file-read" | "recovery" | "voice" => {
+        | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" => {
+            if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
+            if command == "graph" && dry { return Err(Error::new(1,"Graph reads do not support --dry-run")); }
             if command == "dirs" && has(args, "--create") && dry {
                 return Err(Error::new(1, "folder creation does not support --dry-run"));
             }
             if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove") && dry {
                 return Err(Error::new(1, "worktree creation and removal do not support --dry-run"));
             }
-            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "voice") || (command=="attachment" && has(args,"--stage"))) && dry {
+            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "voice" | "schedules") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));
             }
             state_command(command, args)
@@ -751,7 +774,7 @@ fn peer_session(command: &str, args: &[String]) -> String {
         }
     )
 }
-fn peer_json(config: &Config, peer: &str) -> Value {
+fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
     let output = platform::ssh_output(
         platform::ssh()
             .args(crate::machines::ssh_options(config, peer))
@@ -761,7 +784,7 @@ fn peer_json(config: &Config, peer: &str) -> Value {
                 "-o",
                 "ConnectTimeout=3",
                 peer,
-                "~/.local/bin/hgs ls --local --json",
+                if archives { "~/.local/bin/hgs ls --local --json" } else { "~/.local/bin/hgs ls --local --json --no-archives" },
             ])
             .stderr(Stdio::piped()),
     );
@@ -846,8 +869,8 @@ fn remote(
             all.extend(args.clone());
             all
         }
-        "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
+        "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -883,7 +906,11 @@ fn remote(
         }
     };
     flags.extend(crate::machines::ssh_options(config, target));
-    let remote = format!("~/.local/bin/hgs {}", platform::join(&remote_args));
+    let remote = if command == "wait" {
+        // Old peers otherwise interpret an unknown command as an agent launch.
+        // Probe the same installed executable without consuming JSON stdin.
+        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] wait'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to track waits' >&2; exit 1; fi",platform::join(&remote_args))
+    } else { format!("~/.local/bin/hgs {}", platform::join(&remote_args)) };
     if global_dry || has(&args, "--dry-run") {
         if let Some(title) = tab {
             if config.tab {
@@ -894,7 +921,7 @@ fn remote(
         return Ok(0);
     }
     if command == "ls" && has(&args, "--json") {
-        println!("{}", peer_json(config, target));
+        println!("{}", peer_json_archives(config, target, !has(&args,"--no-archives")));
         return Ok(0);
     }
     if command == "ls" {
@@ -922,7 +949,8 @@ fn remote(
     Ok(rc)
 }
 
-pub(crate) fn local_json(config: &Config) -> Result<Value> {
+pub(crate) fn local_json(config: &Config) -> Result<Value> { local_json_archives(config, true) }
+fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     if !platform::local_sessions() {
         // A control console: no tmux, session state or local projects. Absent
         // `local_sessions` means true, so Unix listings stay as they were.
@@ -971,7 +999,9 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> {
         .iter()
         .map(|row| (row.name.clone(), row.id.clone()))
         .collect();
-    let mut merged = state::merge_listing(raw, &ids).map_err(|e| Error::new(1, e))?;
+    let mut merged = state::merge_listing_archives(raw, &ids, archives).map_err(|e| Error::new(1, e))?;
+    merged["archive_paging"] = json!(true);
+    merged["archive_revision"] = json!(state::archive_catalog::revision().map_err(|e|Error::new(1,e))?);
     let ended = launches.ended(merged["sessions"].as_array().map_or(&[], Vec::as_slice));
     if !ended.is_empty() {
         merged["ended_launches"] = json!(ended);
@@ -1006,12 +1036,13 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
             println!("{}", terminal().describe(&DryRun::ListJson));
             return Ok(0);
         }
-        let local = local_json(config)?;
+        let archives = !has(args,"--no-archives");
+        let local = local_json_archives(config, archives)?;
         if has(args, "--local") {
             println!("{local}");
         } else {
             let mut fleet = vec![local];
-            fleet.extend(config.peers.iter().map(|peer| peer_json(config, peer)));
+            fleet.extend(config.peers.iter().map(|peer| peer_json_archives(config, peer, archives)));
             println!("{}", json!(fleet));
         }
         return Ok(0);
@@ -1304,6 +1335,8 @@ fn fork_session(config: &Config, args: &[String], client: &str, mut dry: bool) -
         .map_err(|error| Error::new(1, error))?;
     if detached || dry {
         Ok(0)
+    } else if state::dsh::exists(&target) {
+        crate::native_ui::open(config, "", &target, false)
     } else {
         attach(config, &target, client, false)
     }

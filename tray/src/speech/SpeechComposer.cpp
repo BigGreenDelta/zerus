@@ -1,6 +1,12 @@
 #include "SpeechComposer.h"
 #include "SpeechClient.h"
 #include "SpeechRecorder.h"
+#include "RoundVideo.h"
+#include <QMouseEvent>
+#include <QPlainTextEdit>
+#include <QThreadPool>
+#include <QRunnable>
+#include <QPointer>
 #include "ComposerToolbar.h"
 #include "AttachmentViewer.h"
 #include <QApplication>
@@ -40,12 +46,12 @@ QJsonObject preferredProfile() {
 }
 
 SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *composer, std::function<Target()> target,
-                               SpeechRecorder *recorder, std::function<bool(const QUrl &)> openSettings)
+                               SpeechRecorder *recorder, std::function<bool(const QUrl &)> openSettings, RoundVideoRecorder *videoRecorder)
     : QObject(composer), m_composer(composer), m_client(new SpeechClient(executable,this)),
       m_recorder(recorder ? recorder : new SpeechRecorder(this)), m_currentTarget(std::move(target)),
       m_openSettings(openSettings ? std::move(openSettings) : QDesktopServices::openUrl)
 {
-    m_recorder->setParent(this);qApp->installEventFilter(this);
+    m_recorder->setParent(this);
     m_voice=new ToolbarChip;m_voice->setObjectName("voiceRecord");m_voice->setIconName("microphone");
     m_cancel=new ToolbarChip;m_cancel->setObjectName("voiceCancel");m_cancel->setIconName("close");m_cancel->setLabels(tr("Cancel recording"),tr("Cancel"));
     m_result=new ToolbarChip;m_result->setObjectName("voiceResult");m_result->setIconName("microphone");
@@ -65,7 +71,24 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
     m_recordingHint->setContentsMargins(0,4,0,4);m_recordingHint->setTextFormat(Qt::PlainText);
     qobject_cast<QVBoxLayout *>(composer->layout())->insertWidget(0,m_recordingHint);
     for(auto *button:{m_play,m_discard,m_send,m_refresh})button->setAutoDefault(false);
-    connect(m_voice,&QPushButton::clicked,this,[this]{if(m_state==State::Recording)stopRecording();else start();});
+    m_videoMode=QSettings().value("speech/video_mode",false).toBool();
+    m_videoView=new RoundVideoView(composer);m_videoView->setObjectName("voiceVideoPreview");
+    qobject_cast<QVBoxLayout *>(composer->layout())->insertWidget(0,m_videoView,0,Qt::AlignHCenter);
+    m_videoRecorder=videoRecorder?videoRecorder:new RoundVideoRecorder(m_videoView,this);m_videoRecorder->setParent(this);
+    connect(m_videoRecorder,&RoundVideoRecorder::started,this,[this]{if(m_state==State::Starting){m_state=State::Recording;update();}});
+    connect(m_videoRecorder,&RoundVideoRecorder::preparing,this,[this]{if(m_captureVideo && m_state==State::Recording){m_state=State::Saving;update();}});
+    connect(m_videoRecorder,&RoundVideoRecorder::elapsed,this,[this](int seconds){m_seconds=seconds;update();});
+    connect(m_videoRecorder,&RoundVideoRecorder::completed,this,[this](const QByteArray &pcm,const QByteArray &mp4,const QJsonObject &meta){
+        if(m_state!=State::Saving && m_state!=State::Recording)return;m_video=mp4;m_videoMeta=meta;recorded(pcm.toBase64());
+    });
+    connect(m_videoRecorder,&RoundVideoRecorder::failed,this,[this](const QString &error){if(m_captureVideo)fail(error);});
+    m_stopPreview=new QPushButton(tr("Stop and preview"),composer);m_stopPreview->setObjectName("voiceStopPreview");
+    qobject_cast<QVBoxLayout *>(composer->layout())->insertWidget(0,m_stopPreview,0,Qt::AlignLeft);
+    connect(m_stopPreview,&QPushButton::clicked,this,&SpeechComposer::stopRecording);
+    m_holdTimer=new QTimer(this);m_holdTimer->setSingleShot(true);m_holdTimer->setInterval(200);
+    connect(m_holdTimer,&QTimer::timeout,this,[this]{if(m_pressed){m_locked=false;start();}});
+    // Keyboard/accessibility activation starts locked; physical presses use the Telegram gesture below.
+    connect(m_voice,&QPushButton::clicked,this,[this]{if(m_state==State::Recording)requestSendRecording();else{m_locked=true;start();}});
     connect(m_cancel,&QPushButton::clicked,this,&SpeechComposer::discard);
     connect(m_result,&QPushButton::clicked,this,&SpeechComposer::showResult);
     connect(m_send,&QPushButton::clicked,this,[this]{if(m_state==State::Uncertain)check();else send();});
@@ -87,7 +110,7 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
         const bool denied=reason==SpeechRecorder::Failure::PermissionDenied;fail(error,denied?Notice::MicrophonePermission:Notice::General);
         if(denied){const auto generation=m_generation;QTimer::singleShot(0,this,[this,generation]{if(generation==m_generation && m_noticeKind==Notice::MicrophonePermission && m_composer->isVisible())showPermissionRecovery();});}
     });
-    syncTarget();update();
+    qApp->installEventFilter(this);syncTarget();update();
 }
 QString SpeechComposer::storageKey() const {return "voice-message-draft\n"+m_loadedKey;}
 QJsonObject SpeechComposer::identityPayload(const QString &action) const {
@@ -95,7 +118,36 @@ QJsonObject SpeechComposer::identityPayload(const QString &action) const {
         {"expected_run_id",m_target.run},{"expected_conversation_id",m_target.conversation}};
 }
 bool SpeechComposer::eventFilter(QObject *watched,QEvent *event) {
-    if(watched==m_composer && event->type()==QEvent::Hide){stopPlayback();if(m_state==State::Starting || m_state==State::Recording)discard();}
+    if(watched==m_voice && event->type()==QEvent::MouseButtonPress){
+        auto *mouse=static_cast<QMouseEvent *>(event);
+        if(mouse->button()==Qt::LeftButton && m_voice->isEnabled()){
+            m_pressStartedLocked=m_state==State::Recording && m_locked;
+            m_pressed=true;m_pressPosition=mouse->globalPosition().toPoint();m_voice->grabMouse();
+            if(m_state==State::Idle)m_holdTimer->start();return true;
+        }
+    }
+    if(watched==m_voice && event->type()==QEvent::MouseMove && m_pressed){
+        auto *mouse=static_cast<QMouseEvent *>(event);
+        if(!m_locked && m_state==State::Recording && m_pressPosition.y()-mouse->globalPosition().y()>=57){m_locked=true;update();}
+        return true;
+    }
+    if(watched==m_voice && event->type()==QEvent::MouseButtonRelease && m_pressed){
+        auto *mouse=static_cast<QMouseEvent *>(event);if(mouse->button()!=Qt::LeftButton)return true;
+        m_pressed=false;m_voice->releaseMouse();
+        if(m_holdTimer->isActive()){m_holdTimer->stop();m_videoMode=!m_videoMode;QSettings().setValue("speech/video_mode",m_videoMode);update();}
+        else if(m_state==State::Starting){m_sendAfterSaved=false;stopRecording();}
+        else if(m_state==State::Recording){
+            const auto local=m_composer->mapFromGlobal(mouse->globalPosition().toPoint());
+            const bool inside=m_composer->rect().contains(local);
+            if(!m_locked){if(inside)requestSendRecording();else discard();}
+            else if(m_pressStartedLocked && m_voice->rect().contains(m_voice->mapFromGlobal(mouse->globalPosition().toPoint())))requestSendRecording();
+        }
+        return true;
+    }
+    if((watched==m_composer && event->type()==QEvent::Hide) || event->type()==QEvent::ApplicationDeactivate){
+        m_holdTimer->stop();m_pressed=false;m_voice->releaseMouse();m_sendAfterSaved=false;stopPlayback();
+        if(m_state==State::Starting || m_state==State::Recording)stopRecording();
+    }
     if(event->type()==QEvent::ShortcutOverride || event->type()==QEvent::KeyPress || event->type()==QEvent::KeyRelease){
         auto *widget=qobject_cast<QWidget *>(watched);auto *key=static_cast<QKeyEvent *>(event);
         // Window-scoped, before Qt chooses the agent's Escape shortcut. Other
@@ -118,15 +170,16 @@ bool SpeechComposer::eventFilter(QObject *watched,QEvent *event) {
     return QObject::eventFilter(watched,event);
 }
 void SpeechComposer::stopRecording() {
-    if(m_state==State::Starting){++m_generation;m_recorder->cancel();m_state=State::Idle;update();return;}
+    if(m_state==State::Starting){++m_generation;m_recorder->cancel();m_videoRecorder->cancel();m_sendAfterSaved=false;m_state=State::Idle;update();return;}
     if(m_state!=State::Recording)return;
-    m_state=State::Saving;update();m_recorder->stop();
+    m_state=State::Saving;update();if(m_captureVideo)m_videoRecorder->stop();else m_recorder->stop();
 }
 void SpeechComposer::syncTarget() {
     if(m_syncing)return;
     const auto key=m_composer->sessionKey();if(key==m_loadedKey)return;
-    ++m_generation;m_recorder->cancel();stopPlayback();m_loadedKey=key;m_target=m_currentTarget();
-    m_pcm.clear();m_id.clear();m_notice.clear();m_noticeKind=Notice::General;m_state=State::Idle;m_loading=!key.isEmpty();
+    m_holdTimer->stop();m_pressed=false;m_voice->releaseMouse();m_sendAfterSaved=false;
+    ++m_generation;m_recorder->cancel();m_videoRecorder->cancel();stopPlayback();m_loadedKey=key;m_target=m_currentTarget();
+    m_pcm.clear();m_video.clear();m_videoMeta={};m_captureVideo=false;m_id.clear();m_notice.clear();m_noticeKind=Notice::General;m_state=State::Idle;m_loading=!key.isEmpty();
     m_profilesLoading=false;m_profilesValidated=false;m_profileError.clear();m_selectedProfile=preferredProfile();m_profileBound=false;
     m_syncing=true;m_provider->clear();m_syncing=false;
     if(key.isEmpty())return;
@@ -139,6 +192,8 @@ void SpeechComposer::syncTarget() {
             m_target={m_loadedKey,meta.value("host").toString(),meta.value("session").toString(),meta.value("run").toString(),meta.value("conversation").toString(),{},false};
             const auto audio=draft.attachments.first().data;
             if(!audio.startsWith("RIFF") || audio.mid(8,8)!="WAVEfmt " || audio.mid(36,4)!="data" || audio.size()<3244){m_notice=tr("The saved voice recording is invalid.");update();return;}
+            m_videoMeta=meta.value("video").toObject();
+            if(!m_videoMeta.isEmpty() && draft.attachments.size()==2){m_video=draft.attachments[1].data;m_captureVideo=true;}
             m_pcm=audio.mid(44);m_id=meta.value("id").toString();m_seconds=m_pcm.size()/32000;
             m_state=meta.value("submitted").toBool()?State::Uncertain:State::Preview;
             if(m_state==State::Uncertain)m_notice=tr("Submission was interrupted. Check this message; audio is never sent twice automatically.");
@@ -186,9 +241,11 @@ void SpeechComposer::loadProfiles() {
             m_provider->setCurrentIndex(m_provider->count()-1);
         }
         m_syncing=false;
+        m_videoSupported=reply.value("features").toArray().contains("voice_video");
         m_profilesValidated=true;
         if(selected<0)m_profileError=m_selectedProfile.isEmpty()?tr("No speech provider is available. Refresh to try again; your recording is kept.")
             :tr("The selected voice provider is unavailable or its configuration changed. Refresh or explicitly choose a provider; your recording is kept.");
+        if(m_captureVideo && !m_videoSupported)m_profileError=tr("Update hgs on the conversation computer to send video messages.");
         saveProfileSelection();update();
     });
 }
@@ -204,10 +261,14 @@ void SpeechComposer::saveProfileSelection() {
 void SpeechComposer::start() {
     syncTarget();const auto target=m_currentTarget();
     if(m_loading || m_state!=State::Idle || !target.available || target.run.isEmpty() || target.conversation.isEmpty() || !m_composer->isInputVisible())return;
+    pauseMessagePlayback();
+    m_video.clear();m_videoMeta={};m_captureVideo=m_videoMode;m_sendAfterSaved=false;
+    m_previewBeforeSend=QSettings().value("speech/preview_before_send",false).toBool();
     m_target=target;m_notice.clear();m_noticeKind=Notice::General;m_state=State::Starting;++m_generation;
     m_selectedProfile=preferredProfile();m_profileBound=false;m_profilesLoading=false;m_profilesValidated=false;m_profileError.clear();
     m_syncing=true;m_provider->clear();m_syncing=false;update();
-    m_recorder->start(QSettings().value("speech/microphone").toByteArray());
+    if(m_captureVideo)m_videoRecorder->start(QSettings().value("speech/microphone").toByteArray());
+    else m_recorder->start(QSettings().value("speech/microphone").toByteArray());
     loadProfiles();
 }
 void SpeechComposer::recorded(const QByteArray &base64) {
@@ -215,7 +276,16 @@ void SpeechComposer::recorded(const QByteArray &base64) {
     if(!decoded || decoded.decoded.size()<3200 || decoded.decoded.size()>SpeechPcmConverter::MaximumBytes){fail(tr("The voice recording is invalid."));return;}
     m_pcm=decoded.decoded;m_seconds=m_pcm.size()/32000;m_id=QUuid::createUuid().toString(QUuid::WithoutBraces);m_state=State::Saving;
     update();
-    saveVoice([this](bool saved){m_state=State::Preview;if(!saved)m_notice=tr("Could not save this recording. Keep Zerus open and try Send voice again.");update();});
+    const bool sendAfter=m_sendAfterSaved;m_sendAfterSaved=false;
+    saveVoice([this,sendAfter](bool saved){m_state=State::Preview;if(!saved)m_notice=tr("Could not save this recording. Keep Zerus open and try Send again.");update();if(saved && sendAfter)send();});
+}
+void SpeechComposer::requestSendRecording(){
+    if(m_state!=State::Recording)return;
+    if(m_previewBeforeSend){m_sendAfterSaved=false;stopRecording();return;}
+    // A release never waits for late provider discovery to become a future Send.
+    m_sendAfterSaved=!selectedProfile().isEmpty() && (!m_captureVideo || m_videoSupported);
+    if(!m_sendAfterSaved)m_notice=m_captureVideo && !m_videoSupported?tr("Update hgs on the conversation computer to send video messages."):tr("Review the transcription provider before sending. The recording is kept.");
+    stopRecording();
 }
 void SpeechComposer::saveVoice(std::function<void(bool)> done,bool requireGeneration) {
     ComposerDraft draft;draft.label=tr("Voice message (%1)").arg(m_target.session);
@@ -223,12 +293,14 @@ void SpeechComposer::saveVoice(std::function<void(bool)> done,bool requireGenera
     draft.attachments.append({"voice.wav","audio/wav",wav(m_pcm),{}});
     draft.formState={{"kind","voice_message"},{"id",m_id},{"host",m_target.host},{"session",m_target.session},{"run",m_target.run},{"conversation",m_target.conversation},
         {"speech",m_selectedProfile},{"submitted",m_state==State::Submitting || m_state==State::Uncertain}};
+    if(!m_video.isEmpty()){draft.attachments.append({"video.mp4","video/mp4",m_video,{}});draft.formState["video"]=m_videoMeta;}
     const auto generation=m_generation;
     m_store.saveDurableAsync(storageKey(),draft,this,[this,generation,done,requireGeneration](bool okay,const ComposerDraft &){if(!requireGeneration || generation==m_generation)done(okay);});
 }
 void SpeechComposer::send() {
     const auto chosen=selectedProfile();
     if(m_state!=State::Preview || m_pcm.isEmpty() || chosen.isEmpty())return;
+    if(!m_video.isEmpty() && !m_videoSupported){m_notice=tr("Update hgs on the conversation computer to send video messages.");update();return;}
     const auto current=m_currentTarget();
     if(!current.available || !current.sameConversation(m_target)){m_notice=tr("The conversation changed or cannot receive input. The recording is kept without sending.");update();return;}
     if(!current.warning.isEmpty()){
@@ -247,10 +319,27 @@ void SpeechComposer::send() {
     settings.setValue("speech/machine_id",chosen.value("machine_id").toString());settings.setValue("speech/profile",chosen.value("profile_id").toString());settings.setValue("speech/profile_revision",chosen.value("profile_revision").toVariant());
     payload["audio"]=QJsonObject{{"format","pcm_s16le"},{"sample_rate",16000},{"channels",1},{"data_base64",QString::fromLatin1(m_pcm.toBase64())}};
     const auto target=m_target;const auto key=storageKey();
-    saveVoice([this,generation,payload,target,key](bool saved){
+    const auto video=m_video;const auto videoMeta=m_videoMeta;
+    saveVoice([this,generation,payload,target,key,video,videoMeta](bool saved) mutable {
         if(!saved){if(generation==m_generation){m_state=State::Preview;m_notice=tr("Could not save the voice request. No audio was sent.");update();}return;}
         // Explicit Send owns this immutable target even if navigation changes
         // while the local checkpoint is being written.
+        if(!video.isEmpty()){
+            const QPointer<SpeechComposer> guard(this);
+            QThreadPool::globalInstance()->start(QRunnable::create([guard,generation,payload,target,key,video,videoMeta]() mutable {
+                auto media=videoMeta;media["data_base64"]=QString::fromLatin1(video.toBase64());payload["video"]=media;
+                if(guard)QMetaObject::invokeMethod(guard,[guard,generation,payload,target,key]{if(!guard)return;
+                    guard->m_client->requestVoice(target.host,target.session,payload,[guard,generation,target,key,payload](const QJsonObject &reply,const QString &error){
+                        if(!guard)return;
+                        if(generation==guard->m_generation){guard->result(reply,error);return;}
+                        const auto message=reply.value("message").toObject();
+                        if(error.isEmpty() && message.value("id")==payload.value("request_id") && message.value("run_id").toString()==target.run && message.value("conversation_id").toString()==target.conversation){
+                            emit guard->messageChanged(target.key,message);guard->m_store.saveDurableAsync(key,{},guard,[](bool,const ComposerDraft&){});
+                        }
+                    });
+                },Qt::QueuedConnection);
+            }));return;
+        }
         m_client->requestVoice(target.host,target.session,payload,[this,generation,target,key,payload](const QJsonObject &reply,const QString &error){
             if(generation==m_generation){result(reply,error);return;}
             const auto message=reply.value("message").toObject();
@@ -270,12 +359,20 @@ void SpeechComposer::result(const QJsonObject &reply,const QString &error) {
     if(!error.isEmpty() || message.value("id").toString()!=m_id || message.value("run_id").toString()!=m_target.run || message.value("conversation_id").toString()!=m_target.conversation){
         m_state=State::Uncertain;m_notice=error.isEmpty()?tr("Voice submission is not confirmed. Check this message before trying another recording."):error;update();return;
     }
+    if(!m_video.isEmpty()){
+        const auto media=message.value("video").toObject();
+        if(media.value("request_id").toString()!=m_id || media.value("index").toInt(-1)!=1 || media.value("bytes").toInteger()!=m_video.size()
+            || media.value("mime")!="video/mp4" || media.value("duration_ms")!=m_videoMeta.value("duration_ms")
+            || media.value("width")!=m_videoMeta.value("width") || media.value("height")!=m_videoMeta.value("height")){
+            m_state=State::Uncertain;m_notice=tr("Video acceptance is not confirmed. Check this message before trying again.");update();return;
+        }
+    }
     emit messageChanged(m_target.key,message);
     const auto generation=m_generation;
     m_store.saveDurableAsync(storageKey(),{},this,[this,generation](bool saved,const ComposerDraft &){
         if(generation!=m_generation)return;
         if(!saved){m_state=State::Uncertain;m_notice=tr("The message was accepted, but its local receipt could not be saved. Check it again.");update();return;}
-        m_pcm.clear();m_id.clear();m_state=State::Idle;m_notice.clear();update();
+        m_pcm.clear();m_video.clear();m_videoMeta={};m_id.clear();m_state=State::Idle;m_notice.clear();update();
     });
 }
 void SpeechComposer::discard() {
@@ -299,36 +396,44 @@ void SpeechComposer::discard() {
         m_store.saveDurableAsync(storageKey(),{},this,[this,generation](bool saved,const ComposerDraft&){
             if(generation!=m_generation)return;
             if(!saved){m_state=State::Preview;m_notice=tr("Could not discard the saved recording. Try again.");update();return;}
-            m_pcm.clear();m_id.clear();m_state=State::Idle;m_notice.clear();update();
+            m_pcm.clear();m_video.clear();m_videoMeta={};m_id.clear();m_state=State::Idle;m_notice.clear();update();
         });return;
     }
-    ++m_generation;m_recorder->cancel();stopPlayback();m_pcm.clear();m_id.clear();m_state=State::Idle;m_notice.clear();m_noticeKind=Notice::General;
+    ++m_generation;m_recorder->cancel();m_videoRecorder->cancel();m_sendAfterSaved=false;stopPlayback();m_pcm.clear();m_video.clear();m_videoMeta={};m_id.clear();m_state=State::Idle;m_notice.clear();m_noticeKind=Notice::General;
     if(!m_loadedKey.isEmpty())m_store.saveDurableAsync(storageKey(),{},this,[](bool,const ComposerDraft&){});update();
 }
 void SpeechComposer::stopPlayback(){if(m_player)m_player->stop();}
 void SpeechComposer::play() {
     if(m_pcm.isEmpty())return;
+    m_videoView->setMirrored(false);
     if(m_player && m_player->playbackState()==QMediaPlayer::PlayingState){m_player->pause();return;}
-    if(!m_player){m_player=new QMediaPlayer(this);m_output=new QAudioOutput(this);m_player->setAudioOutput(m_output);
+    if(!m_player){m_player=new QMediaPlayer(this);registerMessagePlayer(m_player);m_output=new QAudioOutput(this);m_player->setAudioOutput(m_output);m_player->setVideoSink(m_videoView->sink());
         connect(m_player,&QMediaPlayer::playbackStateChanged,this,[this]{update();});
         connect(m_player,&QMediaPlayer::errorOccurred,this,[this](QMediaPlayer::Error,const QString &error){m_notice=tr("Could not play recording: %1").arg(error);update();});}
     const auto generation=m_generation;
-    AttachmentFiles::prepareAsync({MessageAttachment{"voice.wav","audio/wav",wav(m_pcm),{}}},this,[this,generation](const QJsonArray &files,const QString &error){
+    AttachmentFiles::prepareAsync({m_video.isEmpty()?MessageAttachment{"voice.wav","audio/wav",wav(m_pcm),{}}:MessageAttachment{"video.mp4","video/mp4",m_video,{}}},this,[this,generation](const QJsonArray &files,const QString &error){
         if(generation!=m_generation || m_pcm.isEmpty())return;
         if(!error.isEmpty() || files.isEmpty()){m_notice=error;update();return;}
         const auto url=QUrl::fromLocalFile(files.first().toObject().value("local_path").toString());if(m_player->source()!=url)m_player->setSource(url);m_player->play();
     });
 }
-void SpeechComposer::fail(const QString &error,Notice notice){m_state=State::Idle;m_notice=error;m_noticeKind=notice;update();}
+void SpeechComposer::fail(const QString &error,Notice notice){m_sendAfterSaved=false;m_state=State::Idle;m_notice=error;m_noticeKind=notice;update();}
 void SpeechComposer::update() {
     const auto current=m_currentTarget();const bool recording=m_state==State::Recording;
     m_composer->setRecording(recording || m_state==State::Starting);
     m_recordingHint->setVisible(recording);
+    m_recordingHint->setText(m_previewBeforeSend
+        ?(m_locked?tr("Recording locked. Stop to preview. Space / Esc to stop"):tr("Release to preview. Drag up to lock. Release outside to cancel"))
+        :(m_locked?tr("Recording locked. Send, or Stop to preview. Space / Esc to stop"):tr("Release to send. Drag up to lock. Release outside to cancel")));
+    m_stopPreview->setVisible(recording && m_locked);
+    m_videoView->setVisible(m_captureVideo && (m_state==State::Starting || recording || !m_pcm.isEmpty()));
     m_voice->setActive(true);m_voice->setEnabled(!m_loading && (recording || (m_state==State::Idle && current.available && !current.conversation.isEmpty() && m_composer->isInputVisible())));
-    m_voice->setTone(recording?ChipTone::Danger:ChipTone::Quiet);m_voice->setIconName(recording?"stop":"microphone");
-    m_voice->setLabels(recording?tr("Stop voice (%1)").arg(duration(m_seconds)):m_state==State::Starting?tr("Opening microphone…"):tr("Voice"));
+    m_voice->setTone(recording?ChipTone::Danger:ChipTone::Quiet);m_voice->setIconName(recording?(m_locked && !m_previewBeforeSend?"send":"stop"):(m_videoMode?"video":"microphone"));
+    m_voice->setLabels(recording?(m_locked?(m_previewBeforeSend?tr("Stop (%1)"):tr("Send (%1)")):tr("Recording (%1)")).arg(duration(m_seconds)):m_state==State::Starting?tr("Opening recorder…"):m_state==State::Saving?tr("Saving recording…"):(m_videoMode?tr("Video"):tr("Voice")));
     m_voice->setDetail(!recording && !current.available && !current.reason.isEmpty()?current.reason
-        :tr("Record a voice message, review it, then choose Send voice. Your text draft stays separate."));
+        :(recording?m_previewBeforeSend:QSettings().value("speech/preview_before_send",false).toBool())
+            ?tr("Tap to switch voice/video. Hold to record; release to preview. Drag up to lock; release outside to cancel.")
+            :tr("Tap to switch voice/video. Hold to record; release to send. Drag up to lock; release outside to cancel."));
     m_cancel->setActive(m_state==State::Starting || recording);
     const bool preview=!m_pcm.isEmpty();m_preview->setVisible(preview);m_previewLabel->setText(tr("Voice %1").arg(duration(m_seconds)));
     m_play->setText(m_player && m_player->playbackState()==QMediaPlayer::PlayingState?tr("Pause"):tr("Play"));
@@ -338,7 +443,7 @@ void SpeechComposer::update() {
     m_discard->setText(m_state==State::Uncertain?tr("Cancel message"):tr("Discard"));
     m_send->setText(m_state==State::Uncertain?tr("Check message"):m_state==State::Submitting?tr("Sending voice…"):tr("Send voice"));
     m_send->setEnabled(m_state==State::Uncertain || (m_state==State::Preview && current.available && current.sameConversation(m_target)
-        && !selectedProfile().isEmpty()));
+        && !selectedProfile().isEmpty() && (m_video.isEmpty() || m_videoSupported)));
     m_result->setActive(!m_notice.isEmpty() || !m_profileError.isEmpty());m_result->setLabels(m_noticeKind==Notice::MicrophonePermission?tr("Microphone access"):tr("Voice notice"));m_result->setDetail(m_notice.isEmpty()?m_profileError:m_notice);
 }
 void SpeechComposer::showResult() {

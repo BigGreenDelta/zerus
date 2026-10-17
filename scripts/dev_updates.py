@@ -14,6 +14,8 @@ import zipfile
 import urllib.parse
 import zlib
 
+from macos_release import catalog_macos, validate_catalog_macos, validate_macos_info, macos_assets
+
 from update_feed import (GitHub, HEX40, HEX64, ORIGIN, REPOSITORY, directory,
                          check_android_sequence, file_hash, fsync_directory, require, safe_name, timestamp)
 
@@ -93,6 +95,20 @@ def validate(info, root, run):
             'Candidate needs one exact source archive within budget')
     require(sum(a['kind'] == ('apk' if platform == 'android' else 'arch-package')
                 for a in artifacts) == 1, 'Candidate lacks its platform binary')
+    if 'macos' in info:
+        require(platform == 'desktop', 'macOS downloads belong to desktop candidates')
+        rows = validate_catalog_macos(info['macos'], version, 'dev',
+                                      f'{ORIGIN}/downloads/dev-desktop-{run["id"]}/')
+        require('dmg' in info['macos'], 'Dev macOS candidates require a disk image')
+        for item in rows:
+            name = item['name']
+            require(name not in names, 'Duplicate macOS artifact')
+            names.add(name)
+            path = root / name
+            require(path.is_file() and not path.is_symlink() and path.stat().st_size == item['size']
+                    and file_hash(path) == item['sha256'], 'macOS bytes do not match seal')
+            total += item['size']
+        require(total <= MAX_BYTES, 'Candidate exceeds the total byte budget')
     if platform == 'android':
         require(type(info.get('versionCode')) is int and 0 < info['versionCode'] <= 2_100_000_000,
                 'Invalid Android version code')
@@ -101,7 +117,7 @@ def validate(info, root, run):
     return info
 
 
-def seal(root, output, platform, run_id, number, commit, published, apk_identity=None):
+def seal(root, output, platform, run_id, number, commit, published, apk_identity=None, macos=None):
     require(platform in PLATFORMS and HEX40.fullmatch(commit), 'Invalid dev source/platform')
     require(type(run_id) is int and run_id > 0 and type(number) is int and number > 0,
             'Invalid dev run')
@@ -146,6 +162,26 @@ def seal(root, output, platform, run_id, number, commit, published, apk_identity
                 'versionName': version, 'buildId': run_id, 'buildNumber': number, 'channelTag': 'dev',
                 'sourceCommit': commit, 'publishedAt': published,
                 'buildUrl': f'https://github.com/{REPOSITORY}/actions/runs/{run_id}', 'artifacts': artifacts}
+        if macos is not None:
+            require(platform == 'desktop', 'macOS bundle requires a desktop candidate')
+            manifest = macos / 'macos-info.json'
+            require(manifest.is_file() and not manifest.is_symlink() and manifest.stat().st_size <= 256*1024,
+                    'Invalid signed macOS metadata')
+            metadata = json.loads(manifest.read_text())
+            validate_macos_info({'macos': metadata, 'homebrew_casks': ['zerus@dev']}, version, 'dev')
+            require('dmg' in metadata, 'Dev macOS candidates require a disk image')
+            names = macos_assets(metadata)
+            require({p.name for p in macos.iterdir()} == set(names) | {'macos-info.json'},
+                    'Unexpected signed macOS files')
+            seals = {}
+            for name in names:
+                source = macos / name
+                require(source.is_file() and not source.is_symlink()
+                        and 0 < source.stat().st_size <= MAX_FILE_BYTES, 'Invalid signed macOS file')
+                seals[name] = {'size': source.stat().st_size, 'sha256': file_hash(source)}
+                shutil.copyfile(source, staging / name)
+            info['macos'] = catalog_macos(metadata, version, 'dev',
+                                          f'{ORIGIN}/downloads/dev-desktop-{run_id}/', seals)
         if apk_identity:
             info['versionCode'] = apk_identity['version_code']
         (staging / 'dev-info.json').write_text(json.dumps(info, indent=2, sort_keys=True) + '\n')

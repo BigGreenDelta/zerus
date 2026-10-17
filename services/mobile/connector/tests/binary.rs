@@ -19,24 +19,71 @@ fn startup_line() -> String {
     format!("ERROR: {STARTUP_FAILURE}")
 }
 
-/// Runs the connector with only HOME and a system PATH, from `$CWD`. A start
-/// that gets past validation is stopped after 10 s, so this never depends on
-/// what the runtime does next.
+/// A journal the started runtime holds, with its binding written.
+fn bound(state: &Path) -> bool {
+    let path = state.join(JOURNAL);
+    path.exists()
+        && rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .and_then(|db| {
+                db.query_row(
+                    "SELECT count(*) FROM metadata WHERE key='relay_binding'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .is_ok_and(|count| count == 1)
+}
+
+/// Runs the connector with only HOME and an empty PATH, from `$CWD`, so no
+/// `hgs` can run and the runtime never reaches a relay. A start that gets past
+/// validation is stopped once its journal is bound, or after 10 s, so this
+/// never depends on what the runtime does next.
 fn connector(scratch: &Scratch, args: &[String]) -> (Option<i32>, String, String) {
+    connector_with_state(scratch, args, &scratch.path("state"))
+}
+
+fn connector_with_state(
+    scratch: &Scratch,
+    args: &[String],
+    state: &Path,
+) -> (Option<i32>, String, String) {
+    connector_with_command(scratch, args, state, Command::new(BINARY))
+}
+
+fn connector_with_command(
+    scratch: &Scratch,
+    args: &[String],
+    state: &Path,
+    mut command: Command,
+) -> (Option<i32>, String, String) {
+    let empty = scratch.path("empty-path");
     let mut child = spawn(
-        Command::new(BINARY)
+        command
             .args(args)
             .env_clear()
             .env("HOME", scratch.path("home"))
-            .env("PATH", "/usr/bin:/bin")
+            .env("PATH", &empty)
             .current_dir(scratch.path("cwd"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
     );
+    // Reports exit by themselves. An existing binding does not prove that a
+    // freshly spawned --check has completed its read-only inspection.
+    let reporting = args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--check" | "--help" | "--version"));
     let deadline = Instant::now() + Duration::from_secs(10);
-    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+    while child.try_wait().unwrap().is_none()
+        && Instant::now() < deadline
+        && (reporting || !bound(state))
+    {
         std::thread::sleep(Duration::from_millis(10));
+    }
+    // The binding is written before the runtime starts; give it a moment to
+    // show that a valid start keeps running.
+    if child.try_wait().unwrap().is_none() {
+        std::thread::sleep(Duration::from_millis(200));
     }
     let running = child.try_wait().unwrap().is_none();
     if running {
@@ -58,7 +105,7 @@ fn connector(scratch: &Scratch, args: &[String]) -> (Option<i32>, String, String
 fn scratch(label: &str) -> Scratch {
     umask();
     let scratch = Scratch::new(label);
-    for name in ["home", "cwd"] {
+    for name in ["home", "cwd", "empty-path"] {
         std::fs::create_dir(scratch.path(name)).unwrap();
         std::fs::set_permissions(scratch.path(name), std::fs::Permissions::from_mode(0o700))
             .unwrap();
@@ -215,7 +262,11 @@ fn state_below_a_symlinked_parent_opens_as_in_python() {
     let config =
         json!({"server_url": RELAY, "node_token": TOKEN, "state_dir": state.display().to_string()});
     let path = write_config(&scratch, &config.to_string(), 0o600);
-    let (code, _, stderr) = connector(&scratch, &["--config".into(), path.clone()]);
+    let (code, _, stderr) = connector_with_state(
+        &scratch,
+        &["--config".into(), path.clone()],
+        &scratch.path("real/state"),
+    );
     assert!(!stderr.contains(STARTUP_FAILURE), "{stderr}");
     assert_ne!(code, Some(2));
     let binding = zerus_relay::json::digest(format!("{RELAY}\0{TOKEN}"));
@@ -253,6 +304,36 @@ fn check(scratch: &Scratch, config: &str) -> (i32, Value) {
         code.unwrap(),
         serde_json::from_str(&stdout).unwrap_or_else(|_| panic!("{stdout}")),
     )
+}
+
+/// A report may start after an existing binding was written. Runtime readiness
+/// must not turn that short report into a process we kill before it answers.
+#[test]
+fn delayed_check_finishes_with_an_already_bound_journal() {
+    let scratch = scratch("delayed-check");
+    let state = scratch.path("state");
+    let binding = zerus_relay::json::digest(format!("{RELAY}\0{TOKEN}"));
+    let held = Journal::open(&state, &binding, EPOCH).unwrap();
+    let config = write_config(&scratch, &valid(&scratch).to_string(), 0o600);
+    let before = fingerprint(&state);
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "/bin/sleep 0.35; exec \"$@\"", "delayed-report"])
+        .arg(BINARY);
+    let (code, stdout, stderr) = connector_with_command(
+        &scratch,
+        &["--check".into(), "--json".into(), "--config".into(), config],
+        &state,
+        command,
+    );
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stderr, "");
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["ok"], true, "{report}");
+    assert_eq!(report["state"]["lock"], "held");
+    assert_eq!(report["state"]["journal"]["binding"], "matches");
+    assert_eq!(fingerprint(&state), before, "report changed the journal");
+    close(held);
 }
 
 /// Bytes, modification time and inode of every file below a directory.

@@ -41,13 +41,24 @@ QJsonObject sharedOrganization(QJsonObject local, const QString &node)
     }
     local.insert("projects", projects);
     local.insert("session_assignments_explicit", true);
+    // The order this desktop shows is the swarm's shared order. Older CLIs
+    // ignore it; a newer one writes it only when it changes.
+    QJsonArray order;
+    for (const auto &project : projects) order.append(project.toObject().value("id"));
+    local.insert("project_order", order);
     return local;
 }
 }
 
+namespace {
+int pollInterval = 5000;
+}
+
+void SwarmController::setPollInterval(int milliseconds) { pollInterval = milliseconds; }
+
 SwarmController::SwarmController(HgsClient *client, QObject *parent) : QObject(parent), m_client(client)
 {
-    m_poll.setInterval(5000);
+    m_poll.setInterval(pollInterval);
     connect(&m_poll,&QTimer::timeout,this,&SwarmController::refresh);
     m_flush.setSingleShot(true);m_flush.setInterval(120);
     connect(&m_flush,&QTimer::timeout,this,[this]{if(!m_suspended && !busy() && m_ready && m_base!=m_desired)send("apply");});
@@ -123,11 +134,8 @@ QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJson
         for(const auto &session:p.toObject().value("sessions").toArray())assigned.insert(session.toString());
     }
     for(const auto &session:local.value("unassigned_sessions").toArray())unassigned.insert(session.toString());
-    QJsonArray ordered;
-    for(const auto &p:local.value("projects").toArray()){
-        const auto old=p.toObject();const auto id=old.value("id").toString();
-        if(!remaining.contains(id))continue;
-        auto project=remaining.take(id);project.insert("collapsed",old.value("collapsed"));project.insert("vivid",old.value("vivid"));
+    const auto merged=[&](QJsonObject project,const QJsonObject &old){
+        project.insert("collapsed",old.value("collapsed"));project.insert("vivid",old.value("vivid"));
         // Preserve local fallback rows only until the catalog assigns them.
         auto sessions=project.value("sessions").toArray();QJsonArray sorted;
         for(const auto &session:old.value("sessions").toArray())
@@ -147,15 +155,34 @@ QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJson
             if(!present)folders.append(folder);
         }
         if(folders.size()!=sharedFolders)project.insert("folders",folders);
-        ordered.append(project);
+        return project;
+    };
+    QMap<QString,QJsonObject> previous;
+    for(const auto &p:local.value("projects").toArray())previous.insert(p.toObject().value("id").toString(),p.toObject());
+    QJsonArray ordered;
+    if(shared.contains("project_order")) {
+        // The swarm's shared order, in which the CLI lists its projects.
+        for(const auto &p:shared.value("projects").toArray()){
+            const auto id=p.toObject().value("id").toString();if(!remaining.contains(id))continue;
+            const auto project=remaining.take(id);ordered.append(previous.contains(id)?merged(project,previous.value(id)):project);
+        }
+    } else {
+        // Without one (an older CLI, or nobody reordered yet) keep this desktop's order.
+        for(const auto &p:local.value("projects").toArray()){
+            const auto id=p.toObject().value("id").toString();
+            if(remaining.contains(id))ordered.append(merged(remaining.take(id),p.toObject()));
+        }
     }
     for(const auto &project:remaining)ordered.append(project);
-    auto result=shared;result.insert("projects",ordered);
+    // sharedOrganization() derives the order from the projects it lists.
+    auto result=shared;result.insert("projects",ordered);result.remove("project_order");
     if(local.contains("unassigned_sessions")) {
         QStringList ids(retained.cbegin(),retained.cend());ids.sort();
         result.insert("unassigned_sessions",QJsonArray::fromStringList(ids));
     }
-    for(const auto &key:{"default_project","runs","imported_machines"})if(local.contains(key))result.insert(key,local.value(key));
+    // Local fields the catalog never returns. Dropping one would make the next
+    // save differ from what this controller observed and write again.
+    for(const auto &key:{"default_project","runs","run_groups","imported_machines"})if(local.contains(key))result.insert(key,local.value(key));
     return result;
 }
 void SwarmController::received(quint64 id,const QJsonObject &result)

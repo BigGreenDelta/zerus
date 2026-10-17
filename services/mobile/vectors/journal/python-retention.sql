@@ -35,6 +35,7 @@ INSERT INTO requests VALUES('87bb327a-4a9b-5086-816c-868fcaeec20e','terminal_sna
 INSERT INTO requests VALUES('75ef017f-55c8-5b36-ac24-4bda5c1c16ec','attachment_read','completed','{"state": "completed", "result": {"text": "private native content attachment_read-119"}, "error": null}',1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1759999881.0,1759999881.0,1759999881.0,0);
 CREATE INDEX delivered_history ON requests(delivered,delivered_at);
 CREATE INDEX terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running';
+CREATE INDEX archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running';
 CREATE INDEX file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running';
 CREATE INDEX attachment_delivered_reads ON requests(delivered_at) WHERE operation='attachment_read' AND delivered=1 AND state!='running';
 CREATE INDEX journal_operation ON requests(operation);

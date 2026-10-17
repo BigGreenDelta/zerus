@@ -49,6 +49,7 @@ class ReadMarks(unittest.TestCase):
         self.assertIn('read', row)
         self.assertIsNone(row['read'])
         self.assertIsNone(row['attention_signature'])
+        self.assertEqual(row['optional_questions'], {'count': 0})
 
     def test_signature_ignores_status_updates_and_changes_for_a_new_request(self):
         self.waiting()
@@ -239,8 +240,11 @@ class ReadMarks(unittest.TestCase):
 
     def test_unindexed_questions_are_never_acknowledged(self):
         self.codex_question()
-        known = self.listing()['attention_signature']
+        row = self.listing()
+        known, optional = row['attention_signature'], row['optional_questions']
         self.assertRegex(known, HEX)  # The pending question needs attention.
+        self.assertEqual(optional, {'count': 1, 'ids': ['codex-async:call-question:0'], 'latest_at': 1791676801.0})
+        self.assertEqual(row['phase'], 'working')
         self.assertTrue(self.mark(attention_signature=known)['applied']['attention_signature'])
         # Another process holds the question index for longer than a listing's budget.
         digest = hashlib.sha256(json.dumps([None, self.conversation_id], separators=(',', ':')).encode()).hexdigest()
@@ -252,11 +256,35 @@ class ReadMarks(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5)
         self.assertRegex(row['attention_signature'], HEX)
         self.assertNotIn(row['attention_signature'], (known, row['read']['attention_signature']))
+        self.assertIsNone(row['optional_questions'])  # Unknown, never a count of 0.
         # `hgs read` cannot index it either and never acknowledges an unknown state.
         self.assertFalse(self.mark(attention_signature=row['attention_signature'])['applied']['attention_signature'])
         fcntl.flock(lock, fcntl.LOCK_UN)
         row = self.listing()
         self.assertEqual((row['attention_signature'], row['read']['attention_signature']), (known, known))
+        self.assertEqual(row['optional_questions'], optional)
+
+    def test_unreadable_question_index_lists_unknown_optional_questions(self):
+        self.codex_question()
+        self.assertEqual(self.listing()['optional_questions']['count'], 1)
+        # A transcript of another conversation cannot be indexed. As before,
+        # the listing adds no attention for it; the questions are unknown.
+        rollout = Path(self.record['transcript'])
+        lines = rollout.read_text().splitlines(keepends=True)
+        rollout.write_text(json.dumps(dict(type='session_meta', payload=dict(id=str(uuid.uuid4())))) + '\n'
+                           + ''.join(lines[1:]))
+        row = self.listing()
+        self.assertIsNone(row['optional_questions'])
+        self.assertIsNone(row['attention_signature'])
+        self.assertEqual(row['phase'], 'working')
+
+    def test_saved_session_lists_no_optional_questions(self):
+        self.codex_question()
+        self.assertEqual(self.listing()['optional_questions']['count'], 1)
+        self.tmux('kill-session', '-t', '=' + self.name)
+        row = self.listing()
+        self.assertEqual(row['state'], 'stopped')
+        self.assertEqual(row['optional_questions'], {'count': 0})
 
     def test_unknown_session_reports_not_found(self):
         result = self.read(name='codex/missing-session', reply_id='1:1.0')

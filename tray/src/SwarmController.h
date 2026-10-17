@@ -20,6 +20,9 @@ public:
     void suspend(bool paused) { m_suspended = paused; if(!paused)refresh(); }
     void acceptExternal(const QJsonObject &snapshot);
     void setDraftEditing(bool active) { m_draftEditing = active; if(!active)refresh(); }
+    // Time between background reads of controllers started later. Isolated tests
+    // lengthen it so a slow fake CLI cannot add reads to the requests they count.
+    static void setPollInterval(int milliseconds);
     // node: this computer's catalog ID (the snapshot's node_id), whose local
     // Windows folders are merged back from local.
     static QJsonObject presentation(const QJsonObject &shared, const QJsonObject &local, const QString &node = {});

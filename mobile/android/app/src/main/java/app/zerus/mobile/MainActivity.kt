@@ -13,7 +13,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
@@ -33,6 +32,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.material.icons.Icons
@@ -59,6 +59,8 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -119,24 +121,33 @@ class MainActivity : ComponentActivity() {
     private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) SessionNotifications.initialize(this)
     }
-    private val fileLaunchers = mutableMapOf<String, ActivityResultLauncher<Array<String>>>()
-    private fun fileLauncher(selectionId: String): ActivityResultLauncher<Array<String>> = fileLaunchers.getOrPut(selectionId) {
-        activityResultRegistry.register("zerus-files:$selectionId", ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-            model.finishAttachmentPick(uris, selectionId)
-        }
-    }
+    private lateinit var filePicker: AttachmentPickerHost
+    private companion object { const val FILE_SELECTION = "zerus.fileSelection" }
     override fun onStop() { model.speech.background(); model.attachments.stopAudio(); super.onStop() }
-    override fun onDestroy() { fileLaunchers.values.forEach { it.unregister() }; super.onDestroy() }
+    override fun onDestroy() { if (::filePicker.isInitialized) filePicker.close(); super.onDestroy() }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(FILE_SELECTION, filePicker.launchedId)
+        super.onSaveInstanceState(outState)
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         sanitizeLaunchIntent(intent)
         super.onCreate(savedInstanceState)
+        filePicker = AttachmentPickerHost(activityResultRegistry, savedInstanceState?.getString(FILE_SELECTION).orEmpty()) { uris, id ->
+            model.finishAttachmentPick(uris, id)
+        }
         AppTelemetry.opened()
         SessionNotifications.initialize(this)
         enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.rgb(16, 21, 23)))
         readIntent(intent)
-        model.pickerId.takeIf { it.isNotBlank() }?.let { fileLauncher(it) }
         setContent { MaterialTheme(colorScheme = Scheme) {
+            LaunchedEffect(model.storageReady, model.pickerId) {
+                if (model.storageReady) {
+                    val id = model.pickerId
+                    if (model.pickerDraft == null || !filePicker.restore(id)) model.recoverAttachmentPick(id, filePicker.launchedId)
+                    filePicker.retain(model.pickerId)
+                }
+            }
             ZerusApp(model, invitation, updateRequest, onInvitationUsed = { invitation = null }, onNotifications = {
                 if (Build.VERSION.SDK_INT >= 33) requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
             }, onLive = { enabled ->
@@ -144,9 +155,9 @@ class MainActivity : ComponentActivity() {
                 if (enabled) startForegroundService(service) else stopService(service)
             }, onAttach = { target ->
                 model.beginAttachmentPick(target) { selectionId ->
-                    if (isDestroyed || isFinishing) return@beginAttachmentPick
-                    try { fileLauncher(selectionId).launch(arrayOf("*/*")) }
-                    catch (_: Exception) { model.cancelAttachmentPick() }
+                    if (isDestroyed || isFinishing) { model.cancelAttachmentPick(selectionId); return@beginAttachmentPick }
+                    try { filePicker.launch(selectionId) }
+                    catch (_: Exception) { model.cancelAttachmentPick(selectionId) }
                 }
             })
         } }
@@ -232,6 +243,8 @@ class MainActivity : ComponentActivity() {
     }
     BackHandler(model.selected != null || tab == 1 && model.selectedProject != null || tab == 0 && model.sessionProjectScope != null) { back() }
     val selected = model.selected
+    val conversationLoad = selected?.let { rememberConversationLoad(model, it.target) }
+    val conversationObscured = LocalConversationObscuration.current?.obscured == true
     var sessionDetails by remember(selected?.target?.key) { mutableStateOf(false) }
     if (selected != null && sessionDetails) {
         ObscureConversation()
@@ -260,8 +273,14 @@ class MainActivity : ComponentActivity() {
                     IconButton(onClick = { stopRequest = selected to model.activity!!.optDouble("turn_started") }) {
                         Icon(Icons.Default.StopCircle, "Stop turn")
                     }
-                IconButton(onClick = { if (selected == null) model.refresh(explicit = true) else model.refreshActivity(explicit = true) }) {
-                    Icon(Icons.Default.Refresh, "Refresh")
+                IconButton(onClick = { if (selected == null) model.refresh(explicit = true) else model.refreshActivity(explicit = true) },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Refresh"
+                        if (!conversationObscured) conversationLoad?.let { stateDescription = it.text; liveRegion = LiveRegionMode.Polite }
+                    }) {
+                    if (conversationLoad?.spinner == true && !conversationObscured)
+                        CircularProgressIndicator(Modifier.size(24.dp), color = Mint, strokeWidth = 2.dp)
+                    else Icon(Icons.Default.Refresh, null)
                 }
                 if (selected == null) IconButton(onClick = { keyboard?.hide(); settings = true }, modifier = Modifier.semantics {
                     if (updateState.sessionId >= 0) stateDescription = "Installation pending"
@@ -292,7 +311,7 @@ class MainActivity : ComponentActivity() {
                     IconButton(onClick = { model.clearError() }) { Icon(Icons.Default.Close, "Dismiss error") }
                 }
             }
-            if (selected != null) Conversation(model, selected, onReview = { review = it }, onReviewOutgoing = { reviewOutgoing = it }, onAttach = onAttach, positions = readingPositions,jumpRequest = messageJump,onJumpConsumed = { messageJump = null })
+            if (selected != null) Conversation(model, selected, conversationLoad, onReview = { review = it }, onReviewOutgoing = { reviewOutgoing = it }, onAttach = onAttach, positions = readingPositions,jumpRequest = messageJump,onJumpConsumed = { messageJump = null })
             else MainListsRefresh(model,tab to project?.key?.key) { when (tab) {
                 0 -> SessionsScreen(model, onPair = { tab = 3 })
                 1 -> if (project != null) ProjectDetails(model, project, onViewSessions = { model.viewProjectSessions(project); tab = 0 })
@@ -358,11 +377,11 @@ class MainActivity : ComponentActivity() {
         Text(text, Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = color, style = MaterialTheme.typography.labelSmall)
     }
 }
-@Composable private fun SessionBadge(session: Session, online: Boolean) {
+@Composable private fun SessionBadge(session: Session, online: Boolean, modifier: Modifier = Modifier) {
     val badge = DesktopSessionPalette.badge(session, online)
     val dark = MaterialTheme.colorScheme.background.luminance() < .5f
     val colors = DesktopSessionPalette.colors(badge.kind, dark)
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier,horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         Surface(color = Color(colors.background), shape = RoundedCornerShape(5.dp)) {
             Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically) {
@@ -372,10 +391,12 @@ class MainActivity : ComponentActivity() {
                         fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                     DesktopBadgeKind.Paused -> Icon(DesktopIcons.Paused, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Unread -> Icon(Icons.Default.MarkEmailUnread, null, Modifier.size(12.dp), tint = Color(colors.foreground))
-                    DesktopBadgeKind.Scheduled -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
+                    DesktopBadgeKind.Scheduled, DesktopBadgeKind.Waiting -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Neutral -> Unit
                 }
-                Text(badge.caption, color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall)
+                Text(badge.caption, color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall,
+                    maxLines=if(badge.kind==DesktopBadgeKind.Waiting) 1 else Int.MAX_VALUE,
+                    overflow=if(badge.kind==DesktopBadgeKind.Waiting) TextOverflow.Ellipsis else TextOverflow.Clip)
             }
         }
         if (badge.additionalUnread) {
@@ -384,6 +405,7 @@ class MainActivity : ComponentActivity() {
                 Icon(Icons.Default.MarkEmailUnread, "New reply", Modifier.padding(4.dp).size(12.dp), tint = Color(unread.foreground))
             }
         }
+        SessionOptionalQuestionChip(session, online)
     }
 }
 @Composable private fun SessionDetailBadge(session: Session,raw: JSONObject?) {
@@ -525,7 +547,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
 }
 
-@Composable private fun SessionsScreen(model: ZerusViewModel, onPair: () -> Unit) {
+@Composable internal fun SessionsScreen(model: ZerusViewModel, onPair: () -> Unit) {
     val project = model.sessionProjectScope
     if (model.connections.isEmpty() && !model.demo) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -540,14 +562,34 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             TextButton(onClick = { model.preview() }, modifier = Modifier.fillMaxWidth()) { Text("Try demo") }
         } }; return
     }
-    val scoped = SessionFilters.scoped(model.sessions, model.machines, model.selectedMachines, model.sessionQuery, project?.key)
-    val drafts = SessionFilters.draftedSessions(model.sessions, model.drafts)
-    val counts = SessionFilters.counts(scoped, model.machines, drafts)
-    val machineCounts = SessionFilters.machineCounts(model.sessions, model.machines, model.sessionFilter, drafts, project?.key)
-    val visible = scoped.filter { SessionFilters.matches(it, model.sessionFilter, SessionFilters.online(it, model.machines), it.target.key in drafts) }
-    val groups = SessionFilters.grouped(visible, model.projects)
-    val readAllTargets = scoped.map { it.target }.filter(model::listReadAllCandidate)
-    val canReadAll = !model.demo && readAllTargets.any(model::canReadAll)
+    DisposableEffect(model) { onDispose { model.archive.pause() } }
+    LaunchedEffect(model.sessionFilter,model.sessionQuery,model.selectedMachines,model.archiveSupportedMachines.map { MachineKey(it.connectionId,it.id) }) { model.configureArchive() }
+    val sessions = model.sessions
+    val machines = model.machines
+    val projects = model.projects
+    val drafts = model.drafts
+    val selectedMachines = model.selectedMachines
+    val query = model.sessionQuery
+    val filter = model.sessionFilter
+    val archiveRange = model.archive.range
+    val projectionGeneration = remember(sessions, machines, projects, drafts, selectedMachines, query, project?.key, filter, archiveRange) { Any() }
+    val preparedProjection by produceState<Pair<Any, SessionListPresentation>?>(null, projectionGeneration) {
+        val prepared = withContext(Dispatchers.Default) {
+            SessionListPresentation.prepare(sessions, machines, projects, selectedMachines, query, project?.key, filter, drafts, archiveRange)
+        }
+        value = projectionGeneration to prepared
+    }
+    // Do not mount a restored LazyListState against an empty placeholder catalog:
+    // LazyColumn would clamp the saved position before the first projection arrives.
+    val (generation, projection) = preparedProjection ?: run {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Preparing sessions…", color = Muted) }
+        return
+    }
+    val counts = projection.counts
+    val machineCounts = projection.machineCounts
+    val groups = projection.groups
+    val readAllTargets = projection.readAllTargets
+    val canReadAll = filter != SessionFilter.Archive && !model.demo && generation === projectionGeneration && readAllTargets.any(model::canReadAll)
     val context = LocalContext.current
     var sessionActions by remember { mutableStateOf<Session?>(null) }
     val listState = rememberLazyListState(model.sessionListIndex, model.sessionListOffset)
@@ -562,30 +604,35 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Column {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(project?.name ?: "Sessions", Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-                TextButton(onClick = {
+                Text(project?.name ?: if(model.sessionFilter==SessionFilter.Archive) "Archive" else "Sessions", Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+                if(model.sessionFilter!=SessionFilter.Archive) TextButton(onClick = {
                     val capturedTargets = readAllTargets.toList()
                     val result = model.markAllRead(capturedTargets,visibleRepliesOnly = true)
                     Toast.makeText(context, ConversationLoadPresentation.readAllOutcome(result.marked, result.skipped, result.partial), Toast.LENGTH_LONG).show()
                 }, enabled = canReadAll, modifier = Modifier.semantics {
                     contentDescription = if (canReadAll) "Read all conversations in the current project, machine and search scope on this phone"
                         else if (model.demo) "Read all unavailable in preview"
+                        else if (generation !== projectionGeneration) "Read all unavailable while the session scope is updating"
                         else if (readAllTargets.none(model::readAllPending)) "Read all unavailable. No unread replies or review reminders are shown in the current scope"
                         else "Read all unavailable. The current scope needs verified history or loaded replies on this phone"
                 }) { Text("Read all") }
             }
         } }
-        item { OutlinedTextField(model.sessionQuery, { model.changeSessionQuery(it) }, Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text("Search sessions and IDs") },
+        item { OutlinedTextField(model.sessionQuery, { model.changeSessionQuery(it) }, Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text(if(model.sessionFilter==SessionFilter.Archive) "Search archive names and IDs" else "Search sessions and IDs") },
             leadingIcon = { Icon(Icons.Default.Search, "Search sessions") }, shape = RoundedCornerShape(14.dp)) }
         item { Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             SessionFilter.entries.forEach { filter ->
                 val selected = model.sessionFilter == filter
+                val count = if(filter==SessionFilter.Archive && !model.demo && model.archiveSupportedMachines.isNotEmpty()) {
+                    if(!model.archive.totalsKnown && counts.getValue(filter)==0) "…"
+                    else counts.getValue(filter).toString() + if(model.archive.partial) "+" else ""
+                } else counts.getValue(filter).toString()
                 val accent = if (filter == SessionFilter.Attention && counts.getValue(filter) > 0) Amber else if (selected) Mint else Muted
                 OutlinedButton(onClick = { model.chooseSessionFilter(filter) }, modifier = Modifier.height(48.dp).widthIn(min = 56.dp).semantics {
-                    contentDescription = "${filter.caption}, ${counts.getValue(filter)} sessions${if (selected) ", selected" else ""}"
+                    contentDescription = "${filter.caption}, $count sessions${if (selected) ", selected" else ""}"
                 }, contentPadding = PaddingValues(horizontal = 9.dp), shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(containerColor = if (selected) Color(0xFF243136) else Color.Transparent, contentColor = accent)) {
-                    Icon(DesktopIcons.forName(filter.id), null, Modifier.size(20.dp)); Spacer(Modifier.width(5.dp)); Text(counts.getValue(filter).toString(), style = MaterialTheme.typography.labelMedium)
+                    Icon(DesktopIcons.forName(filter.id), null, Modifier.size(20.dp)); Spacer(Modifier.width(5.dp)); Text(count, style = MaterialTheme.typography.labelMedium)
                 }
             }
             OutlinedButton(onClick = { machineDialog = true }, modifier = Modifier.height(48.dp).widthIn(min = 56.dp).semantics { contentDescription = "Filter machines" },
@@ -594,7 +641,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 Text(if (model.selectedMachines.isEmpty()) model.machines.size.toString() else model.selectedMachines.size.toString(), style = MaterialTheme.typography.labelMedium)
             }
         } }
-        item { Text("${model.sessionFilter.caption} (${visible.size})" + if (model.selectedMachines.isEmpty()) "" else " on selected machines", color = Muted, style = MaterialTheme.typography.bodyMedium) }
+        if(model.sessionFilter==SessionFilter.Archive) item { ArchiveFiltersUi(model.archive,model.archiveMachines.associate { MachineKey(it.connectionId,it.id) to it.name },model.archiveMachines.filter { it !in model.archiveSupportedMachines }.map { it.name },projection.visibleCount) }
+        item { Text("${model.sessionFilter.caption} (${projection.visibleCount})" + if (model.selectedMachines.isEmpty()) "" else " on selected machines", color = Muted, style = MaterialTheme.typography.bodyMedium) }
         if (model.demo) item { Text("Preview data. Pair a workspace to interact with real sessions.", color = Amber, style = MaterialTheme.typography.bodySmall) }
         groups.forEach { group ->
             val accent = runCatching { Color(android.graphics.Color.parseColor(group.color)) }.getOrDefault(Mint)
@@ -629,7 +677,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             Icon(Icons.Default.ChevronRight, "Open", tint = Muted, modifier = Modifier.size(20.dp))
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            SessionBadge(session, online)
+                            SessionBadge(session, online, if(online && SessionFilters.waitingIdle(session)) Modifier.weight(1.5f,fill=false) else Modifier)
                             Box(Modifier.weight(1f)) { MachineLabel(machine?.name ?: session.target.computerId,colorHex = model.machineColor(MachineKey(session.target.connectionId,session.target.computerId))) }
                             SessionSubagentCounter(model, session, online)
                         }
@@ -637,14 +685,14 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         SessionFilters.archiveDate(session).takeIf { it.isNotBlank() }?.let { archivedDate ->
                             Text("Archived $archivedDate", color = Muted, style = MaterialTheme.typography.labelSmall)
                         }
-                        Text(session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)
+                        Text(if(online && SessionFilters.waitingIdle(session)) SessionFilters.waitingLabel(session) else session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)
                         if (model.connections.size > 1) Text(model.connections.find { it.id == session.target.connectionId }?.displayName.orEmpty(), color = Muted, style = MaterialTheme.typography.labelSmall)
                         SessionSubagentRows(model, session, online)
                     }
                 }
             }
         }
-        if (visible.isEmpty()) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
+        if (projection.visibleCount == 0 && !(model.sessionFilter==SessionFilter.Archive && model.archive.loading)) item { Text(if (model.catalogBusy && model.sessions.isEmpty()) "Checking your sessions…" else if(model.sessionFilter==SessionFilter.Archive && model.archive.partial) "No sessions in this page match. Browse older/newer sessions or narrow the date range." else "No sessions match this view.", color = Muted, modifier = Modifier.padding(vertical = 24.dp)) }
     }
     sessionActions?.let { SessionActionsSheet(model, it) { sessionActions = null } }
     if (machineDialog) ZerusAlertDialog(onDismissRequest = { machineDialog = false }, title = { Text("Filter machines") },
@@ -666,7 +714,30 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         } }, confirmButton = { TextButton(onClick = { machineDialog = false }) { Text("Done") } })
 }
 
-@Composable private fun Conversation(model: ZerusViewModel, session: Session, onReview: (Draft) -> Unit,
+@Composable private fun rememberConversationLoad(model: ZerusViewModel, target: Target): ConversationLoadPresentation.Status? {
+    var opening by remember(target.key) { mutableStateOf(true) }
+    // The opening inspection and canonical history can finish in either order.
+    // Keep their first refresh visible until the owned window is ready; later
+    // automatic polls retain the ordinary five-second progress threshold.
+    LaunchedEffect(target.key, model.detailBusy, model.olderLoading, model.readPositionReady, model.activityVerified) {
+        if (model.activityVerified && model.readPositionReady && !model.detailBusy && !model.olderLoading) opening = false
+    }
+    val historyGate = remember(target.key) { LoadingGate(android.os.SystemClock::elapsedRealtime) }
+    var historyProgress by remember(target.key) { mutableStateOf(false) }
+    LaunchedEffect(target.key, model.olderLoading, model.demo) {
+        historyProgress = false
+        if (!model.olderLoading || model.demo) { historyGate.cancel(); return@LaunchedEffect }
+        val operation = historyGate.begin(target.key).operation
+        delay(historyGate.remaining(operation.id))
+        if (historyGate.owns(operation.id)) historyProgress = historyGate.visible()
+    }
+    val hasContent = model.conversationEvents.isNotEmpty() ||
+        target.archiveId.isBlank() && model.conversationQuestions.isNotEmpty() || model.speech.outgoing.any { it.belongsTo(target) }
+    return ConversationLoadPresentation.status(hasContent, model.detailBusy, model.detailProgress,
+        model.olderLoading, historyProgress, model.demo, resolved = model.activity != null, opening = opening)
+}
+
+@Composable private fun Conversation(model: ZerusViewModel, session: Session, loadStatus: ConversationLoadPresentation.Status?, onReview: (Draft) -> Unit,
     onReviewOutgoing: (OutgoingMessage) -> Unit, onAttach: (Target) -> Unit,
     positions: MutableMap<String, ConversationAnchor>,jumpRequest: ConversationMessageJump?,onJumpConsumed: () -> Unit) {
     val target = session.target
@@ -703,18 +774,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val boundedNotice = if(model.historyEpoch.isNotBlank()) {
         if(model.hasOlder || model.hasNewer) "Showing part of the conversation. Use the history controls to load more messages." else ""
     } else if(model.conversationHistoryTruncated) "Showing recent activity. Older messages may be outside the available history." else ""
-    val historyGate = remember(target.key) { LoadingGate(android.os.SystemClock::elapsedRealtime) }
-    var historyProgress by remember(target.key) { mutableStateOf(false) }
-    LaunchedEffect(target.key, model.olderLoading, model.demo) {
-        historyProgress = false
-        if (!model.olderLoading || model.demo) { historyGate.cancel(); return@LaunchedEffect }
-        val operation = historyGate.begin(target.key).operation
-        delay(historyGate.remaining(operation.id))
-        if (historyGate.owns(operation.id)) historyProgress = historyGate.visible()
-    }
-    val loadStatus = ConversationLoadPresentation.status(events.isNotEmpty() || questions.isNotEmpty(),
-        model.detailBusy, model.detailProgress, model.olderLoading, historyProgress, model.demo)
-    val conversationLoading = !model.demo && (model.detailBusy || model.olderLoading)
+    val conversationLoading = loadStatus?.initial == true
     val context = LocalContext.current
     val keys = buildList {
         add("history:earlier")
@@ -863,8 +923,10 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LaunchedEffect(settledAtTail,listState.isScrollInProgress,programmatic,follow.opened,follow.following,follow.anchor,model.hasNewer) {
         if(!listState.isScrollInProgress && !programmatic) follow = ConversationViewport.settled(follow,settledAtTail,model.hasNewer)
     }
+    val videoCapture = model.speech.recording && model.speech.videoRecorder != null
+    var videoOverlayVisible by remember { mutableStateOf(false) }
     val readable = foreground && window.isWindowFocused && follow.opened && readReady &&
-        !obscured
+        !obscured && !videoCapture && !videoOverlayVisible
     LaunchedEffect(target.key,listState,readable,model.hasOlder,model.olderLoading,model.olderError) {
         if(!readable || !model.hasOlder || model.olderLoading || model.olderError.isNotBlank()) return@LaunchedEffect
         snapshotFlow { listState.isScrollInProgress && !programmatic && listState.firstVisibleItemIndex <= 3 }
@@ -900,18 +962,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
     }
     Column(Modifier.fillMaxSize().imePadding()) {
-        Box(Modifier.fillMaxWidth().height(4.dp)) {
-            if (!obscured && !model.demo && (model.detailProgress || historyProgress))
-                LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
-        }
-        val stripStatus = loadStatus?.takeIf { !it.initial || queueVisible }
-        if (stripStatus != null || unread != null || offeredQuestionCount > 0) {
+        if (unread != null || offeredQuestionCount > 0) {
             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (stripStatus?.spinner == true && !obscured) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                Text(stripStatus?.text ?: unread?.let { "${it.text} unread" }.orEmpty(),
-                    Modifier.weight(1f).semantics { if (!obscured && stripStatus != null) liveRegion = LiveRegionMode.Polite },
-                    color = if (stripStatus == null && unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
+                Text(unread?.let { "${it.text} unread" }.orEmpty(), Modifier.weight(1f),
+                    color = if (unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
                 if (offeredQuestionCount > 0) TextButton(onClick = {
                     if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
                 }) { Text("Questions ($offeredQuestionCount)") }
@@ -923,6 +978,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
         Box(Modifier.weight(1f).fillMaxWidth().onSizeChanged { viewportHeight = it.height }
             .onGloballyPositioned { viewportBounds = it.boundsInWindow() }) {
+            Box(Modifier.fillMaxSize().semantics { if (videoCapture || videoOverlayVisible) hideFromAccessibility() }) {
+            ConversationTailRefresh(model, target.key, Modifier.fillMaxSize()) {
             // The tail item already adds one item gap above the composer.
             LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -933,9 +990,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     } else if(model.hasOlder) TextButton(onClick = { model.loadOlder(target) },enabled = !model.olderLoading && historyReason.isBlank()) { Text("Load earlier messages") }
                     else if(model.historyEpoch.isNotBlank() && !model.historyIndexing) Text(if(model.historyComplete) "Beginning of conversation" else "No earlier page reported; history may be incomplete.",color = Muted,style = MaterialTheme.typography.labelSmall)
                     if(model.historyIndexing) Text("History is still indexing. Unread totals may be unavailable.",color = Muted,style = MaterialTheme.typography.labelSmall)
-                    if(historyReason.isNotBlank()) Text(historyReason,color = Muted,style = MaterialTheme.typography.labelSmall)
+                    if(historyReason.isNotBlank() && events.isNotEmpty()) Text(historyReason,color = Muted,style = MaterialTheme.typography.labelSmall)
                 } }
-                item(key = "history:status") { if (loadStatus?.initial != true) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                item(key = "history:status") { if (loadStatus?.initial != true && events.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (raw == null && !model.demo) Tag("Checking…", Muted) else SessionDetailBadge(session,raw)
                     Tag(if (model.demo) "Preview" else if (model.activityVerified) "Connected" else if (raw != null) "Last known" else "Checking…",
                         if (online) Mint else Amber)
@@ -963,7 +1020,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     }
                 }
                 if (events.isEmpty() && !conversationLoading) item(key = "history:empty") {
-                    Text("No recent messages are available. Refresh to load activity.", color = Muted)
+                    Text(if (raw != null || model.demo) "No messages yet." else
+                        "No recent messages are available. Refresh to load activity.", color = Muted)
                 }
                 item(key = "history:newer") {
                     if(model.hasNewer) Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.Center) {
@@ -978,9 +1036,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
                 item(key = "history:tail") { Spacer(Modifier.height(1.dp)) }
             }
+            }
             if (loadStatus?.initial == true && !queueVisible) Column(Modifier.align(Alignment.Center).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (loadStatus.spinner && !obscured) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                 Text(loadStatus.text, Modifier.semantics { if (!obscured) liveRegion = LiveRegionMode.Polite }, color = Muted, style = MaterialTheme.typography.bodyMedium)
             }
             if ((!follow.following || model.hasNewer || latestPending) && (events.isNotEmpty() || questions.isNotEmpty()) &&
@@ -997,35 +1055,43 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     Text(if(latestPending) "Loading latest…" else unread?.let { "${it.text} unread" } ?: "Latest",
                         Modifier.padding(start = 4.dp),style = MaterialTheme.typography.labelMedium)
                 }
+            }
+            RoundVideoRecordingOverlay(model.speech, Modifier.matchParentSize()) { videoOverlayVisible = it }
         }
         if (archived) {
             ContextFooter(model, session)
             Text("Archived conversation. Read-only.", color = Muted, style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.fillMaxWidth().background(Surface).padding(16.dp))
         }
-        else MessageComposer(model, session, online, onReview, onAttach)
+        else MessageComposer(model, session, online, onReview, onAttach, onReviewOutgoing)
     }
     ExpandedQuestionHost(model, target, questions, online && model.activityVerified && !model.contextBlocked(target),
         questionDisplay, ::updateQuestionDisplay, onReview)
 }
 
-@Composable private fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
+@Composable internal fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
     model: ZerusViewModel, onReview: (OutgoingMessage) -> Unit) {
     val own = QuestionReplyPresentation.isOwnRole(event.role)
     val parsedReply by produceState<Pair<String, List<PresentedQuestionReply>?>>(event.text to null, event.text, own) {
         value = event.text to if (own) withContext(Dispatchers.Default) { QuestionReplyPresentation.parse(event.text) } else null
     }
     val replies = parsedReply.takeIf { it.first == event.text }?.second
+    val roundVideo = event.voice?.video != null
+    val messageColor = if (roundVideo && own) MaterialTheme.colorScheme.primary.copy(alpha = .14f)
+        .compositeOver(MaterialTheme.colorScheme.surface) else if (own) Color(0xFF203733) else Surface
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (own) Arrangement.End else Arrangement.Start) {
-        Surface(color = if (own) Color(0xFF203733) else Surface, shape = RoundedCornerShape(17.dp),
+        Surface(color = if (roundVideo) Color.Transparent else messageColor,
+            shape = if (roundVideo) RectangleShape else RoundedCornerShape(17.dp),
             modifier = Modifier.fillMaxWidth(if (own) .92f else 1f).semantics {
                 contentDescription = if (own) "You" else agent.ifBlank { "Agent" }
             }) {
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(Modifier.padding(horizontal = if (roundVideo) 0.dp else 12.dp,
+                vertical = if (roundVideo) 0.dp else 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (!own) Text(agent.ifBlank { event.role }, color = Muted, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                 if (replies == null && event.role == "You (answer)") Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                 if (event.voice != null) {
-                    ProvideTextStyle(conversationTextStyle()) { VoiceMessageContent(model, model.selected?.target, event.voice) }
+                    ProvideTextStyle(conversationTextStyle()) { VoiceMessageContent(model, target, event.voice,
+                        at = event.at, videoBubbleColor = messageColor) }
                 } else if (replies != null) {
                     Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1048,7 +1114,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
                 if (event.voice == null) AttachmentRows(event.attachments, model.selected?.target, model)
                 if(event.detailTruncated) Text("Message text shortened",color = Amber,style = MaterialTheme.typography.labelSmall)
-                if (event.delivery.isNotBlank() || event.at > 0) Row(Modifier.fillMaxWidth(),
+                if (event.voice == null && (event.delivery.isNotBlank() || event.at > 0)) Row(Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                     if (event.at > 0) Text(java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
                         .format(java.util.Date((event.at * 1000).toLong())), color = Muted, style = MaterialTheme.typography.labelSmall)
@@ -1073,7 +1139,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
 }
 
 @Composable private fun MessageComposer(model: ZerusViewModel, session: Session, online: Boolean,
-    onReview: (Draft) -> Unit, onAttach: (Target) -> Unit) {
+    onReview: (Draft) -> Unit, onAttach: (Target) -> Unit, onReviewOutgoing: (OutgoingMessage) -> Unit) {
     val target = session.target
     val draft = model.draft(target)
     val recording = model.speech.recording
@@ -1145,7 +1211,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         verticalArrangement = Arrangement.spacedBy(4.dp)) {
         // Measure the editor and its controls first. A voice preview uses only the
         // remaining height, with its controls reachable by scrolling.
-        if (model.speech.recording && !model.speech.touchRecording || model.speech.savingRecording || model.speech.draft != null) {
+        if (model.speech.recording && (!model.speech.touchRecording || model.speech.videoRecorder != null) || model.speech.savingRecording || model.speech.draft != null) {
             Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 280.dp)
                 .verticalScroll(rememberScrollState())) { SpeechComposerStatus(model) }
         }
@@ -1169,13 +1235,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             } }
         }
-        if (model.pickerDraft?.target == target) Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(if (model.attachmentImporting) "Saving selected files…" else "File selection is pending.", Modifier.weight(1f), color = Muted, style = MaterialTheme.typography.labelSmall)
-            TextButton(onClick = { model.cancelAttachmentPick() }) { Text("Cancel") }
-        }
-        if (previous?.status == "sending") Text("Sending… You can write the next message.", color = Muted, style = MaterialTheme.typography.labelSmall)
-        else if (previous?.status == "uncertain") Text("Delivery unknown. Check the previous message before sending again.", color = Amber, style = MaterialTheme.typography.labelSmall)
-        CompactMessageInput(state = editor, placeholder = sendReason.ifBlank { "Message" },
+        PendingAttachmentSelection(model, target)
+        if (previous?.status == "uncertain") OutgoingRecovery(previous,
+            "outgoing:${previous.requestId}" in model.receiptFlights,
+            { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) })
+        CompactMessageInput(state = editor, placeholder = "Message",
             recordingContent = if (recording) ({ SpeechRecordingRow(model.speech) }) else null,
             // Keep an already-open IME session in place during capture. The hidden
             // editor remains locked by the synchronous text-and-selection filter.
@@ -1185,7 +1249,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             focusRequester = focusRequester, onFocusChanged = { focused = it },
             leading = {
                 IconButton(onClick = { restorePickerFocus = focused; pickerStarted = false; onAttach(target) },
-                    enabled = !recording && !model.demo && model.storageReady && model.attachmentReason(target).isBlank() && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
+                    enabled = !recording && !model.demo && model.storageReady && !model.updateInstallPreparing && model.attachmentReason(target).isBlank() && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
                     Icon(Icons.Default.AttachFile, "Attach files", Modifier.size(24.dp).rotate(45f), tint = Muted)
                 }
             }, action = {
@@ -1271,10 +1335,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             } }
         }
-        if (model.pickerDraft != null) item { Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("A file selection was interrupted or is pending.", Modifier.weight(1f), color = Muted)
-            TextButton(onClick = { model.cancelAttachmentPick() }) { Text("Cancel selection") }
-        } }
+        if (model.pickerDraft != null) item { PendingAttachmentSelection(model) }
         if (unresolved.isNotEmpty()) item { Text("Outgoing messages", style = MaterialTheme.typography.titleMedium) }
         items(unresolved.sortedByDescending { it.createdAt }, key = { "outgoing:${it.requestId}" }) { message ->
             Card(colors = CardDefaults.cardColors(containerColor = Surface)) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

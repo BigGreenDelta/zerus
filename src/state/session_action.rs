@@ -186,6 +186,10 @@ fn validate(request: &Request, name: &str) -> Result<()> {
 fn perform(request: &Request, name: &str, scope: &Scope) -> Result<()> {
     if opencode::exists(name) { return opencode::session_action(name,&request.action,request.new_name.as_deref(),scope); }
     if dsh::exists(name) {
+        if request.action == "fork" {
+            return dsh::fork(name, request.tag.as_deref(), Some(&request.expected_run_id),
+                Some(&request.expected_conversation_id), false, Some(scope)).map(|_| ());
+        }
         return dsh::session_action(name, &request.action, request.new_name.as_deref(), scope);
     }
     match request.action.as_str() {

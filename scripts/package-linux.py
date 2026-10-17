@@ -23,6 +23,9 @@ def main():
     parser.add_argument("--destdir", type=Path, required=True)
     parser.add_argument("--cli", type=Path, required=True)
     parser.add_argument("--gui", type=Path, required=True)
+    # The Rust mobile connector (services/mobile/connector); its user unit is
+    # packaged but never enabled.
+    parser.add_argument("--connector", type=Path, required=True)
     # The optional embedded DeepSeek native UI; it alone links Qt WebEngine,
     # which the package lists as an optional dependency.
     parser.add_argument("--native-ui-plugin", type=Path)
@@ -32,7 +35,7 @@ def main():
     destination = args.destdir.resolve()
     if destination == Path("/"):
         parser.error("stage into a package directory, never the running system")
-    for name, source in (("hgs", args.cli), ("hgs-tray", args.gui)):
+    for name, source in (("hgs", args.cli), ("hgs-tray", args.gui), ("zerus-mobile-connector", args.connector)):
         if not source.is_file():
             parser.error(f"build output missing: {source}")
         install(source, destination / "usr/bin" / name, 0o755)
@@ -40,8 +43,11 @@ def main():
         if not args.native_ui_plugin.is_file():
             parser.error(f"build output missing: {args.native_ui_plugin}")
         install(args.native_ui_plugin, destination / "usr/lib/hgs-tray/plugins/libhgs-tray-native-ui.so", 0o755)
-    for name, source in (("hgs_state.py", ROOT / "hgs_state.py"), ("zerus-setup", ROOT / "packaging/linux/zerus-setup")):
-        installed = destination / "usr/bin" / name
+    for installed, source in ((destination / "usr/bin/hgs_state.py", ROOT / "hgs_state.py"),
+                              (destination / "usr/bin/zerus-setup", ROOT / "packaging/linux/zerus-setup"),
+                              # zerus-setup --mobile-connector runs it.
+                              (destination / "usr/lib/zerus/install-mobile-connector-service.py",
+                               ROOT / "scripts/install-mobile-connector-service.py")):
         install(source, installed, 0o755)
         # Arch owns /usr/bin/python. Make the runtime dependency visible to
         # package tools while retaining portable source shebangs elsewhere.
@@ -69,8 +75,10 @@ def main():
         parser.error("collect dependency license texts first")
     shutil.copytree(args.licenses, licenses / "rust", dirs_exist_ok=True)
     cli_version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    connector_version = tomllib.loads((ROOT / "services/mobile/connector/Cargo.toml").read_text())["package"]["version"]
     manifest = {"product": "Zerus", "version": (ROOT / "VERSION").read_text().strip(),
-                "cli_version": cli_version, "platform": "Arch Linux", "native_agents_bundled": False}
+                "cli_version": cli_version, "mobile_connector_version": connector_version,
+                "platform": "Arch Linux", "native_agents_bundled": False}
     if (ROOT / ".git").exists():
         manifest["source_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     with tempfile.TemporaryDirectory(prefix="zerus-build-identity-") as home:
@@ -82,7 +90,7 @@ def main():
     manifest["desktop_build"] = identity
     install_info = documentation / "build-info.json"
     install_info.write_text(json.dumps(manifest, indent=2) + "\n")
-    print("Staged CLI, desktop" + (", native UI plugin" if args.native_ui_plugin else "")
+    print("Staged CLI, desktop, mobile connector" + (", native UI plugin" if args.native_ui_plugin else "")
           + ", user service definitions, icons, documentation and dependency notices.")
 
 

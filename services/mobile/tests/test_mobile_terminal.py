@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, patch
 import uuid
 
 from zerus_mobile.connector import Connector, Journal
-from zerus_mobile.server import AUTHENTICATED_REQUEST_LIMIT, GLOBAL_REQUEST_LIMIT, IP_REQUEST_LIMIT, RateLimits, validate_request
+from relay_oracle import validate_request
+from zerus_mobile.server import AUTHENTICATED_REQUEST_LIMIT, GLOBAL_REQUEST_LIMIT, IP_REQUEST_LIMIT, RateLimits
 from zerus_mobile.store import Store
 
 
@@ -116,14 +117,37 @@ class TerminalRateBudget(unittest.TestCase):
             with self.assertRaises(Exception): limits.check(("pair", "loopback"), limit=10)
 
 
+class TerminalJournalRetention(unittest.TestCase):
+    """The connector (Journal) half of the sustained Terminal retention case."""
+    def test_sustained_screens_leave_the_journal_and_inputs_stay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal=Journal(Path(directory)/'connector', 'fixture-binding')
+            try:
+                for index in range(5100):
+                    now=10000+index*.25
+                    with patch('time.time',return_value=now):
+                        identity=str(uuid.uuid4())
+                        self.assertTrue(journal.claim(identity,'terminal_snapshot'))
+                        journal.finish(identity,{'state':'completed','result':{},'error':None});journal.delivered(identity)
+                self.assertLess(journal.db.execute('SELECT count(*) FROM requests').fetchone()[0],500)
+                with patch('time.time',return_value=now+121): journal.prune()
+                self.assertEqual(journal.db.execute('SELECT count(*) FROM requests').fetchone()[0],0)
+                with patch('time.time',return_value=now+200):
+                    identity=str(uuid.uuid4())
+                    journal.claim(identity,'terminal_input');journal.finish(identity,{'state':'uncertain','result':None,'error':'fixture'});journal.delivered(identity)
+                with patch('time.time',return_value=now+1000): journal.prune()
+                self.assertFalse(journal.claim(identity,'terminal_input'))
+            finally: journal.close()
+
+
 class TerminalRetention(unittest.TestCase):
+    """The relay half; its Rust contract is listed in relay/tests/ORACLE.md."""
     def test_sustained_reads_and_abandoned_results_expire_without_mutation_eviction(self):
         with tempfile.TemporaryDirectory() as directory:
             store=Store(Path(directory)/'relay.sqlite3')
             workspace=store.workspace('Example'); credentials=store.node(workspace,'Computer')
             phone=store.pair(store.invite(workspace)['pair_code'],'Phone')
             node=store.authenticate(credentials['node_token'],'nodes');device=store.authenticate(phone['device_token'],'devices')
-            journal=Journal(Path(directory)/'connector', 'fixture-binding')
             try:
                 for index in range(5100):
                     now=10000+index*.25
@@ -135,21 +159,15 @@ class TerminalRetention(unittest.TestCase):
                         status,_=store.submit(device,body,200);self.assertEqual(status,202,index)
                         self.assertEqual(len(store.claim(node)),1)
                         self.assertEqual(store.result(node,identity,{'state':'completed','result':{'screen':'synthetic'},'error':None}),200)
-                        self.assertTrue(journal.claim(identity,'terminal_snapshot'))
-                        journal.finish(identity,{'state':'completed','result':{},'error':None});journal.delivered(identity)
                 self.assertLess(store.db.execute('SELECT count(*) FROM requests').fetchone()[0],500)
-                self.assertLess(journal.db.execute('SELECT count(*) FROM requests').fetchone()[0],500)
-                with patch('time.time',return_value=now+121): store.maintain();store.maintain();journal.prune()
+                with patch('time.time',return_value=now+121): store.maintain();store.maintain()
                 self.assertEqual(store.db.execute('SELECT count(*) FROM requests').fetchone()[0],0)
-                self.assertEqual(journal.db.execute('SELECT count(*) FROM requests').fetchone()[0],0)
                 with patch('time.time',return_value=now+200):
                     store.heartbeat(node,{'sessions':[],'mobile_capabilities':{'protocol_version':1,'operations':['terminal_input']}})
                     body['request_id']=str(uuid.uuid4());body['operation']='terminal_input';body['payload'].update(request_id=body['request_id'],terminal_binding_id='a'*64,text='literal',enter=True)
                     self.assertEqual(store.submit(device,body,200)[0],202)
                     claim=store.claim(node)[0];self.assertEqual(claim['expires_at'],now+205)
                     store.result(node,body['request_id'],{'state':'uncertain','result':None,'error':'fixture'})
-                    journal.claim(body['request_id'],'terminal_input');journal.finish(body['request_id'],{'state':'uncertain','result':None,'error':'fixture'});journal.delivered(body['request_id'])
-                with patch('time.time',return_value=now+1000):store.maintain();store.maintain();journal.prune()
+                with patch('time.time',return_value=now+1000):store.maintain();store.maintain()
                 self.assertEqual(store.db.execute('SELECT operation FROM requests').fetchone()[0],'terminal_input')
-                self.assertFalse(journal.claim(body['request_id'],'terminal_input'))
-            finally: journal.close();store.db.close()
+            finally: store.db.close()

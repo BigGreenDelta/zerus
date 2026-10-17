@@ -205,6 +205,17 @@ value and must print `KillMode=process`. A drop-in that already sets it is enoug
 one that sorts later, such as `override.conf` from `systemctl --user edit`, takes
 precedence over this file.
 
+With the Linux package installed, `zerus-setup --mobile-connector protect` does
+the same: it writes that drop-in only when the unit runs a
+`zerus-mobile-connector` whose effective kill mode is not already `process`,
+reloads the user manager and checks the result, and removes its file again if a
+later drop-in wins. Its `migrate` and `rollback` actions switch an existing
+Python connector unit to the Rust connector and back with a
+`60-zerus-rust-connector.conf` drop-in; they belong to the owner-approved cutover
+in the connector design (`docs/superpowers/specs/2026-10-15-rust-mobile-connector-design.md`),
+refuse while a connector holds the journal, and, like `protect`, never enable,
+start, stop or restart the unit.
+
 Prefer `restart` to `stop`, whatever the kill mode. tmux builds with systemd
 support, such as Arch's, put every pane in a `tmux-spawn-*.scope` unit that is
 `PartOf=` the unit holding the tmux server, whichever client created the pane, so
@@ -225,6 +236,15 @@ service reports `KillMode=process`, so native agents and their hosts keep runnin
 otherwise it offers the [protection](#protect-running-agents) command instead.
 Copied commands require deliberate execution. Wait for active connector requests
 and receipts to drain before restarting it.
+
+While the connector file is missing, the status starts with *not configured* and
+no start or restart command is offered. The panel names the program the service
+runs: the legacy Python connector (a venv's console script, with the migration
+hint), the Rust connector (noting a `zerus-setup --mobile-connector migrate`
+drop-in) or another program, and says when the unit is not enabled at login. On
+macOS it reads the `com.hgdev.zerus-mobile-connector` LaunchAgent with
+`launchctl print`, within the same 3 s and 16 KiB bounds, and offers
+`launchctl kickstart -k` once a configuration exists.
 
 The managed official-relay migration preserves the original binding identity and
 receipt directory. A different relay or replacement computer credential requires

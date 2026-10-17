@@ -7,7 +7,7 @@ if(APPLE AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VER
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(hgs-tray VERSION 0.42.2 LANGUAGES CXX)
+project(hgs-tray VERSION 0.44.0 LANGUAGES CXX)
 set(CMAKE_AUTORCC ON)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -76,11 +76,14 @@ target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
 add_library(hgs-speech-recorder STATIC src/speech/SpeechRecorder.cpp)
 target_include_directories(hgs-speech-recorder PUBLIC src)
 target_link_libraries(hgs-speech-recorder PUBLIC Qt6::Multimedia)
+add_library(hgs-round-video STATIC src/speech/RoundVideo.cpp)
+target_include_directories(hgs-round-video PUBLIC src)
+target_link_libraries(hgs-round-video PUBLIC Qt6::Widgets Qt6::Multimedia hgs-speech-recorder)
 add_library(hgs-speech STATIC src/speech/SpeechClient.cpp
     src/speech/SpeechSettings.cpp src/speech/SpeechComposer.cpp)
 target_include_directories(hgs-speech PUBLIC src)
 # The voice composer extends MessageComposer (hgs-tray-ui below).
-target_link_libraries(hgs-speech PUBLIC Qt6::Widgets Qt6::Multimedia hgs-speech-recorder PRIVATE hgs-tray-ui)
+target_link_libraries(hgs-speech PUBLIC Qt6::Widgets Qt6::Multimedia hgs-speech-recorder hgs-round-video PRIVATE hgs-tray-ui)
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
                 OUTPUT_VARIABLE ZERUS_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 execute_process(COMMAND git rev-parse --show-toplevel WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -110,7 +113,7 @@ include(cmake/BuildVersion.cmake)
 add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/FleetState.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
-    src/LocalSessionHost.cpp src/DownloadCache.cpp
+    src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp
     # Main-thread watchdog (MainThreadWatchdog.h): every platform, prompted by macOS.
     src/MainThreadWatchdog.cpp)
 if(NOT WIN32)
@@ -135,11 +138,11 @@ if(LINUX)
 endif()
 
 add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp
-    src/MachineFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
+    src/MachineFilter.cpp src/ProjectFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
     src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
-    src/KeyboardSettings.cpp src/ShortcutsDialog.cpp
+    src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
     # only on macOS; makeTrayIcon() in TrayAgent.cpp explains why not on Linux.
     src/QuietTrayIcon.cpp)
@@ -148,9 +151,9 @@ target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-core Qt6::Widgets
 
 add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)
-target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown)
+target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown hgs-round-video)
 
-add_library(hgs-tray-views STATIC src/SessionsWindow.cpp src/SessionsWindowShortcuts.cpp src/SessionsWindowGoTo.cpp src/SessionSelection.cpp src/NativeUiView.cpp
+add_library(hgs-tray-views STATIC src/ArchiveDatePicker.cpp src/ArchiveDatePicker.h src/ArchiveBrowser.cpp src/ArchiveBrowser.h src/SessionsWindow.cpp src/SessionsWindowShortcuts.cpp src/SessionsWindowGoTo.cpp src/SessionSelection.cpp src/NativeUiView.cpp
     src/NativeBrowserPlugin.cpp src/NativeBrowser.h)
 target_link_libraries(hgs-tray-views PUBLIC hgs-tray-ui hgs-tray-activity
     PRIVATE hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file hgs-updates)

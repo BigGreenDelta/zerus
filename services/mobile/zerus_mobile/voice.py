@@ -1,5 +1,5 @@
 """Conversation-scoped durable voice messages; native hgs owns their lifetime."""
-from . import speech
+from . import speech, video
 
 OPERATIONS = frozenset({"voice_profiles", "voice_submit", "voice_status", "voice_cancel"})
 READS = frozenset({"voice_profiles", "voice_status"})
@@ -14,6 +14,8 @@ def validate(operation, payload, request_id):
     common = {"request_id", "expected_run_id", "expected_conversation_id"}
     extra = {"speech", "audio"} if operation == "voice_submit" else (
         {"message_id"} if operation in {"voice_status", "voice_cancel"} else set())
+    if operation == "voice_submit" and isinstance(payload, dict) and "video" in payload:
+        extra = extra | {"video"}
     if (operation not in OPERATIONS or not isinstance(payload, dict)
             or set(payload) != common | extra or payload.get("request_id") != request_id):
         raise ValueError("invalid voice message fields")
@@ -32,6 +34,10 @@ def validate(operation, payload, request_id):
         speech.validate("speech_submit", {"request_id": request_id,
                         "profile_id": route["profile_id"], "audio": payload["audio"],
                         **({"profile_revision": route["profile_revision"]} if "profile_revision" in route else {})}, request_id)
+        if "video" in payload:
+            encoded = payload["audio"]["data_base64"]
+            pcm_bytes = len(encoded) // 4 * 3 - (len(encoded) - len(encoded.rstrip("=")))
+            video.validate(payload["video"], pcm_bytes)
     elif "message_id" in extra:
         speech.identity(payload["message_id"])
 
@@ -43,6 +49,16 @@ def result_valid(operation, result, payload):
         return isinstance(result.get("computers"), list) and len(result["computers"]) <= 128
     message = result.get("message")
     expected = payload["request_id"] if operation == "voice_submit" else payload["message_id"]
+    if operation == "voice_submit" and "video" in payload:
+        media = message.get("video") if isinstance(message, dict) else None
+        original = payload["video"]
+        encoded = original["data_base64"]
+        size = len(encoded) // 4 * 3 - (len(encoded) - len(encoded.rstrip("=")))
+        if (not isinstance(media, dict) or media.get("request_id") != expected
+                or media.get("index") != 1 or media.get("mime") != "video/mp4"
+                or media.get("name") != "video.mp4" or media.get("bytes") != size
+                or any(media.get(field) != original[field] for field in ("duration_ms", "width", "height"))):
+            return False
     return (isinstance(message, dict) and message.get("id") == expected
             and message.get("run_id") == payload["expected_run_id"]
             and message.get("conversation_id") == payload["expected_conversation_id"]

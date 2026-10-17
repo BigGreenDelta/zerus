@@ -12,7 +12,9 @@ python3 services/mobile/vectors/capture.py --refresh-oracle  # also recompute th
 ```
 
 Run it in an environment where `zerus_mobile` and aiohttp import, for example
-the venv the relay CI job builds with `pip install ./services/mobile`.
+the venv the relay CI job builds with `pip install ./services/mobile`. In
+`services/mobile/relay`, `ZERUS_BLESS=1 cargo +1.85.0 test --locked --test
+vectors` rewrites only the `relay` column of `validation/*.jsonl`.
 
 ## Provenance and freeze rule
 
@@ -31,13 +33,19 @@ the venv the relay CI job builds with `pip install ./services/mobile`.
   divergences (plan section 3.4, rows a-k) are marked with a `divergence` field
   where a vector touches them.
 - The `oracle` column of `validation/*.jsonl` is frozen data. `--check` and
-  `test_vectors.py` copy it from the committed files and never import
-  `zerus_mobile.server`, so deleting the Python reference relay cannot break
-  them. A frozen decision is reused only for the exact submission it was
-  computed from; a new or changed case needs `--refresh-oracle`. While the
-  reference relay exists, a test compares the frozen column with it;
-  afterwards that test skips. P3 adds a `relay` column computed by the Rust
-  relay.
+  `test_vectors.py` copy it from the committed files. Only `--refresh-oracle`
+  recomputes it, through `services/mobile/tests/relay_oracle.py`: a verbatim
+  copy of the reference relay's `validate_request` that delegates only to
+  connector validators, so deleting `zerus_mobile.server` breaks neither.
+  `test_vectors.py` checks that the copy reproduces the frozen column, and,
+  while `server.py` exists, that it matches that source. A frozen decision is
+  reused only for the exact submission it was computed from; a new or changed
+  case needs `--refresh-oracle`.
+- The `relay` column is the Rust relay's decision (`protocol::request`). The
+  capture copies it like the oracle column, and a new or changed submission has
+  none until `ZERUS_BLESS=1` computes it.
+  `services/mobile/relay/tests/vectors.rs` recomputes the column and lists every
+  case where it differs from the oracle column.
 - When the Python connector is deleted, these files stay as frozen data and the
   capture script goes with it; record the last commit that produced them here.
 
@@ -56,8 +64,9 @@ strict JSON reader can load it. JSONL files hold one record per line.
 | `journal_expect.json` | Each fixture reopened by the Python `Journal`: schema (`sqlite_master` SQL, `table_info`, `index_list`, `index_xinfo`, persistent and connection pragmas), rows, pending uploads, claims, replays and conflicts. |
 | `journal_traces.jsonl` | Step-by-step `Journal` traces on fresh state directories, including file modes, symlinks, hard links, sidecars and a second instance. |
 | `receipts.json` | Fixed receipt texts exactly as stored and uploaded. |
-| `validation/*.jsonl` | Submissions with the connector's decision and receipt error, and the frozen relay-oracle decision, with the source test where a case comes from a `validate_request` call site. |
+| `validation/*.jsonl` | Submissions with the connector's decision and receipt error, the frozen relay-oracle decision and the Rust relay's decision, with the source test where a case comes from a `validate_request` call site. |
 | `projections.jsonl` | Pure projection functions, the heartbeat snapshot, and `Connector.execute` runs with their native argv, stdin payloads, options and stored receipts. |
+| `heartbeat-legacy.json` | Full current-Python heartbeat and native calls with the archive paging marker absent; retains archived rows and project memberships, the listing a CLI without archive pages gives. |
 | `sizes.jsonl` | Python's byte measures and the limits that flip on one byte. |
 | `operations.json` | Operation sets, SQL predicates, constants and the help-marker to capability map. |
 | `errors.json` | AST catalogue of literal error texts, log formats, and library messages that reach receipts. |
@@ -71,8 +80,7 @@ strict JSON reader can load it. JSONL files hold one record per line.
 - `android` marks a receipt error that `AttachmentViewCache.failure()` treats
   specially: `update_required` when it contains `unavailable` or
   `unsupported operation`, `truncated` when the phone shows only its first 200
-  characters. A peer `attachment_read` failure is currently the unflagged
-  `connector could not record native outcome` (divergence c changes it).
+  characters.
 - `stage: before_journal` means the connector rejects the request without a
   journal row or an upload ("Rejected relay request" in the log).
 - A row with `envelope: request` is polled as the only member of a relay
@@ -82,6 +90,8 @@ strict JSON reader can load it. JSONL files hold one record per line.
 - An `OSError` is recorded by its errno only; its text names local paths. A
   JSON parse error, and a `TypeError` in the relay-oracle column, are recorded
   by type only, because their wording is Python's own.
+- The `relay` column holds the decision and, for a rejection, the HTTP status
+  only: the Rust relay's validation errors carry no detail.
 - The order of `pending` rows is unspecified (the query has no `ORDER BY`), so
   the vectors list them sorted by request ID.
 

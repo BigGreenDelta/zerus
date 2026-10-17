@@ -82,7 +82,9 @@ SessionSearch::SessionSearch(const QString &hgs, QWidget *parent) : QWidget(pare
     connect(&m_client, &HgsClient::searchReady, this, [this](quint64 id, const QString &host, const QJsonObject &data) {
         if (m_pending.value(host).first != id) return;
         const auto query = m_pending.take(host).second;
-        if (query == m_query) { m_replies[host] = data; m_errors.remove(host); rebuild(); }
+        if (query == m_query) { m_replies[host] = data; m_errors.remove(host);
+            QJsonArray archives;for(const auto &value:data["results"].toArray()){const auto row=value.toObject()["session"].toObject();if(row["state"]=="archived"&&!row["archive_id"].toString().isEmpty())archives.append(row);}
+            emit archiveSessionsReady(host,archives);rebuild(); }
         else request();
     });
     connect(&m_client, &HgsClient::searchFailed, this, [this](quint64 id, const QString &host, const QString &error) {
@@ -157,6 +159,12 @@ void SessionSearch::setFolderScope(const QString &host,const QString &path,bool 
     if(m_folderHost==host&&m_folderPath==path&&m_folderCheckout==checkout)return;
     m_folderHost=host;m_folderPath=path;m_folderCheckout=checkout;if(active())rebuild();
 }
+void SessionSearch::setProjectScope(const QSet<QString> &sessionKeys, bool enabled)
+{
+    if (m_projectScope == enabled && m_projectKeys == sessionKeys) return;
+    m_projectScope = enabled; m_projectKeys = sessionKeys;
+    if (active()) rebuild();
+}
 void SessionSearch::setTheme(bool dark)
 {
     m_dark = dark; m_list->setProperty("hgsDark", dark); m_list->viewport()->update();
@@ -165,6 +173,8 @@ void SessionSearch::setTheme(bool dark)
 }
 bool SessionSearch::accepts(const QString &host, const SessionInfo &s, bool online) const
 {
+    const QString key = host + '\n' + s.name + (s.state == "archived" ? '\n' + s.archiveId : QString());
+    if (m_projectScope && !m_projectKeys.contains(key)) return false;
     if (!m_hosts.isEmpty() && !m_hosts.contains(host.isEmpty()?QStringLiteral("@local"):host)) return false;
     if(!m_folderPath.isEmpty()&&(host!=m_folderHost||!MachinePlatform::same(m_folderCheckout?s.gitRoot:s.canonicalCwd,m_folderPath,MachinePlatform::of(m_fleet.local().metrics,host.isEmpty()))))return false;
     if (m_filter == "archived") return s.state == "archived";
@@ -199,7 +209,13 @@ void SessionSearch::rebuild()
         if (!m_hosts.isEmpty() && !m_hosts.contains(host.isEmpty()?QStringLiteral("@local"):host)) return;
         visibleHosts << host;
         const auto reply = m_replies.value(host); truncated |= reply.value("truncated").toBool(); unavailable += reply.value("unavailable_sessions").toInt();
-        for (const auto &s : box.sessions) {
+        auto candidates=box.sessions;
+        for(const auto &value:reply["results"].toArray()){
+            const auto row=value.toObject()["session"].toObject();if(row["state"]!="archived"||row["archive_id"].toString().isEmpty())continue;
+            const auto parsed=HgsClient::parseSessions(QJsonArray{row});if(parsed.isEmpty())continue;
+            const auto &s=parsed.first();bool duplicate=false;for(const auto &old:candidates)if(old.archiveId==s.archiveId){duplicate=true;break;}if(!duplicate)candidates.append(s);
+        }
+        for (const auto &s : candidates) {
             const bool reachable = box.ok && (host.isEmpty() || QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs);
             if (!accepts(host, s, reachable) || !active()) continue;
             const QString machine = host.isEmpty() ? box.host : host;

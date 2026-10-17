@@ -232,6 +232,24 @@ UnifiedPush support was removed. A legacy `push_hosts` key is still accepted so
 existing private configurations load; it is ignored with a startup warning.
 Registrations left from UnifiedPush are removed on their next delivery attempt.
 
+iOS wakes use APNs token authentication. Add the private signing key Apple
+issues (`.p8`, mode 0600, outside the repository), its key ID and the owning
+team ID; `apns_topic` defaults to `app.zerus.mobile`:
+
+```json
+{
+  "apns_key": "/private/path/AuthKey.p8",
+  "apns_key_id": "ABCDEFGHIJ",
+  "apns_team_id": "TEAM123456"
+}
+```
+
+The relay then advertises `apns` (production) and `apns_sandbox` (development
+builds) in `push_providers`. Each wake is a generic alert, "New session
+activity.", with only `{event_id, kind}` beside it; the app decides any detailed
+card after authenticated reads. Device tokens that Apple reports as unregistered
+are removed.
+
 FCM uses the optional pinned `firebase-admin` package and its HTTP v1 transport.
 Keep the Google service account JSON outside the repository, readable only by the
 relay user (mode 0600), and restrict its Firebase permissions to sending messages.
@@ -315,6 +333,16 @@ attention identity, a new async question fingerprint, busy-to-idle completion or
 a new error emits a generic event. Async question fingerprints come from the
 connector's bounded round-robin inspection, so notifications can lag by a scan
 cycle when many sessions are running.
+
+Each `mobile_attention` item is `{question_id, question_hash}`. An optional
+Codex async question, one the agent keeps working without (`source`
+`codex_async` with `optional` exactly `true` in `hgs inspect`), also carries
+`optional: true`; blocking items never carry the key. Question text and other
+card fields never leave the computer. Both relays fingerprint whole items and
+treat optional items like any other: they emit the same `attention` event and
+alert, and the phone decides whether an optional item notifies. A connector
+without the marker omits the key, so the first heartbeat after upgrading emits
+one `attention` event for each session with a pending optional question.
 
 
 ## Native projects and attachments

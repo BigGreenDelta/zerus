@@ -1,5 +1,12 @@
 # Zerus Android
 
+Independent-session waits declared through `hgs wait` appear as **Waiting for
+acceptance** or **Waiting for result**, with producer, computer and elapsed time.
+They remain in Active while the exact waiter is live and online; work and
+attention retain priority, and intermediate reply badges wait for settlement.
+The additive snapshot metadata uses the shared desktop filter contract. See
+[Agent coordination](../../docs/agent-coordination.md).
+
 Settings → About shows the Android app version and each connected computer's
 reported `hgs` CLI version. Offline reports are marked `last known`; older CLIs
 without version metadata show `version unavailable`, and an unreachable peer
@@ -81,9 +88,16 @@ and long text scrolls within the field rather than covering its actions.
 
 The message composer clears after the text and immutable attachment snapshots
 are atomically saved in the private outgoing queue. It stays editable while the
-previous message is sending. Each bubble shows Sending, Sent, Not sent, or
+previous message is sending. The field keeps its **Message** placeholder; routine
+sending feedback belongs to the outgoing bubble rather than repeated composer
+notices. The send action explains a blocked submission on request; unknown
+delivery and saved-draft recovery remain visible. Each bubble shows Sending, Sent, Not sent, or
 Delivery unknown; unknown delivery blocks another send to the same conversation
-until an explicit receipt check or review. Sent means the computer accepted the
+until its exact receipt or native delivery row confirms it, or an explicit review.
+Opening a verified conversation checks an uncertain message's saved receipt once;
+an unavailable receipt leaves it saved and never resends it. The composer identifies
+that original message with **Check delivery** and **Review**, leaving the next
+message's input hint clear. Sent means the computer accepted the
 input, not that the model read or answered it. New text is never cleared by an
 older receipt. Native user delivery rows reconcile bubbles by exact request UUID.
 Without such a row, reconciliation requires an unambiguous exact text/time match
@@ -94,23 +108,39 @@ card. Expand it to read and select the full text. Send now remains a manual
 action, available only when the current agent and queued message allow it.
 
 Attach files through the system document picker. The app copies and encrypts
-selected bytes privately rather than sending document URIs or trusting mutable
-files. The supported gateway limits are eight files, 10 MiB per file, 20 MiB total,
+selected bytes privately before adding them to the original draft, rather than
+sending document URIs or trusting mutable files. A restored picker
+callback waits for private drafts to load and stays bound to its exact launch
+identity. A fresh app launch clears an interrupted selection without discarding
+the draft or its existing files. Pending selection can also be canceled from
+Updates, Saved drafts, or any open conversation; a late canceled result cannot
+attach to a newer selection. Active imports continue to block installation.
+The supported gateway limits are eight files, 10 MiB per file, 20 MiB total,
 and 64 KiB of message text. The picker remains bound to its original composition
-if navigation or typing changes; interrupted selection can be canceled in Saved
-drafts. Files remain recoverable with unsent and uncertain messages.
+if navigation or typing changes. Files remain recoverable with unsent and
+uncertain messages.
 
-An empty conversation immediately shows “Loading conversation…” while its
-messages load. Background loading status and spinners appear only after five
-seconds; manual refresh shows progress immediately and reuses any matching
-in-flight read. A thin progress bar accompanies the existing circular refresh
-indicator in catalogs and conversations. Navigation cancels
+An unopened conversation immediately shows “Loading conversation…” while its
+messages load. A resolved empty conversation keeps “No messages yet.” during
+background reads instead of returning to the initial placeholder. Opening cached
+messages immediately animates the existing **Refresh** action until the initial
+inspection and history reads settle. Cached messages remain readable, and the
+indicator never inserts a row or moves the transcript. Later background reads
+show progress only after five seconds; manual refresh shows it immediately and
+reuses any matching in-flight read. Catalogs retain their thin progress bar.
+Pulling a conversation up past its newest
+message, as far as a list's downward pull, is the toolbar's explicit refresh; its
+indicator rises from the bottom. Short pulls and flings do not refresh. Navigation cancels
 ownership of earlier reads so stale results cannot replace a new conversation.
 Matching history reads continue in a bounded shared queue and are reused on
 reopening. Exact-target encrypted history is cached for seven days, up to 20
 conversations and 20 MiB. Cached messages appear immediately when already
 prepared in memory; cached history permits no action until a fresh inspection
 verifies the conversation. History cache failures do not prevent live reads.
+Catalog parsing, local read-state decoration and session-list filtering, counters
+and grouping run on background workers. The list retains its last projection
+and keyed scroll position while a replacement is prepared; canceled projections
+cannot replace newer search or filter results.
 
 Agent messages and ordinary questions render Markdown with headings, emphasis,
 lists, quotes, links, tables, strikethrough, static tasks and code blocks. Code and
@@ -168,7 +198,8 @@ sessions are paused or stopped; Archive contains immutable archived histories.
 
 The computer filter supports several machines across workspaces. Counts and
 cards use the same computer, project, and search scope. Results form collapsible
-project groups; empty groups are hidden in Sessions. Filter, query, collapsed
+project groups in the swarm's shared project order, the order desktops show;
+empty groups are hidden in Sessions. Filter, query, collapsed
 groups, and list position survive opening a conversation and background polling.
 Provider badges match the desktop identity motifs.
 
@@ -201,7 +232,15 @@ in stable ID order. Finished turns stay hidden, as with the desktop default,
 unless the child has an unsent draft on this phone. Profile groups are counted
 but not listed. Tapping a child opens its session and then the child's activity
 once that conversation is verified; Back returns to the session. Open subagent
-lists persist with the other Sessions state.
+lists persist with the other Sessions state. A running session with pending
+optional Codex questions, which the agent keeps working without, shows an
+amber question-mark chip with their count (`99+` above 99) right after its
+status badge, as on the desktop; its spoken description says how many are
+waiting. It shares the amber of attention but changes no status or count.
+The listing's `optional_questions` count wins. Without it (an older computer, or
+while hgs cannot read its question index), the chip counts the connector's
+optional attention items once per question. It is hidden for saved, archived,
+exited and offline sessions; open the session to answer or skip the questions.
 
 Long-pressing a session card, or using its accessibility long-press action,
 opens its actions in the desktop context menu order: Open terminal, Mark as read
@@ -239,6 +278,9 @@ The conversation keeps a bounded hot window rather than imposing a total chat
 length limit. Nodes advertising canonical history support can fetch older and
 newer pages and restore an opaque saved reading anchor. Native page order and
 exact aliases distinguish repeated messages, even with identical timestamps.
+When a reply read from recent inspection later gains a canonical history ID,
+unambiguous native-provided aliases carry its existing read position forward.
+A later unseen reply remains unread; equal text never establishes this identity.
 Initial indexing keeps the recent inspected conversation visible; incomplete
 sources and shortened message bodies are disclosed. Search covers the loaded
 window. A confirmed own message stays visible when it falls out of the native
@@ -314,16 +356,29 @@ worktree, created only after Create session; None and existing or manually
 created worktrees remain available. A launch is confirmed only by its own native
 request identity.
 
-## Voice input
+## Voice and video messages
 
 Settings includes **Voice messages**, with an independently selected transcription
-computer and host-configured profile. Open a conversation to discover the computers
-reachable from its owner. An unavailable saved selection never silently switches
-providers. Both the relay and conversation computer must advertise `voice_profiles`,
+computer and host-configured profile. Global settings lists verified online computers
+and reads the selected computer's `speech_profiles` directly, without opening a
+conversation. **Refresh voice profiles** reloads those profiles and reports progress
+or a read failure. Computer choices are scoped to their workspace; their searchable
+picker shows at most 100 matches. Choosing a default affects new recordings only.
+Existing recordings retain their computer, profile and reviewed revision.
+
+Inside a conversation, discovery still comes from its owner and lists the computers
+it can reach. An unavailable saved selection never silently switches providers.
+Both the relay and conversation computer must advertise `voice_profiles`,
 `voice_submit`, `voice_status` and `voice_cancel`. When supported, `speech_stats`
 displays the selected processing computer's aggregate local counts. Audio and
 transcription are excluded from Firebase events. See [mobile architecture](../../docs/mobile-architecture.md#voice-input)
 and [analytics](../../docs/analytics.md).
+
+`DefaultVoiceProvidersSmokeInstrumentation` exercises the real settings controls
+without a selected conversation: initial discovery, Refresh, computer/profile
+selection, explicit revision changes, failed reads and retry, and stale response
+rejection. A retained recording keeps its original route throughout. It uses only
+computer-scoped reads intercepted at a reserved synthetic endpoint.
 
 **Manage speech providers** works without an open conversation. Choose the processing
 computer, then add or edit **Local GigaAM** or an **OpenAI-compatible server**. Local
@@ -350,8 +405,11 @@ provider revision: if it changes, explicitly select the provider again before
 sending. See [provider configuration](../../docs/speech-providers.md).
 
 With an empty message and no attachments, the composer shows a microphone in the
-Send position. Hold it to record, release to keep a preview, or slide left to
-cancel the recording. Typing text or adding an attachment restores the Send
+Send position. Tap to switch microphone/camera, hold to record and release to send. Slide left
+to cancel or up to lock. **Preview before sending** in Voice settings keeps both
+audio and video after release for playback and a separate Send. It defaults off
+on this device; an active capture keeps the preference it started with.
+Stop a locked recording to retain a preview. Typing text or adding an attachment restores the Send
 button. While holding, a compact recording row replaces the empty editor: a red
 indicator, elapsed time with tenths of a second, and **Slide to cancel** with a
 left chevron. When the full instruction cannot fit at the current font size, the
@@ -367,8 +425,8 @@ prompts, rejected starts and late gesture events do not produce extra pulses.
 Android's vibration settings are respected. Haptic availability never blocks
 recording or saving its preview.
 Local capture starts without waiting for provider discovery; discovery refreshes
-in the background. Capture lasts at most two minutes. Releasing the microphone,
-stopping or leaving the conversation never sends a message. The preview is an
+in the background. Audio capture lasts at most two minutes. Releasing an owned hold requests sending;
+stopping a locked recording or leaving the conversation keeps a preview without sending. The audio preview is an
 encrypted durable WAV file on this phone. A compact **Pending** card contains
 playback and seeking, with Delete and Send icon buttons on the right. All three
 buttons keep 48 dp touch targets and accessible **Play**, **Discard** and **Send
@@ -390,6 +448,13 @@ The composer preview scrolls within a bounded area while the software keyboard i
 open, keeping the typed draft visible and editable after capture stops.
 With a narrow screen, large system text and an expanded editor, you may need to
 close the keyboard to reach the preview controls.
+
+Video mode records up to 60 seconds and 10 MiB with CameraX, with an owned circular
+preview and a camera switch. The phone extracts mono 16 kHz speech audio on a
+worker; one message UUID retains the original MP4 and its derived WAV. The agent
+receives the recognized text. Video needs the additive `voice_video` capability
+on the relay and conversation computer. Older clients keep audio playback.
+
 
 While recording, the typed draft and selection remain saved beneath the recording
 row, and ordinary message sending and attachment changes are disabled. With a hardware keyboard, **Space** or **Esc** stops capture
@@ -478,7 +543,8 @@ adb -s emulator-5580 shell pm clear app.zerus.mobile
 adb -s emulator-5580 shell am instrument -w app.zerus.mobile.test/app.zerus.mobile.VoiceGestureSmokeInstrumentation
 ```
 
-It checks hold/release preview, left-swipe cancellation, interrupted pointers,
+It checks short-tap mode switching, retained preview when provider discovery is
+unavailable, left-swipe cancellation, interrupted pointers,
 background/navigation stop, permission results after release, preserved drafts
 and zero voice uploads before a separate Send. The compact Pending preview checks
 cover action order and touch targets, local playback and seeking, discard
@@ -496,6 +562,21 @@ steps. It opens synthetic history with a pending question, measures the inline
 card from a screenshot and checks the card limit, the whole answer field, the
 footer gap, scrolling to the last option and a compact short question. It sends
 no answers.
+
+Multi-part questions show **Question 1/2** and an explicit **Next** action after
+the current answer is valid. Only the final **Send all** submits the complete
+request. The Other field's keyboard action follows the same steps. Earlier
+selections and custom text remain editable while navigating; an incomplete earlier
+answer is offered for review before submission. Existing exact-request, approval
+and cold-context consent checks still apply to the final send.
+
+`QuestionDeliverySmokeInstrumentation` exercises physical Next/Enter/Send all controls,
+retained per-question answers, one complete synthetic answer, confirmed and missing
+receipt recovery, and native-to-canonical read progress with a later unseen reply.
+Use fresh private emulator data and repeat at a narrow width with font scale 1.8.
+The narrow run exercises recovery inline and opens the full-height question editor
+through its physical **Expand** action before answering.
+Its reserved endpoint is intercepted in-process; no agent receives a message.
 
 Private previews may override only their build identity using
 `-PzerusVersionName=0.1.31-voice.245 -PzerusVersionCode=10245`. Choose a code greater
@@ -583,9 +664,23 @@ and [launcher asset documentation](https://developer.android.com/studio/write/cr
 ## Notifications
 
 In Machines, Session alerts has independent settings for input and approvals,
-errors, and turn completion. Input and errors are on by default; completed turns
-are off. The master switch disables all session alerts. Disabling a type also
-removes its existing cards.
+optional questions, errors, and turn completion. Input and errors are on by
+default; optional questions and completed turns are off. The master switch
+disables all session alerts. Disabling a type also removes its existing cards.
+
+A session whose only pending items are optional Codex questions, which the agent
+keeps working without, notifies as *Optional question on* its computer, and only
+with that switch on. Each question ID announces at most once per session slot:
+answering or skipping one keeps the card, a dismissed card stays dismissed, and
+a resume, connector restart or emptied and refilled list announces nothing
+again. Questions pending while the switch is off, or while the session needs
+input or has an error, are not announced later. Without optional questions the
+card is withdrawn. A blocking request or error in the same session takes
+precedence and its card does not change for new optional questions. When the
+switch is off, a finished turn can still notify. Optional cards never join the
+summary of sessions that need attention, and a new need may replace one when the
+shade is full. Optional-only sessions still count under Needs attention on
+Android, unlike the desktop; aligning them is an open owner decision.
 
 There is one updated card per workspace, computer and live session slot. The
 normal shade shows the authenticated session title and the computer's private
@@ -601,7 +696,7 @@ request can remain until the next refresh when the relay emits no new event.
 
 When the relay advertises `presence_alerts`, a new card needs a relay `alert`
 event for the same workspace, computer and session: an attention or error alert
-for input, approvals or errors (the relay and the phone rank a session that
+for input, approvals, optional questions or errors (the relay and the phone rank a session that
 both asks and fails differently), or completed for an opted-in finished turn.
 The relay sends it only while the item is unread and unresolved, and only when
 the owner is away from every Zerus desktop or chose immediate delivery. A card
@@ -771,3 +866,15 @@ outcomes survive later manual project moves, and the shared catalog keeps its
 existing schema for older desktop binaries. The sidecar is bounded to 10,000
 permanent receipts; at capacity new assignments fail before changing metadata.
 Receipts never enter swarm exports or peer synchronization.
+
+### Synthetic video-message qualification
+
+Use a fresh, isolated Android emulator with emulated front/back cameras (never a
+personal device or webcam). Build with
+`-PzerusInstrumentationRunner=app.zerus.mobile.VideoMessageSmokeInstrumentation`,
+install both debug APKs, then run
+`adb -s <isolated-emulator> shell am instrument -w app.zerus.mobile.test/app.zerus.mobile.VideoMessageSmokeInstrumentation`.
+The runner checks short tap, real CameraX MP4 capture, upward lock, retained
+private media, audio extraction, exact one-time upload and left cancellation
+against an in-process gateway fixture. Its screenshot is saved to the app's
+external files as `video-message-preview.png`.

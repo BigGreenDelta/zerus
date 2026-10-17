@@ -40,12 +40,12 @@ class DesktopSessionPaletteTest {
             DesktopBadgeColors(0xFF2B343E, 0xFFB6C2D0), DesktopBadgeColors(0xFF194D36, 0xFF97F0BA),
             DesktopBadgeColors(0xFFFFDA76, 0xFF392900), DesktopBadgeColors(0xFFFFABB6, 0xFF46202A),
             DesktopBadgeColors(0xFF443654, 0xFFDEC3FF), DesktopBadgeColors(0xFFFFDA76, 0xFF392900),
-            DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0), DesktopBadgeColors(0xFF273544, 0xFFAAC0DF))
+            DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0), DesktopBadgeColors(0xFF273544, 0xFFAAC0DF), DesktopBadgeColors(0xFF443A25, 0xFFEDD096))
         val light = listOf(
             DesktopBadgeColors(0xFFE7EDF2, 0xFF566575), DesktopBadgeColors(0xFFCCEFDC, 0xFF145B37),
             DesktopBadgeColors(0xFFF4CE65, 0xFF392900), DesktopBadgeColors(0xFFB73750, 0xFFFFFFFF),
             DesktopBadgeColors(0xFFE8DDF5, 0xFF634187), DesktopBadgeColors(0xFFF4CE65, 0xFF392900),
-            DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B), DesktopBadgeColors(0xFFE9F0F8, 0xFF466B99))
+            DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B), DesktopBadgeColors(0xFFE9F0F8, 0xFF466B99), DesktopBadgeColors(0xFFF5E8C7, 0xFF795913))
         DesktopBadgeKind.entries.forEachIndexed { index, kind ->
             assertEquals(dark[index], DesktopSessionPalette.colors(kind, true))
             assertEquals(light[index], DesktopSessionPalette.colors(kind, false))

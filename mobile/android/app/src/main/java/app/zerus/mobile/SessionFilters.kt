@@ -38,9 +38,33 @@ object SessionFilters {
     fun working(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
         (session.raw.string("activity") == "busy" || backgroundIdle(session)) && !needsAction(session)
     private fun positiveCount(value: Any?) = (value as? Number)?.toDouble()?.let { it.isFinite() && it > 0 && it % 1.0 == 0.0 } == true
+    fun hasCoordinationWait(session: Session): Boolean {
+        val wait = session.raw.optJSONObject("coordination_wait") ?: return false
+        return wait.optInt("schema") == 1 && wait.string("status") == "ok" && session.target.run.isNotBlank() &&
+            session.target.conversation.isNotBlank() && wait.string("run_id") == session.target.run &&
+            wait.string("conversation_id") == session.target.conversation && positiveCount(wait.opt("count")) && wait.optDouble("count") <= 1024
+    }
+    fun waitingIdle(session: Session) = session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" &&
+        state(session) == "running" && session.raw.string("process_state") != "exited" && !backgroundIdle(session) &&
+        !positiveCount(session.raw.opt("subagent_active_count") as? Number ?: session.raw.opt("subagent_count")) && hasCoordinationWait(session)
+    fun waitingLabel(session: Session, includeProducer: Boolean = true, compact: Boolean = false): String {
+        val wait = session.raw.optJSONObject("coordination_wait") ?: return "Waiting for agent"
+        val item = wait.optJSONArray("items")?.optJSONObject(0)
+        val producer = item?.optJSONObject("producer")
+        val label = if(compact) "Waiting" else if(item?.string("state") == "awaiting_result") "Waiting for result" else "Waiting for acceptance"
+        val name = producer?.string("name").orEmpty().split('/').drop(2).joinToString("/")
+        val host = producer?.string("host").orEmpty()
+        val elapsed = item?.optDouble("created_at", 0.0)?.takeIf { it.isFinite() && it > 0 }?.let {
+            val seconds = ((System.currentTimeMillis()/1000.0)-it).toLong().coerceAtLeast(0)
+            if(seconds < 60) "${seconds}s" else if(seconds < 3600) "${seconds/60}m" else "${seconds/3600}h ${seconds/60%60}m"
+        }.orEmpty()
+        return label + (if(includeProducer && name.isNotBlank()) " from $name" else "") + (if(includeProducer && host.isNotBlank()) " on $host" else "") +
+            (if(wait.optInt("count") > 1) " (+${wait.optInt("count")-1})" else "") + (if(elapsed.isNotBlank()) " ($elapsed)" else "")
+    }
     fun replyInProgress(session: Session, online: Boolean) = currentActivity(session, online) &&
         (session.raw.string("activity") == "busy" || positiveCount(session.raw.optJSONObject("process_work")?.opt("count")) ||
-            positiveCount(session.raw.opt("subagent_active_count") as? Number ?: session.raw.opt("subagent_count")))
+            positiveCount(session.raw.opt("subagent_active_count") as? Number ?: session.raw.opt("subagent_count")) ||
+            session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" && hasCoordinationWait(session))
     /** Keep the read identity while postponing reply badges and reply-only attention. */
     fun visibleUnreadReply(session: Session, online: Boolean) = !archived(session) && !replyInProgress(session, online) &&
         (session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply"))
@@ -54,7 +78,7 @@ object SessionFilters {
         return session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" && (jobs?.toInt() ?: 0) > 0
     }
     fun scheduled(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
-        !needsAction(session) && !backgroundIdle(session) && scheduledIdle(session)
+        !needsAction(session) && !backgroundIdle(session) && !waitingIdle(session) && scheduledIdle(session)
     /** The next run as a time of day, "due" once it has passed, or empty if unknown. */
     fun nextScheduledRun(session: Session, now: Long = System.currentTimeMillis(), locale: Locale = Locale.getDefault(),
         zone: TimeZone = TimeZone.getDefault()): String {
@@ -81,12 +105,18 @@ object SessionFilters {
     fun draftedSessions(sessions: List<Session>, drafts: List<Draft>): Set<String> {
         val unsent = drafts.filter { it.questionId.isBlank() && it.detachedId.isBlank() && it.target.archiveId.isBlank() &&
             it.status !in listOf("submitting", "submitted", "recorded") && (it.text.isNotBlank() || it.attachments.isNotEmpty()) }
-        return sessions.filterNot(::archived).filter { session -> unsent.any { draft ->
-            if (draft.target.agentId.isBlank()) ContextPolicies.sameSession(draft.target, session.target)
-            else session.raw.string("subagent_source") != "hook_profiles" &&
-                draft.target.copy(conversation = draft.target.parentConversation, agentId = "", parentConversation = "") == session.target &&
-                session.raw.optJSONObject("subagents")?.optJSONObject(draft.target.agentId)?.optBoolean("group") == false
-        } }.mapTo(mutableSetOf()) { it.target.key }
+        if (unsent.isEmpty()) return emptySet()
+        val parents = unsent.filter { it.target.agentId.isBlank() }
+            .mapTo(hashSetOf()) { Triple(it.target.connectionId, it.target.computerId, it.target.session) }
+        val children = unsent.filter { it.target.agentId.isNotBlank() }.groupBy {
+            it.target.copy(conversation = it.target.parentConversation, agentId = "", parentConversation = "")
+        }
+        return sessions.filterNot(::archived).filter { session ->
+            session.target.agentId.isBlank() && Triple(session.target.connectionId, session.target.computerId, session.target.session) in parents ||
+                session.raw.string("subagent_source") != "hook_profiles" && children[session.target].orEmpty().any { draft ->
+                    session.raw.optJSONObject("subagents")?.optJSONObject(draft.target.agentId)?.optBoolean("group") == false
+                }
+        }.mapTo(mutableSetOf()) { it.target.key }
     }
     fun active(session: Session, online: Boolean, hasDraft: Boolean = false) =
         !archived(session) && (hasDraft || needsAttention(session, online) || working(session, online) || scheduled(session, online) ||
@@ -132,6 +162,7 @@ object SessionFilters {
             raw.string("phase") == "tool" -> "Using a tool"
             raw.string("activity") == "busy" -> "Working"
             backgroundIdle(session) -> "Background"
+            waitingIdle(session) -> waitingLabel(session)
             scheduledIdle(session) -> nextScheduledRun(session).let { if (it.isEmpty()) "Scheduled" else "Scheduled · $it" }
             raw.string("activity") == "idle" -> "Ready"
             raw.string("activity") in listOf("ended", "unknown") -> "Status unknown"
@@ -153,15 +184,23 @@ object SessionFilters {
         return roster?.keys()?.asSequence()?.flatMap { id -> sequenceOf(id, roster.optJSONObject(id)?.string("conversation_id").orEmpty()) }?.toList().orEmpty() +
             previews.flatMap { listOf(it.string("id", "agent_id"), it.string("conversation_id")) }
     }
-    fun counts(sessions: List<Session>, machines: List<Machine>, drafts: Set<String> = emptySet()): Map<SessionFilter, Int> = SessionFilter.entries.associateWith { filter ->
-        sessions.count { matches(it, filter, online(it, machines), it.target.key in drafts) }
+    fun counts(sessions: List<Session>, machines: List<Machine>, drafts: Set<String> = emptySet()): Map<SessionFilter, Int> {
+        val online = machines.filter { it.online }.mapTo(hashSetOf()) { MachineKey(it.connectionId, it.id) }
+        val counts = SessionFilter.entries.associateWith { 0 }.toMutableMap()
+        sessions.forEach { row ->
+            val isOnline = machineKey(row.target) in online
+            val hasDraft = row.target.key in drafts
+            SessionFilter.entries.forEach { filter -> if (matches(row, filter, isOnline, hasDraft)) counts[filter] = counts.getValue(filter) + 1 }
+        }
+        return counts
     }
     /** Chooser counts precede machine selection and text search, retaining project/state scope. */
     fun machineCounts(sessions: List<Session>, machines: List<Machine>, filter: SessionFilter,
         drafts: Set<String> = emptySet(), project: ProjectKey? = null): Map<MachineKey, Int> {
         val result = machines.associate { MachineKey(it.connectionId, it.id) to 0 }.toMutableMap()
+        val online = machines.filter { it.online }.mapTo(hashSetOf()) { MachineKey(it.connectionId, it.id) }
         for(session in sessions) if((project == null || session.projectKey == project) &&
-            matches(session, filter, online(session, machines), session.target.key in drafts)) {
+            matches(session, filter, machineKey(session.target) in online, session.target.key in drafts)) {
             val key = machineKey(session.target)
             result[key] = result.getOrDefault(key, 0) + 1
         }
@@ -169,9 +208,10 @@ object SessionFilters {
     }
     fun grouped(sessions: List<Session>, projects: List<ProjectSummary>): List<SessionGroup> {
         val grouped = sessions.groupBy { it.projectKey ?: ProjectKey(it.target.connectionId, "unassigned:${it.target.computerId}", "unassigned") }
-        val order = projects.map { it.key } + grouped.keys.filter { key -> projects.none { it.key == key } }
+        val catalog = projects.associateBy { it.key }
+        val order = projects.map { it.key } + grouped.keys.filter { key -> key !in catalog }
         return order.mapNotNull { key -> grouped[key]?.takeIf { it.isNotEmpty() }?.let { members ->
-            val project = projects.find { it.key == key }
+            val project = catalog[key]
             SessionGroup(key, project?.name ?: members.first().project.ifBlank { "Unassigned sessions" }, project?.color.orEmpty(),
                 if (members.all(::archived)) members.sortedByDescending { it.raw.optDouble("archived_at", 0.0) } else members)
         } }

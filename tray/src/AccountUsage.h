@@ -143,6 +143,20 @@ inline QString launchSummary(const QJsonObject &data) {
 inline double highest(const QJsonObject &data) {
     double used=-1;for(const auto &value:data.value("windows").toArray()){const auto w=value.toObject();if(current(w)&&w.value("used_percent").isDouble())used=qMax(used,w.value("used_percent").toDouble());}return used;
 }
+// A fresh account snapshot can explain an early reset without acknowledging a
+// failed native turn or assuming that an open Claude dialog has disappeared.
+inline QString limitRecoveryNotice(const QJsonObject &data,double failureAt,qint64 now=QDateTime::currentSecsSinceEpoch()) {
+    const double checked=data.value("checked_at").toDouble();
+    if(failureAt<=0 || data.value("status")!="ok" || data.value("offline").toBool() || data.value("refresh_error").toBool()
+        || checked<=failureAt || checked>now+5 || now-checked>300) return {};
+    bool session=false,week=false;
+    for(const auto &value:data.value("windows").toArray()) {
+        const auto window=value.toObject();const auto used=window.value("used_percent");const auto at=reset(window.value("resets_at"));
+        if(!used.isDouble() || !std::isfinite(used.toDouble()) || used.toDouble()<0 || used.toDouble()>=100 || !at.isValid() || at.toSecsSinceEpoch()<=now)return {};
+        session|=window.value("window_minutes").toInt()==300;week|=window.value("window_minutes").toInt()==10080;
+    }
+    return session&&week?QObject::tr("Latest account usage is below the limit. Answer any open usage-limit choice in Activity or Terminal, then send a message to continue."):QString();
+}
 inline QString exhausted(const QJsonObject &data) {
     QStringList lines;
     for(const auto &value:data.value("windows").toArray()){

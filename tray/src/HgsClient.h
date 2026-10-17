@@ -20,6 +20,7 @@ struct SessionInfo {
     QJsonObject providerError;
     QJsonObject gitStatus;
     QJsonObject goal;
+    QJsonObject coordinationWait;
     QString name;      // полное имя: cmd/project[/tag]
     QString cmd;
     QString project;   // может быть null -> isNull()
@@ -65,10 +66,27 @@ struct SessionInfo {
     QString processState, conversationState, runtimeState;
     double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0;
     int subagentCount = 0;
+    // Pending optional Codex questions ("optional_questions"): the exact count,
+    // the IDs the host lists (the newest ones) and the newest question's time.
+    // -1 means unknown: null while the host's question index is incomplete, or
+    // a malformed value. optionalQuestionsReported is false for hosts whose hgs
+    // predates the field; they never show a count. These never mean attention.
+    int optionalQuestions = -1;
+    QStringList optionalQuestionIds;
+    double optionalQuestionsLatestAt = 0;
+    bool optionalQuestionsReported = false;
     bool replyInProgress() const {
         return state == QLatin1String("running") && processState != QLatin1String("exited")
             && activity != QLatin1String("unknown") && !(conversationState == QLatin1String("ended") && activity != QLatin1String("idle"))
-            && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0);
+            && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0
+                || (activity == QLatin1String("idle") && phase == QLatin1String("idle") && hasCoordinationWait()));
+    }
+    bool hasCoordinationWait() const {
+        return coordinationWait.value("schema").toInt() == 1 && coordinationWait.value("status") == "ok"
+            && !runId.isEmpty() && !conversationId.isEmpty() && coordinationWait.value("run_id") == runId
+            && coordinationWait.value("conversation_id") == conversationId && coordinationWait.value("count").toInt() > 0
+            && coordinationWait.value("count").toInt() <= 1024
+            && coordinationWait.value("count").toDouble() == coordinationWait.value("count").toInt();
     }
     // Intermediate replies remain unread; only their notification presentation waits.
     bool visibleUnreadReply(bool online = true) const {
@@ -88,6 +106,7 @@ struct SessionInfo {
 };
 
 struct BoxState {
+    bool archivePaging = false;
     QJsonObject metrics;
     // A peer's box is keyed by the alias it was polled under (a name in this
     // computer's "peers"), whatever that machine calls itself.
@@ -204,6 +223,7 @@ public:
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});
     quint64 downloadFile(const QString &host, const QString &path, const QString &destination);
     quint64 downloadFileToCache(const QString &host, const QString &path);
+    quint64 requestApprovalLog(const QString &operation, const QJsonObject &data = {});
     static constexpr qsizetype MaximumMessageBytes = 64 * 1024;
     static constexpr qsizetype MaximumAttachmentBytes = 10 * 1024 * 1024;
     static constexpr qsizetype MaximumAttachmentsBytes = 20 * 1024 * 1024;
@@ -222,12 +242,15 @@ public:
     quint64 requestInterrupt(const QString &host, const QString &name, const QString &run,
                              const QString &conversation, double turnStarted);
     quint64 requestAnswerQuestion(const QString &host, const QString &name,
-                                  const QJsonObject &question, const QJsonArray &answers);
+                                  const QJsonObject &question, const QJsonArray &answers, const QString &durableRequestId = {});
     // `hgs [@host] read <session> --json`: the host applies each field only while
     // it is current. A JSON answer, including not_found, is delivered.
     quint64 requestRead(const QString &host, const QString &name, const QJsonObject &payload);
 
     // Чистые функции разбора: тестируются без запуска процессов.
+    void cancelArchivePages();
+    quint64 requestArchivePage(const QString &host, const QJsonObject &query);
+    static QList<SessionInfo> parseSessions(const QJsonArray &rows);
     static BoxState parseBox(const QByteArray &json, QString *error);
     static QList<BoxState> parseFleet(const QByteArray &json, QString *error);
     static QList<ProjectInfo> parseProjects(const QByteArray &json, QString *error);
@@ -253,6 +276,7 @@ public:
     void projectRemove(const QString &name, const QString &host = {});
 
 signals:
+    void archivePageReady(quint64 request, const QString &host, const QJsonObject &data, const QString &error);
     void versionReady(const QString &version); // Empty when unavailable or unrecognized.
     void sessionReferenceReady(const QString &uri);
     void sessionReferenceFailed(const QString &reason);
@@ -262,6 +286,7 @@ signals:
     void fileDownloaded(quint64 request, const QString &destination);
     void fileDownloadFailed(quint64 request, const QString &error);
     void downloadCacheWarning(const QString &error);
+    void approvalLogFinished(quint64 request, const QString &operation, const QJsonObject &result, const QString &error);
     void attachmentFailed(quint64 request, const QString &detail);
     void nativeUiReady(quint64 request, const QJsonObject &connection);
     void nativeUiFailed(quint64 request, const QString &error);
@@ -325,6 +350,8 @@ signals:
     void writeDone(const QString &op, bool ok, const QString &detail);
 
 private:
+    quint64 m_archiveRequest = 0;
+    QHash<QString,QObject *> m_archiveJobs;
     void transferFile(quint64 id, const QString &host, const QString &path, const QString &destination,
                       const std::shared_ptr<DownloadCache::Pending> &pending = {});
     void scheduleDownloadCacheTrim();
@@ -366,6 +393,8 @@ private:
     quint64 m_searchRequest = 0;
     quint64 m_attachmentRequest = 0;
     quint64 m_fileDownloadRequest = 0;
+    quint64 m_approvalLogRequest = 0;
+    bool m_approvalLogSupported = false;
     quint64 m_effortRequest = 0;
     quint64 m_settingsRequest = 0;
     quint64 m_recoveryRequest = 0;

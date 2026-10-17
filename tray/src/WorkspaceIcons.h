@@ -41,6 +41,13 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "sessions" || name == "all") {
             p.drawRoundedRect(QRectF(4, 4, 16, 7), 2, 2); p.drawRoundedRect(QRectF(4, 14, 16, 6), 2, 2);
             p.drawPoint(QPointF(8, 7.5)); p.drawLine(QPointF(12, 7.5), QPointF(16, 7.5));
+        } else if (name == "calendar") {
+            p.drawRoundedRect(QRectF(4, 5, 16, 16), 2, 2); p.drawLine(4, 10, 20, 10);
+            p.drawLine(8, 3, 8, 7); p.drawLine(16, 3, 16, 7);
+            p.drawPoint(QPointF(8, 14)); p.drawPoint(QPointF(12, 14)); p.drawPoint(QPointF(16, 14));
+        } else if (name == "chevron-left" || name == "chevron-right") {
+            const bool right = name == "chevron-right";
+            QPainterPath path; path.moveTo(right ? 9 : 15, 6); path.lineTo(right ? 15 : 9, 12); path.lineTo(right ? 9 : 15, 18); p.drawPath(path);
         } else if (name == "machines") {
             p.drawRoundedRect(QRectF(3, 4, 18, 12), 2, 2); p.drawLine(12, 16, 12, 20); p.drawLine(8, 20, 16, 20);
         } else if (name == "terminal") {
@@ -97,6 +104,11 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             for (int a = 0; a < 360; a += 45) { p.save(); p.translate(12, 12); p.rotate(a); p.drawLine(0, 7, 0, 9); p.restore(); }
         } else if (name == "context-warning") {
             p.drawEllipse(QRectF(3, 3, 18, 18)); p.drawLine(12, 7, 12, 12); p.drawPoint(QPointF(12, 16));
+        } else if (name == "question") {
+            // An optional question: the circle of context-warning with git-unknown's mark.
+            p.drawEllipse(QRectF(3, 3, 18, 18));
+            QPainterPath question; question.moveTo(10, 10); question.cubicTo(10, 7, 15, 7, 15, 10);
+            question.cubicTo(15, 12, 12, 11, 12, 14); p.drawPath(question); p.drawPoint(QPointF(12, 17));
         } else if (name == "attention") {
             QPainterPath path; path.moveTo(6, 10); path.cubicTo(6, 3, 18, 3, 18, 10); path.lineTo(18, 15); path.lineTo(20, 18); path.lineTo(4, 18); path.lineTo(6, 15); path.closeSubpath();
             p.drawPath(path); p.drawArc(QRectF(10, 18, 4, 4), 180*16, 180*16);
@@ -131,6 +143,9 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             p.drawPath(left); p.drawPath(right);
             if (name == "connect") p.drawLine(8, 12, 16, 12);
             else { p.drawLine(11, 3, 13, 6); p.drawLine(11, 18, 13, 21); }
+        } else if (name == "video") {
+            p.drawRoundedRect(QRectF(3,5,11,14),2,2);
+            QPainterPath lens;lens.moveTo(14,9);lens.lineTo(21,5);lens.lineTo(21,19);lens.lineTo(14,15);p.drawPath(lens);
         } else if (name == "microphone") {
             p.drawRoundedRect(QRectF(9, 3, 6, 12), 3, 3);
             p.drawArc(QRectF(6, 8, 12, 11), 180 * 16, 180 * 16);

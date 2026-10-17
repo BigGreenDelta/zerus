@@ -107,7 +107,9 @@ desktop or Android app. Record, review and send: Zerus transcribes the recording
 and delivers the text to the selected agent's native conversation, including on
 another connected computer. Your message stays in Activity as a **playable voice
 message with a waveform and expandable transcript**, so you can compare what you
-said with what the agent received.
+said with what the agent received. Camera mode records video circles with the same
+hold, cancel and lock controls on desktop and Android; the video stays in history
+and its recognized speech goes to the agent.
 
 Choose the processing computer and manage its recognition profiles in
 **Settings → Voice input**. Use **local GigaAM v3 for Russian**, including GPU
@@ -135,9 +137,10 @@ The **Android app** brings your projects and agents to your phone:
 
 Pair your phone with a computer to reach it and its directly connected Zerus peers
 through a **self-hostable HTTPS relay**. Notifications use Firebase Cloud Messaging,
-with a foreground live connection for phones without it. **iOS is planned.**
+with a foreground live connection for phones without it. A native **iOS app** with
+the same features is in development ([mobile/ios](mobile/ios/README.md)).
 
-[Download the Android APK](https://github.com/ufna/zerus/releases?q=android-dev-&expanded=true) |
+[Download the Android APK](https://zerus.dev/#download) |
 [Connect your phone](docs/mobile-deployment.md#pair-the-phone) |
 [Architecture and trust model](docs/mobile-architecture.md)
 
@@ -186,7 +189,9 @@ the window. [Integration details](docs/reference.md#deepseek).
 On Arch Linux x86_64, install the stable bundle with `yay -S zerus-ade-bin`, then
 run `zerus-setup` as your normal user.
 [Source and development packages](docs/installation.md#arch-linux) are also available.
-On macOS and other Linux distributions, [build from source](docs/installation.md#local-installation);
+On Apple Silicon macOS, install with `brew install --cask ufna/zerus/zerus`, then
+run `zerus-setup`, or use the [signed DMG](docs/installation.md#macos-dmg).
+Other Linux distributions [build from source](docs/installation.md#local-installation);
 see [other platforms](#other-platforms).
 
 [Install Zerus and the CLI](docs/installation.md), then use **New session** to
@@ -203,7 +208,7 @@ hgs status                            # versions and running services here and t
 hgs a codex/orbit/api                  # attach from any terminal
 ```
 
-**On Android:** [download the APK](https://github.com/ufna/zerus/releases?q=android-dev-&expanded=true),
+**On Android:** [download the APK](https://zerus.dev/#download),
 then [pair your phone](docs/mobile-deployment.md#pair-the-phone).
 **Try demo** lets you explore the interface before connecting a computer.
 
@@ -214,10 +219,14 @@ distributions [build from source](docs/installation.md#local-installation) with
 the same installer. Zerus is open source: apt, dnf and other packages are welcome
 as pull requests.
 
-**macOS** builds from source with the same installer. A signed and notarized
-Apple Silicon app will be distributed through the
-[Homebrew tap](docs/installation.md#macos-homebrew) once the first signed build
-is published.
+**macOS**: Apple Silicon Macs running macOS 14 or later can install a signed and
+notarized stable release from the [DMG](docs/installation.md#macos-dmg) or
+[Homebrew tap](docs/installation.md#macos-homebrew):
+`brew install --cask ufna/zerus/zerus`, then `zerus-setup`.
+Daily Nightly and successful main CI Dev builds use `ufna/zerus/zerus@nightly`
+and `ufna/zerus/zerus@dev`, respectively.
+**Settings > Updates** checks versions and provides the update command or DMG.
+Source builds remain available through the same installer.
 
 **Windows**: nightly releases include a portable x86_64
 [control console](docs/installation.md#windows) that manages agents on your

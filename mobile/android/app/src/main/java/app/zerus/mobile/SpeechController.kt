@@ -27,6 +27,8 @@ internal class SpeechController(private val context: Context, private val model:
     private val saveLock = Mutex()
     private var value by mutableStateOf(VoiceState())
     val selection get() = value.selection
+    val videoMode get() = value.videoMode
+    val previewBeforeSend get() = value.previewBeforeSend
     val draft get() = value.draft
     val outgoing get() = value.outgoing
     val recorded get() = draft != null
@@ -45,13 +47,20 @@ internal class SpeechController(private val context: Context, private val model:
     var activeRequests by mutableStateOf<Set<String>>(emptySet()); private set
     var legacyResult by mutableStateOf<SpeechAttempt?>(null); private set
     val busy get() = recording || savingRecording || activeRequests.isNotEmpty()
-    private class Capture(val id: Long, val recorder: SpeechRecorder, val feedback: VoiceCaptureFeedback, val gesture: Boolean) { var discarded = false }
+    private class Capture(val id: Long, val recorder: CaptureDevice, val feedback: VoiceCaptureFeedback, val gesture: Boolean,
+        val target: Target, val machine: String, val profile: String, val revision: Long?, val previewBeforeSend: Boolean) {
+        var discarded = false; var stopping = false; var sendWhenSaved = false; var finishNotice = ""
+    }
     private var capture: Capture? = null
     private var captureSequence = 0L
     val activeCaptureId get() = capture?.id.takeIf { recording }
-    val touchRecording get() = recording && capture?.gesture == true
+    val captureNeedsPreview get() = capture?.previewBeforeSend == true
+    var recordingLocked by mutableStateOf(false); private set
+    var videoRecorder by mutableStateOf<RoundVideoRecorder?>(null); private set
+    val touchRecording get() = recording && capture?.gesture == true && !recordingLocked
     var gestureCaptureId by mutableStateOf<Long?>(null); private set
     var gestureCancelProgress by mutableStateOf(0f); private set
+    var gestureLockProgress by mutableStateOf(0f); private set
     var captureFailure by mutableStateOf<Pair<Long, String>?>(null); private set
     val recordingKeys = RecordingKeys()
     private var profileJob: Job? = null
@@ -171,14 +180,27 @@ internal class SpeechController(private val context: Context, private val model:
         model.sendingBlocked(target) -> "Finish the pending message or session action before recording."
         target.archiveId.isNotBlank() || target.agentId.isNotBlank() -> "Voice messages are available in live parent conversations."
         target.run.isBlank() || target.conversation.isBlank() -> "Wait for the conversation to be ready before recording."
-        outgoing.sumOf { it.audio?.bytes ?: 0 } > 100L * 1024 * 1024 - VoiceProtocol.MAX_PCM_BYTES - 44 -> "Remove an old local voice copy in Drafts to make room for another recording."
+        outgoing.sumOf { (it.audio?.bytes ?: 0) + (it.video?.file?.bytes ?: 0) } > 100L * 1024 * 1024 - VoiceProtocol.MAX_PCM_BYTES - 44 - (if (videoMode) VideoProtocol.MAX_BYTES else 0) -> "Remove an old local voice copy in Drafts to make room for another recording."
         model.selected?.target != target -> "Open the conversation first."
         else -> ""
     }
     fun permissionDenied() { notice = "Microphone access was denied. Allow microphone access in Android app settings to record." }
+    fun toggleMode(target: Target) {
+        if (!ready || recording || savingRecording || draft != null || model.selected?.target != target) return
+        value = value.copy(videoMode = !value.videoMode)
+        scope.launch { runCatching { persist() }.onFailure { notice = "Could not save the recording mode." } }
+    }
+    fun setPreviewBeforeSend(enabled: Boolean) {
+        if (!ready || recording || savingRecording || model.updateInstallPreparing || enabled == value.previewBeforeSend) return
+        value = value.copy(previewBeforeSend = enabled)
+        scope.launch { runCatching { persist() }.onFailure { notice = "Could not save the recording preview preference." } }
+    }
     fun start(target: Target, feedback: (VoiceCaptureFeedback.Event) -> Unit = {}): Long? = start(target, gesture = false, feedback)
     fun startGesture(target: Target, feedback: (VoiceCaptureFeedback.Event) -> Unit = {}): Long? = start(target, gesture = true, feedback)
-    private fun start(target: Target, gesture: Boolean, feedback: (VoiceCaptureFeedback.Event) -> Unit): Long? {
+    fun startVideo(target: Target, gesture: Boolean, recorder: RoundVideoRecorder, feedback: (VoiceCaptureFeedback.Event) -> Unit = {}): Long? =
+        start(target, gesture, feedback, recorder)
+    private fun start(target: Target, gesture: Boolean, feedback: (VoiceCaptureFeedback.Event) -> Unit,
+        device: CaptureDevice = AudioCaptureDevice(context)): Long? {
         val reason = startReason(target)
         if (reason.isNotBlank()) { notice = reason; return null }
         val machine = selection.host?.computerId.orEmpty()
@@ -186,14 +208,17 @@ internal class SpeechController(private val context: Context, private val model:
         val profileRevision = if (profileTarget == target && !loading && profile != null) profile?.profileRevision else selection.profileRevision
         model.attachments.stopAudio()
         seconds = 0; elapsedMs = 0; notice = ""; captureFailure = null; recording = true
-        val owned = Capture(++captureSequence, SpeechRecorder(context), VoiceCaptureFeedback(feedback), gesture); capture = owned
-        gestureCaptureId = owned.id.takeIf { gesture }; gestureCancelProgress = 0f
+        val owned = Capture(++captureSequence, device, VoiceCaptureFeedback(feedback), gesture, target, machine, profileId, profileRevision, previewBeforeSend); capture = owned
+        recordingLocked = !gesture; videoRecorder = device as? RoundVideoRecorder
+        gestureCaptureId = owned.id.takeIf { gesture }; gestureCancelProgress = 0f; gestureLockProgress = 0f
         scope.launch {
-            var imported: Attachment? = null
+            val imported = mutableListOf<Attachment>()
+            var sendSaved = false
             try {
-                val pcm = owned.recorder.capture(120_000, started = {
+                val media = owned.recorder.capture(started = {
                     if (capture === owned && recording) owned.feedback.started()
                 }) { if (capture === owned) { elapsedMs = it; seconds = it / 1_000 } }
+                val pcm = media.pcm
                 // Natural completion and the duration limit retire this touch press before saving.
                 owned.feedback.stopped()
                 retireGesture(owned.id)
@@ -201,11 +226,15 @@ internal class SpeechController(private val context: Context, private val model:
                 if (owned.discarded) { notice = "Recording discarded."; return@launch }
                 check(pcm.size >= 3_200) { "The recording was too short. Try again." }
                 savingRecording = true
-                imported = audioStore.importRecording(VoiceProtocol.wav(pcm))
-                value = value.copy(draft = VoiceDraft(target, machine, profileId, imported, pcm.size / 32, System.currentTimeMillis() / 1000.0, profileRevision))
+                val audio = audioStore.importRecording(VoiceProtocol.wav(pcm)).also { imported += it }
+                val video = media.video?.let { data ->
+                    VideoDraft(audioStore.importVideo(data.bytes).also { imported += it }, data.durationMs, data.width, data.height, data.posterBase64)
+                }
+                value = value.copy(draft = VoiceDraft(target, machine, profileId, audio, pcm.size / 32, System.currentTimeMillis() / 1000.0, profileRevision, video))
                 persist()
-                imported = null
-                notice = ""
+                imported.clear()
+                notice = owned.finishNotice
+                sendSaved = owned.sendWhenSaved
             } catch (cancelled: CancellationException) { owned.feedback.finish(userInitiated = false); throw cancelled }
             catch (error: Exception) {
                 notice = if (owned.discarded) "Recording discarded." else error.message ?: "Could not save the recording."
@@ -216,13 +245,15 @@ internal class SpeechController(private val context: Context, private val model:
                 if (capture === owned) {
                     retireGesture(owned.id)
                     gestureCancelProgress = 0f
-                    recording = false; savingRecording = false; capture = null
+                    gestureLockProgress = 0f
+                    recording = false; recordingLocked = false; videoRecorder = null; savingRecording = false; capture = null
                 }
                 // A committed preview remains recoverable if the Activity or coroutine stops.
-                imported?.takeIf { draft?.audio?.id != it.id }?.let { file ->
+                imported.filter { it.id !in protectedAudioIds() }.forEach { file ->
                     withContext(NonCancellable) { runCatching { audioStore.remove(file.id, protectedAudioIds()) } }
                 }
             }
+            if (sendSaved) submit()
         }
         refreshProfiles(target)
         return owned.id
@@ -230,30 +261,45 @@ internal class SpeechController(private val context: Context, private val model:
     private fun retireGesture(id: Long) {
         if (gestureCaptureId == id) gestureCaptureId = null
     }
-    fun moveGesture(id: Long, progress: Float) {
-        if (gestureCaptureId == id && capture?.id == id) gestureCancelProgress = progress.coerceIn(0f, 1f)
+    fun moveGesture(id: Long, progress: Float, lockProgress: Float = 0f) {
+        if (gestureCaptureId == id && capture?.id == id) { gestureCancelProgress = progress.coerceIn(0f, 1f); gestureLockProgress = lockProgress.coerceIn(0f, 1f) }
+    }
+    fun lockCapture(id: Long) {
+        if (capture?.id != id || gestureCaptureId != id || !recording) return
+        retireGesture(id); recordingLocked = true; gestureCancelProgress = 0f; gestureLockProgress = 0f
+    }
+    fun sendCapture(id: Long) {
+        val owned = capture?.takeIf { it.id == id && recording && !it.discarded && !it.stopping } ?: return
+        // Both media types use the preference captured before recording started.
+        // Only the retained preview's separate Send can authorize delivery in this mode.
+        if (owned.previewBeforeSend) { stopCapture(id); return }
+        val profile = computers.find { it.id == owned.machine }?.profiles?.find { it.id == owned.profile }
+        // The explicit send gesture cannot be revived by a later discovery result.
+        owned.sendWhenSaved = profileTarget == owned.target && !loading && profile?.available == true && profile.profileRevision == owned.revision
+        if (!owned.sendWhenSaved) owned.finishNotice = "Confirm a voice provider before sending."
+        stopCapture(id)
     }
     fun finishGesture(id: Long, cancel: Boolean, userInitiated: Boolean = true): Boolean {
         val owned = capture?.takeIf { it.id == id && gestureCaptureId == id } ?: return false
-        retireGesture(id)
+        retireGesture(id); owned.stopping = true
         if (cancel) owned.discarded = true
         owned.feedback.finish(userInitiated, cancelled = cancel)
-        owned.recorder.stop()
+        if (cancel) owned.recorder.cancel() else owned.recorder.stop()
         return true
     }
     fun stopCapture(id: Long, userInitiated: Boolean = true) {
         capture?.takeIf { it.id == id }?.let {
-            retireGesture(it.id)
+            retireGesture(it.id); it.stopping = true
             it.feedback.finish(userInitiated, cancelled = it.discarded)
-            it.recorder.stop()
+            if (it.discarded) it.recorder.cancel() else it.recorder.stop()
         }
     }
     fun cancelCapture(id: Long) {
-        capture?.takeIf { it.id == id && recording }?.let { it.discarded = true; stopCapture(id) }
+        capture?.takeIf { it.id == id && recording }?.let { it.discarded = true; it.sendWhenSaved = false; stopCapture(id) }
     }
     fun stop() { capture?.let { stopCapture(it.id) } }
     fun background() { capture?.let { stopCapture(it.id, userInitiated = false) } }
-    fun protectedAudioIds() = (outgoing.mapNotNull { it.audio?.id } + listOfNotNull(draft?.audio?.id)).toSet()
+    fun protectedAudioIds() = (outgoing.flatMap { listOfNotNull(it.audio?.id, it.video?.file?.id) } + listOfNotNull(draft?.audio?.id, draft?.video?.file?.id)).toSet()
     fun discardRecording() {
         if (recording) { activeCaptureId?.let(::cancelCapture); return }
         val captured = draft ?: return
@@ -263,6 +309,7 @@ internal class SpeechController(private val context: Context, private val model:
             try {
                 value = value.copy(draft = null); persist()
                 audioStore.remove(captured.audio.id, protectedAudioIds())
+                captured.video?.let { audioStore.remove(it.file.id, protectedAudioIds()) }
                 notice = "Recording discarded."
             } catch (_: Exception) { value = value.copy(draft = captured); notice = "Could not discard the saved recording." }
             finally { savingRecording = false }
@@ -276,6 +323,7 @@ internal class SpeechController(private val context: Context, private val model:
     private fun validateSend(captured: VoiceDraft, allowColdCache: Boolean) {
         check(model.voiceSendReason(captured.target).isBlank()) { "The conversation changed before sending. The recording remains saved." }
         check(providerReason(captured).isBlank()) { providerReason(captured) }
+        if (captured.video != null) check(model.videoHostReason(captured.target).isBlank()) { model.videoHostReason(captured.target) }
         check(allowColdCache || !model.voiceColdCache()) { "The prompt cache expired. The recording remains saved without sending." }
     }
     fun sendReason(): String {
@@ -285,7 +333,7 @@ internal class SpeechController(private val context: Context, private val model:
             outgoing.size >= 100 -> "Remove an old local voice receipt in Drafts before sending another."
             outgoing.any { it.belongsTo(captured.target) && !it.terminal } -> "Wait for the previous voice message to finish."
             outgoing.any { it.belongsTo(captured.target) && it.state == "uncertain" } -> "Check the previous voice message before sending another."
-            else -> model.voiceSendReason(captured.target).ifBlank { providerReason(captured) }
+            else -> model.voiceSendReason(captured.target).ifBlank { if (captured.video != null) model.videoHostReason(captured.target) else "" }.ifBlank { providerReason(captured) }
         }
     }
     fun submit(allowColdCache: Boolean = false) {
@@ -294,7 +342,7 @@ internal class SpeechController(private val context: Context, private val model:
         if (reason.isNotBlank()) { notice = reason; return }
         if (model.voiceColdCache() && !allowColdCache) { notice = "Confirm sending with full context first."; return }
         val id = UUID.randomUUID().toString()
-        val pending = VoiceOutgoing(id, captured.target, captured.machineId, captured.profileId, captured.audio, captured.durationMs, captured.createdAt, profileRevision = captured.profileRevision)
+        val pending = VoiceOutgoing(id, captured.target, captured.machineId, captured.profileId, captured.audio, captured.durationMs, captured.createdAt, profileRevision = captured.profileRevision, video = captured.video)
         savingRecording = true; activeRequests = activeRequests + id
         scope.launch {
             var attempted = false
@@ -313,6 +361,11 @@ internal class SpeechController(private val context: Context, private val model:
                         .put("audio", JSONObject().put("format", "pcm_s16le").put("sample_rate", 16_000).put("channels", 1)
                             .put("data_base64", Base64.getEncoder().encodeToString(VoiceProtocol.pcm(bytes.toByteArray()))))
                 }
+                captured.video?.let { video ->
+                    val original = ByteArrayOutputStream()
+                    audioStore.decrypt(video.file) { original.write(it) }
+                    payload.put("video", withContext(Dispatchers.Default) { VideoProtocol.wire(video, original.toByteArray()) })
+                }
                 validateSend(captured, allowColdCache)
                 attempted = true
                 accept(pending, api.voice(route, captured.target, "voice_submit", payload, id))
@@ -330,6 +383,11 @@ internal class SpeechController(private val context: Context, private val model:
     private suspend fun accept(previous: VoiceOutgoing, raw: JSONObject) {
         val next = VoiceProtocol.response(raw, previous.effectiveTarget, previous.id)
         previous.audio?.let { require(next.audio.bytes == it.bytes && next.durationMs == previous.durationMs) { "The computer returned different audio metadata." } }
+        previous.video?.let { local ->
+            val remote = next.video
+            require(remote != null && remote.file.bytes == local.file.bytes && remote.durationMs == local.durationMs &&
+                remote.width == local.width && remote.height == local.height) { "The computer returned different video metadata." }
+        }
         update(previous.id) { it.copy(message = VoiceProtocol.newer(it.message, next), error = "") }
         persist()
     }
@@ -396,6 +454,7 @@ internal class SpeechController(private val context: Context, private val model:
             try {
                 value = value.copy(outgoing = outgoing.filterNot { it.id == entry.id }); persist()
                 entry.audio?.let { audioStore.remove(it.id, protectedAudioIds()) }
+                entry.video?.let { audioStore.remove(it.file.id, protectedAudioIds()) }
             } catch (_: Exception) { notice = "Could not remove the local voice receipt." }
         }
     }
@@ -404,7 +463,7 @@ internal class SpeechController(private val context: Context, private val model:
         val current = outgoing.find { it.id == entry.id } ?: return
         if (current != entry || !current.canRestoreUnsent || current.audio == null ||
             current.id in activeRequests || draft != null || recording || savingRecording) return
-        val restored = VoiceDraft(current.target, current.machineId, current.profileId, current.audio, current.durationMs, current.createdAt, current.profileRevision)
+        val restored = VoiceDraft(current.target, current.machineId, current.profileId, current.audio, current.durationMs, current.createdAt, current.profileRevision, current.video)
         savingRecording = true
         scope.launch {
             try {

@@ -47,6 +47,20 @@ class RelayFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await databases(), 0)
         self.assertNotIn(relay, UNFINISHED)
 
+    async def test_rust_relay_restarts_on_its_database_at_its_url(self):
+        relay = await start_relay(rust_only=True)
+        self.addAsyncCleanup(relay.cleanup)
+        phone = await relay.pair('Example phone', relay.invitation['pair_code'])
+        url, first = relay.url, relay.process
+        await relay.restart()
+        self.assertEqual(relay.url, url)
+        self.assertIsNotNone(first.returncode)
+        self.assertIsNone(relay.process.returncode)
+        async with ClientSession(base_url=relay.url) as client:
+            headers = {'Authorization': 'Bearer ' + phone['device_token']}
+            async with client.get('/v1/computers', headers=headers) as response:
+                self.assertEqual(response.status, 200)
+
 
 if __name__ == '__main__':
     unittest.main()

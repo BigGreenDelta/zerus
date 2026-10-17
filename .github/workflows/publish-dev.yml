@@ -75,3 +75,35 @@ jobs:
               if result.returncode:
                   raise SystemExit('Dev mirror publication failed; retry the same CI candidate.')
           PY
+
+  homebrew:
+    name: Publish verified macOS Dev cask
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    concurrency:
+      group: release-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify public candidate bytes and synchronize only the Dev cask
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id || github.event.workflow_run.id }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, tempfile
+          key = os.environ.get('HOMEBREW_TAP_DEPLOY_KEY', '')
+          if not key:
+              raise SystemExit('Missing release/HOMEBREW_TAP_DEPLOY_KEY.')
+          with tempfile.TemporaryDirectory(prefix='zerus-dev-tap-', dir=os.environ['RUNNER_TEMP']) as temp:
+              path = pathlib.Path(temp) / 'key'
+              with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as output:
+                  output.write(key.rstrip() + '\n')
+              subprocess.run(['python3', 'scripts/publish-dev-cask.py', '--run-id', os.environ['CI_RUN_ID'],
+                              '--tap-ssh-key', str(path)], check=True)
+          PY

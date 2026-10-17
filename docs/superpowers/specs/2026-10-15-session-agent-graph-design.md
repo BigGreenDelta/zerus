@@ -1,6 +1,10 @@
 # Session and agent graph
 
-Date: 2026-10-15. Status: proposed product and technical design, not shipped.
+> Archived experiment: the desktop Graph was retired on 2026-10-16. See the
+> [retirement record](../../retired-features/session-graph.md) and preserved Git tag.
+> This document records the historical design, not the current product.
+
+Date: 2026-10-15. Desktop shipped in Dev 773; owner usability revision 2026-10-16 follows below.
 Design task: zerus-4rkz. Source audit: `669101d2`.
 Interactive, synthetic preview: [Graph workspace](../../../design/session-graph/index.html).
 
@@ -63,9 +67,11 @@ delegation and verification gates are a later, separate product extension.
   conversation and its one-hop neighborhood; the latter applies the project
   scope while retaining outside collaborators. **Back to Graph** restores the
   prior camera and selection after opening Activity.
-- Keep the main header to one ordinary row: title, search, scope summary,
-  **Filters**, last refresh/coverage and Refresh. A second row appears only for
-  active filter chips. No permanently expanded matrix of filtering controls.
+- Keep the main header to title, search, List and Refresh. Use the ordinary
+  Sessions quick icon strip for All, Needs attention, Active, Saved sessions and
+  Archive; share its machine/project selectors and selected chips. Completed
+  agents and leaving an explicitly focused neighborhood have compact icon actions.
+  Do not hide everyday filters behind a generic Filters menu.
 - The center takes all remaining space. Bottom-corner controls: zoom, Fit,
   Center selection and Reset layout. A compact legend explains relation types.
 - A resizable inspector opens on selection; desktop target width 320–440 logical
@@ -78,13 +84,17 @@ delegation and verification gates are a later, separate product extension.
 
 ### Initial scope
 
-Default: **All current sessions**, all configured accessible computers/projects;
-message relations within the **last 24 hours**. Parent and fork structure is not
-removed by this event-time filter. Ready, paused and disconnected known sessions
-remain included; Active is an optional filter using the existing shared contract.
-Archives are opt-in, except archived endpoints required to explain a visible edge.
-Completed native children collapse under their parent by default, consistently
-with Sessions; attention, unknown children and local drafts remain discoverable.
+Owner revision 2026-10-16: default to **Active**, with the exact existing Sessions
+membership (working, scheduled, attention or unsent drafts). Recorded/unknown
+children without current work do not fill this view. All keeps inactive current
+sessions discoverable, Saved sessions selects retained stopped/paused sessions,
+and Archive is explicit. Completed agents have a separate toggle; attention and
+drafts remain discoverable. Cross-project neighbors respect state/machine scope.
+
+On first use without saved positions, Arrange and Fit once after nonempty data
+and local state loading. Subsequent refreshes do not rearrange existing nodes.
+Preserve legacy pins when upgrading the default filter. Native trackpad pinch
+zooms around the gesture position; regular two-finger scrolling pans.
 
 Time choices: 1 hour, 24 hours, 7 days, retained history, custom range. Changing
 the range filters evidence, not the current status of a session. The header says
@@ -99,10 +109,21 @@ unloaded groups have visible counts or `unknown`, with a path to expand them.
 
 ### Nodes
 
+Owner clarification, 2026-10-15: Graph must use the same visual language as the
+ordinary Sessions list. Status, provider and computer are the existing badges,
+not plain combined text or a new graph-specific set of colors and symbols.
+The native implementation must reuse `SessionStatusBadge`, `IdentityBadges`
+and `MachineAppearance`, including configured computer colors and vivid mode.
+Use the same title, branch icon, selection surface and attention priority as
+`SessionCardDelegate`; keep the machine and provider independently identifiable
+in the canvas, list and inspector. Canvas scale may change how much text fits,
+but must not change the meaning or styling of a status. The HTML preview mirrors
+these components; the shipped Qt view uses the actual shared paint functions.
+
 Use small readable cards, not anonymous dots. At normal zoom a card has:
 
 - session title, with the native provider icon;
-- existing state text and a small state marker;
+- the existing status badge, including its normal state icon and colors;
 - project and computer context, plus a distinct branch icon before branch text;
 - a compact child count or attention badge where relevant.
 
@@ -130,7 +151,31 @@ Start with deterministic placement within groups. A child's default position is
 near its parent; interproject bundles use clear routes between group boundaries.
 Do not run an endless force simulation. New nodes occupy free space near relevant
 neighbors; existing positions and the user's camera stay still. Dragging pins a
-position locally. Reset layout is explicit and reversible through Back.
+position locally.
+
+Owner follow-up, 2026-10-15: manual movement must be predictable and survive
+reopening. Use these complementary controls:
+
+- **Drag a card:** keep its new position. The project's region grows, shrinks
+  and moves around its currently visible members during the drag, with padding.
+  Crossing another region never changes project membership. No force simulation
+  or refresh moves an existing card; new nodes find unoccupied space among
+  visible cards. Hidden saved positions do not reserve space in this scope.
+- **Fit:** change only the camera and zoom to show the visible scope.
+- **Arrange visible:** explicitly pack the current filtered nodes using actual
+  parent/child card heights. Hidden positions stay saved, but are not obstacles.
+  **Undo arrange** restores the previous positions and
+  camera during this visit, including if new nodes arrived meanwhile. A later
+  manual drag starts a new layout decision and retires that one-step undo.
+
+Save positions by stable node ID, camera, zoom, filters and inspection locally
+on this device. The native page coalesces saves on a dedicated settings worker,
+flushes on navigation/close and restores before or after asynchronous graph data.
+A late settings read cannot replace a newer local interaction. Malformed or
+unwritable settings show a concise notice and leave the current graph usable.
+The view state is bounded to 2000 cached node positions and 1 MiB; it is separate
+from the host metadata cache and is not synchronized between computers. The
+default keeps manual placement stable; arrangement is explicit.
 
 Communication cycles are normal. The session graph is a directed multigraph,
 not a DAG. The two directions of a conversation have separate counts/evidence
@@ -145,7 +190,7 @@ Collapsed group edges show aggregate counts; expansion reveals their endpoints.
 | Message / result transfer | Solid mint arrow, sender to recipient | Recorded exchange with identified endpoints; click for evidence |
 | Fork | Thin branching connector, origin to new conversation | Confirmed native fork lineage; not delegation or continued identity |
 | Referenced conversation | Dotted neutral arrow, containing message to referenced conversation | Exact parsed reference only; optional layer, never counted as a sent message |
-| Waiting for result | Dashed amber arrow, waiting session to expected producer | Later: explicit scoped declaration with a clear settlement event |
+| Waiting for result | Dashed amber arrow, waiting session to expected producer | Explicit `hgs wait` declaration, scoped acceptance ticket and confirmed result delivery; see `docs/agent-coordination.md` |
 | User annotation | Dotted connector labeled Manual | Later: authored note, visibly different from observed facts |
 
 Color is redundant with line pattern, arrow and text. Amber remains meaningful
@@ -291,9 +336,12 @@ budget: 50 ms projection work / 2 MiB ordinary source input per slice; one bound
 oversize row follows the existing source-reader policy instead of silently
 skipping evidence. Benchmark and adjust these targets before implementation freeze.
 
-Proposed read-only API: `hgs graph snapshot --json` and
+Read-only API under implementation: `hgs graph snapshot --json` and
 `hgs graph changes --after <opaque-cursor> --json`, with bounded query scope and
-event detail pagination. These commands do not exist yet. Replies include schema,
+event detail pagination. The isolated implementation currently collects saved
+bindings and persisted native rosters; communication and archived history remain
+explicitly `not_indexed`. This is a data-layer milestone, not the first usable
+Graph release. Replies include schema,
 origin UUID/epoch, revision, nodes, relations, coverage, deletions, continuation
 and reset-required state. Limits are server-enforced; partial pages do not delete
 unseen nodes. Unsupported hosts return a capability result, never an empty-success
@@ -394,6 +442,57 @@ reviewed native contracts. Sessions can execute many work units; one workflow no
 cannot simply be a session card with a Play button. The observed graph must remain
 useful before any orchestration engine exists.
 
+## Current implementation milestone
+
+The isolated implementation contains a bounded saved-binding host projection,
+transactional snapshot/delta storage and native `GraphCanvas` / `GraphPage`
+presentation components. Canvas, list and inspector use the actual Sessions
+painter. Project regions, cross-project filter context, search, exact-target
+Open Activity signals, retained positions and a narrow overlay inspector have
+synthetic native coverage. Selection keeps Draft/unread badges and does not
+navigate or acknowledge messages.
+
+Native layout persistence now includes actual process-exit/reopen coverage,
+live project bounds, collision-aware insertion and undoable visible arrangement.
+The synthetic public preview demonstrates the same movement, local-save, Fit and
+Arrange/Undo behavior in the browser. It does not share layout with the app.
+
+A separate controller now schedules one bounded configured-host read at a time,
+assembles pages off the UI thread, retains last-good metadata and writes a private
+atomic disk cache. Hidden views stop polling; removed routes discard stale replies
+and cached data. The CLI transport keeps request IDs and always includes `--json`,
+which old launch parsers reject before creating sessions.
+
+A pure projection join now matches current Sessions presentation by exact
+configured route, provider, name, run and conversation. A stale or reused name
+cannot borrow a current card or authorize navigation. Multiple configured aliases
+of one native machine use one coherent projection; multiple bindings retain
+explicit action choices and conflicting project assignments remain visible.
+Unverified message claims cannot become communication edges. Canvas limits expose
+omitted records and prefer current bindings over unrelated recorded history.
+
+The private desktop branch now wires these components into main navigation and
+fleet updates. It uses the exact same card-role builder as Sessions, assembles
+projections on a worker and starts reads only while Graph is visible. Open Activity
+revalidates the current route/name/run/conversation/archive; selecting a node alone
+does not navigate or mark a message read. The current view retains at most 2000
+card bindings and reports omitted bindings explicitly. This integration is not
+yet part of an installed release.
+Node inspection waits until a pointer gesture ends before opening the side pane,
+so shrinking the canvas cannot move a card beneath a held pointer. The camera
+then reveals the selected card without changing positions; polling never repeats
+that reveal or replaces a manually adjusted camera.
+The first desktop release now adds verified new-send provenance, archived native
+bindings, current native-API children and receipt-level navigation. Attribution is
+based on actual native process ancestry plus the recipient's own exact receipt;
+older quoted envelopes remain explicitly unattributed. Delivery metadata is
+retained for 30 days without message bodies. Equivalent live/archive structural
+proofs retain one child identity; contradictory observations stay unresolved.
+Manual positions follow only verified provisional-to-confirmed aliases. Archived
+and completed-child filters and bounded 50-receipt inspection avoid unbounded UI
+lists. Native Android Graph transport and its destination remain a following
+release; they are not implied by the desktop preview.
+
 ## Delivery boundaries and acceptance
 
 **First usable release:** main Graph destination, all-session inventory, project
@@ -402,8 +501,8 @@ communication, edge evidence, Activity navigation, cache/freshness, list alterna
 and honest partial coverage. Structured provenance for new Zerus-mediated sends is
 part of the data work, not postponed until after a decorative canvas ships.
 
-**Following releases:** wider native/external event coverage, explicit wait/handoff
-metadata and history browsing; Android parity on the deployed read contract;
+**Following releases:** wider native/external event coverage and handoff history
+browsing; Android Graph parity on the deployed read contract;
 workflow authoring only after a separate owner-reviewed specification.
 
 Qualify at least these synthetic scenarios before product delivery:
@@ -425,5 +524,6 @@ Qualify at least these synthetic scenarios before product delivery:
 
 The interactive preview demonstrates proposed layout, scoped search, external
 neighbors, relation details, focus mode and cached refresh using synthetic data.
-It does not implement the index, native navigation, actual sends or a workflow
-engine. Product code, dependencies, live state and installed clients are unchanged.
+It does not implement native navigation, actual sends or a workflow engine.
+The host metadata projection is being implemented separately; the preview never
+reads it. Live state and installed clients are unchanged by prototype work.

@@ -1,21 +1,24 @@
 package app.zerus.mobile
 
-/** Cold loads are explicit immediately; cached background reads wait for their owned progress gate. */
+/** A resolved empty inspection is content too: polling must not restore the cold placeholder. */
 object ConversationLoadPresentation {
     data class Status(val text: String, val initial: Boolean, val spinner: Boolean)
 
     fun status(hasContent: Boolean, detailLoading: Boolean, detailProgress: Boolean,
-        historyLoading: Boolean, historyProgress: Boolean, demo: Boolean): Status? {
+        historyLoading: Boolean, historyProgress: Boolean, demo: Boolean, resolved: Boolean = false,
+        opening: Boolean = false): Status? {
         if (demo || !detailLoading && !historyLoading) return null
-        val progress = detailLoading && detailProgress || historyLoading && historyProgress
-        if (hasContent && !progress) return null
+        val progress = opening || detailLoading && detailProgress || historyLoading && historyProgress
+        val initial = !hasContent && !resolved
+        if (!initial && !progress) return null
         val text = when {
-            !hasContent -> "Loading conversation…"
+            initial -> "Loading conversation…"
+            opening -> "Updating messages…"
             historyLoading && detailLoading -> "Refreshing conversation and history…"
             historyLoading -> "Loading message history…"
             else -> "Refreshing conversation…"
         }
-        return Status(text, !hasContent, progress)
+        return Status(text, initial, progress)
     }
 
     fun readAllOutcome(marked: Int, skipped: Int, partial: Int): String = buildList {

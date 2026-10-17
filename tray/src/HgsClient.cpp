@@ -1,4 +1,5 @@
 #include "HgsClient.h"
+#include <QtMath>
 #include "DownloadCache.h"
 #include "ChildProcess.h"
 #include "ProcessRunner.h"
@@ -24,6 +25,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <utility>
@@ -44,6 +46,11 @@ QString resolvedProgram(const QString &program)
 ProcessRunner::Request processRequest(const QString &program, const QStringList &arguments)
 {
     ProcessRunner::Request request;
+    // GUI actions are human input even when this GUI was launched from an
+    // agent's shell tool. Never inherit that tool's attribution identity.
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.remove("HGS_SESSION");environment.remove("HGS_RUN_ID");
+    request.environment=environment;
 #ifdef Q_OS_MACOS
     // Qt encodes argv with QFile::encodeName(), which decomposes Unicode on
     // macOS. Session names are byte identities, not filesystem names: changing
@@ -51,7 +58,6 @@ ProcessRunner::Request processRequest(const QString &program, const QStringList 
     // Environment values use UTF-8 without normalization. The ASCII-only sh
     // trampoline expands those values as quoted data, removes its private
     // variables, and execs the CLI with the original argv and process identity.
-    auto environment = QProcessEnvironment::systemEnvironment();
     QStringList values{program}; values.append(arguments);
     QStringList variables;
     QString script = QStringLiteral("set --");
@@ -106,6 +112,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.scheduledJobs = schedules.value("count").toInt(-1);
     s.recurringSchedules = schedules.value("recurring").toInt(-1);
     s.nextScheduledAt = schedules.value("next_at").toDouble();
+    s.coordinationWait = obj.value("coordination_wait").toObject();
     const auto work = obj.value("process_work").toObject();
     s.backgroundProcesses = work.value("count").toInt(-1);
     s.backgroundStarted = work.value("started_at").toDouble();
@@ -120,6 +127,22 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     if (!s.conversationId.isEmpty() && read.value("conversation_id").toString() == s.conversationId) {
         s.readReplyId = read.value("reply_id").toString();
         s.readAttentionSignature = read.value("attention_signature").toString();
+    }
+    // Strict types: anything but a whole non-negative count is unknown, never 0.
+    s.optionalQuestionsReported = obj.contains(QStringLiteral("optional_questions"));
+    const auto optional = obj.value(QStringLiteral("optional_questions"));
+    if (optional.isObject()) {
+        const auto summary = optional.toObject();
+        const auto count = summary.value(QStringLiteral("count"));
+        const double value = count.isDouble() ? count.toDouble() : -1;
+        if (value >= 0 && value <= 1e9 && value == std::floor(value)) {
+            s.optionalQuestions = int(value);
+            for (const auto &id : summary.value(QStringLiteral("ids")).toArray())
+                if (id.isString() && !id.toString().isEmpty() && !s.optionalQuestionIds.contains(id.toString()))
+                    s.optionalQuestionIds << id.toString();
+            const auto latest = summary.value(QStringLiteral("latest_at"));
+            s.optionalQuestionsLatestAt = latest.isDouble() && latest.toDouble() > 0 ? latest.toDouble() : 0;
+        }
     }
     s.state = obj.value(QStringLiteral("state")).toString(QStringLiteral("running"));
     s.archiveId = s.state == QLatin1String("archived") ? obj.value(QStringLiteral("archive_id")).toString() : QString();
@@ -176,6 +199,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
 BoxState boxFromObject(const QJsonObject &obj)
 {
     BoxState box;
+    box.archivePaging = obj.value("archive_paging").toBool();
     box.metrics = obj.value("metrics").toObject();
     box.host = obj.value(QStringLiteral("host")).toString();
     box.ok = obj.value(QStringLiteral("ok")).toBool();
@@ -258,6 +282,11 @@ HgsClient::~HgsClient()
         proc->disconnect(); proc->blockSignals(true);
         if (proc->state() != QProcess::NotRunning) { proc->kill(); proc->waitForFinished(1000); }
     }
+}
+
+QList<SessionInfo> HgsClient::parseSessions(const QJsonArray &rows) {
+    QJsonObject box{{"host","archive"},{"ok",true},{"sessions",rows}};
+    return boxFromObject(box).sessions;
 }
 
 BoxState HgsClient::parseBox(const QByteArray &json, QString *error)
@@ -360,6 +389,28 @@ void runHgs(const QString &hgs, const QStringList &args, int timeoutMs, QObject 
 }
 
 } // namespace
+
+void HgsClient::cancelArchivePages(){const auto jobs=std::exchange(m_archiveJobs,{});qDeleteAll(jobs);}
+quint64 HgsClient::requestArchivePage(const QString &host,const QJsonObject &query) {
+    delete m_archiveJobs.take(host); // Cancels only our read-only CLI helper.
+    auto *owner=new QObject(this);m_archiveJobs[host]=owner;
+    const quint64 request=++m_archiveRequest;
+    QStringList args;if(!host.isEmpty())args<<'@'+host;args<<"archives"<<"--json";
+    const auto finish=[this,owner,request,host](const QJsonObject &data,const QString &error){m_archiveJobs.remove(host);owner->deleteLater();emit archivePageReady(request,host,data,error);};
+    runHgs(m_hgs,args,30000,owner,[query,finish](const QByteArray &out){
+        const auto doc=QJsonDocument::fromJson(out);const auto data=doc.object();QString error;
+        const auto rows=data["sessions"].toArray();
+        if(!doc.isObject()||data["version"].toInt()!=1||!data["sessions"].isArray()||rows.size()>50||!data["next_cursor"].isString()||data["next_cursor"].toString().size()>1024||!data["total"].isDouble()||data["total"].toDouble()<rows.size()
+            ||data["from"]!=query["from"]||data["until"]!=query["until"]||data["query"]!=query["query"]||rows.isEmpty()&&!data["next_cursor"].toString().isEmpty()||!query["cursor"].toString().isEmpty()&&query["cursor"]==data["next_cursor"])error=tr("Invalid archive page. Update the computer CLI and refresh.");
+        if(data.contains("previous_cursor")||data.contains("position")) {
+            const auto previous=data["previous_cursor"];const auto position=data["position"].toDouble(-1);
+            if(!previous.isString()||previous.toString().size()>1024||!data["position"].isDouble()||position<0||position!=qFloor(position)||position+rows.size()>data["total"].toDouble())error=tr("Invalid archive window. Refresh the archive.");
+        }
+        for(const auto &value:rows){const auto row=value.toObject();const auto id=row["archive_id"].toString();if(row["state"]!="archived"||row["name"].toString().isEmpty()||QUuid(id).toString(QUuid::WithoutBraces)!=id||!row["archived_at"].isDouble()||row["archived_at"].toDouble()<query["from"].toDouble()||row["archived_at"].toDouble()>=query["until"].toDouble())error=tr("Invalid archived session identity. Refresh the archive.");}
+        finish(data,error);
+    },[finish](const QString &,const QString &error){finish({},error);},QJsonDocument(query).toJson(QJsonDocument::Compact));
+    return request;
+}
 
 void HgsClient::requestVersion()
 {
@@ -494,7 +545,7 @@ void HgsClient::requestLocal()
     emit stateReadStarted({});
     // Large native histories can take longer than five seconds. Keep one poll
     // in flight and allow it to finish instead of continually killing/restarting it.
-    runHgs(m_hgs, {QStringLiteral("ls"), QStringLiteral("--json"), QStringLiteral("--local")},
+    runHgs(m_hgs, {QStringLiteral("ls"), QStringLiteral("--json"), QStringLiteral("--local"), QStringLiteral("--no-archives")},
            15000, this,
            [this](const QByteArray &out) {
                m_localInFlight = false;
@@ -523,7 +574,7 @@ void HgsClient::requestPeer(const QString &peer)
 
     // ssh-рукопожатие может занять больше времени, чем локальный вызов — у самого hgs
     // уже есть ConnectTimeout=3, но обвязка (auth, motd) укладывается не всегда в 5с.
-    runHgs(m_hgs, {QLatin1Char('@') + peer, QStringLiteral("ls"), QStringLiteral("--json")},
+    runHgs(m_hgs, {QLatin1Char('@') + peer, QStringLiteral("ls"), QStringLiteral("--json"), QStringLiteral("--no-archives")},
            15000, this,
            [this, peer](const QByteArray &out) {
                // Снятие метки здесь и в onFailed ниже -- ровно те же два колбэка, которыми
@@ -640,6 +691,35 @@ quint64 HgsClient::downloadFileToCache(const QString &host, const QString &path)
             if (!prepared.error.isEmpty()) { emit fileDownloadFailed(id, prepared.error); return; }
             transferFile(id, host, path, prepared.pending->path, prepared.pending);
         });
+    return id;
+}
+
+quint64 HgsClient::requestApprovalLog(const QString &operation, const QJsonObject &data)
+{
+    const auto id = ++m_approvalLogRequest;
+    const auto submit = [this, id, operation, data] {
+        auto request = processRequest(m_hgs, {"approval-log", operation}); request.timeoutMs = 10000;
+        request.input = QJsonDocument(data).toJson(QJsonDocument::Compact);
+        ProcessRunner::run(std::move(request), this, [this, id, operation](const ProcessRunner::Result &reply) {
+            QString error;
+            const auto result = reply.standardOutput.size() <= 256 * 1024 ? QJsonDocument::fromJson(reply.standardOutput).object() : QJsonObject();
+            if (reply.outcome != ProcessRunner::Result::Finished || reply.exitStatus != QProcess::NormalExit || reply.exitCode)
+                error = QString::fromUtf8(reply.standardError).trimmed().left(2000);
+            else if (reply.standardOutput.size() > 256 * 1024 || result.isEmpty()) error = tr("Invalid automatic approval journal response.");
+            if (error.isEmpty() && (reply.outcome != ProcessRunner::Result::Finished || reply.exitStatus != QProcess::NormalExit || reply.exitCode))
+                error = tr("The automatic approval journal is unavailable. No new approval was authorized.");
+            emit approvalLogFinished(id, operation, result, error);
+        });
+    };
+    // Unknown CLI words can launch an agent on retained versions. Probe the
+    // configured local executable before ever using this additive command.
+    if (m_approvalLogSupported) submit();
+    else runHgs(m_hgs, {"--help"}, 5000, this, [this, id, operation, submit](const QByteArray &help) {
+        if (!help.contains("hgs approval-log begin|finish|list|detail")) {
+            emit approvalLogFinished(id, operation, {}, tr("Update the local hgs CLI to use automatic approvals and its journal.")); return;
+        }
+        m_approvalLogSupported = true; submit();
+    }, [this, id, operation](const QString &, const QString &error) { emit approvalLogFinished(id, operation, {}, error); });
     return id;
 }
 
@@ -1336,7 +1416,7 @@ quint64 HgsClient::createDirectory(const QString &host, const QString &path)
 }
 
 quint64 HgsClient::requestAnswerQuestion(const QString &host, const QString &name,
-                                        const QJsonObject &question, const QJsonArray &answers)
+                                        const QJsonObject &question, const QJsonArray &answers, const QString &durableRequestId)
 {
     const quint64 request = ++m_answerRequest;
     const QString key = host + QLatin1Char('\n') + name;
@@ -1382,7 +1462,8 @@ quint64 HgsClient::requestAnswerQuestion(const QString &host, const QString &nam
     if (program.isEmpty() || !executable.isFile() || !executable.isExecutable()) {
         reject(tr("Cannot start hgs: executable not found or not executable: %1").arg(m_hgs)); return request;
     }
-    const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString requestId = durableRequestId.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : durableRequestId;
+    if (QUuid(requestId).isNull()) { reject(tr("The approval journal request identity is invalid.")); return request; }
     const QByteArray payload = QJsonDocument(QJsonObject{
         {"request_id", requestId}, {"question_id", questionId}, {"expected_question_hash", questionHash},
         {"expected_run_id", runId}, {"expected_conversation_id", conversationId}, {"answers", answers}
@@ -1392,65 +1473,34 @@ quint64 HgsClient::requestAnswerQuestion(const QString &host, const QString &nam
     }
     QStringList args{QStringLiteral("answer"), name, QStringLiteral("--json")};
     if (!host.isEmpty()) args.prepend(QLatin1Char('@') + host);
-    auto *process = new QProcess(this);
-    configureProcess(process, program, args);
-    auto *timer = new QTimer(process); timer->setSingleShot(true);
-    auto reported = std::make_shared<bool>(false);
-    auto fail = [this, request, host, name, key, reported](const QString &detail, bool uncertain) {
-        if (*reported) return;
-        *reported = true; m_answersInFlight.remove(key);
-        emit questionAnswerFailed(request, host, name, detail, uncertain);
-    };
-    connect(process, &QProcess::started, process, [process, payload, fail] {
-        if (process->write(payload) != payload.size()) {
-            fail(tr("Answer transfer failed. Check Terminal before retrying."), true); process->kill();
-        }
-        process->closeWriteChannel();
-    });
-    connect(timer, &QTimer::timeout, process, [process, fail] {
-        fail(tr("Answer delivery timed out. Check Terminal before retrying."), true); process->kill();
-    });
-    connect(process, &QProcess::errorOccurred, process, [process, timer, fail](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart) {
-            timer->stop(); fail(tr("Cannot start hgs: %1").arg(process->errorString()), false); process->deleteLater();
-        }
-    });
-    connect(process, &QProcess::finished, process,
-        [this, process, timer, fail, reported, request, host, name, key, requestId, questionId, questionHash, runId, conversationId, asyncQuestion, canSkip]
-        (int code, QProcess::ExitStatus exitStatus) {
-            timer->stop();
-            if (*reported) { process->deleteLater(); return; }
-            const QString errorText = QString::fromUtf8(process->readAllStandardError()).trimmed().left(4000);
-            if (code != 0 || exitStatus != QProcess::NormalExit) {
-                const bool uncertain = exitStatus != QProcess::NormalExit || code != 1
-                    || errorText.contains(QStringLiteral("delivery uncertain"), Qt::CaseInsensitive);
-                fail(errorText.isEmpty() ? tr("Answer transfer failed (exit %1).").arg(code) : errorText, uncertain);
-            } else {
-                QJsonParseError error;
-                const auto doc = QJsonDocument::fromJson(process->readAllStandardOutput(), &error);
-                const auto receipt = doc.object();
-                if (error.error != QJsonParseError::NoError || !doc.isObject()
-                    || (receipt.value("status") != "answered" && !(asyncQuestion && !canSkip && receipt.value("status") == "submitted" && !receipt.value("skipped").toBool()))
-                    || receipt.value("request_id").toString() != requestId
-                    || receipt.value("name").toString() != name
-                    || receipt.value("question_id").toString() != questionId
-                    || receipt.value("question_hash").toString() != questionHash
-                    || receipt.value("run_id").toString() != runId
-                    || !receipt.value("conversation_id").isString()
-                    || receipt.value("conversation_id").toString() != conversationId)
-                    fail(tr("The answer acknowledgement is invalid. Check Terminal before retrying."), true);
-                else {
-                    *reported = true; m_answersInFlight.remove(key);
-                    if (receipt.value("status") == "submitted") emit questionAnswerSubmitted(request, host, name, receipt);
-                    else emit questionAnswered(request, host, name, receipt);
-                    emit sessionWriteDone(host);
-                }
-            }
-            process->deleteLater();
-        });
     m_answersInFlight.insert(key);
-    timer->start(host.isEmpty() ? 30000 : 45000);
-    process->start(); return request;
+    auto job = processRequest(program, args); job.input = payload; job.timeoutMs = host.isEmpty() ? 30000 : 45000;
+    ProcessRunner::run(std::move(job), this,
+        [this, request, host, name, key, requestId, questionId, questionHash, runId, conversationId, asyncQuestion, canSkip]
+        (const ProcessRunner::Result &result) {
+            m_answersInFlight.remove(key);
+            const auto fail = [this, request, host, name](const QString &detail, bool uncertain) { emit questionAnswerFailed(request, host, name, detail, uncertain); };
+            if (result.outcome == ProcessRunner::Result::FailedToStart) { fail(tr("Cannot start hgs: %1").arg(result.errorString), false); return; }
+            if (result.outcome == ProcessRunner::Result::TimedOut) { fail(tr("Answer delivery timed out. Check Terminal before retrying."), true); return; }
+            const QString errorText = QString::fromUtf8(result.standardError).trimmed().left(4000);
+            if (result.exitCode != 0 || result.exitStatus != QProcess::NormalExit) {
+                const bool uncertain = result.exitStatus != QProcess::NormalExit || result.exitCode != 1
+                    || errorText.contains(QStringLiteral("delivery uncertain"), Qt::CaseInsensitive);
+                fail(errorText.isEmpty() ? tr("Answer transfer failed (exit %1).").arg(result.exitCode) : errorText, uncertain); return;
+            }
+            if (result.standardOutput.size() > 65536) { fail(tr("The answer acknowledgement is too large. Check Terminal before retrying."), true); return; }
+            QJsonParseError error; const auto doc = QJsonDocument::fromJson(result.standardOutput, &error); const auto receipt = doc.object();
+            if (error.error != QJsonParseError::NoError || !doc.isObject()
+                || (receipt.value("status") != "answered" && !(asyncQuestion && !canSkip && receipt.value("status") == "submitted" && !receipt.value("skipped").toBool()))
+                || receipt.value("request_id").toString() != requestId || receipt.value("name").toString() != name
+                || receipt.value("question_id").toString() != questionId || receipt.value("question_hash").toString() != questionHash
+                || receipt.value("run_id").toString() != runId || !receipt.value("conversation_id").isString()
+                || receipt.value("conversation_id").toString() != conversationId) { fail(tr("The answer acknowledgement is invalid. Check Terminal before retrying."), true); return; }
+            if (receipt.value("status") == "submitted") emit questionAnswerSubmitted(request, host, name, receipt);
+            else emit questionAnswered(request, host, name, receipt);
+            emit sessionWriteDone(host);
+        });
+    return request;
 }
 
 quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, const QString &text,

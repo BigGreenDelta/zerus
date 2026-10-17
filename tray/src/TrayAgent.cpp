@@ -1,4 +1,6 @@
 #include "TrayAgent.h"
+#include "QuestionNotificationSettings.h"
+#include "AutomaticApprovals.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -126,6 +128,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     : QObject(parent)
     , m_cfg(cfg)
     , m_client(cfg.hgsPath)
+    , m_automaticApprovals(std::make_unique<AutomaticApprovals>(cfg.hgsPath))
     , m_readSync(&m_client)
     , m_terminal(makeTerminal(cfg))
     // Набор режимов для подменю «Open in» спрашивается У AppConfig, а не строится
@@ -209,6 +212,9 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     connect(&m_client, &HgsClient::localReady, this, &TrayAgent::onLocalReady);
     connect(&m_client, &HgsClient::peerReady, this, &TrayAgent::onPeerReady);
     connect(&m_client, &HgsClient::failed, this, &TrayAgent::onFailed);
+    connect(m_automaticApprovals.get(), &AutomaticApprovals::changed, this, [this](const QString &host) {
+        if (host.isEmpty()) m_client.requestLocal(); else m_client.requestPeer(host);
+    });
     // Reads in flight come from the client, keyed by the alias each one polled:
     // a peer's answer may name that machine differently.
     connect(&m_client, &HgsClient::stateReadStarted, this, [this]() {
@@ -238,7 +244,13 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     // сразу же, не дожидаясь ни peerPollMs, ни обнаружения пиров ниже -- та часть, что
     // отвечает "тик и первая отрисовка не должны ждать пиров" из задания.
     m_localTimer.setInterval(cfg.localPollMs);
-    connect(&m_localTimer, &QTimer::timeout, &m_client, &HgsClient::requestLocal);
+    connect(&m_localTimer, &QTimer::timeout, this, [this] {
+        m_client.requestLocal();
+        // Short-lived remote permission prompts must not wait for the ordinary
+        // minute-long peer cadence. The client coalesces reads already in flight.
+        const int interval = AutomaticApprovalPolicy::enabled() ? qMin(m_cfg.peerPollMs, 5000) : m_cfg.peerPollMs;
+        if (m_peerTimer.interval() != interval) m_peerTimer.setInterval(interval);
+    });
     m_localTimer.start();
     m_client.requestLocal();
 
@@ -267,7 +279,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     // заводится m_peerTimer и делается первый (немедленный) опрос каждого пира. Меню
     // до этого момента показывает пустой список пиров -- секции появляются по мере
     // разрешения, а не блокируют иконку.
-    m_peerTimer.setInterval(cfg.peerPollMs);
+    m_peerTimer.setInterval(AutomaticApprovalPolicy::enabled() ? qMin(cfg.peerPollMs, 5000) : cfg.peerPollMs);
     connect(&m_peerTimer, &QTimer::timeout, this, [this]() {
         pollAllKnownPeers(m_client, m_state);
     });
@@ -363,6 +375,7 @@ void TrayAgent::onLocalReady(const BoxState &box)
     m_lastError.clear();
     const auto previousPeers = m_state.peerNames();
     m_state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    m_automaticApprovals->setFleet(m_state);
     migrateReadMarks({}); publishReadMarks();
     for (const auto &peer : previousPeers) if (!m_state.peerNames().contains(peer)) {
         BoxState removed; removed.host = peer; removed.ok = true; observeAttention(peer, removed);
@@ -397,6 +410,7 @@ void TrayAgent::onPeerReady(const BoxState &box)
     if (m_state.local().peersKnown && !m_state.local().peers.contains(box.host)) return;
     m_lastError.clear();
     m_state.setPeer(box, QDateTime::currentMSecsSinceEpoch());
+    m_automaticApprovals->setFleet(m_state);
     migrateReadMarks(box.host); publishReadMarks();
     observeAttention(box.host, *m_state.peer(box.host));
     if (m_sessionsWindow) m_sessionsWindow->setFleet(m_state);
@@ -455,6 +469,7 @@ void TrayAgent::refreshIcon()
 void TrayAgent::observeAttention(const QString &host, const BoxState &box)
 {
     const auto before = m_attention.state();
+    m_attention.setOptionalQuestions(QuestionNotificationSettings::enabled());
     const auto changes = m_attention.observe(host, box);
     if (m_attention.state() != before)
         QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));

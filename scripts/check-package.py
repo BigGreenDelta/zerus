@@ -8,6 +8,11 @@ import subprocess
 import tempfile
 
 PLUGIN = "usr/lib/hgs-tray/plugins/libhgs-tray-native-ui.so"
+CONNECTOR = "usr/bin/zerus-mobile-connector"
+CONNECTOR_UNIT = "usr/lib/systemd/user/zerus-mobile-connector.service"
+# The connector links rustls, ring and SQLite statically: it needs nothing
+# beyond the C runtime that every package depends on.
+CONNECTOR_LIBRARIES = {"libc.so.6", "libm.so.6", "libgcc_s.so.1", "ld-linux-x86-64.so.2"}
 
 
 def needed(path):
@@ -28,7 +33,7 @@ def main():
                 f"usr/share/licenses/{args.package_name}/LICENSE", f"usr/share/licenses/{args.package_name}/libvterm-LICENSE",
                 f"usr/share/licenses/{args.package_name}/md4c-LICENSE",
                 f"usr/share/licenses/{args.package_name}/rust/inventory.json", "usr/share/doc/zerus/build-info.json",
-                PLUGIN]
+                PLUGIN, CONNECTOR, CONNECTOR_UNIT, "usr/lib/zerus/install-mobile-connector-service.py"]
     for name in required:
         if not (root / name).is_file():
             raise SystemExit(f"Missing package file: {name}")
@@ -40,12 +45,22 @@ def main():
         raise SystemExit("hgs-tray must not link Qt WebEngine; the native UI plugin does")
     if "libQt6WebEngineWidgets.so.6" not in needed(root / PLUGIN):
         raise SystemExit("The native UI plugin does not use Qt WebEngine Widgets")
+    linked = set(needed(root / CONNECTOR))
+    if not linked <= CONNECTOR_LIBRARIES:
+        raise SystemExit(f"The mobile connector links unexpected libraries: {sorted(linked - CONNECTOR_LIBRARIES)}")
+    # Its black-box test seams exist only with the test-hooks feature.
+    if b"ZERUS_CONNECTOR_TEST_" in (root / CONNECTOR).read_bytes():
+        raise SystemExit("The packaged mobile connector was built with test hooks")
+    unit = (root / CONNECTOR_UNIT).read_text().splitlines()
+    if "KillMode=process" not in unit or "ExecStart=/usr/bin/zerus-mobile-connector --config %E/hgs/mobile/connector.json" not in unit:
+        raise SystemExit("The mobile connector unit must run the packaged binary with KillMode=process")
     manifest = json.loads((root / "usr/share/doc/zerus/build-info.json").read_text())
     with tempfile.TemporaryDirectory(prefix="zerus-package-test-") as home:
         env = {key: value for key, value in os.environ.items() if not key.startswith("HGS_")}
         env.update(HOME=home, HGS_STATE_DIR=home+"/state", HGS_CONFIG_DIR=home+"/config")
         desktop = manifest.get("desktop_build", {})
-        expected = {"hgs": "hgs " + manifest["cli_version"], "hgs-tray": "Zerus " + desktop.get("versionName", manifest["version"])}
+        expected = {"hgs": "hgs " + manifest["cli_version"], "hgs-tray": "Zerus " + desktop.get("versionName", manifest["version"]),
+                    "zerus-mobile-connector": "zerus-mobile-connector " + manifest["mobile_connector_version"]}
         for name, version in expected.items():
             result = subprocess.run([str(root / "usr/bin" / name), "--version"], env=env,
                                     capture_output=True, text=True, timeout=20, check=True)

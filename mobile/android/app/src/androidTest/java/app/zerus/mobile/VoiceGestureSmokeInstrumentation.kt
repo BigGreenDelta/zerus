@@ -243,7 +243,7 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
         }
         val timerBounds = Rect().also(timer::getBoundsInScreen)
         val hintBounds = Rect().also(hint::getBoundsInScreen)
-        val actionBounds = Rect().also { node("Stop recording").getBoundsInScreen(it) }
+        val actionBounds = Rect().also { node("Recording").getBoundsInScreen(it) }
         val tolerance = (2 * targetContext.resources.displayMetrics.density).toInt()
         check(!timerBounds.isEmpty && !hintBounds.isEmpty)
         check(timerBounds.top >= actionBounds.top - tolerance && timerBounds.bottom <= actionBounds.bottom + tolerance &&
@@ -482,7 +482,7 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
                 try {
                     await("held microphone samples") { model.speech.recording && model.speech.seconds >= 1 }
                 } catch (error: IllegalStateException) {
-                    val currentBounds = Rect().also { (named("Voice input") ?: named("Stop recording"))?.getBoundsInScreen(it) }
+                    val currentBounds = Rect().also { (named("Voice input") ?: named("Recording"))?.getBoundsInScreen(it) }
                     throw IllegalStateException(main {
                         "Hold at (${press.x},${press.y}) failed; currentMic=$currentBounds; recording=${model.speech.recording}, busy=${model.speech.busy}, capture=${model.speech.activeCaptureId}, preview=${model.speech.draft != null}, notice=${model.speech.notice}"
                     }, error)
@@ -590,7 +590,7 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             val withKeyboard = hold(hideKeyboard = false)
             check(main { activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true }) { "Recording dismissed the open software keyboard" }
             check(main { model.speechComposer?.editor === imeEditor && imeEditor.selection == imeSelection && imeEditor.text.isEmpty() })
-            val micDuringImeHold = Rect().also { node("Stop recording").getBoundsInScreen(it) }
+            val micDuringImeHold = Rect().also { node("Recording").getBoundsInScreen(it) }
             val positionTolerance = 2 * targetContext.resources.displayMetrics.density
             check(kotlin.math.abs(micDuringImeHold.exactCenterX() - micBeforeImeHold.exactCenterX()) <= positionTolerance &&
                 kotlin.math.abs(micDuringImeHold.exactCenterY() - micBeforeImeHold.exactCenterY()) <= positionTolerance) {
@@ -640,22 +640,13 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             check(PrivateStore(targetContext).voiceState().draft == null)
             noDelivery()
 
-            // Real fast release can produce <100ms on a fast emulator or a short
-            // valid preview under load. Both must finish visibly and permit retry.
-            val brief = down()
-            touch(brief, MotionEvent.ACTION_UP)
-            await("fast press terminal state") { !model.speech.busy && (model.speech.draft != null || model.speech.captureFailure != null) }
-            if (main { model.speech.draft != null }) {
-                check(PrivateStore(targetContext).voiceState().draft == main { model.speech.draft })
-                discard()
-            } else {
-                node("Recording not saved")
-                check(main { model.speech.captureFailure?.second?.isNotBlank() == true })
-                tap("Done")
-                node("Voice input")
-                check(main { !model.speech.busy && model.speech.draft == null })
-            }
-            noDelivery()
+            // Telegram short tap switches mode without creating a capture.
+            val brief = down();touch(brief, MotionEvent.ACTION_UP)
+            node("Video input");check(main { model.speech.videoMode && !model.speech.busy })
+            val cameraBounds = Rect().also { node("Video input").getBoundsInScreen(it) }
+            val switchBack = Press(SystemClock.uptimeMillis(), cameraBounds.exactCenterX(), cameraBounds.exactCenterY())
+            touch(switchBack, MotionEvent.ACTION_DOWN);touch(switchBack, MotionEvent.ACTION_UP)
+            node("Voice input");check(main { !model.speech.videoMode && !model.speech.busy });noDelivery()
 
             val interrupted = hold()
             touch(interrupted, MotionEvent.ACTION_CANCEL)
@@ -705,8 +696,7 @@ class VoiceGestureSmokeInstrumentation : Instrumentation() {
             waitForIdleSync()
             check(main { model.speechComposer?.editor === accessibleEditor && accessibleEditor.text.isEmpty() })
             assertNoEditableControl()
-            check(uiNode("accessible stop action") { it.contentDescription?.toString() == "Stop recording" }
-                .performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            tap("Stop recording")
             preview("accessible stop retained preview")
             discard()
 

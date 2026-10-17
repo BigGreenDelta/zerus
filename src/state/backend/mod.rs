@@ -135,6 +135,8 @@ pub(crate) struct PaneRow {
 /// A pane's reported current directory (passive metadata only).
 pub(crate) struct PanePath {
     pub session: String,
+    /// The session's immutable ID, `$N`.
+    pub session_id: String,
     pub active_window: bool,
     pub active_pane: bool,
     pub path: String,
@@ -514,17 +516,22 @@ mod tests {
             ])
         }
         fn pane_paths(&self) -> Result<Vec<PanePath>> {
-            let path = |active_window: bool, active_pane: bool, path: &str| PanePath {
-                session: "codex/p/b".into(),
+            let path = |session: &str, id: &str, active_window, active_pane, path: &str| PanePath {
+                session: session.into(),
+                session_id: id.into(),
                 active_window,
                 active_pane,
                 path: path.into(),
             };
             Ok(vec![
-                path(false, true, "/inactive-window"),
-                path(true, true, "/active"),
-                path(true, false, "/inactive-pane"),
-                path(true, true, "relative"),
+                path("codex/p/b", "$2", false, true, "/inactive-window"),
+                path("codex/p/b", "$2", true, true, "/active"),
+                path("codex/p/b", "$2", true, false, "/inactive-pane"),
+                path("codex/p/b", "$2", true, true, "relative"),
+                // Renamed since `panes`, started since, and without an ID.
+                path("claude/p/renamed", "$1", true, true, "/renamed"),
+                path("claude/p/new", "$3", true, true, "/new"),
+                path("sh/p/plain", "", true, true, "/plain"),
             ])
         }
     }
@@ -542,6 +549,17 @@ mod tests {
             // The same answer names each live session by its immutable ID.
             let (sessions, names) = storage::live_sessions().unwrap();
             assert_eq!(sessions.len(), snapshot.len());
+            // Folders read later keep the names those IDs had then.
+            assert_eq!(
+                workspace::snapshot_cwds(&names)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                [
+                    ("claude/p/a".into(), "/renamed".into()),
+                    ("codex/p/b".into(), "/active".into()),
+                    ("sh/p/plain".into(), "/plain".into())
+                ]
+            );
             assert_eq!(
                 names.into_iter().collect::<Vec<_>>(),
                 [

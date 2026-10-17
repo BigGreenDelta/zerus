@@ -66,6 +66,14 @@ class Adapter extends LlmAdapter {
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'root-call',name:'hgs_test_root',arguments:args}};
       yield {type:'finish',reason:{kind:'tool-calls'}};return;
     }
+    // The official Schedule tool, when its optional bundle is loaded.
+    if (text.includes('SCHEDULE_FIXTURE') && last?.role !== 'tool') {
+      const args=JSON.stringify({prompt:'Scheduled fixture check',title:'Fixture check',every_seconds:3600});
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'tool-call-delta',index:0,id:'schedule-call',name:'schedule_create',argumentsDelta:args};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'schedule-call',name:'schedule_create',arguments:args}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};return;
+    }
     if (text.includes('QUESTION') && last?.role !== 'tool') {
       const args=JSON.stringify({ questions:[{id:'choice',question:'Which option?',options:[{label:'First'},{label:'Second'}]}] });
       yield {type:'block-start',index:0,blockType:'tool-call'};
@@ -185,7 +193,8 @@ export function apply(ctx,config) {
     async execute(_args,exec){return ctx.approval.request({agent:exec.agent,toolName:'hgs_test_approval',callId:exec.callId,reason:'Test an explicit native decision',signal:exec.signal});}
   }));
   ctx.on('agent/created',({agent,source})=>{
-    if (source !== 'startup') return;
+    // A native fork starts from its source's seeded history, goal included.
+    if (source !== 'startup' || ctx.goals.get(agent)) return;
     const created=ctx.goals.create(agent,{objective:'Test the native adapter',maxGoalRounds:8});
     ctx.goals.pause(agent,{id:created.id,revision:created.revision});
   });

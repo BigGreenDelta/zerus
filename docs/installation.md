@@ -54,6 +54,15 @@ use that exact path. The desktop installs to `~/.local/bin/hgs-tray` on Linux or
 `~/Applications/hgs-tray.app` on macOS. The installer configures autostart through
 systemd or launchd.
 
+`HGS_MOBILE_CONNECTOR=1 ./install.sh` also builds the Rust mobile connector
+(`services/mobile/connector`) into `~/.local/bin/zerus-mobile-connector`. Later
+runs update that copy when it changed; `HGS_MOBILE_CONNECTOR=0` always skips it.
+The installer never enables, starts or restarts the connector's service: when the
+running service uses the replaced binary, it prints the restart command to run
+after phone actions have drained. `mac-install.sh` passes the variable to the
+Mac's build. Moving a gateway from the Python connector is the owner-approved
+cutover in the connector's design.
+
 Open the workspace from the command line:
 
 ```sh
@@ -105,10 +114,14 @@ installation and upgrades do not restart native agents, tmux or the GUI.
 ## macOS (DMG)
 
 For Apple Silicon Macs running macOS 14 or later, download
-`zerus-VERSION-macos-arm64.dmg` from the selected [GitHub release](https://github.com/ufna/zerus/releases).
+`zerus-VERSION-macos-arm64.dmg` from the [latest stable release](https://github.com/ufna/zerus/releases/latest)
+or a selected [nightly release](https://github.com/ufna/zerus/releases?q=nightly-&expanded=true).
 Open the image, drag **Zerus** into **Applications**, then eject the image and
-open Zerus from Applications. The application and disk image are signed and
-notarized by Apple. Older releases may not contain a macOS download.
+open Zerus from Applications. The application and disk image are signed with
+Developer ID and notarized by Apple. Signed stable macOS downloads begin with
+[0.43.0](https://github.com/ufna/zerus/releases/tag/v0.43.0), and nightly downloads with
+[nightly 0.42.2.r1291.g5d2e5d0.n17](https://github.com/ufna/zerus/releases/tag/nightly-38794972859);
+older releases may not contain a macOS download.
 
 To use the bundled CLI and SSH session bridge, run the per-user setup once,
 without sudo:
@@ -119,33 +132,43 @@ without sudo:
 
 Local tmux sessions require `tmux` (`brew install tmux`). Agent providers are
 installed separately. The Homebrew cask below installs tmux and links the CLI
-automatically. For a manual upgrade, replace the application with the new DMG's
-copy and use **Restart to finish update** in Zerus; native agents keep running.
+automatically. For a manual upgrade, quit Zerus from its menu, replace the app
+with the new DMG's copy and open Zerus again; native agents keep running.
+**Settings > Updates** checks the selected channel and offers **Download DMG**
+with replacement instructions. Dev DMGs come from the verified
+[desktop Dev catalog](https://zerus.dev/updates/v2/desktop/dev.json) on zerus.dev;
+stable and nightly DMGs come from GitHub Releases. Updates are installed manually.
 
 ## macOS (Homebrew)
 
 Apple Silicon Macs running macOS 14 or later can install the signed and notarized
-application and CLI from the Zerus tap. The casks appear in the tap with the first
-signed builds.
+application and CLI from the Zerus tap:
 
 ```sh
 brew install --cask ufna/zerus/zerus
 zerus-setup
 ```
 
-The tap has two channels. `zerus` follows stable releases; `zerus@nightly` follows
+The tap supports three channels. `zerus` follows stable releases; `zerus@nightly` follows
 the daily build from main that passed the full CI, published at the same time as
-the AUR nightly. Both install the same `Zerus.app`, so only one can be installed.
-Settings, agents and conversations are shared. To switch channels:
+the AUR nightly. `zerus@dev` follows successful main CI builds, with the same
+Apple signature and notarization. All install the same `Zerus.app`, so only one can be installed.
+Settings, agents and conversations are shared. Switch between Stable and Nightly with:
 
 ```sh
 brew uninstall --cask zerus && brew install --cask ufna/zerus/zerus@nightly
 brew uninstall --cask zerus@nightly && brew install --cask ufna/zerus/zerus
 ```
 
-A Zerus installed from `zerus@nightly` checks the nightly update channel unless you
-choose another one in **Settings > Updates**. The Dev channel, built from every main
-push, has no cask; use `zerus@nightly` for prebuilt builds from main.
+For Dev, install `brew install --cask ufna/zerus/zerus@dev`. To switch from nightly:
+
+```sh
+brew uninstall --cask zerus@nightly && brew install --cask ufna/zerus/zerus@dev
+```
+
+Zerus checks its installed channel unless you choose another one in
+**Settings > Updates**. That page shows the complete installed version, a copyable
+Homebrew update/channel-switch command and a separate DMG download.
 
 The cask installs `/Applications/Zerus.app`, links `hgs` and `zerus-setup` into
 Homebrew's `bin` directory and installs `tmux` as a dependency. It starts nothing
@@ -170,7 +193,7 @@ launchctl bootout "gui/$(id -u)/com.hgdev.hgs-tray"
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.hgdev.hgs-tray.plist
 ```
 
-`brew upgrade --cask zerus` (or `zerus@nightly`) replaces the application but never
+`brew upgrade --cask zerus` (or the installed nightly/dev cask) replaces the application but never
 quits it, unloads its LaunchAgents or stops tmux and native agents. When the
 installed bundle is another build than the running GUI, Zerus shows **Restart to
 finish update**; drafts are kept. Background workers keep the previous binary until
@@ -185,10 +208,10 @@ To uninstall, remove the per-user integration first:
 
 ```sh
 zerus-setup --remove
-brew uninstall --cask zerus
+brew uninstall --cask zerus   # use zerus@nightly for Nightly, or zerus@dev for Dev
 ```
 
-`brew uninstall --zap --cask zerus` (or `zerus@nightly`) additionally removes the Zerus LaunchAgents,
+`brew uninstall --zap --cask zerus` (or `zerus@nightly` / `zerus@dev`) additionally removes the Zerus LaunchAgents,
 including ones created by a source installation, the logs and saved window state.
 `~/.config/hgs`, agent state and conversations are never removed.
 
@@ -388,7 +411,7 @@ stops an idle session host without disabling anything.
 Open **Settings > Updates** to see the installed and published desktop versions,
 the last successful check and any check error. **Update checks** contains the
 automatic-check switch, release channel and **Check now** action. Automatic
-checks run at most once a day per channel; manual checks remain available when
+checks run at most once a day for Stable/Nightly and every 15 minutes for Dev; manual checks remain available when
 automatic checks are disabled.
 
 When a newer release is verified, the workspace shows a compact **New version**
@@ -397,7 +420,8 @@ clicking it opens Updates. The tray menu also offers Updates, and fresh newer
 releases can show a system notification.
 
 **View release** opens the published release page. Expand **Show installation
-details** for package ownership and copyable Arch commands. There, **Installation
+details** for package ownership and copyable Arch or Homebrew commands. Mac
+downloads also offer a DMG button and manual replacement instructions. There, **Installation
 instructions** opens this guide at the section for your system:
 [Arch Linux](#arch-linux) on Arch-based Linux, [local installation](#local-installation)
 on other Linux systems, [Homebrew](#macos-homebrew) on macOS and [Windows](#windows)

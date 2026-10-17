@@ -10,17 +10,17 @@ import java.util.UUID
 data class VoiceMessage(val id: String, val runId: String, val conversationId: String, val createdAt: Double,
     val revision: Long, val state: String, val audio: DisplayedAttachment, val durationMs: Int,
     val transcript: String = "", val error: String = "", val errorCode: String = "", val nativeBinding: String = "",
-    val waveform: List<Int> = emptyList()) {
+    val waveform: List<Int> = emptyList(), val video: VideoMessage? = null) {
     val terminal get() = state in setOf("submitted", "failed", "cancelled", "uncertain")
 }
 internal data class VoiceComputer(val id: String, val name: String, val profiles: List<SpeechProfile>)
 internal data class VoiceDraft(val target: Target, val machineId: String, val profileId: String,
-    val audio: Attachment, val durationMs: Int, val createdAt: Double, val profileRevision: Long? = null) {
+    val audio: Attachment, val durationMs: Int, val createdAt: Double, val profileRevision: Long? = null, val video: VideoDraft? = null) {
     val selection get() = SpeechSelection(machineId.takeIf { it.isNotBlank() }?.let { MachineKey(target.connectionId, it) }, profileId, profileRevision)
 }
 internal data class VoiceOutgoing(val id: String, val target: Target, val machineId: String, val profileId: String,
     val audio: Attachment?, val durationMs: Int, val createdAt: Double, val message: VoiceMessage? = null,
-    val uploadState: String = "uploading", val error: String = "", val profileRevision: Long? = null) {
+    val uploadState: String = "uploading", val error: String = "", val profileRevision: Long? = null, val video: VideoDraft? = null) {
     val state get() = message?.state ?: uploadState
     val terminal get() = state in setOf("submitted", "failed", "cancelled", "uncertain")
     val needsStatus get() = message == null && uploadState == "uncertain" || !terminal
@@ -31,11 +31,14 @@ internal data class VoiceOutgoing(val id: String, val target: Target, val machin
     fun displayed(): VoiceMessage {
         val result = message ?: VoiceMessage(id, target.run, target.conversation, createdAt, 0,
             uploadState, checkNotNull(audio).displayed().copy(messageId = id, index = 0), durationMs, error = error)
-        return audio?.let { result.copy(audio = result.audio.copy(localId = it.id, sha256 = it.sha256)) } ?: result
+        val displayed = audio?.let { result.copy(audio = result.audio.copy(localId = it.id, sha256 = it.sha256)) } ?: result
+        return video?.let { local -> displayed.copy(video = (displayed.video ?: local.displayed(id)).let {
+            it.copy(file = it.file.copy(localId = local.file.id, sha256 = local.file.sha256))
+        }) } ?: displayed
     }
 }
 internal data class VoiceState(val selection: SpeechSelection = SpeechSelection(), val draft: VoiceDraft? = null,
-    val outgoing: List<VoiceOutgoing> = emptyList())
+    val outgoing: List<VoiceOutgoing> = emptyList(), val videoMode: Boolean = false, val previewBeforeSend: Boolean = false)
 
 object VoiceProtocol {
     val operations = setOf("voice_profiles", "voice_submit", "voice_status", "voice_cancel")
@@ -72,7 +75,7 @@ object VoiceProtocol {
             DisplayedAttachment(name, "audio/wav", bytes, messageId = id, index = 0),
             duration, transcript, raw.string("error").take(2000), raw.string("error_code").take(128),
             raw.optJSONObject("native_binding")?.toString()?.also { require(it.length <= 4096) }.orEmpty(),
-            VoiceWaveform.decode(audio.opt("waveform")))
+            VoiceWaveform.decode(audio.opt("waveform")), raw.optJSONObject("video")?.let { VideoProtocol.message(it, id) })
     }
     fun response(raw: JSONObject, target: Target, id: String): VoiceMessage {
         require(raw.optInt("schema") == 1) { "Unsupported voice message response." }
@@ -89,6 +92,7 @@ object VoiceProtocol {
         .put("audio", JSONObject().put("request_id", message.id).put("index", 0).put("name", message.audio.name)
             .put("mime", "audio/wav").put("bytes", message.audio.bytes).put("duration_ms", message.durationMs)
             .put("waveform", message.waveform.takeIf(VoiceWaveform::valid)?.let(::JSONArray)))
+        .put("video", message.video?.let(VideoProtocol::json))
     fun newer(previous: VoiceMessage?, next: VoiceMessage): VoiceMessage {
         if (previous == null) return next
         require(previous.id == next.id && previous.runId == next.runId &&
@@ -149,14 +153,17 @@ internal object VoiceRoutes {
 internal object VoiceCodec {
     private fun draft(value: VoiceDraft) = MessageCodec.targetJson(value.target).put("machine", value.machineId)
         .put("profile", value.profileId).put("profile_revision", value.profileRevision).put("audio", value.audio.toJson()).put("duration_ms", value.durationMs).put("created", value.createdAt)
+        .put("video", value.video?.let(VideoProtocol::draftJson))
     private fun draft(raw: JSONObject) = VoiceDraft(MessageCodec.target(raw), raw.getString("machine"), raw.getString("profile"),
-        Attachment.fromJson(raw.getJSONObject("audio")), raw.getInt("duration_ms"), raw.getDouble("created"), SpeechProtocol.revision(raw))
+        Attachment.fromJson(raw.getJSONObject("audio")), raw.getInt("duration_ms"), raw.getDouble("created"), SpeechProtocol.revision(raw), raw.optJSONObject("video")?.let(VideoProtocol::draft))
     fun encode(value: VoiceState) = JSONObject().put("schema", 1)
-        .put("selection", SpeechProtocol.encode(SpeechState(value.selection)).getJSONObject("selection"))
+        .put("selection", SpeechProtocol.encode(SpeechState(value.selection)).getJSONObject("selection")).put("video_mode", value.videoMode)
+        .put("preview_before_send", value.previewBeforeSend)
         .put("draft", value.draft?.let(::draft)).put("outgoing", JSONArray(value.outgoing.map { entry ->
             MessageCodec.targetJson(entry.target).put("id", entry.id).put("machine", entry.machineId).put("profile", entry.profileId).put("profile_revision", entry.profileRevision)
                 .put("audio", entry.audio?.toJson()).put("duration_ms", entry.durationMs).put("created", entry.createdAt)
                 .put("message", entry.message?.let(VoiceProtocol::json)).put("upload_state", entry.uploadState).put("error", entry.error)
+                .put("video", entry.video?.let(VideoProtocol::draftJson))
         }))
     fun decode(raw: JSONObject): VoiceState {
         require(raw.optInt("schema", 1) == 1)
@@ -167,8 +174,8 @@ internal object VoiceCodec {
                 val target = MessageCodec.target(row)
                 val message = row.optJSONObject("message")?.let { VoiceProtocol.response(JSONObject().put("schema", 1).put("message", it), target, id) }
                 VoiceOutgoing(id, target, row.getString("machine"), row.getString("profile"), row.optJSONObject("audio")?.let(Attachment::fromJson),
-                    row.getInt("duration_ms"), row.getDouble("created"), message, row.getString("upload_state"), row.string("error"), SpeechProtocol.revision(row)).recover()
-            }.also { require(it.map(VoiceOutgoing::id).distinct().size == it.size) })
+                    row.getInt("duration_ms"), row.getDouble("created"), message, row.getString("upload_state"), row.string("error"), SpeechProtocol.revision(row), row.optJSONObject("video")?.let(VideoProtocol::draft)).recover()
+            }.also { require(it.map(VoiceOutgoing::id).distinct().size == it.size) }, raw.optBoolean("video_mode"), raw.optBoolean("preview_before_send"))
     }
 }
 
@@ -185,13 +192,16 @@ internal object VoiceHistory {
             val own = local[voice.id]
             val latest = own?.message?.let { VoiceProtocol.newer(voice, it) } ?: voice
             val audio = own?.audio?.let { latest.audio.copy(localId = it.id, sha256 = it.sha256) } ?: latest.audio
-            event.copy(id = "voice:${voice.id}", text = latest.transcript, voice = latest.copy(audio = audio),
-                attachments = listOf(audio), requestId = voice.id, outgoingId = voice.id)
+            val video = latest.video?.let { remote -> own?.video?.let { local ->
+                remote.copy(file = remote.file.copy(localId = local.file.id, sha256 = local.file.sha256))
+            } ?: remote } ?: own?.video?.displayed(voice.id)
+            event.copy(id = "voice:${voice.id}", text = latest.transcript, voice = latest.copy(audio = audio, video = video),
+                attachments = listOfNotNull(audio, video?.file), requestId = voice.id, outgoingId = voice.id)
         }.toMutableList()
         local.values.filter { it.id !in seen }.forEach { own ->
             val voice = own.displayed().let { message -> own.audio?.let { message.copy(audio = message.audio.copy(localId = it.id, sha256 = it.sha256)) } ?: message }
             val event = Event("voice:${own.id}", "You", voice.transcript, "", own.createdAt, own.id,
-                listOf(voice.audio), "hgs_voice", outgoingId = own.id, nativeType = "UserMessage", voice = voice)
+                listOfNotNull(voice.audio, voice.video?.file), "hgs_voice", outgoingId = own.id, nativeType = "UserMessage", voice = voice)
             val position = rows.indexOfFirst { it.at > event.at }
             if (position < 0) rows += event else rows.add(position, event)
         }

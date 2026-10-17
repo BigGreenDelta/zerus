@@ -781,6 +781,90 @@ os.execv('/bin/sh', ['sh', '-c', sys.argv[-1]])
         altered = dict(payload, text="different")
         self.assertIn("already used", self.send(altered, success=False))
 
+    def test_graph_environment_label_cannot_claim_an_unrelated_native_process(self):
+        origin = dict(self.record, name="claude/graph/source", agent="claude",
+                      run_id=str(uuid.uuid4()), conversation_id=str(uuid.uuid4()))
+        path = self.state / (hashlib.sha256(origin['name'].encode()).hexdigest()+'.json')
+        self.env.update(HGS_SESSION=origin['name'], HGS_RUN_ID=origin['run_id'])
+        # This owned but unrelated pane is not an ancestor of this hgs caller.
+        path.write_text(json.dumps(origin))
+        self.send(self.payload(text="A label alone cannot claim a sender"))
+        ledger = self.state/'graph/sends.sqlite3'
+        self.assertFalse(ledger.exists())
+
+    def test_graph_attribution_checks_process_ancestry_and_never_replays_input(self):
+        import sqlite3
+        origin = dict(self.record, name="claude/graph/source", agent="claude",
+                      run_id=str(uuid.uuid4()), conversation_id=str(uuid.uuid4()))
+        path = self.state / (hashlib.sha256(origin['name'].encode()).hexdigest()+'.json')
+        self.env.update(HGS_SESSION=origin['name'], HGS_RUN_ID=origin['run_id'])
+        ledger = self.state/'graph/sends.sqlite3'
+        # The fixture's actual parent is the recorded owner, just as a native
+        # agent's shell tool is descended from its recorded agent process.
+        origin['pid'] = os.getpid()
+        origin['process_start'] = subprocess.check_output(
+            ['ps','-p',str(os.getpid()),'-o','lstart='],
+            env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
+        path.write_text(json.dumps(origin))
+        payload = self.payload(text="Verified origin content stays out of the graph")
+        receipt = self.send(payload)
+        self.wait_for(lambda:self.received().endswith(b'\r'))
+        before = self.received()
+        self.assertEqual(self.send(payload),receipt)
+        self.assertEqual(self.received(),before)
+        with sqlite3.connect(ledger) as db:
+            events=[json.loads(row[0]) for row in db.execute('SELECT payload FROM sends')]
+        self.assertEqual(len(events),1)
+        self.assertEqual(events[0]['status'],'submitted')
+        self.assertEqual(events[0]['source']['endpoint']['conversation'],origin['conversation_id'])
+        self.assertEqual(events[0]['target'],receipt['graph_target'])
+        self.assertNotIn(payload['text'],json.dumps(events))
+        graph = subprocess.run([str(HGS),'graph','snapshot','--json'],env=self.env,
+                               capture_output=True,text=True,timeout=5)
+        self.assertEqual(graph.returncode,0,graph.stderr)
+        rows=json.loads(graph.stdout)['items']
+        exchange=[r['item']['value'] for r in rows if r['item']['kind']=='event']
+        self.assertEqual(len(exchange),1)
+        self.assertEqual(exchange[0]['request_id'],payload['request_id'])
+        self.assertEqual(exchange[0]['delivery_state'],'submitted')
+        read=dict(name=self.name,expected_run_id=self.run_id,expected_conversation_id=self.conversation_id,
+                  message_request_id=payload['request_id'])
+        def evidence(value):
+            return subprocess.run([str(HGS),'graph','receipt','--json'],input=json.dumps(value),env=self.env,
+                                  capture_output=True,text=True,timeout=5)
+        opened=evidence(read)
+        self.assertEqual(opened.returncode,0,opened.stderr)
+        self.assertEqual(json.loads(opened.stdout)['event']['detail'],payload['text'])
+        self.assertEqual(json.loads(opened.stdout)['event']['message_id'],payload['request_id'])
+        for field in ('name','expected_run_id','expected_conversation_id','message_request_id'):
+            value=dict(read);value[field]=str(uuid.uuid4())
+            self.assertNotEqual(evidence(value).returncode,0,field)
+        self.assertEqual(self.received(),before)
+
+    def test_graph_attribution_keeps_remote_receipt_and_stdin_transport_exact(self):
+        import sqlite3
+        origin=dict(self.record,name='codex/graph/source',run_id=str(uuid.uuid4()),
+                    conversation_id=str(uuid.uuid4()),pid=os.getpid())
+        origin['process_start']=subprocess.check_output(['ps','-p',str(os.getpid()),'-o','lstart='],
+            env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
+        (self.state/(hashlib.sha256(origin['name'].encode()).hexdigest()+'.json')).write_text(json.dumps(origin))
+        self.env.update(HGS_SESSION=origin['name'],HGS_RUN_ID=origin['run_id'])
+        self.script('ssh',"""#!/usr/bin/env python3
+import json,os,pathlib,sys
+pathlib.Path(os.environ['INPUT_FIXTURE'],'ssh-args').write_text(json.dumps(sys.argv[1:]))
+os.execv('/bin/sh',['sh','-c',sys.argv[-1]])
+""")
+        payload=self.payload(text='Private remote graph message')
+        receipt=self.send(payload,remote=True)
+        args=json.loads((self.root/'ssh-args').read_text())
+        self.assertNotIn(payload['text'],' '.join(args))
+        self.assertEqual(args[-1],'~/.local/bin/hgs send codex/input-test --json')
+        with sqlite3.connect(self.state/'graph/sends.sqlite3') as db:
+            event=json.loads(db.execute('SELECT payload FROM sends').fetchone()[0])
+        self.assertEqual(event['status'],'submitted')
+        self.assertEqual(event['route'],'remote')
+        self.assertEqual(event['target'],receipt['graph_target'])
+
     def test_approval_unconfirmed_and_changed_identity_never_receive_input(self):
         cases = [dict(activity="unknown"), dict(phase="approval"), dict(phase="input"),
                  dict(conversation_id=""), dict(expected_id="pending"), dict(error="bad tracking"),

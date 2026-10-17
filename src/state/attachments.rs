@@ -202,7 +202,49 @@ pub(super) fn history_receipt(record:&Value,agent:&str,path:&Path)->Result<Optio
     Ok(Some((json!({"type":"UserPromptSubmit","source":"hgs_delivery","message_id":receipt["request_id"],"agent_id":"",
         "at":receipt.get("submitted_at").unwrap_or(&receipt["at"]),"detail":text,"submitted_text":text,"attachments":public_files(&receipt)}),string(&receipt,"submitted_text").to_owned())))
 }
-pub(super) fn history_directory(record:&Value)->PathBuf {directory(record)}
+pub(super) fn history_directory(record:&Value)->PathBuf {directory(record)
+}
+
+/// Explicitly requested Graph evidence from one exact durable send. It does
+/// not enumerate receipts, fetch attachment bytes or acknowledge any message.
+pub(super) fn graph_receipt(record: &Value, id: &str) -> Result<Value> {
+    let id = uuid::Uuid::parse_str(id).map_err(|_| "Invalid delivery request ID")?;
+    if id.is_nil() {
+        return Err("Invalid delivery request ID".into());
+    }
+    let value = receipt(&directory(record).join(format!("{id}.json")))?;
+    if !belongs(&value, record, "") || value["request_id"] != id.to_string() {
+        return Err("This delivery receipt is unavailable for the exact conversation".into());
+    }
+    let text = message_text(&value);
+    let truncated = text.len() > 32 * 1024;
+    let end = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= 32 * 1024)
+        .last()
+        .unwrap_or(0);
+    let detail = if truncated { &text[..end] } else { &text };
+    Ok(
+        json!({"type":"UserPromptSubmit","source":"hgs_delivery","message_id":id.to_string(),"agent_id":"",
+        "at":value.get("submitted_at").unwrap_or(&value["at"]),"detail":detail,
+        "content_truncated":truncated,"attachments":public_files(&value)}),
+    )
+}
+
+/// Body-free proof that a result was actually submitted to the exact waiter.
+/// A scoped reply ticket declares its meaning; this receipt proves delivery.
+pub(super) fn wait_result(waiter: &Value, id: &str, after: f64) -> Result<Value> {
+    let request = uuid::Uuid::parse_str(id).map_err(|_| "Invalid result request UUID")?;
+    if request.is_nil() || request.to_string()!=id {return Err("Invalid result request UUID".into());}
+    let record=json!({"agent":waiter["endpoint"]["provider"],"run_id":waiter["run_id"],"conversation_id":waiter["endpoint"]["conversation"]});
+    let value=receipt(&directory(&record).join(format!("{id}.json")))?;
+    let at=value.get("submitted_at").or_else(||value.get("at")).and_then(Value::as_f64).filter(|at|at.is_finite() && *at>=after);
+    if !belongs(&value,&record,"") || value["request_id"]!=id || value["run_id"]!=record["run_id"] || at.is_none() {
+        return Err("Result delivery is not confirmed for this exact wait; preserve the wait and check the original send".into());
+    }
+    Ok(json!({"request_id":id,"submitted_at":at}))
+}
 
 pub(super) fn stage_native(request: &Value) -> Result<Value> {
     if request["attachments"].is_null() {

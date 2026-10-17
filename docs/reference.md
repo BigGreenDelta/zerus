@@ -164,6 +164,33 @@ that event stay, and older versions still warn about those. An unreadable versio
 a launcher keeps the entry, as does a wrapper script that starts another Claude Code
 without itself changing: delete the entry from its `settings.json` by hand there.
 `PreModelSwitch` is never registered.
+
+Claude Code reports its context window only to a status line command. For a tracked
+Unix start of the `claude` CLI that reports 2.1.296 or later (the version read as
+for `PostModelSwitch`), `hgs` adds `--settings` with its own `statusLine`,
+`hgs __state statusline`, to the agent's command line; no settings file changes and
+the saved launch arguments stay as typed. The command keeps the run's latest
+`session_id`, `model.id` and `context_window.context_window_size` from Claude's
+input in `context-telemetry/` of the state folder, one file per run; a new run
+removes those not updated for 30 days. It then runs the status line Claude would otherwise use:
+the `statusLine` of the user settings file (`CLAUDE_CONFIG_DIR` or `~/.claude`),
+then the session folder's `.claude/settings.json` and `.claude/settings.local.json`,
+each later file's fields over the earlier ones. It runs that command with
+`/bin/sh -c`, Claude's input, environment and folder, prints its output and exits
+with its status, so Claude shows the user's status line as before and a change to
+it applies at once. Its `padding`, `refreshInterval` and `hideVimModeIndicator` are
+copied at launch. Without a user status line nothing is printed; Claude 2.1.296
+then keeps one empty row below the prompt. Claude keeps its own status line, and
+the session reports no window, on Windows, through a project launcher, with an older
+or unreadable version, when the launch passes `--settings`, `--setting-sources`,
+`--project-config-root`, `--managed-settings` or `--worktree` (`-w`), when managed
+settings exist (`/etc/claude-code` or
+`/Library/Application Support/ClaudeCode`, or `CLAUDE_CODE_MANAGED_SETTINGS_PATH`),
+when a settings file cannot be read or its status line is not a command, and when
+the session folder lies below another repository root (an enclosing repository, or
+the repository of a linked worktree such as a generated one) and the local settings
+of that root or of the folder set one: Claude reads one of the two by ownership checks.
+
 Tracked Codex needs `--no-daemon`; the integration has been verified with 0.160.0,
 while 0.155.1 lacks that required flag.
 
@@ -221,6 +248,82 @@ and removes an archive binding only after the native agent confirms the expected
 conversation. Failed restore keeps it. **Forget archive** preserves native history;
 `resume --all` excludes archives.
 
+### Browse Archive by date
+
+Desktop and Android filter **Archived date**, the time a conversation moved into
+Archive, independently of its creation or last message. Choose All dates, Today,
+7/30 calendar days, or an inclusive From/Through range. Days use the viewing
+device's local time zone, including daylight-saving changes. Pages request the
+most recently archived instances first; the desktop retains saved row order within
+each project. **Refresh** starts a fresh view. **Older sessions** and **Newer
+sessions** replace the current page, retaining at most 50 rows per selected online
+computer. Only two cursor anchors per computer are kept, without a growing page
+or cursor history; every matching record remains reachable in either direction.
+The compact period button opens quick ranges and a custom From/Through picker.
+Quick ranges fill the From/Through draft and keep the picker open, so either date
+can be adjusted before **Apply range**. Only Apply changes the active date filter;
+opening a picker, choosing a preset, Cancel, Escape or dismissing the panel never
+fetches a page. **All dates** shows **Any date** for both bounds and applies no
+date limits. Calendar inputs follow the app's desktop theme.
+The navigation row shows the current range for one computer or the loaded/matching
+count across computers. Hover the desktop count or expand the mobile count for
+each computer's exact page range. Older/Newer arrows sit beside this summary;
+their accessible labels describe the direction. Refresh uses the adjacent icon.
+The Archive badge counts rows in the current project/machine scope, with `+` when
+the current window does not contain the whole archive. An unavailable
+computer keeps its own error and retry state; changing dates, search or machines
+discards responses belonging to the previous view.
+
+Upgraded desktop and connector polls use `hgs ls --json --local --no-archives`.
+For older Android clients, the connector attaches a cached recent window of at
+most 50 archived rows/128 KiB and explicit `mobile_archive` loaded/total/partial
+metadata. It refreshes that window only when the native directory revision
+changes or five minutes expire. Native identity checks and the existing fresh
+snapshot gate remain in force for that window. Updated Android ignores this
+compatibility window when page operations are supported; an old relay can still
+show it while the system updates. Full Archive browsing needs the updated client.
+The legacy `ls --json` default remains compatible. The native, read-only ABI is:
+
+```sh
+printf '%s' '{"from":0,"until":253402300800,"limit":50,"cursor":"","query":""}' | hgs archives --json
+```
+
+`from` is inclusive and `until` exclusive Unix seconds (integers, nonnegative);
+`limit` is 1–50. All fields are optional. `query` is literal case-insensitive
+archive metadata search (names, IDs, provider, folder and title), at most 256
+characters; this is distinct from the desktop's global public-message search.
+The result contains `version:1`, `sessions`, `total`, `next_cursor`, the additive
+`previous_cursor` and zero-based `position`, and the echoed range/query. Pass either
+opaque cursor with the same range/query to move older or newer. Both directions
+use date/ID keysets; no offset scan or retained client cursor stack is required.
+Ordering uses `(archived_at, archive_id)` descending, avoiding offset duplicates
+when an earlier page changes. Newer completions appear after Refresh. Deleted or
+restored instances disappear; all actions still recheck exact native identity.
+Cursors belong to one computer/catalog and cannot be reused after rebuilding it.
+
+A rebuildable `archive-catalog-v1.sqlite3` indexes metadata beside the durable
+state. Archive JSON files remain authoritative. Its first use indexes existing
+records; unchanged polls/pages reuse it, and atomic archive writes, rename,
+restore or forget update the directory generation. Only requested rows open
+conversation summaries, outside the state writer lock. Browsing never starts an
+agent or changes read marks. New archive pages use the additive mobile
+`archive_list` capability; older computers retain their previously loaded archive
+view and need an updated CLI/connector/relay for paging. Archive IDs are admitted
+from validated pages for one hour (bounded to 2,000 recently paged instances),
+while native inspection and lifecycle actions still verify name/archive/run.
+An already-open older archive also survives a connector restart or cache expiry:
+`hgs archives lookup --json` accepts only `name` and `archive_id`, reads that one
+authoritative record without scanning the catalog or transcript, and returns its
+name/archive/run/conversation identity. The connector verifies this response and
+any requested run/conversation before admitting an uncached target. Failed or
+mismatched lookups grant no admission; lifecycle operations keep their native
+fresh checks. This internal read ABI adds no relay mutation or phone operation.
+
+Desktop bulk removal is explicitly **Remove loaded archived sessions** when
+paging is enabled. Its confirmation names/counts those loaded instances in the
+current date/machine scope; unloaded entries are kept. Local user grouping follows
+the exact observed run even when its reusable session label later changes owner.
+
 ## Project wrappers
 
 An executable `run_COMMAND.sh` in the project folder runs inside the tmux session.
@@ -271,7 +374,18 @@ live background commands or active subagents continue, intermediate replies rema
 unread in Activity but show no new-reply badge or reply-only attention count on
 desktop or Android. The pending reply becomes visible when work finishes; this
 never marks it as read. Explicit questions, approvals, errors and review reminders
-remain actionable. Routine replies from a turn the
+remain actionable. Optional Codex questions, which the agent continues without,
+are not attention: on the desktop they change neither the session's status nor
+the Needs attention filter, counters or badges. Listings report them separately
+as [`optional_questions`](#optional-questions-in-listings). Settings → Sessions →
+**Notify about optional questions**, off by default, adds an *Optional question*
+banner once for each new question. Questions already pending when it is turned on,
+or first seen while Zerus is focused or the session needs action, are only
+recorded; a stop, resume or temporarily unknown count announces nothing again. The
+banner opens the conversation's Activity. It is withdrawn when its questions are
+answered or skipped, the session is marked as read here or on another device, or
+the setting is turned off; delivered Windows messages remain but no longer open a
+session. Routine replies from a turn the
 agent scheduled itself (Kimi `CronCreate`) are not new replies while a recurring
 job remains: they appear in Activity without an unread mark, badge or banner. The
 reply after the last job ends, a one-shot reminder and any reply to the person's
@@ -320,8 +434,12 @@ See [provider management](speech-providers.md) and
 Russian `v3_e2e_rnnt` profile. Saving or selecting a profile does not install or
 download a model and never falls back to another provider.
 
-On desktop, use **Voice** in the message toolbar, allow microphone access, then
-stop recording to review the recording with **Play**, **Discard** or **Send voice**. Recordings
+On desktop, use **Voice** in the message toolbar. Tap to switch voice/video,
+hold to record, release to send, drag up to lock or release outside to cancel.
+Enable **Preview before sending** in Voice input settings to keep both audio
+and video for a separate Send instead. The setting is local to this device and
+applies to the next recording; existing drafts and deliveries are unchanged.
+Stop a locked recording to review it with **Play**, **Discard** or **Send**. Audio recordings
 are limited to two minutes and remain separate from the typed draft. Capture
 opens the local microphone without waiting for speech computers or providers.
 Provider discovery runs in the background. If it fails, the recording remains
@@ -337,16 +455,20 @@ action. Holding either key stops capture only once, and editing resumes after
 capture ends unless another delivery lock applies. Android supports the same
 controls with a hardware keyboard; its touch Stop control remains available.
 On Android, an empty editor with no attachments shows a microphone in the Send
-position. Hold to record, release to keep a preview, or slide left to cancel.
+position. Tap to switch voice/video, hold to record, release to send,
+slide left to cancel or up to lock. Stop a locked recording to keep a preview.
 The recording row overlays the retained editor and shows a red indicator, elapsed time and **Slide to cancel**;
 the hint moves and fades as you slide left. Short haptic feedback accompanies
 confirmed capture start and explicit stop/cancel, respecting Android settings.
-Text or attachments restore the ordinary Send button. Releasing the microphone
-never sends the recording; review it and use **Send voice message** separately.
+Text or attachments restore the ordinary Send button. Sending requires a
+confirmed provider for the exact conversation; delayed discovery keeps a preview
+until an explicit Send.
 After granting microphone permission, press again to start recording.
 The preview lists speech profiles reachable from the conversation computer. Explicit Send
 stores the original there, starts recognition and delivers recognized text to
-the pinned agent conversation. One history card retains the playable original,
+the pinned agent conversation. Video is limited to 60 seconds and 10 MiB. Its MP4 and extracted WAV share one
+message identity; the agent receives recognized speech. A tap starts circular
+video playback. One history card retains the playable original,
 expandable transcript and processing or delivery errors across devices. Its
 circular play/pause control sits beside the recording's amplitude waveform;
 the played portion is highlighted, and selecting a point on the waveform seeks
@@ -447,6 +569,31 @@ the option disabled with a window-menu/rules workaround. Files and terminals
 opened from Zerus may appear behind it. Missing Git metadata does not turn
 a folder into a repository.
 
+The project button beside the machine chooser focuses Sessions on one or more
+logical projects. Check projects to apply changes immediately; selected projects
+appear as removable chips. **All projects** clears this restriction. Right-click
+a project band for **Filter this project**, which replaces the selection with
+that project alone. Clear it using its chip or **All projects** in the chooser.
+Multiple projects selected in the chooser form a union,
+narrowed by the machine, state, folder and search filters. Selection stays local
+to the open workspace while navigating sections; an explicit session link or
+Overview scope opens its requested context. Renaming a project retains selection,
+and new projects do not join an explicit selection automatically.
+
+The project chooser shows parent-session counts for the current state, machine
+and folder scope before project selection or text search, including zero counts.
+Its open checkboxes and selection stay in place during polling. A removed selected
+project remains as **Unavailable project** until removed from the filter.
+
+Changing the state, machine or project filter only changes the session list.
+The open conversation and its draft stay in place even when no row matches;
+its row is selected again when it returns to the list. Click another session
+to open it.
+
+When the open session is terminated or removed, the conversation pane returns
+to **Select a session**. Polling, new sessions and filter changes keep this
+selection empty until you choose a session. Unsent drafts remain in **Saved drafts**.
+
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
 each session once. Desktop and Android use the same filter IDs and membership
@@ -455,6 +602,10 @@ their parent session active. Drafts and explicit review-later reminders remain
 active offline; stale work alone does not. Archives stay in Archive. Active also
 applies to desktop content search, and the Dashboard's Active counter opens this
 same filter. Creating, clearing or sending a draft updates the filter and count.
+Cards with an unsent draft have a blue edge in the Draft color, including the
+open conversation, offline sessions and Saved drafts inspection. Collapsed tiles use
+the same color around their frame. Attention and errors retain their warning
+colors; working indicators and unread identity remain unchanged.
 
 The **+** in the session list header opens **New session**, like the one in the
 side rail. The button beside **⋯** collapses the list into a strip. Every project
@@ -477,7 +628,8 @@ the docked width are local preferences.
 
 Search names, IDs, folders, branches and models immediately. From two characters,
 content search also reads public Codex, Claude and Kimi messages and saved tool
-events on each host. Machine and state filters narrow results; the all-sessions
+events on each host, and DeepSeek messages through a running native host
+([DeepSeek](#deepseek)). Project, machine and state filters narrow results; the all-sessions
 view includes archives. Results open the recorded message; **Back to latest
 activity** returns to the live timeline. **Limited history searched**, **Some
 history unavailable** and excerpt labels describe incomplete coverage. Internal
@@ -676,10 +828,66 @@ checkpoint or resurrect a confirmed sent message. Attachment snapshots remain
 immutable. Save failures remain visible and block sending until persistence
 succeeds.
 
+**Settings → Automatic approvals** provides a separate dangerous opt-in, off by
+default. Enabling it explicitly allows reachable sessions to run tools without
+individual review, including destructive commands and paid usage. It works
+while this Zerus process is running, including with its window hidden, and does
+not change another desktop's preference or the agents' permanent permissions.
+Resuming after an expired cache may process the full conversation again. While
+enabled, the normal peer polling interval is capped at five seconds so remote
+permission prompts need not wait for the ordinary minute-long refresh.
+Only verified, answerable one-time Claude, native OpenCode and native DeepSeek
+tool permissions qualify. Ordinary questions, startup trust, incomplete panels and
+persistent permission changes remain manual. Existing native identity and
+delivery guards still apply.
+
+The same Settings page contains this computer's private approval journal, naming
+the computer, session, time, question, selected answer and confirmed outcome.
+Each attempt is durably reserved before native input. Failed, cancelled and
+unconfirmed attempts remain visible; an unconfirmed delivery is never retried
+automatically, including after a restart. If the journal cannot be saved,
+automatic approvals pause without sending new answers. Turning the option off
+stops new approvals; requests already sent may still finish.
+
+The journal stores full questions only in the private local
+`approval-audit/journal.sqlite3` below the existing `HGS_STATE_DIR`. It is not
+part of P2P settings sync. Pages contain at most 50 summaries; exact computer and
+session filters use indexes, and Older/Newer navigation uses stable record-ID
+cursors rather than offsets or complete-table counts. Full question text loads
+only for the selected entry. Background discovery scans at most 512 sessions per
+tick, admits at most two concurrent targets and bounds its cooldown cache to
+4096 entries, independent of total session or journal counts.
+
+`hgs approval-log begin|finish|list|detail` is the local desktop journal API
+(JSON stdin). `begin` selects only a supported one-time grant and returns a
+durable request UUID; an existing reservation never permits another delivery.
+`list` supports exact `host`/`session` filters and `before` or `after` record IDs.
+`detail` reads one entry. The command itself never sends native input.
+
 **Saved drafts** below the session list lets you preview, copy or restore drafts
-from ended or missing sessions into the current session. Copying keeps the dialog
-open; restoring never sends anything and replacing an existing draft requires
-confirmation. A source draft remains available after copying it to another session.
+from ended or missing sessions into the current session. It lists the most
+recently edited drafts first; each row names the draft's session and computer
+(and whether it is a subagent message, question answer or voice message), with
+its time and first line. **Go to session** opens the session that owns the
+selected draft, or its subagent, while that session is in the session list.
+Double-clicking a draft opens the same owning session; unavailable sessions
+remain in the draft browser for preview, copying or explicit restoration.
+Rows reuse the Sessions cards, including provider and computer badges, with
+the last-edited date beside the model footer. Long fields stay within the card;
+rows have no hover tooltip because the selected draft's full text appears in
+the preview below. Both desktop themes use the workspace colors. Metadata uses
+separate fields or slashes, without dot separators.
+Copying keeps the dialog open; restoring never sends anything and replacing an
+existing draft requires confirmation. A source draft remains available after
+copying it to another session.
+
+Independent sessions can explicitly declare **Waiting for acceptance** and
+**Waiting for result** through `hgs wait`. The idle card names the producer and
+computer and shows elapsed time; the session stays in Active. Native work and
+attention take precedence, while reply-only completion badges wait. Settlement requires the scoped reply ticket
+and, for a result, a confirmed delivery receipt in the exact waiting conversation.
+The durable journal has bounded previews and stable pages. See
+[Agent coordination](agent-coordination.md).
 Confirmed sends clear the outgoing draft; failures retain it. After an interrupted
 or uncertain send, check Activity or Terminal before explicitly allowing another
 send. Saving failures are shown in the editor and retried locally; sending starts
@@ -1083,6 +1291,14 @@ Switching dialogs, changing filters or closing the workspace keeps accepted send
 pending on their original sessions. They continue in the background, verify the
 same run/conversation and compaction request, and never submit a second copy.
 Context metrics use native telemetry, without guessing a capacity from a model name.
+Claude's window comes from its status line (see
+[Tracking and durable state](#tracking-and-durable-state)): `session_usage.context`
+gains `limit`, `limit_source` `native_statusline`, `limit_model` and
+`limit_observed_at` only while the latest report belongs to the session's run and
+conversation and names the model that the inspection reports. After a model change
+the window stays hidden until Claude reports the new model; after a clear Claude
+2.1.296 reports at its next update, usually the next reply, and a resumed run
+reports when it starts. Compaction changes the used context, not the window.
 Claude's recorded compaction boundary replaces the earlier context size with its
 reported summary size. It invalidates the earlier prompt cache estimate; a new
 warm countdown requires fresh native usage with a reported TTL.
@@ -1102,8 +1318,13 @@ prompt. Ready does not complete a goal.
 
 Subagents open their own Activity and return through **Main activity**, preserving
 the parent's draft. Individual child IDs and profile groups are distinguished;
-unknown counts remain unknown. Ordinary child results/errors stay out of the
-attention count, while explicit input/approval requests remain visible. DeepSeek
+unknown counts remain unknown. An unknown child never keeps its parent from Ready.
+A Claude child that stops on a provider error, such as a usage limit, gets no
+SubagentStop: its StopFailure, or a `failed` entry for its current start in the
+workflow journal with no newer child event, settles it as **Error** with that
+message, and a later event of the same child resumes it. Ordinary child
+results/errors stay out of the attention count, while explicit input/approval
+requests remain visible. DeepSeek
 continuable children can receive messages through the native API with parent
 verification; other adapters and one-shot children may expose history only.
 The expanded session tree hides children whose latest reported turn is finished
@@ -1155,7 +1376,8 @@ tracking evidence without changing reply/read identities or restarting agents.
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
-DeepSeek native fork remains in Native UI.
+DeepSeek uses the native fork of a supported resident host
+([DeepSeek](#deepseek)).
 
 Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
@@ -1168,8 +1390,12 @@ The child ID is confirmed by the agent's own event; the source session stays int
 
 A project has a stable ID, name, color, folders on multiple computers and session
 membership. Drag sessions between projects without moving folders or replacing
-agent processes. Drag headers, use the context menu or Alt-Up/Down to change local
-order. Empty-project visibility, collapse state and default project are local.
+agent processes. Drag headers, use the context menu or Alt-Up/Down to reorder
+projects. The project order is shared: every computer in the swarm and the
+Android app show the same order, and the latest change from any desktop replaces
+the others without a review. Until someone reorders, each desktop keeps its own
+order and Android lists projects by ID. Empty-project visibility, collapse state,
+session order within a project and default project are local.
 **All swarm projects** explicitly shows the full shared catalog.
 
 A newly discovered session appears in the local default project until a shared
@@ -1182,15 +1408,22 @@ catalog assignments and unresolved conflicts remain available for review.
 
 Folder entries contain a machine, path and optional label. Browse works for local
 and remote folders, including ordinary non-Git directories. The desktop folder
-browser offers **New folder…** on the selected remote computer. Enter a new
-folder path and explicitly choose **Create folder**; the parent must already
-exist. A missing path entered in the browser is carried into that form. Once
+browser offers **New folder** on the selected remote computer. Enter only the
+child folder name directly in the list and press **Create** or Enter; Escape
+cancels the inline entry. The list context menu and Ctrl+Shift+N (Command+Shift+N
+on macOS) open the same entry. The arrow beside **New folder** offers a separate
+name-only dialog with the parent shown above it. A missing path entered in the
+browser supplies that form's parent and initial name; the parent must already
+exist. Once
 creation is confirmed, choose **Use this folder** to select it for the project
 or session. Browsing and cancelling the creation form do not create anything,
 and existing paths are never replaced. This requires an updated `hgs` on the
 selected computer; older peers can still browse existing folders. If creation
-cannot be confirmed, open the path with **Go** before deciding whether to try
-again. Creating a folder does not initialize Git or start an agent.
+cannot be confirmed, the browser checks that exact path without repeating
+creation. An available folder can be selected immediately, including an empty
+folder or one that already existed; an unsuccessful check retains the creation
+error and **Go** remains available. Creating a folder does not initialize Git
+or start an agent.
 
 The CLI equivalent is `hgs [@host] dirs --create <path> [--request-id UUID]`.
 It creates one directory and returns the canonical path plus the exact request
@@ -1289,7 +1522,10 @@ sync service. Windows has no service manager for the worker; the desktop app run
 it there ([Windows](#windows)).
 
 **Swarm → Conflicts** explains the affected session, archived session, project or
-folder. Compare the values and the computers that saved them. **Shown now** marks
+folder. Compare the values and the computers that saved them: projects, project
+names and colors appear as the project labels and computers as the machine badges
+used elsewhere, with **this computer** beside this desktop's badge. A computer the
+catalog does not list stays text with its identifier. **Shown now** marks
 the temporary display choice; it does not mean the conflict has been resolved.
 Select a row to preview the result, then use **Keep this project** or the matching
 action. Project assignments change catalog placement without restarting agents
@@ -1322,7 +1558,8 @@ adopts the swarm's existing choice. Without a swarm the local catalog keeps it t
 same way.
 
 Members running an older hgs keep synchronizing projects, folders and sessions but
-do not receive this choice; Settings → Mobile connection names the computers this
+do not receive this choice or the shared project order (they keep their own
+order); Settings → Mobile connection names the computers this
 one synchronizes with directly until they are updated. A member reached only
 through another computer is named in Settings on the computer that connects to it.
 An older machine cannot preview or join a swarm whose catalog already contains the
@@ -1361,6 +1598,17 @@ rather than its own generated folder. Ordinary folders without Git metadata
 show only their name, preceded by a folder icon. The opened session's header and
 **Details** show the same line, marked `· worktree` for a linked worktree; the
 full folder path stays in the header tooltip and **Details**.
+
+A running Codex session with pending optional questions, ones the agent keeps
+working without, shows an amber question-mark chip with their count (`99+`
+above 99) right after its status badge, or after a separate new-reply badge, on
+its Sessions and Overview cards; a collapsed strip tile shows a small amber `?`
+mark. Its tooltip and the card's accessible description say how many
+are waiting. The chip shares the amber of attention but never changes the
+session's status, the
+Needs attention filter, counters or badges, and it is hidden for paused,
+stopped, archived or offline sessions and while the count is unknown. Open the
+session to answer or skip the question in Activity.
 
 Existing Git worktrees appear in Projects and the session inspector. Clicking a
 checkout filters Sessions while preserving the open conversation and draft.
@@ -1549,12 +1797,14 @@ Zerus lists a machine's sessions and connection state under its alias, even when
 that machine calls itself something else (its `HGS_SELF` or host name).
 
 Multiple machine filters narrow both sessions and content search. Label color,
-Bright/Soft mode and appearance previews are local. **All machines** clears the
+Bright/Soft mode and appearance previews are local. Color pickers cancel on an
+outside click or Escape; only explicit confirmation saves a color. Project
+color changes remain staged until **Apply**. **All machines** clears the
 restriction. A temporary connectivity error retains the last snapshot and makes
 unavailable controls explicit.
 
 The machine chooser shows each computer's session count, including zero, and an
-All machines total. Counts follow the current session state filter and folder
+All machines total. Counts follow the current session state, project and folder
 scope before machine selection or text search; child rows and unconfirmed launch
 placeholders do not add sessions. An open chooser updates counts without replacing
 its checkboxes or changing the selection. Offline computers retain their last
@@ -1739,12 +1989,49 @@ Closing Zerus leaves the host running; Forget retains native history. Linux user
 systemd runs the host in an independent scope so GUI service restart cannot kill
 the engine.
 
-Native fork, global DeepSeek history search, schedule management and account
-transfer are currently handled in Native UI. Native context reset awaits a
-supported Session Controller operation. Other harness versions need contract
-verification; updates never restart live hosts or agents automatically.
+**Fork session…** uses the official Session Controller fork. It copies the
+conversation through its latest completed turn into a new native session of the
+same profile and folder (including its permission preset),
+named after the fork, and binds the exact session ID the engine returns; the
+source keeps its identity and history. The engine, not Zerus, holds the new live
+agent until its host next starts: Zerus sends its messages, while its questions,
+approvals and Pause stay in Native UI until then. A fork needs a completed reply.
+If the reply is lost, forking again under the same name adopts the result from the
+same host; after a host change Zerus refuses to repeat it. A native failure after
+creation can leave an unbound session in Native UI.
+
+Content search covers bound DeepSeek sessions through the native store's
+literal, case-insensitive event scan, which works without the optional full-text
+index. Results contain the person's and the agent's text only; injected context
+and reasoning are excluded. Searching never starts, resumes or reloads a host.
+Hosts are asked at once, each scanning for at most 5 seconds; a stopped host, an
+older adapter or a host that does not answer within 7 seconds reports that
+history as unavailable.
+
+The official optional Schedule bundle (**Automation tasks** in Native UI
+Plugins; shipped profiles leave it off) is listed and managed per exact session:
+
+```sh
+hgs schedules dsh/project/work            # tasks of this session as JSON
+echo '{"request_id":"UUID","expected_run_id":"RUN","expected_conversation_id":"session-ID",
+  "expected_generation":"GENERATION","action":"update","id":"schedule-ID",
+  "expected":{...record from the list...},"title":"New name"}' | hgs schedules dsh/project/work --json
+```
+
+`action` is `delete`, `update` (the native compare-and-set; `title`, `prompt`
+and the native `change` timing object) or `history` (`limit` 1-100, optional
+`before`). Results keep native codes such as `schedule_conflict` and
+`schedule_not_found`. None of these activate the session. Without the bundle the
+command refuses and listings omit `schedules`.
+
+Account transfer stays in Native UI. Native context reset awaits a supported
+Session Controller operation. Resident adapters advertise each operation; one
+started by an older Zerus keeps fork and schedules in Native UI and its history
+unavailable to search until its next ordinary start. Other harness versions need
+contract verification; updates never restart live hosts or agents automatically.
 `python3 tests/test_dsh_native.py -v` exercises the official engine with a local
-keyless model, covering history, lifecycle, questions, settings and browser login.
+keyless model, covering history, lifecycle, questions, settings, fork, search,
+schedules and browser login.
 
 ## Automatic recovery
 
@@ -1787,6 +2074,21 @@ access or wait for the reset, then explicitly send a message to continue. Drafts
 are kept; refreshing usage never retries a turn. Account percentages alone do
 not change a running agent's state. Failed refreshes and offline snapshots are
 labeled as last reported usage.
+
+Claude's **What do you want to do?** usage-limit menu appears in Activity even
+when the failed turn or a background shell leaves hook state at Error or Working.
+Choose the native stop, wait-and-continue, or usage-credit option explicitly;
+there is no preselected answer or automatic approval. Zerus verifies the exact
+process, conversation and complete current panel before each navigation key and
+one confirmation. Usage-credit setup continues in Terminal for any further
+billing consent; unfamiliar account choices are shown read-only there.
+
+After an early reset, fresh complete account usage below the limits shows
+**Usage available** beside the composer and explains how to continue. An open
+native limit menu still needs an answer, and a stopped turn still needs a new
+message. Stale, offline or failed usage reads cannot produce this notice, clear
+the native failure or trigger a retry. Claude's own wait continues under its
+native rules; Zerus does not change the shared recovery policy or enable credits.
 
 Codex failures come from the exact conversation's native error journal and
 structured failed turn completions, including compaction failures. Tool output
@@ -2258,6 +2560,56 @@ and the v2 Dev catalogs have no Windows artifact.
 
 ## JSON and external clients
 
+### Retained session metadata API
+
+The desktop Graph destination has been [retired](retired-features/session-graph.md).
+Its last implementation is preserved by a named Git tag for a separate future
+iteration. The desktop no longer collects or renders Graph data.
+
+`hgs [@host] graph snapshot --json`, `graph changes --json` and `graph receipt
+--json` remain bounded native compatibility APIs for released clients. The
+host-owned metadata index covers exact saved conversation/run identities,
+archives, native children, confirmed forks and verified submission receipts.
+It does not change source bindings, send input or change read marks.
+
+Each call reads at most 32 new or changed metadata records and checks at most
+512 cached stamps, with a 2 MiB ordinary input budget and a
+50 ms cooperative work budget. One manifest may finish within a 16 MiB hard cap;
+directory inventory is capped at 10,000 source files. These are bounds, not a
+measured latency guarantee. Partial or capped inventory never removes unseen
+sources. A malformed source retains last-good facts and reports a coverage gap.
+The derived SQLite file is capped at 32 MiB; exhaustion fails visibly instead of
+deleting source history or quietly dropping evidence.
+
+Replies contain a native `machine_id`, index `epoch`, monotonic `revision`, typed
+`items`, `coverage`, `has_more` and an opaque `cursor`. Continue a snapshot with
+`snapshot --cursor CURSOR --json`; after its final page use
+`changes --after CURSOR --json`. The optional `--limit` is 1–200. Pages have a
+1 MiB metadata budget. A snapshot changed concurrently or a rebuilt index returns
+`reset_required`; retain the prior display until a complete replacement arrives.
+Changes carry explicit tombstones. A missing row on a partial page is not removal.
+Names and routes are labels; exact binding/run targets remain separate even when
+multiple bindings share one conversation. Conflicting observations remain explicit.
+
+New agent-originated `hgs send ... --json` calls reserve bounded private metadata
+before ordinary delivery. Attribution requires a saved live native process to be
+an actual ancestor of the sending CLI; `HGS_SESSION` labels alone are insufficient.
+GUI and connector subprocesses remove those labels. The recipient receipt pins
+its own native machine/provider/account/conversation identity. The source ledger
+stores no message or attachment bodies, retains 30 days and cannot replay input.
+Old, uncertain or unattributed attempts remain explicit coverage gaps. Existing
+quoted message envelopes are not retrospectively treated as verified edges.
+
+`hgs [@host] graph receipt --json` accepts JSON stdin with `name`,
+`expected_run_id`, `expected_conversation_id`, `message_request_id` and optional
+`archive_id`. Every identity is checked again; the response contains one bounded
+public delivery event. Metadata reads never fetch provider transcript bodies.
+Submission does not imply a reply or completed work, and local timestamps do not
+establish cross-computer causal order. Independent-agent waits remain a separate
+explicit protocol; see [Agent coordination](agent-coordination.md).
+
+### Existing session snapshots
+
 ```sh
 hgs ls --json --local
 hgs inspect codex/sample-project/review
@@ -2360,6 +2712,28 @@ host's mark for the current conversation:
 `reply_id` differs from `read.reply_id`; attention is unacknowledged while a
 non-null signature differs from `read.attention_signature`.
 
+<a id="optional-questions-in-listings"></a>
+Every session also has `optional_questions`, the questions Codex asked with
+`request_user_input_async` that still wait for the person while the agent
+continues without them: `{count, ids, latest_at}`. `count` is exact; `ids`
+holds the `question_id` of the newest 32, oldest first, and `latest_at` is when
+the newest was asked (seconds since the epoch, or `null` when not recorded).
+Without any it is `{"count": 0}`, as for saved, archived and non-Codex sessions.
+A question stops counting once its answer appears in the conversation, it is
+skipped, or its answer was submitted (**Submitted / Awaiting agent**); one asked
+in an earlier run of the same conversation counts until then. Only the main
+conversation is indexed: async questions of Codex native subagents are not
+counted. The value is `null` while the question index is incomplete or held by
+another process (as above) or cannot be read: unknown, never a count of 0, so a
+reader keeps the last value it had for the conversation. A listing from an
+older hgs has no `optional_questions`; peers forward theirs unchanged. Only
+identities leave the host, never question text, and no value depends on the
+time of the listing. Optional questions are not attention: they never change
+`phase`, and the count does not affect `attention_signature`, which keeps
+covering their identities as described above. Pending blocking requests of other
+providers stay in `phase` and `pending_question_count` is not used for these
+questions.
+
 Kimi sessions report `schedules: {count, recurring, next_at}` folded from the
 native cron journal: pending jobs the agent scheduled for itself, how many of them
 recur, and the earliest next run in seconds since the epoch (`null` when no
@@ -2370,7 +2744,10 @@ is `null` while the journal cannot be read. While `schedules.recurring` is
 positive, turns opened by those jobs without a prompt from the person do not
 advance `reply_id`; a prompt queued into such a turn makes its reply the person's.
 `reply_scheduled` is true when the reported reply ended a scheduled turn, which
-happens once no recurring job remains or while the count is unknown. Other
+happens once no recurring job remains or while the count is unknown. DeepSeek
+sessions report the same `schedules` object from the active tasks of the native
+Schedule catalog while that optional bundle is loaded, with the earliest stored
+target as `next_at`; delivered reminders remain ordinary replies. Other
 providers report false and omit `schedules`.
 
 ```sh

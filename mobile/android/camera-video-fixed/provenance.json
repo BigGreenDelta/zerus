@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "version": "1.6.2",
+  "sources_sha256": "dc8f8ac4f891fdaa76087ab43ce79b9a8386f507c5cf351d7189eabde1074a66",
+  "aar_sha256": "dee568da7d1ce009506a538b2916cce6f23473a835b0aeb4e8193483ff1174d0",
+  "module_sha256": "cf1e3fb9362af9c020f1126f8c56e7578f73a96b6f670136cc756a907182733c",
+  "recorder_before_sha256": "9291fdcf19acfb6acf31f9d6ec66f1398bbd16e0e6e4425e97a7e8f8970a91a0",
+  "recorder_after_sha256": "39e22cb6e8fc163c0bc0a2ae60599b371dcae8f6a69c776394ead94ab526ceb7",
+  "patch_sha256": "9dcb8835dafb8c4735643716c7d1f1b50f91baef60f54fef4960bbd5dcc4fe09",
+  "upstream_fix": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+  "prerequisites": [
+    "7a2969cbf9b3689d89c4a19117ea9378451c5319",
+    "7b541c103f7ff50274cd42f31b96d44d318aaf4b"
+  ],
+  "original_source_entries": 178,
+  "original_kotlin_sources": 55,
+  "source_url": "https://dl.google.com/dl/android/maven2/androidx/camera/camera-video/1.6.2/camera-video-1.6.2-sources.jar",
+  "aar_url": "https://dl.google.com/dl/android/maven2/androidx/camera/camera-video/1.6.2/camera-video-1.6.2.aar",
+  "abi_adaptation": "Preserve original package-local mEncodingFutures as current non-cancellation-propagating aggregate view; preserve Java 8 generic syntax and 1.6.2 persistent predicate.",
+  "auto_value_processor_sha256": "0aa5463f85a210aacecbebaa45e61b79ec17e903218d79f8db9e1efde06b3c7f"
+}

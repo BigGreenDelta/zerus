@@ -29,6 +29,9 @@ can select a PR head or another exact revision.
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
 | Quick checks | Always | Privacy, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.85 unit tests |
 | Rust relay | Always | Rust 1.85 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
+| Rust mobile connector | Always | Rust 1.85 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
+| Rust mobile connector on macOS | Always | Cold Rust 1.85 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
+| iOS core tests and simulator build | Always | `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |
@@ -63,8 +66,10 @@ attempt has no gate record, an earlier successful gate counts (a failed-job retr
 does not rerun it); an earlier failed or cancelled gate means waiting. Any
 other gate result, repeated API failures or a 135-minute wait fail the job without
 an upload; **Re-run failed jobs** then rebuilds the candidate. `dev.yml` assembles
-the desktop candidate and moves the `dev` tag only after the gate and this job
-succeed. Release builds skip the `lintVital` tasks: the gate requires the
+the desktop candidate and moves the `dev` tag only after the gate, this job
+and the enabled Mac candidate succeed. Main CI invokes `macos-cask.yml` after
+the gate with `channel: dev`; its full bundle/sign/notarize/install checks produce
+the same signed ZIP and DMG later sealed into the desktop candidate. Release builds skip the `lintVital` tasks: the gate requires the
 Android job, whose `lintRelease` covers those fatal checks for the same commit
 and variant.
 
@@ -119,7 +124,7 @@ save them.
 | --- | --- | --- | --- | --- |
 | `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
 | `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.85.0 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
-| `arch-cargo-v1-` | Arch package | Month, `Cargo.lock` hash | Exact key missed; package built | Cargo registry only |
+| `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `windows-qt-6.10.3-` | Windows | Hash of the Qt pin and installer | Exact key missed; desktop build passed | The pinned Qt archives, no WebEngine |
 | `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-`, `windows-ccache-v1-` | Arch desktop, Arch package, macOS, Windows | Architecture (macOS, Windows), Qt release (Windows), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100, 100 and 500 MB |
@@ -189,10 +194,10 @@ format is required by the existing verified agent input transport. Unknown input
 mode must keep rejecting delivery; upgrading the test toolchain preserves that
 guard. The package requires tmux 3.7+. A binary upgrade must not restart live
 servers; see the [installation requirements](installation.md#requirements).
-Release packaging covers **Arch x86_64** and, through the `zerus` and
-`zerus@nightly` Homebrew casks, **Apple Silicon macOS**; see
+Release packaging covers **Arch x86_64** and, through the `zerus`,
+`zerus@nightly` and `zerus@dev` Homebrew casks, **Apple Silicon macOS**; see
 [macOS distribution](macos-distribution.md). Ordinary macOS CI checks build/test
-compatibility with Homebrew Qt; only stable and nightly candidates build, sign and
+compatibility with Homebrew Qt; stable, nightly and successful main Dev candidates build, sign and
 notarize the bundle, and only once the repository variable `MACOS_CASKS_ENABLED`
 is `true`. Stable releases and nightlies add the Windows x86_64 portable zip
 described below (owner decision of 2026-10-14; 0.42.2 is the last stable release
@@ -299,6 +304,14 @@ coverage changes model and effort in a fresh session, accepts Claude's own cache
 notice in a resumed conversation, and requires the session-only transcript
 receipt while `settings.json` stays unchanged. A session-only change made in
 Terminal must reach hgs through `PostModelSwitch` with the exact model ID.
+`tests/test_claude_statusline_native.py` starts the real TUI through a tracked
+`hgs claude` launch, with the private home, state folder and socket and the
+loopback API of `tests/model_api_fixture.py`. Claude 2.1.296 coverage requires the
+user's own status line on screen and its `settings.json` unchanged, and the window
+from Claude's status line input in `hgs inspect` for the exact run, conversation and
+model: before the first reply, after a reply, after a session-only model change, a
+compaction and a clear, and in a resumed run. In a linked worktree whose repository's
+local settings set a status line, Claude keeps that status line and no window is reported.
 
 ### Unix tmux census
 
@@ -752,10 +765,11 @@ prints folders relative to the real one, which the suites place projects by.
 
 On Linux and macOS, Claude Code runs every `tests/test_claude_*_native.py` suite
 plus the Claude clear and compaction fixtures: exact input, questions, approvals,
-trust, resume, clear, compaction and session-only model settings. Each test
-launches the real TUI under `env -i` with a fixture API key, a loopback or local
-fake API and no nonessential traffic, so no account, telemetry or model request
-leaves the runner. On Windows each agent runs its class of
+trust, resume, clear, compaction, session-only model settings and the status line
+context window. Each test launches the real TUI under `env -i`, or through a tracked
+`hgs` launch without the caller's `ANTHROPIC_` and `CLAUDE` variables, with a fixture
+API key, a loopback or local fake API and no nonessential traffic, so no account,
+telemetry or model request leaves the runner. On Windows each agent runs its class of
 `tests/test_windows_native_agents.py` through the session host instead.
 
 Real native checks run at 95x47 and 110x35 terminal sizes with animations explicitly
@@ -996,16 +1010,27 @@ optional and detected at runtime. Packaging never enables services.
 Each flavor installs the same ADE bundle:
 
 - `/usr/bin/hgs`, `/usr/bin/hgs-tray`, the `hgs_state.py` compatibility shim and
-  the explicit `zerus-setup` migration helper.
+  the explicit `zerus-setup` migration helper, whose `--mobile-connector
+  {protect,migrate,rollback}` runs `/usr/lib/zerus/install-mobile-connector-service.py`.
 - `/usr/lib/hgs-tray/plugins/libhgs-tray-native-ui.so`, the embedded DeepSeek
   Native UI. It alone links Qt WebEngine and loads only when `qt6-webengine` is
   installed; otherwise Native UI opens in the browser. `check-package.py`
   requires it and rejects an `hgs-tray` that links Qt WebEngine itself.
+- `/usr/bin/zerus-mobile-connector`, the Rust mobile connector, and its user
+  unit `zerus-mobile-connector.service` (`KillMode=process`, configuration
+  `%E/hgs/mobile/connector.json`, skipped while that file is missing). The
+  package never enables it, and an existing
+  `~/.config/systemd/user/zerus-mobile-connector.service`, such as the Python
+  connector's, keeps precedence; switching an installation over is the
+  owner-approved cutover in the connector design. `check-package.py` requires
+  both, a release build without test hooks that links only the C runtime, and
+  the unit's `ExecStart` and kill mode.
 - A desktop entry, existing application icons and system-provided **user** unit
   definitions for `hgs-tray`, `hgs-swarm` and `hgs-recovery`.
 - Documentation and a sample tmux configuration under `/usr/share/doc/zerus`.
 - Zerus MIT, vendored libvterm MIT and the exact host-target Cargo dependency
-  license texts under `/usr/share/licenses/<package-name>`.
+  license texts of `hgs` and the mobile connector (both locks) under
+  `/usr/share/licenses/<package-name>`.
 
 Qt and KDE libraries are dynamically linked system dependencies. Qt WebEngine is
 needed only by the native UI plugin. Upgrades keep an installed `qt6-webengine`:
@@ -1513,5 +1538,5 @@ GitHub latest remains `v0.42.0`. A fresh isolated desktop controller discovered 
 real public Dev feed, emitted one verified notice, persisted its channel choice
 and suppressed a duplicate check. Retention keeps three Dev builds per platform,
 a 72-hour retirement grace and the shared 20 GiB limit. Desktop installation stays
-explicit; macOS Dev currently offers source and notices while its signed binary
-distribution remains tracked in `zerus-osef.2`.
+explicit. Mac Dev now uses the same candidate/mirror with signed ZIP and DMG
+assets and `zerus@dev`; see [Mac publication](macos-distribution.md#publication).

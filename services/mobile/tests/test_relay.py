@@ -286,7 +286,13 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         await send([first])  # An unchanged heartbeat is silent.
         await send([second])
         await send([])
-        self.assertEqual([e["kind"] for e in (await self.call("GET", "/v1/events"))["events"] if e["kind"] != "alert"], ["attention", "attention"])
+        # An optional Codex question is an ordinary item with one more boolean.
+        optional = {"question_id": "codex-async:call:0", "question_hash": "h3"}
+        await send([optional])
+        await send([{**optional, "optional": True}])  # An upgraded connector marks it once.
+        await send([{**optional, "optional": True}])
+        await send([])
+        self.assertEqual([e["kind"] for e in (await self.call("GET", "/v1/events"))["events"] if e["kind"] != "alert"], ["attention"] * 4)
 
     async def test_push_retired_unifiedpush_and_unavailable_fcm(self):
         self.assertEqual((await self.call("GET", "/v1/capabilities"))["push_providers"], [])

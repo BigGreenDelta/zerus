@@ -6,6 +6,7 @@ version and reference only the bundle itself or the system. The bundle must carr
 its setup files and every notice for the code it distributes.
 """
 import argparse
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -14,6 +15,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+from macos_stapler import run_stapler
 
 BUNDLE_ID = "com.hgdev.hgs-tray"
 MINIMUM_SYSTEM = "14.0"
@@ -172,7 +175,18 @@ def bundle_findings(bundle, version, release=None):
     return findings
 
 
-def run_selftest(bundle):
+def build_identity_findings(info, version, release, commit=None):
+    expected = re.fullmatch(r'\d+\.\d+\.\d+-dev\.([1-9]\d*)', release or '')
+    number = int(expected[1]) if expected else 0
+    if (not isinstance(info, dict) or info.get('version') != version
+            or info.get('devBuildNumber') != number
+            or info.get('versionName') != (release if expected else version)
+            or commit is not None and (info.get('sourceCommit') != commit or info.get('sourceDirty') is not False)):
+        return ['bundled GUI build identity differs from the verified candidate']
+    return []
+
+
+def run_selftest(bundle, version=None, release=None, commit=None):
     tmux = shutil.which("tmux")
     if not tmux:
         return ["bundle self-tests require tmux (brew install tmux)"]
@@ -190,6 +204,14 @@ def run_selftest(bundle):
             result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=60)
             if result.returncode:
                 return [f"{' '.join(command[1:])} failed: {result.stderr.strip() or result.stdout.strip()}"]
+        if version is not None:
+            result = subprocess.run([str(bundle / 'Contents/MacOS/hgs-tray'), '--build-info'],
+                                    env=environment, capture_output=True, text=True, timeout=60)
+            try:
+                info = json.loads(result.stdout) if result.returncode == 0 else None
+            except ValueError:
+                info = None
+            return build_identity_findings(info, version, release, commit)
     return []
 
 
@@ -207,7 +229,7 @@ def signature_findings(bundle, team):
     assess = subprocess.run(["spctl", "-a", "-t", "exec", "-vv", str(bundle)], capture_output=True, text=True)
     if assess.returncode or "source=Notarized Developer ID" not in assess.stderr:
         findings.append("Gatekeeper does not accept a notarized Developer ID bundle: " + assess.stderr.strip())
-    staple = subprocess.run(["xcrun", "stapler", "validate", str(bundle)], capture_output=True, text=True)
+    staple = run_stapler("validate", bundle)
     if staple.returncode:
         findings.append("notarization ticket is not stapled: " + (staple.stdout + staple.stderr).strip())
     return findings
@@ -217,13 +239,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--release", help="stable or nightly release version (default: --version)")
+    parser.add_argument("--release", help="stable, nightly or Dev release version (default: --version)")
+    parser.add_argument("--source-commit", help="require this clean GUI source identity during self-test")
     parser.add_argument("--selftest", action="store_true", help="also run the bundled CLI and GUI self-tests")
     parser.add_argument("--team-id", help="require a notarized Developer ID signature from this team")
     args = parser.parse_args()
     findings = bundle_findings(args.bundle, args.version, args.release)
     if not findings and args.selftest:
-        findings = run_selftest(args.bundle)
+        findings = run_selftest(args.bundle, args.version, args.release, args.source_commit)
     if not findings and args.team_id:
         findings = signature_findings(args.bundle, args.team_id)
     for finding in findings:

@@ -17,14 +17,16 @@ import subprocess
 import sys
 import tempfile
 
+from macos_stapler import run_stapler
+
 ROOT = Path(__file__).resolve().parents[1]
 APP_ENTITLEMENTS = ROOT / "packaging/macos/Zerus.entitlements"
 MINIMUM_SYSTEM = "14.0"
 MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
           b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-# A stable release, or a nightly built from that product version.
-RELEASE = re.compile(r"\d+\.\d+\.\d+(?:\.r\d+\.g[0-9a-f]{7}\.n\d+)?")
+# Stable, nightly or a numbered Dev release; main() also checks the source base.
+RELEASE = re.compile(r"\d+\.\d+\.\d+(?:\.r\d+\.g[0-9a-f]{7}\.n\d+|-dev\.[1-9]\d*)?")
 
 
 def is_mach_o(path):
@@ -137,8 +139,14 @@ def notarize_upload(upload, key_file, key_id, issuer):
 
 
 def staple(path):
-    subprocess.run(["xcrun", "stapler", "staple", str(path)], check=True)
-    subprocess.run(["xcrun", "stapler", "validate", str(path)], check=True)
+    # Apple can accept a submission while its CloudKit ticket endpoint drops
+    # the connection. Both ticket operations use the same bounded policy;
+    # permanent errors and exhausted retries remain fatal.
+    for action in ("staple", "validate"):
+        result = run_stapler(action, path)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        result.check_returncode()
 
 
 def notarize(app, key_file, key_id, issuer):
@@ -171,7 +179,7 @@ def main():
     parser.add_argument("--team-id", required=True)
     parser.add_argument("--keychain", type=Path)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--release", help="stable or nightly release version (default: --version)")
+    parser.add_argument("--release", help="stable, nightly or numbered Dev release (default: --version)")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--notary-key-file", type=Path)
     parser.add_argument("--notary-key-id")
@@ -181,8 +189,11 @@ def main():
     if (any(notary) or args.notary_issuer) and not all(notary):
         parser.error("notarization needs the key file and key ID together")
     release = args.release or args.version
-    if not RELEASE.fullmatch(release) or release.split(".r", 1)[0] != args.version:
-        parser.error("--release must be --version or a nightly built from it")
+    source_dev = (ROOT / "DEV_VERSION").read_text().strip()
+    numbered_dev = (release.startswith(source_dev + "-dev.")
+                    and args.version == (ROOT / "VERSION").read_text().strip())
+    if not RELEASE.fullmatch(release) or not (release.split(".r", 1)[0] == args.version or numbered_dev):
+        parser.error("--release must match the stable version or the numbered nightly/Dev source")
     if not re.fullmatch(r"[A-Z0-9]{10}", args.team_id):
         parser.error("invalid Team ID")
     if args.output.exists():

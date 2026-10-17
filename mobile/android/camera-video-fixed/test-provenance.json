@@ -1,0 +1,108 @@
+{
+  "upstream_commit": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+  "upstream_recorder_test_path": "camera/camera-video/src/test/java/androidx/camera/video/RecorderTest.kt",
+  "upstream_recorder_test_sha256": "c3a0b533b0077f6c64bdd772bb746f33d71e9b488f191eee673e98974de717d9",
+  "retained_test_bodies": [
+    {
+      "name": "persistentRecording_afterRebind_finalizeWaitsForAudioEncoderToStop",
+      "body_sha256": "f1bcbcf426daaf627b76a1ece2586d1fddb5d621dd3bb19d7ada93ac11af51c8"
+    },
+    {
+      "name": "persistentRecording_stopAfterSourceInactive_finalizes",
+      "body_sha256": "a00176134748a753d0dcbf235640e634b37235a92e9481f76aec17f6df60ed6a"
+    },
+    {
+      "name": "persistentRecording_withoutAudio_stopAfterSourceInactive_finalizes",
+      "body_sha256": "1a4fc6e5eee6eb57c46c50dca8144dc550e1c83b425ff0b27aac819fcaac5e89"
+    },
+    {
+      "name": "persistentRecording_stopThenRebind_newVideoEncoderConfiguredWhileStopping_doesNotCrash",
+      "body_sha256": "9269ef860dce919bc0d01870acf1a73d4b19dbc9011be62bab6bd8f8975c0d66"
+    },
+    {
+      "name": "persistentRecording_stopThenRebind_newVideoEncoderConfiguredAfterFinalized_doesNotCrash",
+      "body_sha256": "517d826a401240884dfc1ff6360afec7ddf4fb41ecca0eafd02f1a9b04b46ae1"
+    },
+    {
+      "name": "persistentRecording_rebindThenStop_newVideoEncoderConfiguredWhileStopping_doesNotCrash",
+      "body_sha256": "17ea6ec08ed07905fd8ef934438f2f09ecd46eb60ab28fb14c76f6fc789306f3"
+    },
+    {
+      "name": "persistentRecording_rebindThenStop_newVideoEncoderConfiguredAfterFinalized_doesNotCrash",
+      "body_sha256": "49d7b6fc0980a480782536359c1cc9ffdb3bc44e14a6aa18855bee1e54250b73"
+    },
+    {
+      "name": "persistentRecording_canContinueRecordingAfterRebind",
+      "body_sha256": "7177c1356cf541423080ac374f16f62b61e766f71876888cbf764b6b2c5dfba4"
+    },
+    {
+      "name": "persistentRecording_canContinueRecordingPausedAfterRebind",
+      "body_sha256": "c1eb74c02d61f553ded02c1abbf479c0b465f8e4e25db78ecf0ce4413fbb30c5"
+    },
+    {
+      "name": "persistentRecording_videoEncoderErrorWhileStopping_finalizes",
+      "body_sha256": "2a32d4934bbd447c6158a79a2841d8d7dbe9d6fa56e2f87b13a2794a1fae5ed7"
+    }
+  ],
+  "helpers": [
+    {
+      "path": "camera/camera-testing/src/main/java/androidx/camera/testing/impl/fakes/FakeEncoder.kt",
+      "commit": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+      "original_sha256": "c9e092d5c5ca93f42c5726457b7f4e29147793161d438db853fbe45731b14152",
+      "adapted_sha256": "bd81fef2e3b57a3bf1867ffb354bf8e52db3b245ceaadadc906427ebea8b9b43",
+      "adaptation": "Only 1.6.2 Encoder/EncoderInfo signatures and removal of unused mock-call verification helpers; no timing or ordering changes. Includes an explicit modification notice."
+    },
+    {
+      "path": "camera/camera-testing/src/main/java/androidx/camera/testing/impl/fakes/FakeVideoEncoderInfo.kt",
+      "commit": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+      "original_sha256": "77bbe45c9162365fa0a3cec2468b4231033985db62ab8b22bc98d6bfb9a24bcc",
+      "adapted_sha256": "363efe13c5dfbf0aaf6f2e982ecff883b9c62b084e3652a895bb78e79526eef3",
+      "adaptation": "Only 1.6.2 Encoder/EncoderInfo signatures and removal of unused mock-call verification helpers; no timing or ordering changes. Includes an explicit modification notice."
+    },
+    {
+      "path": "camera/camera-testing/src/main/java/androidx/camera/testing/impl/fakes/FakeEncoderSurfaceInput.kt",
+      "commit": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+      "original_sha256": "aea2e4b38a49057a7975418bac3c66278e4ef588d17df8a20f79d04a4eb9ac72",
+      "adapted_sha256": "aea2e4b38a49057a7975418bac3c66278e4ef588d17df8a20f79d04a4eb9ac72",
+      "adaptation": "Unchanged"
+    },
+    {
+      "path": "camera/camera-testing/src/main/java/androidx/camera/testing/impl/fakes/FakeInputBuffer.kt",
+      "commit": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+      "original_sha256": "5180ccde92489bd815610b713aa07c9ed1ab3e70e5b5b2b7ce959c96cabb6057",
+      "adapted_sha256": "5180ccde92489bd815610b713aa07c9ed1ab3e70e5b5b2b7ce959c96cabb6057",
+      "adaptation": "Unchanged"
+    },
+    {
+      "path": "camera/camera-testing/src/main/java/androidx/camera/testing/impl/fakes/FakeByteBufferInput.kt",
+      "commit": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+      "original_sha256": "8013d4c2c4130546c558f02941788d80db39a9be00912b6605212b7d55903793",
+      "adapted_sha256": "8013d4c2c4130546c558f02941788d80db39a9be00912b6605212b7d55903793",
+      "adaptation": "Unchanged"
+    },
+    {
+      "path": "camera/camera-testing/src/main/java/androidx/camera/testing/impl/fakes/FakeBufferProvider.kt",
+      "commit": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+      "original_sha256": "10c2892b1176c5d817d4d0e997e89aec19cfd213708bc847e76211cd9f69d12c",
+      "adapted_sha256": "ff7cbb5884b303e4f843f4dce00ab54b9a44b789d7b5c3fcfd5da04e9b2f80c0",
+      "adaptation": "Only 1.6.2 Encoder/EncoderInfo signatures and removal of unused mock-call verification helpers; no timing or ordering changes. Includes an explicit modification notice."
+    },
+    {
+      "path": "camera/camera-testing/src/main/java/androidx/camera/testing/impl/fakes/NoOpMuxer.kt",
+      "commit": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+      "original_sha256": "249ea1ba79e5081a4d1c992e589e77f904cc36c790f36a8a653f1bae026531d8",
+      "adapted_sha256": "249ea1ba79e5081a4d1c992e589e77f904cc36c790f36a8a653f1bae026531d8",
+      "adaptation": "Unchanged"
+    },
+    {
+      "path": "camera/camera-video/src/test/java/androidx/camera/video/internal/audio/FakeAudioStream.kt",
+      "commit": "968a36cef8c813f2f3b2c5f1765d40a0836cdab1",
+      "original_sha256": "07bd86499f511554d4a0b9182de7f420f0a186e4ae241aa5fc12f965c78bc862",
+      "adapted_sha256": "7762b9d5c632f8d63695341f56b182b073815754ff7d9bfb42f32b0c3defdd74",
+      "adaptation": "Only 1.6.2 Encoder/EncoderInfo signatures and removal of unused mock-call verification helpers; no timing or ordering changes. Includes an explicit modification notice."
+    }
+  ],
+  "additional_fixture_test": "persistentRecording_staleReleasedEncoderStop_doesNotLoseCurrentFinalize",
+  "api_bridge": "SyntheticAudioFixture and one-time AudioSourceSupplier substitution are test-only 1.6.2 seams; no production API extension.",
+  "body_hash_scope": "Exact UTF-8 @Test declaration with its four-space indentation through the method closing brace, excluding trailing newline."
+}

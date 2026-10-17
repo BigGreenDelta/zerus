@@ -1,10 +1,12 @@
 # Mobile architecture
 
-Status: Android app, protocol version 1. The Android client,
+Status: Android app, protocol version 1; a native iOS client with the same
+safety rules is in development in `mobile/ios`. The clients,
 relay and computer connector live in this repository under the MIT license,
 except for attributed Apache-2.0 terminal adaptations from MuxPod. Their source
-headers identify the upstream revision, and the APK includes the complete
-license in `assets/licenses/mux-pod.txt`.
+headers identify the upstream revision, and the APK and the iOS app include the
+complete license (`assets/licenses/mux-pod.txt` and
+`mobile/ios/Zerus/Licenses/mux-pod.txt`).
 The existing `hgs` CLI remains the authority for native session identity and input.
 
 ## Product boundary
@@ -29,7 +31,7 @@ flowchart LR
     C[Computer connector] -->|Outbound HTTPS, node credential| R
     C -->|Fixed argv and JSON stdin| H[hgs]
     H --> N[Existing native sessions]
-    R -->|Generic wake notification| P[FCM]
+    R -->|Generic wake notification| P[FCM / APNs]
     P --> A
 ```
 
@@ -300,7 +302,8 @@ Explicit refresh shows progress immediately, including when it promotes an
 already-running read. Operation and navigation identities prevent an old
 session's response from replacing the current session or hiding its progress.
 Catalog and conversation reads share their existing progress state with a thin
-top bar; pull-to-refresh keeps its circular indicator. Background reads retain
+top bar; pull-to-refresh keeps its circular indicator. A conversation's pull
+starts past its newest message, so its indicator rises from the bottom. Background reads retain
 the same five-second delay and do not start an extra request for either indicator.
 
 ## Projects and attachments
@@ -321,7 +324,8 @@ Active replaces Working and combines current work with sessions needing
 attention, counting each session once. Explicit review-later reminders remain
 active offline; cached work and input states alone do not.
 Filtering and search produce project groups containing only matching sessions;
-the separate Projects catalog includes empty canonical projects. Directory
+the separate Projects catalog includes empty canonical projects. Both keep the
+order in which `hgs swarm get` lists the projects, the swarm's shared order. Directory
 fallback groups remain confined to the session list. Provider badges and filter
 glyphs reuse the desktop drawing geometry.
 
@@ -864,7 +868,7 @@ API errors carry an `error` string. Relay health reports the protocol version.
 | `POST /v1/requests` | Device | `{request_id, computer_id, operation, session, payload}` → request envelope |
 | `GET /v1/requests/{id}` | Owning device | Request envelope |
 | `GET /v1/events?after=N&wait=25` | Device | `{events: [...], cursor}` |
-| `POST /v1/push` | Device | `{provider: "fcm", token}`; other providers return 400 |
+| `POST /v1/push` | Device | `{provider: "fcm" \| "apns" \| "apns_sandbox", token}`; an unconfigured provider returns 503, others 400 |
 | `DELETE /v1/push` | Device | Remove this device's push registration |
 | `DELETE /v1/device` | Device | Revoke this device, its queued requests and push registration |
 | `POST /v1/node/heartbeat` | Computer | `{snapshot, presence?}` using local `hgs ls --json --local` output; its `desktop_presence` travels as `presence` beside the snapshot |
@@ -1046,8 +1050,13 @@ conversation is suppressed.
 
 Optional Codex questions are discovered by a bounded rotating inspection of two
 live sessions per connector heartbeat. Only their IDs and fingerprints are added
-to snapshots. With many live Codex sessions, these alerts can lag by a complete
-scan cycle; ordinary native attention phases arrive with the next heartbeat.
+to snapshots, as `mobile_attention` items `{question_id, question_hash}`; an
+optional Codex async question also carries `optional: true`, and blocking items
+never carry the key. The relay treats both alike, so the phone decides whether
+an optional item notifies: Android announces optional-only sessions only with its
+off-by-default Optional questions switch, once per question ID. With many live Codex sessions, these alerts can lag
+by a complete scan cycle; ordinary native attention phases arrive with the next
+heartbeat.
 
 Android supports two delivery paths:
 
@@ -1067,6 +1076,26 @@ Settings. It shows the gateway computer's reported value. A change is a durable
 once the gateway confirms it; an unconfirmed change appears in Drafts for a
 receipt check and is never repeated. Older gateways or relays show the value
 read-only with the reason.
+
+iOS uses the same policy, catalog and durable per-workspace state, with these
+paths:
+
+- APNs, when the relay is configured with a private token-signing key. The app
+  registers its device token as `apns` (TestFlight and App Store builds) or
+  `apns_sandbox` (development builds). Each wake is a generic visible alert,
+  "New session activity.", carrying only the wake fields. When iOS lets Zerus run
+  (the alert marks `content-available`), it drains events and replaces that alert
+  with silent session cards; otherwise the cards appear when Zerus next opens.
+- While Zerus is open, each workspace long-polls its events, which also refreshes
+  the visible catalog.
+- A background app refresh task as an opportunistic fallback; iOS decides when it
+  runs.
+
+Session cards use replaceable identifiers per slot; an audible card is
+`active`, and a silent update or replacement of an already announced wake is
+`passive`. A card for the conversation currently on screen is not presented
+again. Machines shows each workspace's push status honestly, including a relay
+without APNs or notifications turned off in iOS Settings.
 
 Android 13 and later require notification permission. Force-stopping the app
 and disabling notifications cannot be bypassed by the relay. Provider status

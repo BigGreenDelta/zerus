@@ -440,9 +440,8 @@ fn prune_json(
     ))
 }
 
-/// Install hgs's tracking hooks into the configuration of `agent`, whose
-/// executable is `program` (spec D12 on Windows).
-pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
+/// The file that holds the hooks of `agent`, past any symlinks.
+fn hook_config(agent: &str) -> Result<PathBuf> {
     let home_key = home_var(agent)?;
     let directory = nonempty_env(home_key)
         .map(PathBuf::from)
@@ -453,11 +452,39 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
                 format!(".{agent}")
             })
         });
-    let path = resolved_target(&directory.join(match agent {
+    resolved_target(&directory.join(match agent {
         "kimi" => "config.toml",
         "claude" => "settings.json",
         _ => "hooks.json",
-    }))?;
+    }))
+}
+
+/// Where the version last read for the hooks of the file `path` is kept.
+fn seen_version(path: &Path) -> PathBuf {
+    root().join("hook-versions").join(format!(
+        "{:x}.json",
+        Sha256::digest(path.to_string_lossy().as_bytes())
+    ))
+}
+
+/// The version of the native Claude Code CLI `program` as its hooks know it:
+/// the one last read while the executable stays the same file, else read once
+/// now and kept. `None` for a project launcher, which runs only under
+/// supervision, and for a version that cannot be read.
+pub(super) fn claude_version(program: &str) -> Option<(u64, u64, u64)> {
+    let installed = Installed {
+        program,
+        agent: "Claude Code",
+        version: std::cell::OnceCell::new(),
+        seen: seen_version(&hook_config("claude").ok()?),
+    };
+    installed.registered_version("claude")
+}
+
+/// Install hgs's tracking hooks into the configuration of `agent`, whose
+/// executable is `program` (spec D12 on Windows).
+pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
+    let path = hook_config(agent)?;
     let lock_path = path.with_file_name(format!(
         "{}.hgs.lock",
         path.file_name().unwrap().to_string_lossy()
@@ -473,10 +500,7 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
         program,
         agent: if agent == "claude" { "Claude Code" } else { agent },
         version: std::cell::OnceCell::new(),
-        seen: root().join("hook-versions").join(format!(
-            "{:x}.json",
-            Sha256::digest(path.to_string_lossy().as_bytes())
-        )),
+        seen: seen_version(&path),
     };
     let merged = if agent == "kimi" {
         merge_kimi(&original, &path, cfg!(windows), &mut || {
@@ -1685,13 +1709,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn model_switch_version_never_runs_a_project_launcher() {
-        use std::os::unix::fs::PermissionsExt;
         let folder = tempfile::tempdir().unwrap();
         let marker = folder.path().join("launcher-ran");
         let launcher = folder.path().join("run_claude.sh");
         let script = format!("#!/bin/sh\n: > '{}'\necho '2.1.296 (Claude Code)'\n", marker.display());
-        fs::write(&launcher, script).unwrap();
-        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::platform::write_script(&launcher, &script);
         let program = launcher.to_string_lossy();
         let installed = Installed {
             program: &program,
@@ -1831,7 +1853,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn registered_version_is_read_again_only_for_another_executable() {
-        use std::os::unix::fs::PermissionsExt;
         let folder = tempfile::tempdir().unwrap();
         let reads = folder.path().join("reads");
         let answer = folder.path().join("answer");
@@ -1844,8 +1865,7 @@ mod tests {
                 reads.display(),
                 answer.display()
             );
-            fs::write(&new, script).unwrap();
-            fs::set_permissions(&new, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::platform::write_script(&new, &script);
             fs::rename(&new, &claude).unwrap();
         };
         let asked = || fs::read_to_string(&reads).map_or(0, |text| text.lines().count());

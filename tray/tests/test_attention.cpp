@@ -27,8 +27,131 @@ private slots:
     void actualApplicationFocusSuppressesBanners();
     void scheduledTicksStayUnreadUntilTheScheduleEnds();
     void replyWaitsForLiveBackgroundShellToFinish();
+    void replyWaitsForExplicitIndependentResult();
     void nativeChildCountersPreserveUnknownEvidence();
+    void optionalQuestionsNotifyOncePerQuestionWhenEnabled();
+    void optionalQuestionsSurviveUnknownCountsAndResume();
+    void optionalQuestionsDeferToRequestsAndRetry();
 };
+
+namespace {
+SessionInfo optionalQuestionSession(const QStringList &ids)
+{
+    SessionInfo s; s.name="codex/project/session"; s.cmd="codex"; s.runId="run"; s.conversationId="conversation";
+    s.phase="working"; s.activity="busy"; s.optionalQuestionsReported=true;
+    s.optionalQuestions=int(ids.size()); s.optionalQuestionIds=ids;
+    return s;
+}
+}
+
+void TestAttention::optionalQuestionsNotifyOncePerQuestionWhenEnabled()
+{
+    BoxState box; box.ok=true; box.host="arch"; box.sessions={optionalQuestionSession({"a"})};
+    AttentionTracker tracker;
+    // Off by default; questions seen meanwhile are not announced later.
+    QVERIFY(tracker.observe({},box,1000,false).raised.isEmpty());
+    tracker.setOptionalQuestions(true);
+    QVERIFY(tracker.observe({},box,1001,false).raised.isEmpty());
+    box.sessions={optionalQuestionSession({"a","b"})};
+    auto changes=tracker.observe({},box,1002,false);
+    QCOMPARE(changes.raised.size(),1); QVERIFY(changes.cleared.isEmpty());
+    QCOMPARE(changes.raised[0].title,QString("Zerus — Optional question"));
+    QVERIFY(changes.raised[0].body.contains("codex/project/session / arch"));
+    QVERIFY(changes.raised[0].body.contains("2 optional questions waiting"));
+    const auto target=AttentionTracker::target(changes.raised[0].token);
+    QCOMPARE(target.value("question").toString(),QString("b"));
+    QVERIFY(tracker.observe({},box,1003,false).raised.isEmpty());
+    AttentionTracker restarted(tracker.state()); restarted.setOptionalQuestions(true);
+    QVERIFY(restarted.observe({},box,1004,false).raised.isEmpty());
+    // Answering one keeps the banner; a new question replaces it.
+    box.sessions={optionalQuestionSession({"b"})};
+    changes=restarted.observe({},box,1005,false); QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    box.sessions={optionalQuestionSession({"b","c"})};
+    changes=restarted.observe({},box,1006,false); QCOMPARE(changes.raised.size(),1); QCOMPARE(changes.cleared.size(),1);
+    QVERIFY(changes.raised[0].body.contains("2 optional questions waiting"));
+    box.sessions={optionalQuestionSession({})};
+    changes=restarted.observe({},box,1007,false); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),1);
+    // Turning banners off withdraws them and still records new questions.
+    box.sessions={optionalQuestionSession({"d"})};
+    QCOMPARE(restarted.observe({},box,1008,false).raised.size(),1);
+    restarted.setOptionalQuestions(false);
+    box.sessions={optionalQuestionSession({"d","e"})};
+    changes=restarted.observe({},box,1009,false); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),1);
+    restarted.setOptionalQuestions(true);
+    QVERIFY(restarted.observe({},box,1010,false).raised.isEmpty());
+    // Acknowledging the session here or on another device withdraws the banner.
+    box.sessions={optionalQuestionSession({"d","e","f"})};
+    QCOMPARE(restarted.observe({},box,1011,false).raised.size(),1);
+    box.sessions[0].attentionAcknowledged=true;
+    changes=restarted.observe({},box,1012,false); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),1);
+    box.sessions={optionalQuestionSession({"d","e","f","g"})}; box.sessions[0].attentionAcknowledged=true;
+    QVERIFY(restarted.observe({},box,1013,false).raised.isEmpty());
+    // The tray and badge counts ignore optional questions.
+    FleetState fleet; fleet.setLocal(box,1000); QCOMPARE(fleet.attentionSessions(1000),0);
+}
+
+void TestAttention::optionalQuestionsSurviveUnknownCountsAndResume()
+{
+    BoxState box; box.ok=true; box.host="arch"; box.sessions={optionalQuestionSession({"a"})};
+    AttentionTracker tracker; tracker.setOptionalQuestions(true);
+    const auto first=tracker.observe({},box,1000,false); QCOMPARE(first.raised.size(),1);
+    QVERIFY(first.raised[0].body.endsWith("Optional question waiting"));
+    // An unreadable question index keeps the banner and its IDs.
+    box.sessions[0].optionalQuestions=-1; box.sessions[0].optionalQuestionIds.clear();
+    auto changes=tracker.observe({},box,1001,false); QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    box.sessions={optionalQuestionSession({"a"})};
+    changes=tracker.observe({},box,1002,false); QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    // Stopping clears it; resuming the conversation with the same question is quiet.
+    box.sessions[0].state="stopped";
+    changes=tracker.observe({},box,1003,false); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),1);
+    box.sessions={optionalQuestionSession({"a"})}; box.sessions[0].runId="resumed"; box.sessions[0].name="renamed";
+    QVERIFY(tracker.observe({},box,1004,false).raised.isEmpty());
+    // An archived instance of the same conversation does not hide the live one.
+    auto archived=optionalQuestionSession({}); archived.state="archived"; archived.runId="old"; archived.name="saved";
+    auto resumed=optionalQuestionSession({"a","b"}); resumed.runId="resumed"; resumed.name="renamed";
+    box.sessions={archived,resumed};
+    changes=tracker.observe({},box,1005,false); QCOMPARE(changes.raised.size(),1);
+    QVERIFY(changes.raised[0].body.startsWith("renamed / arch"));
+    const auto target=AttentionTracker::target(changes.raised[0].token);
+    QCOMPARE(target.value("run").toString(),QString("resumed"));
+    QVERIFY(AttentionTracker::matches(target,resumed)); QVERIFY(!AttentionTracker::matches(target,archived));
+    auto other=resumed; other.conversationId="other"; QVERIFY(!AttentionTracker::matches(target,other));
+    resumed.optionalQuestionIds<<"c"; resumed.optionalQuestions=3; box.sessions={resumed,archived};
+    changes=tracker.observe({},box,1006,false); QCOMPARE(changes.raised.size(),1);
+    QVERIFY(changes.raised[0].body.startsWith("renamed / arch"));
+    // Questions first seen while Zerus has focus are only recorded.
+    box.sessions[0].optionalQuestionIds<<"d"; box.sessions[0].optionalQuestions=4;
+    changes=tracker.observe({},box,1007,true); QVERIFY(changes.raised.isEmpty()); QVERIFY(changes.cleared.isEmpty());
+    QVERIFY(tracker.observe({},box,1008,false).raised.isEmpty());
+    // Hosts without the field add nothing.
+    auto older=optionalQuestionSession({"z"}); older.conversationId="older"; older.optionalQuestionsReported=false;
+    box.sessions={older}; QVERIFY(tracker.observe({},box,1009,false).raised.isEmpty());
+}
+
+void TestAttention::optionalQuestionsDeferToRequestsAndRetry()
+{
+    BoxState box; box.ok=true; box.host="arch"; box.sessions={optionalQuestionSession({"a"})};
+    box.sessions[0].phase="input"; box.sessions[0].attentionId="call-1";
+    AttentionTracker tracker; tracker.setOptionalQuestions(true);
+    // A request that needs action notifies alone and its questions are recorded.
+    auto changes=tracker.observe({},box,1000,false);
+    QCOMPARE(changes.raised.size(),1); QCOMPARE(changes.raised[0].title,QString("Zerus — Needs attention"));
+    box.sessions[0].phase="working";
+    changes=tracker.observe({},box,1001,false); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),1);
+    // Optional notices come first in one poll, so a blocking request posts last.
+    auto waiting=optionalQuestionSession({}); waiting.name="codex/project/other"; waiting.runId="run-2";
+    waiting.conversationId="conversation-2"; waiting.phase="approval"; waiting.attentionId="call-2";
+    box.sessions={optionalQuestionSession({"a","b"}),waiting};
+    changes=tracker.observe({},box,1002,false); QCOMPARE(changes.raised.size(),2);
+    QCOMPARE(changes.raised[0].title,QString("Zerus — Optional question"));
+    QCOMPARE(changes.raised[1].title,QString("Zerus — Needs attention"));
+    // A failed delivery retries after a minute while questions remain.
+    tracker.deliveryFailed(changes.raised[0].token,1002);
+    QVERIFY(tracker.observe({},box,1030,false).raised.isEmpty());
+    changes=tracker.observe({},box,1063,false); QCOMPARE(changes.raised.size(),1); QCOMPARE(changes.cleared.size(),1);
+    QCOMPARE(changes.raised[0].title,QString("Zerus — Optional question"));
+    QVERIFY(tracker.observe({},box,1124,false).raised.isEmpty());
+}
 
 void TestAttention::nativeChildCountersPreserveUnknownEvidence()
 {
@@ -57,6 +180,18 @@ void TestAttention::replyWaitsForLiveBackgroundShellToFinish()
     BoxState box; box.ok=true; box.sessions={s}; AttentionTracker tracker;
     QVERIFY(tracker.observe({},box,1000,false).raised.isEmpty());
     box.sessions[0].backgroundProcesses=0;
+    QCOMPARE(tracker.observe({},box,1001,false).raised.size(),1);
+    QVERIFY(tracker.observe({},box,1002,false).raised.isEmpty());
+}
+
+void TestAttention::replyWaitsForExplicitIndependentResult()
+{
+    SessionInfo s; s.name="codex/project/session";s.runId="run";s.conversationId="conversation";
+    s.phase="idle";s.activity="idle";s.replyId="progress";s.unreadReply=true;s.subagentActiveCount=0;
+    s.coordinationWait={{"schema",1},{"status","ok"},{"revision",1},{"run_id",s.runId},{"conversation_id",s.conversationId},{"count",1}};
+    BoxState box;box.ok=true;box.sessions={s};AttentionTracker tracker;
+    QVERIFY(tracker.observe({},box,1000,false).raised.isEmpty());
+    box.sessions[0].coordinationWait["count"]=0;
     QCOMPARE(tracker.observe({},box,1001,false).raised.size(),1);
     QVERIFY(tracker.observe({},box,1002,false).raised.isEmpty());
 }

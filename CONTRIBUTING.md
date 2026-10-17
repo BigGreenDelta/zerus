@@ -95,6 +95,17 @@ read each suite's setup before running it. Do not run tests against live agent s
 Some platform tests only exist on macOS, Linux or Windows. Record any unavailable
 checks.
 
+Color-popup dismissal also needs Cocoa qualification on macOS. These cases post
+mouse events through the fixture's native Cocoa window; Qt-injected window events
+bypass the native modal-session filter that previously swallowed outside clicks.
+The dismissing click must cancel without activating the control behind the popup.
+
+```sh
+QT_QPA_PLATFORM=cocoa .ci-build/gui/tests/test_machinespage colorPickerDismissalKeepsTheSavedColor
+QT_QPA_PLATFORM=cocoa .ci-build/gui/tests/test_projectsdialog projectColorChangesRequireApply customProjectColorRemainsStaged
+QT_QPA_PLATFORM=cocoa .ci-build/gui/tests/test_sessionswindow colorPickerUsesWorkspaceThemeAndCancelsOutside
+```
+
 On a KDE Plasma 6 Wayland desktop, the optional native window-layer check uses
 its own temporary settings and synthetic windows, verifies KWin's actual state,
 and leaves unrelated windows and desktop rules alone:

@@ -14,8 +14,10 @@ pub(super) fn grouped_active(record: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// An unknown child never establishes current work: listings count it as
+/// unknown, so it must not keep its parent from Ready either.
 pub(super) fn child_working(record: &Value, child: &Value) -> bool {
-    child["state"] == "working" && (record["kimi_native_roster"] != true
+    child["state"] == "working" && child["display_state"] != "unknown" && (record["kimi_native_roster"] != true
         || child["external"] == true || child["native_roster"] == true)
 }
 

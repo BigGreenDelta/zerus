@@ -2,6 +2,7 @@
 
 #include "HgsClient.h"
 #include "QuestionReply.h"
+#include "SessionElapsed.h"
 #include <QObject>
 #include <QDateTime>
 #include <QRegularExpression>
@@ -45,6 +46,12 @@ inline QJsonObject gitStatus(const SessionInfo &s, QJsonObject snapshot, bool on
 }
 inline SessionInfo inspected(SessionInfo s, const QJsonObject &details)
 {
+    const auto wait = details.value("coordination_wait").toObject();
+    if (details.value("run_id") == s.runId && details.value("conversation_id") == s.conversationId
+        && wait.value("status") == "ok" && wait.value("run_id") == s.runId
+        && wait.value("conversation_id") == s.conversationId
+        && wait.value("revision").toDouble() >= s.coordinationWait.value("revision").toDouble())
+        s.coordinationWait = wait;
     const auto work = details.value("process_work").toObject();
     if (s.state == "running" && !s.runId.isEmpty() && details.value("tracked").toBool()
         && details.value("run_id").toString() == s.runId && details.value("conversation_id").toString() == s.conversationId
@@ -98,6 +105,32 @@ inline bool backgroundIdle(const SessionInfo &s)
 {
     return s.activity == "idle" && s.phase == "idle" && s.backgroundProcesses > 0;
 }
+inline bool waitingIdle(const SessionInfo &s)
+{
+    return s.state == "running" && s.processState != "exited" && s.activity == "idle" && s.phase == "idle"
+        && s.backgroundProcesses <= 0 && s.subagentActiveCount <= 0 && s.hasCoordinationWait();
+}
+inline QString waitingLabel(const SessionInfo &s, bool detail = false)
+{
+    const auto items = s.coordinationWait.value("items").toArray();
+    const auto item = items.isEmpty() ? QJsonObject() : items.first().toObject();
+    const auto producer = item.value("producer").toObject();
+    const auto label = item.value("state") == "awaiting_result" ? QObject::tr("Waiting for result") : QObject::tr("Waiting for acceptance");
+    const auto name = producer.value("name").toString().section('/',2);
+    const auto host = producer.value("host").toString();
+    QString result = name.isEmpty() ? label : QObject::tr("%1 from %2").arg(label,name);
+    if (!host.isEmpty()) result += QObject::tr(" on %1").arg(host);
+    if (detail && !item.value("label").toString().isEmpty()) result += ": " + item.value("label").toString();
+    const auto count = s.coordinationWait.value("count").toInt();
+    if (count > 1) result += QObject::tr(" (+%1)").arg(count-1);
+    return SessionElapsed::status(result,item.value("created_at").toDouble());
+}
+inline QString waitingCaption(const SessionInfo &s)
+{
+    const auto items=s.coordinationWait.value("items").toArray();
+    const auto item=items.isEmpty()?QJsonObject():items.first().toObject();
+    return SessionElapsed::status(item.value("state")=="awaiting_result"?QObject::tr("Waiting for result"):QObject::tr("Waiting for acceptance"),item.value("created_at").toDouble());
+}
 // The next run as a time of day, "due" once it has passed, or empty if unknown.
 inline QString nextScheduledRun(const SessionInfo &s, const QDateTime &now = QDateTime::currentDateTime())
 {
@@ -133,6 +166,7 @@ inline QString status(const SessionInfo &s, bool reachable = true)
     if (s.phase == "tool") return QObject::tr("Using a tool");
     if (s.activity == "busy") return QObject::tr("Working");
     if (backgroundIdle(s)) return QObject::tr("Background");
+    if (waitingIdle(s)) return waitingLabel(s);
     if (scheduledIdle(s)) {
         const auto next = nextScheduledRun(s);
         return next.isEmpty() ? QObject::tr("Scheduled") : QObject::tr("Scheduled · %1").arg(next);
@@ -223,7 +257,7 @@ inline bool working(const SessionInfo &s, bool online = true)
 
 inline bool scheduled(const SessionInfo &s, bool online = true)
 {
-    return currentActivity(s, online) && !s.needsAction() && !backgroundIdle(s) && scheduledIdle(s);
+    return currentActivity(s, online) && !s.needsAction() && !backgroundIdle(s) && !waitingIdle(s) && scheduledIdle(s);
 }
 
 inline bool needsAttention(const SessionInfo &s, bool online = true)
@@ -240,6 +274,19 @@ inline bool needsAttention(const SessionInfo &s, bool online = true)
         if (state == "approval" || state == "input" || state == "attention") return true;
     }
     return false;
+}
+
+// Pending optional Codex questions shown on the card; 0 hides the chip. Only a
+// running agent on a reachable machine with a known count shows one. The agent
+// continues without an answer, so these never count as attention or activity.
+inline int optionalQuestionCount(const SessionInfo &s, bool online = true)
+{
+    if (!online || s.state != "running" || s.processState == "exited" || s.optionalQuestions < 0) return 0;
+    return s.optionalQuestions;
+}
+inline QString optionalQuestionsLabel(int count)
+{
+    return count == 1 ? QObject::tr("1 optional question waiting") : QObject::tr("%1 optional questions waiting").arg(count);
 }
 
 inline bool active(const SessionInfo &s, bool online = true, bool hasDraft = false)
@@ -281,6 +328,7 @@ inline QString currentAction(const SessionInfo &s, bool online = true)
     if (!currentActivity(s, online)) return status(s, online);
     if (backgroundIdle(s)) return (s.backgroundProcesses == 1 ? QObject::tr("1 running command") : QObject::tr("%1 running commands").arg(s.backgroundProcesses))
         + (s.backgroundCommand.isEmpty() ? QString() : QStringLiteral(": ") + s.backgroundCommand);
+    if (waitingIdle(s)) return waitingLabel(s,true);
     if (scheduled(s, online)) {
         const auto now = QDateTime::currentDateTime();
         if (s.nextScheduledAt <= 0) return QObject::tr("Waiting for its next scheduled run");

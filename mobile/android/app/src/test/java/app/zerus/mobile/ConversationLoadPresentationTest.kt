@@ -4,6 +4,36 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ConversationLoadPresentationTest {
+    @Test fun openingCachedHistoryIsVisibleImmediatelyAcrossBothReadStages() {
+        val inspection = ConversationLoadPresentation.status(true, true, false, false, false, false, opening = true)!!
+        val history = ConversationLoadPresentation.status(true, false, false, true, false, false, resolved = true, opening = true)!!
+        for (status in listOf(inspection, history)) {
+            assertFalse(status.initial)
+            assertTrue(status.spinner)
+            assertEquals("Updating messages…", status.text)
+        }
+        assertNull(ConversationLoadPresentation.status(true, false, true, false, true, false, opening = true))
+        // Once this opening has settled, fast background polls stay quiet.
+        assertNull(ConversationLoadPresentation.status(true, true, false, false, false, false, opening = false))
+    }
+
+    @Test fun resolvedEmptyConversationStaysEmptyAcrossRepeatedBackgroundPolls() {
+        repeat(4) {
+            assertNull(ConversationLoadPresentation.status(false, true, false, false, false, false, resolved = true))
+            assertNull(ConversationLoadPresentation.status(false, false, false, true, false, false, resolved = true))
+            assertNull(ConversationLoadPresentation.status(false, false, false, false, false, false, resolved = true))
+        }
+        val explicit = ConversationLoadPresentation.status(false, true, true, false, false, false, resolved = true)!!
+        assertFalse(explicit.initial)
+        assertTrue(explicit.spinner)
+        assertEquals("Refreshing conversation…", explicit.text)
+        val slowHistory = ConversationLoadPresentation.status(false, false, false, true, true, false, resolved = true)!!
+        assertFalse(slowHistory.initial)
+        assertEquals("Loading message history…", slowHistory.text)
+        // A different, unopened conversation still gets its own cold placeholder.
+        assertTrue(ConversationLoadPresentation.status(false, true, false, false, false, false, resolved = false)!!.initial)
+    }
+
     @Test fun initialLoadIsExplicitBeforeTheDelayedSpinner() {
         var time = 0L
         val gate = LoadingGate({ time })

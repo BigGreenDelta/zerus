@@ -79,9 +79,23 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
     var playing by mutableStateOf(false); private set
     var audioPositionMs by mutableStateOf(0); private set
 
+    private var videoSurface: android.view.Surface? = null
+    private var videoSurfaceKey = ""
+    internal fun bindVideoSurface(key: String, surface: android.view.Surface?) {
+        if (playingKey != key) return
+        videoSurface = surface; videoSurfaceKey = if (surface != null) key else ""
+        runCatching { player?.setSurface(surface) }
+        if (surface == null) stopAudio()
+    }
+    internal fun toggleVideo(target: Target?, video: VideoMessage) = toggleMedia(target, video.file)
+
     /** Playback only begins after a user's Play tap and authenticated byte verification. */
     fun toggleAudio(target: Target?, file: DisplayedAttachment) {
         if (file.mime != "audio/wav") return
+        toggleMedia(target, file)
+    }
+    private fun toggleMedia(target: Target?, file: DisplayedAttachment) {
+        if (file.mime !in setOf("audio/wav", "video/mp4")) return
         val key = AttachmentIdentity.playbackKey(target, file)
         val current = player
         if (playingKey == key && current != null) {
@@ -139,6 +153,7 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
                 if (playingKey != key) return@launch
                 val next = android.media.MediaPlayer()
                 player = next
+                if (videoSurfaceKey == key) next.setSurface(videoSurface)
                 next.setAudioAttributes(android.media.AudioAttributes.Builder()
                     .setUsage(android.media.AudioAttributes.USAGE_MEDIA).setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
                 withContext(Dispatchers.IO) { next.setDataSource(entry.file.absolutePath) }
@@ -184,6 +199,7 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
         playingKey = ""; playing = false; audioPositionMs = 0
         audioPrepared = false; playRequested = false; seekInFlight = false
         player?.let { runCatching { it.release() } }; player = null
+        videoSurface = null; videoSurfaceKey = ""
         focus?.let { audioManager.abandonAudioFocusRequest(it) }; focus = null
     }
 

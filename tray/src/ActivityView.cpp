@@ -8,6 +8,9 @@
 #include "SessionFileReference.h"
 #include "WorkspaceIcons.h"
 #include "speech/VoicePlayerImage.h"
+#include "speech/RoundVideo.h"
+#include <QDialog>
+#include <QVBoxLayout>
 
 #include <QDateTime>
 #include <QAudioOutput>
@@ -891,13 +894,13 @@ struct ActivityRenderResult {
             const auto text = event.value("detail").toString();
             const auto replies = role == "user" ? QuestionReply::parse(text) : QJsonArray();
             if(event.value("source")=="hgs_voice") {
-                const auto voice=event.value("voice").toObject();const auto audio=voice.value("audio").toObject();
+                const auto voice=event.value("voice").toObject();const auto video=voice.value("video").toObject();const auto audio=voice.value("audio").toObject();
                 const auto id=voice.value("id").toString(event.value("message_id").toString());
                 const auto key=QString::fromLatin1(QCryptographicHash::hash((m_sessionKey+"\n"+id).toUtf8(),QCryptographicHash::Sha256).toHex());
-                if(!audio.value("request_id").toString().isEmpty())m_voiceLinks.insert(key,audio);
+                if(!audio.value("request_id").toString().isEmpty())m_voiceLinks.insert(key,video.isEmpty()?audio:video);
                 const auto state=voice.value("state").toString();
-                const QHash<QString,QString> labels{{"queued",tr("Waiting for recognition")},{"transcribing",tr("Recognizing…")},{"ready",tr("Ready to deliver")},
-                    {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Sent")},{"failed",tr("Voice message failed")},
+                const QHash<QString,QString> labels{{"uploading",tr("Sending recording…")},{"queued",tr("Waiting for recognition")},{"transcribing",tr("Recognizing…")},{"ready",tr("Ready to deliver")},
+                    {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Sent to agent")},{"failed",tr("Voice message failed")},
                     {"cancelled",tr("Cancelled")},{"uncertain",tr("Delivery not confirmed")}};
                 const int playerWidth=qBound(140,int(qMin(width,widthWithScrollBar)/m_scale)-72,420);
                 const QUrl playerUrl("hgs-voice-player:"+key);
@@ -906,15 +909,30 @@ struct ActivityRenderResult {
                 const auto label=tr("Play or pause voice message (%1)").arg(VoicePlayerImage::time(audio.value("duration_ms").toInteger()));
                 QString body=QString("<p style='margin:8px 0 4px;'><a href='hgs-voice:%1' title='%2'><img src='%3' width='%4' height='52' alt='%2'></a></p>")
                     .arg(key,escaped(label),playerUrl.toString(),QString::number(playerWidth));
+                if(!video.isEmpty()){
+                    document->addResource(QTextDocument::ImageResource,playerUrl,VoicePlayerImage::videoPoster(m_scale,document->pixelRatio,video));
+                    body=QString("<p style='margin:4px 0;'><a href='hgs-voice:%1' title='%2'><img src='%3' width='200' height='200' alt='%2'></a></p>")
+                        .arg(key,escaped(tr("Play video message")),playerUrl.toString());
+                }
                 const auto transcript=voice.value("transcript").toString();
+                QString transcriptAction;
                 if(!transcript.isEmpty()) {
                     const auto toggle="voice-text-"+key;m_toggleKeys.insert(toggle);
-                    body+=QString("<p><a href='hgs-activity:%1' style='color:%2;'>%3</a></p>").arg(toggle,accent,escaped(m_expanded.value(toggle)?tr("Hide transcript"):tr("Show transcript")));
-                    if(m_expanded.value(toggle))body+=userMessage(transcript);
+                    const QUrl icon("hgs-voice-transcript:"+key);
+                    document->addResource(QTextDocument::ImageResource,icon,VoicePlayerImage::transcriptIcon(m_scale,document->pixelRatio,m_dark,m_expanded.value(toggle)));
+                    const auto label=escaped(m_expanded.value(toggle)?tr("Hide transcript"):tr("Show transcript"));
+                    transcriptAction=QString("<a href='hgs-activity:%1' title='%2'><img src='%3' width='32' height='32' style='vertical-align:middle;' alt='%2'></a>").arg(toggle,label,icon.toString());
                 }
+                const auto statusLabel=escaped(labels.value(state,tr("Delivery not confirmed")));
+                const QUrl statusIcon("hgs-voice-status:"+key);
+                document->addResource(QTextDocument::ImageResource,statusIcon,VoicePlayerImage::deliveryIcon(state,m_scale,document->pixelRatio,m_dark));
+                const auto mediaTime=video.isEmpty()?QString():VoicePlayerImage::time(video.value("duration_ms").toInteger());
+                body+=QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin:0;'><tr><td valign='middle' style='font-size:11px;color:%3;'>%1%2</td><td align='right' valign='middle' style='font-size:11px;color:%3;'>%4 &nbsp;<img src='%5' width='18' height='18' style='vertical-align:middle;' alt='%6' title='%6'></td></tr></table>")
+                    .arg(transcriptAction,escaped(mediaTime),muted,escaped(timeText(event)),statusIcon.toString(),statusLabel);
+                if(!transcript.isEmpty() && m_expanded.value("voice-text-"+key))body+=userMessage(transcript);
                 if(!voice.value("error").toString().isEmpty())body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(voice.value("error").toString()));
                 if(!m_voiceError.isEmpty() && m_voiceError.startsWith(key+"\n"))body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(m_voiceError.mid(key.size()+1)));
-                html+=card(eventKey(event),tr("You (voice)"),timeText(event)+"  "+labels.value(state,tr("Voice message")),body,true);
+                html+=card(eventKey(event),video.isEmpty()?tr("You (voice)"):tr("You (video)"),{},body,true);
                 ++i;continue;
             }
             const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
@@ -1171,6 +1189,7 @@ ActivityView::ActivityView(QWidget *parent) : QWidget(parent)
 void ActivityView::setSessionKey(const QString &key)
 {
     if (key == m_sessionKey) return;
+    if(m_videoDialog)m_videoDialog->close();
     if(m_voicePlayer)m_voicePlayer->stop();
     m_voiceKey.clear();m_voicePlaying.clear();m_voiceLoading.clear();m_voiceError.clear();m_voiceLinks.clear();m_voicePositions.clear();
     m_voicePressed.clear();m_voicePosition=0;m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;
@@ -1251,6 +1270,14 @@ void ActivityView::setTheme(bool dark)
     palette.setColor(QPalette::Highlight, QColor(dark ? "#375e54" : "#b6e2d2"));
     palette.setColor(QPalette::HighlightedText, palette.color(QPalette::Text));
     m_browser->setPalette(palette);
+    // The workspace's general QTextBrowser style uses a transparent background.
+    // That gives Qt a NoBrush Base even after setPalette(), disabling the bounded
+    // opaque-canvas chip renderer. Own the same canvas colour here so real
+    // workspace scrolls use the fast path, just like a standalone ActivityView.
+    const QString browserStyle = QString("QTextBrowser { background:%1; %2 }")
+        .arg(dark ? "#1c2229" : "#ffffff", qFuzzyCompare(m_scale, 1.0) ? QString()
+            : QString("font-size:%1px;").arg(ContentScale::px(13, m_scale)));
+    if (m_browser->styleSheet() != browserStyle) m_browser->setStyleSheet(browserStyle);
     m_latest->setStyleSheet(QString("QPushButton { color:%1; background:%2; border:1px solid %3; border-radius:12px; padding:5px 13px; font-size:11px; } QPushButton:hover { border-color:%1; }"
         " QPushButton[compact=\"true\"] { background:transparent; border:0; border-radius:6px; padding:0; min-width:0; min-height:0; }"
         " QPushButton[compact=\"true\"]:hover { background:%2; }"
@@ -1276,10 +1303,8 @@ void ActivityView::setContentScale(double scale)
     scale = ContentScale::clamp(scale);
     if (qFuzzyCompare(scale, m_scale)) return;
     m_scale = scale;
-    // Explicit HTML lengths are scaled while rendering. Markdown headings are
-    // relative to the document's default font, which follows the widget font.
-    m_browser->setStyleSheet(qFuzzyCompare(scale, 1.0) ? QString()
-        : QString("QTextBrowser { font-size:%1px; }").arg(ContentScale::px(13, scale)));
+    // setTheme applies the browser font size together with its opaque canvas;
+    // explicit HTML lengths are scaled by the render worker.
     m_queueText->setMaximumHeight(ContentScale::px(100, scale));
     setTheme(m_dark); updateColumnActions();
 }
@@ -1524,7 +1549,8 @@ bool ActivityView::eventFilter(QObject *watched, QEvent *event)
                 const auto rect=voiceRect(key);const auto local=mouse->position()-rect.topLeft();
                 const qreal scale=rect.height()/52.;
                 const auto waveform=VoicePlayerImage::waveformRect(rect.width(),scale);
-                if(waveform.contains(local))activateVoice(key,qBound<qreal>(0,(local.x()-waveform.left())/waveform.width(),1));
+                if(m_voiceLinks.value(key).value("mime")=="video/mp4")activateVoice(key);
+                else if(waveform.contains(local))activateVoice(key,qBound<qreal>(0,(local.x()-waveform.left())/waveform.width(),1));
                 else if(local.x()<48*scale)activateVoice(key);
             }
             return true;
@@ -1597,7 +1623,7 @@ QRect ActivityView::voiceRect(const QString &key) const
 
 void ActivityView::updateVoiceImage(const QString &key)
 {
-    if(key.isEmpty() || !m_voiceLinks.contains(key) || !m_voicePositions.contains(key))return;
+    if(key.isEmpty() || !m_voiceLinks.contains(key) || !m_voicePositions.contains(key) || m_voiceLinks.value(key).value("mime")=="video/mp4")return;
     auto *document=paintDocument(m_browser->document());const QUrl url("hgs-voice-player:"+key);
     const auto previous=document->resource(QTextDocument::ImageResource,url).value<QImage>();
     if(previous.isNull())return;
@@ -1629,6 +1655,7 @@ void ActivityView::activateVoice(const QString &key,std::optional<qreal> fractio
         }
         updateVoiceImage(key);return;
     }
+    if(m_videoDialog)m_videoDialog->close();
     const auto previous=m_voiceKey;
     if(m_voicePlayer){m_voicePlayer->stop();m_voicePlayer->setSource({});}
     m_voiceKey=key;m_voicePosition=position;m_voicePendingSeek=position;m_voiceStartAfterLoad=!fraction.has_value();
@@ -1943,7 +1970,7 @@ void ActivityView::playVoice(const QString &key,const QString &path,const QStrin
     m_voiceLoading.clear();
     if(!error.isEmpty() || path.isEmpty()){m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;m_voiceError=key+"\n"+(error.isEmpty()?tr("Recording is unavailable."):error);render(false);return;}
     if(!m_voicePlayer){
-        m_voicePlayer=new QMediaPlayer(this);m_voiceOutput=new QAudioOutput(this);m_voicePlayer->setAudioOutput(m_voiceOutput);
+        m_voicePlayer=new QMediaPlayer(this);registerMessagePlayer(m_voicePlayer);m_voiceOutput=new QAudioOutput(this);m_voicePlayer->setAudioOutput(m_voiceOutput);
         connect(m_voicePlayer,&QMediaPlayer::playbackStateChanged,this,[this](QMediaPlayer::PlaybackState state){m_voicePlaying=state==QMediaPlayer::PlayingState?m_voiceKey:QString();updateVoiceImage(m_voiceKey);});
         connect(m_voicePlayer,&QMediaPlayer::positionChanged,this,[this](qint64 position){m_voicePosition=position;updateVoiceImage(m_voiceKey);});
         connect(m_voicePlayer,&QMediaPlayer::mediaStatusChanged,this,[this](QMediaPlayer::MediaStatus status){
@@ -1953,11 +1980,21 @@ void ActivityView::playVoice(const QString &key,const QString &path,const QStrin
         });
         connect(m_voicePlayer,&QMediaPlayer::errorOccurred,this,[this](QMediaPlayer::Error,const QString &detail){m_voiceError=m_voiceKey+"\n"+tr("Could not play recording: %1").arg(detail);render(false);});
     }
+    if(m_voiceLinks.value(key).value("mime")=="video/mp4"){
+        if(m_videoDialog)m_videoDialog->close();
+        auto *dialog=new QDialog(this);dialog->setAttribute(Qt::WA_DeleteOnClose);dialog->setWindowTitle(tr("Video message"));m_videoDialog=dialog;
+        auto *layout=new QVBoxLayout(dialog);auto *video=new RoundVideoView(dialog);layout->addWidget(video,0,Qt::AlignHCenter);
+        auto *toggle=new QPushButton(tr("Play / pause"),dialog);layout->addWidget(toggle);
+        connect(toggle,&QPushButton::clicked,dialog,[this]{if(m_voicePlayer->playbackState()==QMediaPlayer::PlayingState)m_voicePlayer->pause();else m_voicePlayer->play();});
+        connect(dialog,&QDialog::finished,this,[this,dialog]{if(m_videoDialog==dialog){m_voicePlayer->stop();m_voicePlayer->setVideoSink(nullptr);m_videoDialog=nullptr;}});
+        m_voicePlayer->setVideoSink(video->sink());dialog->show();
+    } else m_voicePlayer->setVideoSink(nullptr);
     m_voiceKey=key;m_voicePlayer->setSource(QUrl::fromLocalFile(path));
     updateVoiceImage(key);
 }
 void ActivityView::hideEvent(QHideEvent *event)
 {
+    if(m_videoDialog)m_videoDialog->close();
     m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;m_voicePressed.clear();
     if(m_voicePlayer)m_voicePlayer->stop();m_voiceLoading.clear();updateVoiceImage(m_voiceKey);
     QWidget::hideEvent(event);

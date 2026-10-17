@@ -6,6 +6,11 @@ The Rust mobile relay lives in `services/mobile/relay/`; the outbound Python
 connector remains in `services/mobile/zerus_mobile/`. Keep API v1 and durable
 request identities compatible; see `services/mobile/relay/README.md` for relay
 contracts, isolated PostgreSQL tests and container memory qualification.
+The Android client lives in `mobile/android/`; the native iOS client (Swift
+package `ZerusKit` plus SwiftUI app) lives in `mobile/ios/`. Install iOS Dev
+builds with `mobile/ios/scripts/dev-install.sh` or `remote-dev-install.sh`; never
+commit team IDs, device identifiers or signing material. TestFlight uploads run
+only from trusted main; see `docs/ios-distribution.md`.
 `design/` contains prototypes and original artwork, not runtime dependencies.
 
 The repository language is English. Write documentation and other project-facing
@@ -76,6 +81,16 @@ work completes. Historical, unknown and offline jobs never establish current wor
 Keep this contract aligned across desktop, Android, shared fixtures and docs;
 changes to these status semantics need explicit owner direction.
 
+Owner-approved independent-agent waits use `hgs wait`, separately from native
+work. Before handing off work whose acceptance or result you will wait for,
+declare the wait and give the producer its scoped reply ticket. Acknowledge
+acceptance explicitly; deliver the result through the normal guarded send before
+finishing the wait with that exact submission receipt. Cancel abandoned waits.
+Never infer acknowledgement or completion from prose, Beads status, a native Stop
+or peer idleness. Preserve exact waiter identity, native work/attention priority,
+bounded previews and paged journals. Check the selected installed CLI's help
+marker before using `wait` on an older peer. See `docs/agent-coordination.md`.
+
 Use non-interactive filesystem commands and `ssh/scp -o BatchMode=yes` in automation.
 On Windows, reach `ssh.exe` only through `hgs.exe`: Windows OpenSSH hangs after
 using a synchronous pipe, so scripts and tests must not pipe it directly.
@@ -87,6 +102,17 @@ guard still rejects addresses elsewhere, including Beads free text. Use a GitHub
 no-reply address instead if email privacy matters.
 
 ## Validation and handoff
+
+Session counts can reach tens of thousands or more. Histories, audit journals,
+logs and administrative views must use bounded pages, indexed queries and
+background I/O; do not load complete journals or grow per-session GUI caches
+without a bound. Keep pagination stable while new records arrive.
+
+Automatic tool approvals are a separate, dangerous desktop opt-in, off by
+default. Grant only a verified one-time native permission, reserve its private
+audit record durably before delivery, and retain exact run/conversation/question
+identity. Unknown delivery never authorizes replay. Ordinary questions, startup
+trust and broader persistent permission changes remain manual.
 
 Hosted CI runs the complete Linux/Arch/macOS/Windows matrix automatically on
 pushes to main and pull requests targeting main. Manual checks remain available. Public
@@ -125,9 +151,12 @@ assets. Pure VCS version bumps do not create AUR commits. Stable releases after
 0.42.2 and nightly prereleases also carry the tested Windows x86_64 portable zip
 unchanged; it stays GitHub-only (not mirrored or in the v1 feed). Dev builds have
 no Windows asset.
-The Homebrew casks `zerus` (stable) and `zerus@nightly` (tap `ufna/homebrew-zerus`)
-ship the signed, notarized Apple Silicon `Zerus.app` from the same stable or nightly
-candidate once `MACOS_CASKS_ENABLED` is set. Apple credentials stay in the main-only
+The Homebrew casks `zerus` (stable), `zerus@nightly` and `zerus@dev` (tap
+`ufna/homebrew-zerus`) ship signed, notarized Apple Silicon `Zerus.app` once
+`MACOS_CASKS_ENABLED` is set. Dev also requires `DEV_UPDATES_ENABLED`, follows
+successful main CI and uses the existing bounded mirror; it creates no GitHub
+Release per push. Publish its cask only after verifying the exact public catalog
+and signed ZIP/DMG hashes against that CI candidate. Apple credentials stay in the main-only
 `macos-signing` environment and the tap deploy key in `release`. Casks never quit
 the GUI, unload LaunchAgents or write to user homes; `zerus-setup` stays explicit.
 See `docs/macos-distribution.md`.

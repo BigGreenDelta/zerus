@@ -2,7 +2,8 @@
 //! main-agent or child PermissionRequest stays visible while Claude shows a chooser. A
 //! complete panel that matches the request exposes its native options verbatim;
 //! options reaching beyond this one request are marked for a second
-//! confirmation in the desktop. Zerus never chooses an option on its own. An
+//! confirmation in the desktop. The separate explicit desktop automatic-approval
+//! policy may choose only a reviewed one-time grant, with a durable audit record. An
 //! answer given in Terminal sends no hook; only the screen's proof settles it.
 use super::*;
 use sha2::{Digest,Sha256};

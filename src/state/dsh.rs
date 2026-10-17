@@ -83,15 +83,30 @@ fn rpc(_: &Value, _: &str, _: Value) -> Result<Value> {
     Err(UNSUPPORTED.into())
 }
 #[cfg(not(unix))]
+fn search_rpc(_: &Value, _: Value) -> Result<Value> {
+    Err(UNSUPPORTED.into())
+}
+#[cfg(not(unix))]
 fn ensure_host(_: &Value) -> Result<()> {
     Err(UNSUPPORTED.into())
 }
 #[cfg(unix)]
 fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
+    rpc_within(record, method, params, Duration::from_secs(35))
+}
+/// Interactive search waits at most this long for one host: the adapter's own
+/// 5 s scan budget plus a margin. A host that does not answer counts as
+/// unavailable instead of holding up every other provider's results.
+#[cfg(unix)]
+fn search_rpc(record: &Value, params: Value) -> Result<Value> {
+    rpc_within(record, "search-history", params, Duration::from_secs(7))
+}
+#[cfg(unix)]
+fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
     let mut socket = UnixStream::connect(host_dir(record).join("host.sock"))
         .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
     socket
-        .set_read_timeout(Some(Duration::from_secs(35)))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|e| e.to_string())?;
     socket
         .set_write_timeout(Some(Duration::from_secs(10)))
@@ -634,6 +649,14 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
     }
     value["account_id"] = json!("native-dsh");
     value["account_home"] = record["agent_home"].clone();
+    for key in ["fork_parent_id", "fork_source_name"] {
+        if record[key].is_string() { value[key] = record[key].clone(); }
+    }
+    // Present only while the official Schedule bundle is loaded.
+    if row["schedules"].is_object() {
+        value["schedules"] = json!({"count":row["schedules"]["count"],"recurring":row["schedules"]["recurring"],
+            "next_at":row["schedules"]["nextAt"]});
+    }
     value["auth_required"] = json!(auth_required);
     value["account_status"] = inspected
         .get("accountStatus")
@@ -749,6 +772,196 @@ fn message_text(value: &Value) -> String {
 
 pub(super) fn process_rpc(record: &Value, method: &str, params: Value) -> Result<Value> { rpc(record,method,params) }
 
+/// A resident adapter advertises each native operation it implements. Older
+/// adapters stay running and keep the operation in Native UI.
+fn supports(ping: &Value, operation: &str) -> bool {
+    ping["nativeOperations"].as_array().is_some_and(|values| values.iter().any(|value| value == operation))
+}
+const OLDER_ADAPTER: &str = "The running DeepSeek host uses an older adapter; use Native UI until its next ordinary start";
+
+/// Valid DeepSeek bindings, read without contacting any host.
+pub(super) fn binding_records() -> Vec<Value> {
+    let Ok(files) = fs::read_dir(bindings()) else { return Vec::new(); };
+    files.flatten().take(5000).filter_map(|file| {
+        let record: Value = serde_json::from_slice(&fs::read(file.path()).ok()?).ok()?;
+        (record["backend"] == "dsh" && string(&record, "conversation_id").starts_with("session-")
+            && binding_path(string(&record, "name")) == file.path()).then_some(record)
+    }).collect()
+}
+
+fn fork_reason(record: &Value, ping: &Value, inspected: &Value) -> &'static str {
+    if ping["generation"] != inspected["generation"] {
+        "DeepSeek host changed; refresh before forking"
+    } else if !supports(ping, "fork") || inspected["forkSupported"] != true {
+        "The running DeepSeek host uses an older adapter; fork this session in Native UI"
+    } else if record["permissions_pending"] == true {
+        "Resume this DeepSeek session to finish permission setup before forking"
+    } else if inspected["forkReady"] != true {
+        "Wait for a completed reply before forking"
+    } else {
+        ""
+    }
+}
+
+/// Native fork through the resident adapter's official Session Controller.
+/// The new binding keeps the source's native profile and folder and records
+/// the exact identity the engine returned; the source binding never changes.
+/// The engine keeps the new live agent until its host next restarts.
+pub(super) fn fork(
+    name: &str,
+    tag: Option<&str>,
+    expected_run: Option<&str>,
+    expected_conversation: Option<&str>,
+    dry: bool,
+    scope: Option<&session_action::Scope>,
+) -> Result<String> {
+    let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
+    let record = binding(name)?;
+    if let Some(scope) = scope { scope.check(&record)?; }
+    if expected_run.is_some_and(|id| id != string(&record, "run_id"))
+        || expected_conversation.is_some_and(|id| id != string(&record, "conversation_id"))
+    {
+        return Err("source session changed; refresh before forking".into());
+    }
+    let mut occupied: std::collections::BTreeSet<String> = binding_records().iter()
+        .chain(records()?.iter()).chain(archive::records()?.iter())
+        .map(|record| string(record, "name").to_owned()).collect();
+    occupied.insert(name.to_owned());
+    let target = fork::choose_name(name, tag, &occupied)?;
+    if dry {
+        println!("Fork official dsh session {name} as {target}");
+        return Ok(target);
+    }
+    let ping = rpc(&record, "ping", json!({}))?;
+    if !supports(&ping, "fork") { return Err(OLDER_ADAPTER.into()); }
+    let inspected = rpc(&record, "inspect", json!({"sessionId":record["conversation_id"],"includeProcesses":false}))?;
+    let reason = fork_reason(&record, &ping, &inspected);
+    if !reason.is_empty() { return Err(reason.into()); }
+    // A fork whose reply was lost is retried under the same request ID, which
+    // the same host answers with the fork it already made.
+    let pending = root().join("dsh/forks").join(format!("{:x}.json", Sha256::digest(format!("{name}\n{target}").as_bytes())));
+    let mut request_id = uuid::Uuid::new_v4().to_string();
+    if let Ok(bytes) = fs::read(&pending) {
+        let previous: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if previous["source_conversation_id"] != record["conversation_id"] || previous["generation"] != ping["generation"] {
+            fs::remove_file(&pending).map_err(|e| e.to_string())?;
+            return Err(format!("An earlier fork of {name} as {target} was not confirmed before its DeepSeek host changed; check Native UI before forking again"));
+        }
+        request_id = string(&previous, "request_id").to_owned();
+    }
+    private_dir(pending.parent().unwrap())?;
+    atomic(&pending, &json!({"request_id":request_id,"source":name,"source_conversation_id":record["conversation_id"],
+        "target":target,"generation":ping["generation"],"at":now()}).to_string())?;
+    if let Some(scope) = scope { scope.changing(); }
+    let answer = match rpc(&record, "fork", json!({"sessionId":record["conversation_id"],"cwd":record["cwd"],
+        "generation":ping["generation"],"requestId":request_id,"title":target.rsplit('/').next()})) {
+        Ok(answer) => answer,
+        Err(error) if error.contains("delivery uncertain") => {
+            return Err(format!("{error}. Fork {name} as {target} again to adopt the native result"));
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&pending);
+            return Err(error);
+        }
+    };
+    let child = string(&answer, "sessionId");
+    if answer["requestId"] != request_id.as_str() || answer["sourceSessionId"] != record["conversation_id"]
+        || answer["generation"] != ping["generation"] || answer["cwd"] != record["cwd"]
+        || !child.starts_with("session-") || child == string(&record, "conversation_id")
+    {
+        return Err("DeepSeek fork acknowledgement did not match; check Native UI".into());
+    }
+    let run = uuid::Uuid::new_v4().to_string();
+    save(&json!({"backend":"dsh","name":target,"agent":"dsh","agent_home":record["agent_home"],"cwd":record["cwd"],
+        "conversation_id":child,"run_id":run,"created":now(),"launch_id":null,"paused":false,
+        "fork_parent_id":record["conversation_id"],"fork_source_name":name}))?;
+    let _ = fs::remove_file(&pending);
+    match scope {
+        Some(scope) => scope.result(&target, &run, child, None),
+        None => println!("hgs: forked {name} as {target}"),
+    }
+    Ok(target)
+}
+
+/// Public messages matching `query` in exact bound sessions, by binding name:
+/// `Some((events, truncated))`, or `None` when that history is unavailable.
+/// Searching never starts, resumes or reloads a host.
+pub(super) fn history_search(records: &[&Value], query: &str, per_session: usize) -> BTreeMap<String, Option<(Vec<Value>, bool)>> {
+    let mut homes: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    for record in records {
+        homes.entry(string(record, "agent_home")).or_default().push(record);
+    }
+    // Hosts are independent processes: ask them concurrently, each bounded.
+    let answers: Vec<Option<Value>> = std::thread::scope(|scope| {
+        let queries: Vec<_> = homes.values().map(|group| scope.spawn(move || {
+            let ids: Vec<&str> = group.iter().map(|record| string(record, "conversation_id")).collect();
+            search_rpc(group[0], json!({"query":query,"sessionIds":ids,"perSession":per_session})).ok()
+        })).collect();
+        queries.into_iter().map(|query| query.join().ok().flatten()).collect()
+    });
+    let mut found = BTreeMap::new();
+    for (group, answer) in homes.values().zip(answers) {
+        for record in group {
+            // The host's time budget skips later sessions: limited, not unavailable.
+            let session = answer.as_ref().and_then(|answer| answer["sessions"].as_array()?.iter()
+                .find(|session| session["sessionId"] == record["conversation_id"] && ["ok", "skipped"].contains(&string(session, "status"))));
+            found.insert(string(record, "name").to_owned(), session.map(|session| {
+                let rows: Vec<Value> = session["events"].as_array().into_iter().flatten().map(|event| json!({"event":event})).collect();
+                (native_events(&json!(rows)), session["truncated"] == true || session["status"] == "skipped")
+            }));
+        }
+    }
+    found
+}
+
+fn schedule_item(entry: &Value) -> Value {
+    let mut record = entry.clone();
+    if let Some(fields) = record.as_object_mut() {
+        for key in ["sessionId", "status", "lastDelivery"] { fields.remove(key); }
+    }
+    let next = chrono::DateTime::parse_from_rfc3339(string(entry, "scheduledAt")).map(|at| at.timestamp_millis() as f64 / 1000.0).ok();
+    let recurring = ["every", "daily", "weekly", "cron"].contains(&string(entry, "kind"));
+    let delivery = entry.get("lastDelivery").cloned().unwrap_or(Value::Null);
+    json!({"id":entry["id"],"title":entry["title"],"prompt":entry["prompt"],"kind":entry["kind"],"status":entry["status"],
+        "recurring":recurring,"scheduled_at":next,"last_delivery":delivery,"record":record})
+}
+
+/// Official DeepSeek Schedule tasks of one exact session: list them, or with
+/// `--json` delete, edit (native compare-and-set) or read delivery history.
+fn schedules(name: &str, record: &Value, args: &[String]) -> Result<Value> {
+    if record["permissions_pending"] == true && args.iter().any(|arg| arg == "--json") {
+        return Err("Resume this DeepSeek session to finish permission setup before managing its schedules".into());
+    }
+    let ping = rpc(record, "ping", json!({}))?;
+    if !supports(&ping, "schedules") { return Err(OLDER_ADAPTER.into()); }
+    let identity = json!({"name":name,"run_id":record["run_id"],"conversation_id":record["conversation_id"]});
+    let unavailable = "Native Schedule is not enabled for this DeepSeek profile; enable Automation tasks in Native UI Plugins";
+    if !args.iter().any(|arg| arg == "--json") {
+        let listed = rpc(record, "schedules", json!({"sessionId":record["conversation_id"],"action":"list"}))?;
+        if listed["available"] != true { return Err(unavailable.into()); }
+        let mut output = identity;
+        output["generation"] = listed["generation"].clone();
+        output["items"] = json!(listed["items"].as_array().into_iter().flatten().map(schedule_item).collect::<Vec<_>>());
+        return Ok(output);
+    }
+    let request = checked_request(record)?;
+    let action = string(&request, "action");
+    if !["delete", "update", "history"].contains(&action) { return Err("Choose delete, update or history".into()); }
+    if request["expected_generation"] != ping["generation"] { return Err("DeepSeek host changed; refresh schedules".into()); }
+    let mut params = json!({"sessionId":record["conversation_id"],"action":action,"generation":ping["generation"],"id":request["id"]});
+    for (from, to) in [("expected", "expected"), ("title", "title"), ("prompt", "prompt"), ("change", "change"), ("limit", "limit"), ("before", "before")] {
+        if !request[from].is_null() { params[to] = request[from].clone(); }
+    }
+    let answer = rpc(record, "schedules", params)?;
+    if answer["available"] != true { return Err(unavailable.into()); }
+    if answer["generation"] != ping["generation"] { return Err("DeepSeek host changed during the schedule change".into()); }
+    let mut output = identity;
+    output["request_id"] = request["request_id"].clone();
+    output["action"] = json!(action);
+    output["result"] = answer["result"].clone();
+    Ok(output)
+}
+
 pub(super) fn processes(name: &str, output: Option<&str>, stop: Option<&str>, run: Option<&str>, conversation: Option<&str>, generation: Option<&str>) -> Result<i32> {
     let record=binding(name)?;
     if (output.is_some() || stop.is_some()) && (run!=Some(string(&record,"run_id")) || conversation!=Some(string(&record,"conversation_id"))) {
@@ -783,6 +996,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         if let [row] = rows.as_slice() { Some(*row) } else { None }
     })).filter(|_| listed["generation"] == inspected["generation"]);
     let mut result = normalize(&record, child_row.unwrap_or(row), &inspected);
+    if agent_id.is_none() { waits::decorate(std::slice::from_mut(&mut result)); }
     child_summaries(&record, &mut result, &listed, &inspected["generation"]);
     let mut events = native_events(&inspected["page"]["records"]);
     let process_snapshot=if include_processes { processes::dsh_snapshot(&record,&inspected) } else { Value::Null };
@@ -826,6 +1040,15 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         "terminate":"Use Pause for this native DeepSeek session","restore":"Native DeepSeek has no archive lifecycle API",
         "pause":"Requires a supported resident adapter and its owned handle","resume":"Requires a supported resident adapter and a stopped session",
         "rename":"Requires the supported resident scoped adapter","forget":"Requires a supported resident adapter and its owned handle"});
+    let fork_reason = if agent_id.is_some() { "Fork the parent DeepSeek session" } else { fork_reason(&record, &ping, &inspected) };
+    result["fork_supported"] = json!(fork_reason.is_empty());
+    result["fork_reason"] = json!(fork_reason);
+    if fork_reason.is_empty() {
+        if let Some(actions) = result["allowed_actions"].as_array_mut() { actions.push(json!("fork")); }
+        result["action_reasons"].as_object_mut().unwrap().remove("fork");
+    } else {
+        result["action_reasons"]["fork"] = json!(fork_reason);
+    }
     result["pending_questions"] = json!(question_cards(&record, &inspected));
     result["native_questions"] = inspected["pendingQuestions"].clone();
     result["native_projections"] = inspected["baseline"]["values"].clone();
@@ -971,7 +1194,7 @@ fn checked_request(record: &Value) -> Result<Value> {
 /// Lifecycle remains confined to a supported resident host. Never start,
 /// dispose, reload or replace a host to implement a mobile scoped action.
 pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, scope: &session_action::Scope) -> Result<()> {
-    if !["pause","resume","rename","forget"].contains(&action) {return Err("This native DeepSeek adapter has no archive/fork lifecycle API".into());}
+    if !["pause","resume","rename","forget"].contains(&action) {return Err("This native DeepSeek adapter has no archive lifecycle API".into());}
     let _guard=lock(Some(&root().join("dsh/bindings.lock")))?;
     let mut record=binding(name)?;scope.check(&record)?;
     if let Some(new)=new_name {
@@ -1009,7 +1232,7 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
 
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose a DeepSeek session")?;
-    let _guard = if !["inspect", "exists"].contains(&command) {
+    let _guard = if !["inspect", "exists", "schedules"].contains(&command) {
         Some(lock(Some(&root().join("dsh/bindings.lock")))?)
     } else {
         None
@@ -1125,6 +1348,11 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 receipt["submitted_text"] = json!(text);
                 receipt["submitted_at"] = json!(now());
                 receipt["status"] = json!("pending");
+                if agent_id.is_empty() {
+                    if let Some(target) = session_graph::target_receipt(&record) {
+                        receipt["graph_target"] = target;
+                    }
+                }
                 atomic(&receipt_path, &receipt.to_string())?;
                 if agent_id.is_empty() {
                     rpc(
@@ -1283,6 +1511,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
         }
         "exists" => return Ok(0),
+        "schedules" => println!("{}", schedules(name, &record, &args[1..])?),
         _ => {
             return Err(format!(
                 "{command} is not supported for native DeepSeek sessions yet"
@@ -1354,6 +1583,38 @@ mod provider_failure_tests {
         assert_eq!(native_events(&records).last().unwrap()["type"], "Stop");
         records[1]["event"]["data"]["reason"] = json!({"kind":"max-tokens"});
         assert_eq!(latest_failure(&records)["error_kind"], "context_limit");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod native_operation_tests {
+    use super::*;
+    #[test]
+    fn fork_needs_one_advertising_host_generation_and_a_completed_reply() {
+        let record = json!({"name":"dsh/test/session"});
+        let ping = json!({"generation":"host","nativeOperations":["fork","history-search","schedules"]});
+        let ready = json!({"generation":"host","forkSupported":true,"forkReady":true});
+        assert_eq!(fork_reason(&record, &ping, &ready), "");
+        assert!(fork_reason(&record, &json!({"generation":"host","sessionActions":true}), &ready).contains("older adapter"));
+        let mut other = ready.clone();
+        other["generation"] = json!("replacement");
+        assert!(fork_reason(&record, &ping, &other).contains("host changed"));
+        let mut empty = ready.clone();
+        empty["forkReady"] = json!(false);
+        assert_eq!(fork_reason(&record, &ping, &empty), "Wait for a completed reply before forking");
+        let pending = json!({"permissions_pending":true});
+        assert!(fork_reason(&pending, &ping, &ready).contains("permission setup"));
+    }
+    #[test]
+    fn schedule_items_keep_the_exact_native_record_for_compare_and_set() {
+        let entry = json!({"id":"schedule-1","kind":"cron","title":"Deploy","prompt":"Check","expression":"0 9 * * 1-5",
+            "timeZone":"UTC","scheduledAt":"2026-10-16T09:00:00.000Z","sessionId":"session-a","status":"active",
+            "lastDelivery":{"messageId":"m"}});
+        let item = schedule_item(&entry);
+        assert_eq!(item["record"], json!({"id":"schedule-1","kind":"cron","title":"Deploy","prompt":"Check",
+            "expression":"0 9 * * 1-5","timeZone":"UTC","scheduledAt":"2026-10-16T09:00:00.000Z"}));
+        assert_eq!((item["recurring"].as_bool(), item["scheduled_at"].as_f64()), (Some(true), Some(1792141200.0)));
+        assert_eq!(item["last_delivery"]["messageId"], "m");
     }
 }
 

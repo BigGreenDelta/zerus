@@ -78,6 +78,26 @@ impl Backend {
         );
         Self::new(cfg).await
     }
+    /// A PostgreSQL database that first holds `sql`, as an older relay left
+    /// it; the next `store()` upgrades it in place. None without a server,
+    /// which `ZERUS_REQUIRE_RELAY_E2E=1` refuses.
+    pub async fn restored(cfg: Config, sql: &str) -> Option<Self> {
+        use sqlx::Connection;
+        if std::env::var_os(DATABASE_URL).is_none() {
+            assert_ne!(
+                std::env::var("ZERUS_REQUIRE_RELAY_E2E").as_deref(),
+                Ok("1"),
+                "ZERUS_REQUIRE_RELAY_E2E=1 needs {DATABASE_URL}"
+            );
+            return None;
+        }
+        let backend = Self::new(cfg).await;
+        let url = backend.cfg.database_url.as_deref().unwrap();
+        let mut connection = sqlx::PgConnection::connect(url).await.unwrap();
+        sqlx::raw_sql(sql).execute(&mut connection).await.unwrap();
+        connection.close().await.unwrap();
+        Some(backend)
+    }
     pub fn is_postgres(&self) -> bool {
         self.postgres.is_some()
     }

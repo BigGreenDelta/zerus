@@ -3,9 +3,11 @@
 #include "HgsClient.h"
 #include "ComposerDraftStore.h"
 #include <QHash>
+#include <QMap>
 #include <QPixmap>
 #include <QSet>
 #include <QWidget>
+#include <QVariant>
 #include <functional>
 
 class QAction;
@@ -88,6 +90,11 @@ public:
     bool insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved);
     // Opens a stored copy of an attachment; tests replace the desktop handler.
     std::function<bool(const QUrl &)> openUrl;
+    // Whether the session a saved draft belongs to can be shown now. Without it,
+    // Saved drafts offers no Go to session.
+    std::function<bool(const QString &draftKey)> canOpenDraftSession;
+    // Presentation only; draft ownership and Go to eligibility stay independent.
+    std::function<QMap<int, QVariant>(const QString &draftKey)> savedDraftSessionRoles;
     // Send and push now (message.push) in this field; off by default. Only the
     // main message field pushes: a subagent message bypasses the session's queue.
     void setPushEnabled(bool enabled);
@@ -104,6 +111,8 @@ signals:
     void sendNowRequested(const QString &sessionKey);
     // hasDraft(sessionKey) changed.
     void draftChanged(const QString &sessionKey);
+    // Go to session in Saved drafts, after the dialog has closed.
+    void draftSessionRequested(const QString &draftKey);
     void controlsChanged();
 
 protected:

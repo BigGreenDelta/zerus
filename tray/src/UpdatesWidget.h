@@ -15,9 +15,9 @@
 
 class UpdatesWidget : public QWidget {
 public:
-    explicit UpdatesWidget(QWidget *parent = nullptr) : QWidget(parent)
+    explicit UpdatesWidget(QWidget *parent = nullptr, UpdateController *controller = nullptr) : QWidget(parent)
     {
-        auto *controller = UpdateController::instance();
+        if(!controller)controller = UpdateController::instance();
         setMaximumWidth(680);
         auto *layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
@@ -173,9 +173,8 @@ public:
             if (controller->feed().valid) QDesktopServices::openUrl(QUrl(controller->feed().releaseUrl));
         });
         connect(download, &QPushButton::clicked, this, [controller] {
-            const auto feed=controller->feed();
-            if(feed.valid && controller->channel()=="dev")
-                QDesktopServices::openUrl(QUrl(controller->installation().arch ? feed.packageUrl : feed.sourceUrl));
+            const auto url=UpdateController::downloadUrl(controller->installation(),controller->feed());
+            if(!url.isEmpty())QDesktopServices::openUrl(url);
         });
         connect(copy, &QPushButton::clicked, this, [controller] {
             const auto value = UpdateController::updateCommand(controller->installation(), controller->channel());
@@ -184,13 +183,14 @@ public:
 
         auto refresh = [=] {
             const auto install = controller->installation();
-            const auto guide = UpdateController::installationGuide(install, controller->channel());
+            const auto guide = UpdateController::installationGuide(install, controller->channel(),controller->feed());
+            version->setText(controller->installedDisplayVersion());
             ownership->setText(guide.ownership);
 
             const auto feed = controller->feed();
             release->setText(controller->channel()=="dev" ? tr("View build") : tr("View release"));
-            download->setText(install.arch ? tr("Download dev package") : tr("Download dev source"));
-            download->setVisible(feed.valid && controller->channel()=="dev" && install.kind != "portable");
+            download->setText(UpdateController::runningPlatform()=="macos"&&!feed.macosZipUrl.isEmpty()?(feed.macosDmgUrl.isEmpty()?tr("Download macOS ZIP"):tr("Download DMG")):install.arch?tr("Download dev package"):tr("Download dev source"));
+            download->setVisible(!UpdateController::downloadUrl(install,feed).isEmpty());
             title->setText(controller->busy() ? tr("Checking for updates…") : controller->updateAvailable() ? tr("Update available") : feed.valid ? tr("Release status") : tr("Updates have not been checked"));
             released->setText(feed.valid ? feed.version : tr("Not checked"));
             comparison->setText(controller->comparison());

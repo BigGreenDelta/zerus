@@ -1,0 +1,74 @@
+name: iOS TestFlight
+
+# Archives the iOS app of an exact main revision and uploads it to App Store
+# Connect. Trusted main CI calls it for the Dev channel (TestFlight internal
+# testing) after the CI gate succeeds; a maintainer dispatches it from main for a
+# Stable App Store candidate. Only these callers forward the three App Store
+# Connect secret names; the upload job alone reads their values from the
+# ios-testflight environment, whose policy admits only main.
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: dev (TestFlight internal testing) or stable (App Store candidate)
+        type: string
+        required: true
+    secrets:
+      APP_STORE_CONNECT_API_KEY_P8:
+        required: true
+      APP_STORE_CONNECT_API_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_API_ISSUER_ID:
+        required: true
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Upload channel
+        type: choice
+        # Dev uploads come only from CI, whose run number is the Dev build sequence.
+        options: [stable]
+        default: stable
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+concurrency:
+  group: ios-testflight-${{ inputs.channel }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: iOS archive and App Store Connect upload
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: ios-testflight
+    steps:
+      - name: Require upstream main
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          test "$WORKFLOW_REF" = refs/heads/main
+          test "$WORKFLOW_REPOSITORY" = ufna/zerus
+          test "$CHANNEL" = dev || test "$CHANNEL" = stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Xcode 26 or later
+        run: bash mobile/ios/scripts/select-xcode.sh
+      - name: Archive, sign and upload
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          TEAM_ID: ${{ vars.IOS_TEAM_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: bash mobile/ios/scripts/testflight-upload.sh
+      - name: Remove signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/app-store-connect"

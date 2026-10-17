@@ -45,6 +45,24 @@ import androidx.compose.ui.unit.dp
 private fun subagentChildren(model: ZerusViewModel, session: Session, online: Boolean) =
     SessionCardPresentation.children(session, online, drafted = SessionCardPresentation.draftedChildren(session.target, model.drafts))
 
+/**
+ * Pending optional questions, right after the status badge (and its separate new reply badge) in
+ * the attention amber, like the desktop card. Information only: it changes no status or count, and
+ * tapping the card opens the conversation, where Questions (n) offers them with Skip.
+ */
+@Composable internal fun SessionOptionalQuestionChip(session: Session, online: Boolean) {
+    val chip = SessionCardPresentation.optionalQuestionChip(session, online) ?: return
+    val colors = DesktopSessionPalette.colors(DesktopBadgeKind.Attention, MaterialTheme.colorScheme.background.luminance() < .5f)
+    val foreground = Color(colors.foreground)
+    Row(Modifier.clip(RoundedCornerShape(5.dp)).background(Color(colors.background))
+        .clearAndSetSemantics { contentDescription = chip.description }
+        .padding(start = 4.dp, end = 7.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        Icon(DesktopIcons.Question, null, Modifier.size(16.dp), tint = foreground)
+        Text(chip.label, color = foreground, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+    }
+}
+
 /** The subagent counter, at the end of the card's status row like the desktop card. */
 @Composable internal fun SessionSubagentCounter(model: ZerusViewModel, session: Session, online: Boolean) {
     val counter = SessionCardPresentation.counter(session, online, subagentChildren(model, session, online)) ?: return

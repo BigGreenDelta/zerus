@@ -1373,7 +1373,7 @@ void TestHgsClient::peerAnswerIsKeyedByThePolledAlias()
     QTemporaryDir dir; QVERIFY(dir.isValid());
     const QString scriptPath = dir.filePath(QStringLiteral("hgs"));
     QVERIFY(FakeCli::install(scriptPath, "#!/usr/bin/env python3\nimport sys\n"
-        "if sys.argv[1:]!=['@winpeer','ls','--json']:print('unexpected call',file=sys.stderr);sys.exit(1)\n"
+        "if sys.argv[1:]!=['@winpeer','ls','--json','--no-archives']:print('unexpected call',file=sys.stderr);sys.exit(1)\n"
         "print('{\"host\":\"zpeer\",\"ok\":true,\"projects\":{},\"peers\":[\"winpeer\"],"
         "\"sessions\":[{\"name\":\"codex/win/build\",\"cmd\":\"codex\",\"project\":\"win\",\"tag\":\"build\"}]}')\n"));
     HgsClient client(FakeCli::program(scriptPath));

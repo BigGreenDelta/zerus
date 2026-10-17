@@ -6,6 +6,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionFiltersTest {
+    @Test fun explicitWaitKeepsNativePriorityAndRejectsReusedIdentity() {
+        val wait = JSONObject("""{"schema":1,"status":"ok","run_id":"run","conversation_id":"conversation","count":1,
+            "items":[{"state":"awaiting_ack","created_at":1700000000,"producer":{"name":"claude/example/worker","host":"peer"}}]}""")
+        val row = session("""{"activity":"idle","phase":"idle","subagent_active_count":0,"unread_reply":true}""")
+        row.raw.put("coordination_wait", wait)
+        assertTrue(SessionFilters.active(row,true)); assertFalse(SessionFilters.visibleUnreadReply(row,true))
+        assertTrue(SessionFilters.status(row,true).startsWith("Waiting for acceptance from worker on peer"))
+        assertEquals(DesktopBadgeKind.Waiting,DesktopSessionPalette.badge(row,true).kind)
+        row.raw.put("phase","approval"); assertEquals("Needs approval",SessionFilters.status(row,true))
+        row.raw.put("phase","tool").put("activity","busy"); assertEquals("Using a tool",SessionFilters.status(row,true))
+        row.raw.put("phase","idle").put("activity","idle").put("process_work",JSONObject().put("count",1))
+        assertEquals("Background",SessionFilters.status(row,true))
+        row.raw.put("process_work",JSONObject().put("count",0)); wait.put("count",0)
+        assertEquals("Ready",SessionFilters.status(row,true)); assertTrue(SessionFilters.visibleUnreadReply(row,true))
+        wait.put("count",1).put("run_id","other-run"); assertFalse(SessionFilters.hasCoordinationWait(row))
+    }
     @Test fun intermediateRepliesKeepTheirIdentityAndReappearWhenAllWorkFinishes() {
         for (readFlag in listOf("unread_reply", "mobile_unread_reply")) {
             for (work in listOf("""{"activity":"busy","phase":"working"}""",
@@ -44,8 +60,11 @@ class SessionFiltersTest {
         assertFalse(SessionFilters.active(finished,true))
     }
     private val machines = listOf(Machine("a", "same", "Computer A", true), Machine("b", "same", "Computer B", false))
-    private fun session(raw: String = "{}", connection: String = "a", pending: Int = 0, archive: String = "", name: String = "codex/project/task") =
-        Session(Target("same", name, "run", "conversation", connection, archive), "Long title", "codex", "MISLEADING UI STATUS", "Project", "Preview", pending, JSONObject(raw))
+    private fun session(raw: String = "{}", connection: String = "a", pending: Int = 0, archive: String = "", name: String = "codex/project/task"): Session {
+        val data=JSONObject(raw)
+        return Session(Target("same", name, data.string("run_id").ifBlank {"run"}, data.string("conversation_id").ifBlank {"conversation"}, connection, archive),
+            "Long title", "codex", "MISLEADING UI STATUS", "Project", "Preview", pending, data)
+    }
     @Test fun filtersFollowSharedDesktopContract() {
         val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/session-filter-contract.json")).bufferedReader().use { it.readText() })
         assertEquals(contract.getJSONArray("filters").let { array -> (0 until array.length()).map(array::getString) }, SessionFilter.entries.map { it.id })

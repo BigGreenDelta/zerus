@@ -28,7 +28,8 @@ class Terminal(fixtures.InputTransport):
     def test_raw_literal_deadline_and_durable_uuid(self):
         payload=self.input_payload(text='echo "synthetic"',enter=True)
         result=self.terminal(payload);self.assertEqual(result['status'],'submitted')
-        self.wait_for(lambda:bool(self.received()))
+        # The agent records the paste and the Enter that follows it as it reads them.
+        self.wait_for(lambda:self.received().endswith(b'\r'))
         before=self.received();self.assertIn(b'echo "synthetic"',before)
         self.assertEqual(self.terminal(payload),result);self.assertEqual(self.received(),before)
         expired=self.input_payload(text='must not arrive',enter=True);expired['expires_at']=time.time()-1

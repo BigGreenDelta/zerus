@@ -4,6 +4,7 @@ namespace SessionUsage {class ContextButton;}
 namespace CacheStatus {class Chip;}
 namespace RecoveryUi {class Panel;}
 namespace ActivityWidth {class ColumnLayout;}
+class ArchiveBrowser;
 class ToolbarChip;
 class SettingsPage;
 class SwarmController;
@@ -43,6 +44,7 @@ class SessionPanelDock;
 class QHBoxLayout;
 class MachinesPage;
 class MachineFilter;
+class ProjectFilter;
 class DashboardPage;
 class AccountsPage;
 class GoToDialog;
@@ -107,6 +109,8 @@ protected:
     void changeEvent(QEvent *event) override;
 
 private:
+    ArchiveBrowser *m_archiveBrowser = nullptr;
+    QMap<QString,QList<SessionInfo>> m_archiveSearchRows;
     struct Entry { QString host, machine, key, identity; SessionInfo session; bool online; };
     void applyTheme();
     void updateWindowPinAppearance();
@@ -120,10 +124,15 @@ private:
     void showGroupMenu(const QString &group, const QPoint &position);
     void showWorkspaceSettings();
     void revealSession(const QString &key);
+    // The listed session a saved draft belongs to, or null.
+    const Entry *draftOwner(const QString &draftKey) const;
+    void openDraftSession(const QString &draftKey);
     void updateHeaderText();
     void updateSessionLoading();
     void updateSessionFeedback();
     void rebuild();
+    QMap<int, QVariant> sessionCardRoles(const Entry &entry) const;
+    QMap<int,QVariant> childCardRoles(const Entry &entry,const QString &id,const QJsonObject &child) const;
     void selectSession();
     void inspect();
     // The DeepSeek native UI: its tab when the embedded plugin is available,
@@ -330,11 +339,12 @@ private:
     QString m_restoreKey, m_renameKey, m_forkKey, m_forkGroup, m_forkBefore;
     bool m_renameArchived = false;
     QString m_selectedKey, m_filter = "all";
+    bool m_initialSelectionPending = true;
     QString m_folderFilterHost,m_folderFilterPath;
     bool m_folderFilterCheckout=false;
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
-    QSet<QString> m_hostFilters;
+    QSet<QString> m_hostFilters, m_projectFilters;
     QString selectedHostTarget() const;
     void updateDashboard();
     QJsonObject m_details;
@@ -379,6 +389,7 @@ private:
     QStackedWidget *m_listStack;
     MachinesPage *m_machinesPage;
     MachineFilter *m_machineFilter;
+    ProjectFilter *m_projectFilter;
     DashboardPage *m_dashboard;
     AccountsPage *m_accountsPage;
     SessionOrganization m_organization;

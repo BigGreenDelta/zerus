@@ -5,38 +5,36 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VoiceGestureTest {
-    @Test fun releaseFinishesOnlyItsCaptureOnce() {
-        val gesture = VoiceGesture(80f)
-        assertTrue(gesture.begin()); assertFalse(gesture.begin()); gesture.captured(42)
-        assertNull(gesture.move(-79f))
-        assertEquals(VoiceGesture.Finish(42, false), gesture.release())
-        assertNull(gesture.release()); assertNull(gesture.interrupt()); assertNull(gesture.move(-100f))
+    @Test fun shortTapSwitchesAndHoldReleaseSendsOnce() {
+        val g = VoiceGesture(80f)
+        assertTrue(g.begin()); assertEquals(VoiceGesture.Action.SwitchMode, g.release()); assertNull(g.release())
+        assertTrue(g.begin()); assertEquals(VoiceGesture.Action.Start, g.hold()); assertNull(g.hold()); g.captured(42)
+        assertNull(g.move(-10f)); assertEquals(VoiceGesture.Action.Finish(42, VoiceGesture.End.Send), g.release())
+        assertNull(g.interrupt()); assertNull(g.release())
     }
-    @Test fun physicalLeftCommitsCancelEvenIfFingerReturnsOrReleases() {
-        val gesture = VoiceGesture(80f)
-        gesture.begin(); gesture.captured(7)
-        assertNull(gesture.move(100f)); assertEquals(0f, gesture.progress)
-        assertEquals(VoiceGesture.Finish(7, true), gesture.move(-80f))
-        assertNull(gesture.move(0f)); assertEquals(1f, gesture.progress)
-        assertNull(gesture.release())
-        assertTrue(gesture.begin()); gesture.captured(8)
-        assertEquals(VoiceGesture.Finish(8, false), gesture.release())
+    @Test fun cancelCommitsAndPartialLeftReleaseCancels() {
+        val g = VoiceGesture(80f)
+        g.begin(); g.hold(); g.captured(7)
+        assertEquals(VoiceGesture.Action.Finish(7, VoiceGesture.End.Cancel), g.move(-80f))
+        assertNull(g.move(0f)); assertNull(g.release())
+        g.begin(); g.hold(); g.captured(8); g.move(-48f)
+        assertEquals(VoiceGesture.Action.Finish(8, VoiceGesture.End.Cancel), g.release())
     }
-    @Test fun permissionWithoutCaptureAndInterruptedPressCannotAcquireLateCapture() {
-        val gesture = VoiceGesture(80f)
-        gesture.begin(); assertNull(gesture.release()); gesture.captured(1)
-        assertNull(gesture.release())
-        gesture.begin(); gesture.captured(2)
-        assertEquals(VoiceGesture.Finish(2, false), gesture.interrupt())
-        gesture.captured(3); assertNull(gesture.move(-100f)); assertNull(gesture.release())
+    @Test fun upwardLockSurvivesReleaseAndInterruption() {
+        val g = VoiceGesture(80f, 57f)
+        g.begin(); g.hold(); g.captured(3)
+        assertEquals(VoiceGesture.Action.Lock(3), g.move(0f, -57f)); assertTrue(g.locked)
+        assertNull(g.move(-100f)); assertNull(g.release()); assertNull(g.interrupt())
     }
-    @Test fun crossingCancelBeforeCaptureCannotCancelAnotherCapture() {
-        val gesture = VoiceGesture(80f)
-        gesture.begin(); assertNull(gesture.move(-81f)); gesture.captured(9)
-        assertNull(gesture.release())
-        gesture.begin(); gesture.captured(10)
-        assertNull(gesture.move(Float.NaN)); assertNull(gesture.move(Float.NEGATIVE_INFINITY))
-        assertEquals(VoiceGesture.Finish(10, false), gesture.release())
+    @Test fun interruptedAndPermissionPressNeverSendsOrAcquiresLateCapture() {
+        val g = VoiceGesture(80f)
+        g.begin(); g.hold(); assertNull(g.release()); g.captured(9); assertNull(g.release())
+        g.begin(); g.hold(); g.captured(2)
+        assertEquals(VoiceGesture.Action.Finish(2, VoiceGesture.End.Preview), g.interrupt())
+        g.captured(3); assertNull(g.release())
+        g.begin(); g.move(-20f); assertNull(g.hold()); assertNull(g.release())
+        g.begin(); g.hold(); g.captured(4); assertNull(g.move(Float.NaN)); assertNull(g.move(Float.NEGATIVE_INFINITY))
+        assertEquals(VoiceGesture.Action.Finish(4, VoiceGesture.End.Send), g.release())
     }
     @Test fun keyboardActivationOwnsOneReleaseAndDoesNotRepeatOrSurviveFocusLoss() {
         val keys = VoiceActivationKeys()
