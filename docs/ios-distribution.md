@@ -47,11 +47,12 @@ access.
    language English, and a SKU such as `zerus-ios`. The record cannot be created
    through the API.
 2. **App Store Connect API key.** Users and Access → Integrations → App Store
-   Connect API → Team Keys: create a key with the **Admin** role. The export
-   signs with cloud-managed distribution certificates; a Developer-role key (such
-   as a notarization key) installs Local Dev builds but fails the export with a
-   cloud signing permission error. Download the `.p8` once and note its key ID
-   and the issuer ID.
+   Connect API → Team Keys: create a key with the **Admin** role for this
+   runbook's cloud-managed distribution signing. The key needs
+   [access to cloud-managed distribution certificates](https://developer.apple.com/help/account/certificates/cloud-managed-certificates).
+   A Developer-role notarization key without that access may work for local
+   development signing yet fail this export. Download the `.p8` once and note
+   its key ID and the issuer ID.
 3. **GitHub environment.** Create the `ios-testflight` environment with a
    deployment branch policy that admits only `main`. Add the secrets
    `APP_STORE_CONNECT_API_KEY_P8` (the `.p8` file contents),
