@@ -235,7 +235,7 @@ class Harness(unittest.TestCase):
         report = {"test": self.id(), "seconds": round(ended - started, 3), "rc": p.returncode,
                   "stderr": p.stderr[-300:], "started": started, "ended": ended,
                   "bindings": {n: {k: self.binding(n).get(k) for k in ("pid", "supervisor", "session_end", "exited_at", "completion_reason", "updated", "activity")} for n in names},
-                  "term": [t for t in lines("term-trace.jsonl") if t["term"] >= started - 1],
+                  "term": [t for t in lines("term-trace.jsonl") if t.get("term", t.get("exiting", 0)) >= started - 1],
                   "hooks": [h for h in lines("hook-trace.jsonl") if h["end"] >= started - 1]}
         if p.returncode and "did not exit" in p.stderr:
             report["hang"] = self.hang_report("pause")
