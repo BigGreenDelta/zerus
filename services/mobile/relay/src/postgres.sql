@@ -10,6 +10,11 @@ CREATE TABLE IF NOT EXISTS devices(id text PRIMARY KEY,workspace_id text NOT NUL
 CREATE INDEX IF NOT EXISTS device_workspace ON devices(workspace_id) WHERE revoked=0;
 CREATE TABLE IF NOT EXISTS invitations(code_hash text PRIMARY KEY,workspace_id text NOT NULL REFERENCES workspaces(id),expires double precision NOT NULL);
 CREATE INDEX IF NOT EXISTS invitation_expiry ON invitations(expires);
+-- Phone management: when and by which computer a phone was paired, last activity.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS paired_at double precision;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS last_seen double precision;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS added_by text;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS added_by text;
 CREATE TABLE IF NOT EXISTS requests(id text PRIMARY KEY,workspace_id text NOT NULL REFERENCES workspaces(id),device_id text NOT NULL REFERENCES devices(id),node_id text NOT NULL REFERENCES nodes(id),operation text NOT NULL,body_hash text NOT NULL,body_bytes bigint NOT NULL,body text NOT NULL,state text NOT NULL,result text,error text,created double precision NOT NULL,claimed double precision,updated double precision NOT NULL,expires_at double precision,result_read double precision,result_bytes bigint NOT NULL DEFAULT 0,reserved_bytes bigint NOT NULL DEFAULT 0);
 DROP INDEX IF EXISTS read_history_v2;
 CREATE INDEX IF NOT EXISTS request_queue ON requests(node_id,created,id) WHERE state='queued';

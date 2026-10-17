@@ -591,6 +591,19 @@ impl App {
                 self.store.result(&c, id, &b, encoded.as_deref()).await?;
                 (StatusCode::OK, json!({"ok":true}))
             }
+            ("POST", ["v1", "node", "invitations"]) => {
+                let b = self.body(unread, budget.clone(), MIB).await?;
+                protocol::fields(&b, &[], &[])?;
+                self.store
+                    .rate(&json!(["node-invite", &c.id]), 10, false)
+                    .await?;
+                (StatusCode::OK, self.store.invite_from(&c).await?)
+            }
+            ("GET", ["v1", "node", "devices"]) => (StatusCode::OK, self.store.devices(&c).await?),
+            ("DELETE", ["v1", "node", "devices", id]) => {
+                self.store.revoke_device(&c, id).await?;
+                (StatusCode::OK, json!({"revoked":true}))
+            }
             ("POST", ["v1", "push"]) => {
                 let b = self.body(unread, budget.clone(), MIB).await?;
                 let provider = b["provider"].as_str().ok_or(Error::BAD)?;

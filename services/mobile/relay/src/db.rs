@@ -393,6 +393,15 @@ impl Db {
                 ),
                 ("events", vec![("alert_kind", "TEXT")]),
                 (
+                    "devices",
+                    vec![
+                        ("paired_at", "DOUBLE PRECISION"),
+                        ("last_seen", "DOUBLE PRECISION"),
+                        ("added_by", "TEXT"),
+                    ],
+                ),
+                ("invitations", vec![("added_by", "TEXT")]),
+                (
                     "computer_routes",
                     vec![
                         ("presence_at", "DOUBLE PRECISION"),
