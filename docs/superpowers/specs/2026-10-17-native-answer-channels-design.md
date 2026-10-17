@@ -247,6 +247,9 @@ owns this adapter (`zerus-pdmm`). Its spike verified the following on Claude
   each hook process's decision reaches its own `tool_use_id`.
 - A Terminal answer neither kills the hook nor signals it; a late decision is
   ignored.
+- The channel carries only the one-time Allow and the two Deny forms of the
+  hook request. Broader TUI choices ("always allow", auto mode) exist only on
+  the screen and keep their explicit second Confirm there.
 
 Automatic approvals keep their durable private audit reservation before
 delivery. The channel is only another transport.
@@ -273,10 +276,12 @@ then reused here.
 - Every screen parser (Claude questions and approvals, Codex and Kimi panels,
   startup choosers) reports `Clipped` instead of a free-text visibility
   error.
-- Growth runs during inspection and before screen delivery, only while a
-  recorded request is pending. It takes the per-run question lock, so it never
-  runs in the middle of an answer. If the lock is busy it is skipped; the next
-  poll retries.
+- Growth runs only during inspection (the listing path), only while a
+  recorded request is pending. It takes the per-run answer lock without
+  waiting, so it never runs in the middle of an answer; if the lock is busy it
+  is skipped and the next poll retries. Delivery never grows a pane: it
+  delivers only what inspection showed and verified, so a person never
+  approves a screen they did not see.
 - With a client attached, nothing is resized. The reason tells the person to
   enlarge Terminal, which they are looking at.
 - If the panel is still clipped at the cap, the reason says the request is too
