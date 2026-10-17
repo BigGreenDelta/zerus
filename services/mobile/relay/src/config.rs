@@ -25,6 +25,14 @@ pub struct Config {
     #[serde(skip_serializing)]
     pub push_hosts: Vec<String>,
     pub fcm_credentials: Option<String>,
+    /// Private APNs token-signing key (`.p8`, PKCS#8 P-256) for iOS wakes.
+    pub apns_key: Option<String>,
+    /// The ten-character key identifier Apple issued with `apns_key`.
+    pub apns_key_id: Option<String>,
+    /// The Apple Developer team that owns `apns_key`.
+    pub apns_team_id: Option<String>,
+    /// The iOS application's bundle identifier.
+    pub apns_topic: Option<String>,
     pub background: bool,
     pub trusted_proxy_cidrs: Vec<ipnet::IpNet>,
     pub max_forwarded_hops: usize,
@@ -62,6 +70,10 @@ impl Default for Config {
             online_timeout: 45,
             push_hosts: vec![],
             fcm_credentials: None,
+            apns_key: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
             background: true,
             trusted_proxy_cidrs: vec![],
             max_forwarded_hops: 8,
@@ -126,6 +138,25 @@ impl Config {
             && (1..=65536).contains(&self.max_connections)
             && (1..=120).contains(&self.shutdown_timeout);
         if !valid {
+            return Err(Error::BAD);
+        }
+        let apns = [&self.apns_key, &self.apns_key_id, &self.apns_team_id];
+        if apns.iter().any(|v| v.is_some()) && !apns.iter().all(|v| v.is_some()) {
+            return Err(Error::BAD);
+        }
+        let identifier = |v: &Option<String>| {
+            v.as_deref().is_none_or(|s| {
+                s.len() == 10
+                    && s.bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            })
+        };
+        let topic = self.apns_topic.as_deref().is_none_or(|s| {
+            (1..=255).contains(&s.len())
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-.".contains(&b))
+        });
+        if !identifier(&self.apns_key_id) || !identifier(&self.apns_team_id) || !topic {
             return Err(Error::BAD);
         }
         if self

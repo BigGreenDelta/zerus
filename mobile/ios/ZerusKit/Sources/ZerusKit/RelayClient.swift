@@ -119,6 +119,12 @@ public struct RelayClient: Sendable {
         _ = try await call(connection.url, token: connection.token, path: "/v1/device", method: "DELETE")
     }
 
+    /// Registers this phone's APNs device token for generic wakes.
+    public func registerPush(_ connection: Connection, provider: String, token: String) async throws {
+        guard PushRegistration.providers.contains(provider), PushRegistration.validToken(token) else { throw ZerusError.invalid("Invalid push registration.") }
+        _ = try await call(connection.url, token: connection.token, path: "/v1/push", body: ["provider": .string(provider), "token": .string(token)])
+    }
+
     public func events(_ connection: Connection, after: Int64, wait: Int = 25) async throws -> JSONObject {
         try await call(connection.url, token: connection.token, path: "/v1/events?after=\(after)&wait=\(wait)")
     }
@@ -226,6 +232,31 @@ public struct RelayClient: Sendable {
         guard target.archiveId.isEmpty, target.agentId.isEmpty else { throw ZerusError.invalid("Read marks belong to the live parent conversation.") }
         let id = UUID().uuidString.lowercased()
         return try await waitForReceipt(connection, initial: submit(connection, target: target, operation: "mark_read", payload: payload, id: id))
+    }
+
+    /// A voice operation on the exact live conversation; the receipt must complete for this request.
+    public func voice(_ connection: Connection, target: Target, operation: String, payload: JSONObject, id: String) async throws -> JSONObject {
+        guard connection.id == target.connectionId, VoiceProtocol.operations.contains(operation), !target.session.isEmpty,
+              payload.string("request_id") == id, payload.string("expected_run_id") == target.run,
+              payload.string("expected_conversation_id") == target.conversation else { throw ZerusError.invalid("Invalid voice request.") }
+        let receipt = try await waitForReceipt(connection, initial: submit(connection, target: target, operation: operation, payload: payload, id: id))
+        guard receipt.string("request_id") == id, receipt.string("state") == "completed", let result = receipt.object("result") else {
+            throw ZerusError(.unavailable, receipt.string("error").isEmpty ? "The computer has not confirmed this voice request. Check its status." : receipt.string("error"))
+        }
+        return result
+    }
+
+    /// A computer-scoped speech request (statistics or provider configuration) with an empty session.
+    public func speech(_ connection: Connection, host: MachineKey, operation: String, payload: JSONObject,
+                       id: String = UUID().uuidString.lowercased(), fallback: String) async throws -> JSONObject {
+        guard host.connectionId == connection.id, operation == "speech_stats" || SpeechConfigProtocol.operations.contains(operation) else {
+            throw ZerusError.invalid("Invalid speech request.")
+        }
+        let receipt = try await waitForReceipt(connection, initial: post(connection, computerId: host.computerId, operation: operation, payload: payload, id: id))
+        guard receipt.string("state") == "completed", let result = receipt.object("result") else {
+            throw ZerusError(.unavailable, receipt.string("error").isEmpty ? fallback : receipt.string("error"))
+        }
+        return result
     }
 
     /// Submits and waits; a request that does not complete reports its error.

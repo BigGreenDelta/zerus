@@ -49,7 +49,10 @@ struct MachinesScreen: View {
                     } header: {
                         Text(connection.displayName).textCase(nil)
                     } footer: {
-                        Text(connection.endpoint).textSelection(.enabled)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(connection.endpoint).textSelection(.enabled)
+                            if let status = model.notifications.pushStatus[connection.id] { Text(status) }
+                        }
                     }
                 }
                 if !model.connections.isEmpty {
@@ -58,6 +61,8 @@ struct MachinesScreen: View {
                             Label("Pair another workspace", systemImage: "link.badge.plus")
                         }
                     }
+                    NotificationSettingsSection()
+                    MobileDeliverySection()
                 }
             }
             .refreshable { model.refresh(explicit: true) }
@@ -246,6 +251,104 @@ private struct MachineColorSheet: View {
                 prepared = true
                 choice = model.machineColorOverride(machine.key)
             }
+        }
+    }
+}
+
+/// Which session updates can alert this phone, and whether iOS lets Zerus show them.
+private struct NotificationSettingsSection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let notifications = model.notifications!
+        let preferences = notifications.preferences
+        Section {
+            Toggle(isOn: Binding(get: { preferences.master }, set: { notifications.setMaster($0) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Session alerts")
+                    Text("Choose which session updates can alert you.").font(.caption).foregroundStyle(Theme.muted)
+                }
+            }
+            .disabled(!notifications.ready)
+            ForEach([(SessionAlertKind.input, "Input and approvals"), (.optional, "Optional questions"), (.error, "Errors"), (.finished, "Turn finished")],
+                    id: \.0) { kind, caption in
+                Toggle(caption, isOn: Binding(get: { preferences.allows(kind) || (!preferences.master && enabled(preferences, kind)) },
+                                              set: { notifications.set(kind, $0) }))
+                    .padding(.leading, 12)
+                    .disabled(!preferences.master || !notifications.ready)
+            }
+            switch notifications.authorization {
+            case .notDetermined:
+                Button("Allow notifications") { Task { await notifications.requestAuthorization() } }
+            case .denied:
+                Button("Allow notifications in Settings") {
+                    if let url = URL(string: UIApplication.openNotificationSettingsURLString) { UIApplication.shared.open(url) }
+                }
+            default:
+                EmptyView()
+            }
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text("Alerts show the session title and this phone's name for the computer. A push only wakes Zerus; it never carries conversation text, and Zerus reads the current state before showing a card.")
+        }
+        .task { await notifications.refreshAuthorization() }
+    }
+
+    private func enabled(_ preferences: NotificationPreferences, _ kind: SessionAlertKind) -> Bool {
+        switch kind {
+        case .input: preferences.input
+        case .error: preferences.errors
+        case .finished: preferences.finished
+        case .optional: preferences.optional
+        }
+    }
+}
+
+/// One shared timing per workspace; the gateway computer's hgs stores it for every swarm desktop.
+private struct MobileDeliverySection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let conversation = model.conversation!
+        Section {
+            ForEach(model.connections) { connection in
+                let gateway = conversation.mobileDeliveryGateway(connection.id)
+                let action = conversation.mobileDeliveryAction(connection.id)
+                let reason = conversation.mobileDeliveryReason(connection.id)
+                let now = Clock.milliseconds()
+                let selected = MobileDelivery.shown(reported: gateway?.mobileDelivery ?? "", action: action, now: now)
+                VStack(alignment: .leading, spacing: 6) {
+                    if model.connections.count > 1 { Text(connection.displayName).font(.subheadline.weight(.semibold)) }
+                    ForEach(MobileDelivery.values, id: \.self) { value in
+                        Button { conversation.setMobileDelivery(connection.id, value) } label: {
+                            HStack {
+                                Image(systemName: value == selected ? "largecircle.fill.circle" : "circle")
+                                    .foregroundStyle(value == selected ? Theme.mint : Theme.muted)
+                                Text(MobileDelivery.label(value)).foregroundStyle(.primary)
+                                Spacer()
+                            }
+                            .frame(minHeight: 36)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!reason.isEmpty)
+                        .accessibilityAddTraits(value == selected ? [.isSelected] : [])
+                    }
+                    Text(MobileDelivery.status(gateway: gateway?.name ?? "", reported: gateway?.mobileDelivery ?? "", action: action, reason: reason, now: now))
+                        .font(.caption)
+                        .foregroundStyle(Theme.muted)
+                }
+            }
+            if !conversation.mobileDeliveryError.isEmpty {
+                HStack {
+                    Text(conversation.mobileDeliveryError).font(.caption).foregroundStyle(Theme.amber)
+                    Spacer()
+                    Button("Dismiss") { conversation.showMobileDeliveryError("") }.font(.caption)
+                }
+            }
+        } header: {
+            Text("When I'm not at a computer, send notifications to my phone")
         }
     }
 }

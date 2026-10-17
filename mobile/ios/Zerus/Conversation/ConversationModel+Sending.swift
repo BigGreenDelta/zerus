@@ -27,7 +27,7 @@ extension ConversationModel {
     }
 
     func sendingBlocked(_ target: Target) -> Bool {
-        contextBlocked(target) || preparingTargets.contains(target.key) || normalizedOutgoing.contains { $0.belongs(to: target) && $0.blocksSending } ||
+        app.voice.recording || contextBlocked(target) || preparingTargets.contains(target.key) || normalizedOutgoing.contains { $0.belongs(to: target) && $0.blocksSending } ||
             messageState.pickerDraft?.target == target
     }
 

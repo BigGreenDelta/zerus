@@ -15,6 +15,7 @@ struct Composer: View {
     @State private var coldClear = false
     @State private var blockedReason: String?
     @State private var pick: PickRequest?
+    @State private var expanded = false
     @FocusState private var focused: Bool
 
     private var model: ConversationModel { app.conversation }
@@ -44,6 +45,8 @@ struct Composer: View {
             if !model.contextNotice.isEmpty {
                 Text(model.contextNotice).font(.caption).foregroundStyle(Theme.amber)
             }
+            VoiceComposerStatus()
+            RoundVideoRecordingOverlay()
             if !draft.attachments.isEmpty { chips(draft) }
             if model.messageState.pickerDraft?.target == target && model.attachmentImporting {
                 HStack(spacing: 6) {
@@ -55,13 +58,14 @@ struct Composer: View {
             }
             HStack(alignment: .bottom, spacing: 8) {
                 attachMenu(draft)
-                TextField(reason.isEmpty ? "Message" : reason, text: $text, axis: .vertical)
-                    .lineLimit(1...6)
-                    .focused($focused)
-                    .disabled(draft.status != "editing" || app.demo)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 20))
+                if app.voice.recording && (app.voice.touchRecording || app.voice.videoRecorder == nil) {
+                    RecordingRow()
+                } else {
+                    messageField(draft, reason: reason)
+                }
+                if app.voice.recording || (text.isEmpty && draft.attachments.isEmpty && model.messageState.pickerDraft?.target != target) {
+                    VoiceButton(target: target) { if model.draft(target).text != text { model.edit(target, text: text) } }
+                } else {
                 Button {
                     send(canSend: canSend, reason: reason)
                 } label: {
@@ -74,6 +78,7 @@ struct Composer: View {
                 .background(canSend ? Theme.mint : Color(hex: 0x2B3B3B), in: Circle())
                 .disabled(!canSend && reason.isEmpty)
                 .accessibilityLabel(canSend || reason.isEmpty ? "Send message" : "Why sending is unavailable")
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -120,6 +125,28 @@ struct Composer: View {
         }
         .clearContextConfirmation(isPresented: $coldClear, session: session, beforeClear: { _ = capture() })
         .modifier(AttachmentPickers(request: $pick))
+        .sheet(isPresented: $expanded) { ExpandedMessageEditor(text: $text, title: session.title) }
+    }
+
+    private func messageField(_ draft: Draft, reason: String) -> some View {
+        TextField(reason.isEmpty ? "Message" : reason, text: $text, axis: .vertical)
+            .lineLimit(1...6)
+            .focused($focused)
+            .disabled(draft.status != "editing" || app.demo)
+            .padding(.leading, 12)
+            .padding(.trailing, text.isEmpty ? 12 : 30)
+            .padding(.vertical, 9)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 20))
+            .overlay(alignment: .topTrailing) {
+                if !text.isEmpty && draft.status == "editing" && !app.demo {
+                    Button { expanded = true } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption).padding(9)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.muted)
+                    .accessibilityLabel("Expand message")
+                }
+            }
     }
 
     private func chips(_ draft: Draft) -> some View {
@@ -455,4 +482,35 @@ struct NativeInputQueueCard: View {
 extension Color {
     /// An Android ARGB color value.
     init(argb: UInt32) { self.init(hex: argb & 0xFFFFFF, opacity: Double((argb >> 24) & 0xFF) / 255) }
+}
+
+/// A taller editor for the same draft; closing it keeps the text in the composer.
+struct ExpandedMessageEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var text: String
+    let title: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            TextEditor(text: $text)
+                .focused($focused)
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 12)
+                .background(Theme.background)
+                .navigationTitle("Message")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        VStack(spacing: 0) {
+                            Text("Message").font(.headline)
+                            Text(title).font(.caption2).foregroundStyle(Theme.muted).lineLimit(1)
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                }
+                .onAppear { focused = true }
+        }
+        .presentationDetents([.large])
+    }
 }

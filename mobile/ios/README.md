@@ -35,7 +35,13 @@ and digests are authenticated; a message sends their verified bytes, and a copy
 is removed only when no draft or outgoing message still references it. Opened
 attachments and computer files are verified against their digest into bounded
 caches (100 MiB, one day) and leave the app only through Quick Look, Share or an
-explicit Save to Files. Production builds require HTTPS; the relay client never follows redirects
+explicit Save to Files. Voice and round video recordings use the same sealed
+store: a stopped recording is a durable preview, nothing is uploaded before an
+explicit Send, and an unconfirmed upload is only ever checked by its original
+identity. Speech provider API keys are entered only in memory and sealed for the
+processing computer before upload. Notification state (event cursor, posted card
+evidence and preferences) is sealed like other private state; push wakes carry
+no conversation content. Production builds require HTTPS; the relay client never follows redirects
 and keeps no cookies or cached responses.
 
 ## Build and test

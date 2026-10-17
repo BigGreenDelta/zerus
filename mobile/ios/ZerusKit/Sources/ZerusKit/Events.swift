@@ -163,6 +163,14 @@ public struct VideoMessage: Codable, Hashable, Sendable {
     public var width: Int
     public var height: Int
     public var posterBase64: String
+
+    public init(file: DisplayedAttachment, durationMs: Int, width: Int, height: Int, posterBase64: String = "") {
+        self.file = file
+        self.durationMs = durationMs
+        self.width = width
+        self.height = height
+        self.posterBase64 = posterBase64
+    }
 }
 
 /// A session-owned voice message. Audio identity is independent of the speech worker.
@@ -181,6 +189,25 @@ public struct VoiceMessage: Codable, Hashable, Sendable {
     public var nativeBinding: String
     public var waveform: [Int]
     public var video: VideoMessage?
+
+    public init(id: String, runId: String, conversationId: String, createdAt: Double, revision: Int64, state: String, audio: DisplayedAttachment,
+                durationMs: Int, transcript: String = "", error: String = "", errorCode: String = "", nativeBinding: String = "", waveform: [Int] = [],
+                video: VideoMessage? = nil) {
+        self.id = id
+        self.runId = runId
+        self.conversationId = conversationId
+        self.createdAt = createdAt
+        self.revision = revision
+        self.state = state
+        self.audio = audio
+        self.durationMs = durationMs
+        self.transcript = transcript
+        self.error = error
+        self.errorCode = errorCode
+        self.nativeBinding = nativeBinding
+        self.waveform = waveform
+        self.video = video
+    }
 
     public var terminal: Bool { ["submitted", "failed", "cancelled", "uncertain"].contains(state) }
 }

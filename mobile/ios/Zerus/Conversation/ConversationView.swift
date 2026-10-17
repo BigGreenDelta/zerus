@@ -41,7 +41,7 @@ struct ConversationView: View {
         let session = self.session
         let target = session.target
         let archived = !target.archiveId.isEmpty
-        let events = model.events
+        let events = displayedEvents(target)
         let questions = archived || app.demo ? [] : model.questions
         let raw = model.activity
         let warning = app.demo ? "" : (raw?.string("pending_questions_error", "provider_messages_error") ?? "")
@@ -216,6 +216,11 @@ struct ConversationView: View {
     }
 
     // MARK: Rows
+
+    /// Native history with this phone's voice receipts and private media copies merged in.
+    private func displayedEvents(_ target: Target) -> [Event] {
+        app.demo ? model.events : VoiceHistory.merge(target, native: model.events, outgoing: app.voice.outgoing)
+    }
 
     private static func keys(events: [Event], questions: [Question], warning: String, bounded: String, unreadBoundary: String, loading: Bool) -> [String] {
         var keys = ["history:earlier", "history:status"]
@@ -509,7 +514,7 @@ struct ConversationSearchSheet: View {
     }
 }
 
-/// File links and Terminal, kept out of the main body so older compilers type-check it quickly.
+/// File links, Terminal and voice observation, kept out of the main body so older compilers type-check it quickly.
 private struct ConversationTools: ViewModifier {
     @Environment(AppModel.self) private var app
     let session: Session
@@ -536,6 +541,9 @@ private struct ConversationTools: ViewModifier {
                 Text(terminalUnavailable ?? "")
             }
             .fullScreenCover(isPresented: $terminalOpen) { TerminalView(session: session) }
+            .task(id: VoiceObservation(revision: app.conversation.revision, verified: app.conversation.activityVerified, ready: app.voice.ready)) {
+                if !app.demo && app.conversation.activityVerified { app.voice.observe(target, events: app.conversation.events) }
+            }
     }
 
     private func reason(_ target: Target) -> String? {
@@ -543,4 +551,11 @@ private struct ConversationTools: ViewModifier {
         let facts = SessionMenuFacts(target: target, row: raw ?? [:], state: SessionFilters.state(session), archived: archived, online: online, supported: supported)
         return SessionActionsMenu.terminalReason(facts).nonEmpty ?? app.conversation.terminalOpenReason(target).nonEmpty
     }
+}
+
+/// Voice rows are observed again whenever verified history publishes.
+private struct VoiceObservation: Equatable {
+    let revision: Int
+    let verified: Bool
+    let ready: Bool
 }

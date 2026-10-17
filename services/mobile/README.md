@@ -232,6 +232,24 @@ UnifiedPush support was removed. A legacy `push_hosts` key is still accepted so
 existing private configurations load; it is ignored with a startup warning.
 Registrations left from UnifiedPush are removed on their next delivery attempt.
 
+iOS wakes use APNs token authentication. Add the private signing key Apple
+issues (`.p8`, mode 0600, outside the repository), its key ID and the owning
+team ID; `apns_topic` defaults to `app.zerus.mobile`:
+
+```json
+{
+  "apns_key": "/private/path/AuthKey.p8",
+  "apns_key_id": "ABCDEFGHIJ",
+  "apns_team_id": "TEAM123456"
+}
+```
+
+The relay then advertises `apns` (production) and `apns_sandbox` (development
+builds) in `push_providers`. Each wake is a generic alert, "New session
+activity.", with only `{event_id, kind}` beside it; the app decides any detailed
+card after authenticated reads. Device tokens that Apple reports as unregistered
+are removed.
+
 FCM uses the optional pinned `firebase-admin` package and its HTTP v1 transport.
 Keep the Google service account JSON outside the repository, readable only by the
 relay user (mode 0600), and restrict its Firebase permissions to sending messages.

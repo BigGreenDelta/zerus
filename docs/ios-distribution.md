@@ -59,6 +59,15 @@ access.
    distribution, and install TestFlight on the phone.
 5. **Enable Dev uploads.** Set the repository variable `IOS_TESTFLIGHT_ENABLED`
    to `true`. The next main push uploads a Dev build.
+6. **Push notifications.** In Certificates, Identifiers & Profiles enable Push
+   Notifications for `app.zerus.mobile`; automatic signing then includes the
+   app's `aps-environment` entitlement (development for Local Dev builds,
+   production for TestFlight and App Store builds). Under Keys create an Apple
+   Push Notifications service key, download its `.p8` once, and give it to the
+   relay privately as `apns_key`, `apns_key_id` and `apns_team_id` (see
+   [mobile services](../services/mobile/README.md#push-configuration)). Without
+   it the app still works; alerts then arrive only while Zerus is open or when
+   iOS runs its background refresh.
 
 For Local Dev on a Mac, either sign in to Xcode with an Apple ID of the team
 (Xcode → Settings → Accounts) or pass the same API key to `dev-install.sh`
