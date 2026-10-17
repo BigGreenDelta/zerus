@@ -2,7 +2,9 @@
 //! outlive HGS and the GUI; manifests contain bindings, never provider keys.
 use super::*;
 #[allow(dead_code)] // the OpenCode 2 gate is consumed by later phase 1 tasks
+mod catalog;
 mod service;
+pub(crate) use catalog::{catalog, install_state, start_from_accounts};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -149,7 +151,6 @@ fn endpoint(record: &Value, suffix: &str) -> String {
     format!("/api/session/{}{suffix}", string(record, "conversation_id"))
 }
 fn ensure_host(record: &Value) -> Result<()> {
-    file_configuration_only()?;
     let dir = host_dir(record);
     private_dir(&dir)?;
     let _guard = lock(Some(&dir.join("start.lock")))?;
@@ -260,163 +261,10 @@ fn ensure_host(record: &Value) -> Result<()> {
     Err("OpenCode is still starting; explicitly resume when ready".into())
 }
 
-// JSONC syntax is accepted by OpenCode configuration. Strip only comments
-// and trailing commas outside quoted strings; never change URL or key bytes.
-fn configuration_json(bytes: &[u8]) -> Result<Value> {
-    let mut clean = bytes.to_vec();
-    let mut i = 0;
-    let mut quoted = false;
-    let mut escaped = false;
-    while i < clean.len() {
-        let byte = clean[i];
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-            i += 1;
-            continue;
-        }
-        if byte == b'"' {
-            quoted = true;
-            i += 1;
-            continue;
-        }
-        if byte == b'/' && clean.get(i + 1) == Some(&b'/') {
-            while i < clean.len() && !matches!(clean[i], b'\n' | b'\r') {
-                clean[i] = b' ';
-                i += 1;
-            }
-            continue;
-        }
-        if byte == b'/' && clean.get(i + 1) == Some(&b'*') {
-            clean[i] = b' ';
-            clean[i + 1] = b' ';
-            i += 2;
-            let mut closed = false;
-            while i + 1 < clean.len() {
-                if clean[i] == b'*' && clean[i + 1] == b'/' {
-                    clean[i] = b' ';
-                    clean[i + 1] = b' ';
-                    i += 2;
-                    closed = true;
-                    break;
-                }
-                if !matches!(clean[i], b'\n' | b'\r') {
-                    clean[i] = b' ';
-                }
-                i += 1;
-            }
-            if !closed {
-                return Err("Unclosed native configuration comment".into());
-            }
-            continue;
-        }
-        i += 1;
-    }
-    quoted = false;
-    escaped = false;
-    for i in 0..clean.len() {
-        let byte = clean[i];
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-            continue;
-        }
-        if byte == b'"' {
-            quoted = true;
-        } else if byte == b','
-            && clean[i + 1..]
-                .iter()
-                .find(|c| !c.is_ascii_whitespace())
-                .is_some_and(|c| matches!(c, b'}' | b']'))
-        {
-            clean[i] = b' ';
-        }
-    }
-    serde_json::from_slice(&clean).map_err(|_| "Native OpenCode configuration is invalid".into())
-}
-fn file_configuration_only() -> Result<()> {
-    if nonempty_env("OPENCODE_CONFIG_CONTENT").is_some() {
-        return Err("Inline OpenCode configuration is not supported by this adapter; use the host opencode.json file".into());
-    }
-    Ok(())
-}
-/// Accounts never start a server or expose provider credentials. Explicitly
-/// configured model IDs are enough for a cold local-model launch picker.
-pub(crate) fn catalog() -> Value {
-    if let Err(reason) = file_configuration_only() {
-        return json!({"model_options":[],"settings_model":"","model_catalog_source":"unavailable","model_catalog_reason":reason});
-    }
-    let mut paths = vec![
-        config_home().join("opencode.json"),
-        config_home().join("opencode.jsonc"),
-    ];
-    if let Some(p) = nonempty_env("OPENCODE_CONFIG") {
-        paths.push(p.into());
-    }
-    let mut models = BTreeMap::<String, Value>::new();
-    let mut selected = String::new();
-    for path in paths {
-        let Ok(bytes) = fs::read(path) else { continue };
-        if bytes.len() > 1_048_576 {
-            continue;
-        }
-        let Ok(value) = configuration_json(&bytes) else {
-            continue;
-        };
-        if let Some(v) = value["model"].as_str() {
-            selected = v.into();
-        }
-        for (provider, definition) in value["provider"].as_object().into_iter().flatten() {
-            for (id, model) in definition["models"].as_object().into_iter().flatten() {
-                let key = format!("{provider}/{id}");
-                if model_ref(&key).is_err() {
-                    continue;
-                }
-                models.insert(key.clone(),json!({"id":key,"value":key,"effort_options":[],"label":model.get("name").and_then(Value::as_str).unwrap_or(id),"provider":provider}));
-            }
-        }
-    }
-    if model_ref(&selected).is_ok() {
-        models.entry(selected.clone()).or_insert_with(
-            || json!({"id":selected,"value":selected,"effort_options":[],"label":selected}),
-        );
-    }
-    json!({"model_options":models.into_values().collect::<Vec<_>>(),"settings_model":selected,"model_catalog_source":"native_configuration"})
-}
-fn offered_model(value: &str) -> Result<Value> {
-    let model = model_ref(value)?;
-    if !catalog()["model_options"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|row| row["id"] == value)
-    {
-        return Err("This OpenCode model is not in the current native configuration; refresh its model catalog".into());
-    }
-    Ok(model)
-}
-fn model_ref(value: &str) -> Result<Value> {
-    let (provider, id) = value
-        .split_once('/')
-        .ok_or("Choose provider/model for OpenCode")?;
-    if provider.is_empty()
-        || id.is_empty()
-        || value.len() > 256
-        || value.chars().any(|c| c.is_control() || c.is_whitespace())
-    {
-        return Err("Invalid OpenCode provider/model".into());
-    }
-    Ok(json!({"providerID":provider,"id":id}))
+/// OpenCode 1 launch and settings still call this until Task 9 rewrites them.
+fn legacy_offered_model(location: &Path, value: &str) -> Result<Value> {
+    let service = service::connect().map_err(|why| why.reason(&crate::platform::hostname()))?;
+    catalog::offered_model(&service, location, value, "")
 }
 pub(crate) fn account_context(name: &str) -> Result<Value> {
     let record = binding(name)?;
@@ -432,8 +280,9 @@ pub(crate) fn launch(
     dry: bool,
     new_only: bool,
 ) -> Result<()> {
-    file_configuration_only()?;
-    let selected = model.map(offered_model).transpose()?;
+    let selected = model
+        .map(|value| legacy_offered_model(Path::new(cwd), value))
+        .transpose()?;
     if dry {
         println!("Create native OpenCode session {name} in {cwd}");
         return Ok(());
@@ -1096,7 +945,7 @@ fn parent_view(name: &str, record: &Value, roster: bool) -> Result<Value> {
     result["attachment_messages"] = attachments::messages(&record, "");
     result["voice_messages"] =
         conversation_history::inspected_voice_messages(&record, &result, None);
-    let configured = catalog();
+    let configured = catalog(None);
     result["model_options"] = configured["model_options"].clone();
     result["processes"] = json!({"items":[],"complete":false,"source":"opencode_native","reason":"Individual OpenCode shell process controls are not yet qualified"});
     if roster {
@@ -1524,7 +1373,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if !string(&request, "effort").is_empty() {
                 return Err("OpenCode effort controls are not yet qualified".into());
             }
-            let model = offered_model(string(&request, "model"))?;
+            let model = legacy_offered_model(&home(), string(&request, "model"))?;
             let path = root()
                 .join("opencode/settings")
                 .join(format!("{}.json", string(&request, "request_id")));
@@ -1584,19 +1433,6 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     use std::io::Write;
-    #[test]
-    fn jsonc_preserves_literal_urls_and_handles_comments_and_trailing_commas() {
-        let value=configuration_json(br#"{ // visible model config
-          "model":"ollama/qwen3-coder:30b", /* comment */
-          "provider":{"ollama":{"options":{"baseURL":"http://127.0.0.1:11434/v1"},"models":{"qwen3-coder:30b":{"name":"local",},},},},
-        }"#).unwrap();
-        assert_eq!(
-            value["provider"]["ollama"]["options"]["baseURL"],
-            "http://127.0.0.1:11434/v1"
-        );
-        assert_eq!(value["model"], "ollama/qwen3-coder:30b");
-        assert!(configuration_json(b"{ /* unclosed").is_err());
-    }
     #[test]
     fn chunked_native_response_is_bounded_and_complete() {
         assert_eq!(
