@@ -2,6 +2,7 @@
 """Portable source checks without rewriting legacy formatting."""
 import ast
 from pathlib import Path
+import plistlib
 import re
 import subprocess
 import sys
@@ -285,6 +286,16 @@ def main():
         if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', stable) or \
                 tuple(map(int, ios_version.split('.'))) <= tuple(map(int, stable.split('.'))):
             raise SystemExit("mobile/ios/DEV_VERSION must name a release newer than mobile/ios/VERSION.")
+    # The App Store privacy label is published as linked user content for app
+    # functionality, never tracking; the shipped privacy manifest must agree.
+    manifest = plistlib.loads((ROOT / "mobile/ios/Zerus/PrivacyInfo.xcprivacy").read_bytes())
+    collected = {(item.get("NSPrivacyCollectedDataType"), item.get("NSPrivacyCollectedDataTypeLinked"),
+                  item.get("NSPrivacyCollectedDataTypeTracking"), tuple(item.get("NSPrivacyCollectedDataTypePurposes", ())))
+                 for item in manifest.get("NSPrivacyCollectedDataTypes", [])}
+    expected = {(f"NSPrivacyCollectedDataType{kind}", True, False, ("NSPrivacyCollectedDataTypePurposeAppFunctionality",))
+                for kind in ("PhotosorVideos", "AudioData", "OtherUserContent")}
+    if manifest.get("NSPrivacyTracking") is not False or collected != expected:
+        raise SystemExit("mobile/ios PrivacyInfo.xcprivacy must match the published App Store privacy label.")
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
     if cargo["package"]["license"] != "MIT":
         raise SystemExit("Review the package license and notices.")
