@@ -60,10 +60,12 @@ pub(crate) fn config_home() -> PathBuf {
 pub(super) fn new_id(prefix: &str) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut suffix = String::with_capacity(26);
-    // 248 = 4 * 62: bytes at or above it are dropped to avoid modulo bias.
+    // Bytes 6 and 8 of a v4 UUID carry fixed version and variant bits, so
+    // only the other 14 are random. 248 = 4 * 62: bytes at or above it are
+    // dropped to avoid modulo bias.
     while suffix.len() < 26 {
-        for byte in uuid::Uuid::new_v4().into_bytes() {
-            if byte < 248 && suffix.len() < 26 {
+        for (index, byte) in uuid::Uuid::new_v4().into_bytes().into_iter().enumerate() {
+            if index != 6 && index != 8 && byte < 248 && suffix.len() < 26 {
                 suffix.push(ALPHABET[byte as usize % ALPHABET.len()] as char);
             }
         }
@@ -300,11 +302,16 @@ fn legacy_verdict(record: &Value, migration: &Value, session: Option<&Value>) ->
     if record["service"] == "opencode2" {
         return Legacy::Current;
     }
+    let (Some(id), Some(cwd)) = (
+        record["conversation_id"].as_str().filter(|v| !v.is_empty()),
+        record["cwd"].as_str().filter(|v| !v.is_empty()),
+    ) else {
+        return Legacy::Unsupported;
+    };
     let data = session.map(|value| &value["data"]);
     if migration["status"] == "completed"
         && data.is_some_and(|data| {
-            data["id"] == record["conversation_id"]
-                && data["location"]["directory"] == record["cwd"]
+            data["id"].as_str() == Some(id) && data["location"]["directory"].as_str() == Some(cwd)
         })
     {
         Legacy::Adopted
@@ -312,20 +319,208 @@ fn legacy_verdict(record: &Value, migration: &Value, session: Option<&Value>) ->
         Legacy::Unsupported
     }
 }
-fn legacy_state(service: &service::Service, record: &Value) -> Legacy {
-    if record["service"] == "opencode2" {
-        return Legacy::Current;
+type Reply = std::result::Result<Response, String>;
+fn refusal_text(response: &Response) -> String {
+    let reason = response.body["message"]
+        .as_str()
+        .or(response.body["data"]["message"].as_str())
+        .unwrap_or("Native operation refused");
+    format!("OpenCode HTTP {}: {reason}", response.status)
+}
+fn successful(response: &Response) -> bool {
+    (200..300).contains(&response.status)
+}
+/// Whether the migration finished. Only a successful reply answers; any
+/// transport or HTTP failure is an error, never "not migrated".
+fn migration_completed(reply: &Reply) -> Result<bool> {
+    match reply {
+        Err(why) => Err(why.clone()),
+        Ok(response) if !successful(response) => Err(refusal_text(response)),
+        Ok(response) => {
+            let body = if response.body["data"].is_object() {
+                &response.body["data"]
+            } else {
+                &response.body
+            };
+            Ok(body["status"] == "completed")
+        }
     }
-    let Ok(migration) = service.call("GET", "/api/experimental/migration/v1", None) else {
-        return Legacy::Unsupported;
+}
+/// The verdict once the migration completed: a missing session is
+/// Unsupported, any other failure is an error.
+fn settled_verdict(record: &Value, session: &Reply) -> Result<Legacy> {
+    match session {
+        Err(why) => Err(why.clone()),
+        Ok(response) if response.status == 404 => Ok(Legacy::Unsupported),
+        Ok(response) if !successful(response) => Err(refusal_text(response)),
+        Ok(response) => Ok(legacy_verdict(
+            record,
+            &json!({"status": "completed"}),
+            Some(&response.body),
+        )),
+    }
+}
+/// The mapping from the two native replies to a verdict. The flag says the
+/// verdict is settled for this service (the migration finished) and may be
+/// cached; the session is requested only after a completed migration.
+fn legacy_decision(
+    record: &Value,
+    migration: &Reply,
+    session: impl FnOnce() -> Reply,
+) -> Result<(Legacy, bool)> {
+    if record["service"] == "opencode2" {
+        return Ok((Legacy::Current, false));
+    }
+    if !migration_completed(migration)? {
+        return Ok((Legacy::Unsupported, false));
+    }
+    settled_verdict(record, &session()).map(|verdict| (verdict, true))
+}
+/// `migration` is fetched at most once per caller and only when needed.
+fn legacy_state(
+    service: &service::Service,
+    record: &Value,
+    migration: &mut Option<Reply>,
+) -> Result<(Legacy, bool)> {
+    if record["service"] == "opencode2" {
+        return Ok((Legacy::Current, false));
+    }
+    let reply =
+        migration.get_or_insert_with(|| service.raw("GET", "/api/experimental/migration/v1", None));
+    legacy_decision(record, reply, || {
+        service.raw("GET", &session_path(record, ""), None)
+    })
+}
+/// Drop OpenCode 1 fields and mark the binding as an OpenCode 2 binding.
+fn modernize(record: &mut Value) {
+    let map = record.as_object_mut().unwrap();
+    for key in [
+        "paused",
+        "native_data_home",
+        "native_config_file",
+        "creation_pending",
+        "creation_body",
+    ] {
+        map.remove(key);
+    }
+    record["service"] = json!("opencode2");
+}
+const VERDICT_LIMIT: usize = 5000;
+fn verdict_path() -> PathBuf {
+    root().join("opencode/legacy-verdicts.json")
+}
+fn verdict_key(record: &Value, registration: &service::Registration) -> String {
+    format!(
+        "{}\n{}\n{}\n{}",
+        string(record, "name"),
+        string(record, "conversation_id"),
+        registration.id,
+        registration.pid
+    )
+}
+fn load_verdicts() -> Vec<String> {
+    let Ok(file) = fs::File::open(verdict_path()) else {
+        return Vec::new();
     };
-    let migration = if migration["data"].is_object() {
-        migration["data"].clone()
-    } else {
-        migration
+    let mut bytes = Vec::new();
+    if file
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > 4 * 1024 * 1024
+    {
+        return Vec::new();
+    }
+    serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value["unsupported"].as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .take(VERDICT_LIMIT)
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+fn save_verdicts(keys: &[String]) {
+    let path = verdict_path();
+    if let Some(parent) = path.parent() {
+        if private_dir(parent).is_err() {
+            return;
+        }
+    }
+    let _ = atomic(&path, &json!({"unsupported": keys}).to_string());
+}
+/// Rewrite an adopted binding so it is never checked again. Skipped when the
+/// binding lock is busy; the next poll tries again.
+fn adopt_binding(name: &str, conversation_id: &str) {
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let Ok(Some(_guard)) = lock_until(&root().join("opencode/bindings.lock"), deadline) else {
+        return;
     };
-    let session = service.call("GET", &session_path(record, ""), None).ok();
-    legacy_verdict(record, &migration, session.as_ref())
+    if let Ok(mut record) = binding(name) {
+        if record["conversation_id"] == conversation_id {
+            modernize(&mut record);
+            let _ = save(&record);
+        }
+    }
+}
+enum Refusal {
+    /// The service definitely refused the creation (HTTP 4xx).
+    Definite(String),
+    Other(String),
+}
+fn creation_reply(
+    reply: Reply,
+    acknowledged: &dyn Fn(&Value) -> bool,
+) -> std::result::Result<(), Refusal> {
+    match reply {
+        Ok(response) if successful(&response) => {
+            if acknowledged(&response.body) {
+                Ok(())
+            } else {
+                Err(Refusal::Other(
+                    "OpenCode creation acknowledgement did not match; inspect before resuming"
+                        .into(),
+                ))
+            }
+        }
+        Ok(response) if (400..500).contains(&response.status) => {
+            Err(Refusal::Definite(refusal_text(&response)))
+        }
+        Ok(response) => Err(Refusal::Other(refusal_text(&response))),
+        Err(why) => Err(Refusal::Other(why)),
+    }
+}
+/// After a lost or uncertain creation reply: ask for this exact ID, and only
+/// when it does not exist POST the same body once (the ID makes it idempotent).
+fn reconcile_creation(
+    get: &mut dyn FnMut() -> Reply,
+    post: &mut dyn FnMut() -> Reply,
+    acknowledged: &dyn Fn(&Value) -> bool,
+) -> std::result::Result<(), Refusal> {
+    if let Ok(response) = get() {
+        if successful(&response) {
+            return creation_reply(Ok(response), acknowledged);
+        }
+    }
+    creation_reply(post(), acknowledged)
+}
+/// The first POST; a definite refusal or acknowledgement ends it, anything
+/// uncertain is reconciled.
+fn create_session(
+    get: &mut dyn FnMut() -> Reply,
+    post: &mut dyn FnMut() -> Reply,
+    acknowledged: &dyn Fn(&Value) -> bool,
+) -> std::result::Result<(), Refusal> {
+    match post() {
+        Ok(response) if successful(&response) || (400..500).contains(&response.status) => {
+            creation_reply(Ok(response), acknowledged)
+        }
+        _ => reconcile_creation(get, post, acknowledged),
+    }
 }
 pub(crate) fn launch(
     name: &str,
@@ -356,13 +551,27 @@ pub(crate) fn launch(
     if mode != "provider" {
         return Err("OpenCode uses its native permission configuration; select Provider settings for this account".into());
     }
-    let service = service::ensure_started()?;
-    if exists(name) {
-        if new_only {
-            return Err("This OpenCode session name already exists".into());
+    let present = exists(name);
+    if present && new_only {
+        return Err("This OpenCode session name already exists".into());
+    }
+    let cwd = if present {
+        None
+    } else {
+        let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
+        if !cwd.is_dir() {
+            return Err("OpenCode requires an existing directory".into());
         }
+        Some(cwd)
+    };
+    let service = service::ensure_started()?;
+    if present {
         let mut record = binding(name)?;
-        let adopted = match legacy_state(&service, &record) {
+        if record["creation_pending"] == true {
+            return resume_pending(&service, record);
+        }
+        let (verdict, _) = legacy_state(&service, &record, &mut None)?;
+        let adopted = match verdict {
             Legacy::Current => false,
             Legacy::Adopted => true,
             Legacy::Unsupported => {
@@ -373,72 +582,68 @@ pub(crate) fn launch(
             }
         };
         verify_session(&service, &record)?;
-        if adopted || record["creation_pending"].is_boolean() {
-            let map = record.as_object_mut().unwrap();
-            for key in [
-                "paused",
-                "native_data_home",
-                "native_config_file",
-                "creation_pending",
-            ] {
-                map.remove(key);
-            }
-            record["service"] = json!("opencode2");
+        if adopted {
+            modernize(&mut record);
             save(&record)?;
         }
         return Ok(());
     }
-    let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
-    if !cwd.is_dir() {
-        return Err("OpenCode requires an existing directory".into());
-    }
+    let cwd = cwd.unwrap();
     let selected = model
         .map(|value| catalog::offered_model(&service, &cwd, value, effort.unwrap_or("")))
         .transpose()?;
     let mut record = json!({"backend":"opencode","service":"opencode2","agent":"opencode","name":name,"cwd":cwd,"launch_id":launch_id,"run_id":uuid::Uuid::new_v4().to_string(),"conversation_id":new_id("ses_"),"created":now(),"agent_home":config_home(),"creation_pending":true});
-    // Persist the chosen native ID before the first creation attempt so one
-    // launch never has two identities.
-    save(&record)?;
-    let tag = name.rsplit('/').next().unwrap_or(name);
-    let mut body = json!({"id":record["conversation_id"],"location":{"directory":record["cwd"]},"title":tag,"metadata":{"zerus":{"run_id":record["run_id"],"launch_id":record["launch_id"]}}});
+    let mut body = creation_body(&record);
     if let Some(model) = selected {
         body["model"] = model;
     }
-    let acknowledged = |body: &Value| {
-        body["data"]["id"] == record["conversation_id"]
-            && body["data"]["location"]["directory"] == record["cwd"]
+    // Persist the chosen native ID and exact body before the first creation
+    // attempt so one launch never has two identities.
+    record["creation_body"] = body;
+    save(&record)?;
+    finish_creation(&service, record, true)
+}
+fn creation_body(record: &Value) -> Value {
+    let name = string(record, "name");
+    let tag = name.rsplit('/').next().unwrap_or(name);
+    json!({"id":record["conversation_id"],"location":{"directory":record["cwd"]},"title":tag,"metadata":{"zerus":{"run_id":record["run_id"],"launch_id":record["launch_id"]}}})
+}
+/// A binding left with creation_pending (crash or lost reply) is reconciled
+/// instead of blocking its name.
+fn resume_pending(service: &service::Service, record: Value) -> Result<()> {
+    finish_creation(service, record, false)
+}
+fn finish_creation(service: &service::Service, mut record: Value, first: bool) -> Result<()> {
+    let body = if record["creation_body"].is_object() {
+        record["creation_body"].clone()
+    } else {
+        creation_body(&record)
     };
-    let created = match service.raw("POST", "/api/session", Some(&body)) {
-        Ok(response) if (200..300).contains(&response.status) => acknowledged(&response.body),
-        Ok(response) => {
-            let reason = response.body["message"]
-                .as_str()
-                .or(response.body["data"]["message"].as_str())
-                .unwrap_or("Native operation refused");
-            return Err(format!("OpenCode HTTP {}: {reason}", response.status));
-        }
-        Err(_) => {
-            // Delivery is uncertain: ask for this exact ID before retrying.
-            let existing = service
-                .raw("GET", &session_path(&record, ""), None)
-                .ok()
-                .filter(|response| (200..300).contains(&response.status))
-                .is_some_and(|response| acknowledged(&response.body));
-            existing
-                || service
-                    .raw("POST", "/api/session", Some(&body))
-                    .ok()
-                    .filter(|response| (200..300).contains(&response.status))
-                    .is_some_and(|response| acknowledged(&response.body))
-        }
+    let acknowledged = |value: &Value| {
+        value["data"]["id"] == record["conversation_id"]
+            && value["data"]["location"]["directory"] == record["cwd"]
     };
-    if !created {
-        return Err(
-            "OpenCode creation acknowledgement did not match; inspect before resuming".into(),
-        );
+    let path = session_path(&record, "");
+    let mut get = || service.raw("GET", &path, None);
+    let mut post = || service.raw("POST", "/api/session", Some(&body));
+    let result = if first {
+        create_session(&mut get, &mut post, &acknowledged)
+    } else {
+        reconcile_creation(&mut get, &mut post, &acknowledged)
+    };
+    match result {
+        Ok(()) => {
+            let map = record.as_object_mut().unwrap();
+            map.remove("creation_pending");
+            map.remove("creation_body");
+            save(&record)
+        }
+        Err(Refusal::Definite(reason)) => {
+            let _ = fs::remove_file(binding_path(string(&record, "name")));
+            Err(reason)
+        }
+        Err(Refusal::Other(reason)) => Err(reason),
     }
-    record.as_object_mut().unwrap().remove("creation_pending");
-    save(&record)
 }
 fn verify_session(service: &service::Service, record: &Value) -> Result<Value> {
     let result = service.call("GET", &session_path(record, ""), None)?;
@@ -1142,6 +1347,9 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     let mut rows = Vec::new();
     let service = service::connect();
     let computer = crate::platform::hostname();
+    let mut migration: Option<Reply> = None;
+    let mut verdicts: Option<Vec<String>> = None;
+    let mut verdicts_changed = false;
     for entry in entries.flatten().take(5000) {
         let Ok(bytes) = fs::read(entry.path()) else {
             continue;
@@ -1172,24 +1380,51 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         };
         let row = match &service {
             Err(why) => unavailable(why.reason(&computer)),
-            Ok(service) => match legacy_state(service, &record) {
-                Legacy::Unsupported => {
-                    let mut row = unavailable(
-                        "This conversation belongs to OpenCode 1, which Zerus no longer supports"
-                            .into(),
-                    );
-                    row.as_object_mut()
-                        .unwrap()
-                        .remove("inspection_unavailable");
-                    row["state"] = json!("stopped");
-                    row["process_state"] = json!("exited");
-                    row["runtime_state"] = json!("stopped");
-                    row["activity_summary"] = json!("OpenCode 1 conversation");
-                    row["allowed_actions"] = json!(["forget"]);
-                    row
+            Ok(service) => {
+                let key = verdict_key(&record, &service.reg);
+                let known = record["service"] != "opencode2"
+                    && verdicts.get_or_insert_with(load_verdicts).contains(&key);
+                let state = if known {
+                    Ok((Legacy::Unsupported, false))
+                } else {
+                    legacy_state(service, &record, &mut migration)
+                };
+                match state {
+                    Err(reason) => unavailable(reason),
+                    Ok((Legacy::Unsupported, settled)) => {
+                        if settled && !known {
+                            let keys = verdicts.get_or_insert_with(load_verdicts);
+                            if keys.len() >= VERDICT_LIMIT {
+                                keys.clear();
+                            }
+                            keys.push(key);
+                            verdicts_changed = true;
+                        }
+                        let mut row = unavailable(
+                            "This conversation belongs to OpenCode 1, which Zerus no longer supports"
+                                .into(),
+                        );
+                        row.as_object_mut()
+                            .unwrap()
+                            .remove("inspection_unavailable");
+                        row["state"] = json!("stopped");
+                        row["process_state"] = json!("exited");
+                        row["runtime_state"] = json!("stopped");
+                        row["activity_summary"] = json!("OpenCode 1 conversation");
+                        row["allowed_actions"] = json!(["forget"]);
+                        row
+                    }
+                    Ok((verdict, _)) => {
+                        if matches!(verdict, Legacy::Adopted) {
+                            adopt_binding(
+                                string(&record, "name"),
+                                string(&record, "conversation_id"),
+                            );
+                        }
+                        inspect(string(&record, "name"), None).unwrap_or_else(unavailable)
+                    }
                 }
-                _ => inspect(string(&record, "name"), None).unwrap_or_else(unavailable),
-            },
+            }
         };
         let mut row = row;
         if let Some(map) = row.as_object_mut() {
@@ -1204,6 +1439,9 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
             }
         }
         rows.push(row);
+    }
+    if verdicts_changed {
+        save_verdicts(verdicts.as_deref().unwrap_or(&[]));
     }
     Ok(rows)
 }
@@ -1669,6 +1907,132 @@ mod tests {
             legacy_verdict(&current, &json!({}), None),
             Legacy::Current
         ));
+    }
+    #[test]
+    fn legacy_verdict_needs_exact_nonempty_identity() {
+        let done = json!({"status": "completed"});
+        let record = json!({"conversation_id": "ses_a", "cwd": "/workspace/fixture"});
+        let good =
+            json!({"data": {"id": "ses_a", "location": {"directory": "/workspace/fixture"}}});
+        assert!(matches!(
+            legacy_verdict(&record, &done, Some(&good)),
+            Legacy::Adopted
+        ));
+        let other =
+            json!({"data": {"id": "ses_b", "location": {"directory": "/workspace/fixture"}}});
+        assert!(matches!(
+            legacy_verdict(&record, &done, Some(&other)),
+            Legacy::Unsupported
+        ));
+        assert!(matches!(
+            legacy_verdict(&record, &done, Some(&json!({}))),
+            Legacy::Unsupported
+        ));
+        for bad in [
+            json!({"cwd": "/w"}),
+            json!({"conversation_id": "ses_a"}),
+            json!({"conversation_id": "", "cwd": ""}),
+        ] {
+            let blank = json!({"data": {"id": bad["conversation_id"], "location": {"directory": bad["cwd"]}}});
+            assert!(matches!(
+                legacy_verdict(&bad, &done, Some(&blank)),
+                Legacy::Unsupported
+            ));
+        }
+    }
+    fn reply(status: u16, body: Value) -> Reply {
+        Ok(Response { status, body })
+    }
+    #[test]
+    fn only_definite_answers_make_a_binding_unsupported() {
+        let record = json!({"conversation_id": "ses_a", "cwd": "/w"});
+        let session = || {
+            reply(
+                200,
+                json!({"data": {"id": "ses_a", "location": {"directory": "/w"}}}),
+            )
+        };
+        let verdict = |m: Reply, s: Reply| legacy_decision(&record, &m, || s);
+        let done = || reply(200, json!({"data": {"status": "completed"}}));
+        assert!(matches!(
+            verdict(done(), session()),
+            Ok((Legacy::Adopted, true))
+        ));
+        assert!(matches!(
+            verdict(done(), reply(404, json!({}))),
+            Ok((Legacy::Unsupported, true))
+        ));
+        assert!(matches!(
+            verdict(
+                done(),
+                reply(
+                    200,
+                    json!({"data": {"id": "ses_z", "location": {"directory": "/w"}}})
+                )
+            ),
+            Ok((Legacy::Unsupported, true))
+        ));
+        // Not completed: unsupported but not settled, and no session request.
+        let pending = legacy_decision(&record, &reply(200, json!({"status": "running"})), || {
+            panic!("no session GET")
+        });
+        assert!(matches!(pending, Ok((Legacy::Unsupported, false))));
+        // Errors never become a verdict.
+        assert!(verdict(Err("refused".into()), session()).is_err());
+        assert!(verdict(reply(500, json!({})), session()).is_err());
+        assert!(verdict(done(), Err("timeout".into())).is_err());
+        assert!(verdict(done(), reply(503, json!({}))).is_err());
+        let current = json!({"service": "opencode2"});
+        assert!(matches!(
+            legacy_decision(&current, &Err("x".into()), || panic!("none")),
+            Ok((Legacy::Current, false))
+        ));
+    }
+    fn ack(value: &Value) -> bool {
+        value["data"]["id"] == "ses_a"
+    }
+    fn counted(
+        get: Reply,
+        post: Reply,
+        first: bool,
+    ) -> (std::result::Result<(), Refusal>, usize, usize) {
+        let (mut gets, mut posts) = (0, 0);
+        let mut g = || {
+            gets += 1;
+            get.clone()
+        };
+        let mut p = || {
+            posts += 1;
+            post.clone()
+        };
+        let result = if first {
+            create_session(&mut g, &mut p, &ack)
+        } else {
+            reconcile_creation(&mut g, &mut p, &ack)
+        };
+        (result, gets, posts)
+    }
+    #[test]
+    fn lost_creation_replies_are_reconciled_without_a_second_identity() {
+        let found = reply(200, json!({"data": {"id": "ses_a"}}));
+        let (result, gets, posts) = counted(found.clone(), Err("lost".into()), false);
+        assert!(result.is_ok() && gets == 1 && posts == 0);
+        let (result, gets, posts) = counted(reply(404, json!({})), found.clone(), false);
+        assert!(result.is_ok() && gets == 1 && posts == 1);
+        let wrong = reply(200, json!({"data": {"id": "ses_other"}}));
+        let (result, _, posts) = counted(wrong, found.clone(), false);
+        assert!(matches!(result, Err(Refusal::Other(_))) && posts == 0);
+        let (result, _, posts) = counted(reply(404, json!({})), wrong_ack(), false);
+        assert!(matches!(result, Err(Refusal::Other(_))) && posts == 1);
+        // First attempt: a definite refusal ends it; a lost reply reconciles.
+        let (result, gets, posts) =
+            counted(found.clone(), reply(400, json!({"message": "bad"})), true);
+        assert!(matches!(result, Err(Refusal::Definite(_))) && gets == 0 && posts == 1);
+        let (result, gets, posts) = counted(found.clone(), Err("lost".into()), true);
+        assert!(result.is_ok() && gets == 1 && posts == 1);
+    }
+    fn wrong_ack() -> Reply {
+        reply(200, json!({"data": {"id": "ses_other"}}))
     }
     #[test]
     fn session_paths_use_the_conversation_id() {

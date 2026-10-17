@@ -172,6 +172,7 @@ fn schema_has_field(openapi: &Value, schema: &Value, field: &str, depth: u8) -> 
         })
 }
 
+#[derive(Clone)]
 pub(super) struct Response {
     pub status: u16,
     pub body: Value,
