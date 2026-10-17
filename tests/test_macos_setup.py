@@ -20,6 +20,7 @@ _spec = importlib.util.spec_from_file_location("package_macos", ROOT / "scripts/
 _package = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_package)
 SETUP_SCRIPTS = _package.SETUP_SCRIPTS
+CONNECTOR_MARKER = runpy.run_path(str(ROOT / "scripts/install-mobile-connector-service.py"))["AGENT_MARKER"]
 LABELS = {
     "session": "com.hgdev.hgs.user-session",
     "tray": "com.hgdev.hgs-tray",
@@ -142,6 +143,49 @@ class MacSetup(unittest.TestCase):
         self.state.write_text("com.hgdev.zerus-mobile-connector\n")
         self.run_setup("--remove")
         self.assertFalse(path.exists())
+
+    def test_remove_keeps_foreign_connector_agents_that_point_into_the_bundle(self):
+        label = "com.hgdev.zerus-mobile-connector"
+        path = self.home / "Library/LaunchAgents" / (label + ".plist")
+        path.parent.mkdir(parents=True)
+        cases = ((False, label, False, "zerus-mobile-connector"),
+                 (False, label, True, "zerus-mobile-connector"),
+                 (True, label, False, "zerus-mobile-connector"),
+                 (True, "org.example.custom", True, "zerus-mobile-connector"),
+                 (True, label, True, "hgs"))
+        for marker, actual_label, abandon, program in cases:
+            with self.subTest(marker=marker, label=actual_label, abandon=abandon, program=program):
+                definition = {"Label": actual_label,
+                              "ProgramArguments": [str(self.app / "Contents/MacOS" / program),
+                                                   "--config", str(self.root / "custom-connector.json")],
+                              "AbandonProcessGroup": abandon}
+                payload = plistlib.dumps(definition)
+                if marker:
+                    payload = payload.replace(b"\n", b"\n" + CONNECTOR_MARKER + b"\n", 1)
+                path.write_bytes(payload)
+                self.state.write_text(label + "\n")
+                self.log.write_text("")
+                result = self.run_setup("--remove")
+                self.assertTrue(path.exists(), "foreign connector plist was removed")
+                self.assertEqual(path.read_bytes(), payload)
+                self.assertIn("Kept", result.stdout)
+                self.assertFalse([call for call in self.launchctl_calls() if call.startswith("bootout")])
+
+    def test_remove_owned_connector_unloads_only_its_agent(self):
+        label = "com.hgdev.zerus-mobile-connector"
+        path = self.home / "Library/LaunchAgents" / (label + ".plist")
+        path.parent.mkdir(parents=True)
+        definition = {"Label": label,
+                      "ProgramArguments": [str(self.app / "Contents/MacOS/zerus-mobile-connector"), "--config",
+                                           str(self.home / ".config/hgs/mobile/connector.json")],
+                      "AbandonProcessGroup": True}
+        payload = plistlib.dumps(definition).replace(b"\n", b"\n" + CONNECTOR_MARKER + b"\n", 1)
+        path.write_bytes(payload)
+        self.state.write_text(label + "\n")
+        self.run_setup("--remove")
+        self.assertFalse(path.exists())
+        self.assertEqual([call for call in self.launchctl_calls() if call.startswith("bootout")],
+                         [f"bootout gui/{os.getuid()}/{label}"])
 
     def test_existing_executable_aborts_before_any_change(self):
         directory = self.home / ".local/bin"

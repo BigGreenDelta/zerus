@@ -24,6 +24,7 @@ LABELS = {
     # AbandonProcessGroup leaves the agents it launched running.
     "connector": "com.hgdev.zerus-mobile-connector",
 }
+CONNECTOR_AGENT_MARKER = b"<!-- Written by the Zerus mobile connector service installer; it rewrites only this file. -->"
 INSTALLERS = {
     "session": "install-macos-session-service.py",
     "recovery": "install-recovery-service.py",
@@ -54,6 +55,19 @@ def agent_program(path):
 
 
 def owned_agent(kind, app):
+    if kind == "connector":
+        try:
+            payload = agent_path(kind).read_bytes()
+            definition = plistlib.loads(payload)
+            program = definition["ProgramArguments"][0]
+            return (CONNECTOR_AGENT_MARKER in payload.splitlines()[:3]
+                    and definition.get("Label") == LABELS[kind]
+                    and definition.get("AbandonProcessGroup") is True
+                    and inside(program, app)
+                    and Path(program).resolve() == (app / "Contents/MacOS/zerus-mobile-connector").resolve())
+        except Exception:
+            # Manual, modified or unreadable connector definitions stay untouched.
+            return False
     program = agent_program(agent_path(kind))
     return program is not None and inside(program, app)
 
