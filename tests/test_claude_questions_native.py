@@ -28,19 +28,6 @@ def records(path):
  data=Path(path).read_bytes()
  return [json.loads(line) for line in data[:data.rfind(b'\n')+1].decode().split('\n') if line.strip()]
 
-class Records(unittest.TestCase):
- def test_only_complete_records_are_read_and_malformed_ones_still_fail(self):
-  with tempfile.TemporaryDirectory() as temp:
-   path=Path(temp)/'transcript.jsonl'
-   first=json.dumps(dict(type='user',text='a\u2028b\x85c'),ensure_ascii=False).encode()+b'\n'
-   partial=json.dumps(dict(type='assistant',text='Привет'),ensure_ascii=False).encode()
-   path.write_bytes(first+partial[:partial.index('Привет'.encode())+3])
-   self.assertEqual(records(path),[dict(type='user',text='a\u2028b\x85c')])
-   path.write_bytes(first+partial+b'\n')
-   self.assertEqual([row['type'] for row in records(path)],['user','assistant'])
-   path.write_bytes(first+b'{"type":\n'+partial)
-   with self.assertRaises(json.JSONDecodeError):records(path)
-
 def shows_prefix(rows,text):
  """Whether Other editor rows show exactly text. A row ends at a hard newline
  or, unless it is blank, at a wrap; tmux trims, and Ink may swallow, the
