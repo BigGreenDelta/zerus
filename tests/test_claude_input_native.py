@@ -1,5 +1,4 @@
 """Exact message acceptance by real Claude using a private home and localhost API."""
-import json
 import re
 import time
 import unittest
@@ -34,10 +33,8 @@ class NativeClaudeInput(unittest.TestCase):
     payload = fixtures.InputTransport.payload
 
     def accepted(self, text):
-        transcript = self.record['transcript']
-        from pathlib import Path
         return sum(row.get('type') == 'user' and row.get('message', {}).get('content') == text
-                   for line in Path(transcript).read_text().splitlines() if (row := json.loads(line)))
+                   for row in native.records(self.record['transcript']))
 
     def test_trailing_backslash_starts_one_turn_with_the_exact_message(self):
         text = 'Continue the fixture\\'

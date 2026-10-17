@@ -153,7 +153,7 @@ class NativeClaudeSettings(unittest.TestCase):
         return [json.loads(line)[3:] for line in path.read_text().splitlines()] if path.exists() else []
 
     def receipts(self):
-        rows = [json.loads(line) for line in self.transcript.read_text().splitlines() if line.strip()]
+        rows = native.records(self.transcript)
         return [row['message']['content'] for row in rows
                 if row.get('type') == 'user' and isinstance(row.get('message', {}).get('content'), str)
                 and 'Set model to' in row['message']['content']]

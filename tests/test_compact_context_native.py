@@ -1,9 +1,8 @@
 """Real Claude compaction with a localhost-only model and native completion hooks."""
 import json, subprocess, time, unittest, uuid
-from pathlib import Path
 import test_input
 from test_clear_context_native import NativeClearContext
-from test_claude_questions_native import CLAUDE
+from test_claude_questions_native import CLAUDE, records
 
 @unittest.skipUnless(CLAUDE, 'Set HGS_CLAUDE_TEST_BIN for native compaction')
 class NativeCompactContext(unittest.TestCase):
@@ -32,7 +31,7 @@ class NativeCompactContext(unittest.TestCase):
         # PostCompact completes the request before Claude redraws its summary.
         self.wait_for(lambda:'compacted' in self.screen().lower())
         def compact_boundary():
-            history=[json.loads(line) for line in Path(current['transcript']).read_text().splitlines()]
+            history=records(current['transcript'])
             return next((event for event in reversed(history) if event.get('subtype')=='compact_boundary'),None)
         boundary=self.wait_for(compact_boundary)
         fresh=self.inspect()['session_usage']
@@ -46,9 +45,9 @@ class NativeCompactContext(unittest.TestCase):
         sent=subprocess.run([str(test_input.HGS),'send',self.name,'--json'],input=json.dumps(message),env=self.env,text=True,capture_output=True,timeout=12)
         self.assertEqual(sent.returncode,0,sent.stderr+'\n'+self.screen())
         self.wait_for(lambda:any(e.get('type')=='user' and e.get('message',{}).get('content')==message['text']
-            for e in map(json.loads,Path(current['transcript']).read_text().splitlines())))
+            for e in records(current['transcript'])))
         replay=subprocess.run([str(test_input.HGS),'send',self.name,'--json'],input=json.dumps(message),env=self.env,text=True,capture_output=True,timeout=12)
         self.assertEqual(replay.returncode,0,replay.stderr)
-        events=list(map(json.loads,Path(current['transcript']).read_text().splitlines()))
+        events=records(current['transcript'])
         self.assertEqual(sum(e.get('type')=='user' and e.get('message',{}).get('content')==message['text'] for e in events),1)
 if __name__=='__main__':unittest.main()

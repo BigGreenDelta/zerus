@@ -20,6 +20,27 @@ WRAPPED_ITEMS=[dict(ITEMS[0],options=[dict(label='Stable',description='Use stabl
    dict(label='Preview',description='Use preview build 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef')]),ITEMS[1],
  dict(ITEMS[2],question='What else should we know? Compare /work/example/projects/a-really-long-directory-name/contracts/template-with-a-long-name.html after step 1. review.'),ITEMS[3]]
 
+def records(path):
+ """JSON Lines records of a file that a native agent may still be appending
+ to. A last line without its newline is not written yet and waits for the next
+ read, so the file is cut there before decoding; a complete malformed record
+ still fails. Only newlines end records: JSON keeps U+2028 and NEL unescaped."""
+ data=Path(path).read_bytes()
+ return [json.loads(line) for line in data[:data.rfind(b'\n')+1].decode().split('\n') if line.strip()]
+
+class Records(unittest.TestCase):
+ def test_only_complete_records_are_read_and_malformed_ones_still_fail(self):
+  with tempfile.TemporaryDirectory() as temp:
+   path=Path(temp)/'transcript.jsonl'
+   first=json.dumps(dict(type='user',text='a\u2028b\x85c'),ensure_ascii=False).encode()+b'\n'
+   partial=json.dumps(dict(type='assistant',text='Привет'),ensure_ascii=False).encode()
+   path.write_bytes(first+partial[:partial.index('Привет'.encode())+3])
+   self.assertEqual(records(path),[dict(type='user',text='a\u2028b\x85c')])
+   path.write_bytes(first+partial+b'\n')
+   self.assertEqual([row['type'] for row in records(path)],['user','assistant'])
+   path.write_bytes(first+b'{"type":\n'+partial)
+   with self.assertRaises(json.JSONDecodeError):records(path)
+
 def shows_prefix(rows,text):
  """Whether Other editor rows show exactly text. A row ends at a hard newline
  or, unless it is blank, at a wrap; tmux trims, and Ink may swallow, the
@@ -233,9 +254,7 @@ sys.exit(result.returncode)
    labels=[option['label'] for i,option in enumerate(item['options']) if 'opt_'+str(len(expected))+'_'+str(i) in answer['selected_option_ids']]
    expected[item['question']]=', '.join(labels+([answer['text']] if answer['text'] else []))
   def recorded():
-   for row in Path(self.record['transcript']).read_text().splitlines():
-    try:event=json.loads(row)
-    except json.JSONDecodeError:continue
+   for event in records(self.record['transcript']):
     if event.get('sessionId')!=self.conversation_id:continue
     parts=event.get('message',{}).get('content',[])
     if isinstance(parts,list) and any(p.get('type')=='tool_result' and p.get('tool_use_id')=='toolu_native_fixture' for p in parts):return event.get('toolUseResult')
