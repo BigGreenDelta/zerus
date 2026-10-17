@@ -83,7 +83,8 @@ object SessionCardPresentation {
 
     fun inactiveChild(child: JSONObject, countsComplete: Boolean = false): Boolean {
         val state = childState(child)
-        val inactive = state == "finished" || state == "idle" || state == "ready"
+        // A failed turn has ended too; its error belongs to the parent's result.
+        val inactive = state == "finished" || state == "idle" || state == "ready" || state == "error"
         // Explicit display evidence wins over an older raw turn state or count.
         if (state.isNotEmpty() && !inactive) return false
         if (flag(child, "group")) return countsComplete && (child.opt("active_count") as? Number)?.toDouble() == 0.0
@@ -120,7 +121,7 @@ object SessionCardPresentation {
             child.copy(conversation = child.parentConversation, agentId = "", parentConversation = "") == parent
     }.mapTo(mutableSetOf()) { it.target.agentId }
 
-    /** The expanded rows. Finished, idle and ready turns are hidden unless completed children are included. */
+    /** The expanded rows. Finished, idle, ready and failed turns are hidden unless completed children are included. */
     fun children(session: Session, online: Boolean, includeCompleted: Boolean = false,
         drafted: Set<String> = emptySet()): List<SessionCardChild> {
         val current = SessionFilters.currentActivity(session, online)
