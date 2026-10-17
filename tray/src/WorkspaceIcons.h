@@ -135,6 +135,11 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "reset") {
             // Refresh turned back: counterclockwise, to the default value.
             p.drawArc(QRectF(5, 5, 14, 14), 140*16, -290*16); p.drawLine(5, 4, 5, 9); p.drawLine(5, 9, 10, 9);
+        } else if (name == "clear") {
+            // An eraser on its baseline: Clear session.
+            p.save(); p.translate(12, 11); p.rotate(-45);
+            p.drawRoundedRect(QRectF(-7, -4, 14, 8), 1.5, 1.5); p.drawLine(QPointF(-1, -4), QPointF(-1, 4)); p.restore();
+            p.drawLine(10, 21, 20, 21);
         } else if (name == "connect" || name == "disconnect") {
             // Opposing chain links, separated for a terminal detach.
             QPainterPath left, right;
