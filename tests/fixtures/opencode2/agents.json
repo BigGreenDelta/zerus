@@ -1,0 +1,66 @@
+{
+ "data": [
+  {
+   "description": "The default agent. Executes tools based on configured permissions.",
+   "hidden": false,
+   "id": "build",
+   "mode": "primary",
+   "name": "Build",
+   "permissions": [
+    {
+     "action": "*",
+     "effect": "allow",
+     "resource": "*"
+    },
+    {
+     "action": "read",
+     "effect": "ask",
+     "resource": "*.env"
+    },
+    {
+     "action": "read",
+     "effect": "ask",
+     "resource": "*.env.*"
+    },
+    {
+     "action": "read",
+     "effect": "allow",
+     "resource": "*.env.example"
+    },
+    {
+     "action": "question",
+     "effect": "allow",
+     "resource": "*"
+    },
+    {
+     "action": "*",
+     "effect": "ask",
+     "resource": "*"
+    },
+    {
+     "action": "question",
+     "effect": "allow",
+     "resource": "*"
+    },
+    {
+     "action": "read",
+     "effect": "allow",
+     "resource": "*"
+    },
+    {
+     "action": "browser",
+     "effect": "deny",
+     "resource": "*"
+    }
+   ],
+   "request": {
+    "body": {},
+    "headers": {},
+    "settings": {}
+   }
+  }
+ ],
+ "location": {
+  "directory": "/home/example"
+ }
+}

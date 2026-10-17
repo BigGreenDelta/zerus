@@ -1,0 +1,20 @@
+{
+ "data": [
+  {
+   "action": "shell",
+   "id": "per_14bb53e450011OX4ETfI3adcUy",
+   "resources": [
+    "printf native-tool-output"
+   ],
+   "save": [
+    "printf *"
+   ],
+   "sessionID": "ses_Mol6tv7rhWoDfwAt7DZhYxn5R1",
+   "source": {
+    "id": "call_xwdqunwm",
+    "messageID": "msg_14bb53e26001cif2gJy5y4QAwa",
+    "type": "tool"
+   }
+  }
+ ]
+}
