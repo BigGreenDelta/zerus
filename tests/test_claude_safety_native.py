@@ -60,6 +60,14 @@ class NativeClaudeSafety(unittest.TestCase):
         self.tmux('new-session', '-d', '-s', 'viewer', '-x', '120', '-y', '45',
                   'env', '-u', 'TMUX', str(self.bin / 'tmux'), 'attach', '-t', '=' + self.name)
         self.wait_for(lambda: self.window('session_attached') == '1')
+        # The window takes the client's size and Claude redraws its whole clipped
+        # panel; a capture during that redraw can miss the footer and warning.
+        def settled():
+            first = self.screen()
+            time.sleep(.15)
+            second = self.screen()
+            return first == second and 'Esc to cancel · Tab to amend' in second and 'Dangerous rm operation' in second
+        self.wait_for(settled)
 
     def hold_answer_lock(self):
         # The lock an answer driving this run's terminal holds.
