@@ -71,6 +71,9 @@ private:
     FleetState m_fleet;
     QString m_host;
     QSet<QString> m_importing;
+    // Machines whose import left aliases out this run: not marked imported, so the
+    // next start tries them again, but not asked again before then.
+    QSet<QString> m_importDeferred;
     QListWidget *m_list;
     QAction *m_moveUp,*m_moveDown;
     QTableWidget *m_folders;

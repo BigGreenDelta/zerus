@@ -53,6 +53,18 @@ alone never launches a session or sends input.
 same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.
 
+An agent obtains its own reference with `hgs self [--json]`. The caller must run
+inside a live tracked native agent: like an agent-originated send, the binding is
+proven through that agent's process ancestry, never through `HGS_SESSION` alone.
+The reply carries the current name after a rename, the `reference` fields and
+`provider`. It never routes to a peer and refuses `--dry-run`.
+
+`hgs [@host] guide [send|wait|launch|stop]` prints compact instructions for
+agents that read, message, wait for, launch or stop other sessions. The text is
+compiled into hgs and stays small because agents read it into their context;
+topics are read only when needed. `@host` returns that peer's guide after
+probing its installed help, so an older peer fails without launching anything.
+
 Native conversation IDs appear only in **Details** on desktop and **Session
 details → Overview** on Android, labeled **Session ID** with a dedicated copy
 icon immediately after the exact identifier. The desktop icon uses the same
@@ -1627,7 +1639,10 @@ swarm catalog, and leaves it untouched, until hgs is updated again.
 
 `~/.config/hgs/projects.local` retains `NAME=FOLDER` aliases for CLI compatibility.
 The old infrastructure-owned `~/.config/hgs/projects` is no longer read. Aliases
-import into Zerus once per machine; later project edits belong in Projects.
+import into Zerus once per machine; later project edits belong in Projects. An
+alias whose folder that machine cannot take (not an absolute path in its form)
+starts no project. Projects names it, and the machine imports again at the next
+start of Zerus.
 
 ```sh
 hgs project ls --json
@@ -2112,6 +2127,9 @@ session usage limits and network failures. Automation is off by default. Each cl
 `15, 30, 60, 300, -1` stops after four attempts; `15, 30, 60, 0` repeats the previous
 60-second delay indefinitely after the first two attempts; `-1` alone does nothing.
 Small jitter is applied. Class counters persist within an episode when errors change.
+Temporary overload covers HTTP 500, 502–504 and 529, model capacity errors and the
+520–524 gateway failures that Cloudflare reports for an unreachable or timed-out
+provider, often without a response body.
 
 **Session usage limit** is separate from a temporary rate limit. Its default mode,
 **Wait for reset**, schedules a continuation at the provider's reset time, using

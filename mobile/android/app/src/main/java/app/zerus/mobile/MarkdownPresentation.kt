@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.job
 import kotlinx.coroutines.sync.Semaphore
 import org.commonmark.ext.autolink.AutolinkExtension
 import org.commonmark.ext.gfm.strikethrough.Strikethrough
@@ -271,7 +272,12 @@ internal class MarkdownDocumentCache(
                 entries[source]?.let { return it }
                 flights[source] ?: scope.async(start = CoroutineStart.LAZY) {
                     val document = try { parse(source) } catch (_: Exception) { MarkdownDocument.literal(source) }
+                    val self = coroutineContext.job
                     synchronized(lock) {
+                        // A finished flight leaves with its result: await() can return before the
+                        // completion handler runs, and a later request must then find the retained
+                        // document or parse again, never join this job.
+                        if (flights[source] === self) flights.remove(source)
                         if (maxEntries > 0 && document.estimatedBytes <= maxBytes) {
                             entries.put(source, document)?.let { bytes -= it.estimatedBytes }
                             bytes += document.estimatedBytes

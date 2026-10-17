@@ -198,18 +198,47 @@ pub(crate) fn create(config: &Config, args: &[String]) -> cli::Result<i32> {
         archive,
         agent,
     };
+    print(&reference, as_json, json!({}))
+}
+
+fn print(reference: &Reference, as_json: bool, extra: Value) -> cli::Result<i32> {
     let uri = reference.uri();
     Reference::parse(&uri)?;
     if as_json {
-        println!(
-            "{}",
-            json!({"schema":1,"uri":uri,"name":reference.name,"machine_id":reference.machine,
-        "host":reference.host,"run_id":reference.run,"conversation_id":reference.conversation,"archive_id":reference.archive,"agent_id":reference.agent})
-        );
+        let mut output = json!({"schema":1,"uri":uri,"name":reference.name,"machine_id":reference.machine,
+        "host":reference.host,"run_id":reference.run,"conversation_id":reference.conversation,"archive_id":reference.archive,"agent_id":reference.agent});
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            output[key] = value.clone();
+        }
+        println!("{output}");
     } else {
         println!("{uri}");
     }
     Ok(0)
+}
+
+/// `hgs self`: the reference of the agent whose process runs this CLI, under
+/// its current name. Only verified native ancestry identifies the caller.
+pub(crate) fn current(config: &Config, args: &[String]) -> cli::Result<i32> {
+    let as_json = match args {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        _ => return Err(Error::new(1, "usage: hgs self [--json]")),
+    };
+    let record = state::session_graph::caller_record().ok_or_else(|| {
+        Error::new(1, "hgs self: no live Zerus session owns this process")
+    })?;
+    let text = |key: &str| record[key].as_str().unwrap_or_default().to_owned();
+    let reference = Reference {
+        machine: swarm::local_node_id(config).map_err(|e| Error::new(1, e.to_string()))?,
+        host: config.host().into(),
+        name: text("name"),
+        conversation: text("conversation_id"),
+        run: text("run_id"),
+        archive: String::new(),
+        agent: String::new(),
+    };
+    print(&reference, as_json, json!({"provider": text("agent")}))
 }
 pub(crate) fn inspect(config: &Config, reference: &Reference) -> cli::Result<Value> {
     if swarm::local_node_id(config).map_err(|e| Error::new(1, e.to_string()))? != reference.machine

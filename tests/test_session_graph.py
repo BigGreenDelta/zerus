@@ -79,7 +79,7 @@ class SessionGraph(unittest.TestCase):
         bindings = self.state/'bindings'; bindings.mkdir()
         (bindings/path.name).write_text(json.dumps(current)); path.unlink()
         archives = self.state/'archives'; archives.mkdir()
-        for i in range(80):
+        for i in range(120):
             archive = str(uuid.uuid4())
             saved = dict(current, name=f'codex/example/archived-{i}', run_id=f'archive-run-{i}',
                          conversation_id=f'archived-native-{i}', state='archived', archive_id=archive)
@@ -89,8 +89,14 @@ class SessionGraph(unittest.TestCase):
                             r['item']['value']['name']==current['name'] for r in first['items']))
         self.full()
         # A warm unchanged inventory checks metadata rather than spending the
-        # 32 changed-record budget on old archives again.
-        self.assertTrue(self.graph('snapshot')['coverage']['bindings_complete'])
+        # 32 changed-record budget on old archives again: rereading all 121
+        # sources takes at least four slices, checking their stamps one. A slow
+        # runner may still end a slice at its 50 ms budget, so up to three pass.
+        for _ in range(3):
+            if self.graph('snapshot')['coverage']['bindings_complete']:
+                break
+        else:
+            self.fail('the warm rescan reread old archives')
 
     def test_partial_scan_retains_inventory_and_changes_include_exact_deletion(self):
         paths = [self.record(name=f'codex/example/s{i}', conversation=f'native-{i}')[0] for i in range(75)]

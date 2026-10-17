@@ -60,6 +60,21 @@ double rms(const QByteArray &pcm) {
     }
     return std::sqrt(sum / (pcm.size()/2 - 2*skip));
 }
+// The fixture appends one JSON line per voice action, and a reader can see the
+// file before the line is written (Windows CI read it empty): wait for whole lines.
+QList<QByteArray> voiceActions(const QString &directory, int count = 1) {
+    QList<QByteArray> lines;
+    QTest::qWaitFor([&] {
+        QFile file(directory + "/voice-actions");
+        if (!file.open(QIODevice::ReadOnly)) return false;
+        const auto text = file.readAll();
+        if (!text.endsWith('\n')) return false;
+        lines = text.trimmed().split('\n');
+        return lines.size() >= count;
+    }, 10000);
+    return lines;
+}
+
 QString fixture(const QString &directory) {
     QFile file(directory + "/hgs"); if (!file.open(QIODevice::WriteOnly)) return {};
     file.write(R"PY(#!/usr/bin/python3
@@ -480,8 +495,8 @@ private slots:
         QCOMPARE(ComposerDraftStore().load("voice-message-draft\nfixture\noriginal").formState.value("speech").toObject().value("profile_revision").toInteger(),initialRevision);
         provider->setCurrentIndex(0);QVERIFY(send->isEnabled());ComposerDraftStore::flushWrites();const auto draft=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");
         QCOMPARE(draft.formState.value("id").toString(),id);QCOMPARE(draft.attachments[0].data,audio);QCOMPARE(draft.formState.value("speech").toObject().value("profile_revision").toInteger(),2);
-        send->click();QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile log(dir.path()+"/voice-actions");QVERIFY(log.open(QIODevice::ReadOnly));
-        QCOMPARE(QJsonDocument::fromJson(log.readLine()).object().value("speech").toObject().value("profile_revision").toInteger(),2);
+        send->click();const auto logged=voiceActions(dir.path());QVERIFY(!logged.isEmpty());
+        QCOMPARE(QJsonDocument::fromJson(logged[0]).object().value("speech").toObject().value("profile_revision").toInteger(),2);
     }
     void malformedProviderRevisionCannotBeSent_data() {
         QTest::addColumn<QJsonValue>("revision");QTest::newRow("zero")<<QJsonValue(0);QTest::newRow("negative")<<QJsonValue(-1);
@@ -548,8 +563,7 @@ private slots:
         QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(video->starts,1);
         QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
         QTest::mouseRelease(voice,Qt::LeftButton);
-        QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile actions(dir.path()+"/voice-actions");QVERIFY(actions.open(QIODevice::ReadOnly));
-        const auto lines=actions.readAll().trimmed().split('\n');QCOMPARE(lines.size(),1);
+        const auto lines=voiceActions(dir.path());QCOMPARE(lines.size(),1);
         const auto payload=QJsonDocument::fromJson(lines[0]).object();QCOMPARE(payload.value("expected_conversation_id").toString(),"native-conversation");
         QCOMPARE(QByteArray::fromBase64(payload.value("video").toObject().value("data_base64").toString().toLatin1()),QByteArray("synthetic-video"));
         QCOMPARE(QByteArray::fromBase64(payload.value("audio").toObject().value("data_base64").toString().toLatin1()).size(),32000);
@@ -582,8 +596,7 @@ private slots:
         QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(recorder->starts,1);
         QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
         QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));QTest::mouseRelease(voice,Qt::LeftButton);
-        QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile calls(dir.path()+"/voice-actions");QVERIFY(calls.open(QIODevice::ReadOnly));
-        const auto lines=calls.readAll().trimmed().split('\n');QCOMPARE(lines.size(),1);
+        const auto lines=voiceActions(dir.path());QCOMPARE(lines.size(),1);
         QCOMPARE(QJsonDocument::fromJson(lines[0]).object().value("action").toString(),"submit");
         QTRY_VERIFY(voice->isEnabled());QCOMPARE(recorder->stops,1);
     }
@@ -617,8 +630,7 @@ private slots:
             ComposerDraftStore::flushWrites();const auto saved=ComposerDraftStore().load("voice-message-draft\n"+composer.sessionKey());
             QCOMPARE(saved.attachments.size(),videoMode?2:1);QVERIFY(!saved.formState.value("submitted").toBool());
             const auto id=saved.formState.value("id").toString();QVERIFY(!id.isEmpty());send->click();
-            QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile file(dir.path()+"/voice-actions");QVERIFY(file.open(QIODevice::ReadOnly));
-            const auto calls=file.readAll().trimmed().split('\n');QCOMPARE(calls.size(),1);
+            const auto calls=voiceActions(dir.path());QCOMPARE(calls.size(),1);
             QCOMPARE(QJsonDocument::fromJson(calls[0]).object().value("request_id").toString(),id);
         }else{QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));}
         QTRY_VERIFY(voice->isEnabled());QCOMPARE(videoMode?video->stops:audio->stops,1);

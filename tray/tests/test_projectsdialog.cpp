@@ -42,6 +42,7 @@ private slots:
     void folderDialogTakesDriveFoldersOnlyOnLocalWindows_data();
     void folderDialogTakesDriveFoldersOnlyOnLocalWindows();
     void legacyAliasesOfALocalWindowsComputerBecomeFolders();
+    void legacyImportReportsAliasesItCannotAdd();
     void acceptsPlainName();
     void rejectsSlashAndSpace();
     void rejectsEmpty();
@@ -423,6 +424,36 @@ print(json.dumps([{"name": "DCB", "dir": "D:\\Work\\DCB", "src": "local", "exist
     QString tools; for (const auto &group : projects.groups()) if (group.name == "Tools") tools = group.id;
     QVERIFY(!tools.isEmpty());
     QCOMPARE(projects.group(tools)->folders.first().path, QString("D:/Work/Tools"));
+}
+
+void TestProjectsDialog::legacyImportReportsAliasesItCannotAdd()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
+    QCoreApplication::setOrganizationName("hgs-import-report-test"); QCoreApplication::setApplicationName("projects");
+    // One alias this Windows computer takes, one it does not (a relative path).
+    const auto hgs = directory.filePath("hgs");
+    QVERIFY(FakeCli::install(hgs, R"PY(#!/usr/bin/env python3
+import json
+open(__file__ + ".calls", "a").write("call\n")
+print(json.dumps([{"name": "DCB", "dir": "D:\\Work\\DCB", "src": "local", "exists": True},
+                  {"name": "Loose", "dir": "work\\loose", "src": "local", "exists": False}]))
+)PY"));
+    SessionOrganization projects; const auto dcb = projects.createGroup("DCB");
+    HgsClient client(FakeCli::program(hgs)); ProjectsDialog dialog(&client, nullptr, false, &projects);
+    BoxState local; local.host = "desktop"; local.ok = true; local.localSessions = true; local.metrics["platform"] = "windows";
+    FleetState fleet; fleet.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    dialog.setFleet(fleet);
+    auto *status = dialog.findChild<QLabel *>("projectsStatus"); QVERIFY(status);
+    QTRY_VERIFY(status->text().contains("Loose (work\\loose)"));
+    QCOMPARE(projects.group(dcb)->folders.size(), 1);
+    // The left-out alias starts no project, and the computer stays unimported so
+    // that the next start tries again; until then no fleet update asks again.
+    for (const auto &group : projects.groups()) QVERIFY(group.name != "Loose");
+    QVERIFY(!projects.hasImported("desktop"));
+    dialog.setFleet(fleet); QTest::qWait(300);
+    QFile calls(hgs + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+    QCOMPARE(calls.readAll().count('\n'), 1);
 }
 
 void TestProjectsDialog::emptyListContextCreatesProject()
