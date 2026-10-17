@@ -19,9 +19,11 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
+from xml.parsers.expat import ExpatError
 
 UNIT = "zerus-mobile-connector.service"
 PROTECT = "50-zerus-killmode.conf"
@@ -34,6 +36,7 @@ UNSAFE = set(" \t\n\"'\\%$;")
 
 
 INSTALLED = "# Written by zerus-setup --mobile-connector install; it rewrites only this file."
+AGENT_MARKER = b"<!-- Written by the Zerus mobile connector service installer; it rewrites only this file. -->"
 LABEL = "com.hgdev.zerus-mobile-connector"
 
 
@@ -211,7 +214,7 @@ def captured_path():
     return os.pathsep.join(part for part in dict.fromkeys(parts) if part)
 
 
-def install_binary(args, candidates):
+def install_binary(args, candidates, *, unit=True):
     if args.binary:
         binary = Path(args.binary)
         if not binary.is_absolute() or binary.name != "zerus-mobile-connector":
@@ -223,7 +226,7 @@ def install_binary(args, candidates):
         binary = present[0]
     if not (binary.is_file() and os.access(binary, os.X_OK)):
         raise Refusal(f"{binary} is not an executable file")
-    if set(str(binary)) & UNSAFE:
+    if unit and set(str(binary)) & UNSAFE:
         raise Refusal(f"{binary} contains characters this tool does not write into a service definition")
     return binary
 
@@ -273,7 +276,8 @@ def launchctl(*args):
 
 
 def install_agent(args, bundled):
-    binary = install_binary(args, [*bundled, Path.home() / ".local/bin/zerus-mobile-connector"])
+    # ProgramArguments is an array, so macOS paths need no systemd escaping.
+    binary = install_binary(args, [*bundled, Path.home() / ".local/bin/zerus-mobile-connector"], unit=False)
     path = Path.home() / "Library/LaunchAgents" / (LABEL + ".plist")
     logs = Path.home() / "Library/Logs/hgs"
     content = plistlib.dumps({
@@ -289,12 +293,15 @@ def install_agent(args, bundled):
         "StandardOutPath": str(logs / "mobile-connector.log"),
         "StandardErrorPath": str(logs / "mobile-connector.log"),
     })
+    content = content.replace(b"\n", b"\n" + AGENT_MARKER + b"\n", 1)
     if path.exists():
         try:
-            existing = plistlib.loads(path.read_bytes())
+            previous = path.read_bytes()
+            existing = plistlib.loads(previous)
             program = existing.get("ProgramArguments") or [""]
-            ours = existing.get("Label") == LABEL and Path(str(program[0])).name == "zerus-mobile-connector"
-        except (plistlib.InvalidFileException, ValueError, AttributeError, TypeError):
+            ours = (AGENT_MARKER in previous.splitlines()[:3] and existing.get("Label") == LABEL
+                    and Path(str(program[0])).name == "zerus-mobile-connector")
+        except (plistlib.InvalidFileException, ExpatError, ValueError, AttributeError, TypeError):
             ours = False
         if not ours:
             raise Refusal(f"{path} exists and is not a zerus-mobile-connector agent; kept")
@@ -308,11 +315,12 @@ def install_agent(args, bundled):
     temporary.chmod(0o644)
     os.replace(temporary, path)
     domain = f"gui/{os.getuid()}"
+    quoted_path = shlex.quote(str(path))
     if launchctl("print", f"{domain}/{LABEL}").returncode == 0:
         print(f"Wrote {path}. The loaded agent keeps its previous definition: after phone actions drain, run "
-              f"launchctl bootout {domain}/{LABEL} && launchctl bootstrap {domain} {path}")
+              f"launchctl bootout {domain}/{LABEL} && launchctl bootstrap {domain} {quoted_path}")
     else:
-        print(f"Wrote {path}; nothing was loaded. When ready: launchctl bootstrap {domain} {path}")
+        print(f"Wrote {path}; nothing was loaded. When ready: launchctl bootstrap {domain} {quoted_path}")
 
 
 def install(args, platform):

@@ -78,7 +78,7 @@ import androidx.compose.ui.unit.dp
     val selected = speech.computers.find { it.id == choice.host?.computerId }
     val profiles = selected?.profiles.orEmpty()
     val profile = profiles.find { it.id == choice.profileId }
-    LaunchedEffect(speech.ready, target, currentPreview) { if (speech.ready && currentPreview) speech.refreshProfiles(target) }
+    LaunchedEffect(speech.ready, target, currentPreview) { if (speech.ready && currentPreview && target != null) speech.refreshProfiles(target) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Voice messages", style = MaterialTheme.typography.titleLarge)
         if (!currentPreview) {
@@ -94,42 +94,46 @@ import androidx.compose.ui.unit.dp
                 enabled = speech.ready && !speech.recording && !speech.savingRecording && !model.updateInstallPreparing,
                 modifier = Modifier.semantics { contentDescription = "Preview before sending" })
         }
-        Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.", style = MaterialTheme.typography.bodySmall)
+        Text(if (target == null) "Choose the computer and profile for new recordings. Saved recordings keep their selected provider."
+            else "Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.", style = MaterialTheme.typography.bodySmall)
         TextButton(onClick = { manage = true }, enabled = !model.demo && model.storageReady && !model.updateInstallPreparing) { Text("Manage speech providers") }
-        Box {
-            OutlinedButton(onClick = { hostsOpen = true }, enabled = speech.ready && !speech.loading && speech.computers.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
-                modifier = Modifier.fillMaxWidth()) {
-                Text(selected?.name ?: if (choice.host == null) "Choose voice computer" else "Selected computer unavailable", maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            DropdownMenu(expanded = hostsOpen, onDismissRequest = { hostsOpen = false }) {
-                speech.computers.forEach { machine ->
-                    DropdownMenuItem(text = { Text(machine.name) }, onClick = {
-                        hostsOpen = false
-                        target?.let { speech.chooseHost(MachineKey(it.connectionId, machine.id), it, choicePreview?.audio?.id) }
-                    })
+        if (target == null) DefaultVoiceProviderSettings(model, active = !manage)
+        else {
+            Box {
+                OutlinedButton(onClick = { hostsOpen = true }, enabled = speech.ready && !speech.loading && speech.computers.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text(selected?.name ?: if (choice.host == null) "Choose voice computer" else "Selected computer unavailable", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                DropdownMenu(expanded = hostsOpen, onDismissRequest = { hostsOpen = false }) {
+                    speech.computers.forEach { machine ->
+                        DropdownMenuItem(text = { Text(machine.name) }, onClick = {
+                            hostsOpen = false
+                            speech.chooseHost(MachineKey(target.connectionId, machine.id), target, choicePreview?.audio?.id)
+                        })
+                    }
                 }
             }
-        }
-        Box {
-            OutlinedButton(onClick = { profilesOpen = true }, enabled = !speech.loading && profiles.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
-                modifier = Modifier.fillMaxWidth()) {
-                Text(profile?.name ?: choice.profileId.ifBlank { "Choose voice profile" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            DropdownMenu(expanded = profilesOpen, onDismissRequest = { profilesOpen = false }) {
-                profiles.forEach { profile -> DropdownMenuItem(text = { Column {
-                    Text(profile.name)
-                    if (profile.model.isNotBlank()) Text(profile.model, style = MaterialTheme.typography.bodySmall)
-                    if (!profile.available) Text(profile.reason.ifBlank { "Unavailable" }, style = MaterialTheme.typography.bodySmall)
-                } }, onClick = { profilesOpen = false; speech.chooseProfile(profile.id, target, choicePreview?.audio?.id) }) }
+            Box {
+                OutlinedButton(onClick = { profilesOpen = true }, enabled = !speech.loading && profiles.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text(profile?.name ?: choice.profileId.ifBlank { "Choose voice profile" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                DropdownMenu(expanded = profilesOpen, onDismissRequest = { profilesOpen = false }) {
+                    profiles.forEach { profile -> DropdownMenuItem(text = { Column {
+                        Text(profile.name)
+                        if (profile.model.isNotBlank()) Text(profile.model, style = MaterialTheme.typography.bodySmall)
+                        if (!profile.available) Text(profile.reason.ifBlank { "Unavailable" }, style = MaterialTheme.typography.bodySmall)
+                    } }, onClick = { profilesOpen = false; speech.chooseProfile(profile.id, target, choicePreview?.audio?.id) }) }
+                }
             }
         }
         Text((if (speech.previewBeforeSend) "Hold to record and release to preview; tap Send when ready. " else "Hold to record and release to send. ") +
             "Slide up to lock, or left to cancel. Stop always keeps a preview. Zerus keeps the media in conversation history, transcribes it, then sends the recognized text to the agent. Your typed draft is kept separately. Your gateway can read the recordings.", style = MaterialTheme.typography.bodySmall)
-        if (speech.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if (speech.profileNotice.isNotBlank()) Text(speech.profileNotice, style = MaterialTheme.typography.bodySmall)
+        if (target != null && speech.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (target != null && speech.profileNotice.isNotBlank()) Text(speech.profileNotice, style = MaterialTheme.typography.bodySmall)
         if (speech.notice.isNotBlank()) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
         if (speech.statistics.isNotBlank()) Text(speech.statistics, style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = { speech.refreshProfiles(target) }, enabled = !speech.loading) { Text("Refresh voice profiles") }
+        if (target != null) TextButton(onClick = { speech.refreshProfiles(target) }, enabled = !speech.loading) { Text("Refresh voice profiles") }
         if (showPreview) SpeechComposerStatus(model)
         speech.legacyResult?.let { legacy ->
             Text("An earlier dictation result remains saved on this phone. It has not been sent.", style = MaterialTheme.typography.bodySmall)
@@ -141,6 +145,52 @@ import androidx.compose.ui.unit.dp
         }
     }
     if (manage) SpeechConfigurationScreen(model, choice) { manage = false }
+}
+
+@Composable private fun DefaultVoiceProviderSettings(model: ZerusViewModel, active: Boolean) {
+    val catalog = model.defaultVoiceProviders
+    val speech = model.speech
+    val selected = catalog.host
+    var hostsOpen by remember { mutableStateOf(false) }
+    var profilesOpen by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    val hosts = catalog.hosts(query)
+    val hasHosts = catalog.hosts().isNotEmpty()
+    val connection = model.connections.find { it.id == selected?.key?.connectionId }
+    val profiles = catalog.profiles
+    val editable = speech.ready && !speech.recording && !speech.savingRecording && !model.updateInstallPreparing && !model.demo
+    LaunchedEffect(speech.ready, model.storageReady, selected, connection, hasHosts, selected?.let(catalog::reason), active) {
+        if (speech.ready && active) catalog.refresh()
+    }
+    Box {
+        OutlinedButton(onClick = { hostsOpen = true }, enabled = editable && hasHosts, modifier = Modifier.fillMaxWidth()) {
+            Text(selected?.name ?: if (speech.selection.host == null) "Choose voice computer" else "Selected computer unavailable")
+        }
+        DropdownMenu(expanded = hostsOpen, onDismissRequest = { hostsOpen = false }) {
+            OutlinedTextField(query, { query = it }, label = { Text("Find computer") }, singleLine = true)
+            hosts.forEach { host -> DropdownMenuItem(text = { Column {
+                Text(host.name)
+                if (model.connections.size > 1) Text(model.connections.find { it.id == host.key.connectionId }?.displayName.orEmpty(), style = MaterialTheme.typography.bodySmall)
+                catalog.reason(host).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            } }, enabled = catalog.reason(host).isBlank(), onClick = { hostsOpen = false; catalog.chooseHost(host) }) }
+            if (hosts.size == 100) Text("Showing up to 100 matches. Refine the computer name.", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    Box {
+        OutlinedButton(onClick = { profilesOpen = true }, enabled = editable && !catalog.loading && profiles.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
+            Text(profiles.find { it.id == speech.selection.profileId }?.name ?: speech.selection.profileId.ifBlank { "Choose voice profile" })
+        }
+        DropdownMenu(expanded = profilesOpen, onDismissRequest = { profilesOpen = false }) {
+            profiles.forEach { profile -> DropdownMenuItem(text = { Column {
+                Text(profile.name)
+                if (profile.model.isNotBlank()) Text(profile.model, style = MaterialTheme.typography.bodySmall)
+                if (!profile.available) Text(profile.reason.ifBlank { "Unavailable" }, style = MaterialTheme.typography.bodySmall)
+            } }, onClick = { profilesOpen = false; catalog.chooseProfile(profile) }) }
+        }
+    }
+    if (catalog.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+    if (catalog.notice.isNotBlank()) Text(catalog.notice, style = MaterialTheme.typography.bodySmall)
+    TextButton(onClick = catalog::refresh, enabled = speech.ready && !catalog.loading && !model.updateInstallPreparing && !model.demo) { Text("Refresh voice profiles") }
 }
 
 @Composable internal fun SpeechComposerButton(model: ZerusViewModel, target: Target, saveEditor: () -> Unit) {
