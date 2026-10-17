@@ -158,11 +158,12 @@ ensures the service, see Service lifecycle); a Node sidecar using
 
 ### Service lifecycle
 
-- Zerus never runs an OpenCode CLI command that ensures the service:
-  `opencode service`, `opencode models`, `opencode auth` and `opencode run`
-  are not used without `--standalone`, and `--standalone` commands are not
-  used against the user's data either, because they open a second server on
-  the same database.
+- Zerus never runs an OpenCode CLI command that ensures the service, except
+  `opencode service start` under the start rule below: `opencode models`,
+  `opencode auth`, `opencode run` and the other `opencode service`
+  subcommands are not used, and `--standalone` commands are not used against
+  the user's data either, because they open a second server on the same
+  database.
 - Inspection, catalog polling, snapshots, connector refreshes and opening a
   session's details never start the service. When it is not running they
   report `OpenCode is not running on <computer>` and keep native state
@@ -171,10 +172,10 @@ ensures the service, see Service lifecycle); a Node sidecar using
   unavailable banner) and launch implicitly starts it. Start runs only when no
   registration file exists or its `pid` is not alive; it never runs while a
   registered process is alive, however slow. It starts
-  `opencode service start` with `HGS_*`, `OPENCODE_SERVER_*` and the
-  connector's own variables removed, detached from `hgs`, and on Linux in its
-  own transient user scope (`systemd-run --user --scope`) as tmux servers
-  are, so restarting the GUI or connector unit never takes the service with
+  `opencode service start` with the environment `hgs` uses for new tmux
+  servers, additionally without `HGS_*`, `SSH_*`, `OPENCODE_SERVER_*` and
+  the connector's own variables, detached from `hgs`, and on Linux in its own
+  transient user scope (`systemd-run --user --scope`) as tmux servers are, so restarting the GUI or connector unit never takes the service with
   it. It then waits up to 20 seconds for a compatible registration.
 - If OpenCode replaces the service during a turn (for example after an
   upgrade), Zerus treats the result like a native stop: it reads state again
@@ -190,8 +191,8 @@ New session and launch validation use the selected project folder.
 
 ### Identity, launch and delivery
 
-- Launch generates a session ID matching `^ses_[0-9A-Za-z]{26}` (validated by
-  Zerus), records it in the launch journal, and creates the session with that
+- Launch generates a new session ID as `ses_` plus 26 random ASCII letters
+  and digits, records it in the launch journal, and creates the session with that
   `id`, `location.directory`, the chosen `model` (with `variant` for effort),
   `title` from the Zerus name, `permissions` from the permission mode (phase
   2), and `metadata` `{"zerus": {"run_id", "launch_id"}}`. Metadata never
@@ -199,6 +200,9 @@ New session and launch validation use the selected project folder.
 - A lost launch response is reconciled by `GET /api/session/{id}`, or by
   posting the same ID again, which returns the existing session. Zerus never
   creates two sessions for one launch.
+- That pattern applies only to generating IDs. Stored, adopted, child and
+  fork session IDs and message IDs keep the existing check: the expected
+  prefix, at most 128 characters of ASCII letters, digits, `_` and `-`.
 - Bindings store run ID, session ID, directory and name. The service URL and
   password come only from the registration file.
 - Each message gets a pre-generated `msg_` ID recorded in the durable request
@@ -241,9 +245,13 @@ New session and launch validation use the selected project folder.
   - `Working`: the session is in `/api/session/active`;
   - `Needs attention`: it has pending forms or permission requests;
   - `Error`: the newest assistant message ended with a provider error;
-  - `Background` (phase 2): idle, with a confirmed live child session (a child
-    in `/api/session/active` with this `parentID`), following the existing
-    status contract, including deferred reply-only notifications;
+  - `Background` (phase 2): idle, with a confirmed live child session: a
+    current `/api/session/active` entry for an exact child listed with this
+    `parentID`. It follows the existing status contract, including deferred
+    reply-only notifications; `Working` and `Needs attention` keep priority,
+    and an unreachable service means unknown, never `Background`. The same
+    phase updates `docs/opencode.md`, the shared status fixtures, Android and
+    iOS;
   - `Ready` otherwise.
   An unreachable or incompatible service makes state unknown with its reason.
 - The adapter polls, as today. `/api/event` is a later optimization.
@@ -288,8 +296,8 @@ desktop, Android, iOS and the connector keep one card type:
 - Child forms and permission requests are answerable from Zerus with the
   child's exact session identity. Sending messages to children stays in the
   OpenCode client.
-- A child never takes its parent's state; the parent's `Background` comes only
-  from confirmed live children.
+- A child never takes its parent's state, and the parent's state comes from
+  its children only as `Background` from confirmed live children.
 
 ### Models and effort
 
@@ -339,8 +347,14 @@ the draft.
 
 - `Default` adds no session rules; OpenCode's configuration applies.
 - `Bypass` sets a session ruleset that allows every action and then re-appends
-  the deny rules of the session's agent (`GET /api/agent/{id}`), so configured
-  denies still win. Selecting it requires the existing confirmation.
+  the deny rules of the session's agent, read from `GET /api/agent/{id}` with
+  the session's directory as `location`, so configured denies still win. An
+  error, 404 or empty answer fails closed: Bypass is not applied and the
+  reason is shown. The denies are a snapshot taken when Bypass is applied;
+  Zerus derives them again whenever it applies the mode (launch, mode change
+  or agent change), and the confirmation says that later configuration edits
+  apply after selecting Bypass again. Selecting it requires the existing
+  confirmation.
 - Other Zerus modes are offered only where an equivalent ruleset exists;
   otherwise they stay unavailable with a reason.
 - Changing the mode uses a read-modify-write `PATCH`.

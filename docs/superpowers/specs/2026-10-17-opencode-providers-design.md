@@ -72,9 +72,10 @@ Each phase ships as its own pull request.
 - `hgs` reads the catalog through the adapter's service connection and catalog
   allowlist: IDs, names, labels, provider and integration IDs and names,
   status, `enabled`, cost numbers, limits, `capabilities`, variant IDs,
-  method types and labels, credential IDs, labels and active flags. Secret
-  fields are dropped in memory and never cached, logged or returned. Only the
-  phase 3 copy path reads one credential value (below).
+  method types and labels, and connection IDs, labels, methods and status from
+  `/api/integration`. Secret fields are dropped in memory and never cached,
+  logged or returned. Polling never calls `/api/credential`; only the phase 3
+  copy path reads one credential (below).
 - Machine-level views use the home directory as `location`; New session uses
   the selected project folder and labels folder-specific providers.
 - Inspection never starts the service. When it is not running the account row
@@ -85,12 +86,14 @@ Each phase ships as its own pull request.
     (`free`, `key`, `oauth`, `env`, `config`, `command`, `external`,
     `local`), credential count, active credential label and model count;
   - `model_options`: the short list, ordered default model, favorites, models
-    from configuration, free models; each entry has `id`, `label`,
-    `provider`, `provider_label`, flags `free`, `favorite`, `default`, and
-    `effort_options`;
+    from configuration, free models; each entry has `id` and `value` (equal,
+    because the connector and its launch check keep only entries with
+    `value`), `label`, `provider`, `provider_label`, flags `free`,
+    `favorite`, `default`, and `effort_options`;
   - `catalog_at`, `catalog_state` (`ready`, `loading`, `not_running`,
     `incompatible`) and `catalog_reason`.
-- The OpenCode row has a 32 KiB serialized budget so the connector's 128 KiB
+- The OpenCode row has a 32 KiB budget, measured as the connector measures
+  projections (ASCII-escaped JSON), so the connector's 128 KiB
   account projection limit cannot empty the phones' account list. When the
   budget is reached, entries are dropped in this order: free models, then
   configured models, then favorites, then providers beyond the first 16; the
@@ -164,10 +167,13 @@ that computer and require an explicit confirmation that says so.
   computers; the dialog offers Sign in on the target computer instead.
   Environment-variable and local connections are not copied.
 - The desktop runs `hgs` on the source computer, which reads that one key
-  credential through `/api/credential` and writes a minimal record (integration
-  ID, label, key) to a private pipe, never to a terminal or file, with a size
+  credential through `/api/credential` and writes its record (integration ID,
+  label, and `value` with type, key, `configuration` and `metadata`, so
+  prompted fields such as an Azure resource or Cloudflare account survive) to
+  a private pipe, never to a terminal or file, with a size
   limit, as account copies do today. The desktop pipes it to `hgs` on the
-  target computer, which creates the credential through the service.
+  target computer, which creates it with `POST /api/credential`, passing `activate`
+  explicitly.
 - If the target already has a credential for that integration, the dialog asks
   whether to add it as another account or to replace the active one; the new
   credential becomes active only when the user chooses so.
