@@ -368,6 +368,9 @@ private:
     // the listing or inspect shows the session leave Ready (`rearmed`).
     struct ScheduledSettings { QByteArray identity; bool rearmed = false; };
     QHash<QString, ScheduledSettings> m_scheduledSettings;
+    // The selected session's inspection was already running when a settings
+    // receipt arrived: its reply shows the settings from before the change.
+    QSet<QString> m_inspectionBehindSettings;
     QByteArray m_settingsIdentity; // The automatic apply in flight.
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
     // Polls keep hidden pages' data current; these pages render when shown.

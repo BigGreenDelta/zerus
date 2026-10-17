@@ -1122,6 +1122,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 m_details["model"] = receipt.value("model"); m_details["effort"] = receipt.value("effort");
                 m_details.remove("pending_model"); m_details.remove("pending_effort"); m_details.remove("pending_settings_id");
             }
+            // inspect() below starts nothing while one runs, and that one read
+            // the session before this change.
+            if (const auto *entry = selected();
+                entry && m_client.inspectionInFlight(entry->host, entry->session.name, entry->session.archiveId))
+                m_inspectionBehindSettings.insert(m_settingsKey);
         }
         // A send or another client can consume/replace the pending request.
         // These exact preflight refusals send no native input; refresh below
@@ -3107,8 +3112,9 @@ void SessionsWindow::finishSendEvidence(const QString &key)
     m_pendingEvidenceUsers.remove(key); m_pendingSendEvidence.remove(key);
 }
 
-void SessionsWindow::acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId)
+void SessionsWindow::acceptInspection(const QString &host, const QString &name, const QJsonObject &reply, const QString &archiveId)
 {
+    auto data = reply;
     if (archiveId.isEmpty()) {
         for (const auto &entry : m_entries)
             if (entry.host == host && entry.session.name == name && entry.session.archiveId.isEmpty())
@@ -3117,6 +3123,15 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     }
     if (!m_pending && !m_renameKey.isEmpty()) return;
     const auto *entry = selected(); if (!entry || entry->host != host || entry->session.name != name || entry->session.archiveId != archiveId) return;
+    // A reply read before a settings receipt of the same run would undo it: drop
+    // its pending change, so the queued automatic apply never comes, or bring back
+    // one the receipt applied. Keep the receipt's settings; the next poll reads anew.
+    if (m_inspectionBehindSettings.remove(entry->key) && !m_details.isEmpty()
+        && m_details.value("run_id") == data.value("run_id") && m_details.value("conversation_id") == data.value("conversation_id"))
+        for (const auto *field : {"model", "effort", "pending_model", "pending_effort", "pending_settings_id"}) {
+            if (m_details.contains(field)) data[field] = m_details.value(field);
+            else data.remove(field);
+        }
     // A confirmed clear continues the same Activity timeline, and its global
     // journal cursor stays valid. Keep the earlier events in place.
     if (!m_details.isEmpty() && m_details.value("conversation_id") != data.value("conversation_id")

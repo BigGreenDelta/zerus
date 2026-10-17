@@ -347,6 +347,7 @@ private slots:
     void modelSettingsKeepSessionIdentity();
     void scheduledSettingsApplyOncePerReady_data();
     void scheduledSettingsApplyOncePerReady();
+    void inspectionBehindSettingsReceiptKeepsTheChange();
     void coldQuestionSubmissionRevalidatesConsent_data();
     void coldQuestionSubmissionRevalidatesConsent();
     void questionAnswersStayWithOriginalSession();
@@ -3541,6 +3542,85 @@ elif args[0]=='settings':
     QCOMPARE(composer->editor()->toPlainText(), QString("[File #1] Saved draft for original session"));
     QCOMPARE(composer->findChildren<QPushButton *>("removeAttachment").size(), 1);
     QTest::qWait(80); QCOMPARE(changes.size(), state == "running" ? 2 : 1);
+}
+
+void TestSessionsWindow::inspectionBehindSettingsReceiptKeepsTheChange()
+{
+    // An inspection that read the session before a settings change and answers
+    // after its scheduled receipt must not drop the queued change: the idle
+    // listing still starts its automatic apply (zerus-ssoi, slow Windows runners).
+    constexpr int Timeout = 20000;
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QString program = directory.filePath("hgs"), snapshot = directory.filePath("snapshot.json");
+    QJsonObject details{{"tracked", true}, {"run_id", "run-original"}, {"conversation_id", "conversation-one"},
+        {"activity", "busy"}, {"phase", "tool"}, {"model", "gpt-6.1-sol"}, {"effort", "high"},
+        {"settings_change_supported", true}, {"settings_apply_when", "ready"},
+        {"model_options", QJsonArray{QJsonObject{{"id", "gpt-6.1-sol"}, {"effort_options", QJsonArray{"high", "xhigh"}}}}},
+        {"cursor", 0}, {"events", QJsonArray{}}};
+    QVERIFY(FakeCli::replace(snapshot, QJsonDocument(details).toJson()));
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,sys,pathlib,time
+root=pathlib.Path(__file__).parent
+args=sys.argv[1:]
+def publish(data):
+ staged=root/'snapshot.tmp';staged.write_text(json.dumps(data))
+ for _ in range(250):
+  try:return staged.replace(root/'snapshot.json')
+  except PermissionError:time.sleep(.02)
+ sys.exit('snapshot.json stayed open')
+if args[0]=='inspect':
+ if args[1]!='codex/hgs/dashboard':
+  print(json.dumps({'tracked':True,'run_id':'run-other','conversation_id':'conversation-other','activity':'idle','phase':'idle','cursor':0,'events':[]}));sys.exit()
+ text=(root/'snapshot.json').read_text()
+ if (root/'hold').exists() and not (root/'settled').exists():
+  # Read before the change; answer only after its receipt.
+  (root/'held').write_text('1')
+  for _ in range(1000):
+   if (root/'settled').exists():break
+   time.sleep(.01)
+  time.sleep(.3)
+ print(text)
+elif args[0]=='settings':
+ p=json.load(sys.stdin)
+ calls=root/'calls.jsonl'
+ previous=calls.read_text().count('\n') if calls.exists() else 0
+ with calls.open('a') as out: out.write(json.dumps({'args':args,'payload':p})+'\n')
+ data=json.loads((root/'snapshot.json').read_text())
+ receipt={'request_id':p['request_id'],'name':args[1],'run_id':p['expected_run_id'],
+  'conversation_id':p['expected_conversation_id'],'model':p['model'],'effort':p['effort']}
+ if previous==0:
+  data['pending_model']=p['model'];data['pending_effort']=p['effort'];data['pending_settings_id']=p['request_id'];publish(data)
+  receipt.update(status='scheduled',pending_settings_id=p['request_id'],apply_when='ready')
+ else:
+  data['model']=p['model'];data['effort']=p['effort']
+  for field in ['pending_model','pending_effort','pending_settings_id']:data.pop(field,None)
+  publish(data);receipt['status']='applied'
+ print(json.dumps(receipt));sys.stdout.flush()
+ if previous==0:(root/'settled').write_text('1')
+)PY"));
+    auto current = fleet(); auto box = current.local(); box.sessions[0].runId = "run-original";
+    current.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program)); window.setDetailsPollForTests(100, 200);
+    window.setFleet(current); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy inspections(client, &HgsClient::inspectionReady), changes(client, &HgsClient::settingsFinished);
+    QTRY_VERIFY(!inspections.isEmpty());
+    // The next inspection reads the session now and answers after the receipt.
+    QFile hold(directory.filePath("hold")); QVERIFY(hold.open(QIODevice::WriteOnly)); hold.close();
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(directory.filePath("held")), Timeout);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    composer->findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *efforts = composer->findChild<QComboBox *>("sessionEffortChoice"); efforts->setCurrentIndex(efforts->findData("xhigh"));
+    auto *apply = composer->findChild<QPushButton *>("applySessionSettings"); QVERIFY(apply->isEnabled()); apply->click();
+    QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 1, Timeout);
+    QCOMPARE(changes[0][2].toJsonObject().value("status").toString(), QString("scheduled"));
+    // The held reply, from before the change, arrives after the receipt.
+    const auto seen = inspections.size();
+    QTRY_VERIFY_WITH_TIMEOUT(inspections.size() > seen, Timeout);
+    QVERIFY(!inspections.last()[2].toJsonObject().contains("pending_settings_id"));
+    box.sessions[0].activity = "idle"; box.sessions[0].phase = "idle"; box.sessions[0].processState = "running";
+    current.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(current);
+    QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 2, Timeout);
+    QCOMPARE(changes[1][2].toJsonObject().value("status").toString(), QString("applied"));
 }
 
 void TestSessionsWindow::scheduledSettingsApplyOncePerReady_data()
