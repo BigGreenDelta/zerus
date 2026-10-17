@@ -1,18 +1,16 @@
-//! OpenCode's reviewed native API, authenticated on loopback. Native hosts
-//! outlive HGS and the GUI; manifests contain bindings, never provider keys.
+//! OpenCode 2's shared background service, authenticated on loopback.
+//! Bindings hold Zerus and session identities, never provider keys.
 use super::*;
 #[allow(dead_code)] // the OpenCode 2 gate is consumed by later phase 1 tasks
 mod catalog;
+mod history;
 mod service;
 pub(crate) use catalog::{catalog, install_state, start_from_accounts};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Read;
-use std::net::{TcpListener, TcpStream};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub(crate) const VERSION: &str = "1.18.35";
 fn bindings() -> PathBuf {
     root().join("opencode/bindings")
 }
@@ -75,208 +73,7 @@ pub(super) fn new_id(prefix: &str) -> String {
 fn session_path(record: &Value, suffix: &str) -> String {
     format!("/api/session/{}{suffix}", string(record, "conversation_id"))
 }
-fn host_dir(record: &Value) -> PathBuf {
-    root().join("opencode/hosts").join(format!(
-        "{:x}",
-        Sha256::digest(
-            json!([
-                record["agent_home"],
-                record["native_data_home"],
-                record["native_config_file"]
-            ])
-            .to_string()
-            .as_bytes()
-        )
-    ))
-}
-fn host(record: &Value) -> Result<Value> {
-    let bytes = fs::read(host_dir(record).join("host.json"))
-        .map_err(|_| "OpenCode host is unavailable; explicitly resume the session".to_owned())?;
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid private OpenCode host metadata")?;
-    if value["version"] != VERSION
-        || value["port"].as_u64().is_none_or(|p| p == 0 || p > 65535)
-        || string(&value, "password").len() != 36
-        || string(&value, "generation").is_empty()
-        || value["pid"]
-            .as_u64()
-            .is_none_or(|pid| pid <= 1 || pid > u32::MAX as u64)
-        || string(&value, "process_start").is_empty()
-        || string(&value, "process_start").len() > 512
-    {
-        return Err("Invalid private OpenCode host metadata".into());
-    }
-    Ok(value)
-}
-use service::{Registration, Response};
-#[cfg(test)]
-fn decode_response(bytes: &[u8]) -> Result<Value> {
-    legacy_value(service::decode_response(bytes)?)
-}
-/// OpenCode 1 callers expect failures as errors and strict JSON on success.
-fn legacy_value(response: Response) -> Result<Value> {
-    if !(200..300).contains(&response.status) {
-        let reason = response.body["message"]
-            .as_str()
-            .or(response.body["data"]["message"].as_str())
-            .unwrap_or("Native operation refused");
-        return Err(format!("OpenCode HTTP {}: {reason}", response.status));
-    }
-    if response.body.is_string() {
-        return Err("Invalid native JSON response; delivery uncertain".into());
-    }
-    Ok(response.body)
-}
-fn http(host: &Value, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-    http_until(
-        host,
-        method,
-        path,
-        body,
-        Instant::now() + Duration::from_secs(10),
-    )
-}
-fn http_until(
-    host: &Value,
-    method: &str,
-    path: &str,
-    body: Option<&Value>,
-    deadline: Instant,
-) -> Result<Value> {
-    let registration = Registration {
-        id: String::new(),
-        version: String::new(),
-        port: host["port"]
-            .as_u64()
-            .and_then(|p| u16::try_from(p).ok())
-            .ok_or("Missing native endpoint")?,
-        pid: 0,
-        password: Some(string(host, "password").to_owned()).filter(|p| !p.is_empty()),
-    };
-    legacy_value(service::request(
-        &registration,
-        method,
-        path,
-        body,
-        deadline,
-    )?)
-}
-fn rpc(record: &Value, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-    http(&host(record)?, method, path, body)
-}
-fn endpoint(record: &Value, suffix: &str) -> String {
-    format!("/api/session/{}{suffix}", string(record, "conversation_id"))
-}
-fn ensure_host(record: &Value) -> Result<()> {
-    let dir = host_dir(record);
-    private_dir(&dir)?;
-    let _guard = lock(Some(&dir.join("start.lock")))?;
-    if dir.join("host.json").exists() {
-        let previous = host(record)?;
-        if let Ok(health) = http(&previous, "GET", "/global/health", None) {
-            if health["healthy"] == true && health["version"] == VERSION {
-                return Ok(());
-            }
-            return Err("The resident OpenCode host is incompatible; it was left running".into());
-        }
-        // Never replace a hung host; the launcher may be systemd-run rather
-        // than OpenCode, so also refuse any listener at its recorded endpoint.
-        let pid = previous["pid"].as_u64().unwrap_or(0) as u32;
-        if pid > 0
-            && !string(&previous, "process_start").is_empty()
-            && process_start(pid) == string(&previous, "process_start")
-        {
-            return Err("The resident OpenCode host is not responding; it was left running".into());
-        }
-        let address = std::net::SocketAddr::from((
-            [127, 0, 0, 1],
-            previous["port"].as_u64().unwrap_or(0) as u16,
-        ));
-        if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
-            return Err(
-                "The private native endpoint is still occupied; it was left untouched".into(),
-            );
-        }
-    }
-    let version = crate::platform::output(Command::new("opencode").arg("--version"))
-        .map_err(|_| format!("Install OpenCode {VERSION} on this computer"))?;
-    if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != VERSION {
-        return Err(format!(
-            "This native adapter requires reviewed OpenCode {VERSION}"
-        ));
-    }
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    drop(listener);
-    let mut metadata = json!({"version":VERSION,"port":port,"password":uuid::Uuid::new_v4().to_string(),"generation":uuid::Uuid::new_v4().to_string()});
-    let log = crate::platform::private_open(OpenOptions::new().create(true).append(true))
-        .open(dir.join("host.log"))
-        .map_err(|e| e.to_string())?;
-    let mut command = Command::new("opencode");
-    #[cfg(target_os = "linux")]
-    {
-        let runtime = PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }));
-        if runtime.join("systemd/private").exists() && crate::platform::available("systemd-run") {
-            command = Command::new("systemd-run");
-            command
-                .args([
-                    "--user",
-                    "--scope",
-                    "--quiet",
-                    "--collect",
-                    "--expand-environment=no",
-                    "--unit",
-                ])
-                .arg(format!("hgs-opencode-{}", uuid::Uuid::new_v4()))
-                .args(["--", "opencode"])
-                .env("XDG_RUNTIME_DIR", runtime);
-        }
-    }
-    command
-        .args(["serve", "--hostname", "127.0.0.1", "--port"])
-        .arg(port.to_string())
-        .env("OPENCODE_SERVER_USERNAME", "opencode")
-        .env("OPENCODE_SERVER_PASSWORD", string(&metadata, "password"))
-        .env("OPENCODE_CONFIG_DIR", string(record, "agent_home"))
-        .env("XDG_DATA_HOME", string(record, "native_data_home"))
-        .env_remove("OPENCODE_CONFIG_CONTENT")
-        .env_remove("OPENCODE_CONFIG")
-        .current_dir(home())
-        .stdin(Stdio::null())
-        .stdout(log.try_clone().map_err(|e| e.to_string())?)
-        .stderr(log);
-    for key in [
-        "HGS_SESSION",
-        "HGS_RUN_ID",
-        "HGS_ACCOUNT_ID",
-        "HGS_ACCOUNT_HOME",
-        "HGS_AGENT",
-    ] {
-        command.env_remove(key);
-    }
-    if !string(record, "native_config_file").is_empty() {
-        command.env("OPENCODE_CONFIG", string(record, "native_config_file"));
-    }
-    // Detach only the dedicated native host: its own session outlives the
-    // launching terminal and HGS process.
-    let mut child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
-    metadata["pid"] = json!(child.id());
-    metadata["process_start"] = json!(process_start(child.id()));
-    atomic(&dir.join("host.json"), &metadata.to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(35);
-    while Instant::now() < deadline {
-        if let Ok(health) = http(&metadata, "GET", "/global/health", None) {
-            if health["healthy"] == true && health["version"] == VERSION {
-                return Ok(());
-            }
-        }
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
-            return Err("OpenCode host failed to start; inspect its private host log".into());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err("OpenCode is still starting; explicitly resume when ready".into())
-}
+use service::Response;
 
 /// OpenCode 1 launch and settings still call this until Task 9 rewrites them.
 /// Remove in Task 9: this shim has no place in the OpenCode 2 adapter.
@@ -651,150 +448,20 @@ fn finish_creation(service: &service::Service, mut record: Value, first: bool) -
     }
 }
 fn verify_session(service: &service::Service, record: &Value) -> Result<Value> {
-    let result = service.call("GET", &session_path(record, ""), None)?;
-    if result["data"]["id"] != record["conversation_id"]
-        || result["data"]["location"]["directory"] != record["cwd"]
+    exact_session(
+        record,
+        service.call("GET", &session_path(record, ""), None)?,
+    )
+}
+/// The session object of a `GET /api/session/{id}` answer, only when it is
+/// exactly this binding's session in this binding's directory.
+fn exact_session(record: &Value, answer: Value) -> Result<Value> {
+    if answer["data"]["id"] != record["conversation_id"]
+        || answer["data"]["location"]["directory"] != record["cwd"]
     {
         return Err("The exact native OpenCode session or directory changed".into());
     }
-    Ok(result["data"].clone())
-}
-/// Remove with the OpenCode 1 callers in Tasks 5-9.
-fn legacy_verify_session(record: &Value) -> Result<Value> {
-    let result = rpc(record, "GET", &endpoint(record, ""), None)?;
-    if result["data"]["id"] != record["conversation_id"]
-        || result["data"]["location"]["directory"] != record["cwd"]
-    {
-        return Err("The exact native OpenCode session or directory changed".into());
-    }
-    Ok(result["data"].clone())
-}
-fn history(record: &Value) -> Result<Vec<Value>> {
-    let cache = root().join("opencode/history").join(format!(
-        "{:x}.json",
-        Sha256::digest(
-            json!([record["native_data_home"], record["conversation_id"]])
-                .to_string()
-                .as_bytes()
-        )
-    ));
-    let _guard = lock(Some(&cache.with_extension("lock")))?;
-    let generation = host(record)?["generation"].clone();
-    let cached = fs::metadata(&cache)
-        .ok()
-        .filter(|m| m.len() <= 16 * 1024 * 1024)
-        .and_then(|_| fs::read(&cache).ok())
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .unwrap_or(Value::Null);
-    let mut rows = if cached["generation"] == generation {
-        cached["rows"].as_array().cloned().unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let mut byte_count = rows.iter().map(|e| e.to_string().len()).sum::<usize>();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut after = rows
-        .last()
-        .and_then(|e| e["durable"]["seq"].as_i64())
-        .unwrap_or(0);
-    for _ in 0..100 {
-        if Instant::now() >= deadline {
-            return Err("Native history deadline exceeded".into());
-        }
-        let page = http_until(
-            &host(record)?,
-            "GET",
-            &endpoint(record, &format!("/history?limit=100&after={after}")),
-            None,
-            deadline.min(Instant::now() + Duration::from_secs(10)),
-        )?;
-        let batch = page["data"].as_array().ok_or("Invalid OpenCode history")?;
-        if batch.is_empty() && page["hasMore"] == true {
-            return Err("OpenCode history pagination made no progress".into());
-        }
-        for event in batch {
-            if event["data"]["sessionID"] != record["conversation_id"] {
-                return Err("Native history belongs to another conversation".into());
-            }
-            let seq = event["durable"]["seq"]
-                .as_i64()
-                .ok_or("Native history lacks a durable sequence")?;
-            if seq <= after {
-                return Err("Native history sequence is not ordered".into());
-            }
-            byte_count = byte_count.saturating_add(event.to_string().len());
-            if byte_count > 16 * 1024 * 1024 {
-                return Err("Native history exceeds its cumulative byte bound".into());
-            }
-            after = seq;
-            rows.push(event.clone());
-        }
-        if rows.len() > 10000 {
-            return Err("OpenCode history exceeds the bounded scan".into());
-        }
-        if page["hasMore"] == false {
-            atomic(
-                &cache,
-                &json!({"generation":generation,"rows":rows}).to_string(),
-            )?;
-            return Ok(rows);
-        }
-    }
-    Err("OpenCode history exceeds the bounded scan; no complete-history claim was made".into())
-}
-fn event_rows(native: &[Value]) -> Vec<Value> {
-    let mut rows = Vec::new();
-    for event in native {
-        let data = &event["data"];
-        let kind = string(event, "type");
-        let (typ, detail, tool) = match kind {
-            "session.next.prompted" => (
-                "UserPromptSubmit",
-                string(&data["prompt"], "text").to_owned(),
-                String::new(),
-            ),
-            "session.next.text.ended" => (
-                "AgentMessage",
-                string(data, "text").to_owned(),
-                String::new(),
-            ),
-            "session.next.tool.called" => (
-                "PreToolUse",
-                journal::clipped(&data["input"], 32000),
-                string(data, "tool").to_owned(),
-            ),
-            "session.next.tool.success" => (
-                "PostToolUse",
-                data["content"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                String::new(),
-            ),
-            "session.next.tool.failed" => (
-                "PostToolUse",
-                journal::clipped(&data["error"], 32000),
-                String::new(),
-            ),
-            "session.next.step.failed" => {
-                ("StopFailure", error_detail(&data["error"]), String::new())
-            }
-            "session.next.step.ended" => ("Stop", String::new(), String::new()),
-            _ => continue,
-        };
-        rows.push(json!({"type":typ,"detail":detail,"tool":tool,"at":data["timestamp"].as_f64().unwrap_or(0.0)/1000.0,"seq":event["durable"]["seq"],"source":"opencode_native","agent_id":"","message_id":data.get("messageID").unwrap_or(&data["assistantMessageID"]),"reply_id":if typ=="AgentMessage"{data["assistantMessageID"].clone()}else{Value::Null}}));
-    }
-    rows
-}
-fn error_detail(value: &Value) -> String {
-    value["message"]
-        .as_str()
-        .or(value["data"]["message"].as_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| journal::clipped(value, 32000))
+    Ok(answer["data"].clone())
 }
 fn cards(record: &Value, questions: &Value, permissions: &Value) -> Vec<Value> {
     let mut cards = Vec::new();
@@ -829,70 +496,113 @@ fn cards(record: &Value, questions: &Value, permissions: &Value) -> Vec<Value> {
     }
     cards
 }
-fn normalize(
-    record: &Value,
-    session: &Value,
+/// What one inspection read from the service for one session.
+struct Observed {
+    /// The session object.
+    session: Value,
     active: bool,
-    native: &[Value],
-    questions: &Value,
-    permissions: &Value,
-    available: bool,
-) -> Value {
-    let pending = cards(record, questions, permissions);
-    let alive = available && record["paused"] != true && !session.is_null();
-    let error_event = native
-        .iter()
-        .rev()
-        .find_map(|e| match string(e, "type") {
-            "session.next.step.failed" => Some(e.clone()),
-            "session.next.prompted" | "session.next.step.started" | "session.next.step.ended" => {
-                Some(Value::Null)
-            }
-            _ => None,
-        })
-        .unwrap_or(Value::Null);
-    let error = error_event["data"]["error"].clone();
+    page: history::Page,
+    /// The `/inbox` response.
+    inbox: Value,
+    forms: Value,
+    permissions: Value,
+}
+/// The status of one binding; `None` when the service could not be read,
+/// which keeps native state unknown rather than stopped.
+fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
+    let available = observed.is_some();
+    let null = Value::Null;
+    let session = observed.map_or(&null, |o| &o.session);
+    let active = observed.is_some_and(|o| o.active);
+    let messages: &[Value] = observed.map_or(&[], |o| &o.page.messages);
+    let pending = observed.map_or_else(Vec::new, |o| cards(record, &o.forms, &o.permissions));
+    let failure = history::last_error(messages);
     let phase = if !available {
         "unknown"
     } else if !pending.is_empty() {
         "input"
     } else if active {
         "working"
-    } else if error.is_object() {
+    } else if failure.is_some() {
         "error"
     } else {
         "idle"
     };
-    let parts = string(record, "name").splitn(3, '/').collect::<Vec<_>>();
-    let events = event_rows(native);
-    let reply = events.iter().rev().find(|e| e["type"] == "AgentMessage");
-    let prompt = events
+    let (activity, summary) = match phase {
+        "input" => ("attention", "Needs attention"),
+        "working" => ("busy", "Working"),
+        "error" => ("attention", "Provider request failed"),
+        "idle" => ("idle", "Ready"),
+        _ => ("unknown", "Inspection unavailable"),
+    };
+    let delivered = history::rows(messages);
+    // A message admitted between the history and inbox reads is shown once.
+    let ids: std::collections::HashSet<&str> = messages.iter().map(|m| string(m, "id")).collect();
+    let queued: Vec<Value> = observed
+        .map_or_else(Vec::new, |o| history::queued_rows(&o.inbox, !active))
+        .into_iter()
+        .filter(|row| !ids.contains(string(row, "message_id")))
+        .collect();
+    // A reply becomes the session's reply once OpenCode completed it, so a
+    // read mark taken while it streams never covers its final text.
+    let completed: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|m| m["type"] == "assistant" && m["time"]["completed"].is_number())
+        .map(|m| string(m, "id"))
+        .collect();
+    let reply = delivered
+        .iter()
+        .rev()
+        .find(|e| e["type"] == "AgentMessage" && completed.contains(string(e, "message_id")));
+    let prompt = delivered
         .iter()
         .rev()
         .find(|e| e["type"] == "UserPromptSubmit");
-    let turn_started = native
-        .iter()
-        .rev()
-        .find(|e| {
-            matches!(
-                string(e, "type"),
-                "session.next.step.started" | "session.next.prompted"
-            )
-        })
-        .and_then(|e| e["data"]["timestamp"].as_f64())
-        .unwrap_or(0.0)
-        / 1000.0;
+    let turn_started = prompt.and_then(|r| r["at"].as_f64()).unwrap_or(0.0);
     let mut allowed = if available {
-        vec!["rename"]
+        vec!["rename", "forget"]
     } else {
-        vec!["resume"]
+        vec!["forget"]
     };
-    if available && !active {
-        allowed.push("forget");
-        allowed.push(if alive { "pause" } else { "resume" });
+    if queued
+        .iter()
+        .any(|row| row["delivery_state"] == "not_delivered")
+    {
+        allowed.push("remove_queued");
     }
-    let mut value = json!({"name":record["name"],"cmd":"opencode","agent":"opencode","backend":"opencode","project":parts.get(1),"tag":parts.get(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],"launch_id":record["launch_id"],"created":record["created"],"cwd":record["cwd"],"cwd_source":"native_session","tracked":true,"resumable":true,"attached":0,"clients":[],"state":if alive{"running"}else if record["paused"]==true{"paused"}else{"stopped"},"process_state":if alive{"running"}else{"exited"},"runtime_state":if alive{"live"}else{"stopped"},"conversation_state":"active","phase":phase,"activity":if !pending.is_empty() || error.is_object(){"attention"}else if active{"busy"}else if alive{"idle"}else{"unknown"},"activity_summary":if !pending.is_empty(){"Needs attention"}else if active{"Working"}else if error.is_object(){"Provider request failed"}else if alive{"Ready"}else{"Stopped"},"activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["message_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),"last_event_at":session["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":turn_started,"account_id":"native-opencode","account_home":record["agent_home"],"model":session["model"]["id"],"model_provider":session["model"]["providerID"],"settings_model":format!("{}/{}",string(&session["model"],"providerID"),string(&session["model"],"id"))});
-    for (key,item) in json!({"send_available":alive && !active && pending.is_empty(),"send_supported":alive && !active && pending.is_empty(),"settings_change_supported":alive && !active && pending.is_empty(),"interrupt_supported":alive && active && turn_started>0.0,"terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),"native_ui_available":false,"bulk_lifecycle_supported":false,"attachments_supported":false,"clear_context_supported":false,"clear_context_reason":"OpenCode context reset is not available in this adapter","compact_context_supported":false,"compact_context_reason":"OpenCode compaction is not yet qualified in this adapter","allowed_actions":allowed,"action_reasons":{"archive":"OpenCode archives are not supported by this adapter","fork":"OpenCode forks are not supported by this adapter","terminate":"Use Stop or Pause for this native OpenCode session","restore":"OpenCode archives are not supported by this adapter"},"pending_questions":pending,"events":events,"replace_events":true,"cursor":0,"history_truncated":false}).as_object().unwrap() {value[key]=item.clone();}
+    let model = &session["model"];
+    let settings_model = match (string(model, "providerID"), string(model, "id")) {
+        ("", _) | (_, "") => Value::Null,
+        (provider, id) => json!(format!("{provider}/{id}")),
+    };
+    let effort = model["variant"]
+        .as_str()
+        .filter(|variant| !variant.is_empty() && *variant != "default")
+        .map_or(Value::Null, |variant| json!(variant));
+    let (state, process_state, runtime_state) = if available {
+        ("running", "running", "live")
+    } else {
+        ("unknown", "unknown", "unknown")
+    };
+    let parts = string(record, "name").splitn(3, '/').collect::<Vec<_>>();
+    let idle = available && pending.is_empty();
+    let mut events = delivered.clone();
+    events.extend(queued);
+    let mut value = json!({"name":record["name"],"cmd":"opencode","agent":"opencode","backend":"opencode","project":parts.get(1),"tag":parts.get(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],"launch_id":record["launch_id"],"created":record["created"],"cwd":record["cwd"],"cwd_source":"native_session","tracked":true,"resumable":true,"attached":0,"clients":[],
+        "state":state,"process_state":process_state,"runtime_state":runtime_state,"conversation_state":"active","phase":phase,"activity":activity,"activity_summary":summary,
+        "activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
+        "last_event_at":session["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":turn_started,"account_id":"native-opencode","account_home":record["agent_home"],
+        "model":model["id"],"model_provider":model["providerID"],"settings_model":settings_model,"effort":effort});
+    let controls = json!({"send_available":idle,"send_supported":idle,"settings_change_supported":idle && !active,"interrupt_supported":available && active,
+        "terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),"native_ui_available":false,"bulk_lifecycle_supported":false,"attachments_supported":false,
+        "clear_context_supported":false,"clear_context_reason":"OpenCode context reset is not available in this adapter",
+        "compact_context_supported":false,"compact_context_reason":"OpenCode compaction arrives in a later update",
+        "allowed_actions":allowed,"action_reasons":{"pause":"OpenCode sessions have no separate process to pause","resume":"OpenCode sessions have no separate process to pause",
+            "archive":"OpenCode archives are not supported","restore":"OpenCode archives are not supported","fork":"OpenCode fork arrives in a later update","terminate":"Use Stop for this OpenCode session"},
+        "pending_questions":pending,"events":events,"replace_events":true,"cursor":0,"history_truncated":observed.is_some_and(|o| o.page.truncated)});
+    for (key, item) in controls.as_object().into_iter().flatten() {
+        value[key] = item.clone();
+    }
     if !pending.is_empty() {
         value["attention_id"] = json!(format!(
             "opencode_question:{}",
@@ -903,535 +613,247 @@ fn normalize(
                 .join("\n")
         ));
     }
-    if error.is_object() && !active && pending.is_empty() {
-        let failure = provider_errors::event(
-            &format!(
-                "opencode-error-{}",
-                error_event["durable"]["seq"].as_i64().unwrap_or(0)
-            ),
-            session["time"]["updated"].as_f64().unwrap_or(0.0) / 1000.0,
-            &error_detail(&error),
+    if let (Some(failure), "error") = (&failure, phase) {
+        let error = provider_errors::event(
+            &format!("opencode-error-{}", string(failure, "id")),
+            failure["at"].as_f64().unwrap_or(0.0),
+            string(failure, "message"),
             "opencode_native",
         );
-        provider_errors::apply(&mut value, &failure);
+        provider_errors::apply(&mut value, &error);
     }
     value
 }
-// The reviewed release creates children only with its classic `task` tool,
-// for example in the OpenCode TUI or `opencode run` sharing this data home.
-// Their own native messages are the only exact turn evidence the API host has;
-// it does not own those processes, so it never reports such a child as working.
-const CHILD_ROSTER: usize = 64;
-const CHILD_HISTORY: usize = 200;
-
-fn child_unknown(reason: &str) -> Value {
-    json!({"state":"unknown","reason":reason})
+/// A binding whose service could not be read: unknown, with the reason.
+fn unavailable(record: &Value, reason: String) -> Value {
+    let mut row = normalize(record, None);
+    row["inspection_unavailable"] = json!(true);
+    row["inspection_reason"] = json!(reason);
+    row
 }
-
-/// Exact children by native `parentID`. Any contradictory row makes the whole
-/// membership unavailable rather than silently dropping a child.
-fn children(record: &Value, deadline: Instant) -> Result<Vec<Value>> {
-    let parent = string(record, "conversation_id");
-    let listed = http_until(
-        &host(record)?,
-        "GET",
-        &format!("/session/{parent}/children"),
-        None,
-        deadline,
-    )?;
-    exact_children(record, &listed)
+/// A binding that OpenCode 2 did not migrate: stopped, and only Forget.
+fn legacy_row(record: &Value) -> Value {
+    let mut row = normalize(record, None);
+    row["state"] = json!("stopped");
+    row["process_state"] = json!("exited");
+    row["runtime_state"] = json!("stopped");
+    row["activity_summary"] = json!("OpenCode 1 conversation");
+    row["inspection_reason"] =
+        json!("This conversation belongs to OpenCode 1, which Zerus no longer supports");
+    row
 }
-fn exact_children(record: &Value, listed: &Value) -> Result<Vec<Value>> {
-    let parent = string(record, "conversation_id");
-    let rows = listed.as_array().ok_or("Invalid OpenCode child list")?;
-    if rows.len() > 10000 {
-        return Err("OpenCode child list exceeds bounds".into());
+/// One GET that must succeed.
+fn get(native: &dyn Native, path: &str) -> Result<Value> {
+    let response = native.raw("GET", path, None)?;
+    if successful(&response) {
+        return Ok(response.body);
     }
-    let mut seen = std::collections::BTreeSet::new();
-    for row in rows {
-        let id = string(row, "id");
-        if !native_id(id, "ses_")
-            || id == parent
-            || row["parentID"] != record["conversation_id"]
-            || !seen.insert(id)
-        {
-            return Err("OpenCode child list does not match the exact parent conversation".into());
-        }
-    }
-    let mut rows = rows.clone();
-    let created = |row: &Value| row["time"]["created"].as_f64().unwrap_or(0.0);
-    rows.sort_by(|a, b| {
-        created(b)
-            .total_cmp(&created(a))
-            .then_with(|| string(a, "id").cmp(string(b, "id")))
-    });
-    Ok(rows)
+    let reason = response.body["message"]
+        .as_str()
+        .or(response.body["data"]["message"].as_str())
+        .unwrap_or("Native operation refused");
+    Err(format!(
+        "OpenCode HTTP {}: {}",
+        response.status,
+        journal::clipped(&json!(reason), 300)
+    ))
 }
-
-/// A child's latest turn ends exactly as the reviewed classic loop decides:
-/// its newest message is a completed assistant step with a terminal finish and
-/// no tool call still awaiting a follow-up step, or an abort/provider error
-/// completed that step. Any other shape stays unknown: another OpenCode process
-/// may still own the turn, or a crashed one abandoned it.
-fn child_turn(child: &str, latest: &Value) -> Value {
-    let info = &latest["info"];
-    if info["sessionID"] != child || !native_id(string(info, "id"), "msg_") {
-        return child_unknown("The child's native message identity did not match");
+/// The sessions OpenCode is running now, keyed by session ID.
+fn active_sessions(native: &dyn Native) -> Result<Value> {
+    let active = get(native, "/api/session/active")?;
+    if !active["data"].is_object() {
+        return Err("Invalid OpenCode session activity".into());
     }
-    let open = "Turn end not recorded; another OpenCode process may still be running it";
-    if info["role"] != "assistant" {
-        return child_unknown(open);
-    }
-    let Some(completed) = info["time"]["completed"].as_f64().filter(|t| *t > 0.0) else {
-        return child_unknown(open);
-    };
-    let ended = |kind: &str, detail: String| json!({"state":"finished","kind":kind,"at":completed/1000.0,"native_id":info["id"],"detail":detail});
-    if info["error"].is_object() {
-        if info["error"]["name"] == "MessageAbortedError" {
-            return ended("turn_interrupted", "Native child turn interrupted".into());
-        }
-        let mut failed = ended(
-            "turn_failed",
-            journal::clipped(&json!(error_detail(&info["error"])), 240),
-        );
-        failed["error"] = json!(true);
-        return failed;
-    }
-    let finish = string(info, "finish");
-    let follow_up = latest["parts"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|part| {
-            part["type"] == "tool"
-                && part["metadata"]["providerExecuted"] != true
-                && !(part["state"]["status"] == "error"
-                    && part["state"]["metadata"]["interrupted"] == true)
-        });
-    if finish.is_empty() || ["tool-calls", "unknown"].contains(&finish) || follow_up {
-        return child_unknown(open);
-    }
-    ended("turn_completed", "Native child turn completed".into())
+    Ok(active["data"].clone())
 }
-
-fn child_model(info: &Value) -> Value {
-    let (provider, id) = (
-        string(&info["model"], "providerID"),
-        string(&info["model"], "id"),
-    );
-    if provider.is_empty() || id.is_empty() {
-        Value::Null
-    } else {
-        json!(format!("{provider}/{id}"))
+fn pending_requests(native: &dyn Native, record: &Value, suffix: &str) -> Result<Value> {
+    let answer = get(native, &session_path(record, suffix))?;
+    if !answer["data"].is_array() {
+        return Err("Invalid OpenCode pending requests".into());
     }
+    Ok(answer["data"].clone())
 }
-
-/// Parent summaries use only bounded per-child native reads. A child beyond the
-/// roster bound or the time budget remains a member with unknown state.
-fn child_roster(record: &Value, value: &mut Value) {
-    let deadline = Instant::now() + Duration::from_secs(4);
-    let listed = match children(record, deadline) {
-        Ok(rows) => rows,
-        Err(error) => {
-            value["subagent_source"] = json!("unavailable");
-            value["subagent_reason"] = json!(error);
-            value["subagent_counts_complete"] = json!(false);
-            value["subagent_total_count"] = Value::Null;
-            value["subagents"] = json!({});
-            return;
-        }
-    };
-    let native = host(record);
-    let evidence = listed
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let id = string(row, "id");
-            if index >= CHILD_ROSTER {
-                return child_unknown("This child is beyond the bounded native roster");
-            }
-            let page = native.clone().and_then(|native| {
-                http_until(
-                    &native,
-                    "GET",
-                    &format!("/session/{id}/message?limit=1"),
-                    None,
-                    deadline,
-                )
-            });
-            match page {
-                Ok(page) => match page.as_array().map(Vec::as_slice) {
-                    Some([latest]) => child_turn(id, latest),
-                    Some([]) => child_unknown("No native turn has been recorded for this child"),
-                    _ => child_unknown("Invalid native child messages"),
-                },
-                Err(error) => child_unknown(&error),
-            }
-        })
-        .collect::<Vec<_>>();
-    summarize_children(value, &listed, &evidence);
+/// Everything one session's status needs, given the shared activity map.
+fn observe(
+    native: &dyn Native,
+    record: &Value,
+    active: &Value,
+    history: impl FnOnce() -> Result<history::Page>,
+) -> Result<Observed> {
+    let session = exact_session(record, get(native, &session_path(record, ""))?)?;
+    let forms = pending_requests(native, record, "/form")?;
+    let permissions = pending_requests(native, record, "/permission")?;
+    let page = history()?;
+    let inbox = get(native, &session_path(record, "/inbox"))?;
+    if !inbox["data"].is_array() {
+        return Err("Invalid OpenCode inbox".into());
+    }
+    Ok(Observed {
+        session,
+        active: active.get(string(record, "conversation_id")).is_some(),
+        page,
+        inbox,
+        forms,
+        permissions,
+    })
 }
-/// Counts never include an active child: the API host does not own the classic
-/// process running one. Unknown states keep the totals incomplete.
-fn summarize_children(value: &mut Value, listed: &[Value], evidence: &[Value]) {
-    let mut roster = serde_json::Map::new();
-    let (mut completed, mut unknown) = (0, 0);
-    for (row, evidence) in listed.iter().zip(evidence) {
-        let id = string(row, "id");
-        let finished = evidence["state"] == "finished";
-        let created = row["time"]["created"].as_f64().unwrap_or(0.0) / 1000.0;
-        let updated = row["time"]["updated"].as_f64().unwrap_or(0.0) / 1000.0;
-        let mut child = json!({"name":journal::clipped(&row["title"],200),"agent_profile":row["agent"],"model":child_model(row),
-            "started":created,"updated":if finished {evidence["at"].as_f64().unwrap_or(updated).max(updated)} else {updated},
-            "state":if finished {"finished"} else {"unknown"},"current_tool":""});
-        if finished {
-            completed += 1;
-            child["detail"] = evidence["detail"].clone();
-            child["completion_source"] = json!("opencode_native_messages");
-            child["tracking_evidence"] = json!({"source":"opencode_native_messages","kind":evidence["kind"],"at":evidence["at"],"native_id":evidence["native_id"]});
-            if evidence["error"] == true {
-                child["display_state"] = json!("error");
-            }
-        } else {
-            unknown += 1;
-            child["detail"] = evidence["reason"].clone();
-        }
-        roster.insert(id.to_owned(), child);
-    }
-    unknown += listed.len().saturating_sub(evidence.len());
-    value["subagent_source"] = json!("opencode_native");
-    value["subagents"] = Value::Object(roster);
-    value["subagent_active_count"] = json!(0);
-    value["subagent_count"] = json!(0);
-    value["subagent_completed_count"] = json!(completed);
-    value["subagent_unknown_count"] = json!(unknown);
-    value["subagent_total_count"] = json!(listed.len());
-    value["subagent_counts_complete"] = json!(unknown == 0);
+#[derive(Clone, Copy, PartialEq)]
+enum Detail {
+    /// A session list row: status only.
+    Listing,
+    /// The session's own state for an action.
+    Own,
+    /// `hgs inspect`: also the model options for its folder.
+    Full,
 }
-
-fn child_events(child: &str, messages: &[Value]) -> Result<Vec<Value>> {
-    let mut rows = Vec::new();
-    let row = |typ: &str, detail: String, tool: &str, at: f64, id: &str, reply: Value| json!({"type":typ,"detail":detail,"tool":tool,"at":at,"source":"opencode_native","agent_id":child,"message_id":id,"reply_id":reply});
-    for message in messages {
-        let info = &message["info"];
-        let id = string(info, "id");
-        let parts = message["parts"]
-            .as_array()
-            .ok_or("Invalid native child message")?;
-        if info["sessionID"] != child
-            || !native_id(id, "msg_")
-            || parts.iter().any(|p| {
-                p["sessionID"] != child
-                    || p["messageID"] != id
-                    || !native_id(string(p, "id"), "prt_")
-            })
-        {
-            return Err("Native child history belongs to another conversation".into());
-        }
-        let created = info["time"]["created"].as_f64().unwrap_or(0.0) / 1000.0;
-        let at = |part: &Value| {
-            part["time"]["end"]
-                .as_f64()
-                .or(part["state"]["time"]["end"].as_f64())
-                .map(|t| t / 1000.0)
-                .unwrap_or(created)
-        };
-        let text = |part: &Value| {
-            part["type"] == "text" && part["synthetic"] != true && part["ignored"] != true
-        };
-        match string(info, "role") {
-            "user" => {
-                let prompt = parts
-                    .iter()
-                    .filter(|p| text(p))
-                    .filter_map(|p| p["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                rows.push(row(
-                    "UserPromptSubmit",
-                    prompt,
-                    "",
-                    created,
-                    id,
-                    Value::Null,
-                ));
-            }
-            "assistant" => {
-                for part in parts {
-                    let part_id = string(part, "id");
-                    if text(part) {
-                        rows.push(row(
-                            "AgentMessage",
-                            string(part, "text").to_owned(),
-                            "",
-                            at(part),
-                            part_id,
-                            json!(id),
-                        ));
-                    } else if part["type"] == "tool" {
-                        let state = &part["state"];
-                        let title = journal::clipped(&state["title"], 32000);
-                        let call = if title.is_empty() {
-                            journal::clipped(&json!(state["input"].to_string()), 32000)
-                        } else {
-                            title
-                        };
-                        rows.push(row(
-                            "PreToolUse",
-                            call,
-                            string(part, "tool"),
-                            at(part),
-                            part_id,
-                            Value::Null,
-                        ));
-                        let result = match string(state, "status") {
-                            "completed" => Some(journal::clipped(&state["output"], 32000)),
-                            "error" => Some(journal::clipped(&state["error"], 32000)),
-                            _ => None,
-                        };
-                        if let Some(result) = result {
-                            rows.push(row(
-                                "PostToolUse",
-                                result,
-                                string(part, "tool"),
-                                at(part),
-                                &format!("{part_id}:result"),
-                                Value::Null,
-                            ));
-                        }
-                    }
-                }
-                let end = info["time"]["completed"].as_f64().map(|t| t / 1000.0);
-                if info["error"].is_object() && info["error"]["name"] != "MessageAbortedError" {
-                    rows.push(row(
-                        "StopFailure",
-                        error_detail(&info["error"]),
-                        "",
-                        end.unwrap_or(created),
-                        &format!("{id}:failure"),
-                        Value::Null,
-                    ));
-                } else if let Some(end) = end {
-                    rows.push(row(
-                        "Stop",
-                        String::new(),
-                        "",
-                        end,
-                        &format!("{id}:stop"),
-                        Value::Null,
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    for (index, event) in rows.iter_mut().enumerate() {
-        event["seq"] = json!(index + 1);
-    }
-    Ok(rows)
+fn processes() -> Value {
+    json!({"items":[],"complete":false,"source":"opencode_native","reason":"Individual OpenCode shell process controls are not yet qualified"})
 }
-
-/// Read-only child view. Identity is the exact native child whose recorded
-/// parent is this binding's conversation; its state is its own evidence only.
-fn child(record: &Value, id: &str) -> Result<Value> {
-    let parent = string(record, "conversation_id");
-    if !native_id(id, "ses_") || id == parent {
-        return Err("Invalid OpenCode child identity".into());
+fn parent_view(
+    service: &service::Service,
+    record: &Value,
+    active: &Value,
+    detail: Detail,
+) -> Result<Value> {
+    let observed = observe(service, record, active, || history::fetch(service, record))?;
+    let mut result = normalize(record, Some(&observed));
+    if detail != Detail::Listing {
+        result["attachment_messages"] = attachments::messages(record, "");
+        result["voice_messages"] =
+            conversation_history::inspected_voice_messages(record, &result, None);
     }
-    let session = legacy_verify_session(record)?;
-    let info = rpc(record, "GET", &format!("/api/session/{id}"), None)?["data"].clone();
-    if info["id"] != id || info["parentID"] != record["conversation_id"] {
-        return Err("This OpenCode child does not belong to the exact parent conversation".into());
-    }
-    let page = rpc(
-        record,
-        "GET",
-        &format!("/session/{id}/message?limit={CHILD_HISTORY}"),
-        None,
-    )?;
-    let messages = page.as_array().ok_or("Invalid OpenCode child history")?;
-    if messages.len() > CHILD_HISTORY {
-        return Err("OpenCode child history exceeds its requested bound".into());
-    }
-    let events = child_events(id, messages)?;
-    let evidence = messages.last().map_or_else(
-        || child_unknown("No native turn has been recorded for this child"),
-        |latest| child_turn(id, latest),
-    );
-    let mut value = normalize(
-        record,
-        &session,
-        false,
-        &[],
-        &Value::Null,
-        &Value::Null,
-        true,
-    );
-    let finished = evidence["state"] == "finished";
-    let reply = events.iter().rev().find(|e| e["type"] == "AgentMessage");
-    let summary = match string(&evidence, "kind") {
-        "turn_completed" => "Ready",
-        "turn_interrupted" => "Interrupted",
-        "turn_failed" => "Turn failed",
-        _ => "Status unavailable",
-    };
-    for (key,item) in json!({"agent_id":id,"parent_conversation_id":parent,"conversation_id":format!("{parent}/{id}"),
-        "created":info["time"]["created"].as_f64().unwrap_or(0.0)/1000.0,"cwd":info["location"]["directory"],
-        "phase":if finished {"idle"} else {"unknown"},"activity":if finished {"idle"} else {"unknown"},"activity_summary":summary,
-        "activity_detail":if finished {reply.map(|r|r["detail"].clone()).unwrap_or(evidence["detail"].clone())} else {evidence["reason"].clone()},
-        "prompt":events.iter().rev().find(|e| e["type"]=="UserPromptSubmit").map(|r|r["detail"].clone()),
-        "reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
-        "last_event_at":info["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":0.0,
-        "model":info["model"]["id"],"model_provider":info["model"]["providerID"],"settings_model":child_model(&info),"agent_profile":info["agent"],
-        "send_available":false,"send_supported":false,"read_only":true,"settings_change_supported":false,"interrupt_supported":false,
-        "allowed_actions":[],"pending_questions":[],"events":events,"history_truncated":messages.len()==CHILD_HISTORY,
-        "history_scope":"Native OpenCode subagent history","tracking_evidence":if finished {json!({"source":"opencode_native_messages","kind":evidence["kind"],"at":evidence["at"],"native_id":evidence["native_id"]})} else {Value::Null}}).as_object().unwrap() {value[key]=item.clone();}
-    if let Some(map) = value.as_object_mut() {
-        map.remove("attention_id");
-    }
-    value["host_generation"] = host(record)?["generation"].clone();
-    value["attachment_messages"] = json!([]);
-    value["voice_messages"] = json!([]);
-    value["processes"] = json!({"items":[],"complete":false,"source":"opencode_native","reason":"OpenCode child process controls are not available"});
-    Ok(value)
-}
-
-pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
-    let record = binding(name)?;
-    if let Some(id) = agent_id {
-        return child(&record, id);
-    }
-    let mut value = parent_view(name, &record, true)?;
-    waits::decorate(std::slice::from_mut(&mut value));
-    Ok(value)
-}
-// Delivery, answer, interrupt and lifecycle checks need only the parent's
-// own state; they never wait for the bounded child roster.
-pub(crate) fn own_state(name: &str) -> Result<Value> {
-    parent_view(name, &binding(name)?, false)
-}
-fn parent_view(name: &str, record: &Value, roster: bool) -> Result<Value> {
-    let record = record.clone();
-    let session = legacy_verify_session(&record)?;
-    let active = rpc(&record, "GET", "/api/session/active", None)?;
-    let questions = rpc(&record, "GET", &endpoint(&record, "/question"), None)?;
-    let permissions = rpc(&record, "GET", &endpoint(&record, "/permission"), None)?;
-    let native = history(&record)?;
-    let mut result = normalize(
-        &record,
-        &session,
-        active["data"]
-            .get(string(&record, "conversation_id"))
-            .is_some(),
-        &native,
-        &questions["data"],
-        &permissions["data"],
-        true,
-    );
-    result["host_generation"] = host(&record)?["generation"].clone();
-    result["attachment_messages"] = attachments::messages(&record, "");
-    result["voice_messages"] =
-        conversation_history::inspected_voice_messages(&record, &result, None);
-    let configured = catalog(None);
-    result["model_options"] = configured["model_options"].clone();
-    result["processes"] = json!({"items":[],"complete":false,"source":"opencode_native","reason":"Individual OpenCode shell process controls are not yet qualified"});
-    if roster {
-        child_roster(&record, &mut result);
+    if detail == Detail::Full {
+        let cwd = PathBuf::from(string(record, "cwd"));
+        result["model_options"] = catalog(Some(&cwd))["model_options"].clone();
     }
     let questions = result["pending_questions"]
         .as_array()
         .cloned()
         .unwrap_or_default();
-    read_marks::enrich(&mut result, &read_marks::load(), name, Some(&questions));
+    read_marks::enrich(
+        &mut result,
+        &read_marks::load(),
+        string(record, "name"),
+        Some(&questions),
+    );
     Ok(result)
+}
+/// Inspects bindings against one service connection: at most one
+/// `/api/session/active` and one migration check per instance.
+struct Inspector {
+    service: std::result::Result<service::Service, service::Unavailable>,
+    computer: String,
+    active: Option<Result<Value>>,
+    migration: Option<Reply>,
+    verdicts: Option<Vec<String>>,
+    verdicts_changed: bool,
+}
+impl Inspector {
+    /// Never starts the service.
+    fn connect() -> Self {
+        Inspector {
+            service: service::connect(),
+            computer: crate::platform::hostname(),
+            active: None,
+            migration: None,
+            verdicts: None,
+            verdicts_changed: false,
+        }
+    }
+    fn row(&mut self, record: &Value, detail: Detail) -> Value {
+        let mut row = self.view(record, detail);
+        if detail != Detail::Listing && row.get("processes").is_none() {
+            row["processes"] = processes();
+        }
+        row
+    }
+    fn view(&mut self, record: &Value, detail: Detail) -> Value {
+        let service = match &self.service {
+            Err(why) => return unavailable(record, why.reason(&self.computer)),
+            Ok(service) => service,
+        };
+        let key = verdict_key(record, &service.reg);
+        let known = record["service"] != "opencode2"
+            && self
+                .verdicts
+                .get_or_insert_with(load_verdicts)
+                .contains(&key);
+        let state = if known {
+            Ok((Legacy::Unsupported, false))
+        } else {
+            legacy_state(service, record, &mut self.migration)
+        };
+        let mut current = record.clone();
+        match state {
+            Err(reason) => return unavailable(record, reason),
+            Ok((Legacy::Unsupported, settled)) => {
+                if settled && !known {
+                    let keys = self.verdicts.get_or_insert_with(load_verdicts);
+                    if keys.len() >= VERDICT_LIMIT {
+                        keys.clear();
+                    }
+                    keys.push(key);
+                    self.verdicts_changed = true;
+                }
+                return legacy_row(record);
+            }
+            Ok((Legacy::Adopted, _)) => {
+                adopt_binding(string(record, "name"), string(record, "conversation_id"));
+                modernize(&mut current);
+            }
+            Ok((Legacy::Current, _)) => {}
+        }
+        let active = match self.active.get_or_insert_with(|| active_sessions(service)) {
+            Ok(active) => active,
+            Err(reason) => return unavailable(record, reason.clone()),
+        };
+        parent_view(service, &current, active, detail)
+            .unwrap_or_else(|reason| unavailable(record, reason))
+    }
+    fn finish(self) {
+        if self.verdicts_changed {
+            save_verdicts(self.verdicts.as_deref().unwrap_or(&[]));
+        }
+    }
+}
+pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
+    let record = binding(name)?;
+    if agent_id.is_some() {
+        return Err("OpenCode child sessions arrive in a later update".into());
+    }
+    let mut inspector = Inspector::connect();
+    let mut value = inspector.row(&record, Detail::Full);
+    inspector.finish();
+    waits::decorate(std::slice::from_mut(&mut value));
+    Ok(value)
+}
+/// The session's own state for delivery, answer, interrupt and lifecycle
+/// checks; unknown with its reason while the service is unavailable.
+pub(crate) fn own_state(name: &str) -> Result<Value> {
+    let record = binding(name)?;
+    let mut inspector = Inspector::connect();
+    let value = inspector.row(&record, Detail::Own);
+    inspector.finish();
+    Ok(value)
 }
 pub(crate) fn snapshots() -> Result<Vec<Value>> {
     let Ok(entries) = fs::read_dir(bindings()) else {
         return Ok(Vec::new());
     };
+    let records: Vec<Value> = entries
+        .flatten()
+        .take(5000)
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|record| record["backend"] == "opencode")
+        .collect();
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut inspector = Inspector::connect();
     let mut rows = Vec::new();
-    let service = service::connect();
-    let computer = crate::platform::hostname();
-    let mut migration: Option<Reply> = None;
-    let mut verdicts: Option<Vec<String>> = None;
-    let mut verdicts_changed = false;
-    for entry in entries.flatten().take(5000) {
-        let Ok(bytes) = fs::read(entry.path()) else {
-            continue;
-        };
-        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        if record["backend"] != "opencode" {
-            continue;
-        }
-        let unavailable = |reason: String| {
-            let mut row = normalize(
-                &record,
-                &Value::Null,
-                false,
-                &[],
-                &Value::Null,
-                &Value::Null,
-                false,
-            );
-            row["state"] = json!("unknown");
-            row["process_state"] = json!("unknown");
-            row["runtime_state"] = json!("unknown");
-            row["activity_summary"] = json!("Inspection unavailable");
-            row["inspection_unavailable"] = json!(true);
-            row["inspection_reason"] = json!(reason);
-            row
-        };
-        let row = match &service {
-            Err(why) => unavailable(why.reason(&computer)),
-            Ok(service) => {
-                let key = verdict_key(&record, &service.reg);
-                let known = record["service"] != "opencode2"
-                    && verdicts.get_or_insert_with(load_verdicts).contains(&key);
-                let state = if known {
-                    Ok((Legacy::Unsupported, false))
-                } else {
-                    legacy_state(service, &record, &mut migration)
-                };
-                match state {
-                    Err(reason) => unavailable(reason),
-                    Ok((Legacy::Unsupported, settled)) => {
-                        if settled && !known {
-                            let keys = verdicts.get_or_insert_with(load_verdicts);
-                            if keys.len() >= VERDICT_LIMIT {
-                                keys.clear();
-                            }
-                            keys.push(key);
-                            verdicts_changed = true;
-                        }
-                        let mut row = unavailable(
-                            "This conversation belongs to OpenCode 1, which Zerus no longer supports"
-                                .into(),
-                        );
-                        row.as_object_mut()
-                            .unwrap()
-                            .remove("inspection_unavailable");
-                        row["state"] = json!("stopped");
-                        row["process_state"] = json!("exited");
-                        row["runtime_state"] = json!("stopped");
-                        row["activity_summary"] = json!("OpenCode 1 conversation");
-                        row["allowed_actions"] = json!(["forget"]);
-                        row
-                    }
-                    Ok((verdict, _)) => {
-                        if matches!(verdict, Legacy::Adopted) {
-                            adopt_binding(
-                                string(&record, "name"),
-                                string(&record, "conversation_id"),
-                            );
-                        }
-                        inspect(string(&record, "name"), None).unwrap_or_else(unavailable)
-                    }
-                }
-            }
-        };
-        let mut row = row;
+    for record in &records {
+        let mut row = inspector.row(record, Detail::Listing);
         if let Some(map) = row.as_object_mut() {
             for key in [
                 "events",
@@ -1445,9 +867,7 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         }
         rows.push(row);
     }
-    if verdicts_changed {
-        save_verdicts(verdicts.as_deref().unwrap_or(&[]));
-    }
+    inspector.finish();
     Ok(rows)
 }
 fn checked_request(record: &Value) -> Result<Value> {
@@ -1474,10 +894,30 @@ fn checked_request(record: &Value) -> Result<Value> {
 /// The native OpenCode 2 operations that delivery needs.
 trait Native {
     fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response>;
+    /// The same request, ending no later than `deadline`.
+    fn raw_until(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        _deadline: Instant,
+    ) -> Result<Response> {
+        self.raw(method, path, body)
+    }
 }
 impl Native for service::Service {
     fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
         service::Service::raw(self, method, path, body)
+    }
+    fn raw_until(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Response> {
+        let deadline = deadline.min(Instant::now() + Duration::from_secs(10));
+        service::request(&self.reg, method, path, body, deadline)
     }
 }
 #[derive(Debug)]
@@ -1839,7 +1279,8 @@ fn answer(record: &Value, request: &Value) -> Result<Value> {
     };
     let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"status":"pending"});
     atomic(&path, &receipt.to_string())?;
-    rpc(record, "POST", &endpoint(record, &suffix), Some(&body))?;
+    // Task 7 replaces these OpenCode 1 reply bodies with form answers.
+    running_service()?.call("POST", &session_path(record, &suffix), Some(&body))?;
     receipt["status"] = json!("answered");
     atomic(&path, &receipt.to_string())?;
     Ok(receipt)
@@ -1856,10 +1297,9 @@ pub(crate) fn interrupt(record: &Value) -> Result<()> {
     if current["interrupt_supported"] != true || current["turn_started"] != record["turn_started"] {
         return Err("OpenCode turn changed before interruption".into());
     }
-    rpc(
-        &original,
+    running_service()?.call(
         "POST",
-        &endpoint(&original, "/interrupt"),
+        &session_path(&original, "/interrupt"),
         Some(&json!({})),
     )?;
     Ok(())
@@ -1875,9 +1315,6 @@ fn action(
     }
     if let Some(scope) = scope {
         scope.check(record)?;
-    }
-    if action == "resume" {
-        ensure_host(record)?;
     }
     let current = own_state(string(record, "name"))?;
     if !current["allowed_actions"]
@@ -1909,13 +1346,14 @@ fn action(
         if let Some(scope) = scope {
             scope.changing();
         }
-        let renamed = rpc(
-            record,
+        // OpenCode 2 answers 204; the title is verified by reading it back.
+        let service = running_service()?;
+        service.call(
             "PATCH",
-            &format!("/session/{}", string(record, "conversation_id")),
+            &session_path(record, ""),
             Some(&json!({"title":b[2]})),
         )?;
-        if renamed["id"] != record["conversation_id"] || renamed["title"] != b[2] {
+        if verify_session(&service, record)?["title"] != b[2] {
             return Err(
                 "Native OpenCode rename acknowledgement did not match; inspect before retrying"
                     .into(),
@@ -2007,13 +1445,13 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 );
             }
             atomic(&path, &json!({"status":"pending"}).to_string())?;
-            rpc(
-                &record,
+            let service = running_service()?;
+            service.call(
                 "POST",
-                &endpoint(&record, "/model"),
+                &session_path(&record, "/model"),
                 Some(&json!({"model":model})),
             )?;
-            let verified_model = legacy_verify_session(&record)?["model"].clone();
+            let verified_model = verify_session(&service, &record)?["model"].clone();
             if verified_model["id"] != model["id"]
                 || verified_model["providerID"] != model["providerID"]
             {
@@ -2056,7 +1494,6 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     #[test]
     fn new_ids_match_opencode_and_stored_ids_keep_the_existing_check() {
         for prefix in ["ses_", "msg_"] {
@@ -2232,311 +1669,6 @@ mod tests {
             session_path(&record, "/prompt"),
             "/api/session/ses_abc/prompt"
         );
-    }
-    #[test]
-    fn chunked_native_response_is_bounded_and_complete() {
-        assert_eq!(
-            decode_response(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{\"a\":1}\r\n0\r\n\r\n"
-            )
-            .unwrap(),
-            json!({"a":1})
-        );
-        assert!(decode_response(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{}").is_err());
-    }
-    #[test]
-    fn partial_reads_cannot_extend_the_absolute_native_deadline() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let worker = std::thread::spawn(move || {
-            let (mut peer, _) = listener.accept().unwrap();
-            let mut request = [0u8; 2048];
-            let _ = peer.read(&mut request);
-            peer.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n")
-                .unwrap();
-            for _ in 0..30 {
-                if peer.write_all(b"n").is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        });
-        let started = Instant::now();
-        let result = http_until(
-            &json!({"port":port,"password":"fixture"}),
-            "GET",
-            "/fixture",
-            None,
-            started + Duration::from_millis(120),
-        );
-        let elapsed = started.elapsed();
-        assert!(result.is_err());
-        assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
-        worker.join().unwrap();
-    }
-    #[test]
-    fn malformed_native_http_never_acknowledges_mutations() {
-        for raw in [
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnull\r\n0\r\n".as_slice(),
-            b"HTTP/1.1 200 OK\r\nContent-Length: junk\r\n\r\nnull",
-            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnull\r\n0\r\n\r\n",
-            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nnull",
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnullXX0\r\n\r\n",
-        ] {assert!(decode_response(raw).is_err(),"{}",String::from_utf8_lossy(raw));}
-        assert_eq!(
-            decode_response(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap(),
-            Value::Null
-        );
-        assert_eq!(decode_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnull\r\n0\r\nX-Native: yes\r\n\r\n").unwrap(),Value::Null);
-    }
-    #[test]
-    fn native_states_and_question_identity_do_not_depend_on_terminal() {
-        let record = json!({"name":"opencode/test/one","run_id":"run","conversation_id":"ses_one"});
-        let session = json!({"model":{"id":"local","providerID":"fixture"}});
-        let pending = json!([{"id":"que_one","sessionID":"ses_one","questions":[{"question":"Pick","header":"Pick","options":[{"label":"One"}]}]}]);
-        let idle = normalize(
-            &record,
-            &session,
-            false,
-            &[],
-            &Value::Null,
-            &Value::Null,
-            true,
-        );
-        assert_eq!(idle["phase"], "idle");
-        assert_eq!(idle["terminal_supported"], false);
-        let working = normalize(
-            &record,
-            &session,
-            true,
-            &[],
-            &Value::Null,
-            &Value::Null,
-            true,
-        );
-        assert_eq!(working["phase"], "working");
-        assert_eq!(working["send_available"], false);
-        let input = normalize(&record, &session, true, &[], &pending, &Value::Null, true);
-        assert_eq!(input["phase"], "input");
-        assert_eq!(input["pending_questions"][0]["answerable"], true);
-        assert_ne!(input["attention_id"], idle["attention_id"]);
-    }
-    #[test]
-    fn exact_native_history_has_stable_ids_and_literal_text() {
-        let native = vec![
-            json!({"type":"session.next.prompted","durable":{"seq":2},"data":{"timestamp":1000,"messageID":"msg_one","prompt":{"text":"literal\\\ntext"}}}),
-            json!({"type":"session.next.text.ended","durable":{"seq":7},"data":{"timestamp":2000,"assistantMessageID":"msg_two","text":"answer"}}),
-        ];
-        let events = event_rows(&native);
-        assert_eq!(events[0]["detail"], "literal\\\ntext");
-        assert_eq!(events[1]["reply_id"], "msg_two");
-        assert_eq!(events[1]["seq"], 7);
-    }
-    // Shapes recorded from the reviewed release's classic task-tool children.
-    fn assistant(
-        child: &str,
-        completed: Option<u64>,
-        finish: Option<&str>,
-        error: Value,
-        parts: Value,
-    ) -> Value {
-        let mut info = json!({"id":"msg_1406139c9002","sessionID":child,"role":"assistant","time":{"created":1792081476041_u64},"parentID":"msg_1406139c9001","agent":"general"});
-        if let Some(t) = completed {
-            info["time"]["completed"] = json!(t);
-        }
-        if let Some(f) = finish {
-            info["finish"] = json!(f);
-        }
-        if !error.is_null() {
-            info["error"] = error;
-        }
-        json!({"info":info,"parts":parts})
-    }
-    #[test]
-    fn child_turn_requires_the_native_loop_exit_and_keeps_open_turns_unknown() {
-        let child = "ses_ebf9b81dcffe0BQL0Ct6wWuwaX";
-        let text = json!([{"id":"prt_a","sessionID":child,"messageID":"msg_1406139c9002","type":"step-start"},
-            {"id":"prt_b","sessionID":child,"messageID":"msg_1406139c9002","type":"text","text":"Child reply"}]);
-        let done = child_turn(
-            child,
-            &assistant(
-                child,
-                Some(1792081690267),
-                Some("stop"),
-                Value::Null,
-                text.clone(),
-            ),
-        );
-        assert_eq!(done["state"], "finished");
-        assert_eq!(done["kind"], "turn_completed");
-        assert_eq!(done["native_id"], "msg_1406139c9002");
-        // Running in another process, between tool steps, or abandoned.
-        for open in [
-            assistant(child, None, None, Value::Null, text.clone()),
-            assistant(
-                child,
-                Some(1),
-                Some("tool-calls"),
-                Value::Null,
-                text.clone(),
-            ),
-            assistant(child, Some(1), Some("unknown"), Value::Null, text.clone()),
-            assistant(child, Some(1), None, Value::Null, text.clone()),
-            assistant(
-                child,
-                Some(1),
-                Some("stop"),
-                Value::Null,
-                json!([{"id":"prt_c","type":"tool","tool":"bash","state":{"status":"completed"}}]),
-            ),
-            json!({"info":{"id":"msg_1406139c9003","sessionID":child,"role":"user","time":{"created":1}},"parts":[]}),
-        ] {
-            assert_eq!(child_turn(child, &open)["state"], "unknown", "{open}");
-        }
-        // Provider-executed and interrupted tool calls do not await a follow-up.
-        let settled = json!([{"id":"prt_d","type":"tool","metadata":{"providerExecuted":true},"state":{"status":"completed"}},
-            {"id":"prt_e","type":"tool","state":{"status":"error","metadata":{"interrupted":true}}}]);
-        assert_eq!(
-            child_turn(
-                child,
-                &assistant(child, Some(1), Some("stop"), Value::Null, settled)
-            )["state"],
-            "finished"
-        );
-        let aborted = child_turn(
-            child,
-            &assistant(
-                child,
-                Some(1792081883704),
-                None,
-                json!({"name":"MessageAbortedError","data":{"message":"Aborted"}}),
-                text.clone(),
-            ),
-        );
-        assert_eq!(aborted["kind"], "turn_interrupted");
-        assert!(aborted.get("error").is_none());
-        let failed = child_turn(
-            child,
-            &assistant(
-                child,
-                Some(2),
-                None,
-                json!({"name":"APIError","data":{"message":"Fixture provider rejected"}}),
-                text.clone(),
-            ),
-        );
-        assert_eq!(failed["kind"], "turn_failed");
-        assert_eq!(failed["error"], true);
-        assert_eq!(failed["detail"], "Fixture provider rejected");
-        assert_eq!(
-            child_turn(
-                child,
-                &assistant(child, None, None, json!({"name":"APIError"}), text.clone())
-            )["state"],
-            "unknown"
-        );
-        // Another session's message never settles this child.
-        assert_eq!(
-            child_turn(
-                "ses_other",
-                &assistant(child, Some(1), Some("stop"), Value::Null, text)
-            )["state"],
-            "unknown"
-        );
-    }
-    #[test]
-    fn child_membership_is_exact_and_counts_never_claim_active_work() {
-        let record = json!({"conversation_id":"ses_parent"});
-        let row = |id: &str, parent: &str, created: u64| json!({"id":id,"parentID":parent,"title":format!("{id} (@general subagent)"),"agent":"general","model":{"id":"local","providerID":"fixture"},"time":{"created":created,"updated":created+5}});
-        let listed = exact_children(
-            &record,
-            &json!([
-                row("ses_old", "ses_parent", 1000),
-                row("ses_new", "ses_parent", 2000)
-            ]),
-        )
-        .unwrap();
-        assert_eq!(
-            listed.iter().map(|r| string(r, "id")).collect::<Vec<_>>(),
-            ["ses_new", "ses_old"]
-        );
-        for contradictory in [
-            json!([row("ses_one", "ses_other", 1)]),
-            json!([row("ses_parent", "ses_parent", 1)]),
-            json!([
-                row("ses_one", "ses_parent", 1),
-                row("ses_one", "ses_parent", 2)
-            ]),
-            json!([row("bad/id", "ses_parent", 1)]),
-            json!({"data":[]}),
-        ] {
-            assert!(
-                exact_children(&record, &contradictory).is_err(),
-                "{contradictory}"
-            );
-        }
-        let mut parent = json!({"phase":"working","activity":"busy"});
-        let finished = json!({"state":"finished","kind":"turn_failed","at":3.0,"native_id":"msg_x","detail":"failed","error":true});
-        summarize_children(&mut parent, &listed, &[child_unknown("open"), finished]);
-        // A working parent never makes its children working.
-        assert_eq!(parent["subagents"]["ses_new"]["state"], "unknown");
-        assert_eq!(parent["subagents"]["ses_new"]["detail"], "open");
-        assert_eq!(parent["subagents"]["ses_old"]["state"], "finished");
-        assert_eq!(parent["subagents"]["ses_old"]["display_state"], "error");
-        assert_eq!(
-            parent["subagents"]["ses_old"]["tracking_evidence"]["native_id"],
-            "msg_x"
-        );
-        assert_eq!(parent["subagents"]["ses_old"]["model"], "fixture/local");
-        assert_eq!(parent["subagent_active_count"], 0);
-        assert_eq!(parent["subagent_completed_count"], 1);
-        assert_eq!(parent["subagent_unknown_count"], 1);
-        assert_eq!(parent["subagent_total_count"], 2);
-        assert_eq!(parent["subagent_counts_complete"], false);
-        assert_eq!(parent["phase"], "working");
-        let mut idle = json!({});
-        summarize_children(&mut idle, &[], &[]);
-        assert_eq!(idle["subagent_counts_complete"], true);
-        assert_eq!(idle["subagent_total_count"], 0);
-    }
-    #[test]
-    fn child_history_is_bound_to_its_own_session_and_messages() {
-        let child = "ses_child";
-        let user = json!({"info":{"id":"msg_1","sessionID":child,"role":"user","time":{"created":1000}},
-            "parts":[{"id":"prt_1","sessionID":child,"messageID":"msg_1","type":"text","text":"literal\\\nwork"},
-                     {"id":"prt_2","sessionID":child,"messageID":"msg_1","type":"text","text":"hidden","synthetic":true}]});
-        let reply = json!({"info":{"id":"msg_2","sessionID":child,"role":"assistant","time":{"created":2000,"completed":4000},"finish":"stop"},
-            "parts":[{"id":"prt_3","sessionID":child,"messageID":"msg_2","type":"tool","tool":"bash","state":{"status":"completed","title":"Print","input":{"command":"printf x"},"output":"x","time":{"end":3000}}},
-                     {"id":"prt_4","sessionID":child,"messageID":"msg_2","type":"text","text":"Child reply","time":{"end":3500}}]});
-        let events = child_events(child, &[user.clone(), reply.clone()]).unwrap();
-        let kinds = events
-            .iter()
-            .map(|e| string(e, "type").to_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            kinds,
-            [
-                "UserPromptSubmit",
-                "PreToolUse",
-                "PostToolUse",
-                "AgentMessage",
-                "Stop"
-            ]
-        );
-        assert_eq!(events[0]["detail"], "literal\\\nwork");
-        assert_eq!(events[2]["detail"], "x");
-        assert_eq!(events[3]["reply_id"], "msg_2");
-        assert_eq!(events[3]["message_id"], "prt_4");
-        assert_eq!(events[3]["at"], 3.5);
-        assert!(events
-            .iter()
-            .all(|e| e["agent_id"] == child && e["source"] == "opencode_native"));
-        let mut foreign = reply.clone();
-        foreign["parts"][1]["sessionID"] = json!("ses_other");
-        assert!(child_events(child, &[user.clone(), foreign]).is_err());
-        let mut moved = reply;
-        moved["info"]["sessionID"] = json!("ses_other");
-        assert!(child_events(child, &[user, moved]).is_err());
     }
     struct Scripted(std::cell::RefCell<Vec<(String, u16, Value)>>);
     impl Native for Scripted {
@@ -2794,5 +1926,325 @@ mod tests {
             reconcile(&native, &record, "msg_X", "hello").unwrap(),
             Delivery::Refused(_)
         ));
+    }
+    fn opencode2(name: &str) -> Value {
+        let path = format!(
+            "{}/tests/fixtures/opencode2/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+    fn observed(messages: &str, active: bool, inbox: Value) -> Observed {
+        let mut page = opencode2(messages)["data"].as_array().unwrap().clone();
+        page.reverse();
+        Observed {
+            session: json!({"id":"ses_A","model":{"id":"local","providerID":"fixture","variant":"default"},"time":{"updated":5000}}),
+            active,
+            page: history::Page {
+                messages: page,
+                truncated: false,
+            },
+            inbox,
+            forms: json!([]),
+            permissions: json!([]),
+        }
+    }
+    fn status_record(id: &str) -> Value {
+        json!({"name":"opencode/project/one","run_id":"run","conversation_id":id,"cwd":"/x"})
+    }
+    fn no_inbox() -> Value {
+        json!({"data": []})
+    }
+    #[test]
+    fn an_idle_session_is_ready_for_messages_and_settings() {
+        let value = normalize(
+            &status_record("ses_A"),
+            Some(&observed("messages", false, no_inbox())),
+        );
+        assert_eq!(value["phase"], "idle");
+        assert_eq!(value["activity"], "idle");
+        assert_eq!(value["activity_summary"], "Ready");
+        assert_eq!(value["state"], "running");
+        assert_eq!(value["send_available"], true);
+        assert_eq!(value["settings_change_supported"], true);
+        assert_eq!(value["interrupt_supported"], false);
+        assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
+        assert_eq!(value["settings_model"], "fixture/local");
+        assert!(value["effort"].is_null());
+        assert_eq!(value["events"].as_array().unwrap().len(), 3);
+        assert_eq!(value["reply_id"], "msg_14bb2d63e001NhfRTKy4frROM8");
+        assert_eq!(value["activity_detail"], "Native OpenCode reply");
+        assert_eq!(value["prompt"], "hello");
+        assert_eq!(value["turn_started"], 1792271373.881);
+        assert_eq!(value["history_truncated"], false);
+        for key in [
+            "terminal_supported",
+            "attachments_supported",
+            "native_ui_available",
+            "compact_context_supported",
+        ] {
+            assert_eq!(value[key], false, "{key}");
+        }
+        assert_eq!(
+            value["action_reasons"]["pause"],
+            "OpenCode sessions have no separate process to pause"
+        );
+        assert_eq!(
+            value["action_reasons"]["fork"],
+            "OpenCode fork arrives in a later update"
+        );
+        assert_eq!(
+            value["action_reasons"]["terminate"],
+            "Use Stop for this OpenCode session"
+        );
+        assert_eq!(
+            value["compact_context_reason"],
+            "OpenCode compaction arrives in a later update"
+        );
+        assert!(value.get("attention_id").is_none());
+    }
+    #[test]
+    fn a_running_session_is_working_and_still_accepts_queued_messages() {
+        let inbox = opencode2("inbox_busy");
+        let value = normalize(
+            &status_record("ses_A"),
+            Some(&observed("messages", true, inbox)),
+        );
+        assert_eq!(value["phase"], "working");
+        assert_eq!(value["activity"], "busy");
+        assert_eq!(value["activity_summary"], "Working");
+        assert_eq!(value["send_available"], true);
+        assert_eq!(value["interrupt_supported"], true);
+        assert_eq!(value["settings_change_supported"], false);
+        let events = value["events"].as_array().unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[3]["delivery_state"], "queued");
+        assert_eq!(events[3]["detail"], "queued later");
+        assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
+        // Queued text is not the prompt the agent is working on.
+        assert_eq!(value["prompt"], "hello");
+    }
+    #[test]
+    fn after_stop_queued_messages_are_not_delivered_and_removable() {
+        let value = normalize(
+            &status_record("ses_A"),
+            Some(&observed("messages", false, opencode2("inbox_busy"))),
+        );
+        assert_eq!(value["phase"], "idle");
+        assert_eq!(value["events"][3]["delivery_state"], "not_delivered");
+        assert_eq!(
+            value["allowed_actions"],
+            json!(["rename", "forget", "remove_queued"])
+        );
+    }
+    #[test]
+    fn a_message_admitted_between_reads_is_shown_once() {
+        let inbox = json!({"data":[{"id":"msg_6kezDqwZEklnh8eFGVy3UbP6iX","type":"user","payload":{"text":"hello"},"time":{"created":1}}]});
+        let value = normalize(
+            &status_record("ses_A"),
+            Some(&observed("messages", false, inbox)),
+        );
+        assert_eq!(value["events"].as_array().unwrap().len(), 3);
+        assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
+    }
+    #[test]
+    fn pending_forms_or_permissions_need_attention_before_work() {
+        let forms = opencode2("forms_question");
+        let id = forms["data"][0]["sessionID"].as_str().unwrap();
+        let mut seen = observed("messages_question", true, no_inbox());
+        seen.forms = forms["data"].clone();
+        let value = normalize(&status_record(id), Some(&seen));
+        assert_eq!(value["phase"], "input");
+        assert_eq!(value["activity"], "attention");
+        assert_eq!(value["activity_summary"], "Needs attention");
+        assert_eq!(value["send_available"], false);
+        assert_eq!(value["settings_change_supported"], false);
+        assert_eq!(value["interrupt_supported"], true);
+        assert_eq!(
+            value["attention_id"],
+            "opencode_question:frm_14bb2df2500101YAecuyKBa9qA"
+        );
+        let permissions = opencode2("permissions");
+        let id = permissions["data"][0]["sessionID"].as_str().unwrap();
+        let mut seen = observed("messages", false, no_inbox());
+        seen.permissions = permissions["data"].clone();
+        let value = normalize(&status_record(id), Some(&seen));
+        assert_eq!(value["phase"], "input");
+        assert_eq!(value["pending_questions"][0]["kind"], "opencode_permission");
+        // Another session's request never needs this session's attention.
+        let value = normalize(&status_record("ses_A"), Some(&seen));
+        assert_eq!(value["phase"], "idle");
+    }
+    #[test]
+    fn a_failed_turn_is_a_provider_error_until_work_resumes() {
+        let record = status_record("ses_A");
+        let value = normalize(
+            &record,
+            Some(&observed("messages_error", false, no_inbox())),
+        );
+        assert_eq!(value["phase"], "error");
+        assert_eq!(value["activity"], "attention");
+        assert_eq!(
+            value["provider_error"]["message_id"],
+            "opencode-error-msg_14bb546e7001QR5FwtWF0VburA"
+        );
+        assert_eq!(value["provider_error"]["at"], 1792271533.799);
+        assert_eq!(value["last_error"], "Fixture provider rejected");
+        let busy = normalize(&record, Some(&observed("messages_error", true, no_inbox())));
+        assert_eq!(busy["phase"], "working");
+        assert!(busy.get("provider_error").is_none());
+    }
+    #[test]
+    fn an_unreadable_service_is_unknown_and_allows_only_forget() {
+        let record = status_record("ses_A");
+        let value = unavailable(&record, "OpenCode is not running on fixture".into());
+        assert_eq!(value["state"], "unknown");
+        assert_eq!(value["phase"], "unknown");
+        assert_eq!(value["activity"], "unknown");
+        assert_eq!(value["send_available"], false);
+        assert_eq!(value["interrupt_supported"], false);
+        assert_eq!(value["allowed_actions"], json!(["forget"]));
+        assert_eq!(value["inspection_unavailable"], true);
+        assert_eq!(
+            value["inspection_reason"],
+            "OpenCode is not running on fixture"
+        );
+        let legacy = legacy_row(&record);
+        assert_eq!(legacy["state"], "stopped");
+        assert_eq!(legacy["allowed_actions"], json!(["forget"]));
+        assert!(legacy.get("inspection_unavailable").is_none());
+    }
+    #[test]
+    fn a_streaming_reply_is_shown_but_not_yet_the_session_reply() {
+        let mut seen = observed("messages", true, no_inbox());
+        seen.page.messages.truncate(2);
+        seen.page.messages[1]["time"]
+            .as_object_mut()
+            .unwrap()
+            .remove("completed");
+        let value = normalize(&status_record("ses_A"), Some(&seen));
+        assert_eq!(value["events"][1]["detail"], "Native OpenCode reply");
+        assert!(value["reply_id"].is_null());
+        assert!(value["activity_detail"].is_null());
+    }
+    #[test]
+    fn effort_is_the_session_variant_and_truncation_is_reported() {
+        let mut seen = observed("messages", false, no_inbox());
+        seen.session["model"]["variant"] = json!("high");
+        seen.page.truncated = true;
+        let value = normalize(&status_record("ses_A"), Some(&seen));
+        assert_eq!(value["effort"], "high");
+        assert_eq!(value["history_truncated"], true);
+    }
+    #[test]
+    fn one_inspection_reads_each_route_once_and_the_activity_map_is_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "ses_IycejmWY8RpJq1aeBnnIpbaNAt";
+        let record = status_record(id);
+        let session = json!({"data":{"id":id,"location":{"directory":"/x"},"model":{"id":"local","providerID":"fixture"}}});
+        let messages = opencode2("messages");
+        let next = messages["cursor"]["next"].as_str().unwrap().to_owned();
+        let native = Scripted(std::cell::RefCell::new(vec![
+            (format!("GET /api/session/{id}"), 200, session.clone()),
+            (
+                format!("GET /api/session/{id}/form"),
+                200,
+                json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/permission"),
+                200,
+                json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/message?limit=100&order=desc"),
+                200,
+                messages,
+            ),
+            (
+                format!("GET /api/session/{id}/message?limit=100&cursor={next}"),
+                200,
+                json!({"data": [], "cursor": {"next": null}}),
+            ),
+            (
+                format!("GET /api/session/{id}/inbox"),
+                200,
+                opencode2("inbox_busy"),
+            ),
+        ]));
+        let active = opencode2("active_busy")["data"].clone();
+        let cache = dir.path().join("history.json");
+        let seen = observe(&native, &record, &active, || {
+            history::fetch_at(&native, &record, &cache)
+        })
+        .unwrap();
+        assert!(native.0.borrow().is_empty());
+        assert!(seen.active);
+        assert_eq!(seen.page.messages.len(), 3);
+        assert_eq!(normalize(&record, Some(&seen))["phase"], "working");
+        // The next poll reuses the cached history after one page.
+        let native = Scripted(std::cell::RefCell::new(vec![
+            (format!("GET /api/session/{id}"), 200, session),
+            (
+                format!("GET /api/session/{id}/form"),
+                200,
+                json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/permission"),
+                200,
+                json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/message?limit=100&order=desc"),
+                200,
+                opencode2("messages"),
+            ),
+            (
+                format!("GET /api/session/{id}/inbox"),
+                200,
+                json!({"data": []}),
+            ),
+        ]));
+        let seen = observe(&native, &record, &json!({}), || {
+            history::fetch_at(&native, &record, &cache)
+        })
+        .unwrap();
+        assert!(native.0.borrow().is_empty());
+        assert!(!seen.active);
+        assert_eq!(seen.page.messages.len(), 3);
+    }
+    #[test]
+    fn a_moved_session_or_invalid_answers_fail_the_inspection() {
+        let record = status_record("ses_A");
+        let moved = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/ses_A".into(),
+            200,
+            json!({"data":{"id":"ses_A","location":{"directory":"/elsewhere"}}}),
+        )]));
+        let none = || -> Result<history::Page> { panic!("no history read") };
+        assert!(observe(&moved, &record, &json!({}), none).is_err());
+        let invalid = Scripted(std::cell::RefCell::new(vec![
+            (
+                "GET /api/session/ses_A".into(),
+                200,
+                json!({"data":{"id":"ses_A","location":{"directory":"/x"}}}),
+            ),
+            (
+                "GET /api/session/ses_A/form".into(),
+                200,
+                json!({"data": {}}),
+            ),
+        ]));
+        assert!(observe(&invalid, &record, &json!({}), none).is_err());
+        let refused = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/active".into(),
+            500,
+            json!({"message": "busy"}),
+        )]));
+        assert_eq!(
+            active_sessions(&refused).unwrap_err(),
+            "OpenCode HTTP 500: busy"
+        );
     }
 }

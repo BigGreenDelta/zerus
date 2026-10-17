@@ -1387,10 +1387,13 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         .map_err(|e| e.to_string())?;
     let (provider_complete, mut status) = if string(&parent,"agent")=="opencode" {
         let detail=opencode::inspect(name,request.agent_id.as_deref())?;
+        // An unreadable service or an OpenCode 1 binding has no history to index.
+        if let Some(reason)=detail["inspection_reason"].as_str() {return Err(reason.into());}
         // A child view carries its exact parent separately from its own ID.
         if detail["run_id"]!=parent["run_id"] || detail.get("parent_conversation_id").unwrap_or(&detail["conversation_id"])!=&parent["conversation_id"]
             || detail.get("agent_id").map(|id| Some(id.as_str().unwrap_or_default())!=request.agent_id.as_deref()).unwrap_or(request.agent_id.is_some()) {return Err("OpenCode history identity changed".into());}
-        for row in detail["events"].as_array().into_iter().flatten() { add(&db,&key(&parent,&request),row.clone(),"journal")?; }
+        // Queued inbox items are not native history until OpenCode admits them.
+        for row in detail["events"].as_array().into_iter().flatten().filter(|row| row.get("delivery_state").is_none()) { add(&db,&key(&parent,&request),row.clone(),"journal")?; }
         let done=detail["history_truncated"]==false;
         (done,json!({"provider":if done{"complete"}else{"partial_native_window"}}))
     } else if string(&parent, "agent") == "dsh" {

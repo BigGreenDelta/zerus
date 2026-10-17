@@ -71,7 +71,7 @@ pub(super) fn project(models: &Value) -> Vec<Value> {
 }
 
 /// Percent-encodes every byte outside the RFC 3986 unreserved set.
-fn encode(text: &str) -> String {
+pub(super) fn encode(text: &str) -> String {
     let mut out = String::new();
     for byte in text.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {

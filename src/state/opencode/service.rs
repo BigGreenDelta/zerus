@@ -1030,4 +1030,70 @@ mod tests {
             ]
         );
     }
+    fn body(bytes: &[u8]) -> Result<Value> {
+        decode_response(bytes).map(|response| response.body)
+    }
+    #[test]
+    fn chunked_native_response_is_bounded_and_complete() {
+        assert_eq!(
+            body(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{\"a\":1}\r\n0\r\n\r\n"
+            )
+            .unwrap(),
+            json!({"a":1})
+        );
+        assert!(body(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{}").is_err());
+    }
+    #[test]
+    fn partial_reads_cannot_extend_the_absolute_native_deadline() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let worker = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = peer.read(&mut request);
+            peer.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n")
+                .unwrap();
+            for _ in 0..30 {
+                if peer.write_all(b"n").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = Instant::now();
+        let reg = Registration {
+            id: String::new(),
+            version: String::new(),
+            port,
+            pid: 0,
+            password: Some("fixture".into()),
+        };
+        let result = request(
+            &reg,
+            "GET",
+            "/fixture",
+            None,
+            started + Duration::from_millis(120),
+        );
+        let elapsed = started.elapsed();
+        assert!(result.is_err());
+        assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+        worker.join().unwrap();
+    }
+    #[test]
+    fn malformed_native_http_never_acknowledges_mutations() {
+        for raw in [
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnull\r\n0\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: junk\r\n\r\nnull",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnull\r\n0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nnull",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnullXX0\r\n\r\n",
+        ] {assert!(body(raw).is_err(),"{}",String::from_utf8_lossy(raw));}
+        assert_eq!(
+            body(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap(),
+            Value::Null
+        );
+        assert_eq!(body(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnull\r\n0\r\nX-Native: yes\r\n\r\n").unwrap(),Value::Null);
+    }
 }
