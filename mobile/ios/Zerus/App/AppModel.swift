@@ -270,13 +270,15 @@ final class AppModel {
         guard storageReady, !demo, !connections.isEmpty else { return }
         Task {
             await notifications.refreshAuthorization()
+            let active = UIApplication.shared.applicationState == .active
             if notifications.authorization == .notDetermined && notifications.preferences.master {
-                await notifications.requestAuthorization()
+                // The system prompt only appears in the foreground; a background launch asks later.
+                if active { await notifications.requestAuthorization() }
             } else if notifications.allowed {
                 UIApplication.shared.registerForRemoteNotifications()
                 await notifications.registerAll()
             }
-            if UIApplication.shared.applicationState == .active { notifications.setActive(true) }
+            if active { notifications.setActive(true) }
         }
     }
 
@@ -325,6 +327,7 @@ final class AppModel {
             connections = next
             if demo { stopPreview() }
             refresh(explicit: true)
+            startNotifications()
             return true
         } catch {
             self.error = Self.message(error, fallback: "Pairing failed.")
