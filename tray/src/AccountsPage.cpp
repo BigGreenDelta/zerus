@@ -4,6 +4,7 @@
 #include "AccountCatalog.h"
 #include "AccountChoice.h"
 #include "IdentityBadge.h"
+#include "LocalSessionHost.h"
 #include "MachinePlatform.h"
 #include "WorkspaceIcons.h"
 #include "WorkspacePageHeader.h"
@@ -164,8 +165,12 @@ QStringList accountHosts(const FleetState &fleet, const QString &explicitHost = 
     if (!explicitHost.isEmpty() && !hosts.contains(explicitHost)) hosts << explicitHost;
     return hosts;
 }
-QString remoteOnlyHint() {
-    return QObject::tr("Add a remote machine in Machines to manage agent accounts; this computer runs no agents.");
+// Without remote machines, a control console sends you to Machines: to add one or,
+// where Machines offers it (spec D16), to enable local sessions.
+QString remoteOnlyHint(const FleetState &fleet) {
+    return LocalSessionHost::canEnable(fleet.local())
+        ? QObject::tr("To manage agent accounts, enable local sessions for this computer in Machines or add a remote machine.")
+        : QObject::tr("Add a remote machine in Machines to manage agent accounts; this computer runs no agents.");
 }
 QString machineChoice(const FleetState &fleet, const QString &host) {
     return host.isEmpty() ? fleet.local().host + QObject::tr(" (this machine)") : host;
@@ -385,7 +390,7 @@ void AccountsPage::updateRefreshState()
     const auto caption = pending ? tr("Updating accounts… %1 remaining").arg(pending) : tr("Refresh accounts");
     m_refresh->setToolTip(caption); m_refresh->setAccessibleName(caption);
     QSet<QString> loadedHosts;for(const auto &value:m_displayProfiles)loadedHosts.insert(value.toObject()["host"].toString());
-    if (accountHosts(m_fleet, m_explicitHost).isEmpty()) { m_summary->setText(remoteOnlyHint()); return; }
+    if (accountHosts(m_fleet, m_explicitHost).isEmpty()) { m_summary->setText(remoteOnlyHint(m_fleet)); return; }
     const int accounts = m_list->count(), machines = loadedHosts.size();
     const auto loaded = tr("%1, %2").arg(accounts == 1 ? tr("1 account") : tr("%1 accounts").arg(accounts),
         machines == 1 ? tr("1 machine loaded") : tr("%1 machines loaded").arg(machines));
@@ -535,7 +540,7 @@ void AccountsPage::selectionChanged()
     m_permissions->setToolTip(tr("Change permission defaults on %1").arg(p["machine"].toString()));
     m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool() && !nativeConfig); m_remove->setEnabled(has && idle && online(p["host"].toString()));
     const bool machines = !accountHosts(m_fleet, m_explicitHost).isEmpty();
-    m_add->setEnabled(idle && machines); m_add->setToolTip(machines ? QString() : remoteOnlyHint());
+    m_add->setEnabled(idle && machines); m_add->setToolTip(machines ? QString() : remoteOnlyHint(m_fleet));
     updateRefreshState();
     m_install->setVisible(has && !p["installed"].toBool()); m_install->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
     m_remove->setText(has ? tr("Remove from %1…").arg(p["machine"].toString()) : tr("Remove…"));
@@ -712,8 +717,8 @@ void AccountsPage::add()
         const QString openCode=tr("Use OpenCode's native configuration on %1 for new sessions again.").arg(where()),
             restore=tr("Use the saved sign-in on %1. The account will be available for new sessions again.").arg(where()),
             key=tr("Configure a DeepSeek API key on the selected machine."),fresh=tr("Create a separate account profile on the selected machine, then sign in.");
-        hint->reserve({remoteOnlyHint(),openCode,restore,key,fresh});
-        hint->setText(none?remoteOnlyHint():reuse&&chosen=="opencode"?openCode:reuse?restore:chosen=="dsh"?key:fresh);
+        hint->reserve({remoteOnlyHint(m_fleet),openCode,restore,key,fresh});
+        hint->setText(none?remoteOnlyHint(m_fleet):reuse&&chosen=="opencode"?openCode:reuse?restore:chosen=="dsh"?key:fresh);
     };
     const auto populate=[=] {
         const QSignalBlocker blocker(saved);saved->clear();const auto chosen=agent();

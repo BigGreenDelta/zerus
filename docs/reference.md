@@ -2529,12 +2529,15 @@ machines only: in New session, Overview, the tray menu, Accounts, Projects and
 search. The Machines page lists this computer as a control console without SSH
 settings, with **Enable local sessions** (`hgs.exe session-host install`, after a
 confirmation), and shows the session host's state, PID, ConPTY, integrity level
-and Windows session in both modes. Automatic recovery settings of a control
-console are saved to the first reachable remote machine, and it is listed at most
-once every 15 seconds. With local sessions enabled, New session and Accounts offer
-this computer without DeepSeek and OpenCode, the shell entry is
-**Run PowerShell**, voice messages to its sessions are disabled with the reason as
-the tooltip, and it is listed at most once every 5 seconds. In both modes,
+and Windows session in both modes. Without remote machines, New session, Accounts
+and automatic recovery send you to Machines: to add a remote machine and, where
+Machines offers **Enable local sessions**, to enable them. New session then has
+**Open Machines**, which only selects this computer there. Automatic recovery
+settings of a control console are saved to the first reachable remote machine, and
+it is listed at most once every 15 seconds. With local sessions enabled, New
+session and Accounts offer this computer without DeepSeek and OpenCode, the shell
+entry is **Run PowerShell**, voice messages to its sessions are disabled with the
+reason as the tooltip, and it is listed at most once every 5 seconds. In both modes,
 Settings → Mobile connection is hidden and no desktop presence is recorded.
 Attention notices are tray notifications with a taskbar badge. A start without
 options opens the workspace, because Windows 11 first hides a new notification

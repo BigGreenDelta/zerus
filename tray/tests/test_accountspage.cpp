@@ -435,7 +435,24 @@ void TestAccountsPage::controlOnlyComputerManagesAccountsOnRemoteMachinesOnly()
     {
         AccountsPage page(FakeCli::program(m_script)); page.setFleet(lonely); page.show();
         auto *add = page.findChild<QPushButton *>("addAccount");
-        QTRY_VERIFY(hinted(page)); QVERIFY(!add->isEnabled()); QVERIFY(add->toolTip().startsWith("Add a remote machine in Machines"));
+        QTRY_VERIFY(hinted(page)); QVERIFY(!add->isEnabled());
+        QCOMPARE(add->toolTip(), QString("Add a remote machine in Machines to manage agent accounts; this computer runs no agents."));
+    }
+    {
+        // A Windows console whose CLI reports a session host can enable local
+        // sessions in Machines (spec D16): the hint names that way too.
+        auto windows = lonely; auto console = windows.local(); console.metrics = QJsonObject{{"platform", "windows"}};
+        console.localHost = QJsonObject{{"state", "not-installed"}}; windows.setLocal(console, 0);
+        const QString both("To manage agent accounts, enable local sessions for this computer in Machines or add a remote machine.");
+        AccountsPage page(FakeCli::program(m_script)); page.setFleet(windows); page.show();
+        auto *add = page.findChild<QPushButton *>("addAccount");
+        const auto shown = [&] {
+            for (auto *label : page.findChildren<QLabel *>()) if (label->isVisible() && label->text() == both) return true;
+            return false;
+        };
+        QTRY_VERIFY(shown()); QVERIFY(!hinted(page)); QVERIFY(!add->isEnabled()); QCOMPARE(add->toolTip(), both);
+        // Without a session host Machines offers nothing: only a remote machine helps.
+        page.setFleet(lonely); QTRY_VERIFY(hinted(page)); QVERIFY(!shown());
     }
     auto remote = fleet(); local = remote.local(); local.localSessions = false; remote.setLocal(local, 0);
     AccountsPage page(FakeCli::program(m_script)); page.setFleet(remote); page.show();

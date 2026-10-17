@@ -207,6 +207,7 @@ private slots:
     void automaticApprovalSettingsNavigation();
     void mobileConnectionSettingsOfferTheSharedDeliveryChoice();
     void controlOnlyComputerOffersOnlyRemoteMachines();
+    void enablableConsoleNamesBothWaysToStartSessions();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
     void controlOnlyComputerAloneExplainsRecovery();
     void enabledWindowsComputerIsNoMobileGateway();
@@ -9148,9 +9149,52 @@ void TestSessionsWindow::controlOnlyComputerOffersOnlyRemoteMachines(){
     FleetState alone;alone.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     NewSessionDialog lonely(program(),alone,{},"codex");lonely.show();
     QCOMPARE(lonely.findChild<QComboBox *>("launchComputer")->count(),0);
-    QTRY_VERIFY(lonely.findChild<QLabel *>("launchError")->text().contains("Add a remote machine"));
+    QTRY_COMPARE(lonely.findChild<QLabel *>("launchError")->text(),QString("Add a remote machine in Machines to start sessions from this computer."));
     QVERIFY(!lonely.findChild<QPushButton *>("primary")->isEnabled());
     QVERIFY(!lonely.findChild<QPushButton *>("browseLaunchFolder")->isEnabled());
+    QVERIFY(lonely.findChild<QPushButton *>("launchOpenMachines")->isVisible());
+    QVERIFY(!launch.findChild<QPushButton *>("launchOpenMachines")->isVisible());
+}
+
+namespace {
+// A Windows control console whose CLI reports a session host, alone: Machines
+// offers Enable local sessions for it (spec D16).
+FleetState enablableConsole()
+{
+    BoxState local;local.host="windows-pc";local.ok=true;local.localSessions=false;local.metrics={{"platform","windows"}};
+    local.localHost={{"state","not-installed"},{"pid",QJsonValue::Null},{"protocol",QJsonValue::Null},{"conpty",QJsonValue::Null},
+        {"integrity",QJsonValue::Null},{"windows_session",QJsonValue::Null}};
+    FleetState fleet;fleet.setLocal(local,QDateTime::currentMSecsSinceEpoch());return fleet;
+}
+}
+
+// Without remote machines a console that can enable local sessions names both
+// ways, and New session only opens Machines with this computer selected.
+void TestSessionsWindow::enablableConsoleNamesBothWaysToStartSessions(){
+    const auto lonely=enablableConsole();
+    SessionsWindow window(program());window.resize(1100,760);window.setFleet(lonely);window.show();
+    bool checked=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget());QVERIFY(dialog);
+        QTimer::singleShot(5000,dialog,&QDialog::reject);
+        QCOMPARE(dialog->findChild<QComboBox *>("launchComputer")->count(),0);
+        auto *error=dialog->findChild<QLabel *>("launchError");
+        QTRY_COMPARE(error->text(),QString("Enable local sessions for this computer in Machines, or add a remote machine."));
+        // The hint follows each poll: without a session host only a remote machine helps.
+        auto plain=lonely;auto local=plain.local();local.localHost={};plain.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+        dialog->setFleet(plain);QCOMPARE(error->text(),QString("Add a remote machine in Machines to start sessions from this computer."));
+        dialog->setFleet(lonely);QCOMPARE(error->text(),QString("Enable local sessions for this computer in Machines, or add a remote machine."));
+        auto *open=dialog->findChild<QPushButton *>("launchOpenMachines");QVERIFY(open->isVisible());QVERIFY(open->isEnabled());
+        if(const auto preview=qEnvironmentVariable("HGS_CONTROL_PREVIEW_DIR");!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(dialog->grab().save(preview+"/launch-enable.png"));}
+        checked=true;open->click();
+    });
+    window.findChild<QPushButton *>("newSession")->click();QVERIFY(checked);
+    QVERIFY(!QApplication::activeModalWidget());
+    auto *machines=window.findChild<QWidget *>("machinesPage");QTRY_VERIFY(machines->isVisible());
+    QTRY_COMPARE(machines->findChild<QListWidget *>("machineProfiles")->currentItem()->data(Qt::UserRole).toString(),QString("@local"));
+    // Only navigation: enabling stays behind its confirmation on the page.
+    auto *enable=machines->findChild<QPushButton *>("enableLocalSessions");QVERIFY(enable->isVisible());
+    QVERIFY(!machines->findChild<QMessageBox *>("enableLocalSessionsConfirm"));
 }
 
 void TestSessionsWindow::controlOnlyComputerKeepsRecoveryOnRemoteMachines(){
@@ -9190,10 +9234,16 @@ void TestSessionsWindow::controlOnlyComputerAloneExplainsRecovery(){
     SessionsWindow window(program());window.resize(1100,900);window.setFleet(alone);window.show();
     window.findChild<QPushButton *>("workspaceSettings")->click();static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"))->openRecovery();
     auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
-    QTRY_VERIFY(status->text().startsWith("Add a remote machine in Machines"));QVERIFY(!status->text().contains("Synchronized"));
+    QTRY_COMPARE(status->text(),QString("Add a remote machine in Machines to configure automatic recovery; this computer runs no agents."));
+    QVERIFY(!status->text().contains("Synchronized"));
     QVERIFY(!window.findChild<QPushButton *>("recoverySave")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryEnabled")->isEnabled());
     QVERIFY(!window.findChild<QCheckBox *>("recoveryRule_service")->isEnabled());
+    // Where Machines offers Enable local sessions, the status names it too.
+    window.setFleet(enablableConsole());
+    QTRY_COMPARE(status->text(),QString("To configure automatic recovery, enable local sessions for this computer in Machines or add a remote machine."));
+    QVERIFY(!window.findChild<QPushButton *>("recoverySave")->isEnabled());
+    window.setFleet(alone);QTRY_VERIFY(status->text().startsWith("Add a remote machine in Machines"));
 }
 
 // An enabled Windows computer runs sessions, so it keeps its recovery policy, but

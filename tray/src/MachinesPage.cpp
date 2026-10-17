@@ -2,6 +2,7 @@
 #include <QScopedValueRollback>
 #include "HgsClient.h"
 #include "MachineAppearance.h"
+#include "LocalSessionHost.h"
 #include "MachinePlatform.h"
 #include "WorkspaceIcons.h"
 #include "WorkspacePageHeader.h"
@@ -278,7 +279,9 @@ void MachinesPage::setTheme(bool dark) {
     WorkspacePageHeader::theme(m_refresh, m_add, tr("Refresh machines"), dark);
 }
 void MachinesPage::setFleet(const FleetState &fleet) {
-    const bool console = fleet.local().localSessions != m_fleet.local().localSessions;
+    // The origin text also names Enable local sessions while it is offered.
+    const bool console = fleet.local().localSessions != m_fleet.local().localSessions
+        || LocalSessionHost::canEnable(fleet.local()) != LocalSessionHost::canEnable(m_fleet.local());
     // Windows: its platform and session host decide what this computer offers.
     const bool host = fleet.local().localHost != m_fleet.local().localHost
         || MachinePlatform::of(fleet.local().metrics, true) != MachinePlatform::of(m_fleet.local().metrics, true);
@@ -319,7 +322,8 @@ void MachinesPage::loadSelection() {
     m_port->setValue(c.value("port").toInt()); m_key->setText(c.value("identity_file").toString()); m_enabled->setChecked(c.value("enabled").toBool(true));
     // A control-only computer (hgs.exe on Windows) runs no agents of its own.
     m_origin->setText(local ? (m_fleet.local().localSessions ? tr("This device runs Zerus. Add a remote machine to manage its agents over SSH.")
-                                                             : tr("This computer is a control console: agents run on the remote machines you add here, over SSH.")) :
+                               : tr("This computer is a control console: agents run on the remote machines you add here, over SSH.")
+                                 + (LocalSessionHost::canEnable(m_fleet.local()) ? tr(" Enable local sessions to run them on this computer too.") : QString())) :
         (row.value("source").toString() == "config" ? tr("This alias comes from HGS configuration. ") : QString()) +
         tr("SSH supplies inherited values from your OpenSSH configuration and defaults. Fields below are Zerus overrides; blank fields keep the inherited value.") + (m_data.value("environment_override").toBool() ? tr(" HGS_PEERS in the environment overrides the list of monitored machines.") : QString()));
     m_dirty = false; m_loading = false; m_log->hide(); report(local ? m_localNotice : QString()); updateControls(); resolveConnection();
@@ -391,7 +395,7 @@ void MachinesPage::updateControls() {
     const auto &host = m_fleet.local().localHost;
     const bool windowsHost = local && !m_new && !host.isEmpty()
         && MachinePlatform::of(m_fleet.local().metrics, true) == MachinePlatform::Style::Windows;
-    m_enableLocal->setVisible(windowsHost && console); m_enableLocal->setEnabled(!busy);
+    m_enableLocal->setVisible(local && !m_new && LocalSessionHost::canEnable(m_fleet.local())); m_enableLocal->setEnabled(!busy);
     m_localHost->setVisible(windowsHost);
     if (windowsHost) {
         const auto state = host.value("state").toString();

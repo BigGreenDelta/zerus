@@ -33,6 +33,8 @@ signals:
     void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,const QString &addFolder,const QString &model);
     void manageProjectsRequested(const QString &host);
     void projectFoldersRequested(const QString &project);
+    // Open Machines with this computer selected (offered without a computer).
+    void machinesRequested();
 private:
     void loadMachines();
     void loadFolders(const QString &selectedPath = {});
@@ -83,7 +85,7 @@ private:
     QString m_folderContext;
     QLineEdit *m_name;
     QLabel *m_projectPath,*m_preview,*m_error,*m_nameError,*m_modelLabel;
-    QPushButton *m_start,*m_browse,*m_autoWorktree,*m_plainFolder,*m_worktreeOptions,*m_cancel;
+    QPushButton *m_start,*m_browse,*m_autoWorktree,*m_plainFolder,*m_worktreeOptions,*m_cancel,*m_openMachines;
     QAction *m_worktrees,*m_newWorktree;
     QLabel *m_worktreeTarget;
     QString m_generatedBranch;

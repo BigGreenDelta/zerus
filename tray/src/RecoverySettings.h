@@ -46,6 +46,9 @@ public:
     // A control-only computer (hgs.exe on Windows) keeps no recovery policy of its
     // own: only the remote machines are read, and a save goes to one of them.
     void setLocalSessions(bool enabled){if(enabled==local)return;local=enabled;copies.remove({});errors.remove({});refresh();}
+    // Machines offers Enable local sessions for this console (spec D16), which the
+    // status then names besides adding a remote machine.
+    void setLocalSessionsOffered(bool offered){if(offered==enableOffered)return;enableOffered=offered;if(changed)changed();}
     QJsonObject envelope()const{return best;}
     // Machines that keep a recovery policy: none on a control-only computer
     // without remote machines.
@@ -53,7 +56,8 @@ public:
     // A save has a machine to go to: this one, or a reachable remote machine.
     bool canSave()const{return !busy()&&!best.isEmpty()&&(local||!saveTarget().isEmpty());}
     QString status()const {
-        if(!hasMachines())return tr("Add a remote machine in Machines to configure automatic recovery; this computer runs no agents.");
+        if(!hasMachines())return enableOffered?tr("To configure automatic recovery, enable local sessions for this computer in Machines or add a remote machine.")
+                                              :tr("Add a remote machine in Machines to configure automatic recovery; this computer runs no agents.");
         QStringList missing;for(const auto &host:hosts())if(errors.contains(host)||!copies.contains(host))missing<<label(host);
         if(!pending.isEmpty())return tr("Synchronizing recovery settings…");
         if(!missing.isEmpty())return tr("Waiting for %1. Changes will sync when connected; those machines keep their last settings.").arg(missing.join(", "));
@@ -82,7 +86,7 @@ private:
         for(const auto &host:hosts())if(!errors.contains(host)&&copies.contains(host)&&compare(copies[host],best)<0)
             send(host,"sync",best.value("policy").toObject());
     }
-    HgsClient client;QTimer timer;QStringList machines;QJsonObject best;bool local=true;
+    HgsClient client;QTimer timer;QStringList machines;QJsonObject best;bool local=true,enableOffered=false;
     QMap<QString,QJsonObject> copies;QMap<QString,QString> errors;QMap<quint64,Request> pending;QString saveError;
 };
 
