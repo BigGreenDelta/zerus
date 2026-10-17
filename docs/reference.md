@@ -57,7 +57,8 @@ Native conversation IDs appear only in **Details** on desktop and **Session
 details → Overview** on Android, labeled **Session ID** with a dedicated copy
 icon immediately after the exact identifier. The desktop icon uses the same
 borderless style as header actions. The ID stays on one line whenever the pane
-has room. The icon copies the ID as plain text;
+has room. The icon copies the ID as plain text, as does the **Copy session ID**
+icon in the desktop session header, which copies without showing the ID;
 **Copy session reference** remains in the desktop session context menu and copies
 the portable URI. Successful text copies use the window's status confirmation
 without a system notification on Linux or macOS. Before that ID is reported,
@@ -68,6 +69,15 @@ parts of conversation, run, archive and reported child IDs; a child match
 identifies its parent conversation.
 Machine, project and state filters still apply. Desktop ID results show the
 matched identifier and expose its complete value in the tooltip.
+
+The desktop session header keeps frequent actions as icons: open the session
+folder, open a shell there, **Copy session ID** and **Clear session**. Its **⋯**
+menu holds **Rename…**, **Fork session…**, **Copy connect command** (**Open
+externally** without clipboard mode, or the native DeepSeek UI), **Pause
+session** or **Resume session**, **Start fresh…**, **Move to archive** and
+**Terminate session…**. A stopped session hides the Clear session icon and offers
+**Start fresh…** in the menu; an archived session shows **Restore session** in its
+place.
 
 Identifiers such as `zerus-ab12` are Beads task numbers, not session IDs. Desktop
 message search finds their public mentions; Android session search finds mentions

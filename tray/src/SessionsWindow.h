@@ -178,6 +178,7 @@ private:
     // Opens a session file like a browser download; see ExternalFile.h.
     void openExternalFile(const QString &path, bool otherMachine);
     void jumpToLatestActivity(QListWidgetItem *item);
+    void copySessionIdentity();
     void openSession();
     void changeSession();
     // Spec D5: asks before resuming or restoring this selected session starts its
@@ -434,8 +435,8 @@ private:
     void refreshAccountUsage(bool force = false);
     void renderAccountUsage();
     void updateDashboardAccounts(bool request = false, bool force = false);
-    QPushButton *m_open, *m_shell, *m_fileManager, *m_pause, *m_more;
-    QAction *m_renameAction, *m_forkAction, *m_clearAction, *m_freshAction, *m_archiveAction, *m_forgetAction;
+    QPushButton *m_shell, *m_fileManager, *m_copyHeaderId, *m_clear, *m_restore, *m_more;
+    QAction *m_renameAction, *m_forkAction, *m_openAction, *m_changeAction, *m_freshAction, *m_archiveAction, *m_forgetAction;
     QAction *m_markAllReadAction = nullptr;
     QMenu *m_sessionMenu;
     QTextBrowser *m_children = nullptr, *m_info = nullptr;

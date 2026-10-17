@@ -538,29 +538,36 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_badge = label({}, "badge"); m_badge->setFixedHeight(24);
     badges->addWidget(m_badge, 0, Qt::AlignVCenter); badges->addSpacing(6);
     m_model = label({}, "sessionModel", details); m_model->setMaximumWidth(260);
-    m_open = iconButton("external", tr("Open externally"), "openSessionAction");
     m_shell = iconButton("terminal", tr("Open shell in session folder"), "openFolderShellAction");
     connect(m_shell, &QPushButton::clicked, this, &SessionsWindow::openFolderShell);
     m_fileManager = iconButton("folder", tr("Open session folder in file manager"), "openSessionFolderAction");
     connect(m_fileManager, &QPushButton::clicked, this, &SessionsWindow::openSessionFolder);
-    m_pause = iconButton("pause", tr("Pause session"), "pauseAction");
-    connect(m_open, &QPushButton::clicked, this, &SessionsWindow::openSession);
-    connect(m_pause, &QPushButton::clicked, this, &SessionsWindow::changeSession);
-    badges->addWidget(m_fileManager); badges->addWidget(m_shell); badges->addWidget(m_open); badges->addWidget(m_pause);
+    // The header copies the same identity as Details; connect commands live in the menu.
+    m_copyHeaderId = iconButton("copy", tr("Copy session ID"), "headerCopySessionIdAction");
+    connect(m_copyHeaderId, &QPushButton::clicked, this, &SessionsWindow::copySessionIdentity);
+    m_clear = iconButton("clear", tr("Clear session"), "clearSessionAction");
+    connect(m_clear, &QPushButton::clicked, this, &SessionsWindow::clearContext);
+    // Pause and resume live in the menu; only an archived session keeps a header Restore.
+    m_restore = iconButton("play", tr("Restore session"), "restoreSessionAction"); m_restore->setProperty("archiveRestore", true);
+    connect(m_restore, &QPushButton::clicked, this, &SessionsWindow::changeSession);
+    badges->addWidget(m_fileManager); badges->addWidget(m_shell); badges->addWidget(m_copyHeaderId); badges->addWidget(m_clear); badges->addWidget(m_restore);
     m_more = iconButton("more", tr("Session actions"), "more");
-    for (auto *button : {m_fileManager, m_shell, m_open, m_pause, m_more}) {
+    for (auto *button : {m_fileManager, m_shell, m_copyHeaderId, m_clear, m_restore, m_more}) {
         button->setProperty("sessionHeaderAction", true);
         configureWorkspaceIconButton(button, button->property("glyph").toString(), button->toolTip(), m_dark);
     }
+    m_clear->setToolTip(tr("Clear session\nStart this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
     auto *moreMenu = new QMenu(m_more);
     m_renameAction = moreMenu->addAction(tr("Rename…")); m_renameAction->setObjectName("renameSessionAction");
     connect(m_renameAction, &QAction::triggered, this, &SessionsWindow::renameSession);
     m_forkAction = moreMenu->addAction(tr("Fork session…")); m_forkAction->setObjectName("forkSessionAction");
     connect(m_forkAction, &QAction::triggered, this, &SessionsWindow::forkSession);
     moreMenu->addSeparator();
-    m_clearAction = moreMenu->addAction(tr("Clear session…")); m_clearAction->setObjectName("clearSessionAction");
-    m_clearAction->setToolTip(tr("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
-    connect(m_clearAction, &QAction::triggered, this, &SessionsWindow::clearContext);
+    m_openAction = moreMenu->addAction(tr("Copy connect command")); m_openAction->setObjectName("openSessionAction");
+    connect(m_openAction, &QAction::triggered, this, &SessionsWindow::openSession);
+    m_changeAction = moreMenu->addAction(tr("Pause session")); m_changeAction->setObjectName("pauseAction");
+    connect(m_changeAction, &QAction::triggered, this, &SessionsWindow::changeSession);
+    moreMenu->addSeparator();
     m_freshAction = moreMenu->addAction(tr("Start fresh…")); m_freshAction->setObjectName("freshSessionAction");
     m_freshAction->setToolTip(tr("Start this stopped session with a new conversation and the same folder, account and model."));
     connect(m_freshAction, &QAction::triggered, this, &SessionsWindow::startFresh);
@@ -1184,11 +1191,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_copySessionId = iconButton("copy", tr("Copy session ID"), "copySessionIdAction"); m_copySessionId->setAutoDefault(false);
     m_copySessionId->setProperty("sessionHeaderAction", true);
     configureWorkspaceIconButton(m_copySessionId, "copy", tr("Copy session ID"), m_dark);
-    connect(m_copySessionId, &QPushButton::clicked, this, [this] {
-        const auto value = m_detailsIdValue->property("copyValue").toString();
-        if (!selected() || value.isEmpty()) return;
-        emit copyTextRequested(value); showNotice(tr("%1 copied").arg(m_detailsIdTitle->text()));
-    });
+    connect(m_copySessionId, &QPushButton::clicked, this, &SessionsWindow::copySessionIdentity);
     identityRow->addWidget(m_copySessionId); identityRow->addStretch(); identityLayout->addLayout(identityRow);
     detailsLayout->addWidget(identity); detailsLayout->addWidget(m_info,1);
     auto *contextRow=new QHBoxLayout;m_detailsContext=new QLabel;m_detailsContext->setObjectName("detailsContext");m_detailsContext->setWordWrap(true);
@@ -3217,12 +3220,12 @@ void SessionsWindow::renderDetails()
     m_detailsClear->setEnabled(canClear);
     // A Claude chooser still allows Dismiss and clear.
     const auto clearReason=reported && !m_details.value("clear_context_dismiss").toBool()?contextActionReason(m_details,"clear"):QString();
-    explainContextAction(m_detailsClear,clearReason);explainContextAction(m_clearAction,clearReason);
+    explainContextAction(m_detailsClear,clearReason);explainContextAction(m_clear,clearReason);
     m_detailsClear->setText(m_clearRequest?tr("Clearing…"):tr("Clear session"));
     // A live agent clears natively; a stopped one starts fresh instead.
     const bool stopped=entry && (entry->session.state=="paused" || entry->session.state=="stopped");
-    m_clearAction->setVisible(mainContext && !stopped);m_clearAction->setEnabled(canClear);
-    m_clearAction->setText(m_clearRequest?tr("Clearing…"):tr("Clear session…"));
+    m_clear->setVisible(mainContext && !stopped && !(entry && entry->session.state=="archived"));m_clear->setEnabled(canClear);
+    m_clear->setAccessibleName(m_clearRequest?tr("Clearing…"):tr("Clear session"));
     m_freshAction->setVisible(mainContext && stopped);m_freshAction->setEnabled(entry && canStartStopped(*entry));
     m_detailsContext->setText(tr("Context: %1").arg(m_contextUsage->text().isEmpty()?tr("Not reported"):m_contextUsage->text()));m_detailsContext->setToolTip(m_contextUsage->toolTip());
     m_subagentContextUsage->setData(entry?m_subagentDetails.value("session_usage").toObject():QJsonObject(),recorded);
@@ -3232,7 +3235,7 @@ void SessionsWindow::renderDetails()
         m_hint->clear(); m_hint->setProperty("active", false); m_hint->hide();
         m_composer->setSessionStatus({}); updateSessionFeedback();
         m_detailsIdValue->setText(tr("Not confirmed")); m_detailsIdValue->setProperty("copyValue", QString());
-        m_copySessionId->setEnabled(false);
+        m_copySessionId->setEnabled(false); m_copyHeaderId->setEnabled(false);
         m_question->setQuestion({}, {}); m_question->hide();
         m_terminal->setAvailable(false, tr("Select a running session."));
         m_composer->setAvailability(false, tr("Select a session.")); return;
@@ -3299,22 +3302,19 @@ void SessionsWindow::renderDetails()
     const bool answering = std::any_of(m_pendingAnswers.cbegin(), m_pendingAnswers.cend(), [this](const PendingAnswer &p) { return p.key == m_selectedKey; });
     const bool updating = terminating || m_pending || m_settingsRequest || !m_renameKey.isEmpty() || m_composer->isSending(m_selectedKey) || answering;
     const bool occupied = archived && archiveNameOccupied(*entry);
-    if (m_pause->property("archiveRestore").toBool() != archived) {
-        m_pause->setProperty("archiveRestore", archived); m_pause->style()->unpolish(m_pause); m_pause->style()->polish(m_pause);
-    }
     const bool terminalAvailable=NativeSessionCapabilities::terminal(s,m_details);
-    m_open->setVisible(!archived && (s.cmd=="dsh"||terminalAvailable));
+    m_openAction->setVisible(!archived && (s.cmd=="dsh"||terminalAvailable));
     const QString openCaption = s.cmd == "dsh" ? tr("Open native DeepSeek UI in browser") : m_clipboard ? tr("Copy connect command") : tr("Open externally");
-    m_open->setToolTip(openCaption); m_open->setAccessibleName(openCaption); m_open->setText({});
-    m_open->setIcon(workspaceIcon(s.cmd != "dsh" && m_clipboard ? "copy" : "external", QColor(m_muted))); m_open->setEnabled(entry->online && !updating && !archived && (s.cmd=="dsh"||terminalAvailable));
+    m_openAction->setText(openCaption); m_openAction->setEnabled(entry->online && !updating && !archived && (s.cmd=="dsh"||terminalAvailable));
     const QString pauseCaption = updating ? tr("Updating…") : archived ? tr("Restore session") : s.state == "running" ? tr("Pause session") : tr("Resume session");
-    m_pause->setAccessibleName(pauseCaption); m_pause->setText({});
-    m_pause->setIcon(workspaceIcon(s.state == "running" ? "pause" : "play", QColor(archived ? m_accent : m_muted)));
+    m_changeAction->setText(pauseCaption);
     // Codex defers SessionStart after resume; its verified restored conversation can pause too.
     const bool canPause = s.state == "running" && s.resumable && (s.activity == "idle" || m_details.value("auth_required").toBool()) && s.processState != "exited"
         && (m_details.value("expected_id").toString().isEmpty() || m_details.value("resume_message_can_send").toBool());
-    m_pause->setEnabled(entry->online && !updating && (archived ? (s.resumable && !s.archiveId.isEmpty() && !occupied) :
+    m_changeAction->setEnabled(entry->online && !updating && (archived ? (s.resumable && !s.archiveId.isEmpty() && !occupied) :
         ((canPause && NativeSessionCapabilities::action(s,"pause",m_details)) || (s.state != "running" && s.resumable && NativeSessionCapabilities::action(s,"resume",m_details)))));
+    m_restore->setVisible(archived); m_restore->setEnabled(m_changeAction->isEnabled());
+    m_restore->setAccessibleName(pauseCaption); m_restore->setIcon(workspaceIcon("play", QColor(m_accent)));
     m_more->setEnabled(entry->online && !updating && (!archived || !s.archiveId.isEmpty()));
     m_renameAction->setEnabled(NativeSessionCapabilities::action(s,"rename",m_details) && entry->online && !updating && !s.name.section('/', 0, 0).isEmpty() && !s.name.section('/', 1, 1).isEmpty() && (!archived || !s.archiveId.isEmpty()));
     m_archiveAction->setVisible(s.cmd != "dsh" && (s.state == "paused" || s.state == "stopped"));
@@ -3361,8 +3361,9 @@ void SessionsWindow::renderDetails()
         setWorkspaceStyle(m_goal, QString("QPushButton { text-align:left; color:%1; background:transparent; border:0; border-left:3px solid %1; border-radius:0; padding:7px 10px; } QPushButton:hover { background:%2; }").arg(goalColor, m_dark ? "#29323d" : "#e9eef4"));
     }
     m_badge->setToolTip(sessionTooltip({hint, m_model->text()}, 380).html);
-    m_pause->setToolTip(sessionTooltip({pauseCaption, !NativeSessionCapabilities::action(s,archived?"restore":s.state=="running"?"pause":"resume",m_details) ? NativeSessionCapabilities::actionReason(s,archived?"restore":s.state=="running"?"pause":"resume",m_details) : canPause
+    m_changeAction->setToolTip(sessionTooltip({pauseCaption, !NativeSessionCapabilities::action(s,archived?"restore":s.state=="running"?"pause":"resume",m_details) ? NativeSessionCapabilities::actionReason(s,archived?"restore":s.state=="running"?"pause":"resume",m_details) : canPause
         ? tr("Close the idle agent and save its conversation. Resume starts it again with the same history.") : hint}, 380).html);
+    m_restore->setToolTip(m_changeAction->toolTip());
     const bool contextVisible = !entry->online || !m_inspectError.isEmpty() || !questionError.isEmpty()
         || (archived && (occupied || !m_details.value("last_restore_error").toString().isEmpty()));
     const bool contextError = !entry->online || !m_inspectError.isEmpty() || !questionError.isEmpty()
@@ -3547,9 +3548,9 @@ void SessionsWindow::renderDetails()
         m_fullTitle = (project ? project->name + " / " + sessionLabel(s) : displayTitle(s)) + " / " + childName(child, m_subagentId); updateHeaderText();
         m_badge->setText(childStatus(child)); m_badge->setToolTip({});
         m_subagentComposer->setAvailability(!isTerminating(*entry) && entry->online && m_subagentDetails.value("send_supported").toBool(), entry->online ? QString() : tr("Machine unavailable. Your draft stays here."));
-        m_goal->hide(); m_model->hide(); m_open->hide(); m_pause->hide(); m_more->hide();
+        m_goal->hide(); m_model->hide(); m_restore->hide(); m_more->hide();
         m_forkAction->setEnabled(false); m_renameAction->setEnabled(false);
-    } else { m_pause->show(); m_more->show(); }
+    } else m_more->show();
     updateBrowser(m_children, children, m_childrenHtml);
     const auto conversation = m_details.value("conversation_id").toString(s.conversationId);
     const auto run = m_details.value("run_id").toString(s.runId);
@@ -3568,6 +3569,7 @@ void SessionsWindow::renderDetails()
     m_detailsIdValue->setProperty("copyValue", identity); m_detailsIdValue->setAccessibleName(identityTitle + ": " + identityText);
     m_copySessionId->setEnabled(!identity.isEmpty());
     m_copySessionId->setToolTip(copyCaption); m_copySessionId->setAccessibleName(copyCaption);
+    m_copyHeaderId->setEnabled(!identity.isEmpty()); m_copyHeaderId->setToolTip(copyCaption); m_copyHeaderId->setAccessibleName(copyCaption);
     QString info = QString("<h3>Session</h3><p>%1</p><h3>Directory</h3><p>%2</p><h3>Last recorded event</h3><p>%3</p><h3>History</h3><p>Activity stays on %4. Closing this window does not stop your agent.</p>")
         .arg(htmlText(s.name),
              htmlText(s.cwd.isEmpty() ? tr("Not reported") : s.cwd),
@@ -4581,7 +4583,7 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     }
     m_sessionMenu->addSeparator();
     add(archived ? tr("Restore session") : original.session.state == "running" ? tr("Pause session") : tr("Resume session"),
-        "contextChangeSession", SessionMenuAction::ChangeState, selectedTarget ? m_pause->isEnabled() : canChange && NativeSessionCapabilities::action(target,archived?"restore":target.state=="running"?"pause":"resume"));
+        "contextChangeSession", SessionMenuAction::ChangeState, selectedTarget ? m_changeAction->isEnabled() : canChange && NativeSessionCapabilities::action(target,archived?"restore":target.state=="running"?"pause":"resume"));
     if (target.state == "paused" || target.state == "stopped")
         add(tr("Start fresh…"), "contextStartFresh", SessionMenuAction::StartFresh, canStartStopped(original),
             tr("Start with a new conversation and the same folder, account and model"));
@@ -4685,12 +4687,12 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         return;
     case SessionMenuAction::OpenTerminal:
         if (entry->session.cmd == "dsh") { showNativeUi(*entry); return; }
-        if (!entry->online || !m_open->isEnabled() || entry->session.state == "archived" || !NativeSessionCapabilities::terminal(entry->session,m_details)) return;
+        if (!entry->online || !m_openAction->isEnabled() || entry->session.state == "archived" || !NativeSessionCapabilities::terminal(entry->session,m_details)) return;
         // This terminal opens also in clipboard mode, and `hgs a` resumes a saved session.
         if (entry->session.state != "running") {
             if (!confirmLocalStart(*entry)) return;
             entry = selected();
-            if (!entry->online || !m_open->isEnabled() || !NativeSessionCapabilities::terminal(entry->session,m_details)) return;
+            if (!entry->online || !m_openAction->isEnabled() || !NativeSessionCapabilities::terminal(entry->session,m_details)) return;
         }
         emit terminalOpenRequested(entry->host, entry->session.name,
             entry->host.isEmpty() && entry->session.attached && !entry->session.clients.isEmpty() ? entry->session.clients.first() : QString());
@@ -4723,14 +4725,21 @@ void SessionsWindow::showNativeUi(const Entry &entry)
     if (entry.online) m_client.openNativeUi(entry.host, entry.session.name);
 }
 
+void SessionsWindow::copySessionIdentity()
+{
+    const auto value = m_detailsIdValue->property("copyValue").toString();
+    if (!selected() || value.isEmpty()) return;
+    emit copyTextRequested(value); showNotice(tr("%1 copied").arg(m_detailsIdTitle->text()));
+}
+
 void SessionsWindow::openSession()
 {
-    const auto *e = selected(); if (!e || !e->online || !m_open->isEnabled() || e->session.state == "archived") return;
+    const auto *e = selected(); if (!e || !e->online || !m_openAction->isEnabled() || e->session.state == "archived") return;
     if (e->session.cmd == "dsh") { m_client.openNativeUi(e->host,e->session.name); return; }
     // `hgs a` resumes a saved session; a copied command starts nothing.
     if (!m_clipboard && e->session.state != "running") {
         if (!confirmLocalStart(*e)) return;
-        e = selected(); if (!e->online || !m_open->isEnabled()) return;
+        e = selected(); if (!e->online || !m_openAction->isEnabled()) return;
     }
     emit sessionActivated(e->host, e->session.name,
         e->host.isEmpty() && e->session.attached && !e->session.clients.isEmpty() ? e->session.clients.first() : QString());
@@ -4747,10 +4756,10 @@ bool SessionsWindow::confirmLocalStart(const Entry &original)
 
 void SessionsWindow::changeSession()
 {
-    const auto *e = selected(); if (!e || !e->online || m_pending || !m_pause->isEnabled()) return;
+    const auto *e = selected(); if (!e || !e->online || m_pending || !m_changeAction->isEnabled()) return;
     if (e->session.state != "running") {
         if (!confirmLocalStart(*e)) return;
-        e = selected(); if (!e->online || m_pending || !m_pause->isEnabled()) return;
+        e = selected(); if (!e->online || m_pending || !m_changeAction->isEnabled()) return;
     }
     m_pending = true; m_restoreKey.clear();
     if (e->session.state == "archived") {
