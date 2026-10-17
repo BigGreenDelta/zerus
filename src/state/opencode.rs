@@ -1484,9 +1484,21 @@ impl Native for service::Service {
 enum Delivery {
     Delivered,
     Queued,
-    #[allow(dead_code)]
-    Unknown,
+    /// The service definitively rejected the message (a 4xx answer).
+    Refused(String),
 }
+fn refusal_reason(response: &Response) -> String {
+    let text = response.body["message"]
+        .as_str()
+        .or(response.body["data"]["message"].as_str())
+        .unwrap_or("request rejected");
+    let clean: String = text.chars().filter(|c| !c.is_control()).take(160).collect();
+    format!("HTTP {}: {clean}", response.status)
+}
+fn refused(reason: &str) -> String {
+    format!("OpenCode refused this message: {reason}")
+}
+const MISMATCH: &str = "Native message acknowledgement did not match; delivery uncertain";
 const UNCERTAIN: &str = "Native message ID has conflicting text; delivery uncertain";
 const UNCERTAIN_REPLAY: &str = "Delivery uncertain; this request will not be replayed. Inspect native history before creating a new request";
 /// Resolve one message ID exactly: look it up, then the inbox, and only then
@@ -1510,7 +1522,7 @@ fn reconcile(
             }
             return Err(UNCERTAIN.into());
         }
-        404 => {}
+        404 if found.body["_tag"] == "MessageNotFoundError" => {}
         _ => return Err("Native delivery state is uncertain".into()),
     }
     let inbox = native.raw("GET", &session_path(record, "/inbox"), None)?;
@@ -1533,13 +1545,21 @@ fn reconcile(
         &session_path(record, "/prompt"),
         Some(&json!({"id":message_id,"text":text,"delivery":"queue"})),
     )?;
-    if posted.status == 200
-        && posted.body["data"]["id"] == message_id
-        && posted.body["data"]["payload"]["text"] == text
-    {
-        return Ok(Delivery::Delivered);
+    match posted.status {
+        200..=299 => {
+            let data = &posted.body["data"];
+            if data["id"] == message_id
+                && data["sessionID"] == record["conversation_id"]
+                && data["payload"]["text"] == text
+            {
+                Ok(Delivery::Delivered)
+            } else {
+                Err(MISMATCH.into())
+            }
+        }
+        400..=499 => Ok(Delivery::Refused(refusal_reason(&posted))),
+        _ => Err("Native delivery state is uncertain".into()),
     }
-    Err("Native delivery state is uncertain".into())
 }
 fn receipt_path(receipt: &Value) -> PathBuf {
     root()
@@ -1559,26 +1579,39 @@ fn check_receipt_identity(record: &Value, receipt: &Value) -> Result<()> {
     }
     Ok(())
 }
-fn settle(native: &dyn Native, record: &Value, receipt: &mut Value) -> Result<bool> {
+/// Reconcile one receipt; a definite refusal is recorded in it.
+fn settle(
+    native: &dyn Native,
+    record: &Value,
+    receipt: &mut Value,
+    path: &Path,
+) -> Result<Delivery> {
     check_receipt_identity(record, receipt)?;
     let id = string(receipt, "native_message_id").to_owned();
     let text = string(receipt, "text").to_owned();
-    match reconcile(native, record, &id, &text)? {
-        Delivery::Delivered | Delivery::Queued => {
-            receipt["status"] = json!("submitted");
-            atomic(&receipt_path(receipt), &receipt.to_string())?;
-            Ok(true)
+    let outcome = reconcile(native, record, &id, &text)?;
+    match &outcome {
+        Delivery::Delivered | Delivery::Queued => receipt["status"] = json!("submitted"),
+        Delivery::Refused(reason) => {
+            receipt["status"] = json!("refused");
+            receipt["reason"] = json!(reason);
         }
-        Delivery::Unknown => Ok(false),
     }
+    atomic(path, &receipt.to_string())?;
+    Ok(outcome)
 }
 pub(super) fn reconcile_receipt(record: &Value, receipt: &mut Value) -> Result<bool> {
-    if receipt["status"] == "submitted" {
-        return Ok(true);
+    match receipt["status"].as_str() {
+        Some("submitted") => return Ok(true),
+        Some("refused") => return Err(refused(string(receipt, "reason"))),
+        _ => {}
     }
     let service = running_service()?;
     verify_session(&service, record)?;
-    settle(&service, record, receipt)
+    match settle(&service, record, receipt, &receipt_path(receipt))? {
+        Delivery::Refused(reason) => Err(refused(&reason)),
+        _ => Ok(true),
+    }
 }
 /// Whether a form or permission is waiting on the user for this session.
 fn waiting_for_user(native: &dyn Native, record: &Value) -> Result<bool> {
@@ -1630,54 +1663,101 @@ fn send(record: &Value, request: &Value) -> Result<Value> {
         Sha256::digest(json!([record["name"], request]).to_string().as_bytes())
     );
     let service = running_service()?;
+    deliver(
+        &service,
+        record,
+        request,
+        &path,
+        digest,
+        session_graph::target_receipt(record),
+    )
+}
+/// Core of `send`: everything after validation, against any native service.
+fn deliver(
+    native: &dyn Native,
+    record: &Value,
+    request: &Value,
+    path: &Path,
+    digest: String,
+    graph_target: Option<Value>,
+) -> Result<Value> {
+    let text = string(request, "text");
     if path.exists() {
-        let mut prior: Value = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+        let mut prior: Value = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         if prior["digest"] != digest {
             return Err("This request ID was already used for another message".into());
         }
-        if prior["status"] == "submitted" {
-            return Ok(prior);
+        match prior["status"].as_str() {
+            Some("submitted") => return Ok(prior),
+            Some("refused") => return Err(refused(string(&prior, "reason"))),
+            _ => {}
         }
-        verify_session(&service, record)?;
-        if settle(&service, record, &mut prior)? {
-            return Ok(prior);
-        }
-        return Err(UNCERTAIN_REPLAY.into());
+        verify_native(native, record)?;
+        return match settle(native, record, &mut prior, path) {
+            Ok(Delivery::Refused(reason)) => Err(refused(&reason)),
+            Ok(_) => Ok(prior),
+            Err(_) => Err(UNCERTAIN_REPLAY.into()),
+        };
     }
-    verify_session(&service, record)?;
-    if waiting_for_user(&service, record)? {
+    verify_native(native, record)?;
+    if waiting_for_user(native, record)? {
         return Err(
             "OpenCode is waiting for an exact question or permission; no message was sent".into(),
         );
     }
     let message_id = new_id("msg_");
     let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"digest":digest,"native_message_id":message_id,"text":text,"submitted_text":text,"submitted_at":now(),"at":now(),"status":"pending","attachments":[],"transport":"native_opencode"});
-    if let Some(target) = session_graph::target_receipt(record) {
+    if let Some(target) = graph_target {
         receipt["graph_target"] = target;
     }
-    let queued = session_active(&service, record);
-    atomic(&path, &receipt.to_string())?;
-    let posted = service.raw(
+    let queued = session_active(native, record);
+    atomic(path, &receipt.to_string())?;
+    let posted = native.raw(
         "POST",
         &session_path(record, "/prompt"),
         Some(&json!({"id":message_id,"text":text,"delivery":"queue"})),
     );
-    let acknowledged = posted.is_ok_and(|answer| {
-        answer.status == 200
-            && answer.body["data"]["id"] == message_id
-            && answer.body["data"]["sessionID"] == record["conversation_id"]
-            && answer.body["data"]["payload"]["text"] == text
-    });
-    if !acknowledged && !matches!(settle(&service, record, &mut receipt), Ok(true)) {
-        return Err(UNCERTAIN_REPLAY.into());
+    match posted {
+        Ok(answer) if (200..300).contains(&answer.status) => {
+            let data = &answer.body["data"];
+            if data["id"] != message_id
+                || data["sessionID"] != record["conversation_id"]
+                || data["payload"]["text"] != text
+            {
+                return Err(MISMATCH.into());
+            }
+        }
+        Ok(answer) if (400..500).contains(&answer.status) => {
+            let reason = refusal_reason(&answer);
+            receipt["status"] = json!("refused");
+            receipt["reason"] = json!(reason);
+            atomic(path, &receipt.to_string())?;
+            return Err(refused(&reason));
+        }
+        // A transport error or a 5xx leaves the admission unknown.
+        _ => match settle(native, record, &mut receipt, path) {
+            Ok(Delivery::Refused(reason)) => return Err(refused(&reason)),
+            Ok(_) => {}
+            Err(_) => return Err(UNCERTAIN_REPLAY.into()),
+        },
     }
     receipt["status"] = json!("submitted");
     if queued {
         receipt["queued"] = json!(true);
     }
-    atomic(&path, &receipt.to_string())?;
+    atomic(path, &receipt.to_string())?;
     Ok(receipt)
+}
+fn verify_native(native: &dyn Native, record: &Value) -> Result<()> {
+    let result = native.raw("GET", &session_path(record, ""), None)?;
+    if result.status != 200
+        || result.body["data"]["id"] != record["conversation_id"]
+        || result.body["data"]["location"]["directory"] != record["cwd"]
+    {
+        return Err("The exact native OpenCode session or directory changed".into());
+    }
+    Ok(())
 }
 fn answer(record: &Value, request: &Value) -> Result<Value> {
     let current = own_state(string(record, "name"))?;
@@ -2490,17 +2570,18 @@ mod tests {
     }
     #[test]
     fn an_unknown_message_is_reposted_with_the_same_id_and_never_twice() {
-        let record = json!({"conversation_id": "ses_A"});
         let prompt = fixture(include_bytes!("../../tests/fixtures/opencode2/prompt.json"));
+        let session = prompt["data"]["sessionID"].as_str().unwrap().to_owned();
+        let record = json!({"conversation_id": session});
         let id = prompt["data"]["id"].as_str().unwrap().to_owned();
         let native = Scripted(std::cell::RefCell::new(vec![
             (
-                format!("GET /api/session/ses_A/message/{id}"),
+                format!("GET /api/session/{session}/message/{id}"),
                 404,
                 json!({"_tag": "MessageNotFoundError"}),
             ),
-            ("GET /api/session/ses_A/inbox".into(), 200, json!({"data": []})),
-            ("POST /api/session/ses_A/prompt".into(), 200, prompt.clone()),
+            (format!("GET /api/session/{session}/inbox"), 200, json!({"data": []})),
+            (format!("POST /api/session/{session}/prompt"), 200, prompt.clone()),
         ]));
         assert!(matches!(
             reconcile(&native, &record, &id, "hello").unwrap(),
@@ -2548,5 +2629,170 @@ mod tests {
         assert!(!resumes_pending(&json!({"creation_pending":true})));
         assert!(!resumes_pending(&json!({"service":"opencode1","creation_pending":true})));
         assert!(!resumes_pending(&json!({"service":"opencode2"})));
+    }
+    type Step = (String, Result<Response>);
+    struct Live {
+        script: std::cell::RefCell<Vec<Step>>,
+        posted: std::cell::RefCell<Vec<Value>>,
+        path: PathBuf,
+    }
+    impl Native for Live {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            let (expected, reply) = self.script.borrow_mut().remove(0);
+            assert_eq!(expected, format!("{method} {path}"));
+            if method == "POST" {
+                let receipt: Value =
+                    serde_json::from_slice(&fs::read(&self.path).unwrap()).unwrap();
+                assert_eq!(receipt["status"], "pending");
+                assert_eq!(receipt["native_message_id"], body.unwrap()["id"]);
+                self.posted.borrow_mut().push(body.unwrap().clone());
+            }
+            reply
+        }
+    }
+    fn ok(body: Value) -> Result<Response> {
+        Ok(Response { status: 200, body })
+    }
+    fn status(status: u16, body: Value) -> Result<Response> {
+        Ok(Response { status, body })
+    }
+    fn live(dir: &Path, steps: Vec<(&str, Result<Response>)>) -> Live {
+        Live {
+            script: std::cell::RefCell::new(
+                steps.into_iter().map(|(p, r)| (p.to_owned(), r)).collect(),
+            ),
+            posted: Default::default(),
+            path: dir.join("receipt.json"),
+        }
+    }
+    fn session_record() -> Value {
+        json!({"name":"w","run_id":"r1","conversation_id":"ses_A","cwd":"/x"})
+    }
+    fn request() -> Value {
+        json!({"request_id":"11111111-1111-4111-8111-111111111111","text":"hello"})
+    }
+    fn preflight() -> Vec<(&'static str, Result<Response>)> {
+        vec![
+            ("GET /api/session/ses_A", ok(json!({"data":{"id":"ses_A","location":{"directory":"/x"}}}))),
+            ("GET /api/session/ses_A/form", ok(json!({"data":[]}))),
+            ("GET /api/session/ses_A/permission", ok(json!({"data":[]}))),
+            ("GET /api/session/active", ok(json!({"data":{}}))),
+        ]
+    }
+    fn run(native: &Live, digest: &str) -> Result<Value> {
+        deliver(native, &session_record(), &request(), &native.path, digest.into(), None)
+    }
+    #[test]
+    fn a_message_is_journaled_before_the_post_and_marked_queued_when_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps[3] = ("GET /api/session/active", ok(json!({"data":{"ses_A":{"type":"running"}}})));
+        steps.push(("POST /api/session/ses_A/prompt", ok(json!(null))));
+        let native = live(dir.path(), steps);
+        struct Echo<'a>(&'a Live);
+        impl Native for Echo<'_> {
+            fn raw(&self, m: &str, p: &str, b: Option<&Value>) -> Result<Response> {
+                if m == "POST" {
+                    let _ = self.0.raw(m, p, b)?;
+                    let id = b.unwrap()["id"].clone();
+                    return ok(json!({"data":{"id":id,"sessionID":"ses_A","payload":{"text":"hello"}}}));
+                }
+                self.0.raw(m, p, b)
+            }
+        }
+        let receipt = deliver(&Echo(&native), &session_record(), &request(), &native.path, "d".into(), None).unwrap();
+        assert_eq!(receipt["status"], "submitted");
+        assert_eq!(receipt["queued"], true);
+        assert!(native.script.borrow().is_empty());
+        let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
+        assert_eq!(saved["status"], "submitted");
+    }
+    #[test]
+    fn a_refused_post_is_recorded_and_never_reposted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps.push(("POST /api/session/ses_A/prompt", status(400, json!({"message":"bad"}))));
+        let native = live(dir.path(), steps);
+        let error = run(&native, "d").unwrap_err();
+        assert_eq!(error, "OpenCode refused this message: HTTP 400: bad");
+        let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
+        assert_eq!(saved["status"], "refused");
+        let retry = live(dir.path(), vec![]);
+        assert_eq!(run(&retry, "d").unwrap_err(), error);
+        assert!(retry.posted.borrow().is_empty());
+        let other = live(dir.path(), vec![]);
+        assert!(run(&other, "e").unwrap_err().contains("already used"));
+    }
+    #[test]
+    fn a_mismatched_acknowledgement_is_uncertain_without_a_repost() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps.push((
+            "POST /api/session/ses_A/prompt",
+            ok(json!({"data":{"id":"msg_other","sessionID":"ses_A","payload":{"text":"hello"}}})),
+        ));
+        let native = live(dir.path(), steps);
+        assert_eq!(run(&native, "d").unwrap_err(), MISMATCH);
+        assert_eq!(native.posted.borrow().len(), 1);
+        let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
+        assert_eq!(saved["status"], "pending");
+    }
+    #[test]
+    fn a_transport_error_reconciles_and_a_retry_reuses_the_same_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps.push(("POST /api/session/ses_A/prompt", Err("reset".into())));
+        steps.push(("GET /api/session/ses_A/message/ID", status(500, json!({}))));
+        let native = live(dir.path(), steps);
+        // The message ID is generated inside, so match the path loosely.
+        struct Loose<'a>(&'a Live);
+        impl Native for Loose<'_> {
+            fn raw(&self, m: &str, p: &str, b: Option<&Value>) -> Result<Response> {
+                let p = if p.contains("/message/") { "/api/session/ses_A/message/ID" } else { p };
+                self.0.raw(m, p, b)
+            }
+        }
+        let error = deliver(&Loose(&native), &session_record(), &request(), &native.path, "d".into(), None).unwrap_err();
+        assert!(error.starts_with("Delivery uncertain"));
+        let first = native.posted.borrow()[0]["id"].as_str().unwrap().to_owned();
+        let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
+        assert_eq!(saved["status"], "pending");
+        assert_eq!(saved["native_message_id"], first);
+        // Same request and digest: reconcile only; the message is now found.
+        let retry = live(
+            dir.path(),
+            vec![
+                ("GET /api/session/ses_A", ok(json!({"data":{"id":"ses_A","location":{"directory":"/x"}}}))),
+                ("GET /api/session/ses_A/message/ID", ok(json!({"data":{"id":first,"type":"user","text":"hello"}}))),
+            ],
+        );
+        let receipt = deliver(&Loose(&retry), &session_record(), &request(), &retry.path, "d".into(), None).unwrap();
+        assert_eq!(receipt["status"], "submitted");
+        assert_eq!(receipt["native_message_id"], first);
+        assert!(retry.posted.borrow().is_empty());
+    }
+    #[test]
+    fn only_a_message_not_found_404_allows_the_inbox_and_repost() {
+        let record = json!({"conversation_id": "ses_A"});
+        let native = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/ses_A/message/msg_X".into(),
+            404,
+            json!({"_tag": "SessionNotFoundError"}),
+        )]));
+        assert!(reconcile(&native, &record, "msg_X", "hello").is_err());
+        assert!(native.0.borrow().is_empty());
+    }
+    #[test]
+    fn a_refused_repost_is_a_definite_refusal() {
+        let record = json!({"conversation_id": "ses_A"});
+        let native = Scripted(std::cell::RefCell::new(vec![
+            ("GET /api/session/ses_A/message/msg_X".into(), 404, json!({"_tag": "MessageNotFoundError"})),
+            ("GET /api/session/ses_A/inbox".into(), 200, json!({"data": []})),
+            ("POST /api/session/ses_A/prompt".into(), 422, json!({"message": "no"})),
+        ]));
+        assert!(matches!(
+            reconcile(&native, &record, "msg_X", "hello").unwrap(),
+            Delivery::Refused(_)
+        ));
     }
 }
