@@ -66,7 +66,9 @@ access.
    Notifications for `app.zerus.mobile`; automatic signing then includes the
    app's `aps-environment` entitlement (development for Local Dev builds,
    production for TestFlight and App Store builds). Under Keys create an Apple
-   Push Notifications service key, download its `.p8` once, and give it to the
+   Push Notifications service key with the environment **Sandbox & Production**
+   and the team-scoped restriction: the relay signs both `apns` and
+   `apns_sandbox` wakes with one key. Download its `.p8` once, and give it to the
    relay privately as `apns_key`, `apns_key_id` and `apns_team_id` (see
    [mobile services](../services/mobile/README.md#push-configuration)). Without
    it the app still works; alerts then arrive only while Zerus is open or when
