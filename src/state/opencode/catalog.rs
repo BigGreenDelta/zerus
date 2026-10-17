@@ -4,7 +4,8 @@
 use super::super::*;
 use super::service::{connect, ensure_started, version_at_least, Service, Unavailable, MINIMUM};
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 const MAX_MODELS: usize = 256;
 const MAX_CACHE: u64 = 1_048_576;
@@ -129,14 +130,23 @@ fn cache_path() -> PathBuf {
 }
 
 fn cached() -> Option<Value> {
-    let file = std::fs::File::open(cache_path()).ok()?;
+    cached_for(&home())
+}
+
+fn cached_for(home: &Path) -> Option<Value> {
+    cached_at(&cache_path(), home)
+}
+
+fn cached_at(path: &Path, home: &Path) -> Option<Value> {
+    let file = std::fs::File::open(path).ok()?;
     let mut bytes = Vec::new();
     file.take(MAX_CACHE + 1).read_to_end(&mut bytes).ok()?;
     if bytes.len() as u64 > MAX_CACHE {
         return None;
     }
     let value: Value = serde_json::from_slice(&bytes).ok()?;
-    value["model_options"].is_array().then_some(value)
+    (value["model_options"].is_array() && value["location"].as_str() == home.to_str())
+        .then_some(value)
 }
 
 fn answer(
@@ -170,6 +180,30 @@ fn unavailable(why: &Unavailable, home_location: bool) -> Value {
         ),
         None => answer(json!([]), "", "unavailable", state, &reason, Value::Null),
     }
+}
+
+/// The selected model is always offered: when the projection missed it (past
+/// the bound), add its allowlisted row, replacing the last row at the bound.
+fn include_selected(rows: &mut Vec<Value>, models: &Value, default: &Value, selected: &str) {
+    if selected.is_empty() || rows.iter().any(|row| row["id"] == selected) {
+        return;
+    }
+    let listed = models["data"].as_array().into_iter().flatten().find(|m| {
+        format!(
+            "{}/{}",
+            m["providerID"].as_str().unwrap_or(""),
+            m["id"].as_str().unwrap_or("")
+        ) == selected
+    });
+    let source = json!({"data": [listed.unwrap_or(&default["data"]).clone()]});
+    let mut extra = project(&source);
+    if extra.is_empty() {
+        return;
+    }
+    if rows.len() >= MAX_MODELS {
+        rows.pop();
+    }
+    rows.push(extra.remove(0));
 }
 
 fn fetch(service: &Service, location: &Path) -> Result<(Vec<Value>, String, bool)> {
@@ -243,18 +277,22 @@ pub(crate) fn start_from_accounts() -> Result<Value> {
     Ok(catalog(None))
 }
 
-/// `opencode --version`, the only subcommand this adapter may run.
+/// `opencode --version`, the only subcommand this adapter may run, bounded
+/// to five seconds. A hang, failure or odd output means "version unknown".
 pub(crate) fn installed_version() -> Option<String> {
-    let output = Command::new("opencode")
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let mut command = Command::new("opencode");
+    command.arg("--version");
+    let (status, stdout, _) = crate::platform::run_bounded(
+        &mut command,
+        [4096, 4096],
+        Instant::now() + Duration::from_secs(5),
+        &|| false,
+    )
+    .ok()?;
+    if !status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = String::from_utf8_lossy(&stdout);
     let version = text.lines().next()?.trim().trim_start_matches('v').trim();
     (!version.is_empty() && version.len() <= 64).then(|| version.to_owned())
 }
@@ -266,6 +304,11 @@ pub(crate) fn install_state() -> (bool, String) {
         Some(v) => (
             false,
             format!("OpenCode {v} is not supported; install OpenCode 2.0.32 or newer 2.x"),
+        ),
+        None if crate::platform::available("opencode") => (
+            false,
+            "The OpenCode version could not be determined; install OpenCode 2.0.32 or newer 2.x"
+                .into(),
         ),
         None => (false, "Install OpenCode 2.0.32 or newer 2.x".into()),
     }
@@ -359,5 +402,45 @@ mod tests {
         assert!(model_ref(&rows, "fixture", "").is_err());
         assert!(model_ref(&rows, "fixture/local/x", "").is_err());
         assert!(model_ref(&rows, "ollama/qwen3-coder:30b", "low").is_err());
+    }
+
+    #[test]
+    fn selected_model_beyond_the_bound_is_still_offered() {
+        let mut many = json!({"data": []});
+        for i in 0..300 {
+            many["data"].as_array_mut().unwrap().push(
+                json!({"id": format!("m{i}"), "providerID": "p", "name": "M", "enabled": true,
+                "settings": {"apiKey": "fixture-secret-key"}}),
+            );
+        }
+        let default = json!({"data": {"id": "m290", "providerID": "p", "settings": {"apiKey": "fixture-secret-key"}}});
+        let mut rows = project(&many);
+        assert!(rows.iter().all(|r| r["id"] != "p/m290"));
+        include_selected(&mut rows, &many, &default, "p/m290");
+        assert_eq!(rows.len(), 256);
+        assert_eq!(rows[255]["id"], "p/m290");
+        assert!(!serde_json::to_string(&rows)
+            .unwrap()
+            .contains("fixture-secret-key"));
+        assert!(model_ref(&rows, "p/m290", "").is_ok());
+        // Unlisted: built from the default response alone.
+        let mut rows = project(&many);
+        include_selected(
+            &mut rows,
+            &json!({"data": []}),
+            &json!({"data": {"id": "zz", "providerID": "q"}}),
+            "q/zz",
+        );
+        assert_eq!(rows[255]["id"], "q/zz");
+    }
+
+    #[test]
+    fn cache_is_ignored_for_another_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let record = json!({"location": "/srv/a", "model_options": [], "settings_model": "", "catalog_at": 1});
+        std::fs::write(&path, record.to_string()).unwrap();
+        assert!(cached_at(&path, Path::new("/srv/a")).is_some());
+        assert!(cached_at(&path, Path::new("/srv/b")).is_none());
     }
 }

@@ -262,6 +262,7 @@ fn ensure_host(record: &Value) -> Result<()> {
 }
 
 /// OpenCode 1 launch and settings still call this until Task 9 rewrites them.
+/// Remove in Task 9: this shim has no place in the OpenCode 2 adapter.
 fn legacy_offered_model(location: &Path, value: &str) -> Result<Value> {
     let service = service::connect().map_err(|why| why.reason(&crate::platform::hostname()))?;
     catalog::offered_model(&service, location, value, "")
