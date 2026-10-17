@@ -114,24 +114,32 @@ pub(super) fn offer(dir: &Path, offer: &Value) -> Result<()> {
     write(dir, ANSWER, offer)
 }
 
-/// Take the offered answer; None when there is none or it was retracted.
-fn claim(dir: &Path) -> Result<Option<Value>> {
-    match fs::rename(dir.join(ANSWER), dir.join(CLAIMED)) {
-        Ok(()) => read(dir, CLAIMED)
-            .map(Some)
-            .ok_or_else(|| "claimed answer is unreadable".into()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-/// Withdraw the offer; false when the waiting process already claimed it.
-fn retract(dir: &Path) -> Result<bool> {
-    match fs::rename(dir.join(ANSWER), dir.join(RETRACTED)) {
+/// Move the offered answer to `stage` if it is still offered. A rename alone
+/// is not exclusive on Windows, where std renames through an open handle: two
+/// renames that both opened answer.json would both succeed. Both sides
+/// therefore take the channel's handover lock first.
+fn take(dir: &Path, stage: &str) -> Result<bool> {
+    let _handover = lock(Some(&dir.join("handover.lock")))?;
+    match fs::rename(dir.join(ANSWER), dir.join(stage)) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// Take the offered answer; None when there is none or it was retracted.
+fn claim(dir: &Path) -> Result<Option<Value>> {
+    if !take(dir, CLAIMED)? {
+        return Ok(None);
+    }
+    read(dir, CLAIMED)
+        .map(Some)
+        .ok_or_else(|| "claimed answer is unreadable".into())
+}
+
+/// Withdraw the offer; false when the waiting process already claimed it.
+fn retract(dir: &Path) -> Result<bool> {
+    take(dir, RETRACTED)
 }
 
 #[derive(Debug, PartialEq)]
@@ -728,7 +736,16 @@ mod tests {
             fs::create_dir_all(root.join(name).join("question")).unwrap();
         }
         let old = std::time::SystemTime::now() - Duration::from_secs(40 * 86400);
-        fs::File::open(root.join("old")).unwrap().set_modified(old).unwrap();
+        // Windows opens a directory for its times only with backup semantics.
+        #[cfg(windows)]
+        let folder = {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new().write(true).custom_flags(0x0200_0000).open(root.join("old")).unwrap()
+        };
+        #[cfg(not(windows))]
+        let folder = fs::File::open(root.join("old")).unwrap();
+        folder.set_modified(old).unwrap();
+        drop(folder);
         prune(&root, Duration::from_secs(30 * 86400), 64);
         assert!(!root.join("old").exists());
         assert!(root.join("new").exists());
