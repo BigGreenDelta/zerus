@@ -3,6 +3,7 @@ package app.zerus.mobile
 import org.json.JSONArray
 import org.json.JSONObject
 
+data class QuestionTextField(val label: String, val maxLength: Int?)
 data class QuestionQueue(val selected: Question?, val optional: List<Question>, val index: Int,
     val submitted: List<Question>, val promptCount: Int)
 
@@ -50,6 +51,15 @@ object QuestionPolicies {
             if (selected.any { id -> prompt.choices.none { it.id == id } }) return "An answer option changed. Review this request again."
             if (text.isNotBlank() && !prompt.other) return "This request does not accept an Other answer."
             if (!prompt.multi && selected.size + (if (text.isNotBlank()) 1 else 0) > 1) return "Choose one answer for this question."
+            if (text.isNotEmpty()) {
+                prompt.maxLength?.let { if (characters(text) > it) return "Answer is longer than $it characters" }
+                prompt.minLength?.let { if (characters(text) < it) return "Answer is shorter than $it characters" }
+            }
+            if (prompt.multi) {
+                val count = selected.size + (if (text.isNotBlank()) 1 else 0)
+                prompt.maxItems?.let { if (count > it) return "Choose at most $it answers" }
+                prompt.minItems?.let { if (count in 1 until it) return "Choose at least $it answers" }
+            }
         }
         return ""
     }
@@ -57,6 +67,27 @@ object QuestionPolicies {
         prompts.isNotEmpty() && answerError(prompts, options, texts).isBlank() && prompts.all {
             options[it.id].orEmpty().isNotEmpty() || it.other && texts[it.id].orEmpty().isNotBlank()
         }
+
+    /**
+     * The free-text field of one item, or null when it takes only offered options. A plain text item
+     * (`input_kind: "text"`) is the answer itself; an unanswerable card shows no empty field for it.
+     */
+    fun textField(question: Question, prompt: Prompt): QuestionTextField? = when {
+        !prompt.other || question.approval -> null
+        prompt.inputKind == "text" -> if (question.canAnswer) QuestionTextField(prompt.otherLabel.ifBlank { "Answer" }, prompt.maxLength) else null
+        else -> QuestionTextField(prompt.otherLabel.ifBlank { "Other answer" }, prompt.maxLength)
+    }
+    /** Characters as the computer counts them: Unicode code points. */
+    private fun characters(text: String) = text.codePointCount(0, text.length)
+    fun limitText(text: String, max: Int?): String =
+        if (max == null || characters(text) <= max) text else text.substring(0, text.offsetByCodePoints(0, max))
+    /** Saved selections win; otherwise the item's offered defaults (one for a single choice). */
+    fun initialOptions(prompts: List<Prompt>, saved: Map<String, NativeQuestionAnswer>): Map<String, Set<String>> =
+        prompts.associate { prompt -> prompt.id to (saved[prompt.id]?.optionIds?.toSet()
+            ?: prompt.defaults.filter { id -> prompt.choices.any { it.id == id } }.let { if (prompt.multi) it else it.take(1) }.toSet()) }
+    /** An unanswerable card shows its reason and no Send. */
+    fun submitVisible(question: Question) = question.canAnswer
+    fun unavailableNotice(question: Question) = question.unavailableReason.ifBlank { "Complete this request on your machine." }
 
     fun approvalSupported(question: Question) = question.approval && question.prompts.size == 1 &&
         !question.prompts.single().multi && question.prompts.single().choices.any { it.id == "allow" } &&

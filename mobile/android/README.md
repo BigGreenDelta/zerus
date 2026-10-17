@@ -75,6 +75,11 @@ unknown distinguish an active attempt from its result. A submitted answer stays
 locked through a stale inspection or an application restart; checking delivery
 reads the original receipt. Approval review time counts only while its disclosure
 is visible in the focused foreground form.
+OpenCode form items follow the shared `opencode-form-contract.json`: a plain text
+item is an **Answer** field limited to the form's `max_length`, with a character
+counter; `default_option_ids` start selected, and length and `min_items`/`max_items`
+bounds are checked before Send. A card with `can_answer: false` shows its
+`unavailable_reason`, such as **Answer this form in OpenCode**, and no Send.
 
 Conversation messages use 16 sp text and a 20 sp baseline; the editor uses 18 sp
 text and a 22 sp baseline. Both keep natural character spacing. Compact Markdown
@@ -106,6 +111,9 @@ after a successful native receipt.
 A message waiting in the agent's native queue appears as one compact expandable
 card. Expand it to read and select the full text. Send now remains a manual
 action, available only when the current agent and queued message allow it.
+An OpenCode message in the session inbox is a user bubble labelled **Queued**;
+after Stop it is labelled **Not delivered**. Phones do not remove undelivered
+messages.
 
 Attach files through the system document picker. The app copies and encrypts
 selected bytes privately before adding them to the original draft, rather than
@@ -336,6 +344,8 @@ Back returns to models and preserves the staged selections. Selected rows have
 a checkmark and accessible radio state, with at least 48 dp touch targets.
 Default retains the native default choice. Selection and navigation only edit
 the form; Apply keeps the exact-session, pending-request and readiness checks.
+An OpenCode session's effort page lists the selected model's own variants with
+the computer's labels; choosing a model without that variant returns to Default.
 
 Model labels and order come from the shared `hgs` catalog, without Android
 sorting or invented recommendation/cost badges. Codex uses its native cached
@@ -343,7 +353,7 @@ catalog's `display_name` (falling back to the ID) and stable ascending `priority
 order; missing or invalid priorities follow ranked entries in source order.
 Claude uses the account catalog's `name` and retains its array order. Kimi
 retains configuration order, and DeepSeek retains native group/model order.
-OpenCode currently uses provider/model ID order in the backend. Desktop consumes
+OpenCode retains the service's model order. Desktop consumes
 the same catalog, deduplicates model IDs and prepends the current model when absent.
 
 Terminal uses a separate saved input buffer and a fresh exact native binding.
@@ -354,7 +364,10 @@ account catalog and an explicitly chosen folder. Ordinary folders remain usable
 without creating a Git repository. A verified repository defaults to a generated
 worktree, created only after Create session; None and existing or manually
 created worktrees remain available. A launch is confirmed only by its own native
-request identity.
+request identity. For OpenCode, an **Effort** choice (Model default or the chosen
+model's variants) appears only when that model reports variants and the
+computer's connector advertises `opencode_launch_effort`; otherwise the launch
+request carries no effort.
 
 ## Voice and video messages
 

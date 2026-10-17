@@ -1120,7 +1120,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         .format(java.util.Date((event.at * 1000).toLong())), color = Muted, style = MaterialTheme.typography.labelSmall)
                     if (event.delivery.isNotBlank()) {
                         Spacer(Modifier.width(8.dp))
-                        Text(deliveryLabel(event.delivery), color = if (event.delivery in listOf("failed", "uncertain")) Amber else Muted,
+                        Text(MessageDeliveryPresentation.label(event.delivery), color = if (MessageDeliveryPresentation.warning(event.delivery)) Amber else Muted,
                             style = MaterialTheme.typography.labelSmall)
                     }
                 }
@@ -1377,12 +1377,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
 }
 
 
-private fun deliveryLabel(status: String) = when (status) {
-    "sending", "submitting" -> "Sending…"
-    "uncertain" -> "Delivery unknown"
-    "failed" -> "Not sent"
-    "submitted", "recorded" -> "Sent"
-    else -> status.replaceFirstChar { it.uppercase() }
-}
+private fun deliveryLabel(status: String) = MessageDeliveryPresentation.label(status)
 @Composable private fun AttachmentRows(attachments: List<DisplayedAttachment>, target: Target?, model: ZerusViewModel) =
     AttachmentList(attachments, target, model.attachments)

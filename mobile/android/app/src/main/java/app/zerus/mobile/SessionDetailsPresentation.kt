@@ -14,12 +14,13 @@ data class SessionDetailsView(val fields: List<ContextDetail>, val goal: List<Co
     val tasks: List<DetailTaskList>, val agents: List<DetailAgent>, val agentNotice: String,
     val processes: List<DetailProcess>, val processNotes: List<String>, val processComplete: Boolean,
     val generation: String, val recorded: Boolean)
-data class NativeModelChoice(val id: String, val label: String, val efforts: List<String>)
+/** [effortLabels] maps native effort IDs to labels the computer reported (OpenCode variants). */
+data class NativeModelChoice(val id: String, val label: String, val efforts: List<String>, val effortLabels: Map<String, String> = emptyMap())
 data class NativeSettings(val model: String, val effort: String, val models: List<NativeModelChoice>, val efforts: List<String>,
     val pendingModel: String, val pendingEffort: String, val pendingId: String, val applyWhen: String,
     val supported: Boolean, val reason: String, val notice: String = "") {
     /** Relevant semantic fields only; timestamps and unrelated history polls do not invalidate a dialog. */
-    val signature get() = JSONArray(listOf(model, effort, models.map { listOf(it.id, it.label, it.efforts) }, efforts,
+    val signature get() = JSONArray(listOf(model, effort, models.map { listOf(it.id, it.label, it.efforts, it.effortLabels.entries.map { entry -> listOf(entry.key, entry.value) }) }, efforts,
         pendingModel, pendingEffort, pendingId, applyWhen, supported, reason, notice)).toString()
 }
 
@@ -29,10 +30,31 @@ object SessionDetailsPresentation {
     }?.toLong()
     private fun strings(raw: JSONArray?): List<String> = raw?.let { values -> (0 until values.length()).mapNotNull { values.opt(it) as? String } }.orEmpty()
     fun settings(raw: JSONObject?) = NativeSettings(raw?.string("settings_model").orEmpty().ifBlank { raw?.string("model").orEmpty() }, raw?.string("effort").orEmpty(),
-        raw?.optJSONArray("model_options")?.objects().orEmpty().map { NativeModelChoice(it.string("id"), it.string("label").ifBlank { it.string("id") }, strings(it.optJSONArray("effort_options"))) },
+        raw?.optJSONArray("model_options")?.objects().orEmpty().map { NativeModelChoice(it.string("id"), it.string("label").ifBlank { it.string("id") }, strings(it.optJSONArray("effort_options")), effortLabels(it)) },
         strings(raw?.optJSONArray("effort_options")), raw?.string("pending_model").orEmpty(), raw?.string("pending_effort").orEmpty(),
         raw?.string("pending_settings_id").orEmpty(), raw?.string("settings_apply_when").orEmpty(), raw?.optBoolean("settings_change_supported") == true,
         raw?.string("settings_change_reason").orEmpty(), raw?.string("settings_change_notice").orEmpty())
+
+    /** Effort page rows for [model]: Default first, then that model's own options, else the session's list. */
+    fun effortChoices(settings: NativeSettings, model: String): List<String> =
+        (listOf("") + (settings.models.find { it.id == model }?.efforts ?: settings.efforts)).distinct()
+    /** Labels at the same index as `effort_options`; a missing or unusable label falls back to the shared name. */
+    private fun effortLabels(option: JSONObject): Map<String, String> {
+        val ids = option.optJSONArray("effort_options") ?: return emptyMap()
+        val labels = option.optJSONArray("effort_labels") ?: return emptyMap()
+        return (0 until minOf(ids.length(), labels.length())).mapNotNull { index ->
+            val id = ids.opt(index) as? String ?: return@mapNotNull null
+            val label = (labels.opt(index) as? String)?.takeIf { it.isNotBlank() && it.length <= 80 && it.none(Char::isISOControl) } ?: return@mapNotNull null
+            id to label
+        }.distinctBy { it.first }.toMap()
+    }
+    fun effortLabel(settings: NativeSettings, model: String, effort: String): String =
+        effort.takeIf { it.isNotEmpty() }?.let { settings.models.find { choice -> choice.id == model }?.effortLabels?.get(it) } ?: effortLabel(effort)
+    fun effortLabel(effort: String) = when(effort) {
+        "" -> "Default"
+        "xhigh" -> "Extra high"
+        else -> effort.replaceFirstChar { it.uppercase() }
+    }
 
     fun parse(raw: JSONObject?, target: Target, verified: Boolean): SessionDetailsView {
         val record = raw ?: JSONObject()
