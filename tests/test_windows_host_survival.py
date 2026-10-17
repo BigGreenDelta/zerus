@@ -8,7 +8,9 @@ starts the host from a helper process that first joins named kill-on-close
 jobs, as a shell inside sshd's job runs hgs (D4): from a job that allows
 breakaway the host and its session outlive that job; a job that forbids it
 starts no host; a host that breakaway leaves in an outer job is refused by its
-launcher and exits once idle. A host also outlives the client that started it.
+launcher and exits once idle, unless that job also holds the desktop's shell, as
+on desktops whose every process runs in a job that forbids breakaway. A host
+also outlives the client that started it.
 `Ownership` ends a host and checks that every process of its sessions ends
 with it (D3, D9). `StableCli` installs another build while the staged stable
 CLI runs (D2). Every case closes its jobs, stops its helpers and ends any
@@ -108,10 +110,66 @@ with open(sys.argv[1] + ".tmp", "w") as file:
 os.replace(sys.argv[1] + ".tmp", sys.argv[1])
 '''
 
+# Run by a helper process (python -I <file> REPORT JOB): join the named job,
+# make a hidden window this desktop's shell window, as explorer.exe's is, report
+# whether that worked in REPORT and stay until the case closes its input.
+SHELL = r'''
+import ctypes, json, os, sys
+from ctypes import wintypes
+
+report, name = sys.argv[1:]
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32.OpenJobObjectW.restype = wintypes.HANDLE
+kernel32.OpenJobObjectW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+kernel32.GetCurrentProcess.argtypes = ()
+kernel32.CloseHandle.restype = wintypes.BOOL
+kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+user32.CreateWindowExW.restype = wintypes.HWND
+user32.CreateWindowExW.argtypes = (wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                   wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID)
+user32.SetShellWindow.restype = wintypes.BOOL
+user32.SetShellWindow.argtypes = (wintypes.HWND,)
+user32.GetShellWindow.restype = wintypes.HWND
+user32.GetShellWindow.argtypes = ()
+JOB_OBJECT_ASSIGN_PROCESS = 0x0001
+WS_POPUP = 0x80000000
+
+outcome = {"pid": os.getpid(), "shell": False, "error": ""}
+try:
+    job = kernel32.OpenJobObjectW(JOB_OBJECT_ASSIGN_PROCESS, False, name)
+    if not job:
+        raise OSError(f"OpenJobObjectW {name}: error {ctypes.get_last_error()}")
+    try:
+        if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
+            raise OSError(f"AssignProcessToJobObject {name}: error {ctypes.get_last_error()}")
+    finally:
+        kernel32.CloseHandle(job)
+    window = user32.CreateWindowExW(0, "STATIC", "hgs test shell", WS_POPUP, 0, 0, 0, 0, None, None, None, None)
+    if not window:
+        raise OSError(f"CreateWindowExW: error {ctypes.get_last_error()}")
+    if not user32.SetShellWindow(window):
+        raise OSError(f"SetShellWindow: error {ctypes.get_last_error()}")
+    outcome["shell"] = user32.GetShellWindow() == window
+except Exception as error:
+    outcome["error"] = repr(error)
+with open(report + ".tmp", "w", encoding="utf-8") as file:
+    json.dump(outcome, file)
+os.replace(report + ".tmp", report)
+sys.stdin.read()
+'''
+
 if os.name == "nt":
     from ctypes import wintypes
 
     KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    USER32 = ctypes.WinDLL("user32", use_last_error=True)
+    USER32.GetShellWindow.restype = wintypes.HWND
+    USER32.GetShellWindow.argtypes = ()
 
     def bind(name, restype, *argtypes):
         function = getattr(KERNEL32, name)
@@ -331,6 +389,21 @@ class SurvivalCase(windows_host.HostCase):
             time.sleep(0.1)
         return helper, json.loads(report.read_text(encoding="utf-8"))
 
+    def desktop_shell(self, job):
+        """A helper in `job` whose hidden window is this desktop's shell window
+        (`SHELL`), until the case stops its helpers or closes the job."""
+        script = self.root / "shell-helper.py"
+        script.write_text(SHELL, encoding="utf-8")
+        report = self.root / "shell.json"
+        helper = subprocess.Popen([PYTHON, "-I", str(script), str(report), job], env=self.env,
+                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  creationflags=HIDDEN)
+        self.helpers.append(helper)
+        self.wait_for("the shell helper's report", report.exists, timeout=LAUNCH_LIMIT)
+        outcome = json.loads(report.read_text(encoding="utf-8"))
+        self.assertTrue(outcome["shell"], outcome)
+        return outcome["pid"]
+
     def launched(self, report):
         """The session a helper's launcher created."""
         self.assertEqual(report["code"], 0, f"{report}; this test process runs {placement()}")
@@ -433,6 +506,25 @@ class Breakaway(SurvivalCase):
         self.wait_for("the refused host's exit", lambda: not self.status()["running"], timeout=IDLE_EXIT)
         for handle in self.hosts.values():
             self.assertTrue(ended(handle, LIMIT), "the refused host still runs")
+
+    def test_a_host_that_shares_the_job_of_the_desktop_shell_is_accepted(self):
+        # Some desktops run every process in a job that forbids breakaway, the
+        # shell first: there the host stops in the shell's job and ends no
+        # earlier than the desktop, so it is accepted (D4).
+        if USER32.GetShellWindow():
+            self.skipTest("this desktop has a shell window; the case needs to make its own")
+        outer = self.job(breakaway_ok=False)
+        inner = self.job(breakaway_ok=True)
+        shell = self.desktop_shell(outer)
+        prompt = f"{self.unique}-desktop"
+        helper, report = self.launch(self.create_request("cmd/desktop", self.cmd_argv(prompt)), jobs=[outer, inner])
+        self.assertEqual(report["jobs"], [True, True], report)
+        pane = self.launched(report)["pane"]
+        self.wait_for("the prompt", lambda: prompt + ">" in self.capture(pane))
+        hello = self.status()["host"]
+        self.assertEqual((hello["in_job"], hello["desktop_job"]), (True, True), f"{hello}; shell {shell}")
+        self.assertIn("in_job true desktop_job true", (self.state / "host.log").read_text(errors="replace"))
+        self.assertEqual(helper.wait(timeout=LIMIT), 0)
 
     def test_a_host_outlives_the_client_that_started_it(self):
         # As when the desktop app that started a session exits.

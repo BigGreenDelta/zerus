@@ -388,14 +388,17 @@ mod windows {
                 return FAILED;
             }
         };
-        let in_job = match job::join_host_job() {
+        let placement = match job::join_host_job() {
             Ok(host_job) => {
-                let in_job = host_job.was_in_job;
+                let placement = Placement {
+                    in_job: host_job.was_in_job,
+                    desktop_job: host_job.desktop_job,
+                };
                 // The job's handle stays open until this process exits; closing
                 // it earlier would end the host with it. Its kill-on-close then
                 // ends whatever is left (D3).
                 std::mem::forget(host_job);
-                in_job
+                placement
             }
             Err(error) => {
                 note(format!(
@@ -404,7 +407,7 @@ mod windows {
                 return FAILED;
             }
         };
-        match run(&state, in_job, admitted) {
+        match run(&state, placement, admitted) {
             Ok(()) => {
                 note("exited");
                 0
@@ -416,7 +419,18 @@ mod windows {
         }
     }
 
-    fn run(state: &Path, in_job: bool, admitted: Admitted) -> Result<(), (i32, String)> {
+    /// Where the host stood before it joined its own job (D4).
+    #[derive(Clone, Copy)]
+    struct Placement {
+        in_job: bool,
+        desktop_job: bool,
+    }
+
+    fn run(state: &Path, placement: Placement, admitted: Admitted) -> Result<(), (i32, String)> {
+        let Placement {
+            in_job,
+            desktop_job,
+        } = placement;
         let failed = |message: String| (FAILED, message);
         let api = Api::get().map_err(|e| failed(format!("no pseudoconsole API: {e}")))?;
         let identity = Identity::current().map_err(|e| failed(e.to_string()))?;
@@ -443,9 +457,10 @@ mod windows {
             integrity: identity.integrity.clone(),
             windows_session: token::windows_session().map_err(|e| failed(e.to_string()))?,
             in_job,
+            desktop_job,
         };
         note(format!(
-            "started: image {} conpty {}{} in_job {in_job}{}",
+            "started: image {} conpty {}{} in_job {in_job} desktop_job {desktop_job}{}",
             reply.image,
             api.source().name(),
             api.fallback()

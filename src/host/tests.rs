@@ -382,6 +382,7 @@ fn identity() -> HelloReply {
         integrity: Integrity::from_rid(Integrity::MEDIUM),
         windows_session: 1,
         in_job: false,
+        desktop_job: false,
     }
 }
 

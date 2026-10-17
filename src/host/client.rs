@@ -399,7 +399,11 @@ mod windows {
         let mut missing: Option<PathBuf> = None;
         loop {
             let absent = match attempt(state_dir, role, deadline.min(Instant::now() + BUSY_WAIT)) {
-                Attempt::Connected(connection) if connection.host().in_job => {
+                // A host that shares the desktop shell's job ends no earlier
+                // than the desktop does (D4).
+                Attempt::Connected(connection)
+                    if connection.host().in_job && !connection.host().desktop_job =>
+                {
                     return Err(ClientError::InJob)
                 }
                 Attempt::Connected(connection) => return Ok(connection),
@@ -477,6 +481,7 @@ mod tests {
             integrity: Integrity::from_rid(Integrity::MEDIUM),
             windows_session: 1,
             in_job: false,
+            desktop_job: false,
         }
     }
 

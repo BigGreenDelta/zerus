@@ -25,6 +25,7 @@ use windows_sys::Win32::{
         },
         Threading::GetCurrentProcess,
     },
+    UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId},
 };
 
 /// What a job allows its processes.
@@ -279,6 +280,31 @@ pub(crate) fn in_any_job() -> io::Result<bool> {
     Ok(result != 0)
 }
 
+/// The process of this desktop's shell window, normally explorer.exe; None
+/// without one, as in a service's or an SSH logon's window station.
+fn shell_process_id() -> Option<u32> {
+    // SAFETY: GetShellWindow takes no arguments and returns null without a shell.
+    let window = unsafe { GetShellWindow() };
+    if window.is_null() {
+        return None;
+    }
+    let mut pid = 0;
+    // SAFETY: `window` is a window handle (a stale one makes the call return 0)
+    // and `pid` is writable.
+    unsafe { GetWindowThreadProcessId(window, &mut pid) };
+    (pid != 0).then_some(pid)
+}
+
+/// Whether this desktop's shell runs in this process's immediate job, nested
+/// jobs included (D4). Some desktops run every process in a job that forbids
+/// breakaway, the shell first; a host there ends no earlier than the desktop.
+pub(crate) fn shell_in_own_job() -> io::Result<bool> {
+    let Some(shell) = shell_process_id() else {
+        return Ok(false);
+    };
+    Ok(own_job_process_ids()?.is_some_and(|ids| ids.contains(&shell)))
+}
+
 /// Whether this process's immediate job lets it start a child outside the job;
 /// None outside any job (D4).
 pub(crate) fn current_job_allows_breakaway() -> io::Result<Option<bool>> {
@@ -314,8 +340,11 @@ pub(crate) struct HostJob {
     pub job: Job,
     /// The host already ran in a job: breakaway stopped below a job that forbids
     /// it. The host reports this in its hello, and the launcher refuses such a
-    /// host (D4).
+    /// host (D4) unless `desktop_job`.
     pub was_in_job: bool,
+    /// That job also holds the shell of this desktop: the host then ends no
+    /// earlier than the desktop, whose processes all run in that job (D4).
+    pub desktop_job: bool,
 }
 
 /// D3, D4: note whether this process (the host) already runs in a job, then put it
@@ -323,11 +352,18 @@ pub(crate) struct HostJob {
 /// fail closed when this fails.
 pub(crate) fn join_host_job() -> io::Result<HostJob> {
     let was_in_job = in_any_job()?;
+    // Asked before the host's own job exists: the immediate job is still the one
+    // breakaway stopped at.
+    let desktop_job = was_in_job && shell_in_own_job()?;
     let job = Job::new(Limits::HOST)?;
     // SAFETY: GetCurrentProcess returns the current-process pseudo-handle, which
     // is always valid and which BorrowedHandle allows.
     job.assign(unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) })?;
-    Ok(HostJob { job, was_in_job })
+    Ok(HostJob {
+        job,
+        was_in_job,
+        desktop_job,
+    })
 }
 
 #[cfg(test)]

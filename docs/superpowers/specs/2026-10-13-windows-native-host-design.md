@@ -170,7 +170,16 @@ readable in both directions across one version of skew.
   succeeds, so a check in the launcher cannot see that failure. The host checks
   `IsProcessInJob(GetCurrentProcess(), NULL) == FALSE` before it joins its own job and
   reports the result in the hello; the launcher fails closed with a clear message
-  when the host is in any job.
+  when the host is in any job, with one exception. Some desktops run every process
+  of the interactive session in a job that forbids breakaway, `explorer.exe` first
+  (reported on Windows 11 Home 26H2, build 26300, 2026-10-17; zerus-rwuf). There
+  no host could ever start. When the job the host stopped in also holds the shell
+  of its desktop (the process of `GetShellWindow`, in
+  `JobObjectBasicProcessIdList` of that job), the host and its sessions end no
+  earlier than the desktop, which already ends them at sign-out, so the hello
+  reports `desktop_job` and the launcher accepts the host. An agent's sandbox, a
+  terminal or a CI step holds no shell, and a host over SSH has none, so those
+  jobs are still refused.
 - `hgs.exe`'s own kill-on-close job (`src/platform/windows.rs:63-83`) gains
   `JOB_OBJECT_LIMIT_BREAKAWAY_OK`. Because the MSYS runtime of Git for Windows breaks
   away whenever it may, every bounded child (`git`, `ssh.exe`, `tar.exe`, probes)
