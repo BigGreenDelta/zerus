@@ -83,7 +83,10 @@ pub(super) fn capture_with_exit(
 }
 pub(super) fn native_command(provider: &str, home: &Path, native: bool) -> Command {
     if provider == "claude" { let _ = crate::macos_session::join(); }
-    let mut cmd = Command::new(provider);
+    // As a session starts it (spec D8): on Windows found with PATHEXT, and an npm
+    // command shim (`codex.cmd`) runs what it would run, never through cmd.exe.
+    let mut cmd = crate::platform::agent_command(&[provider.to_owned()])
+        .unwrap_or_else(|_| Command::new(provider));
     if let Ok(key) = home_var(provider) {
         // Preserve native Claude's keychain service name when its directory was implicit.
         if !native || env::var(key).is_ok_and(|v| !v.is_empty()) {
