@@ -23,6 +23,8 @@ internal data class VoiceOutgoing(val id: String, val target: Target, val machin
     val uploadState: String = "uploading", val error: String = "", val profileRevision: Long? = null, val video: VideoDraft? = null) {
     val state get() = message?.state ?: uploadState
     val terminal get() = state in setOf("submitted", "failed", "cancelled", "uncertain")
+    // Submitted receipts remain a local history/playback cache, not unsent drafts.
+    val needsDraftReview get() = message?.state != "submitted"
     val needsStatus get() = message == null && uploadState == "uncertain" || !terminal
     val canRestoreUnsent get() = message == null && uploadState == "failed" && audio != null
     val effectiveTarget get() = if (target.conversation.isBlank() && !message?.conversationId.isNullOrBlank()) target.copy(conversation = message!!.conversationId) else target

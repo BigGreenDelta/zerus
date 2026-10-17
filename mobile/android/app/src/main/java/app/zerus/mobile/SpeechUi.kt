@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -24,11 +25,10 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Subject
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material3.*
@@ -542,8 +542,12 @@ import androidx.compose.ui.unit.dp
     at: Double = voice.createdAt, videoBubbleColor: Color? = null) {
     var expanded by rememberSaveable(voice.id) { mutableStateOf(false) }
     var actionsOpen by remember(voice.id) { mutableStateOf(false) }
+    var statusOpen by remember(voice.id) { mutableStateOf(false) }
+    var removeLocal by remember(voice.id) { mutableStateOf(false) }
     val local = model.speech.outgoing.find { it.id == voice.id && target?.let(it::belongsTo) == true }
     val delivery = RecordingDelivery.of(voice.state)
+    val statusDescription = if (delivery in setOf(RecordingDelivery.Uploading, RecordingDelivery.Processing))
+        VoiceProtocol.label(voice.state) else delivery.description
     val pending = local != null && voice.state !in setOf("submitted", "failed", "cancelled")
     val restorable = local?.canRestoreUnsent == true
     val transcriptControl: @Composable () -> Unit = {
@@ -565,8 +569,7 @@ import androidx.compose.ui.unit.dp
         }
     }
     val metadata: @Composable () -> Unit = {
-        Row(Modifier.background(if (voice.video != null && !expanded) MaterialTheme.colorScheme.surface.copy(alpha = .92f)
-            else Color.Transparent, RoundedCornerShape(12.dp)), verticalAlignment = Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             if (voice.video == null && voice.transcript.isNotBlank()) transcriptControl()
             if (pending || restorable) Box {
                 IconButton(onClick = { actionsOpen = true }) { Icon(Icons.Default.MoreVert, "Recording actions", Modifier.size(20.dp)) }
@@ -582,28 +585,41 @@ import androidx.compose.ui.unit.dp
                         onClick = { actionsOpen = false; model.speech.restoreUnsent(local) })
                 }
             }
-            if (at > 0) Text(remember(at) { java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
-                .format(java.util.Date((at * 1000).toLong())) }, style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            TooltipBox(positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
-                tooltip = { PlainTooltip { Text(VoiceProtocol.label(voice.state)) } }, state = rememberTooltipState()) {
-                val color = if (delivery in setOf(RecordingDelivery.Failed, RecordingDelivery.Uncertain)) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurfaceVariant
-                Box(Modifier.heightIn(min = 24.dp).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
-                    if (delivery == RecordingDelivery.Processing) CircularProgressIndicator(Modifier.size(16.dp)
-                        .semantics { contentDescription = VoiceProtocol.label(voice.state) }, color = color, strokeWidth = 1.5.dp)
-                    else Icon(when (delivery) {
+            Box(Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                .clickable(role = Role.Button, onClickLabel = "Show message status") { statusOpen = true }
+                .semantics(mergeDescendants = true) { contentDescription = statusDescription }, contentAlignment = Alignment.Center) {
+                val color = when (delivery) {
+                    RecordingDelivery.Sent -> MaterialTheme.colorScheme.primary
+                    RecordingDelivery.Failed, RecordingDelivery.Uncertain -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                Row(Modifier.background(if (voice.video != null && !expanded) MaterialTheme.colorScheme.surface.copy(alpha = .92f)
+                    else Color.Transparent, RoundedCornerShape(12.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (at > 0) Text(remember(at) { java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                        .format(java.util.Date((at * 1000).toLong())) }, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (delivery == RecordingDelivery.Cancelled) Text("Not sent", style = MaterialTheme.typography.labelSmall, color = color)
+                    Icon(when (delivery) {
                         RecordingDelivery.Sent -> Icons.Default.Check
-                        RecordingDelivery.Failed -> Icons.Default.ErrorOutline
-                        RecordingDelivery.Cancelled -> Icons.Default.Close
-                        RecordingDelivery.Uploading -> Icons.Default.CloudUpload
-                        else -> Icons.Default.HelpOutline
-                    }, delivery.description, Modifier.size(18.dp), tint = color)
+                        RecordingDelivery.Uploading, RecordingDelivery.Processing -> Icons.Default.Schedule
+                        else -> Icons.Default.ErrorOutline
+                    }, null, Modifier.size(18.dp), tint = color)
                 }
             }
         }
     }
     val error = local?.error?.ifBlank { voice.error } ?: voice.error
+    if (statusOpen) ZerusAlertDialog(onDismissRequest = { statusOpen = false }, title = { Text(delivery.description) },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (delivery in setOf(RecordingDelivery.Uploading, RecordingDelivery.Processing)) Text(VoiceProtocol.label(voice.state))
+            Text(delivery.explanation)
+            if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error)
+        } },
+        confirmButton = { if (local?.terminal == true) TextButton(onClick = { statusOpen = false; removeLocal = true },
+            enabled = local.id !in model.speech.activeRequests) { Text("Remove local copy") } },
+        dismissButton = { TextButton(onClick = { statusOpen = false }) { Text("Close") } })
+    if (removeLocal && local != null) VoiceLocalCopyConfirmation(model, local) { removeLocal = false }
     val video = voice.video
     if (video == null) {
         VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform, metadata = metadata)
@@ -652,7 +668,7 @@ import androidx.compose.ui.unit.dp
     var remove by remember { mutableStateOf<VoiceOutgoing?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SpeechComposerStatus(model)
-        speech.outgoing.sortedByDescending { it.createdAt }.forEach { entry ->
+        speech.outgoing.filter { it.needsDraftReview }.sortedByDescending { it.createdAt }.forEach { entry ->
             Card { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(entry.target.session, style = MaterialTheme.typography.titleSmall)
                 VoiceMessageContent(model, entry.effectiveTarget, entry.displayed())
@@ -665,8 +681,13 @@ import androidx.compose.ui.unit.dp
             } }
         }
     }
-    remove?.let { entry -> ZerusAlertDialog(onDismissRequest = { remove = null }, title = { Text("Remove local voice copy?") },
-        text = { Text("Remove this phone's saved audio and receipt for ${entry.target.session}? This does not cancel delivery or remove the message from the computer's conversation history.") },
-        confirmButton = { TextButton(onClick = { model.attachments.stopAudio(); speech.dismiss(entry); remove = null }) { Text("Remove local copy") } },
-        dismissButton = { TextButton(onClick = { remove = null }) { Text("Keep") } }) }
+    remove?.let { entry -> VoiceLocalCopyConfirmation(model, entry) { remove = null } }
+}
+
+@Composable private fun VoiceLocalCopyConfirmation(model: ZerusViewModel, entry: VoiceOutgoing, onDismiss: () -> Unit) {
+    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text("Remove local recording copy?") },
+        text = { Text("Remove this phone's saved recording and receipt for ${entry.target.session}? This does not cancel delivery or remove the message from the computer's conversation history.") },
+        confirmButton = { TextButton(onClick = { model.attachments.stopAudio(); model.speech.dismiss(entry); onDismiss() },
+            enabled = entry.id !in model.speech.activeRequests) { Text("Remove local copy") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Keep") } })
 }

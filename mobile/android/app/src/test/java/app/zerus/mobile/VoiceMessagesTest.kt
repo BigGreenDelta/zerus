@@ -42,6 +42,39 @@ class VoiceMessagesTest {
     private fun event(message: VoiceMessage = message()) = Event("native-voice", "You", message.transcript, "", 50.0, id,
         listOf(message.audio), "hgs_voice", nativeType = "UserMessage", voice = message)
 
+    @Test fun sentAudioAndVideoStayInHistoryButNeverReappearAsDraftsAfterReload() {
+        val video = VideoDraft(audio.copy(id = UUID.randomUUID().toString(), name = "video.mp4", mime = "video/mp4"), 200, 480, 480)
+        for (movie in listOf(null, video)) {
+            val sent = entry(message("submitted", 5)).copy(video = movie)
+            val before = VoiceState(outgoing = listOf(sent))
+            val restored = VoiceCodec.decode(VoiceCodec.encode(before))
+            assertEquals(before, restored)
+            assertFalse(restored.outgoing.single().needsDraftReview)
+            val history = VoiceHistory.merge(target, emptyList(), restored.outgoing).single().voice!!
+            assertEquals("submitted", history.state)
+            assertEquals("Привет.", history.transcript)
+            assertEquals(audio.id, history.audio.localId)
+            assertEquals(movie?.file?.id, history.video?.file?.localId)
+            assertFalse(restored.outgoing.single().needsStatus)
+        }
+    }
+
+    @Test fun draftProjectionPreservesUnsentUncertainCancelledFailedAndUnknownMedia() {
+        for (state in VoiceProtocol.states - "submitted") {
+            val restored = VoiceCodec.decode(VoiceCodec.encode(VoiceState(outgoing = listOf(entry(message(state))))))
+            assertTrue("Must keep $state", restored.outgoing.single().needsDraftReview)
+        }
+        for (state in listOf("uploading", "uncertain", "failed", "read", "finished", "submitted", "")) {
+            // Upload state alone is never an authoritative submission receipt.
+            assertTrue(entry().copy(uploadState = state).needsDraftReview)
+        }
+        val original = VoiceState(draft = VoiceDraft(target, "", "", audio, 200, 50.0),
+            outgoing = listOf(entry(message("submitted")), entry(message("uncertain")).copy(id = UUID.randomUUID().toString(), message = null, uploadState = "uncertain")))
+        assertEquals(1, original.outgoing.count { it.needsDraftReview })
+        assertNotNull(original.draft)
+        assertEquals(2, original.outgoing.size)
+    }
+
     @Test fun audioIsLosslesslyWrappedAndTamperingRejected() {
         val pcm = ByteArray(6400) { (it % 127).toByte() }
         val wav = VoiceProtocol.wav(pcm)

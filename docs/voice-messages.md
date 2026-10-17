@@ -129,10 +129,20 @@ Zerus implements these interactions in its existing Compose components with the 
 Audio and video use one compact media block with aligned metadata and icon
 controls. Recognized text is collapsed behind its transcript icon. Android's
 recording menu contains status checks, cancellation and unsent recovery actions;
-errors remain visible. Status icons preserve the actual workflow: pending or
-processing, one check for confirmed native submission, cancellation, failure or
-unconfirmed delivery. There are no read/completion ticks. An unfamiliar state
-remains unconfirmed. Icon controls retain accessible names and touch targets.
+errors remain visible. A clock marks uploading or processing, one accent-colored
+check confirms native submission, and an exclamation marks failure or unconfirmed
+delivery. Cancelled delivery explicitly says **Not sent**, without a close/delete
+cross beside the timestamp. Tap the time/status capsule for its plain-language
+explanation; it has a 48 dp touch target in both media presentations. There are no
+read/completion ticks. An unfamiliar state remains unconfirmed.
+
+Saved drafts contains retained previews and recordings that still need delivery
+or recovery review. Confirmed submitted recordings stay in conversation history,
+including local playback and transcript, and are excluded from Saved drafts even
+after restart. This changes presentation only: no receipt or media is deleted,
+and no request is replayed. Terminal local copies can still be removed explicitly
+from the message-status dialog, with confirmation. The existing 100-receipt bound
+is unchanged.
 
 Android round videos sit directly in the conversation with compact duration,
 time and delivery indicators. Their transcript icon opens a text card with a
@@ -143,8 +153,8 @@ this view never opens media or submits a message; it stops only that recording's
 current player, preserving playback of other messages.
 
 The visual reference is Telegram Android's
-[ChatMessageCell](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java),
-which groups media time and delivery glyphs. Zerus uses its own UI components
+[ChatMessageCell](https://github.com/DrKLO/Telegram/blob/f32ffeec763f0bdbf4bec25b52d654f77bff733d/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java#L29109-L29143),
+which groups media time with clock, check and error glyphs. Zerus uses its own UI components
 and state model; no Telegram source is copied.
 
 ## Authority and processing

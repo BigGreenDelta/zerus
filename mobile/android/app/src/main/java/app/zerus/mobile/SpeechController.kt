@@ -330,7 +330,7 @@ internal class SpeechController(private val context: Context, private val model:
         val captured = draft ?: return "Record a voice message first."
         return when {
             savingRecording -> "Saving the recording…"
-            outgoing.size >= 100 -> "Remove an old local voice receipt in Drafts before sending another."
+            outgoing.size >= 100 -> "Local recording limit reached. Open a recording's status in its conversation to remove its local copy."
             outgoing.any { it.belongsTo(captured.target) && !it.terminal } -> "Wait for the previous voice message to finish."
             outgoing.any { it.belongsTo(captured.target) && it.state == "uncertain" } -> "Check the previous voice message before sending another."
             else -> model.voiceSendReason(captured.target).ifBlank { if (captured.video != null) model.videoHostReason(captured.target) else "" }.ifBlank { providerReason(captured) }

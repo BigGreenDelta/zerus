@@ -1312,7 +1312,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Saved drafts", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold) }
         item { Text("Private to this phone. Kept for the exact machine, session, run, and conversation.", color = Muted) }
-        if (model.speech.draft != null || model.speech.outgoing.isNotEmpty()) item { VoiceSavedMessages(model) }
+        if (model.speech.draft != null || model.speech.outgoing.any { it.needsDraftReview }) item { VoiceSavedMessages(model) }
         if(model.actionResultNotice.isNotBlank()) item { Text(model.actionResultNotice,color = Amber,style = MaterialTheme.typography.bodySmall) }
         items(unsent.sortedByDescending { it.updatedAt }, key = { it.key }) { draft ->
             Card(colors = CardDefaults.cardColors(containerColor = Surface)) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
