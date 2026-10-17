@@ -1,6 +1,7 @@
 #include <QtTest>
 #include "ProjectsDialog.h"
 #include "PopupMouse.h"
+#include "FakeCli.h"
 #include <QInputDialog>
 #include <QColorDialog>
 #include <QCheckBox>
@@ -405,12 +406,13 @@ void TestProjectsDialog::legacyAliasesOfALocalWindowsComputerBecomeFolders()
     QCoreApplication::setOrganizationName("hgs-windows-import-test"); QCoreApplication::setApplicationName("projects");
     // `hgs project ls --json` of a Windows computer: drive paths as hgs.exe stores them.
     const auto hgs = directory.filePath("hgs");
-    QFile script(hgs); QVERIFY(script.open(QIODevice::WriteOnly));
-    script.write("#!/bin/sh\nprintf '%s\\n' '[{\"name\":\"DCB\",\"dir\":\"D:\\\\Work\\\\DCB\",\"src\":\"local\",\"exists\":true},"
-                 "{\"name\":\"Tools\",\"dir\":\"D:\\\\Work\\\\Tools\",\"src\":\"local\",\"exists\":true}]'\n");
-    script.close(); script.setPermissions(script.permissions() | QFileDevice::ExeOwner);
+    QVERIFY(FakeCli::install(hgs, R"PY(#!/usr/bin/env python3
+import json
+print(json.dumps([{"name": "DCB", "dir": "D:\\Work\\DCB", "src": "local", "exists": True},
+                  {"name": "Tools", "dir": "D:\\Work\\Tools", "src": "local", "exists": True}]))
+)PY"));
     SessionOrganization projects; const auto dcb = projects.createGroup("DCB");
-    HgsClient client(hgs); ProjectsDialog dialog(&client, nullptr, false, &projects);
+    HgsClient client(FakeCli::program(hgs)); ProjectsDialog dialog(&client, nullptr, false, &projects);
     BoxState local; local.host = "desktop"; local.ok = true; local.localSessions = true; local.metrics["platform"] = "windows";
     FleetState fleet; fleet.setLocal(local, QDateTime::currentMSecsSinceEpoch());
     dialog.setFleet(fleet);
