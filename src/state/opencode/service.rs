@@ -625,7 +625,13 @@ pub(super) fn start_decision(
 }
 
 /// Variables the shared service must not inherit from `hgs`, the connector
-/// or an SSH login.
+/// or an SSH login: `HGS_*`, `SSH_*`, `OPENCODE_SERVER_*`, `ZERUS_MOBILE_*`,
+/// and the inline configuration and permission overrides
+/// `OPENCODE_CONFIG_CONTENT` and `OPENCODE_PERMISSION`. `OPENCODE_CONFIG`,
+/// `OPENCODE_CONFIG_DIR`, `HOME` and every `XDG_*` variable stay: they name
+/// the user's own configuration and state locations, the user's own
+/// `opencode` CLI would pass them too, and the service must register its
+/// `service.json` where `registration_path()` looks.
 pub(super) fn start_environment(vars: Vec<(String, String)>) -> Vec<(String, String)> {
     vars.into_iter()
         .filter(|(k, _)| {
@@ -633,9 +639,19 @@ pub(super) fn start_environment(vars: Vec<(String, String)>) -> Vec<(String, Str
                 || k.starts_with("SSH_")
                 || k.starts_with("OPENCODE_SERVER_")
                 || k.starts_with("ZERUS_MOBILE_")
-                || k == "OPENCODE_CONFIG_CONTENT")
+                || k == "OPENCODE_CONFIG_CONTENT"
+                || k == "OPENCODE_PERMISSION")
         })
         .collect()
+}
+
+/// Collect the child's exit without blocking, so it never stays a zombie.
+fn reap(mut child: std::process::Child) {
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 /// Connect, starting `opencode service start` only when no service runs.
@@ -697,12 +713,23 @@ pub(super) fn ensure_started() -> Result<Service> {
     let mut child = crate::platform::spawn_detached(&mut command)
         .map_err(|_| "OpenCode could not be started; install OpenCode 2".to_owned())?;
     let deadline = Instant::now() + Duration::from_secs(20);
+    let mut failed = false;
     while Instant::now() < deadline {
         if let Ok(service) = connect() {
-            let _ = child.try_wait();
+            reap(child);
             return Ok(service);
         }
+        if let Ok(Some(status)) = child.try_wait() {
+            if !status.success() {
+                failed = true;
+                break;
+            }
+        }
         std::thread::sleep(Duration::from_millis(200));
+    }
+    reap(child);
+    if failed {
+        return Err("OpenCode could not be started; install OpenCode 2".into());
     }
     Err("OpenCode is still starting; try again shortly".into())
 }
@@ -983,10 +1010,23 @@ mod tests {
             ("SSH_CONNECTION".into(), "1".into()),
             ("OPENCODE_SERVER_PASSWORD".into(), "p".into()),
             ("OPENCODE_CONFIG_CONTENT".into(), "{}".into()),
+            ("OPENCODE_PERMISSION".into(), "{}".into()),
+            ("OPENCODE_CONFIG".into(), "/home/example/oc.json".into()),
+            ("OPENCODE_CONFIG_DIR".into(), "/home/example/oc".into()),
+            ("XDG_STATE_HOME".into(), "/home/example/state".into()),
             ("ZERUS_MOBILE_TOKEN".into(), "t".into()),
             ("HOME".into(), "/home/example".into()),
         ]);
         let names: Vec<_> = kept.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(names, vec!["PATH", "HOME"]);
+        assert_eq!(
+            names,
+            vec![
+                "PATH",
+                "OPENCODE_CONFIG",
+                "OPENCODE_CONFIG_DIR",
+                "XDG_STATE_HOME",
+                "HOME"
+            ]
+        );
     }
 }
