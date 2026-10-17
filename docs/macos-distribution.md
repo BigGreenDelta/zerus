@@ -79,6 +79,16 @@ command instead of loading it. `zerus-setup --remove` unloads and removes it wit
 the other agents of the bundle; the agents and tmux servers it launched keep
 running.
 
+Under this agent, macOS attributes the connector's file access, and that of its
+`hgs` and `git` children, to Zerus (`com.hgdev.hgs-tray`) rather than to
+`zerus-mobile-connector`. Folder browsing and worktree catalogs in Documents,
+Desktop and Downloads therefore use Zerus's Files and Folders consent; the
+connector needs no consent of its own and no Full Disk Access. The stored consent
+carries Zerus's Developer ID requirement, which later builds signed with the same
+identifier and team satisfy. This was rehearsed on 2026-10-17 with a signed main
+build under a fixture label, on a Mac where Zerus already had that consent, and
+no prompt appeared (`zerus-nbzl.23`).
+
 ## Pinned Qt
 
 `packaging/macos/qt.json` pins official Qt **6.11.2** (`qtbase`, `qtsvg`,
