@@ -11,6 +11,32 @@ pub fn digest(s: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(s.as_ref()))
 }
 
+/// Python's `json` refuses integers of more than 4,300 digits
+/// (`sys.int_info.default_max_str_digits`); this codec keeps them.
+pub const MAX_INT_DIGITS: usize = 4300;
+
+/// Whether every integer in `value` has at most [`MAX_INT_DIGITS`] digits, so
+/// that Python's `json`, and the connector that applies its bound, reads it.
+pub fn python_integers(value: &Value) -> bool {
+    let mut pending = vec![value];
+    while let Some(item) = pending.pop() {
+        match item {
+            Value::Number(number) => {
+                let literal = number.to_string();
+                if !literal.contains(['.', 'e', 'E'])
+                    && literal.trim_start_matches('-').len() > MAX_INT_DIGITS
+                {
+                    return false;
+                }
+            }
+            Value::Array(items) => pending.extend(items),
+            Value::Object(members) => pending.extend(members.values()),
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Parses untrusted JSON after a lexical scan that bounds it without building
 /// any tree. `depth_limit` bounds container nesting (`[]` is depth 1), and
 /// `value_limit` bounds the containers, strings (object keys included) and

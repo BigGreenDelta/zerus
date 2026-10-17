@@ -2,30 +2,16 @@
 use serde_json::{Map, Value};
 use zerus_relay::{error::Error, json};
 
-/// Python's `json` refuses integers of more than 4,300 digits
-/// (`sys.int_info.default_max_str_digits`); the relay codec keeps them.
-pub const MAX_INT_DIGITS: usize = 4300;
+pub use zerus_relay::json::MAX_INT_DIGITS;
 
 /// Untrusted JSON (relay batches, native output, stored rows) under explicit
 /// bounds. Beyond the relay codec, an integer Python could not read is
-/// refused, so nothing Python refuses is executed here.
+/// refused, so nothing Python refuses is executed here; the relay refuses the
+/// same integers at submission.
 pub fn parse(raw: &[u8], depth_limit: usize, value_limit: usize) -> Result<Value, Error> {
     let value = json::parse(raw, depth_limit, value_limit)?;
-    let mut pending = vec![&value];
-    while let Some(item) = pending.pop() {
-        match item {
-            Value::Number(number) => {
-                let literal = number.to_string();
-                if !literal.contains(['.', 'e', 'E'])
-                    && literal.trim_start_matches('-').len() > MAX_INT_DIGITS
-                {
-                    return Err(Error::BAD);
-                }
-            }
-            Value::Array(items) => pending.extend(items),
-            Value::Object(members) => pending.extend(members.values()),
-            _ => {}
-        }
+    if !json::python_integers(&value) {
+        return Err(Error::BAD);
     }
     Ok(value)
 }

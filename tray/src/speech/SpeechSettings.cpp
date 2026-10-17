@@ -189,7 +189,7 @@ SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent, std::
     auto *heading = label(tr("Voice input")); heading->setObjectName("heading"); layout->addWidget(heading);
     auto *preview = new QCheckBox(tr("Preview before sending")); preview->setObjectName("speechPreviewBeforeSend");
     preview->setChecked(QSettings().value("speech/preview_before_send",false).toBool()); layout->addWidget(preview);
-    layout->addWidget(label(tr("Review audio and video recordings after release, then choose Send. This preference applies on this device.")));
+    layout->addWidget(label(tr("Show Stop instead of Send while recording audio or video. Stop retains a preview for review and a separate Send. This preference applies on this device.")));
     connect(preview,&QCheckBox::toggled,this,[](bool checked){QSettings().setValue("speech/preview_before_send",checked);});
     layout->addWidget(label(tr("Manage recognition providers on a processing computer. Recording starts on this device; Send voice uses the provider selected beside your recording.")));
     layout->addWidget(label(tr("Configure providers on")));
