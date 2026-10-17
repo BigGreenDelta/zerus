@@ -2082,6 +2082,9 @@ session usage limits and network failures. Automation is off by default. Each cl
 `15, 30, 60, 300, -1` stops after four attempts; `15, 30, 60, 0` repeats the previous
 60-second delay indefinitely after the first two attempts; `-1` alone does nothing.
 Small jitter is applied. Class counters persist within an episode when errors change.
+Temporary overload covers HTTP 500, 502–504 and 529, model capacity errors and the
+520–524 gateway failures that Cloudflare reports for an unreachable or timed-out
+provider, often without a response body.
 
 **Session usage limit** is separate from a temporary rate limit. Its default mode,
 **Wait for reset**, schedules a continuation at the provider's reset time, using

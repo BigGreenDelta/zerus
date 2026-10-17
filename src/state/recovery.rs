@@ -218,6 +218,9 @@ fn adapter(s: &Value) -> Option<&'static str> {
 fn contains(text: &str, words: &[&str]) -> bool {
     words.iter().any(|w| text.contains(w))
 }
+fn status_code(text: &str, codes: &[&str]) -> bool {
+    text.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| codes.contains(&word))
+}
 fn class(error: &Value) -> &'static str {
     if string(error, "error_kind") == "provider_policy"
         || provider_errors::category(string(error, "detail")) == "provider_policy"
@@ -276,7 +279,9 @@ fn class(error: &Value) -> &'static str {
             "internal server error",
             "service unavailable",
         ],
-    ) {
+    ) || status_code(&text, &["520", "521", "522", "523", "524"])
+    {
+        // Cloudflare reports an unreachable or timed-out provider as 520–524, often without a body.
         return "service";
     }
     if contains(
@@ -1177,6 +1182,11 @@ mod tests {
             ("529 Overloaded", "service"),
             ("HTTP 503", "service"),
             ("500 internal server error", "service"),
+            ("524 status code (no body)", "service"),
+            ("HTTP 520", "service"),
+            ("522: connection timed out", "service"),
+            ("read 5240 lines", "manual"),
+            ("exit 1524", "manual"),
             ("429 rate limit", "rate_limit"),
             ("429 insufficient quota", "manual"),
             ("overloaded account balance exhausted", "manual"),
