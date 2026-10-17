@@ -199,13 +199,46 @@ the window. [Integration details](docs/reference.md#deepseek).
 
 ## Quick start
 
-On Arch Linux x86_64, install the stable bundle with `yay -S zerus-ade-bin`, then
-run `zerus-setup` as your normal user.
-[Source and development packages](docs/installation.md#arch-linux) are also available.
-On Apple Silicon macOS, install with `brew install --cask ufna/zerus/zerus`, then
-run `zerus-setup`, or use the [signed DMG](docs/installation.md#macos-dmg).
-Other Linux distributions [build from source](docs/installation.md#local-installation);
-see [other platforms](#other-platforms).
+### macOS — Homebrew or DMG
+
+For Apple Silicon Macs running macOS 14 or later:
+
+```sh
+brew install --cask ufna/zerus/zerus
+zerus-setup
+```
+
+Run `zerus-setup` once as your normal user, without `sudo`. Prefer a download?
+[Get the signed, notarized DMG](https://zerus.dev/#download-macos), then follow
+the [DMG installation steps](docs/installation.md#macos-dmg).
+
+### Windows — portable ZIP
+
+[Download Zerus for Windows](https://zerus.dev/#download-windows).
+Extract the whole `zerus-<version>-windows-x86_64.zip` archive and launch
+**`hgs-tray.exe`** from the extracted folder. The CLI, **`hgs.exe`**, is included;
+keep the bundled files together. No installer or WSL is required.
+
+Requires Windows 10 version 1903 or later, or Windows 11, on x86_64. Connect to
+Linux/macOS agents over SSH, or enable **local sessions** in Machines to run
+agents on Windows itself. See the [Windows guide](docs/installation.md#windows)
+for setup and supported features. The ZIP is also on the
+[latest stable release page](https://github.com/ufna/zerus/releases/latest).
+
+### Linux — Arch package or source
+
+On Arch Linux x86_64:
+
+```sh
+yay -S zerus-ade-bin
+zerus-setup
+```
+
+Run setup as your normal user. [Source and development packages](docs/installation.md#arch-linux)
+are also available. Other Linux distributions
+[build from source](docs/installation.md#local-installation).
+
+### Start a session
 
 [Install Zerus and the CLI](docs/installation.md), then use **New session** to
 choose an agent, machine, project and folder. Ordinary folders without Git work
@@ -243,12 +276,9 @@ and `ufna/zerus/zerus@dev`, respectively.
 **Settings > Updates** checks versions and provides the update command or DMG.
 Source builds remain available through the same installer.
 
-**Windows**: nightly releases include a portable x86_64
-[control console](docs/installation.md#windows) that manages agents on your
-Linux and macOS machines over SSH. With local sessions enabled on its Machines
-page, it also runs agents on the Windows computer itself, in a native session
-host on ConPTY without WSL. Stable releases after 0.42.2 include it too; Dev
-builds have none. Contributions that follow the plan are welcome.
+**Windows**: stable and nightly releases include the portable x86_64 ZIP
+described [above](#windows--portable-zip). Dev builds have no Windows asset.
+Local sessions use a native ConPTY session host; remote sessions use SSH.
 
 [Windows support plan](docs/superpowers/specs/2026-10-10-windows-support-design.md)
 
