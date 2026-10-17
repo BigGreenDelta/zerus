@@ -38,6 +38,11 @@ impl Role {
         }
     }
 }
+/// Seconds between recorded phone activity times.
+pub const LAST_SEEN_INTERVAL: f64 = 300.0;
+/// The phone list bound per workspace.
+pub const MAX_LISTED_DEVICES: usize = 200;
+
 pub fn token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -113,11 +118,35 @@ impl Store {
             .await?;
         Ok(json!({"workspace_id":w,"pair_code":code,"expires_at":expires}))
     }
+    /// A phone invitation issued by a computer of the workspace, which the phone
+    /// list later names. Same lifetime and single use as the administrator's.
+    pub async fn invite_from(&self, c: &Credential) -> Result<Value> {
+        let mut t = self.db.begin().await?;
+        self.authorized_tx(&mut t, c).await?;
+        let code = token();
+        let expires = now() + 600.0;
+        t.exec(
+            "INSERT INTO invitations(code_hash,workspace_id,expires,added_by) VALUES(?,?,?,?)",
+            args![&digest(&code), &c.workspace, expires, &c.id],
+        )
+        .await?;
+        let workspace = t
+            .one(
+                "SELECT name FROM workspaces WHERE id=?",
+                args![&c.workspace],
+            )
+            .await?
+            .ok_or(Error::UNAUTHORIZED)?;
+        t.commit().await?;
+        Ok(
+            json!({"workspace_id":c.workspace,"workspace_name":workspace["name"],"pair_code":code,"expires_at":expires}),
+        )
+    }
     pub async fn pair(&self, code: &str, name: &str) -> Result<Value> {
         let mut t = self.db.begin().await?;
         let row = t
             .one(
-                "DELETE FROM invitations WHERE code_hash=? AND expires>? RETURNING workspace_id",
+                "DELETE FROM invitations WHERE code_hash=? AND expires>? RETURNING workspace_id,added_by",
                 args![&digest(code), now()],
             )
             .await?
@@ -126,8 +155,8 @@ impl Store {
         let id = Uuid::new_v4().to_string();
         let secret = token();
         t.exec(
-            "INSERT INTO devices(id,workspace_id,name,token_hash) VALUES(?,?,?,?)",
-            args![&id, w, name, &digest(&secret)],
+            "INSERT INTO devices(id,workspace_id,name,token_hash,paired_at,added_by) VALUES(?,?,?,?,?,?)",
+            args![&id, w, name, &digest(&secret), now(), &row["added_by"]],
         )
         .await?;
         let workspace = t
@@ -140,17 +169,34 @@ impl Store {
         )
     }
     pub async fn authenticate(&self, secret: &str, role: Role) -> Result<Credential> {
+        let device = role == Role::Device;
         let r = self
             .db
             .one(
                 &format!(
-                    "SELECT id,workspace_id FROM {} WHERE token_hash=? AND revoked=0",
+                    "SELECT id,workspace_id{} FROM {} WHERE token_hash=? AND revoked=0",
+                    if device { ",last_seen" } else { "" },
                     role.table()
                 ),
                 args![&digest(secret)],
             )
             .await?
             .ok_or(Error::UNAUTHORIZED)?;
+        // The phone list's last activity, written at most every five minutes so
+        // long polls do not write on every request.
+        let at = now();
+        if device
+            && r["last_seen"]
+                .as_f64()
+                .is_none_or(|seen| seen < at - LAST_SEEN_INTERVAL)
+        {
+            self.db
+                .exec(
+                    "UPDATE devices SET last_seen=? WHERE id=?",
+                    args![at, s(&r, "id")],
+                )
+                .await?;
+        }
         Ok(Credential {
             id: s(&r, "id").into(),
             workspace: s(&r, "workspace_id").into(),
@@ -201,6 +247,54 @@ impl Store {
         .await?;
         t.commit().await?;
         Ok(v)
+    }
+    /// The active phones of the computer's workspace, newest pairing first.
+    pub async fn devices(&self, c: &Credential) -> Result<Value> {
+        let mut t = self.db.begin().await?;
+        self.authorized_tx(&mut t, c).await?;
+        let workspace = t
+            .one(
+                "SELECT name FROM workspaces WHERE id=?",
+                args![&c.workspace],
+            )
+            .await?
+            .ok_or(Error::UNAUTHORIZED)?;
+        let rows = t
+            .all(
+                &format!("SELECT d.id,d.name,d.paired_at,d.last_seen,d.added_by,COALESCE(n.computer_id,n.id) AS added_computer,n.name AS added_name,p.provider FROM devices d LEFT JOIN nodes n ON n.id=d.added_by AND n.workspace_id=d.workspace_id LEFT JOIN pushes p ON p.device_id=d.id WHERE d.workspace_id=? AND d.revoked=0 ORDER BY CASE WHEN d.paired_at IS NULL THEN 1 ELSE 0 END,d.paired_at DESC,d.id LIMIT {MAX_LISTED_DEVICES}"),
+                args![&c.workspace],
+            )
+            .await?;
+        t.commit().await?;
+        let devices: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                let platform = match r["provider"].as_str() {
+                    Some("apns" | "apns_sandbox") => json!("ios"),
+                    Some("fcm") => json!("android"),
+                    _ => Value::Null,
+                };
+                let added_by = if r["added_name"].is_string() {
+                    json!({"computer_id":r["added_computer"],"name":r["added_name"]})
+                } else {
+                    Value::Null
+                };
+                json!({"id":r["id"],"name":r["name"],"platform":platform,"paired_at":r["paired_at"],"last_seen_at":r["last_seen"],"added_by":added_by})
+            })
+            .collect();
+        Ok(json!({"workspace_id":c.workspace,"workspace_name":workspace["name"],"devices":devices}))
+    }
+    /// A computer revokes an active phone of its own workspace.
+    pub async fn revoke_device(&self, c: &Credential, id: &str) -> Result<()> {
+        self.authorized(c).await?;
+        self.db
+            .one(
+                "SELECT id FROM devices WHERE id=? AND workspace_id=? AND revoked=0",
+                args![id, &c.workspace],
+            )
+            .await?
+            .ok_or(Error::NOT_FOUND)?;
+        self.revoke(Role::Device, id).await
     }
     pub async fn revoke(&self, role: Role, id: &str) -> Result<()> {
         let mut t = self.db.begin().await?;

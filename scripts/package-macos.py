@@ -134,6 +134,7 @@ def main():
     install(ROOT / "THIRD_PARTY_NOTICES.md", licenses / "THIRD_PARTY_NOTICES.md")
     install(ROOT / "tray/vendor/libvterm/LICENSE", licenses / "libvterm-LICENSE")
     install(ROOT / "tray/vendor/md4c/LICENSE.md", licenses / "md4c-LICENSE")
+    install(ROOT / "tray/vendor/qrcodegen/LICENSE", licenses / "qrcodegen-LICENSE")
     install(ROOT / "docs/licenses/codex-LICENSE.txt", licenses / "codex-LICENSE.txt")
     shutil.copytree(args.licenses, licenses / "rust")
     for name in ("LGPL-3.0.txt", "GPL-3.0.txt"):

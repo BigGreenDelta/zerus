@@ -456,6 +456,31 @@ quint64 HgsClient::requestAccounts(const QString &host, const QStringList &argum
     return request;
 }
 
+quint64 HgsClient::requestMobile(const QString &host, const QStringList &arguments)
+{
+    const quint64 request = ++m_mobileRequest;
+    QStringList help{QStringLiteral("--help")}, args{QStringLiteral("mobile")};
+    args.append(arguments);
+    if (!host.isEmpty()) { help.prepend(QLatin1Char('@') + host); args.prepend(QLatin1Char('@') + host); }
+    const auto failed = [this, request, host](const QString &, const QString &error) {
+        auto text = error; if (text.startsWith(QLatin1String("hgs: "))) text.remove(0, 5);
+        emit mobileFailed(request, host, text);
+    };
+    // An older CLI would read "mobile" as an agent to launch.
+    runHgs(m_hgs, help, host.isEmpty() ? 5000 : 15000, this, [this, request, host, args, failed](const QByteArray &out) {
+        if (!out.contains("mobile phones|invite|revoke-phone")) {
+            emit mobileFailed(request, host, tr("Update Zerus on %1 to manage phones from here.").arg(host.isEmpty() ? tr("this computer") : host));
+            return;
+        }
+        runHgs(m_hgs, args, 40000, this, [this, request, host](const QByteArray &bytes) {
+            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
+            if (error.error != QJsonParseError::NoError || !data.isObject()) emit mobileFailed(request, host, tr("Invalid phone management response"));
+            else emit mobileReady(request, host, data.object());
+        }, failed);
+    }, failed);
+    return request;
+}
+
 quint64 HgsClient::requestMachines(const QStringList &arguments)
 {
     const quint64 request = ++m_machineRequest;

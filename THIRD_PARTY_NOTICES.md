@@ -21,6 +21,11 @@ source provenance and archive checksum are in `UPSTREAM.md` beside it.
 under MIT. Its original license is retained in `tray/vendor/md4c/LICENSE.md`;
 source provenance and archive checksum are in `UPSTREAM.md` beside it.
 
+`tray/vendor/qrcodegen` contains the Nayuki QR Code generator 1.8.0 (C++) under
+MIT, which draws the phone pairing code. Its license is retained in
+`tray/vendor/qrcodegen/LICENSE`; source provenance and file checksums are in
+`UPSTREAM.md` beside it.
+
 ## GitHub logo
 
 The About page uses the [GitHub mark from Primer Octicons](

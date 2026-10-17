@@ -176,6 +176,7 @@ def main():
         licenses = stage / "licenses"
         copy(ROOT / "tray/vendor/libvterm/LICENSE", licenses / "libvterm-LICENSE")
         copy(ROOT / "tray/vendor/md4c/LICENSE.md", licenses / "md4c-LICENSE")
+        copy(ROOT / "tray/vendor/qrcodegen/LICENSE", licenses / "qrcodegen-LICENSE")
         copy(ROOT / "docs/licenses/codex-LICENSE.txt", licenses / "codex-LICENSE.txt")
         copy(ROOT / "docs/licenses/conpty-LICENSE.txt", licenses / "conpty-LICENSE.txt")
         copy(ROOT / "docs/licenses/conpty-NOTICE.md", licenses / "conpty-NOTICE.md")

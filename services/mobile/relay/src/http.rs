@@ -591,6 +591,25 @@ impl App {
                 self.store.result(&c, id, &b, encoded.as_deref()).await?;
                 (StatusCode::OK, json!({"ok":true}))
             }
+            ("POST", ["v1", "node", "invitations"]) => {
+                let b = self.body(unread, budget.clone(), MIB).await?;
+                protocol::fields(&b, &[], &["workspace_id"])?;
+                // The desktop names the workspace it listed: a gateway moved to
+                // another workspace since then must not issue that one's code.
+                if !b["workspace_id"].is_null() {
+                    pinned(&c, Some(protocol::text(&b["workspace_id"], 64, false)?))?;
+                }
+                self.store
+                    .rate(&json!(["node-invite", &c.id]), 10, false)
+                    .await?;
+                (StatusCode::OK, self.store.invite_from(&c).await?)
+            }
+            ("GET", ["v1", "node", "devices"]) => (StatusCode::OK, self.store.devices(&c).await?),
+            ("DELETE", ["v1", "node", "devices", id]) => {
+                pinned(&c, params.get("workspace_id").map(String::as_str))?;
+                self.store.revoke_device(&c, id).await?;
+                (StatusCode::OK, json!({"revoked":true}))
+            }
             ("POST", ["v1", "push"]) => {
                 let b = self.body(unread, budget.clone(), MIB).await?;
                 let provider = b["provider"].as_str().ok_or(Error::BAD)?;
@@ -635,6 +654,14 @@ impl App {
         self.store.db.tasks.spawn(async move{loop{tokio::select!{biased;_=app.stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs_f64(app.cfg.maintenance_interval))=>{if app.store.maintain(false).await.is_err(){eprintln!("relay maintenance deferred");}}}}});
         let app = self.clone();
         self.store.db.tasks.spawn(async move{loop{tokio::select!{biased;_=app.stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{if app.push.once().await.is_err(){eprintln!("relay push delivery deferred");}}}}});
+    }
+}
+/// A computer's phone management names the workspace it showed; a mismatch
+/// means its credential now belongs to another one.
+fn pinned(c: &crate::store::Credential, workspace: Option<&str>) -> Result<()> {
+    match workspace {
+        Some(w) if w != c.workspace => Err(Error::CONFLICT),
+        _ => Ok(()),
     }
 }
 async fn dispatch(State(app): State<App>, req: Request) -> Response {

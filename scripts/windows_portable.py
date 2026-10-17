@@ -34,7 +34,7 @@ REQUIRED = (
     "multimedia/ffmpegmediaplugin.dll", "multimedia/windowsmediaplugin.dll",
     "avcodec-61.dll", "avformat-61.dll", "avutil-59.dll", "swresample-5.dll", "swscale-8.dll",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "conpty.dll", "OpenConsole.exe",
-    "licenses/libvterm-LICENSE", "licenses/md4c-LICENSE", "licenses/conpty-LICENSE.txt",
+    "licenses/libvterm-LICENSE", "licenses/md4c-LICENSE", "licenses/qrcodegen-LICENSE", "licenses/conpty-LICENSE.txt",
     "licenses/conpty-NOTICE.md", "licenses/rust/inventory.json",
     *(f"licenses/qt/{name}.txt" for name in QT_LICENSE_TEXTS),
 )

@@ -10,6 +10,7 @@ mod metrics;
 #[cfg(unix)]
 mod mobile_peers;
 mod native_ui;
+mod phones;
 mod session_reference;
 mod platform;
 mod presence;

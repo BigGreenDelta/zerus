@@ -359,7 +359,7 @@ for compatibility. Windows, notifications, the tray, `--version` and the Linux l
 show Zerus. On macOS, a localized display name shows Zerus in the Dock, Finder,
 Spotlight and System Settings for the unchanged `hgs-tray.app` bundle.
 
-Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
+Settings → Mobile connection also lists and pairs [phones](#machines-and-accounts). Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
 
 The tray has two counters: all sessions and **Needs attention**. Attention includes
 input, approvals, errors and unread main-agent replies. An offline host retains
@@ -1795,6 +1795,28 @@ a selected checkout while preserving existing state. Unsaved machine drafts do
 not change configuration; **Discard draft** removes the draft explicitly.
 Zerus lists a machine's sessions and connection state under its alias, even when
 that machine calls itself something else (its `HGS_SELF` or host name).
+
+**Phones**, below the machines and in Settings → Mobile connection, lists the
+phones paired with every workspace this computer reaches: through its own mobile
+connection, or through one enabled peer that has one (one hop, like phones reach
+peers). Each phone shows its platform, when it was paired, its last activity
+(recorded at most every five minutes) and the computer whose invitation it used;
+older pairings show "—". **Pair a phone…** shows a single-use QR code with the
+server and code for manual entry; it expires after ten minutes and closing the
+dialog discards it. Scan it in Zerus on the phone through Machines → Pair another
+workspace. **Revoke…** asks for confirmation, then removes that phone's
+credential, queued requests and push registration; the phone loses every computer
+of the workspace at once. A computer whose hgs predates phone management is named
+and never asked. The same operations are available as
+`hgs [@host] mobile phones|invite|revoke-phone <id> --json`; a computer without
+a mobile connection answers `{"configured": false}`. Requests go to the relay
+through the system `curl` with the computer credential on its standard input;
+curl ignores the user's `.curlrc` and environment proxies and never follows
+redirects. The desktop passes `--workspace ID --server URL` from the list it
+shows, so a gateway whose mobile connection changed meanwhile refuses to invite
+or revoke for another relay or workspace, and a code for another workspace is
+never shown. A revocation that fails or cannot be confirmed stays reported until
+**Refresh**; it is never retried automatically.
 
 Multiple machine filters narrow both sessions and content search. Label color,
 Bright/Soft mode and appearance previews are local. Color pickers cancel on an

@@ -595,6 +595,11 @@ target_include_directories(test_mobiledeliverysettings PRIVATE ../src)
 target_link_libraries(test_mobiledeliverysettings PRIVATE Qt6::Test Qt6::Widgets hgs-tray-core)
 zerus_add_test(mobiledeliverysettings test_mobiledeliverysettings)
 set_tests_properties(mobiledeliverysettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_executable(test_phonepairing test_phonepairing.cpp)
+target_include_directories(test_phonepairing PRIVATE ../src)
+target_link_libraries(test_phonepairing PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(phonepairing test_phonepairing)
+set_tests_properties(phonepairing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # Windows pieces with portable logic: the Windows Terminal command, the console
 # host, terminal templates, tray-icon notifications and the swarm worker the
