@@ -9316,7 +9316,7 @@ void TestSessionsWindow::localWindowsSessionExplainsDisabledVoice(){
     QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
     settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);
     auto *voice=composer->findChild<ToolbarChip *>("voiceRecord");QVERIFY(voice);
-    QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Tap to switch voice/video"));
+    QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Click to start"));
     local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
     QTRY_VERIFY(!voice->isEnabled());
     QCOMPARE(voice->toolTip(),QString("Voice messages cannot be sent to sessions on this Windows computer yet."));

@@ -174,15 +174,15 @@ public:
 class FixtureVideoRecorder : public RoundVideoRecorder {
 public:
     FixtureVideoRecorder():RoundVideoRecorder(nullptr){}
-    int starts=0,stops=0;bool cancelled=false;
-    void start(const QByteArray &) override {++starts;cancelled=false;emit started();}
+    int starts=0,stops=0;bool cancelled=false,startImmediately=true;
+    void start(const QByteArray &) override {++starts;cancelled=false;if(startImmediately)emit started();}
     void stop() override {++stops;emit completed(QByteArray(32000,'\0'),QByteArray("synthetic-video"),QJsonObject{{"format","mp4"},{"duration_ms",1000},{"width",480},{"height",480}});}
     void cancel() override {cancelled=true;}
 };
 
 }
-// These retained-preview tests use the explicit Stop control. Physical gesture
-// behavior (including release-to-send) has separate coverage below.
+// These retained-preview tests use the explicit Stop control. Physical clicks
+// on Record and Send have separate coverage below.
 static void recordOrPreview(ToolbarChip *voice) {
     if(voice->fullLabel().startsWith("Send (")) {
         auto *parent=voice->parentWidget();
@@ -530,24 +530,24 @@ private slots:
         QTRY_COMPARE(voice->toolTip(),windows);QVERIFY(!voice->isEnabled());QCOMPARE(voice->accessibleDescription(),windows);
         QCOMPARE(voice->fullLabel(),QString("Voice"));recordOrPreview(voice);QCOMPARE(recorder->starts,0);
         available=true;reason.clear();composer.setAvailability(true,{});
-        QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Tap to switch"));
+        QTRY_VERIFY(voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Click to start"));
         // Unavailable for a passing reason (offline, archived): the usual hint stays.
         available=false;composer.setAvailability(true,{});
-        QVERIFY(!voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Tap to switch"));
+        QVERIFY(!voice->isEnabled());QVERIFY(voice->toolTip().startsWith("Click to start"));
     }
     void nativeVideoAudioOnExplicitSyntheticFile() {
         const auto path=qEnvironmentVariable("ZERUS_TEST_VIDEO_FILE");if(path.isEmpty())QSKIP("Set ZERUS_TEST_VIDEO_FILE to an explicitly generated synthetic MP4.");
         QString error;const auto pcm=RoundVideoRecorder::extractAudio(path,std::make_shared<std::atomic_bool>(false),error);
         QVERIFY2(error.isEmpty(),qPrintable(error));QVERIFY(pcm.size()>=62000 && pcm.size()<=66000);QVERIFY(rms(pcm)>100);
     }
-    void videoHoldPersistsTwoMediaAndSendsOnePinnedRequest() {
+    void videoClicksPersistTwoMediaAndSendOnePinnedRequest() {
         QTemporaryDir dir;QSettings().setValue("speech/video_mode",true);
         MessageComposer composer;composer.setSessionKey("fixture\nvideo");composer.show();auto *video=new FixtureVideoRecorder;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},new FixtureRecorder,{},video);
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());QCOMPARE(voice->fullLabel(),"Video");
-        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(video->starts,1);
+        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(video->starts,1);QCOMPARE(video->stops,0);
         QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
-        QTest::mouseRelease(voice,Qt::LeftButton);
+        QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));QTest::mouseClick(voice,Qt::LeftButton);
         QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile actions(dir.path()+"/voice-actions");QVERIFY(actions.open(QIODevice::ReadOnly));
         const auto lines=actions.readAll().trimmed().split('\n');QCOMPARE(lines.size(),1);
         const auto payload=QJsonDocument::fromJson(lines[0]).object();QCOMPARE(payload.value("expected_conversation_id").toString(),"native-conversation");
@@ -561,27 +561,47 @@ private slots:
         MessageComposer composer;composer.setSessionKey("fixture\nlegacy-video");composer.show();auto *video=new FixtureVideoRecorder;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},new FixtureRecorder,{},video);
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
-        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(video->starts,1);QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
-        QTest::mouseRelease(voice,Qt::LeftButton);QTRY_VERIFY(composer.findChild<QWidget *>("voicePreview")->isVisible());
+        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(video->starts,1);QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
+        QTest::mouseClick(voice,Qt::LeftButton);QTRY_VERIFY(composer.findChild<QWidget *>("voicePreview")->isVisible());
         QVERIFY(!composer.findChild<QPushButton *>("voiceSend")->isEnabled());QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
         ComposerDraftStore::flushWrites();ComposerDraftStore store;const auto draft=store.load("voice-message-draft\n"+composer.sessionKey());
         QCOMPARE(draft.attachments.size(),2);QCOMPARE(draft.attachments[1].data,QByteArray("synthetic-video"));
         QCOMPARE(draft.formState.value("video").toObject().value("duration_ms").toInt(),1000);
     }
-    void telegramShortTapChangesModeWithoutOpeningDevice() {
-        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nshort");composer.show();
-        auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
-        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(voice->fullLabel(),"Video");QCOMPARE(recorder->starts,0);
-        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(voice->fullLabel(),"Voice");QCOMPARE(recorder->starts,0);
+    void adjacentModeIconSwitchesWithoutCaptureAndPersists() {
+        QTemporaryDir dir;const auto executable=fixture(dir.path());
+        for(bool restored:{false,true}){
+            MessageComposer composer;composer.setSessionKey("fixture\nmode");composer.resize(640,300);composer.show();
+            auto *audio=new FixtureRecorder;auto *video=new FixtureVideoRecorder;
+            SpeechComposer speech(executable,&composer,[&]{return target(composer);},audio,{},video);
+            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");auto *mode=composer.findChild<ToolbarChip *>("voiceMode");
+            QVERIFY(mode);QTRY_VERIFY(voice->isEnabled());QVERIFY(mode->isEnabled());
+            QCOMPARE(voice->fullLabel(),restored?QString("Video"):QString("Voice"));
+            QCOMPARE(mode->accessibleName(),restored?QString("Switch to voice recording"):QString("Switch to video recording"));
+            QCOMPARE(mode->toolTip(),mode->accessibleName());QVERIFY(mode->text().isEmpty());QVERIFY(!mode->icon().isNull());
+            // The switch stays beside Record, including when the toolbar compacts.
+            for(int width:{640,320}){
+                composer.resize(width,300);composer.toolbar()->fit();QCoreApplication::processEvents();
+                const QRect recordBounds(voice->mapTo(composer.toolbar(),QPoint()),voice->size());
+                const QRect modeBounds(mode->mapTo(composer.toolbar(),QPoint()),mode->size());
+                QVERIFY(mode->isVisible());QVERIFY(modeBounds.left()>recordBounds.right());
+                QVERIFY(modeBounds.left()-recordBounds.right()<=7);QVERIFY(composer.toolbar()->rect().contains(modeBounds));
+            }
+            QTest::mouseClick(mode,Qt::LeftButton);
+            QCOMPARE(voice->fullLabel(),restored?QString("Voice"):QString("Video"));
+            QCOMPARE(QSettings().value("speech/video_mode").toBool(),!restored);
+            QCOMPARE(audio->starts,0);QCOMPARE(video->starts,0);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+        }
     }
-    void telegramHoldReleaseSendsExactlyOnceAfterProviderConfirmation() {
-        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nhold");composer.show();
+    void clickStartsAndSecondClickSendsExactlyOnce() {
+        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nclick");composer.show();
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
-        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(recorder->starts,1);
+        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(recorder->starts,1);QCOMPARE(recorder->stops,0);
+        QCOMPARE(voice->fullLabel(),"Send (0:00)");QVERIFY(!QSettings().value("speech/video_mode",false).toBool());
         QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
-        QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));QTest::mouseRelease(voice,Qt::LeftButton);
+        QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));QCOMPARE(recorder->stops,0);
+        QTest::mouseClick(voice,Qt::LeftButton);
         QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile calls(dir.path()+"/voice-actions");QVERIFY(calls.open(QIODevice::ReadOnly));
         const auto lines=calls.readAll().trimmed().split('\n');QCOMPARE(lines.size(),1);
         QCOMPARE(QJsonDocument::fromJson(lines[0]).object().value("action").toString(),"submit");
@@ -594,23 +614,24 @@ private slots:
         SpeechSettings restored(executable);QVERIFY(restored.findChild<QCheckBox *>("speechPreviewBeforeSend")->isChecked());
         QVERIFY(!QSettings().contains("speech/profile"));QVERIFY(!QSettings().contains("speech/video_mode"));
     }
-    void releaseUsesCapturedPreviewPreference_data() {
+    void secondClickUsesCapturedPreviewPreference_data() {
         QTest::addColumn<bool>("videoMode");QTest::addColumn<bool>("preview");
         QTest::newRow("audio-preview")<<false<<true;QTest::newRow("video-preview")<<true<<true;
         QTest::newRow("audio-send")<<false<<false;QTest::newRow("video-send")<<true<<false;
     }
-    void releaseUsesCapturedPreviewPreference() {
+    void secondClickUsesCapturedPreviewPreference() {
         QFETCH(bool,videoMode);QFETCH(bool,preview);QTemporaryDir dir;
         QSettings().setValue("speech/video_mode",videoMode);QSettings().setValue("speech/preview_before_send",preview);
         MessageComposer composer;composer.setSessionKey("fixture\npreview-option");composer.show();
         auto *audio=new FixtureRecorder;auto *video=new FixtureVideoRecorder;
         SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},audio,{},video);
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
-        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(videoMode?video->starts:audio->starts,1);
+        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(videoMode?video->starts:audio->starts,1);
         QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
         // Preferences changed elsewhere cannot turn an in-flight review into an upload, or vice versa.
         QSettings().setValue("speech/preview_before_send",!preview);
-        QTest::mouseRelease(voice,Qt::LeftButton);
+        QCOMPARE(voice->fullLabel(),preview?QString("Stop (0:00)"):QString("Send (0:00)"));
+        QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));QTest::mouseClick(voice,Qt::LeftButton);
         if(preview){
             auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());
             QVERIFY(composer.findChild<QWidget *>("voicePreview")->isVisible());QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
@@ -623,25 +644,34 @@ private slots:
         }else{QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));}
         QTRY_VERIFY(voice->isEnabled());QCOMPARE(videoMode?video->stops:audio->stops,1);
     }
-    void telegramUpwardLockRetainsCaptureUntilExplicitStop() {
-        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nlock");composer.show();
-        auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
-        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
-        const auto initial=voice->mapToGlobal(voice->rect().center());
-        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(recorder->starts,1);
-        const auto global=initial-QPoint(0,65);const auto point=voice->mapFromGlobal(global);
-        QMouseEvent move(QEvent::MouseMove,QPointF(point),QPointF(global),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(voice,&move);
-        QTest::mouseRelease(voice,Qt::LeftButton,Qt::NoModifier,point);
-        QCOMPARE(recorder->stops,0);QVERIFY(composer.findChild<QPushButton *>("voiceStopPreview")->isVisible());
-        composer.findChild<QPushButton *>("voiceStopPreview")->click();QCOMPARE(recorder->stops,1);
-        QTRY_VERIFY(composer.findChild<QWidget *>("voicePreview")->isVisible());QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+    void modeSwitchIsDisabledForOpeningCaptureAndPreview_data() {
+        QTest::addColumn<bool>("videoMode");QTest::newRow("audio")<<false;QTest::newRow("video")<<true;
     }
-    void telegramReleaseOutsideCancelsWithoutSavingOrUploading() {
+    void modeSwitchIsDisabledForOpeningCaptureAndPreview() {
+        QFETCH(bool,videoMode);QSettings().setValue("speech/video_mode",videoMode);
+        QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nmode-lock");composer.show();
+        auto *audio=new FixtureRecorder;audio->startImmediately=false;auto *video=new FixtureVideoRecorder;video->startImmediately=false;
+        SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},audio,{},video);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");auto *mode=composer.findChild<ToolbarChip *>("voiceMode");QTRY_VERIFY(voice->isEnabled());
+        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(videoMode?video->starts:audio->starts,1);QVERIFY(!mode->isEnabled());
+        QVERIFY(!voice->isEnabled());QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(videoMode?video->starts:audio->starts,1);
+        mode->click();QCOMPARE(QSettings().value("speech/video_mode").toBool(),videoMode);
+        if(videoMode)emit video->started();else emit audio->started();
+        QTRY_VERIFY(voice->isEnabled());mode->click();QCOMPARE(QSettings().value("speech/video_mode").toBool(),videoMode);
+        composer.findChild<QPushButton *>("voiceStopPreview")->click();
+        QTRY_VERIFY(composer.findChild<QPushButton *>("voiceSend")->isEnabled());QVERIFY(!mode->isEnabled());
+        mode->click();QCOMPARE(QSettings().value("speech/video_mode").toBool(),videoMode);
+        QCOMPARE(videoMode?video->stops:audio->stops,1);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+    }
+    void cancelledSendClickKeepsCaptureUntilExplicitCancel() {
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\ncancel");composer.show();
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);
         auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
-        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(recorder->starts,1);
+        QTest::mouseClick(voice,Qt::LeftButton);QCOMPARE(recorder->starts,1);
+        QTest::mousePress(voice,Qt::LeftButton);
         QTest::mouseRelease(voice,Qt::LeftButton,Qt::NoModifier,QPoint(10,composer.height()+400));
+        QVERIFY(!recorder->cancelled);QCOMPARE(recorder->stops,0);QVERIFY(voice->fullLabel().startsWith("Send ("));
+        composer.findChild<ToolbarChip *>("voiceCancel")->click();
         QVERIFY(recorder->cancelled);QCOMPARE(recorder->stops,0);QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
         QVERIFY(!composer.findChild<QWidget *>("voicePreview")->isVisible());
     }
@@ -660,7 +690,7 @@ private slots:
         // Synchronous local start is required even while either subprocess is gated.
         QCOMPARE(recorder->starts,1);QVERIFY(voice->fullLabel().startsWith("Send ("));QVERIFY(composer.editor()->isReadOnly());
         if(gate=="profiles-gate")QTRY_VERIFY(QFile::exists(dir.path()+"/profiles-started"));
-        recordOrPreview(voice);QTRY_VERIFY(composer.findChild<QPushButton *>("voiceDiscard")->isEnabled());QVERIFY(!send->isEnabled());
+        voice->click();QTRY_VERIFY(composer.findChild<QPushButton *>("voiceDiscard")->isEnabled());QVERIFY(!send->isEnabled());
         ComposerDraftStore::flushWrites();const auto before=ComposerDraftStore().load("voice-message-draft\nfixture\noriginal");
         QCOMPARE(before.attachments.size(),1);QVERIFY(!before.formState.value("id").toString().isEmpty());
         QVERIFY(blocked.remove());QTRY_VERIFY(send->isEnabled());ComposerDraftStore::flushWrites();

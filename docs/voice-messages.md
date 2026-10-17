@@ -3,23 +3,29 @@
 ## Video messages and recording controls
 
 Owner direction (2026-10-16, zerus-eo7j): video messages retain the recording
-in conversation history and deliver its recognized speech to the agent. Desktop
-and Android recording controls follow the corresponding open Telegram clients.
-The reference revisions are Telegram Android
-[`f32ffeec763f`](https://github.com/DrKLO/Telegram/blob/f32ffeec763f0bdbf4bec25b52d654f77bff733d/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java#L3059-L3220)
-and Telegram Desktop
-[`b16daff6df63`](https://github.com/telegramdesktop/tdesktop/blob/b16daff6df63e8a812bc2b52a04ff243f67a7d3f/Telegram/SourceFiles/history/view/controls/history_view_voice_record_bar.cpp#L2427-L2451).
+in conversation history and deliver its recognized speech to the agent.
 
+Desktop controls (owner revision 2026-10-17, zerus-0dwp) start recording with a
+normal click on **Voice** or **Video**. The adjacent icon immediately to its right
+switches microphone/camera mode without opening a device and remembers the mode
+on this computer. It stays disabled while opening, recording or retaining a
+preview. Recording continues after the starting click; the next **Send** click
+requests delivery. **Stop and preview**, Space or Escape retain a reviewable draft.
+**Cancel recording** discards an active capture.
+
+Android controls follow Telegram Android
+[`f32ffeec763f`](https://github.com/DrKLO/Telegram/blob/f32ffeec763f0bdbf4bec25b52d654f77bff733d/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java#L3059-L3220).
 A short press switches microphone/camera mode without opening a device. Holding
 starts the selected capture after a short threshold. Releasing an owned,
-unlocked recording requests sending by default. **Preview before sending** in
-Voice settings instead retains both audio and video for review and a separate
-**Send**. The device-local preference defaults off and is captured at recording
-start; changing it cannot send an existing recording. On Android a left drag cancels and an
-upward drag locks; on desktop releasing outside the recording area cancels and
-dragging up locks. A locked recording continues after release, with separate
-Stop/preview, Send and Cancel controls. Stop retains a reviewable draft. These
-explicit gestures keep release-to-send as the default;
+unlocked recording requests sending by default. A left drag cancels and an upward
+drag locks. A locked recording continues after release, with separate
+Stop/preview, Send and Cancel controls.
+
+**Preview before sending** in Voice settings retains both audio and video for
+review and a separate **Send**. Desktop shows **Stop** as the recording button;
+Android retains the preview on release. The device-local preference defaults off
+and is captured at recording start; changing it cannot send an existing recording.
+On both platforms,
 system cancellation, lost focus, navigation, permission callbacks and capture
 limits cannot submit. Completed, explicitly stopped recordings retain a preview. Provider discovery cannot
 silently resume a deferred send, and cold-context confirmation remains explicit.
