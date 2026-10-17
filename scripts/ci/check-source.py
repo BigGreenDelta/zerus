@@ -279,6 +279,12 @@ def main():
     if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', ios_version) or \
             not re.search(rf'(?m)^MARKETING_VERSION = {re.escape(ios_version)}$', ios_config):
         raise SystemExit("mobile/ios/DEV_VERSION must be X.Y.Z and equal MARKETING_VERSION in Config/Base.xcconfig.")
+    ios_stable = ROOT / "mobile/ios/VERSION"
+    if ios_stable.exists():
+        stable = ios_stable.read_text().strip()
+        if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', stable) or \
+                tuple(map(int, ios_version.split('.'))) <= tuple(map(int, stable.split('.'))):
+            raise SystemExit("mobile/ios/DEV_VERSION must name a release newer than mobile/ios/VERSION.")
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
     if cargo["package"]["license"] != "MIT":
         raise SystemExit("Review the package license and notices.")
