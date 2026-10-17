@@ -23,6 +23,14 @@ CURRENT_PROJECT_VERSION = 0
 ZERUS_BUILD_CHANNEL = local
 ZERUS_SOURCE_REVISION = unknown
 
+// The APNs environment follows each channel's signing, not its configuration:
+// local builds carry development profiles even in Release, while TestFlight and
+// App Store exports re-sign for production. The relay provider follows it.
+ZERUS_APNS_ENVIRONMENT = $(ZERUS_APNS_ENVIRONMENT_$(ZERUS_BUILD_CHANNEL))
+ZERUS_APNS_ENVIRONMENT_local = development
+ZERUS_APNS_ENVIRONMENT_dev = production
+ZERUS_APNS_ENVIRONMENT_stable = production
+
 IPHONEOS_DEPLOYMENT_TARGET = 18.0
 SDKROOT = iphoneos
 SUPPORTED_PLATFORMS = iphoneos iphonesimulator
