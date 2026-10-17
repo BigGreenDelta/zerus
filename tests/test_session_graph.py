@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 'target/debug/hgs')).resolve()
@@ -30,9 +31,9 @@ class SessionGraph(unittest.TestCase):
         path.write_text(json.dumps(value))
         return path, value
 
-    def graph(self, *args, success=True):
+    def graph(self, *args, success=True, timeout=5):
         result = subprocess.run([str(HGS), 'graph', *args, '--json'], env=self.env,
-                                text=True, capture_output=True, timeout=5)
+                                text=True, capture_output=True, timeout=timeout)
         self.assertEqual(self.marker.read_bytes(), b'{"fixture":"untouched"}\n')
         if success:
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -41,10 +42,15 @@ class SessionGraph(unittest.TestCase):
         self.assertEqual(result.stdout, '')
 
     def full(self):
-        for _ in range(12):
-            value = self.graph('snapshot')
+        # A bounded native slice may advance only one source under slow I/O.
+        # Keep the original 12 x 5 s budget, rather than assuming 12 slices.
+        deadline = time.monotonic() + 60
+        value = None
+        while (remaining := deadline - time.monotonic()) > 0:
+            value = self.graph('snapshot', timeout=min(5, remaining))
             if value['coverage']['bindings_complete']:
                 break
+        self.assertIsNotNone(value)
         self.assertTrue(value['coverage']['bindings_complete'])
         rows = value['items'][:]
         while value['has_more']:

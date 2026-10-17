@@ -115,13 +115,27 @@ The reserved domain in these examples must be replaced with your own.
 
 ## Connect a computer
 
-Install the Python package on each computer that already has `hgs`. The connector
+Each computer runs the outbound connector beside the `hgs` it already has. It
 uses the local CLI, so existing native accounts, hooks, conversations and safety
 checks continue to apply. Do not stop or relaunch native sessions for setup.
 
+Install the Rust connector, `zerus-mobile-connector`, with the rest of Zerus:
+
+- **Arch Linux package** (`zerus`, `zerus-git`, `zerus-ade-bin` or
+  `zerus-ade-nightly-bin`): `/usr/bin/zerus-mobile-connector` and its user unit
+  `zerus-mobile-connector.service`, which the package never enables.
+- **Zerus.app with the bundled connector**: use its signed
+  `Contents/MacOS/zerus-mobile-connector`. Older bundles do not contain it; use
+  the source installation below until upgrading to a bundle that does.
+- **Source checkout**: `HGS_MOBILE_CONNECTOR=1 ./install.sh` builds
+  `~/.local/bin/zerus-mobile-connector`; later runs keep it current.
+
+Run `zerus-mobile-connector --version` to confirm it (use the complete bundled
+path when it is not on `PATH`). Configure it in Zerus under
+Settings → [Mobile connection](#configure-the-connector-from-the-desktop), or
+create the file by hand:
+
 ```sh
-python3 -m venv "$HOME/.local/share/zerus-mobile/venv"
-"$HOME/.local/share/zerus-mobile/venv/bin/pip" install ./services/mobile
 install -d -m 700 "$HOME/.config/hgs/mobile"
 ```
 
@@ -142,14 +156,40 @@ shell command arguments, issues or version control. The state directory belongs
 to one relay and computer credential; use a new directory if those change and
 retain the old one for uncertain-delivery review.
 
-Run the connector in the foreground initially:
+`zerus-mobile-connector --check --config "$HOME/.config/hgs/mobile/connector.json"`
+reports the configuration, the journal and their permissions without
+connecting or changing anything; fix what it refuses first. Then start the
+service from the user service manager, so it does not inherit a running
+agent's environment:
+
+- **Arch package:** `systemctl --user enable --now zerus-mobile-connector.service`.
+- **Source install on Linux:** `python3 scripts/install-mobile-connector-service.py install`
+  writes `~/.config/systemd/user/zerus-mobile-connector.service` for
+  `~/.local/bin/zerus-mobile-connector`, then enable it as above.
+- **macOS:** from a source checkout,
+  `python3 scripts/install-mobile-connector-service.py install` writes the
+  `com.hgdev.zerus-mobile-connector` LaunchAgent. Bundles with the connector
+  setup action also expose `zerus-setup --mobile-connector install`. Load the
+  agent with the printed `launchctl bootstrap` command.
+
+The installation helpers only write definitions and refuse to replace a
+definition they did not write. They never enable, load, start or restart the
+connector. The separate `systemctl --user enable --now` and
+`launchctl bootstrap` commands above explicitly start it.
+
+### Python connector (legacy)
+
+Computers set up before the Rust connector run the Python package from a venv.
+It stays supported until each one has [moved](#move-a-computer-to-the-rust-connector):
 
 ```sh
+python3 -m venv "$HOME/.local/share/zerus-mobile/venv"
+"$HOME/.local/share/zerus-mobile/venv/bin/pip" install ./services/mobile
 "$HOME/.local/share/zerus-mobile/venv/bin/zerus-mobile-connector" \
   --config "$HOME/.config/hgs/mobile/connector.json"
 ```
 
-For persistent Linux operation, use a dedicated systemd user service:
+Its systemd user service:
 
 ```ini
 [Unit]
@@ -169,10 +209,8 @@ KillMode=process
 WantedBy=default.target
 ```
 
-Save it as `~/.config/systemd/user/zerus-mobile-connector.service`, then run
-`systemctl --user daemon-reload` and
-`systemctl --user enable --now zerus-mobile-connector.service`. Start it from
-the user service manager so it does not inherit a running agent's environment.
+It lives in `~/.config/systemd/user/zerus-mobile-connector.service`, where it
+takes precedence over the packaged unit of the same name.
 
 Agents launched from the phone run in tmux. A launch that finds no tmux server
 running starts one in a transient scope of its own (see
@@ -205,26 +243,23 @@ value and must print `KillMode=process`. A drop-in that already sets it is enoug
 one that sorts later, such as `override.conf` from `systemctl --user edit`, takes
 precedence over this file.
 
-`zerus-setup --mobile-connector install` (or, from a source checkout,
-`python3 scripts/install-mobile-connector-service.py install`) sets up the Rust
-connector's service: with the Linux package it relies on the packaged unit and
-writes nothing; for `~/.local/bin/zerus-mobile-connector` it writes a user unit
-with that absolute path, the session's `PATH` and `KillMode=process`; on macOS it
-writes the `com.hgdev.zerus-mobile-connector` LaunchAgent (`AbandonProcessGroup`,
-`KeepAlive` on failure only, logs in `~/Library/Logs/hgs`). It writes only when
-no definition exists or the existing one is its own, and prints the enable or
-`launchctl bootstrap` command instead of running it.
+`zerus-setup --mobile-connector install` (see [Connect a computer](#connect-a-computer))
+writes a user unit for a `~/.local/bin` connector with its absolute path, the
+session's `PATH` and `KillMode=process`, relies on the packaged unit for the
+Arch package's binary, and on macOS writes the LaunchAgent with
+`AbandonProcessGroup`, `KeepAlive` on failure only and logs in
+`~/Library/Logs/hgs`.
 
 With the Linux package installed, `zerus-setup --mobile-connector protect` adds
 the protection above: it writes that drop-in only when the unit runs a
 `zerus-mobile-connector` whose effective kill mode is not already `process`,
 reloads the user manager and checks the result, and removes its file again if a
-later drop-in wins. Its `migrate` and `rollback` actions switch an existing
-Python connector unit to the Rust connector and back with a
-`60-zerus-rust-connector.conf` drop-in; they belong to the owner-approved cutover
-in the connector design (`docs/superpowers/specs/2026-10-15-rust-mobile-connector-design.md`),
-refuse while a connector holds the journal, and, like `protect`, never enable,
-start, stop or restart the unit.
+later drop-in wins. Its `migrate` and `rollback` actions
+[move a computer to the Rust connector](#move-a-computer-to-the-rust-connector)
+and back with a `60-zerus-rust-connector.conf` drop-in. `migrate` refuses while a
+connector holds the journal; `rollback` only removes its own drop-in and must
+follow the drain and stop steps below. Neither action enables, starts, stops or
+restarts the unit.
 
 Prefer `restart` to `stop`, whatever the kill mode. tmux builds with systemd
 support, such as Arch's, put every pane in a `tmux-spawn-*.scope` unit that is
@@ -232,6 +267,73 @@ support, such as Arch's, put every pane in a `tmux-spawn-*.scope` unit that is
 `systemctl --user stop` ends those panes. Stop a protected connector only when
 `systemctl --user show -p ConsistsOf zerus-mobile-connector.service` lists no
 `tmux-spawn-*.scope` units.
+
+### Move a computer to the Rust connector
+
+Move one computer at a time, deliberately. `connector.json` and `state_dir` are
+used in place and never copied, reset or rebound: the journal keeps the
+no-replay record of every phone request. A repeated request returns its stored
+receipt; interrupted mutations remain uncertain rather than executing again.
+
+1. **Install** the Rust connector as above and keep the venv. Run
+   `zerus-mobile-connector --version`.
+2. **Protect agents:** `zerus-setup --mobile-connector protect` (Arch package) or
+   `python3 scripts/install-mobile-connector-service.py protect` (source), and
+   check `systemctl --user show -p KillMode zerus-mobile-connector.service`
+   prints `KillMode=process`. Never stop the unit before this passes.
+3. **Record, read-only:** `systemctl --user cat zerus-mobile-connector.service`,
+   `systemctl --user show -p ExecStart,KillMode,FragmentPath,DropInPaths
+   zerus-mobile-connector.service`, `hgs status`,
+   `zerus-mobile-connector --check --json --config <file>` and the venv's version
+   (`pip show zerus-mobile`). Note the tmux server and agent process IDs.
+4. **Drain:** pause phone actions for this computer and repeat `--check` until no
+   request is `running`. Undelivered results need not drain.
+5. **Stop only the connector:** first check that
+   `systemctl --user show -p ConsistsOf zerus-mobile-connector.service` lists no
+   `tmux-spawn-*.scope` units, since stopping would also end those panes (see
+   [Protect running agents](#protect-running-agents)); then
+   `systemctl --user stop zerus-mobile-connector.service`. `hgs status` shows it
+   stopped; agents, tmux and DeepSeek hosts keep running.
+6. **Switch:** `zerus-setup --mobile-connector migrate` (add
+   `--binary PATH` when both `/usr/bin` and `~/.local/bin` copies exist). It
+   writes only `60-zerus-rust-connector.conf` beside the unit and reloads the user
+   manager. It refuses while the journal is still held, for a unit that does not
+   run `<venv>/bin/zerus-mobile-connector --config FILE`, and when a later drop-in
+   such as `override.conf` would keep the old program.
+7. **Start:** `systemctl --user start zerus-mobile-connector.service`.
+8. **Verify:** `systemctl --user show -p ExecStart,KillMode` names the Rust binary
+   and `process`; `hgs status` shows the connector running; `--check` reports the
+   same binding and counts apart from pruning; the unit's journal shows no startup
+   error; the phone shows the computer online with the same capabilities and
+   peers; one inspect and one disposable send, never to an unrelated live agent,
+   succeed; the tmux and agent process IDs match step 3. Reopen phone actions.
+   Early `429` answers while the old poll lease expires and a short offline blip
+   are expected.
+
+On macOS no Python LaunchAgent was documented. Record the actual Python command,
+the read-only `--check` report and native process IDs, drain phone actions, and
+stop only the foreground Python connector. Install the new agent as described
+under [Connect a computer](#connect-a-computer), then run its printed
+`launchctl bootstrap` command. Verify the binding, counts, capabilities, peers
+and native process IDs as in step 8, using launchd rather than systemd for the
+connector status. A manually created LaunchAgent is not adopted or overwritten
+by the installer; inspect its configuration before planning a separate cutover.
+
+### Roll back to the Python connector
+
+On Linux, drain and stop the unit as in steps 4 and 5 (agents survive under
+`KillMode=process`), run `zerus-setup --mobile-connector rollback`, which removes
+only `60-zerus-rust-connector.conf` and reloads while keeping the kill-mode
+protection, then start the unit and verify as in step 8. The Python connector
+opens the same journal in place. Never copy, restore, clear or rebind
+`journal.sqlite3`: an older copy loses the no-replay record. Never resend a
+request whose outcome is uncertain, and never kill native agents, tmux servers or
+DeepSeek hosts.
+
+On macOS, drain and stop only the Rust connector, then restore the recorded
+Python command against the same configuration and journal. Keep
+`AbandonProcessGroup` when stopping a launchd agent and verify that native process
+IDs survive. Do not replace an existing custom LaunchAgent automatically.
 
 ## Configure the connector from the desktop
 
