@@ -518,9 +518,10 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     } else {
         vec!["forget"]
     };
-    if queued
-        .iter()
-        .any(|row| row["delivery_state"] == "not_delivered")
+    if !active
+        && queued
+            .iter()
+            .any(|row| row["delivery_state"] == "not_delivered")
     {
         allowed.push("remove_queued");
     }
@@ -1290,8 +1291,11 @@ fn interrupt_with(native: &dyn Native, record: &Value) -> Result<()> {
     if successful(&reply) && said {
         return Ok(());
     }
-    if !session_active(native, record) {
-        return Ok(());
+    // A failed lookup never counts as "not running".
+    if let Ok(active) = active_sessions(native) {
+        if active.get(string(record, "conversation_id")).is_none() {
+            return Ok(());
+        }
     }
     Err(format!(
         "OpenCode did not confirm the interruption ({})",
@@ -1309,7 +1313,14 @@ fn queued_id(request: &Value) -> Result<String> {
 }
 /// Core of `remove_queued`: a message can be removed only while it sits in
 /// the inbox of a session that is not running; it is then not delivered.
-fn remove_queued_with(native: &dyn Native, record: &Value, id: &str) -> Result<()> {
+/// `before_delete` runs once, immediately before the DELETE, so a clean
+/// refusal is never recorded as a possible change.
+fn remove_queued_with(
+    native: &dyn Native,
+    record: &Value,
+    id: &str,
+    before_delete: impl FnOnce(),
+) -> Result<()> {
     let inbox = get(native, &session_path(record, "/inbox"))?;
     if !inbox["data"]
         .as_array()
@@ -1321,6 +1332,7 @@ fn remove_queued_with(native: &dyn Native, record: &Value, id: &str) -> Result<(
     if active.get(string(record, "conversation_id")).is_some() {
         return Err(NOT_QUEUED.into());
     }
+    before_delete();
     let reply = native.raw("DELETE", &session_path(record, &format!("/inbox/{id}")), None)?;
     if reply.status == 404 {
         return Err(NOT_QUEUED.into());
@@ -1328,6 +1340,8 @@ fn remove_queued_with(native: &dyn Native, record: &Value, id: &str) -> Result<(
     if !successful(&reply) {
         return Err(format!("OpenCode could not remove this message ({})", refusal_reason(&reply)));
     }
+    // A 2xx DELETE is accepted without re-reading the inbox; the next
+    // inspection reflects it.
     Ok(())
 }
 /// Core of a model change: set the exact model, then read it back.
@@ -1397,10 +1411,11 @@ fn action(
     let old = string(record, "name").to_owned();
     if action == "remove_queued" {
         let id = queued_id(&json!({"message_id": message_id}))?;
-        if let Some(scope) = scope {
-            scope.changing();
-        }
-        remove_queued_with(&running_service()?, record, &id)?;
+        remove_queued_with(&running_service()?, record, &id, || {
+            if let Some(scope) = scope {
+                scope.changing();
+            }
+        })?;
         if let Some(scope) = scope {
             scope.result_record(record);
         }
@@ -1524,7 +1539,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             {
                 return Err(NOT_QUEUED.into());
             }
-            remove_queued_with(&running_service()?, &record, &id)?;
+            remove_queued_with(&running_service()?, &record, &id, || {})?;
             println!("{}", own_state(name)?);
         }
         "pause" | "resume" => return Err(NO_PROCESS.into()),
@@ -2506,6 +2521,11 @@ mod tests {
             ("GET /api/session/active", 200, json!({"data": {"ses_A": {}}})),
         ]);
         assert!(interrupt_with(&running, &bound()).is_err());
+        let unknown = seen(vec![
+            ("POST /api/session/ses_A/interrupt", 500, json!({"message": "down"})),
+            ("GET /api/session/active", 500, json!({"message": "down"})),
+        ]);
+        assert!(interrupt_with(&unknown, &bound()).is_err());
     }
     #[test]
     fn a_queued_message_is_removed_only_while_stopped_and_still_queued() {
@@ -2515,11 +2535,13 @@ mod tests {
             ("GET /api/session/active", 200, json!({"data": {}})),
             ("DELETE /api/session/ses_A/inbox/msg_A", 204, Value::Null),
         ]);
-        remove_queued_with(&ok, &bound(), "msg_A").unwrap();
+        let calls = std::cell::Cell::new(0);
+        remove_queued_with(&ok, &bound(), "msg_A", || calls.set(calls.get() + 1)).unwrap();
+        assert_eq!(calls.get(), 1);
         assert!(ok.script.borrow().is_empty());
         let gone = seen(vec![("GET /api/session/ses_A/inbox", 200, json!({"data":[]}))]);
         assert_eq!(
-            remove_queued_with(&gone, &bound(), "msg_A").unwrap_err(),
+            remove_queued_with(&gone, &bound(), "msg_A", || panic!("no change")).unwrap_err(),
             NOT_QUEUED
         );
         let active = seen(vec![
@@ -2527,7 +2549,7 @@ mod tests {
             ("GET /api/session/active", 200, json!({"data": {"ses_A": {}}})),
         ]);
         assert_eq!(
-            remove_queued_with(&active, &bound(), "msg_A").unwrap_err(),
+            remove_queued_with(&active, &bound(), "msg_A", || panic!("no change")).unwrap_err(),
             NOT_QUEUED
         );
     }
