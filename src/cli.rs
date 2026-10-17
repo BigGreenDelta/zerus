@@ -50,6 +50,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
+       hgs [@host] mobile phones|invite|revoke-phone <id> --json   phones paired through this mobile connection
        Speech profile management v1
        hgs [@host] a <session>        attach by full name (see hgs ls)
        hgs [@host] a <session> --existing [--run-id ID]   attach only to this live run
@@ -522,13 +523,14 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
-    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "graph" | "wait") {
+    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "graph" | "wait" | "mobile") {
         local_sessions()?;
     }
     // Only Unix has arms for these below; elsewhere they would reach the launch arm.
     unix_only(command, cfg!(unix))?;
     match command.as_str() {
         "speech" => crate::speech::dispatch(&config, args, dry),
+        "mobile" => crate::phones::dispatch(&config, args, dry),
         "__dsh-ui-url" => {
             let url = state::dsh::native_ui_url(require(args, 0, "Choose a native session")?)
                 .map_err(|e| Error::new(1, e))?;
@@ -859,6 +861,18 @@ fn remote(
             all
         }
         "account" if args.first().is_some_and(|s| s != "login" && s != "install") => {
+            flags = vec![
+                "-o".into(),
+                "BatchMode=yes".into(),
+                "-o".into(),
+                "ConnectTimeout=5".into(),
+            ];
+            let mut all = vec![command.into()];
+            all.extend(args.clone());
+            all
+        }
+        // Phone management reaches the relay through the gateway peer.
+        "mobile" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
