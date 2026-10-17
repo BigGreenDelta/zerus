@@ -242,6 +242,8 @@ def install_unit(args):
     binary = install_binary(args, candidates)
     configuration = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     path = configuration / "systemd/user" / UNIT
+    if path.is_symlink() and not path.exists():
+        raise Refusal(f"{path} is a dangling symbolic link; kept")
     packaged = Path("/usr/lib/systemd/user") / UNIT
     if not path.exists() and binary == Path("/usr/bin/zerus-mobile-connector") and packaged.is_file():
         print(f"The package provides {UNIT} for {binary}; nothing written. "
@@ -279,6 +281,8 @@ def install_agent(args, bundled):
     # ProgramArguments is an array, so macOS paths need no systemd escaping.
     binary = install_binary(args, [*bundled, Path.home() / ".local/bin/zerus-mobile-connector"], unit=False)
     path = Path.home() / "Library/LaunchAgents" / (LABEL + ".plist")
+    if path.is_symlink() and not path.exists():
+        raise Refusal(f"{path} is a dangling symbolic link; kept")
     logs = Path.home() / "Library/Logs/hgs"
     content = plistlib.dumps({
         "Label": LABEL,
