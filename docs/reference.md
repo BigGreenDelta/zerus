@@ -1066,6 +1066,17 @@ the terminal width and splits words longer than a row. Zerus matches the wrapped
 rows against the exact request at any width; only a clipped panel needs a
 larger Terminal.
 
+Claude keeps no scrollback for an approval panel taller than its pane, so a
+long command can lose its title and beginning everywhere. A session no client
+views keeps tmux's default 80x24 size. While a recorded permission request
+waits and such a pane shows a clipped panel, Zerus makes that pane taller,
+doubling its height up to 192 rows without changing its width, until Claude
+redraws the complete panel. The exact request match still decides; the next
+client that attaches sets the size again. A pane a client views keeps that
+client's size, so its clipped panel stays in Terminal. Only a question listing,
+such as `hgs inspect`, grows a pane, and never while an answer to that run
+drives it: both hold the run's answer lock.
+
 Claude tool approvals keep the session at **Needs approval** and appear in
 Activity while Claude shows its chooser. When the complete panel matches the
 agent's request, such as the Bash command, file name or fetched host, Activity
@@ -1088,7 +1099,7 @@ paths in `rm` commands, also appear in Activity with the native warning text.
 A visible safety confirmation makes the session **Needs approval** even if
 its permission hook was not recorded, and ordinary message sending waits for
 the decision. Without a matching permission request, or when the full command
-is clipped, the card offers **Open Terminal**. With a complete matching request,
+stays clipped, the card offers **Open Terminal**. With a complete matching request,
 Activity can submit the native **Yes** or **No** choice. Claude's unattended
 denial countdown stays visible without replacing the request as it ticks.
 Desktop keeps the card's scroll, chosen option and review delay through these

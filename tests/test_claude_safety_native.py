@@ -3,6 +3,7 @@
 The rm operation is fenced to this fixture's generated working directory.
 No live session, real account or model service is used.
 """
+import hashlib
 import json
 import shlex
 import subprocess
@@ -31,13 +32,46 @@ class NativeClaudeSafety(unittest.TestCase):
 
     def native_tool_input(self, work):
         prefix = ':\n' * 90 if 'clipped' in self._testMethodName else ''
+        if '_80x24' in self._testMethodName:
+            # One long line of statements, as agents write them, wraps past 24 rows.
+            prefix = ''.join(f'test -d {shlex.quote(str(work))} || echo missing fixture directory {i}; '
+                             for i in range(8))
         command = ('T=$(pwd); test "$T" = ' + shlex.quote(str(work)) +
                    ' && rm -f $T/*.jsonl $T/*.port && printf approved > approved.txt')
         return dict(command=prefix + command, description='Remove owned fixture files after confirmation')
 
     def setUp(self):
+        prepare = (self.attach_viewer if '_viewed_' in self._testMethodName else
+                   self.hold_answer_lock if '_answering_' in self._testMethodName else None)
+        if prepare:
+            # Before the first hook or inspection can read the panel.
+            tmux = self.tmux
+            def marked(*args, **kwargs):
+                result = tmux(*args, **kwargs)
+                if '@hgs_run' in args:
+                    prepare()
+                return result
+            self.tmux = marked
         native.NativeClaudeQuestions.setUp(self)
         self.assertIn('Dangerous rm operation on possibly-empty variable path:', self.screen())
+
+    def attach_viewer(self):
+        # A real client on the agent's session, as Terminal attaches one.
+        self.tmux('new-session', '-d', '-s', 'viewer', '-x', '120', '-y', '45',
+                  'env', '-u', 'TMUX', str(self.bin / 'tmux'), 'attach', '-t', '=' + self.name)
+        self.wait_for(lambda: self.window('session_attached') == '1')
+
+    def hold_answer_lock(self):
+        # The lock an answer driving this run's terminal holds.
+        import fcntl
+        locks = self.state / 'question_locks'
+        locks.mkdir(mode=0o700, exist_ok=True)
+        self.answer_lock = open(locks / (hashlib.sha256(self.run_id.encode()).hexdigest() + '.lock'), 'w')
+        self.addCleanup(self.answer_lock.close)
+        fcntl.flock(self.answer_lock, fcntl.LOCK_EX)
+
+    def window(self, field):
+        return self.tmux('display-message', '-p', '-t', '=' + self.name + ':', '#{' + field + '}').strip()
 
     def choose(self, label, **updates):
         item = self.card['questions'][0]
@@ -110,8 +144,42 @@ class NativeClaudeSafety(unittest.TestCase):
         self.assertIn('Do you want to proceed?', self.screen())
         self.assertFalse((self.root / 'work/approved.txt').exists())
 
-    def test_clipped_command_keeps_warning_with_hook_and_without_hook(self):
+    def test_clipped_command_grows_an_unviewed_pane_and_approves_once(self):
+        self.assertTrue(self.card['can_answer'], self.card['answer_unavailable_reason'])
+        self.assertIn('Dangerous rm operation', self.card['questions'][0]['body'])
+        self.assertEqual(self.window('window_width'), '120')
+        self.assertGreater(int(self.window('window_height')), 45)
+        # The window takes the size of the next client that attaches.
+        self.assertEqual(self.tmux('show-options', '-w', '-v', '-t', '=' + self.name + ':', 'window-size').strip(), '')
+        self.answer(self.choose('Yes'))
+        self.wait_for(lambda: (self.root / 'work/approved.txt').exists())
+        self.assertEqual((self.root / 'work/approved.txt').read_text(), 'approved')
+
+    def test_default_80x24_pane_shows_the_complete_long_command_and_denies(self):
+        self.assertTrue(self.card['can_answer'], self.card['answer_unavailable_reason'])
+        body = self.card['questions'][0]['body']
+        self.assertTrue(body.startswith('Bash command'), body)
+        self.assertIn('Dangerous rm operation', body)
+        self.assertEqual(self.window('window_width'), '80')
+        self.assertGreater(int(self.window('window_height')), 24)
+        self.answer(self.choose('No'))
+        self.wait_for(lambda: 'What should Claude do instead?' in self.screen())
+        self.assertFalse((self.root / 'work/approved.txt').exists())
+        self.assertEqual(self.inspect()['pending_questions'], [])
+
+    def test_clipped_command_never_grows_while_an_answering_run_holds_its_lock(self):
         self.assertFalse(self.card['can_answer'])
+        self.assertEqual(self.window('window_height'), '45')
+        import fcntl
+        fcntl.flock(self.answer_lock, fcntl.LOCK_UN)
+        card = self.inspect()['pending_questions'][0]
+        self.assertTrue(card['can_answer'], card['answer_unavailable_reason'])
+        self.assertGreater(int(self.window('window_height')), 45)
+
+    def test_clipped_command_in_a_viewed_pane_keeps_warning_with_hook_and_without_hook(self):
+        self.assertFalse(self.card['can_answer'])
+        self.assertIn('Enlarge Terminal', self.card['answer_unavailable_reason'])
+        self.assertLessEqual(int(self.window('window_height')), 45)
         self.assertIn('Dangerous rm operation', self.card['questions'][0]['body'])
         self.without_permission_hook('tool')
         self.assertFalse(self.card['can_answer'])
