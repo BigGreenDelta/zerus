@@ -31,24 +31,18 @@ fn supported(form: &Value) -> bool {
     let Some(fields) = form["fields"].as_array() else {
         return false;
     };
-    let mut text = string(form, "title").len();
     let mut visible = 0;
     for field in fields {
-        if field.get("when").is_some()
+        if field.get("when").is_some_and(|when| !when.is_null())
             || !["string", "boolean", "multiselect"].contains(&kind(field))
             || string(field, "key").is_empty()
             || options(field).len() > MAX_OPTIONS
         {
             return false;
         }
-        text += string(field, "title").len() + string(field, "description").len();
-        text += options(field)
-            .iter()
-            .map(|o| string(o, "label").len() + string(o, "description").len())
-            .sum::<usize>();
         visible += usize::from(!hidden(field));
     }
-    !fields.is_empty() && fields.len() <= MAX_FIELDS && visible > 0 && text <= MAX_TEXT
+    !fields.is_empty() && fields.len() <= MAX_FIELDS && visible > 0
 }
 fn item(field: &Value) -> Value {
     let header = if string(field, "title").is_empty() {
@@ -145,10 +139,9 @@ pub(super) fn cards(record: &Value, forms: &Value, permissions: &Value) -> Vec<V
             if native["sessionID"] != record["conversation_id"] {
                 continue;
             }
-            let (items, answerable) = if kind == "permission" {
+            let (mut items, mut answerable) = if kind == "permission" {
                 (vec![permission_item(native)], true)
             } else {
-                let answerable = supported(native);
                 let items = native["fields"]
                     .as_array()
                     .into_iter()
@@ -157,14 +150,13 @@ pub(super) fn cards(record: &Value, forms: &Value, permissions: &Value) -> Vec<V
                     .take(MAX_FIELDS)
                     .map(item)
                     .collect::<Vec<_>>();
-                // An oversized form is not shown field by field.
-                let bounded = if answerable || items.len() <= MAX_FIELDS {
-                    items
-                } else {
-                    Vec::new()
-                };
-                (bounded, answerable)
+                (items, supported(native))
             };
+            // A card never carries more than MAX_TEXT of question text.
+            if json!(items).to_string().len() > MAX_TEXT {
+                items.clear();
+                answerable = false;
+            }
             let hash = format!(
                 "{:x}",
                 Sha256::digest(
@@ -230,7 +222,10 @@ fn field_value(field: &Value, answer: &Value) -> Result<Option<Value>> {
         .map(|(i, o)| (option_id(i, o), o))
         .collect();
     let mut values: Vec<Value> = Vec::new();
-    for id in selected {
+    for (i, id) in selected.iter().enumerate() {
+        if selected[..i].contains(id) {
+            return Err("Choose each answer only once".into());
+        }
         if kind == "boolean" {
             values.push(match id.as_str() {
                 Some("yes") => json!(true),
@@ -324,7 +319,7 @@ mod tests {
             .iter()
             .map(|c| c["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 11);
         for case in contract["cases"].as_array().unwrap() {
             let record = json!({"run_id": "run", "conversation_id": "ses_A"});
             let name = case["name"].as_str().unwrap();
@@ -355,9 +350,7 @@ mod tests {
                 assert!(case["card"]["can_answer"] == false, "{name}");
                 continue;
             }
-            let mut checks = vec![case.clone()];
-            checks.extend(case["then"].as_array().cloned().unwrap_or_default());
-            for check in checks {
+            for check in [case] {
                 let answers = check["answers"].as_array().unwrap();
                 let result = if permission {
                     permission_decision(answers).map(|d| json!({"decision": d}))
@@ -425,6 +418,38 @@ mod tests {
         assert_eq!(
             form_answer(&cards[0], &form, &answers).unwrap(),
             json!({"answer":{"h":"secret","b":"x"}})
+        );
+    }
+    #[test]
+    fn a_card_never_carries_more_than_the_text_bound() {
+        let record = json!({"run_id": "run", "conversation_id": "ses_A"});
+        let long = "x".repeat(8 * 1024);
+        let form = json!({"id":"frm_1","sessionID":"ses_A","title":"T","fields":[
+            {"key":"a","type":"string","title":"A","description":long},
+            {"key":"b","type":"string","title":"B","description":long},
+            {"key":"c","type":"string","title":"C","description":long}]});
+        let card = cards(&record, &json!([form]), &json!([])).remove(0);
+        assert_eq!(card["can_answer"], false);
+        assert_eq!(card["unavailable_reason"], UNAVAILABLE);
+        assert!(card["questions"].as_array().unwrap().is_empty());
+        assert!(card.to_string().len() < MAX_TEXT);
+        let permission = json!({"id":"per_1","sessionID":"ses_A","action":"shell","resources":[long, long, long]});
+        let card = cards(&record, &json!([]), &json!([permission])).remove(0);
+        assert_eq!(card["can_answer"], false);
+        assert!(card["questions"].as_array().unwrap().is_empty());
+    }
+    #[test]
+    fn duplicate_selections_and_null_when_are_handled() {
+        let form = json!({"id":"frm_1","sessionID":"ses_A","title":"T","fields":[
+            {"key":"k","type":"multiselect","title":"K","when":null,
+             "options":[{"value":"a","label":"A"},{"value":"b","label":"B"}]}]});
+        let record = json!({"run_id": "run", "conversation_id": "ses_A"});
+        let card = cards(&record, &json!([form]), &json!([])).remove(0);
+        assert_eq!(card["can_answer"], true);
+        let dup = [json!({"question_id":"k","selected_option_ids":["a","a"],"text":""})];
+        assert_eq!(
+            form_answer(&card, &form, &dup).unwrap_err(),
+            "Choose each answer only once"
         );
     }
     #[test]

@@ -1194,6 +1194,10 @@ fn reply_for(card: &Value, native: &Value, answers: &[Value]) -> Result<(String,
     }
 }
 const CHANGED: &str = "This question changed or is no longer pending";
+/// Server text safe to show: control characters removed, at most 200 chars.
+fn clip_text(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(200).collect()
+}
 fn answer(record: &Value, request: &Value) -> Result<Value> {
     let current = own_state(string(record, "name"))?;
     let card = current["pending_questions"]
@@ -1208,28 +1212,37 @@ fn answer(record: &Value, request: &Value) -> Result<Value> {
     let path = root()
         .join("opencode/answers")
         .join(format!("{}.json", string(request, "request_id")));
+    answer_with(&running_service()?, record, request, card, &path)
+}
+/// Core of `answer`: the journal, the exact native request and the reply.
+fn answer_with(
+    native: &dyn Native,
+    record: &Value,
+    request: &Value,
+    card: &Value,
+    path: &Path,
+) -> Result<Value> {
     if path.exists() {
         return Err("This answer was already attempted; refresh its native acknowledgement".into());
     }
     let raw = request["answers"]
         .as_array()
         .ok_or("Answers are required")?;
-    let service = running_service()?;
     // The exact native request the card was made from, read again now.
     let suffix = if card["kind"] == "opencode_permission" {
         "/permission"
     } else {
         "/form"
     };
-    let pending = pending_requests(&service, record, suffix)?;
-    let native = pending
+    let pending = pending_requests(native, record, suffix)?;
+    let found = pending
         .as_array()
         .into_iter()
         .flatten()
         .find(|n| n["id"] == card["question_id"])
         .ok_or(CHANGED)?;
     let none = json!([]);
-    let one = json!([native]);
+    let one = json!([found]);
     let again = if suffix == "/form" {
         forms::cards(record, &one, &none)
     } else {
@@ -1238,22 +1251,30 @@ fn answer(record: &Value, request: &Value) -> Result<Value> {
     if again.first().map(|c| &c["question_hash"]) != Some(&card["question_hash"]) {
         return Err(CHANGED.into());
     }
-    let (route, body) = reply_for(card, native, raw)?;
+    let (route, body) = reply_for(card, found, raw)?;
     let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"status":"pending"});
-    atomic(&path, &receipt.to_string())?;
+    atomic(path, &receipt.to_string())?;
     // A 4xx is a definite refusal; anything else leaves the delivery unknown
     // and the pending journal blocks a replay.
-    let reply = service.raw("POST", &session_path(record, &route), Some(&body))?;
+    let reply = native.raw("POST", &session_path(record, &route), Some(&body))?;
     if (400..500).contains(&reply.status) {
         receipt["status"] = json!("refused");
-        atomic(&path, &receipt.to_string())?;
+        atomic(path, &receipt.to_string())?;
+        if reply.body["_tag"] == "FormInvalidAnswerError" {
+            let reason = reply.body["message"].as_str().unwrap_or("invalid answer");
+            return Err(format!("OpenCode rejected this answer: {}", clip_text(reason)));
+        }
         return Err(CHANGED.into());
     }
     if !successful(&reply) {
-        return Err(refusal_text(&reply));
+        let reason = reply.body["message"]
+            .as_str()
+            .or(reply.body["data"]["message"].as_str())
+            .unwrap_or("Native operation failed");
+        return Err(format!("OpenCode HTTP {}: {}", reply.status, clip_text(reason)));
     }
     receipt["status"] = json!("answered");
-    atomic(&path, &receipt.to_string())?;
+    atomic(path, &receipt.to_string())?;
     Ok(receipt)
 }
 pub(crate) fn interrupt(record: &Value) -> Result<()> {
@@ -2043,6 +2064,95 @@ mod tests {
             )
         );
         assert!(reply_for(&card, &permission, &ask).is_err());
+    }
+    struct Answering {
+        forms: std::cell::RefCell<Value>,
+        reply: Result<Response>,
+        posted: std::cell::RefCell<Vec<(String, Value)>>,
+    }
+    impl Native for Answering {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            if method == "GET" {
+                assert_eq!(path, "/api/session/ses_A/form");
+                return ok(json!({"data": self.forms.borrow().clone()}));
+            }
+            self.posted.borrow_mut().push((path.to_owned(), body.unwrap().clone()));
+            self.reply.clone()
+        }
+    }
+    fn answering(reply: Result<Response>) -> (Answering, Value, Value) {
+        let form = json!({"id":"frm_1","sessionID":"ses_A","title":"Q","fields":[{"key":"q0","title":"C","type":"string"}]});
+        let card = forms::cards(&session_record(), &json!([form.clone()]), &json!([])).remove(0);
+        let request = json!({"request_id":"r1","question_id":"frm_1","expected_question_hash":card["question_hash"],
+            "answers":[{"question_id":"q0","selected_option_ids":[],"text":"hi"}]});
+        let native = Answering { forms: json!([form]).into(), reply, posted: Default::default() };
+        (native, card, request)
+    }
+    fn journal(path: &Path) -> Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+    #[test]
+    fn a_4xx_answer_is_refused_once_and_never_retried() {
+        for tag in ["FormAlreadySettledError", "FormNotFoundError"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("r1.json");
+            let (native, card, request) = answering(status(409, json!({"_tag":tag,"message":"gone"})));
+            let record = session_record();
+            assert_eq!(answer_with(&native, &record, &request, &card, &path).unwrap_err(), CHANGED);
+            assert_eq!(native.posted.borrow().len(), 1);
+            assert_eq!(native.posted.borrow()[0].0, "/api/session/ses_A/form/frm_1/reply");
+            assert_eq!(journal(&path)["status"], "refused");
+            assert!(answer_with(&native, &record, &request, &card, &path).is_err());
+            assert_eq!(native.posted.borrow().len(), 1);
+        }
+    }
+    #[test]
+    fn an_invalid_answer_shows_the_clipped_server_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r1.json");
+        let message = format!("bad\u{7}{}", "y".repeat(500));
+        let (native, card, request) =
+            answering(status(400, json!({"_tag":"FormInvalidAnswerError","message":message})));
+        let error = answer_with(&native, &session_record(), &request, &card, &path).unwrap_err();
+        assert_eq!(error, format!("OpenCode rejected this answer: bad{}", "y".repeat(197)));
+        assert_eq!(journal(&path)["status"], "refused");
+    }
+    #[test]
+    fn a_changed_native_request_is_not_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r1.json");
+        let (native, card, request) = answering(status(204, json!({})));
+        native.forms.borrow_mut()[0]["title"] = json!("Changed");
+        assert_eq!(answer_with(&native, &session_record(), &request, &card, &path).unwrap_err(), CHANGED);
+        assert!(native.posted.borrow().is_empty());
+        assert!(!path.exists());
+        *native.forms.borrow_mut() = json!([]);
+        assert_eq!(answer_with(&native, &session_record(), &request, &card, &path).unwrap_err(), CHANGED);
+        assert!(native.posted.borrow().is_empty());
+    }
+    #[test]
+    fn an_unknown_delivery_stays_pending_and_blocks_a_replay() {
+        for reply in [status(503, json!({"message":"down\u{7}"})), Err("reset".to_owned())] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("r1.json");
+            let (native, card, request) = answering(reply);
+            let record = session_record();
+            assert!(answer_with(&native, &record, &request, &card, &path).is_err());
+            assert_eq!(journal(&path)["status"], "pending");
+            assert!(answer_with(&native, &record, &request, &card, &path)
+                .unwrap_err()
+                .contains("already attempted"));
+            assert_eq!(native.posted.borrow().len(), 1);
+        }
+    }
+    #[test]
+    fn an_accepted_answer_is_journaled_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r1.json");
+        let (native, card, request) = answering(status(204, json!({})));
+        let receipt = answer_with(&native, &session_record(), &request, &card, &path).unwrap();
+        assert_eq!(receipt["status"], "answered");
+        assert_eq!(native.posted.borrow()[0].1, json!({"answer":{"q0":"hi"}}));
     }
     #[test]
     fn pending_forms_or_permissions_need_attention_before_work() {
