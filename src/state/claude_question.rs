@@ -245,6 +245,43 @@ fn option_shown(rows: &[&str], option: &Value, multi: bool) -> Option<bool> {
         (!multi && question_terminal::wrapped(&head, label)).then_some(true)
     })
 }
+/// The trimmed plain rows of a Claude screen, as `parse` reads them.
+fn panel_rows(screen: &str) -> Option<Vec<String>> {
+    let plain = question_terminal::plain(screen).ok()?;
+    Some(plain.trim().lines().map(|row| row.trim().to_owned()).collect())
+}
+/// The top of a question panel: Claude's divider directly above its tab row.
+fn panel_top(rows: &[String]) -> bool {
+    rows.windows(2).any(|pair| {
+        let tab = &pair[1];
+        divider(&pair[0])
+            && ((tab.starts_with('←') && tab.ends_with('→') && tab.contains("✔ Submit"))
+                || tab.starts_with("☐ ")
+                || tab.starts_with("☒ "))
+    })
+}
+/// The bottom of a question panel: its key hints, which a narrow terminal may
+/// wrap anywhere, or the review's final prompt.
+fn panel_bottom(rows: &[String]) -> bool {
+    let footer = rows
+        .iter()
+        .rposition(String::is_empty)
+        .map_or(rows, |blank| &rows[blank + 1..]);
+    let hints: String = footer.concat().split_whitespace().collect();
+    ["Entertoselect", "Esctocancel", "navigate"]
+        .iter()
+        .all(|hint| hints.contains(hint))
+        || rows.iter().any(|row| row == "Ready to submit your answers?")
+}
+/// A question panel taller than its pane: Claude keeps no scrollback for it, so
+/// its bottom shows while its top does not.
+pub(super) fn clipped(screen: &str) -> bool {
+    panel_rows(screen).is_some_and(|rows| panel_bottom(&rows) && !panel_top(&rows))
+}
+/// A question panel whose top and bottom both show.
+pub(super) fn complete(screen: &str) -> bool {
+    panel_rows(screen).is_some_and(|rows| panel_bottom(&rows) && panel_top(&rows))
+}
 pub(super) fn same_panel(first: &str, second: &str, card: &Value) -> bool {
     matches!((parse(first,card),parse(second,card)),(Ok(a),Ok(b)) if a==b)
 }
@@ -1070,6 +1107,31 @@ mod tests {
     }
     fn card() -> Value {
         json!({"questions":questions::normalize(&items()).unwrap(),"tool_call_id":"toolu_native_fixture"})
+    }
+    #[test]
+    fn clipped_panels_differ_from_complete_ones() {
+        let clipped_panel = include_str!("../../tests/fixtures/claude-question-clipped-80x24.txt");
+        assert!(clipped(clipped_panel));
+        assert!(!complete(clipped_panel));
+        for screen in [
+            include_str!("../../tests/fixtures/claude-question-single.txt"),
+            include_str!("../../tests/fixtures/claude-question-multi-selected.txt"),
+            include_str!("../../tests/fixtures/claude-question-other.txt"),
+            include_str!("../../tests/fixtures/claude-question-review.txt"),
+            include_str!("../../tests/fixtures/claude-question-single-windows.txt"),
+        ] {
+            assert!(!clipped(screen), "{screen}");
+            assert!(complete(screen), "{screen}");
+        }
+        // A review whose heading scrolled off is clipped as well.
+        let review = include_str!("../../tests/fixtures/claude-question-review.txt");
+        let tail: String = review.lines().skip(12).map(|row| format!("{row}\n")).collect();
+        assert!(clipped(&tail));
+        // Without any panel there is nothing to fit.
+        for screen in ["", "❯ Ask questions with the tool now.\n", "Enter to select\n"] {
+            assert!(!clipped(screen));
+            assert!(!complete(screen));
+        }
     }
     #[test]
     fn recognizes_recorded_claude_2_1_289_panels() {
