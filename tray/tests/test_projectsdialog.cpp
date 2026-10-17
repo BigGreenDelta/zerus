@@ -17,6 +17,7 @@
 #include <QTableWidget>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QFile>
 #include <QLineEdit>
 #include <functional>
 #include <QTimer>
@@ -39,6 +40,7 @@ private slots:
     void folderSplitPrioritizesListAndRemembersAdjustment();
     void folderDialogTakesDriveFoldersOnlyOnLocalWindows_data();
     void folderDialogTakesDriveFoldersOnlyOnLocalWindows();
+    void legacyAliasesOfALocalWindowsComputerBecomeFolders();
     void acceptsPlainName();
     void rejectsSlashAndSpace();
     void rejectsEmpty();
@@ -394,6 +396,31 @@ void TestProjectsDialog::folderDialogTakesDriveFoldersOnlyOnLocalWindows()
     });
     table->setCurrentCell(0, 0); dialog.findChild<QPushButton *>("editProjectFolder")->click(); QVERIFY(edited);
     QCOMPARE(projects.group(project)->folders[0].path, stored);
+}
+
+void TestProjectsDialog::legacyAliasesOfALocalWindowsComputerBecomeFolders()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
+    QCoreApplication::setOrganizationName("hgs-windows-import-test"); QCoreApplication::setApplicationName("projects");
+    // `hgs project ls --json` of a Windows computer: drive paths as hgs.exe stores them.
+    const auto hgs = directory.filePath("hgs");
+    QFile script(hgs); QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nprintf '%s\\n' '[{\"name\":\"DCB\",\"dir\":\"D:\\\\Work\\\\DCB\",\"src\":\"local\",\"exists\":true},"
+                 "{\"name\":\"Tools\",\"dir\":\"D:\\\\Work\\\\Tools\",\"src\":\"local\",\"exists\":true}]'\n");
+    script.close(); script.setPermissions(script.permissions() | QFileDevice::ExeOwner);
+    SessionOrganization projects; const auto dcb = projects.createGroup("DCB");
+    HgsClient client(hgs); ProjectsDialog dialog(&client, nullptr, false, &projects);
+    BoxState local; local.host = "desktop"; local.ok = true; local.localSessions = true; local.metrics["platform"] = "windows";
+    FleetState fleet; fleet.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    dialog.setFleet(fleet);
+    QTRY_VERIFY(projects.hasImported("desktop"));
+    // The alias joins the project of its name; another one starts its own project.
+    QCOMPARE(projects.group(dcb)->folders.size(), 1);
+    QCOMPARE(projects.group(dcb)->folders.first().path, QString("D:/Work/DCB"));
+    QString tools; for (const auto &group : projects.groups()) if (group.name == "Tools") tools = group.id;
+    QVERIFY(!tools.isEmpty());
+    QCOMPARE(projects.group(tools)->folders.first().path, QString("D:/Work/Tools"));
 }
 
 void TestProjectsDialog::emptyListContextCreatesProject()

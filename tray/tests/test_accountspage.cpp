@@ -20,6 +20,9 @@
 #include "AccountChoice.h"
 #include <QSettings>
 #include <QStyleOptionComboBox>
+#include <QPainter>
+#include <QProxyStyle>
+#include <QStyleFactory>
 #include "FakeCli.h"
 #include "AccountCatalog.h"
 #include "AccountUsage.h"
@@ -37,10 +40,23 @@ static QString selectedLaunchProvider(const QListWidget *list) {
     return list->currentItem()?list->currentItem()->data(Qt::UserRole+1).toString():QString();
 }
 
+// Counts the focus frames a style draws, as Windows 11 does around an item's text.
+class FocusFrames : public QProxyStyle {
+public:
+    using QProxyStyle::QProxyStyle;
+    mutable int frames = 0;
+    void drawPrimitive(PrimitiveElement element, const QStyleOption *option, QPainter *painter, const QWidget *widget) const override
+    {
+        if (element == PE_FrameFocusRect) ++frames;
+        QProxyStyle::drawPrimitive(element, option, painter, widget);
+    }
+};
+
 class TestAccountsPage : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void accountRowsDrawNoNativeFocusFrame();
     void init();
     void nativeDefaultsAndMachineScopedActions();
     void openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations();
@@ -1014,5 +1030,21 @@ void TestAccountsPage::preview()
     NewSessionDialog dialog(FakeCli::program(m_script), fleet(), "mac", "codex", "", &page); dialog.show(); QTRY_COMPARE(dialog.findChild<QListWidget *>("launchAccount")->count(), 5);
     dialog.findChild<QListWidget *>("launchAccount")->setCurrentRow(1); QVERIFY(dialog.grab().save(dir+"/new-session-account.png"));
 }
+void TestAccountsPage::accountRowsDrawNoNativeFocusFrame()
+{
+    // The selected row of New session and Add account is the current one: its
+    // background marks it, and no native frame outlines the text beside the logo.
+    FocusFrames style(QStyleFactory::create("Fusion"));
+    QListWidget list; list.setStyle(&style); new QListWidgetItem("Account n/a", &list);
+    QStyleOptionViewItem option; option.initFrom(&list); option.widget = &list; option.rect = {0, 0, 320, 56};
+    option.state |= QStyle::State_Selected | QStyle::State_HasFocus | QStyle::State_Enabled;
+    const auto paint = [&](const QStyledItemDelegate &delegate) {
+        QImage image(option.rect.size(), QImage::Format_ARGB32_Premultiplied); image.fill(Qt::transparent);
+        QPainter painter(&image); delegate.paint(&painter, option, list.model()->index(0, 0));
+    };
+    paint(QStyledItemDelegate()); QCOMPARE(style.frames, 1);
+    style.frames = 0; paint(AccountChoice::Delegate(&list)); QCOMPARE(style.frames, 0);
+}
+
 QTEST_MAIN(TestAccountsPage)
 #include "test_accountspage.moc"
