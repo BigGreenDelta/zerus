@@ -65,9 +65,10 @@ Keep the dynamic IPAM range separate from Caddy's static address; the supplied
 `172.30.78.128/25` allocation range excludes its `.2` address.
 
 The relay limits each credential to 2,400 authenticated requests a minute and
-admits work through bounded lanes, so one phone or computer cannot exhaust it.
-It does not limit requests globally or per client address. That is enough for
-a private relay. Before a shared relay opens to the public, add global and
+admits concurrent work through bounded lanes that all credentials share; a busy
+lane answers 429. It does not limit requests globally or per client address, so
+it does not guarantee fairness between workspaces. That is enough for a private
+relay. Before a shared relay opens to the public, add global and
 per-address request limits in the reverse proxy, for example Nginx `limit_req`
 or a Caddy build with a rate-limit module: the supplied Caddy profile has none.
 
