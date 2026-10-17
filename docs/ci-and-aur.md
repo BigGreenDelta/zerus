@@ -938,7 +938,13 @@ yay -Syu --devel
 
 Failed builds never publish. GitHub or AUR publication failures leave stable
 releases untouched. Retry only the publisher with the same run ID; do not rerun a
-published build to produce different bytes under its existing tag. Artifacts are
+published build to produce different bytes under its existing tag. If GitHub
+refuses the job token's draft (seen once, for 0.42.0, as `403 Resource not
+accessible by integration`), the publisher stops before any public write and prints
+the release notes and the exact `gh release create ... --draft --target <commit>`
+command. The owner creates that draft with their own token and reruns the same
+publisher for the same candidate, which verifies the draft's target and uploads
+only the sealed assets. Artifacts are
 retained for three days and logs for three; public GitHub release assets remain
 available after artifact expiry. Nightlies run even without new commits to test
 current rolling Arch dependencies and produce fresh, uniquely versioned binaries.
