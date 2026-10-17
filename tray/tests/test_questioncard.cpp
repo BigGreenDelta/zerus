@@ -144,6 +144,7 @@ private slots:
     void claudeCapabilityRefreshPreservesCompletedOtherDraft();
     void replacementHashAndBackgroundReplyAreIsolated();
     void capabilityOfflineAndErrorStates();
+    void disabledSubmitAlwaysExplainsItself();
     void freeformLimitsAndPlainText();
     void markdownLinksOpenOnlyOnClick();
     void approvalAndTrustDisclosuresStayLiteral();
@@ -763,6 +764,25 @@ void TestQuestionCard::capabilityOfflineAndErrorStates()
     card.findChild<QPushButton *>("questionAllowRetry")->click(); QVERIFY(submit(card)->isEnabled());
     setSendingReady(card, "arch/session", "tool-question"); card.setError("arch/session", "tool-question", "Request changed");
     QVERIFY(submit(card)->isEnabled()); QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), "Request changed");
+}
+
+void TestQuestionCard::disabledSubmitAlwaysExplainsItself()
+{
+    auto status = [](QuestionCard &card) { return card.findChild<QLabel *>("questionStatus")->text(); };
+    QuestionCard card; auto unsupported = request(); unsupported["can_answer"] = false;
+    unsupported["answer_unavailable_reason"] = "";
+    setQuestionReady(card, "arch/reason", unsupported); complete(card);
+    QVERIFY(!submit(card)->isEnabled()); QCOMPARE(status(card), "Answer this request in Terminal.");
+    // A saved answer still loading holds Submit and says so.
+    setQuestionReady(card, "arch/stall", request());
+    QSemaphore entered, release; std::atomic<int> operations = 0;
+    ComposerDraftStore::setWriteObserver([&] { if (++operations == 1) { entered.release(); release.acquire(); } });
+    auto cleanup = qScopeGuard([&] { release.release(); ComposerDraftStore::flushWrites(); ComposerDraftStore::setWriteObserver({}); });
+    option(card, "opt_0_0")->click(); QVERIFY(entered.tryAcquire(1, 3000));
+    card.setQuestion("arch/loading", request("loading-question")); QVERIFY(card.isDraftLoading());
+    QVERIFY(!submit(card)->isEnabled());
+    QCOMPARE(status(card), "Loading your saved answer…");
+    release.release(); QTRY_VERIFY(!card.isDraftLoading());
 }
 
 void TestQuestionCard::freeformLimitsAndPlainText()
