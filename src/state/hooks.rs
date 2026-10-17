@@ -391,7 +391,7 @@ fn merge_json(
     let mut changed = false;
     // One version reading serves every versioned entry.
     let mut known = None;
-    let mut version = || *known.get_or_insert_with(|| version());
+    let mut version = || *known.get_or_insert_with(&mut *version);
     let versioned = versioned_events(agent)
         .iter()
         .map(|&(event, oldest)| (event, Some(oldest)));
@@ -487,7 +487,7 @@ fn prune_json(
     let owned = |hook: &Value| Entry::owned(hook, windows).is_some();
     let mut changed = false;
     let mut known = None;
-    let mut version = || *known.get_or_insert_with(|| version());
+    let mut version = || *known.get_or_insert_with(&mut *version);
     for &(event, oldest) in versioned_events(agent) {
         let Some(groups) = hooks.get_mut(event).and_then(Value::as_array_mut) else {
             continue;
