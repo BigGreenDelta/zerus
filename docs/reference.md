@@ -53,6 +53,18 @@ alone never launches a session or sends input.
 same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.
 
+An agent obtains its own reference with `hgs self [--json]`. The caller must run
+inside a live tracked native agent: like an agent-originated send, the binding is
+proven through that agent's process ancestry, never through `HGS_SESSION` alone.
+The reply carries the current name after a rename, the `reference` fields and
+`provider`. It never routes to a peer and refuses `--dry-run`.
+
+`hgs [@host] guide [send|wait|launch|stop]` prints compact instructions for
+agents that read, message, wait for, launch or stop other sessions. The text is
+compiled into hgs and stays small because agents read it into their context;
+topics are read only when needed. `@host` returns that peer's guide after
+probing its installed help, so an older peer fails without launching anything.
+
 Native conversation IDs appear only in **Details** on desktop and **Session
 details → Overview** on Android, labeled **Session ID** with a dedicated copy
 icon immediately after the exact identifier. The desktop icon uses the same
