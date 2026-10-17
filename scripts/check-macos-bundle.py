@@ -43,6 +43,7 @@ REQUIRED_FILES = [
     "Contents/Resources/licenses/THIRD_PARTY_NOTICES.md",
     "Contents/Resources/licenses/libvterm-LICENSE",
     "Contents/Resources/licenses/md4c-LICENSE",
+    "Contents/Resources/licenses/qrcodegen-LICENSE",
     "Contents/Resources/licenses/codex-LICENSE.txt",
     "Contents/Resources/licenses/rust/inventory.json",
     "Contents/Resources/licenses/qt/LGPL-3.0.txt",

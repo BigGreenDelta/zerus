@@ -13,7 +13,10 @@ transport. Version 1 does **not** provide end-to-end encryption.
 See [the architecture and wire contract](../../docs/mobile-architecture.md) and
 [deployment instructions](../../docs/mobile-deployment.md). The relay exposes no
 signup, workspace creation or administrator HTTP endpoint. Provisioning is a local
-CLI operation. A phone can revoke its own credential with `DELETE /v1/device`.
+CLI operation. A phone can revoke its own credential with `DELETE /v1/device`. A
+computer credential may invite, list and revoke the phones of its own workspace
+(`/v1/node/invitations`, `/v1/node/devices`); Zerus desktop uses them for
+**Machines → Phones**.
 
 ## Local installation
 

@@ -64,7 +64,14 @@ closure of the machine graph. Arbitrary SSH aliases and shared-catalog entries
 do not establish a sharing edge.
 
 An explicit gateway connection means owner-authorized connector enrollment in
-the workspace. Existing device credentials remain workspace-scoped; this design
+the workspace. A gateway credential may also invite, list and revoke the phones of
+its workspace (owner decision, 2026-10-17): every computer shows the phones, the
+computer whose invitation each one used and a revoke action, so a phone added
+through one gateway, which reaches every computer of the workspace, stays
+visible. `platform` follows the push registration (`ios` for APNs, `android` for
+FCM, otherwise `null`); `paired_at`, `last_seen_at` and `added_by` are `null` for
+phones paired before the relay recorded them. Peers manage phones through their
+gateway with `hgs @gateway mobile`, never with a credential of their own. Existing device credentials remain workspace-scoped; this design
 does not introduce phone-specific gateway grants. Discovering a neighbor must
 never create a connector credential or enroll that neighbor as a gateway.
 
@@ -871,6 +878,9 @@ API errors carry an `error` string. Relay health reports the protocol version.
 | `POST /v1/push` | Device | `{provider: "fcm" \| "apns" \| "apns_sandbox", token}`; an unconfigured provider returns 503, others 400 |
 | `DELETE /v1/push` | Device | Remove this device's push registration |
 | `DELETE /v1/device` | Device | Revoke this device, its queued requests and push registration |
+| `POST /v1/node/invitations` | Computer | `{}` → `{pair_code, expires_at, workspace_id, workspace_name}`: a ten-minute, single-use phone invitation; 10 per minute per computer |
+| `GET /v1/node/devices` | Computer | `{workspace_id, workspace_name, devices: [{id, name, platform, paired_at, last_seen_at, added_by}]}`, at most 200 active phones, newest pairing first |
+| `DELETE /v1/node/devices/{id}` | Computer | Revoke a phone of this workspace exactly like `DELETE /v1/device`; 404 when it is not an active phone of the workspace |
 | `POST /v1/node/heartbeat` | Computer | `{snapshot, presence?}` using local `hgs ls --json --local` output; its `desktop_presence` travels as `presence` beside the snapshot |
 | `GET /v1/node/requests?wait=25` | Computer | `{requests: [{request_id, operation, session, payload}]}` |
 | `POST /v1/node/requests/{id}/result` | Computer | `{state, result, error}` |

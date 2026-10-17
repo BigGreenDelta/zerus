@@ -1,6 +1,7 @@
 #include "MachinesPage.h"
 #include <QScopedValueRollback>
 #include "HgsClient.h"
+#include "PhonePairing.h"
 #include "MachineAppearance.h"
 #include "LocalSessionHost.h"
 #include "MachinePlatform.h"
@@ -107,6 +108,8 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     auto *scroll = new QScrollArea; scroll->setObjectName("machineEditorScroll"); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(editorWidget);
     scroll->setAutoFillBackground(false); scroll->viewport()->setAutoFillBackground(false); editorWidget->setAutoFillBackground(false);
     body->addWidget(scroll, 3); layout->addLayout(body, 1);
+    // Phones of every workspace this computer reaches, here or through a peer.
+    layout->addWidget(new PhonePairing::Panel(path));
     connect(m_color, &QPushButton::clicked, this, [this] {
         const auto machine = appearanceMachine(); if (m_new || machine.isEmpty()) return;
         WorkspaceColorDialog dialog(MachineAppearance::color(machine), this);

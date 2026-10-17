@@ -70,5 +70,5 @@ describes the components it uses. The folder also contains:
   (licenses\conpty-LICENSE.txt), with the notices of the third-party code
   that OpenConsole.exe contains (licenses\conpty-NOTICE.md). hgs.exe hosts
   consoles with them once local sessions are enabled.
-- License texts of the Rust crates in hgs.exe (licenses\rust) and of libvterm
-  and md4c, which hgs-tray.exe contains (licenses).
+- License texts of the Rust crates in hgs.exe (licenses\rust) and of libvterm,
+  md4c and the QR Code generator, which hgs-tray.exe contains (licenses).

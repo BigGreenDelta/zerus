@@ -367,8 +367,12 @@ is currently active.
 
 ## Pair the phone
 
-Open Zerus, choose **Machines → Pair another workspace**, enter the HTTPS server URL and the
-current invitation code, and confirm. A `zerus://pair?server=...&code=...` link can
+On a desktop computer with Zerus, open **Machines → Phones → Pair a phone…** (or
+Settings → Mobile connection). It works on the gateway itself and on any computer
+that has the gateway as an enabled peer. On the phone, open Zerus, choose
+**Machines → Pair another workspace** and scan the QR code, or enter the HTTPS
+server URL and the code shown, and confirm. Without a desktop, the relay
+administrator's `invite --workspace UUID` command prints a code as before. A `zerus://pair?server=...&code=...` link can
 prefill these fields, but the app still requires explicit confirmation. Treat
 such a link as a credential until it is consumed or expires.
 

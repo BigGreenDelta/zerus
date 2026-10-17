@@ -137,17 +137,21 @@ if(LINUX)
     target_link_libraries(hgs-tray-gui PRIVATE Qt6::DBus)
 endif()
 
+# The vendored QR Code generator (vendor/qrcodegen/UPSTREAM.md) draws phone pairing codes.
+add_library(hgs-qrcodegen STATIC vendor/qrcodegen/qrcodegen.cpp)
+target_include_directories(hgs-qrcodegen PUBLIC vendor/qrcodegen)
+
 add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp
     src/MachineFilter.cpp src/ProjectFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
     src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
-    src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp
+    src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
     # only on macOS; makeTrayIcon() in TrayAgent.cpp explains why not on Linux.
     src/QuietTrayIcon.cpp)
 target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-core Qt6::Widgets
-    PRIVATE hgs-markdown hgs-external-file hgs-updates)
+    PRIVATE hgs-markdown hgs-external-file hgs-updates hgs-qrcodegen)
 
 add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)

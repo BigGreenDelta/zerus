@@ -184,6 +184,9 @@ public:
     void requestProjects(const QString &host = {});
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
+    // hgs [@host] mobile …: phones of the workspace that host's mobile connection
+    // reaches. Probes the host CLI first, so an older one is never asked.
+    quint64 requestMobile(const QString &host, const QStringList &arguments);
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
     // `hgs session-host <action> --json` on this computer (Windows, spec D2):
     // install enables local sessions and stages the stable CLI and a host image.
@@ -297,6 +300,8 @@ signals:
     void searchFailed(quint64 request, const QString &host, const QString &error);
     void accountsReady(quint64 request, const QString &host, const QJsonObject &result);
     void accountsFailed(quint64 request, const QString &host, const QString &error);
+    void mobileReady(quint64 request, const QString &host, const QJsonObject &result);
+    void mobileFailed(quint64 request, const QString &host, const QString &error);
     void machinesReady(quint64 request, const QJsonObject &result);
     void machinesFailed(quint64 request, const QString &error);
     void swarmReady(quint64 request, const QJsonObject &result);
@@ -399,6 +404,7 @@ private:
     quint64 m_settingsRequest = 0;
     quint64 m_recoveryRequest = 0;
     quint64 m_machineRequest = 0;
+    quint64 m_mobileRequest = 0;
     quint64 m_swarmRequest = 0;
     quint64 m_sessionHostRequest = 0;
     quint64 m_accountRequest = 0;
