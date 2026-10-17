@@ -106,3 +106,8 @@ through `ZERUS_IOS_ASC_KEY_PATH`, `ZERUS_IOS_ASC_KEY_ID` and
   explain that real use needs the user's own Zerus relay.
 - **Store listing:** screenshots for the required iPhone sizes, description,
   keywords, support URL (`https://zerus.dev`) and age rating.
+- **Creative assets:** the optional product page header (21:9, 3840 × 1646 PNG)
+  and search results image (3:2) shown on iOS 27 and later. Keep the logo, text
+  and screens inside the safe area of Apple's templates. Place them before
+  submitting: App Store Connect refuses new placements while the version waits
+  for review, so adding one later means removing the version from review.
