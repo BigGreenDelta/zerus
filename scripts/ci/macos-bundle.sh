@@ -13,8 +13,10 @@ command -v tmux > /dev/null || { echo 'Install tmux before bundle self-tests.' >
 export MACOSX_DEPLOYMENT_TARGET=14.0
 mkdir -p artifacts/test-results
 cargo build --locked --release
+cargo build --locked --release --manifest-path services/mobile/connector/Cargo.toml
 rm -rf artifacts/macos-licenses
-python3 scripts/collect-licenses.py artifacts/macos-licenses
+python3 scripts/collect-licenses.py artifacts/macos-licenses \
+    --manifest-path Cargo.toml --manifest-path services/mobile/connector/Cargo.toml
 cmake_args=(-G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$qt"
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_ARCHITECTURES=arm64)
 if [ -n "${ZERUS_DEV_BUILD_NUMBER:-}" ]; then
@@ -32,7 +34,8 @@ QT_QPA_PLATFORM=offscreen \
 cmake -S tray -B .ci-build/macos-release "${cmake_args[@]}" -DBUILD_TESTING=OFF
 cmake --build .ci-build/macos-release --parallel "$jobs"
 python3 scripts/package-macos.py --qt "$qt" --app .ci-build/macos-release/hgs-tray.app \
-    --cli target/release/hgs --licenses artifacts/macos-licenses --version "$version" --release "$release" \
+    --cli target/release/hgs --connector services/mobile/connector/target/release/zerus-mobile-connector \
+    --licenses artifacts/macos-licenses --version "$version" --release "$release" \
     --output "$output"
 python3 scripts/check-macos-bundle.py "$output/Zerus.app" --version "$version" --release "$release" --selftest --source-commit "$(git rev-parse HEAD)"
 # ditto keeps the framework symlinks and permissions that artifact uploads drop.

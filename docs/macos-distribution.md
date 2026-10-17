@@ -47,9 +47,10 @@ See [DMG installation](installation.md#macos-dmg) for CLI and local-session setu
 | --- | --- |
 | `Contents/MacOS/hgs-tray` | GUI; the executable keeps its name |
 | `Contents/MacOS/hgs` | CLI, linked by the cask into Homebrew's `bin` |
+| `Contents/MacOS/zerus-mobile-connector` | Rust mobile connector, signed with the other code; its LaunchAgent is opt-in through `zerus-setup --mobile-connector install` |
 | `Contents/Frameworks`, `Contents/PlugIns` | Qt frameworks and plugins deployed by `macdeployqt` |
 | `Contents/Resources/bin/zerus-setup` | Per-user setup, linked by the cask |
-| `Contents/Resources/setup` | `hgs_state.py`, the three LaunchAgent installers with their `launchd_agent.py` helper and the tray LaunchAgent template |
+| `Contents/Resources/setup` | `hgs_state.py`, the three LaunchAgent installers with their `launchd_agent.py` helper, the mobile connector's service installer and the tray LaunchAgent template |
 | `Contents/Resources/licenses` | Zerus, libvterm, md4c, Codex and Cargo notices; `qt/` holds LGPL-3.0, GPL-3.0, Qt's SPDX documents including Chromium components, and the Qt source location |
 
 The bundle ID stays `com.hgdev.hgs-tray`, so settings, drafts and LaunchAgent
@@ -65,7 +66,18 @@ the bundle or the system.
 
 The cask has no `postflight`, `uninstall quit:`, `uninstall launchctl:` or
 `auto_updates`: an upgrade must not quit the GUI or unload agents. `zap` removes
-only logs, saved window state and the four Zerus LaunchAgents.
+only logs, saved window state and the five Zerus LaunchAgents, the mobile
+connector's included; never `connector.json` or the connector's journal in
+`~/.local/state/hgs/mobile-connector`, whose tombstones keep phone requests from
+running twice.
+
+`zerus-setup --mobile-connector install` writes the
+`com.hgdev.zerus-mobile-connector` LaunchAgent for the bundled connector
+(`AbandonProcessGroup`, `KeepAlive` on failure only, logs in `~/Library/Logs/hgs`),
+only when none exists or it is its own, and prints the `launchctl bootstrap`
+command instead of loading it. `zerus-setup --remove` unloads and removes it with
+the other agents of the bundle; the agents and tmux servers it launched keep
+running.
 
 ## Pinned Qt
 

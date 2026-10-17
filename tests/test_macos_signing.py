@@ -30,6 +30,7 @@ class Signing(unittest.TestCase):
         self.write("Contents/Info.plist", plistlib.dumps({"CFBundleExecutable": "hgs-tray"}))
         self.write("Contents/MacOS/hgs-tray", MACH_O)
         self.write("Contents/MacOS/hgs", MACH_O)
+        self.write("Contents/MacOS/zerus-mobile-connector", MACH_O)
         self.write("Contents/PlugIns/platforms/libqcocoa.dylib", MACH_O)
         self.write("Contents/Resources/setup/install-swarm-service.py", b"#!/usr/bin/env python3\n")
         for name in ("QtCore", "QtHelpers"):
@@ -74,10 +75,12 @@ class Signing(unittest.TestCase):
         self.assertEqual(len(order), len(set(order)))
         self.assertEqual(order[-1], "Zerus.app")
         self.assertEqual(set(order), {
-            "Zerus.app/Contents/PlugIns/platforms/libqcocoa.dylib", "Zerus.app/Contents/MacOS/hgs", helper,
+            "Zerus.app/Contents/PlugIns/platforms/libqcocoa.dylib", "Zerus.app/Contents/MacOS/hgs",
+            "Zerus.app/Contents/MacOS/zerus-mobile-connector", helper,
             engine, "Zerus.app/Contents/Frameworks/QtCore.framework/Versions/A", "Zerus.app"})
         self.assertLess(order.index(helper), order.index(engine))
-        for standalone in ("Zerus.app/Contents/PlugIns/platforms/libqcocoa.dylib", "Zerus.app/Contents/MacOS/hgs"):
+        for standalone in ("Zerus.app/Contents/PlugIns/platforms/libqcocoa.dylib", "Zerus.app/Contents/MacOS/hgs",
+                           "Zerus.app/Contents/MacOS/zerus-mobile-connector"):
             self.assertLess(order.index(standalone), order.index(engine))
 
     def test_only_the_application_gets_entitlements(self):

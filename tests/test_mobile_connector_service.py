@@ -284,6 +284,17 @@ class InstallUnit(ServiceFixture):
         self.assertEqual(self.unit_text(), before)
         self.assertNotIn("--user daemon-reload", calls)
 
+    def test_install_keeps_a_dangling_foreign_unit_link(self):
+        target = self.root / "missing.service"
+        path = self.units / UNIT
+        path.symlink_to(target)
+        result, calls = self.run_action("install", code=1)
+        self.assertIn("dangling symbolic link", result.stderr)
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(path.readlink(), target)
+        self.assertFalse(target.exists())
+        self.assertEqual(calls, [])
+
     def test_install_updates_its_own_unit_for_another_binary(self):
         self.run_action("install")
         other = self.root / "other/zerus-mobile-connector"
@@ -330,6 +341,7 @@ class InstallAgent(unittest.TestCase):
         calls_path = self.state / "launchctl.calls"
         calls = calls_path.read_text().splitlines() if calls_path.exists() else []
         calls_path.unlink(missing_ok=True)
+        self.launchctl_calls = calls
         for call in calls:
             self.assertTrue(call.startswith("print gui/"), call)
         return result
@@ -380,6 +392,17 @@ class InstallAgent(unittest.TestCase):
         result = self.run_agent("install", code=1)
         self.assertIn("is not a zerus-mobile-connector agent", result.stderr)
         self.assertEqual(self.plist.read_bytes(), original)
+
+    def test_install_keeps_a_dangling_foreign_agent_link(self):
+        target = self.root / "missing.plist"
+        self.plist.parent.mkdir(parents=True)
+        self.plist.symlink_to(target)
+        result = self.run_agent("install", code=1)
+        self.assertIn("dangling symbolic link", result.stderr)
+        self.assertTrue(self.plist.is_symlink())
+        self.assertEqual(self.plist.readlink(), target)
+        self.assertFalse(target.exists())
+        self.assertEqual(self.launchctl_calls, [])
 
     def test_an_app_path_with_spaces_is_one_plist_argument(self):
         import plistlib

@@ -164,7 +164,7 @@ if pathlib.Path(sys.argv[0]).name == "python3" and os.environ["ZERUS_CASK_TEST_R
             bundle = root / "Zerus.app"
             binaries = bundle / "Contents/MacOS"
             binaries.mkdir(parents=True)
-            for name in ("hgs", "hgs-tray"):
+            for name in ("hgs", "hgs-tray", "zerus-mobile-connector"):
                 executable = binaries / name
                 executable.write_text(f"#!{sys.executable}\n" + '''import os, pathlib, subprocess
 assert os.environ["HOME"] != "/nonexistent/parent-home"
@@ -264,14 +264,26 @@ assert subprocess.check_output(["tmux", "-V"], text=True).strip() == "tmux fixtu
 
     def test_required_files_include_setup_and_notices(self):
         names = set(check.REQUIRED_FILES)
-        for name in ("Contents/MacOS/hgs", "Contents/Resources/bin/zerus-setup",
+        for name in ("Contents/MacOS/hgs", "Contents/MacOS/zerus-mobile-connector", "Contents/Resources/bin/zerus-setup",
                      "Contents/Resources/setup/install-macos-session-service.py",
+                     "Contents/Resources/setup/install-mobile-connector-service.py",
                      "Contents/Resources/licenses/qt/LGPL-3.0.txt",
                      "Contents/Resources/licenses/qt/qtmultimedia.spdx.json",
                      "Contents/Resources/licenses/qt/SOURCE.md",
                      "Contents/Resources/licenses/rust/inventory.json",
                      "Contents/Resources/licenses/codex-LICENSE.txt"):
             self.assertIn(name, names)
+
+    def test_a_connector_built_with_test_hooks_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "Zerus.app"
+            (bundle / "Contents/MacOS").mkdir(parents=True)
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({}))
+            connector = bundle / check.CONNECTOR
+            connector.write_bytes(b"ZERUS_CONNECTOR_TEST_CLOCK_SCALE")
+            self.assertIn(f"{check.CONNECTOR} was built with test hooks", check.bundle_findings(bundle, "0.38.0"))
+            connector.write_bytes(b"release build")
+            self.assertNotIn(f"{check.CONNECTOR} was built with test hooks", check.bundle_findings(bundle, "0.38.0"))
 
     def test_qt_webengine_never_ships_in_the_bundle(self):
         self.assertFalse([name for name in check.REQUIRED_FILES if "webengine" in name.lower()])

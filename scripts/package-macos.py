@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MINIMUM_SYSTEM = "14.0"
 # Installers zerus-setup runs from Contents/Resources/setup, with the local modules they import.
 SETUP_SCRIPTS = ("install-macos-session-service.py", "install-recovery-service.py",
-                 "install-swarm-service.py", "launchd_agent.py")
+                 "install-swarm-service.py", "launchd_agent.py", "install-mobile-connector-service.py")
 QT_NOTICES = ("qtbase", "qtsvg", "qtmultimedia")
 SOURCE_NOTE = """# Qt in Zerus.app
 
@@ -73,6 +73,8 @@ def main():
     parser.add_argument("--qt", type=Path, required=True, help="Qt prefix created by install-qt-macos.py")
     parser.add_argument("--app", type=Path, required=True, help="production hgs-tray.app (BUILD_TESTING=OFF)")
     parser.add_argument("--cli", type=Path, required=True, help="release hgs executable")
+    parser.add_argument("--connector", type=Path, required=True,
+                        help="release zerus-mobile-connector executable (services/mobile/connector)")
     parser.add_argument("--licenses", type=Path, required=True, help="output of collect-licenses.py")
     parser.add_argument("--version", required=True)
     parser.add_argument("--release", help="stable, nightly or numbered Dev release (default: --version)")
@@ -117,6 +119,8 @@ def main():
 
     contents = staged / "Contents"
     install(args.cli, contents / "MacOS/hgs", 0o755)
+    # Opt-in through zerus-setup --mobile-connector install; signed with the other code.
+    install(args.connector, contents / "MacOS/zerus-mobile-connector", 0o755)
     resources = contents / "Resources"
     install(ROOT / "packaging/macos/zerus-setup", resources / "bin/zerus-setup", 0o755)
     for name in SETUP_SCRIPTS:
