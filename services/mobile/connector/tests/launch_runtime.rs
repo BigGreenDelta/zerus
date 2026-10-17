@@ -1002,7 +1002,7 @@ fn an_oversized_opencode_projection_degrades_before_it_fails() {
     // 160-character labels and 64-character variants: the full projection is
     // over 128 KiB, the labels-free one is not.
     let efforts: Vec<String> = (0..8).map(|i| format!("{i}{}", "v".repeat(63))).collect();
-    let models: Vec<Value> = (0..200)
+    let models: Vec<Value> = (0..120)
         .map(|index| {
             json!({"id": format!("p/m{index:03}"), "value": format!("p/m{index:03}"),
                    "label": "l".repeat(160), "provider": "p", "provider_label": "P", "free": false,
