@@ -397,8 +397,8 @@ unread in Activity but show no new-reply badge or reply-only attention count on
 desktop or Android. The pending reply becomes visible when work finishes; this
 never marks it as read. Explicit questions, approvals, errors and review reminders
 remain actionable. Optional Codex questions, which the agent continues without,
-are not attention: on the desktop they change neither the session's status nor
-the Needs attention filter, counters or badges. Listings report them separately
+are not attention: on the desktop and Android they change neither the session's
+status nor the Needs attention filter, counters or badges. Listings report them separately
 as [`optional_questions`](#optional-questions-in-listings). Settings → Sessions →
 **Notify about optional questions**, off by default, adds an *Optional question*
 banner once for each new question. Questions already pending when it is turned on,

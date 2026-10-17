@@ -140,7 +140,7 @@ class DesktopSessionPaletteTest {
         assertEquals(DesktopBadgeKind.Working, DesktopSessionPalette.badge(session(acknowledged.toString()), true).kind)
         val ended = JSONObject(child).put("conversation_state", "ended")
         assertEquals(DesktopBadgeKind.Neutral, DesktopSessionPalette.badge(session(ended.toString()), true).kind)
-        // Optional questions affect filtering; desktop badges still follow the actual row state.
+        // A pending connector request affects filtering; desktop badges still follow the actual row state.
         assertEquals(DesktopBadgeKind.Working, DesktopSessionPalette.badge(session("""{"activity":"busy"}""", pending = 1), true).kind)
     }
 
