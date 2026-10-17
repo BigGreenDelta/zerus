@@ -220,19 +220,30 @@ fn answers_hold_only_integers_python_reads() {
     // the relay refuses them at submission rather than queue a request that
     // could only expire unclaimed (zerus-3rqx.7).
     let answer = |digits: usize| {
-        let mut b = command("computer", "answer",
-            json!({"question_id":"q","expected_question_hash":"h","answers":[["Yes"]]}));
+        let mut b = command(
+            "computer",
+            "answer",
+            json!({"question_id":"q","expected_question_hash":"h","answers":[["Yes"]]}),
+        );
         b["payload"]["answers"] = json!([[0]]);
-        let text = canonical(&b).unwrap().replace("[[0]]", &format!("[[{}]]", "9".repeat(digits)));
+        let text = canonical(&b)
+            .unwrap()
+            .replace("[[0]]", &format!("[[{}]]", "9".repeat(digits)));
         zerus_relay::json::parse(text.as_bytes(), 32, 50_000).unwrap()
     };
     assert_eq!(wire(&answer(zerus_relay::json::MAX_INT_DIGITS)), 202);
     assert_eq!(wire(&answer(zerus_relay::json::MAX_INT_DIGITS + 1)), 400);
     // Anywhere in the request, as the connector checks the whole of it.
-    let mut b = command("computer", "answer",
-        json!({"question_id":"q","expected_question_hash":"h","answers":[["Yes"]],"extra":0}));
+    let mut b = command(
+        "computer",
+        "answer",
+        json!({"question_id":"q","expected_question_hash":"h","answers":[["Yes"]],"extra":0}),
+    );
     b["payload"].as_object_mut().unwrap().remove("extra");
-    let text = canonical(&b).unwrap().replace("\"computer_id\"", &format!("\"n\":{},\"computer_id\"", "1".repeat(4301)));
+    let text = canonical(&b).unwrap().replace(
+        "\"computer_id\"",
+        &format!("\"n\":{},\"computer_id\"", "1".repeat(4301)),
+    );
     let parsed = zerus_relay::json::parse(text.as_bytes(), 32, 50_000).unwrap();
     assert_eq!(wire(&parsed), 400);
 }
