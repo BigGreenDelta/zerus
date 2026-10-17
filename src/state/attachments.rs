@@ -163,7 +163,7 @@ pub(super) fn messages(record: &Value, agent: &str) -> Value {
         .filter(|p| p.path().extension().is_some_and(|e| e == "json"))
         .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p.path())))
         .collect::<Vec<_>>();
-    paths.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    paths.sort_unstable_by_key(|p| std::cmp::Reverse(p.0));
     let mut messages = Vec::new();
     for (_, path) in paths.into_iter().take(512) {
         let Ok(mut receipt) = receipt(&path) else {

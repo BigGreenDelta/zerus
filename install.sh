@@ -11,7 +11,7 @@ elif [ -x "$HOME/.cargo/bin/cargo" ]; then
 elif [ -x /opt/homebrew/bin/cargo ]; then
     cargo_bin=/opt/homebrew/bin/cargo
 else
-    echo "hgs: cargo not found; install Rust 1.85 or later to build the CLI" >&2
+    echo "hgs: cargo not found; install the newest stable Rust to build the CLI" >&2
     exit 1
 fi
 

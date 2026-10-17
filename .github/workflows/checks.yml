@@ -66,7 +66,7 @@ jobs:
             "$commit" "$RUN_LINUX" "$RUN_ARCH" "$RUN_MACOS" "$RUN_WINDOWS" >> "$GITHUB_STEP_SUMMARY"
 
   quick:
-    name: Quick checks (source and Rust 1.85)
+    name: Quick checks (source and Rust 1.99)
     needs: source
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -93,16 +93,16 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           "$lint_dir/actionlint" -color -ignore 'unexpected key "cache-mode" for "(workflow|job)" section'
 
-      - run: rustup toolchain install 1.85.0 --profile minimal
+      - run: rustup toolchain install 1.99.1 --profile minimal
       # Rust caches: the compiler identity and a monthly epoch precede the lock
       # hash. A Cargo.lock change restores the previous target; a new month or
       # compiler starts afresh, so stale dependency builds cannot accumulate.
       - name: Rust cache identity
         id: rust
         run: |
-          echo "rustc=$(rustc +1.85.0 -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "rustc=$(rustc +1.99.1 -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
           echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
-      - name: Restore Rust 1.85 cache
+      - name: Restore Rust 1.99 cache
         id: rust-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -112,8 +112,8 @@ jobs:
             target
           key: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
-      - run: cargo +1.85.0 test --locked
-      - name: Save Rust 1.85 cache
+      - run: cargo +1.99.1 test --locked
+      - name: Save Rust 1.99 cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -143,7 +143,7 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
-      - run: rustup toolchain install 1.85.0 --profile minimal --component rustfmt --component clippy
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
       # Each storage contract and relay fixture creates and drops its own
       # database on the service. With the requirement set, a missing URL fails
       # instead of falling back to SQLite or skipping.
@@ -153,23 +153,23 @@ jobs:
           ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           ZERUS_REQUIRE_RELAY_E2E: "1"
         run: |
-          cargo +1.85.0 fmt --check
-          cargo +1.85.0 clippy --locked --all-targets -- -D warnings
-          cargo +1.85.0 test --locked
-          cargo +1.85.0 test --locked --test contracts postgres_cross_worker -- --ignored
+          cargo +1.99.1 fmt --check
+          cargo +1.99.1 clippy --locked --all-targets -- -D warnings
+          cargo +1.99.1 test --locked
+          cargo +1.99.1 test --locked --test contracts postgres_cross_worker -- --ignored
           # The connector links only the protocol library: it builds without the
           # server stack, reproduces the golden vectors, and no build may give
           # serde_json insertion-ordered maps.
-          cargo +1.85.0 clippy --locked --no-default-features --lib --test codec --test vectors -- -D warnings
-          cargo +1.85.0 build --locked --no-default-features --lib
-          cargo +1.85.0 test --locked --no-default-features --test codec --test vectors
-          library="$(cargo +1.85.0 tree --locked --no-default-features --target all -e normal --prefix none)"
+          cargo +1.99.1 clippy --locked --no-default-features --lib --test codec --test vectors -- -D warnings
+          cargo +1.99.1 build --locked --no-default-features --lib
+          cargo +1.99.1 test --locked --no-default-features --test codec --test vectors
+          library="$(cargo +1.99.1 tree --locked --no-default-features --target all -e normal --prefix none)"
           if grep -E '^(axum|clap|hyper|reqwest|ring|rustls|sqlx|tokio|tower)[ -]' <<<"$library"; then
             echo "The protocol library depends on server crates" >&2
             exit 1
           fi
           serde_features() {
-            features="$(cargo +1.85.0 tree --locked --target all -e features -i serde_json "$@")"
+            features="$(cargo +1.99.1 tree --locked --target all -e features -i serde_json "$@")"
             if ! grep -q 'serde_json feature "arbitrary_precision"' <<<"$features" \
               || grep -q 'serde_json feature "preserve_order"' <<<"$features"; then
               echo "serde_json needs arbitrary_precision and must not preserve_order $*" >&2
@@ -188,8 +188,8 @@ jobs:
           ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           ZERUS_REQUIRE_RELAY_E2E: "1"
         run: |
-          cargo +1.85.0 build --locked --bin hgs
-          cargo +1.85.0 build --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir services/mobile/relay/target
+          cargo +1.99.1 build --locked --bin hgs
+          cargo +1.99.1 build --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir services/mobile/relay/target
           export ZERUS_CONNECTOR_E2E_COMMAND="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/zerus-mobile-connector"
           python3 -m venv "$RUNNER_TEMP/relay-venv"
           "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile -r services/mobile/tests/requirements.txt
@@ -210,7 +210,7 @@ jobs:
   # The Rust connector against the golden vectors, the Python connector and hgs
   # on one journal, and the black-box suites against both implementations.
   connector:
-    name: Rust mobile connector (Rust 1.85 and black-box suites)
+    name: Rust mobile connector (Rust 1.99 and black-box suites)
     needs: source
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -223,11 +223,11 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
-      - run: rustup toolchain install 1.85.0 --profile minimal --component rustfmt --component clippy
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
       - name: Rust cache identity
         id: rust
         run: |
-          echo "rustc=$(rustc +1.85.0 -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "rustc=$(rustc +1.99.1 -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
           echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
       - name: Restore connector Rust cache
         id: rust-cache
@@ -242,11 +242,11 @@ jobs:
       - name: Format, lint and dependency boundaries
         working-directory: services/mobile/connector
         run: |
-          cargo +1.85.0 fmt --check
-          cargo +1.85.0 clippy --locked --all-targets -- -D warnings
-          cargo +1.85.0 clippy --locked --all-targets --features test-hooks -- -D warnings
-          cargo +1.85.0 build --locked --features test-hooks
-          cargo +1.85.0 build --locked
+          cargo +1.99.1 fmt --check
+          cargo +1.99.1 clippy --locked --all-targets -- -D warnings
+          cargo +1.99.1 clippy --locked --all-targets --features test-hooks -- -D warnings
+          cargo +1.99.1 build --locked --features test-hooks
+          cargo +1.99.1 build --locked
           # The black-box test seams exist only with the test-hooks feature.
           if grep -q ZERUS_CONNECTOR_TEST_ target/debug/zerus-mobile-connector; then
             echo "A build without test-hooks reads ZERUS_CONNECTOR_TEST_ variables" >&2
@@ -259,7 +259,7 @@ jobs:
           fi
           # request_hash needs exact numbers, and no build may give serde_json
           # insertion-ordered maps.
-          features="$(cargo +1.85.0 tree --locked --target all -e features -i serde_json)"
+          features="$(cargo +1.99.1 tree --locked --target all -e features -i serde_json)"
           if ! grep -q 'serde_json feature "arbitrary_precision"' <<<"$features" \
             || grep -q 'serde_json feature "preserve_order"' <<<"$features"; then
             echo "serde_json needs arbitrary_precision and must not preserve_order" >&2
@@ -267,7 +267,7 @@ jobs:
           fi
       - name: Python connector and hgs for the handoff tests
         run: |
-          cargo +1.85.0 build --locked --bin hgs
+          cargo +1.99.1 build --locked --bin hgs
           python3 -m venv "$RUNNER_TEMP/connector-venv"
           "$RUNNER_TEMP/connector-venv/bin/pip" install ./services/mobile
       - name: Vector, binary and handoff tests
@@ -275,7 +275,7 @@ jobs:
         env:
           ZERUS_CONNECTOR_TEST_PYTHON: ${{ runner.temp }}/connector-venv/bin/python
           ZERUS_CONNECTOR_TEST_HGS: ${{ github.workspace }}/target/debug/hgs
-        run: cargo +1.85.0 test --locked
+        run: cargo +1.99.1 test --locked
       - name: Save connector Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -306,7 +306,7 @@ jobs:
       # the soak of the Rust build: the connectors' own clocks set their pace.
       - name: Black-box suites against the Python and Rust connectors, differential traces and soak
         run: |
-          (cd services/mobile/connector && cargo +1.85.0 build --locked --features test-hooks)
+          (cd services/mobile/connector && cargo +1.99.1 build --locked --features test-hooks)
           rust="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/zerus-mobile-connector"
           traces="$RUNNER_TEMP/traces"
           ZERUS_CONNECTOR_TRACE_DIR="$traces/python" \
@@ -336,7 +336,7 @@ jobs:
             "$traces/python" "$traces/rust" || status=1
           exit "$status"
 
-  # The connector on macOS (design C7): a cold Rust 1.85 build, its unit,
+  # The connector on macOS (design C7): a cold Rust 1.99 build, its unit,
   # vector and binary tests, and the black-box modules that need no real hgs
   # against the build with the test seams, with Keychain trust and kqueue. The
   # journal handoffs run this tree's Python connector beside it.
@@ -353,7 +353,7 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
-      - run: rustup toolchain install 1.85.0 --profile minimal
+      - run: rustup toolchain install 1.99.1 --profile minimal
       - name: Python connector for the handoffs
         run: |
           python3 -m venv "$RUNNER_TEMP/connector-venv"
@@ -361,12 +361,12 @@ jobs:
       - name: Unit, vector and binary tests
         working-directory: services/mobile/connector
         run: |
-          cargo +1.85.0 test --locked --lib --test config_vectors --test journal_vectors --test runtime_vectors \
+          cargo +1.99.1 test --locked --lib --test config_vectors --test journal_vectors --test runtime_vectors \
             --test mutations --test launch_runtime --test binary
       - name: Black-box smoke against the Rust connector
         working-directory: services/mobile/tests
         run: |
-          (cd ../connector && cargo +1.85.0 build --locked --features test-hooks)
+          (cd ../connector && cargo +1.99.1 build --locked --features test-hooks)
           ZERUS_CONNECTOR_COMMAND="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/zerus-mobile-connector" \
             "$RUNNER_TEMP/connector-venv/bin/python" -m unittest -v test_bb_harness test_bb_startup test_bb_journal \
             test_bb_requests test_bb_restart test_bb_retention test_bb_heartbeat test_bb_runtime test_bb_send \
@@ -820,7 +820,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13.15'
-      - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup toolchain install 1.85.0 --profile minimal --component clippy
+      - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup toolchain install 1.99.1 --profile minimal --component clippy
       - name: Rust cache identity
         id: rust
         run: |
@@ -839,14 +839,14 @@ jobs:
       # The runner gives every step a synchronous pipe as stdin. Windows OpenSSH
       # (and the fake client, which refuses it) must never inherit it, so steps
       # that start hgs, ssh or the desktop app read from /dev/null.
-      - name: Rust client tests, Rust 1.85 lints and release build
+      - name: Rust client tests, Rust 1.99 lints and release build
         run: |
           mkdir -p artifacts/test-results
           cargo test --locked </dev/null 2>&1 | tee artifacts/test-results/rust.log
           # Pinned like the relay lints, so a new stable release cannot fail an
           # unchanged commit. Windows-only code is compiled nowhere else, so this
-          # also checks it against Rust 1.85.
-          cargo +1.85.0 clippy --locked --all-targets -- -D warnings 2>&1 | tee artifacts/test-results/clippy.log
+          # also checks it against Rust 1.99.
+          cargo +1.99.1 clippy --locked --all-targets -- -D warnings 2>&1 | tee artifacts/test-results/clippy.log
           cargo build --release --locked
           cargo build --locked --example fake_ssh
           cargo build --locked --example fake_agent

@@ -408,7 +408,7 @@ fn setup(config: &Config, alias: &str, source: Option<&str>, dry: bool) -> Resul
     let script = r#"set -eu
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 case "$(uname -s)" in Linux|Darwin) ;; *) echo 'HGS supports Linux and macOS peers.' >&2; exit 1;; esac
-command -v cargo >/dev/null 2>&1 || { echo 'Rust is missing. Install Rust 1.85+ on this machine, then retry.' >&2; exit 1; }
+command -v cargo >/dev/null 2>&1 || { echo 'Rust is missing. Install the newest stable Rust on this machine, then retry.' >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo 'tmux is missing. Install tmux on this machine, then retry.' >&2; exit 1; }
 mkdir -p "$HOME/.local/share/hgs" "$HOME/.config/hgs"
 hgs_stage=$(mktemp -d "$HOME/.local/share/hgs/setup.XXXXXXXX")

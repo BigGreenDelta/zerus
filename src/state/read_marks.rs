@@ -436,7 +436,7 @@ mod tests {
         next["attention_id"] = json!("call-2");
         assert_ne!(signature(&next, Some(&[])).unwrap(), first);
         let question = json!({"question_id":"q-1","question_hash":"h-1"});
-        assert_ne!(signature(&waiting(), Some(&[question.clone()])).unwrap(), first);
+        assert_ne!(signature(&waiting(), Some(std::slice::from_ref(&question))).unwrap(), first);
         let mut child = waiting();
         child["subagents"] = json!({"helper":{"state":"working","display_state":"approval"}});
         assert_ne!(signature(&child, Some(&[])).unwrap(), first);
@@ -469,7 +469,7 @@ mod tests {
         let mut working = waiting();
         working["phase"] = json!("working");
         let question = json!({"question_id":"q-1","question_hash":"h-1"});
-        assert!(signature(&working, Some(&[question.clone()])).is_some());
+        assert!(signature(&working, Some(std::slice::from_ref(&question))).is_some());
         let mut submitted = question;
         submitted["answer_delivery"] = json!({"status":"submitted"});
         assert_eq!(signature(&working, Some(&[submitted])), None);

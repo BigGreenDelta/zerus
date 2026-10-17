@@ -176,7 +176,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// The bytes `text` spells as pairs of hex digits.
 fn unhex(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     (0..text.len())

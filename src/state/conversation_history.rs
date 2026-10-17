@@ -1837,7 +1837,7 @@ mod tests {
             let hook = format!("{prefix}…");
             assert!(stop_excerpt_matches(&full, &hook));
             assert!(!stop_excerpt_matches(
-                &format!("different{}", &prefix.chars().skip(1).collect::<String>()),
+                &format!("different{}", prefix.chars().skip(1).collect::<String>()),
                 &hook
             ));
         }

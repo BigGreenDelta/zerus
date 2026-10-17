@@ -1853,10 +1853,8 @@ impl Agent {
             }
             "enter" => self.submit(),
             "ctrl-c" => self.composer.clear(),
-            "control" if matches!(token.bytes[0], 0x7f | 0x08) => {
-                if self.composer.pop().is_some() && self.config.echo {
-                    out(b"\x08 \x08");
-                }
+            "control" if matches!(token.bytes[0], 0x7f | 0x08) && self.composer.pop().is_some() && self.config.echo => {
+                out(b"\x08 \x08");
             }
             _ => {}
         }

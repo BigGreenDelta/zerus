@@ -2007,7 +2007,7 @@ mod tests {
             None
         );
         assert_eq!(
-            prepared_path(&path(&[r"C:\Windows"]), None, &[npm.clone()]),
+            prepared_path(&path(&[r"C:\Windows"]), None, std::slice::from_ref(&npm)),
             Some(path(&[r"C:\Windows", r"C:\Users\a\AppData\Roaming\npm"]))
         );
         assert_eq!(

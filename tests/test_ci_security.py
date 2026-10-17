@@ -313,9 +313,9 @@ class WorkflowSecurityTests(unittest.TestCase):
                       "'scripts/install-qt-windows.py', 'scripts/qt_archives.py') }}", windows)
         self.assertIn(f"key: windows-ccache-v1-${{{{ runner.arch }}}}-qt{version}-", windows)
         # A new stable Rust release must not fail an unchanged commit.
-        self.assertIn("cargo +1.85.0 clippy --locked --all-targets -- -D warnings", windows)
+        self.assertIn("cargo +1.99.1 clippy --locked --all-targets -- -D warnings", windows)
         self.assertNotRegex(windows, r"(?m)^\s*cargo clippy")
-        self.assertIn("rustup toolchain install 1.85.0 --profile minimal --component clippy", windows)
+        self.assertIn("rustup toolchain install 1.99.1 --profile minimal --component clippy", windows)
         # The runner's stdin is a synchronous pipe that Windows OpenSSH never exits on.
         for line in ("cargo test --locked </dev/null", "test_windows_client.py -v </dev/null",
                      "test_windows_lifecycle test_windows_hooks test_backend_contract </dev/null",
@@ -463,10 +463,10 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("uses: actions/checkout@", steps[0])
         self.assertIn("\n        id: revision\n", steps[1])
         quick = job(checks, "quick")
-        self.assertEqual(field(quick, "name"), "Quick checks (source and Rust 1.85)")
+        self.assertEqual(field(quick, "name"), "Quick checks (source and Rust 1.99)")
         for line in ("run: python3 scripts/ci/check-source.py", "-p 'test_*publication.py'", "-p test_ci_security.py",
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
-                     "run: cargo +1.85.0 test --locked"):
+                     "run: cargo +1.99.1 test --locked"):
             self.assertIn(line, quick)
         for name in ("quick", "relay", "connector", "connector-macos", "android", "cli", "arch", "arch-package",
                      "mac-desktop", "windows-desktop", "windows-host"):
@@ -519,11 +519,11 @@ class WorkflowSecurityTests(unittest.TestCase):
                           "${{ job.services.postgres.ports['5432'] }}/postgres\n"
                           '          ZERUS_REQUIRE_RELAY_E2E: "1"\n', step)
         for contract in ("", " --test contracts postgres_cross_worker -- --ignored"):
-            self.assertIn(f"\n          cargo +1.85.0 test --locked{contract}\n", postgres[0])
+            self.assertIn(f"\n          cargo +1.99.1 test --locked{contract}\n", postgres[0])
         self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests'
                       " -p 'test_[!b]*.py' -v\n", postgres[1])
         # The end-to-end suites also run the Rust connector, built beside the relay.
-        build = ("\n          cargo +1.85.0 build --locked --manifest-path services/mobile/connector/Cargo.toml"
+        build = ("\n          cargo +1.99.1 build --locked --manifest-path services/mobile/connector/Cargo.toml"
                  " --target-dir services/mobile/relay/target\n")
         export = ('\n          export ZERUS_CONNECTOR_E2E_COMMAND="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/'
                   'zerus-mobile-connector"\n')
@@ -545,24 +545,24 @@ class WorkflowSecurityTests(unittest.TestCase):
         for command in ("fmt --check", "clippy --locked --all-targets -- -D warnings",
                         "clippy --locked --all-targets --features test-hooks -- -D warnings",
                         "build --locked --features test-hooks", "build --locked"):
-            self.assertIn(f"\n          cargo +1.85.0 {command}\n", rust)
+            self.assertIn(f"\n          cargo +1.99.1 {command}\n", rust)
         self.assertIn("        working-directory: services/mobile/connector\n", rust)
         self.assertIn("""grep -q 'serde_json feature "preserve_order"'""", rust)
         self.assertIn("(axum|sqlx|reqwest|openssl-sys|native-tls)", rust)
         # The plain build, the last one in this step, carries no test seam.
         self.assertIn("\n          if grep -q ZERUS_CONNECTOR_TEST_ target/debug/zerus-mobile-connector; then\n", rust)
-        self.assertLess(rust.index("\n          cargo +1.85.0 build --locked\n"), rust.index("grep -q ZERUS_CONNECTOR_TEST_"))
+        self.assertLess(rust.index("\n          cargo +1.99.1 build --locked\n"), rust.index("grep -q ZERUS_CONNECTOR_TEST_"))
         tests = next(step for step in steps(connector) if "name: Vector, binary and handoff tests" in step)
         for variable in ("ZERUS_CONNECTOR_TEST_PYTHON", "ZERUS_CONNECTOR_TEST_HGS"):
             self.assertIn(f"\n          {variable}: ", tests)
-        self.assertIn("run: cargo +1.85.0 test --locked\n", tests)
+        self.assertIn("run: cargo +1.99.1 test --locked\n", tests)
         python = '"$RUNNER_TEMP/connector-venv/bin/python" -m unittest discover -s services/mobile/tests'
         black_box = next(step for step in steps(connector) if "name: Black-box suites against the" in step)
         self.assertEqual(re.findall(rf"(?m)^ +(.*){re.escape(python)}(.*)$", black_box),
                          [("", " -p 'test_bb_*.py' -v \\"), ("", " -p 'test_bb_*.py' -v \\"),
                           ("", " -p test_bb_soak.py -v \\")])
         # cargo test rebuilt the binary without the test hooks the Rust runs need.
-        hooks = "\n          (cd services/mobile/connector && cargo +1.85.0 build --locked --features test-hooks)\n"
+        hooks = "\n          (cd services/mobile/connector && cargo +1.99.1 build --locked --features test-hooks)\n"
         self.assertTrue(black_box.startswith(f"      - name: Black-box suites against the Python and Rust "
                                              f"connectors, differential traces and soak\n        run: |{hooks}"))
         self.assertIn('\n          rust="$GITHUB_WORKSPACE/services/mobile/connector/target/debug/zerus-mobile-connector"\n',
@@ -600,8 +600,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertNotIn(text, smoke)
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", smoke), ["actions/checkout"])
         self.assertIn("persist-credentials: false", smoke)
-        self.assertIn("cargo +1.85.0 test --locked --lib ", smoke)
-        self.assertIn("(cd ../connector && cargo +1.85.0 build --locked --features test-hooks)", smoke)
+        self.assertIn("cargo +1.99.1 test --locked --lib ", smoke)
+        self.assertIn("(cd ../connector && cargo +1.99.1 build --locked --features test-hooks)", smoke)
         self.assertIn("test_bb_handoff", smoke)
         self.assertIn("'connector-macos': json.loads(os.environ['RUN_MACOS']),", job(checks, "gate"))
         # Selected with the other macOS jobs: a failure or a skip fails the gate.
@@ -667,13 +667,13 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_relay_job_checks_the_protocol_library_alone(self):
         relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
         rust = next(step for step in steps(relay) if "name: Rust format, lint and PostgreSQL storage contracts" in step)
-        # The connector links the library without the server feature on Rust 1.85,
+        # The connector links the library without the server feature on Rust 1.99,
         # and that build reproduces the golden vectors.
         for command in ("clippy --locked --no-default-features --lib --test codec --test vectors -- -D warnings",
                         "build --locked --no-default-features --lib",
                         "test --locked --no-default-features --test codec --test vectors"):
-            self.assertIn(f"\n          cargo +1.85.0 {command}\n", rust)
-        self.assertIn('library="$(cargo +1.85.0 tree --locked --no-default-features --target all -e normal', rust)
+            self.assertIn(f"\n          cargo +1.99.1 {command}\n", rust)
+        self.assertIn('library="$(cargo +1.99.1 tree --locked --no-default-features --target all -e normal', rust)
         self.assertIn("\n          serde_features\n          serde_features --no-default-features\n", rust)
         self.assertIn("""grep -q 'serde_json feature "preserve_order"'""", rust)
 
@@ -786,11 +786,11 @@ class WorkflowSecurityTests(unittest.TestCase):
             for second in families.values():
                 self.assertTrue(first == second or not first.startswith(second))
         identity = "${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-"
-        rust = {"quick": ("msrv-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.85.0 -Vv"),
+        rust = {"quick": ("msrv-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.99.1 -Vv"),
                 "cli": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
                 "windows-desktop": ("windows-cli-${{ runner.arch }}-", "rustc -Vv"),
                 "windows-host": ("windows-cli-${{ runner.arch }}-", "rustc -Vv"),
-                "connector": ("connector-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.85.0 -Vv")}
+                "connector": ("connector-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.99.1 -Vv")}
         for name, (family, rustc) in rust.items():
             with self.subTest(job=name):
                 self.assertIn(f'echo "rustc=$({rustc} | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"\n'

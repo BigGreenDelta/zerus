@@ -11,7 +11,7 @@ itself.
 
 ## Requirements
 
-For the CLI: Rust 1.85+, a C compiler, Python 3, tmux 3.7+ and OpenSSH. Install the
+For the CLI: the newest stable Rust, a C compiler, Python 3, tmux 3.7+ and OpenSSH. Install the
 agents you want to use on the machines where they will run.
 
 The ADE's verified answer/message delivery needs tmux 3.7's input-mode inspection.

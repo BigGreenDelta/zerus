@@ -27,17 +27,17 @@ can select a PR head or another exact revision.
 | Job | Automatic CI | Checks |
 | --- | --- | --- |
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
-| Quick checks | Always | Privacy, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.85 unit tests |
-| Rust relay | Always | Rust 1.85 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
-| Rust mobile connector | Always | Rust 1.85 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
-| Rust mobile connector on macOS | Always | Cold Rust 1.85 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
+| Quick checks | Always | Privacy, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.99 unit tests |
+| Rust relay | Always | Rust 1.99 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
+| Rust mobile connector | Always | Rust 1.99 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
+| Rust mobile connector on macOS | Always | Cold Rust 1.99 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
 | iOS core tests and simulator build | Always | `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
-| Windows client and desktop | Always | Rust tests, Rust 1.85 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
+| Windows client and desktop | Always | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
 | Windows real agents | Always | The pinned `win32-x64` Claude Code and Codex in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
@@ -123,7 +123,7 @@ save them.
 | Family | Job | Key after the prefix | Saved when | Bound |
 | --- | --- | --- | --- | --- |
 | `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
-| `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.85.0 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
+| `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.99.1 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
 | `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `windows-qt-6.10.3-` | Windows | Hash of the Qt pin and installer | Exact key missed; desktop build passed | The pinned Qt archives, no WebEngine |
@@ -241,8 +241,9 @@ checks appropriate to the active CI policy; there is no automatic merge.
 
 Cargo proposals update only `Cargo.lock` within the reviewed `Cargo.toml`
 constraints. This also avoids unreviewed breaking minor upgrades of `0.x` crates.
-Manifest migrations are deliberate maintenance work, including Rust 1.85 and
-existing state/configuration compatibility checks. Actions keep their exact
+Manifest migrations are deliberate maintenance work, including raising the pinned
+Rust to the newest stable release and existing state/configuration compatibility
+checks. Actions keep their exact
 commit pins and may propose major upgrades in their group for manual review.
 
 Dependabot vulnerability alerts and security updates are enabled separately in
@@ -267,7 +268,7 @@ and [Dependabot options](https://docs.github.com/en/code-security/reference/supp
 python3 scripts/ci/check-source.py
 bash scripts/ci/cli.sh
 bash scripts/ci/gui.sh
-cargo +1.85.0 test --locked
+cargo +1.99.1 test --locked
 # Arch only, as an ordinary user with the documented build dependencies:
 bash scripts/ci/arch.sh
 ```
@@ -455,10 +456,10 @@ host in its session host step
 The `windows-desktop` job runs on a standard `windows-2025` runner. It disables
 Git's CRLF conversion before checkout, so fixtures and scripts keep LF, and every
 Python step uses one exact CPython 3.13 from the SHA-pinned `actions/setup-python`.
-It runs `cargo test` with stable Rust and `cargo +1.85.0 clippy --all-targets -- -D
+It runs `cargo test` with stable Rust and `cargo +1.99.1 clippy --all-targets -- -D
 warnings`: clippy is pinned like the relay lints, so a new stable release cannot
 fail an unchanged commit, and Windows-only code, compiled nowhere else, is checked
-against Rust 1.85. It builds the release `hgs.exe` and the `fake_ssh` and
+against Rust 1.99. It builds the release `hgs.exe` and the `fake_ssh` and
 `fake_agent` examples and runs `tests/test_windows_client.py` and the session host
 suites (`tests/test_windows_host.py`, `tests/test_windows_host_conpty.py`,
 `tests/test_windows_host_survival.py`, `tests/test_windows_lifecycle.py`,
@@ -619,7 +620,7 @@ test compares them) and run the host suites, including
 
 From Linux or macOS, `scripts/ci/check-windows-target.sh` type-checks all targets
 for `x86_64-pc-windows-msvc` without the MSVC toolchain (`clippy` instead of the
-default `check` runs `cargo +1.85.0 clippy -D warnings`). It needs `rustup target add
+default `check` runs `cargo +1.99.1 clippy -D warnings`). It needs `rustup target add
 x86_64-pc-windows-msvc` for the toolchains it uses. Build scripts that compile C get a
 stand-in compiler that writes empty objects, since nothing is linked; only the
 Windows job builds and tests the real binary.
@@ -869,7 +870,7 @@ No blanket formatting/clippy gate was added over legacy source: it would reject
 unrelated existing formatting rather than verify this change. Existing unit,
 integration and Qt suites provide the initial gate. Add stricter linting with a
 separate, reviewed baseline cleanup. The Windows job is the exception: it runs
-the pinned Rust 1.85 clippy with `-D warnings` over every module compiled for the
+the pinned Rust 1.99 clippy with `-D warnings` over every module compiled for the
 Windows target, which is clean today; Linux-only modules are not linted.
 Logs are under ignored
 `artifacts/test-results/`; packaging outputs are under ignored `artifacts/` and

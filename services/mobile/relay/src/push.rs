@@ -360,7 +360,7 @@ pub fn apns_unregistered(status: u16, reason: &str) -> bool {
 /// A device token as iOS reports it: hexadecimal, normalized to lowercase.
 pub fn apns_token(value: &str) -> Option<String> {
     ((64..=200).contains(&value.len())
-        && value.len() % 2 == 0
+        && value.len().is_multiple_of(2)
         && value.bytes().all(|b| b.is_ascii_hexdigit()))
     .then(|| value.to_ascii_lowercase())
 }

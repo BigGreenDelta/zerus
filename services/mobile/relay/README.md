@@ -1,7 +1,7 @@
 # Rust relay runtime
 
-`zerus-relay` is the standalone server for Zerus mobile API v1. It runs on Rust
-1.85 or newer, Tokio, Axum/Hyper and SQLx. PostgreSQL serves multiple workers;
+`zerus-relay` is the standalone server for Zerus mobile API v1. It runs on the newest
+stable Rust, Tokio, Axum/Hyper and SQLx. PostgreSQL serves multiple workers;
 SQLite is an exclusive local backend. The production image contains the Rust
 binary and its system libraries, without Python. The Python outbound connector
 and installed Android clients use their existing protocol and credentials.
@@ -11,10 +11,10 @@ and installed Android clients use their existing protocol and credentials.
 From this directory:
 
 ```sh
-cargo +1.85.0 build --release --locked
-cargo +1.85.0 fmt --check
-cargo +1.85.0 clippy --locked --all-targets -- -D warnings
-cargo +1.85.0 test --locked
+cargo +1.99.1 build --release --locked
+cargo +1.99.1 fmt --check
+cargo +1.99.1 clippy --locked --all-targets -- -D warnings
+cargo +1.99.1 test --locked
 ```
 
 [`tests/ORACLE.md`](tests/ORACLE.md) maps every test of the Python reference
@@ -25,8 +25,8 @@ API v1 codec (`json`), envelope validation (`protocol`) and `error`, with none
 of the HTTP, database or TLS crates, for the outbound connector:
 
 ```sh
-cargo +1.85.0 clippy --locked --no-default-features --lib --test codec --test vectors -- -D warnings
-cargo +1.85.0 test --locked --no-default-features --test codec --test vectors
+cargo +1.99.1 clippy --locked --no-default-features --lib --test codec --test vectors -- -D warnings
+cargo +1.99.1 test --locked --no-default-features --test codec --test vectors
 ```
 
 `tests/vectors.rs` checks the library against the golden vectors in
@@ -35,7 +35,7 @@ the codec at a claim batch's limits, the operation tables, and the `relay`
 column of `validation/*.jsonl`, which `protocol::request` decides. It names every
 case where that column differs from the frozen decision of the Python reference
 relay. After a reviewed change to the validation or to a vector submission,
-`ZERUS_BLESS=1 cargo +1.85.0 test --locked --test vectors` rewrites only that
+`ZERUS_BLESS=1 cargo +1.99.1 test --locked --test vectors` rewrites only that
 column; then run `capture.py --check`.
 
 The image and the infra packager copy only `Cargo.toml`, `Cargo.lock`, `.cargo`
@@ -76,8 +76,8 @@ With 32 test threads the parallel contracts peak near PostgreSQL's default of
 cross-worker contracts exist only on PostgreSQL and run explicitly):
 
 ```sh
-cargo +1.85.0 test --locked
-cargo +1.85.0 test --locked --test contracts postgres_cross_worker -- --ignored
+cargo +1.99.1 test --locked
+cargo +1.99.1 test --locked --test contracts postgres_cross_worker -- --ignored
 ```
 
 From the repository root, with `services/mobile` and

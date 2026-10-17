@@ -2,7 +2,7 @@
 name = "zerus-mobile-connector"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.99"
 license = "MIT"
 description = "Outbound mobile connector for Zerus: relay API v1 client and native hgs bridge"
 

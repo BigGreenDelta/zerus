@@ -1,4 +1,4 @@
-FROM rust:1.85.0-bookworm AS build
+FROM rust:1.99.1-bookworm AS build
 WORKDIR /build
 COPY relay/Cargo.toml relay/Cargo.lock ./
 COPY relay/.cargo ./.cargo

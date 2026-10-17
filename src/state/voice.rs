@@ -444,7 +444,9 @@ fn waveform(pcm: &[u8]) -> Vec<u8> {
         let start = index * samples / WAVEFORM_BINS;
         let end = ((index + 1) * samples / WAVEFORM_BINS).max(start + 1);
         let power: u64 = pcm[start * 2..end * 2]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|sample| {
                 let value = i64::from(i16::from_le_bytes([sample[0], sample[1]]));
                 (value * value) as u64
@@ -454,13 +456,7 @@ fn waveform(pcm: &[u8]) -> Vec<u8> {
     }
     let peak = rms.iter().copied().max().unwrap_or(0);
     rms.into_iter()
-        .map(|value| {
-            if peak == 0 {
-                0
-            } else {
-                ((value * 255 + peak / 2) / peak) as u8
-            }
-        })
+        .map(|value| (value * 255 + peak / 2).checked_div(peak).unwrap_or(0) as u8)
         .collect()
 }
 fn waveform_version(job: &Value) -> i64 {

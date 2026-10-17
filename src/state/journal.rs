@@ -98,8 +98,9 @@ pub(super) fn system_prompt(text: &str) -> Option<Value> {
             reports.push(report.lines().map(|line| line.strip_prefix("  ").unwrap_or(line)).collect::<Vec<_>>().join("\n").trim().to_owned());
             if agent.is_empty() { agent = from.to_owned(); }
             rest = after;
-        } else if let Some(body) = rest.strip_prefix("<cross-session-message ") {
+        } else {
             // Another local Claude session wrote to this one; the user did not.
+            let body = rest.strip_prefix("<cross-session-message ")?;
             let (attributes, body) = body.split_once('>')?;
             let attribute = |name: &str| attributes.split_once(&format!("{name}=\""))
                 .and_then(|(_, value)| value.split_once('"')).map(|(value, _)| value.trim());
@@ -111,8 +112,6 @@ pub(super) fn system_prompt(text: &str) -> Option<Value> {
             messages.push(inner.trim().to_owned());
             if sender.is_empty() { sender = name.to_owned(); }
             rest = after;
-        } else {
-            return None;
         }
     }
     let kind = if !reports.is_empty() { "subagent_report" } else if !messages.is_empty() { "peer_message" } else if !summaries.is_empty() { "task_notification" } else { return None };
@@ -507,7 +506,7 @@ pub(super) fn terminal_chooser(record: &Value) -> Option<(Value, &'static str, &
     choosers
         .into_iter()
         .filter_map(|(current, phase, detail)| current(record).map(|question| (question, phase, detail)))
-        .last()
+        .next_back()
 }
 
 /// A chooser only the terminal shows leaves the saved activity idle, so the

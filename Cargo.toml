@@ -2,7 +2,7 @@
 name = "hgs"
 version = "1.53.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.99"
 description = "Persistent local and remote agent sessions for Zerus"
 license = "MIT"
 repository = "https://github.com/ufna/zerus"

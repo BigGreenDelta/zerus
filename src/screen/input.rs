@@ -500,11 +500,7 @@ impl Parser {
                 0 => screen.clear_end_of_screen(bg),
                 1 => screen.clear_start_of_screen(bg),
                 2 => screen.clear_screen(bg),
-                3 => {
-                    if self.get(1, 0, 0) == 0 {
-                        screen.clear_history();
-                    }
-                }
+                3 if self.get(1, 0, 0) == 0 => screen.clear_history(),
                 _ => {}
             },
             (b"", b'K') => match self.get(0, 0, 0) {

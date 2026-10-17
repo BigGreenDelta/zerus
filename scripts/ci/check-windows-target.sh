@@ -6,7 +6,7 @@
 #
 # Usage: scripts/ci/check-windows-target.sh [check|clippy] [extra cargo args...]
 # Needs: rustup target add x86_64-pc-windows-msvc (and for clippy, the same target
-# for the 1.85.0 toolchain).
+# for the 1.99.1 toolchain).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 mode="${1:-check}"
@@ -40,6 +40,6 @@ export CC_x86_64_pc_windows_msvc="$tools/cc" AR_x86_64_pc_windows_msvc="$tools/a
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/windows-check}"
 case "$mode" in
     check) cargo check --locked --target "$target" --all-targets "$@" ;;
-    clippy) cargo +1.85.0 clippy --locked --target "$target" --all-targets "$@" -- -D warnings ;;
+    clippy) cargo +1.99.1 clippy --locked --target "$target" --all-targets "$@" -- -D warnings ;;
     *) echo "usage: $0 [check|clippy] [cargo args...]" >&2; exit 2 ;;
 esac

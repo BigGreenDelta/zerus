@@ -42,9 +42,9 @@ compare both heartbeats with Python: `heartbeat-legacy.json` and the paged
 
 ```sh
 cd services/mobile/connector
-cargo +1.85.0 fmt --check
-cargo +1.85.0 clippy --locked --all-targets -- -D warnings
-cargo +1.85.0 test --locked
+cargo +1.99.1 fmt --check
+cargo +1.99.1 clippy --locked --all-targets -- -D warnings
+cargo +1.99.1 test --locked
 ```
 
 The unit and integration tests replay the golden vectors in
@@ -60,13 +60,13 @@ same state directory; it needs two variables, and fails without them when
 | Variable | Meaning |
 |---|---|
 | `ZERUS_CONNECTOR_TEST_PYTHON` | A Python 3.11+ interpreter with aiohttp, for example the venv of `pip install ./services/mobile`. The tests add `services/mobile` to its `PYTHONPATH`. |
-| `ZERUS_CONNECTOR_TEST_HGS` | A built `hgs`, such as `target/debug/hgs` after `cargo +1.85.0 build --locked --bin hgs`. |
+| `ZERUS_CONNECTOR_TEST_HGS` | A built `hgs`, such as `target/debug/hgs` after `cargo +1.99.1 build --locked --bin hgs`. |
 
 The black-box suites (`services/mobile/tests/BLACKBOX.md`) run against a
 build with the test seams:
 
 ```sh
-cargo +1.85.0 build --locked --features test-hooks
+cargo +1.99.1 build --locked --features test-hooks
 ZERUS_CONNECTOR_COMMAND=$PWD/target/debug/zerus-mobile-connector \
   python -m unittest discover -s ../tests -p 'test_bb_*.py' -v
 ```

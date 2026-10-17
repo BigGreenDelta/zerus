@@ -2,7 +2,7 @@
 name = "zerus-relay"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.99"
 license = "MIT"
 description = "Bounded, durable API v1 relay for Zerus"
 

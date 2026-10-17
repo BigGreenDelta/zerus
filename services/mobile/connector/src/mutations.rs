@@ -356,7 +356,7 @@ fn reference(value: &str) -> bool {
 /// The bytes `chunk` decodes to when it is exactly what `b64encode` would
 /// write: `b64decode(chunk, validate=True)` succeeds and re-encodes to it.
 fn canonical_base64(chunk: &[u8]) -> Option<usize> {
-    if chunk.len() % 4 != 0 {
+    if !chunk.len().is_multiple_of(4) {
         return None;
     }
     let digit = |b: u8| match b {

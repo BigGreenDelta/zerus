@@ -135,7 +135,8 @@ action SHA pins enforced and never execute PR code with publication credentials
 or on development-machine runners. Review workflow changes before approving runs.
 Dependency proposals are monthly and grouped, with one ordinary PR per ecosystem.
 Cargo proposals update only the lockfile within reviewed manifest constraints;
-review manifest migrations explicitly and retain Rust 1.85 compatibility.
+review manifest migrations explicitly. Zerus tracks the newest stable Rust: raise
+`rust-version` and the pinned CI toolchain to each stable release.
 Keep security alerts and security updates enabled separately. Never auto-merge.
 AUR packages are `zerus` (stable source), `zerus-git` (upstream main),
 `zerus-ade-bin` (stable binary) and `zerus-ade-nightly-bin` (verified nightly binary),

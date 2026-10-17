@@ -33,8 +33,10 @@ covers its code instead of listing `tray/src` files, which fails configuration.
 8 Qt jobs, never more than the CPU count; `1` runs them one after another);
 `ZERUS_PYTHON_JOBS` overrides it for the Python classes. Test logs and Python
 job durations live in ignored `artifacts/test-results/`. Set
-`ZERUS_BUILD_JOBS` to limit desktop build parallelism. Run
-`cargo +1.85.0 test --locked` for the minimum supported Rust.
+`ZERUS_BUILD_JOBS` to limit desktop build parallelism. Zerus tracks the newest
+stable Rust: `rust-version` and the toolchain pinned in CI follow the latest
+stable release, and raising them is routine maintenance. Run
+`cargo +1.99.1 test --locked` for that pinned toolchain.
 
 `check-source.py` keeps the desktop's Unix children from inheriting its descriptors
 ([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects
@@ -120,9 +122,9 @@ QT_QPA_PLATFORM=wayland \
 The ordinary `kwinwindowlayer` test runs on a private D-Bus session with a fake
 compositor and never controls the user's desktop.
 
-For the Rust mobile relay, run `cargo +1.85.0 test --locked` inside
+For the Rust mobile relay, run `cargo +1.99.1 test --locked` inside
 `services/mobile/relay`. The Docker image uses that Rust binary. For the Rust
-mobile connector, run `cargo +1.85.0 test --locked` inside
+mobile connector, run `cargo +1.99.1 test --locked` inside
 `services/mobile/connector`; [its README](services/mobile/connector/README.md)
 names the variables its Python and `hgs` handoff tests need and how the
 black-box suites run against its binary. For the Python connector and reference
@@ -165,7 +167,7 @@ You need:
 
 - Visual Studio 2022 with the x64 C++ tools and a Windows SDK; its own CMake
   (3.22 or later is needed for the Windows tests) and Ninja are used;
-- Rust for MSVC: stable, and 1.85.0 with clippy;
+- Rust for MSVC: stable, and 1.99.1 with clippy;
 - Python 3.9 or later for the Qt test fixtures and 3.11 or later for the
   packaging scripts;
 - Git for Windows with Git Bash, and 7-Zip;
@@ -185,7 +187,7 @@ scripts must keep LF line endings. Then, from Git Bash in the checkout:
 
 ```sh
 cargo test --locked </dev/null
-cargo +1.85.0 clippy --locked --all-targets -- -D warnings
+cargo +1.99.1 clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 cargo build --locked --example fake_ssh
 cargo build --locked --example fake_agent

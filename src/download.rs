@@ -89,7 +89,7 @@ pub fn dispatch(config: &Config, host: &str, args: &[String], dry: bool) -> Resu
         "ServerAliveCountMax=2",
     ]);
     let options = crate::machines::ssh_options(config, host);
-    for pair in options.chunks_exact(2) {
+    for pair in options.as_chunks::<2>().0 {
         match pair[0].as_str() {
             "-l" => {
                 command.args(["-o", &format!("User={}", pair[1])]);

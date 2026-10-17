@@ -724,9 +724,7 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
                     || identity.is_empty()
                     || model.chars().any(char::is_whitespace)
                     || !provider.bytes().enumerate().all(|(i, c)| {
-                        c.is_ascii_alphanumeric()
-                            || c == b'_'
-                            || (i > 0 && [b'.', b'-'].contains(&c))
+                        c.is_ascii_alphanumeric() || c == b'_' || (i > 0 && b".-".contains(&c))
                     })
                 {
                     return Err(Error::BAD);

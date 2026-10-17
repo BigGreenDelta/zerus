@@ -22,7 +22,7 @@ computer credential may invite, list and revoke the phones of its own workspace
 
 ```sh
 cd services/mobile/relay
-cargo +1.85.0 build --release --locked
+cargo +1.99.1 build --release --locked
 mkdir -p "$HOME/.local/bin"
 install -m 0755 target/release/zerus-relay "$HOME/.local/bin/zerus-relay"
 zerus-relay --database ./data/relay.sqlite3 provision \

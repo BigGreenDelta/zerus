@@ -207,7 +207,7 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
                 if (data.value("tmux").toString().isEmpty()) missing << tr("tmux");
                 if (data.value("cargo").toString().isEmpty()) missing << tr("Rust");
                 report(data.value("os").toString().isEmpty() ? data.value("error").toString()
-                    : tr("SSH connected: %1 %2. Missing: %3. Install Rust 1.85+ and tmux in the SSH terminal if needed, then use Install / update HGS.").arg(data.value("os").toString(), data.value("arch").toString(), missing.isEmpty() ? tr("a working HGS installation") : missing.join(", ")), true);
+                    : tr("SSH connected: %1 %2. Missing: %3. Install the newest stable Rust and tmux in the SSH terminal if needed, then use Install / update HGS.").arg(data.value("os").toString(), data.value("arch").toString(), missing.isEmpty() ? tr("a working HGS installation") : missing.join(", ")), true);
             }
             else report(tr("SSH connection failed: %1\nOpen SSH terminal to check credentials or approve the host key, then test again.").arg(data.value("error").toString()), true);
         } else { m_dirty = false; m_new = false; emit machinesChanged(); reload(); }
@@ -436,7 +436,7 @@ void MachinesPage::enableLocalSessions() {
 void MachinesPage::install() {
     QDialog dialog(this); dialog.setObjectName("machineSetupDialog"); dialog.setWindowTitle(tr("Install HGS on %1").arg(alias())); dialog.resize(520, 280);
     auto *layout = new QVBoxLayout(&dialog);
-    auto *description = new QLabel(tr("Build and install the HGS CLI on %1 using SSH. Rust 1.85+ and tmux must already be installed there. Existing sessions and configuration are preserved.").arg(alias())); description->setWordWrap(true); layout->addWidget(description);
+    auto *description = new QLabel(tr("Build and install the HGS CLI on %1 using SSH. The newest stable Rust and tmux must already be installed there. Existing sessions and configuration are preserved.").arg(alias())); description->setWordWrap(true); layout->addWidget(description);
     auto *source = new QLineEdit; source->setObjectName("machineSetupSource"); source->setPlaceholderText(tr("Default: ~/.local/src/hgs on this device")); layout->addWidget(source);
     auto *browse = new QPushButton(tr("Choose HGS source folder…")); layout->addWidget(browse);
     connect(browse, &QPushButton::clicked, &dialog, [&] { const auto dir = QFileDialog::getExistingDirectory(&dialog, tr("HGS source folder")); if (!dir.isEmpty()) source->setText(dir); });

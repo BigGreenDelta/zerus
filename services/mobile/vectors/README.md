@@ -13,7 +13,7 @@ python3 services/mobile/vectors/capture.py --refresh-oracle  # also recompute th
 
 Run it in an environment where `zerus_mobile` and aiohttp import, for example
 the venv the relay CI job builds with `pip install ./services/mobile`. In
-`services/mobile/relay`, `ZERUS_BLESS=1 cargo +1.85.0 test --locked --test
+`services/mobile/relay`, `ZERUS_BLESS=1 cargo +1.99.1 test --locked --test
 vectors` rewrites only the `relay` column of `validation/*.jsonl`.
 
 ## Provenance and freeze rule

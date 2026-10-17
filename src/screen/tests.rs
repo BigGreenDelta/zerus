@@ -271,7 +271,7 @@ fn invalid_input_never_panics() {
         state ^= state >> 7;
         state ^= state << 17;
         let byte = (state >> 24) as u8;
-        bytes.push(if state % 7 == 0 { 0x1b } else { byte });
+        bytes.push(if state.is_multiple_of(7) { 0x1b } else { byte });
     }
     for chunk in bytes.chunks(97) {
         screen.process(chunk);
