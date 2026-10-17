@@ -10,9 +10,25 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QPushButton>
+#include <QShortcut>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
+
+namespace {
+bool validFolderName(const QString &name, const QString &parent)
+{
+    return !name.isEmpty() && name != "." && name != ".." && !name.contains('/')
+        && (parent + '/' + name).toUtf8().size() <= 4096
+        && std::none_of(name.cbegin(), name.cend(), [](QChar c) { return c.category() == QChar::Other_Control; });
+}
+QString childPath(const QString &parent, const QString &name)
+{
+    return parent + (parent.endsWith('/') ? "" : "/") + name;
+}
+}
 
 QString DirectoryDialog::chooseDirectory(const QString &hgsPath, const QString &host,
                                          const QString &path, QWidget *parent)
@@ -48,8 +64,16 @@ DirectoryDialog::DirectoryDialog(const QString &hgsPath, const QString &host,
     auto *folderActions = new QHBoxLayout;
     m_hidden = new QCheckBox(tr("Show hidden folders")); folderActions->addWidget(m_hidden);
     folderActions->addStretch();
-    m_newFolder = new QPushButton(tr("New folder…")); m_newFolder->setObjectName("newFolder");
-    folderActions->addWidget(m_newFolder); layout->addLayout(folderActions);
+    m_newFolder = new QPushButton(tr("New folder")); m_newFolder->setObjectName("newFolder");
+    folderActions->addWidget(m_newFolder);
+    m_newFolderOptions = new QToolButton; m_newFolderOptions->setObjectName("newFolderOptions");
+    m_newFolderOptions->setArrowType(Qt::DownArrow); m_newFolderOptions->setPopupMode(QToolButton::InstantPopup);
+    m_newFolderOptions->setAccessibleName(tr("More folder creation options"));
+    m_newFolderOptions->setToolTip(tr("More folder creation options"));
+    auto *creationMenu = new QMenu(m_newFolderOptions);
+    auto *dialogAction = creationMenu->addAction(tr("New folder dialog…"), this, &DirectoryDialog::newFolderDialog);
+    dialogAction->setObjectName("newFolderDialog"); m_newFolderOptions->setMenu(creationMenu);
+    folderActions->addWidget(m_newFolderOptions); layout->addLayout(folderActions);
     m_status = new QLabel; m_status->setWordWrap(true); m_status->setTextFormat(Qt::PlainText); m_status->setObjectName("muted"); layout->addWidget(m_status);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
     m_cancel = buttons->button(QDialogButtonBox::Cancel);
@@ -61,13 +85,25 @@ DirectoryDialog::DirectoryDialog(const QString &hgsPath, const QString &host,
     connect(m_go, &QPushButton::clicked, this, [this]() { navigate(m_path->text()); });
     connect(m_path, &QLineEdit::returnPressed, m_go, &QPushButton::click);
     connect(m_newFolder, &QPushButton::clicked, this, &DirectoryDialog::newFolder);
-    connect(m_list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) { navigate(item->data(Qt::UserRole).toString()); });
+    auto *shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N), this);
+    connect(shortcut, &QShortcut::activated, m_newFolder, &QPushButton::click);
+    m_list->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_list, &QListWidget::customContextMenuRequested, this, [this, dialogAction](const QPoint &point) {
+        QMenu menu(this);
+        auto *create = menu.addAction(tr("New folder"), m_newFolder, &QPushButton::click);
+        create->setEnabled(m_newFolder->isEnabled());
+        menu.addAction(dialogAction); menu.exec(m_list->viewport()->mapToGlobal(point));
+    });
+    connect(m_list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+        if (item != m_inlineItem) navigate(item->data(Qt::UserRole).toString());
+    });
     connect(m_list, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *item) {
         if (m_current.isEmpty()) return;
-        m_choose->setText(item ? tr("Use selected folder") : tr("Use this folder"));
+        m_choose->setText(item && item != m_inlineItem ? tr("Use selected folder") : tr("Use this folder"));
     });
     connect(m_path, &QLineEdit::textEdited, this, [this]() {
-        m_request = 0; m_newFolder->setEnabled(true);
+        cancelInlineFolder(); m_request = 0; m_creationError.clear();
+        m_newFolder->setEnabled(true); m_newFolderOptions->setEnabled(true); m_list->setEnabled(false);
         m_choose->setEnabled(false); m_status->setText(tr("Press Go to open this path, or New folder to create it."));
     });
     connect(m_choose, &QPushButton::clicked, this, [this]() {
@@ -79,12 +115,14 @@ DirectoryDialog::DirectoryDialog(const QString &hgsPath, const QString &host,
     connect(m_hidden, &QCheckBox::toggled, this, [this]() { navigate(m_current.isEmpty() ? "~" : m_current); });
     connect(m_filter, &QLineEdit::textChanged, this, [this](const QString &query) {
         for (int i = 0; i < m_list->count(); ++i) {
-            auto *item = m_list->item(i); item->setHidden(!item->text().contains(query, Qt::CaseInsensitive));
+            auto *item = m_list->item(i); if (item == m_inlineItem) continue;
+            item->setHidden(!item->text().contains(query, Qt::CaseInsensitive));
             if (item->isHidden() && item == m_list->currentItem()) m_list->setCurrentRow(-1);
         }
     });
     connect(&m_client, &HgsClient::directoriesReady, this, [this](quint64 request, const QString &host, const QJsonObject &data) {
         if (request != m_request || host != m_host || m_creating) return;
+        m_request = 0; cancelInlineFolder();
         m_current = data.value("path").toString(); m_parent = data.value("parent").toString();
         m_path->setText(m_current); m_list->clear(); m_filter->clear();
         for (const auto &value : data.value("directories").toArray()) {
@@ -92,15 +130,19 @@ DirectoryDialog::DirectoryDialog(const QString &hgsPath, const QString &host,
             item->setData(Qt::UserRole, folder.value("path").toString());
             item->setToolTip(folder.value("path").toString());
         }
-        m_list->setEnabled(true); m_choose->setEnabled(true); m_newFolder->setEnabled(true); m_choose->setText(tr("Use this folder"));
-        m_status->setText(m_current == m_createdPath ? tr("Folder created. Press Use this folder to select it.") :
+        m_list->setEnabled(true); m_choose->setEnabled(true); m_newFolder->setEnabled(true); m_newFolderOptions->setEnabled(true);
+        m_choose->setText(tr("Use this folder"));
+        m_status->setText(!m_creationError.isEmpty() ? tr("The folder is available. Press Use this folder to select it.") :
+            m_current == m_createdPath ? tr("Folder created. Press Use this folder to select it.") :
             data.value("truncated").toBool() ? tr("Showing the first 2,000 folders. You can also enter an exact path above.") :
             m_list->count() ? tr("Double-click to open a folder, or select it and press Use selected folder.") : tr("No subfolders. You can use this folder."));
     });
     connect(&m_client, &HgsClient::directoriesFailed, this, [this](quint64 request, const QString &host, const QString &error) {
         if (request != m_request || host != m_host || m_creating) return;
-        m_status->setText(error); m_current.clear(); m_list->clear(); m_choose->setEnabled(false);
-        m_newFolder->setEnabled(true);
+        m_request = 0;
+        m_status->setText(m_creationError.isEmpty() ? error : m_creationError);
+        m_current.clear(); m_list->clear(); m_list->setEnabled(true); m_choose->setEnabled(false);
+        m_newFolder->setEnabled(true); m_newFolderOptions->setEnabled(true);
     });
     connect(&m_client, &HgsClient::directoryCreated, this, [this](quint64 request, const QString &host, const QJsonObject &data) {
         if (request != m_createRequest || host != m_host || !m_creating) return;
@@ -108,7 +150,10 @@ DirectoryDialog::DirectoryDialog(const QString &hgsPath, const QString &host,
     });
     connect(&m_client, &HgsClient::directoryCreationFailed, this, [this](quint64 request, const QString &host, const QString &error) {
         if (request != m_createRequest || host != m_host || !m_creating) return;
-        setCreating(false); m_current.clear(); m_list->clear(); m_choose->setEnabled(false); m_status->setText(error);
+        setCreating(false); m_current.clear(); m_list->clear(); m_choose->setEnabled(false);
+        // mkdir may have succeeded before its receipt was lost, or the path may
+        // already exist. A fresh read can prove it selectable without replaying mkdir.
+        navigate(m_path->text()); m_creationError = error;
     });
     for (auto *button : findChildren<QPushButton *>()) button->setAutoDefault(false);
     navigate(path.isEmpty() ? "~" : path);
@@ -116,10 +161,15 @@ DirectoryDialog::DirectoryDialog(const QString &hgsPath, const QString &host,
 
 bool DirectoryDialog::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == m_inlineName && event->type() == QEvent::KeyPress
+        && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
+        cancelInlineFolder(); m_list->setFocus(); return true;
+    }
     if (watched == m_list && event->type() == QEvent::KeyPress) {
         const auto *key = static_cast<QKeyEvent *>(event);
         if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
-            if (const auto *item = m_list->currentItem()) navigate(item->data(Qt::UserRole).toString());
+            if (const auto *item = m_list->currentItem(); item && item != m_inlineItem)
+                navigate(item->data(Qt::UserRole).toString());
             return true;
         }
     }
@@ -129,8 +179,9 @@ bool DirectoryDialog::eventFilter(QObject *watched, QEvent *event)
 void DirectoryDialog::navigate(const QString &path)
 {
     if (m_creating) return;
+    cancelInlineFolder(); m_creationError.clear();
     m_path->setText(path); m_status->setText(tr("Loading folders…"));
-    m_choose->setEnabled(false); m_list->setEnabled(false); m_newFolder->setEnabled(false);
+    m_choose->setEnabled(false); m_list->setEnabled(false); m_newFolder->setEnabled(false); m_newFolderOptions->setEnabled(false);
     m_request = m_client.requestDirectories(m_host, path, m_hidden->isChecked());
 }
 
@@ -142,45 +193,94 @@ void DirectoryDialog::reject()
 void DirectoryDialog::setCreating(bool creating)
 {
     m_creating = creating;
-    for (auto *widget : QList<QWidget *>{m_up, m_home, m_go, m_path, m_filter, m_list, m_hidden, m_newFolder, m_cancel})
+    for (auto *widget : QList<QWidget *>{m_up, m_home, m_go, m_path, m_filter, m_list, m_hidden, m_newFolder, m_newFolderOptions, m_cancel})
         widget->setEnabled(!creating);
     m_choose->setEnabled(!creating && !m_current.isEmpty());
 }
 
 void DirectoryDialog::newFolder()
 {
-    if (m_creating) return;
+    if (m_creating || m_request) return;
+    if (m_current.isEmpty() || m_path->text() != m_current) { newFolderDialog(); return; }
+    if (m_inlineName) { m_inlineName->setFocus(); return; }
+    const auto parent = m_current;
+    m_filter->clear(); m_list->clearSelection();
+    m_inlineItem = new QListWidgetItem;
+    m_list->insertItem(0, m_inlineItem);
+    auto *row = new QWidget; auto *layout = new QHBoxLayout(row);
+    layout->setContentsMargins(8, 4, 8, 4);
+    m_inlineName = new QLineEdit; m_inlineName->setObjectName("inlineFolderName");
+    m_inlineName->setPlaceholderText(tr("Folder name")); m_inlineName->setAccessibleName(tr("New folder name"));
+    m_inlineName->installEventFilter(this); layout->addWidget(m_inlineName, 1);
+    auto *create = new QPushButton(tr("Create")); create->setObjectName("createInlineFolder");
+    create->setAutoDefault(false); create->setEnabled(false); layout->addWidget(create);
+    auto *cancel = new QToolButton; cancel->setText(QString::fromUtf8("×"));
+    cancel->setObjectName("cancelInlineFolder"); cancel->setAccessibleName(tr("Cancel new folder"));
+    cancel->setToolTip(tr("Cancel new folder")); layout->addWidget(cancel);
+    m_list->setItemWidget(m_inlineItem, row);
+    row->ensurePolished(); layout->activate();
+    m_inlineItem->setSizeHint(row->sizeHint());
+    m_list->setCurrentItem(m_inlineItem); m_choose->setEnabled(false);
+    connect(m_inlineName, &QLineEdit::textChanged, row, [this, parent, create](const QString &name) {
+        create->setEnabled(validFolderName(name, parent));
+    });
+    connect(m_inlineName, &QLineEdit::returnPressed, create, &QPushButton::click);
+    connect(create, &QPushButton::clicked, this, [this, parent] {
+        if (!m_inlineName || !validFolderName(m_inlineName->text(), parent)) return;
+        createFolder(childPath(parent, m_inlineName->text()));
+    });
+    connect(cancel, &QToolButton::clicked, this, &DirectoryDialog::cancelInlineFolder);
+    m_list->scrollToItem(m_inlineItem); m_inlineName->setFocus();
+}
+
+void DirectoryDialog::cancelInlineFolder()
+{
+    if (!m_inlineItem) return;
+    auto *item = m_inlineItem; m_inlineItem = nullptr; m_inlineName = nullptr;
+    delete m_list->takeItem(m_list->row(item));
+    m_list->setCurrentRow(-1); m_list->clearSelection();
+    m_choose->setText(tr("Use this folder"));
+    m_choose->setEnabled(!m_creating && !m_request && !m_current.isEmpty() && m_path->text() == m_current);
+}
+
+void DirectoryDialog::newFolderDialog()
+{
+    if (m_creating || m_request) return;
+    const auto typed = m_path->text();
+    const bool current = !m_current.isEmpty() && typed == m_current;
+    const auto split = typed.lastIndexOf('/');
+    const auto parent = current ? m_current : split == 0 ? QStringLiteral("/") : typed.left(split);
+    if (parent != "~" && !parent.startsWith('/') && !parent.startsWith("~/")) return;
+    const auto initialName = m_inlineName ? m_inlineName->text() : current ? QString() : typed.mid(split + 1);
+    cancelInlineFolder();
     QDialog prompt(this); prompt.setObjectName("createFolderDialog");
     prompt.setWindowTitle(tr("New folder — %1").arg(m_host.isEmpty() ? tr("This machine") : m_host));
     prompt.setMinimumWidth(440);
     auto *layout = new QVBoxLayout(&prompt);
-    auto *description = new QLabel(tr("Create a folder on %1. Its parent folder must already exist.")
-        .arg(m_host.isEmpty() ? tr("this computer") : m_host));
+    auto *description = new QLabel(tr("Create a folder in %1 on %2.")
+        .arg(parent, m_host.isEmpty() ? tr("this computer") : m_host));
     description->setTextFormat(Qt::PlainText); description->setWordWrap(true); layout->addWidget(description);
-    auto *path = new QLineEdit; path->setObjectName("newFolderPath"); path->setAccessibleName(tr("New folder path"));
-    const auto typed = m_path->text();
-    path->setText(!m_current.isEmpty() && typed == m_current ? m_current + (m_current.endsWith('/') ? "" : "/") : typed);
-    auto *form = new QFormLayout; form->addRow(tr("Folder path"), path); layout->addLayout(form);
+    auto *name = new QLineEdit(initialName); name->setObjectName("newFolderName"); name->setAccessibleName(tr("New folder name"));
+    auto *form = new QFormLayout; form->addRow(tr("Folder name"), name); layout->addLayout(form);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
     auto *create = buttons->addButton(tr("Create folder"), QDialogButtonBox::AcceptRole);
     create->setObjectName("confirmCreateFolder"); create->setDefault(false); create->setAutoDefault(false);
     layout->addWidget(buttons);
-    const auto update = [path, create] {
-        const auto text = path->text();
-        const bool absolute = text.startsWith('/') || (text.startsWith("~/") && !text.startsWith("~//"));
-        const bool controls = std::any_of(text.cbegin(), text.cend(), [](QChar c) {
-            return c.category() == QChar::Other_Control;
-        });
-        const auto leaf = text.section('/', -1);
-        create->setEnabled(absolute && !controls && text.toUtf8().size() <= 4096
-            && !leaf.isEmpty() && leaf != "." && leaf != ".." && text != "~");
-    };
-    connect(path, &QLineEdit::textChanged, &prompt, update); update();
+    const auto update = [name, create, parent] { create->setEnabled(validFolderName(name->text(), parent)); };
+    connect(name, &QLineEdit::textChanged, &prompt, update); update();
+    connect(name, &QLineEdit::returnPressed, create, &QPushButton::click);
     connect(create, &QPushButton::clicked, &prompt, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &prompt, &QDialog::reject);
-    path->setFocus(); path->setCursorPosition(path->text().size());
+    for (auto *button : prompt.findChildren<QPushButton *>()) button->setAutoDefault(false);
+    name->setFocus(); name->selectAll();
     if (prompt.exec() != QDialog::Accepted) return;
-    m_request = 0; m_createdPath.clear(); m_path->setText(path->text());
+    createFolder(childPath(parent, name->text()));
+}
+
+void DirectoryDialog::createFolder(const QString &path)
+{
+    if (m_creating) return;
+    cancelInlineFolder(); m_request = 0; m_createdPath.clear(); m_creationError.clear(); m_path->setText(path);
     m_status->setText(tr("Creating folder on %1…").arg(m_host.isEmpty() ? tr("this computer") : m_host));
-    setCreating(true); m_createRequest = m_client.createDirectory(m_host, path->text());
+    setCreating(true); m_createRequest = m_client.createDirectory(m_host, path);
 }

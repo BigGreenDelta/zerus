@@ -31,6 +31,16 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
     private val api = RelayApi()
     internal val speech by lazy { SpeechController(application, this, viewModelScope, api) }
+    internal val defaultVoiceProviders by lazy { DefaultVoiceProviders(this, viewModelScope, api) }
+    internal fun defaultVoiceProfilesReason(host: SpeechConfigHost): String = when {
+        demo || !storageReady -> "Connect a computer to load its voice profiles."
+        connections.none { it.id == host.key.connectionId } -> "The voice workspace is disconnected."
+        DefaultVoiceRoutes.resolve(MachineKey(host.key.connectionId, host.machineId), machines, connections) != host ->
+            "The voice computer is unavailable or its identity changed. Refresh Machines and try again."
+        "speech_profiles" !in relayOperations[host.key.connectionId].orEmpty() -> "Update this gateway to load voice profiles."
+        "speech_profiles" !in machineOperations[host.key].orEmpty() -> "Update Zerus on this computer to load voice profiles."
+        else -> ""
+    }
     internal val speechConfiguration by lazy { SpeechConfigurationController(application, this, viewModelScope, api) }
     internal fun speechConfigurationReason(host: SpeechConfigHost): String = when {
         demo || !storageReady -> "Connect a computer to manage its speech providers."
@@ -331,10 +341,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     private fun observeHistoryHead(page:HistoryPage,verified:Boolean=true) {
         if(connections.none { it.id==page.target.connectionId }) return
-        readWriter?.let { readState=it.edit { state ->
-            val next=state.head(page.target,page.epoch,page.latestIncoming,page.totalIncoming,page.complete)
-            next.visible(page.target,page.events.filter { it.id in next.record(page.target)?.seen.orEmpty() })
-        } }
+        readWriter?.let { readState=it.edit { state -> ConversationReadHead.observe(state,page) } }
         if(page.complete && verified) currentHistoryHeads+=ConversationReadPolicies.key(page.target) else currentHistoryHeads-=ConversationReadPolicies.key(page.target)
         refreshReadAttention()
     }
@@ -615,6 +622,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     val drafts get() = messageState.drafts
     val terminalBuffers get()=messageState.terminalBuffers
     private var deliveryFlights by mutableStateOf<Set<String>>(emptySet())
+    private val outgoingReceiptProbe = OutgoingReceiptProbe()
     private var normalizedOutgoing by mutableStateOf<List<OutgoingMessage>>(emptyList())
     val outgoing get() = normalizedOutgoing
     private val emptyDrafts = mutableMapOf<Triple<Target, String, String>, Draft>()
@@ -848,6 +856,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (activityVerified && messages.any { it.requestId in merged.recordedRequestIds && it.status != "recorded" }) {
                 editState { state -> state.copy(outgoing = state.outgoing.map { if (it.requestId in merged.recordedRequestIds && it.status != "reviewed") it.copy(status = "recorded", error = "") else it }) }
+            }
+            if (activityVerified) messages.lastOrNull { it.status == "uncertain" && it.requestId !in merged.recordedRequestIds }?.let { message ->
+                if (outgoingReceiptProbe.claim(target, navigationId, message,
+                    message.requestId in deliveryFlights || "outgoing:${message.requestId}" in receiptFlights)) checkOutgoing(message, automatic = true)
             }
             // Last: opening a child replaces this parent presentation.
             if (activityVerified) openPendingAgent()
@@ -2286,14 +2298,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         } }) } catch (_: Exception) { error = "Could not save the delivery result. Check its receipt; the outgoing message remains recoverable."; return }
         if (selected?.target?.let(message::belongsTo) == true) refreshActivity()
     }
-    fun checkOutgoing(message: OutgoingMessage) = viewModelScope.launch {
+    fun checkOutgoing(message: OutgoingMessage, automatic: Boolean = false) = viewModelScope.launch {
         val connection = connections.find { it.id == message.target.connectionId } ?: return@launch
         val flight = "outgoing:${message.requestId}"
         if (flight in receiptFlights || message.status == "sending") return@launch
         receiptFlights += flight
-        try { settleOutgoing(message, api.await(connection, api.receipt(connection, message.requestId))) }
+        try { kotlinx.coroutines.withTimeout(45_000) { settleOutgoing(message, api.await(connection, api.receipt(connection, message.requestId))) } }
         catch (e: CancellationException) { throw e }
-        catch (_: Exception) { error = "Receipt unavailable. The outgoing message remains saved." }
+        catch (_: Exception) { if (!automatic) error = "Receipt unavailable. The outgoing message remains saved." }
         finally { receiptFlights -= flight }
     }
     fun prepareOutgoing(message: OutgoingMessage) {
@@ -2314,7 +2326,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         activity?.takeIf { it.string("run_id")==target.run && it.string("conversation_id")==target.conversation } ?: sessions.find { it.target==target }?.raw)
     fun beginAttachmentPick(target: Target, onReady: (String) -> Unit) {
         if(attachmentReason(target).isNotBlank()) return
-        if (speech.recording || target.archiveId.isNotBlank() || childSendReason(target).isNotBlank() || demo || !storageReady || target.key in preparingTargets || attachmentPreparing || pickerDraft != null || importJob?.isActive == true || attachmentImporting) return
+        if (speech.recording || updateInstallPreparing || target.archiveId.isNotBlank() || childSendReason(target).isNotBlank() || demo || !storageReady || target.key in preparingTargets || attachmentPreparing || pickerDraft != null || importJob?.isActive == true || attachmentImporting) return
         if (continuation?.draft?.target == target) cancelCompactContinuation("Selecting files canceled the automatic continuation. Your composition is preserved.")
         val origin = draft(target); if (origin.status != "editing") return
         val id = UUID.randomUUID().toString()
@@ -2359,9 +2371,20 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-    fun cancelAttachmentPick() {
+    fun recoverAttachmentPick(selectionId: String, launchedId: String) {
+        if (!storageReady) return
+        val busy = attachmentPreparing || attachmentImporting || importJob?.isActive == true
+        if (AttachmentSelection.recover(messageState, selectionId, launchedId, busy) == messageState) return
+        try {
+            editState { AttachmentSelection.recover(it, selectionId, launchedId, busy) }
+            flushDrafts()
+            error = "File selection was interrupted. Your draft is preserved; choose files again."
+        } catch (e: Exception) { error = e.message.orEmpty() }
+    }
+    fun cancelAttachmentPick(selectionId: String = pickerId, pendingOnly: Boolean = false) {
+        if (selectionId != pickerId || (pendingOnly && (attachmentPreparing || attachmentImporting || importJob?.isActive == true))) return
         importJob?.cancel()
-        try { editState { it.copy(pickerDraft = null, pickerId = "") }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
+        try { editState { AttachmentSelection.cancel(it, selectionId) }; flushDrafts() } catch (e: Exception) { error = e.message.orEmpty() }
     }
     private fun protectedAttachmentIds(): Set<String> {
         fun refs(state: MessageState) = state.drafts.flatMap { it.attachments } + state.outgoing.flatMap { it.attachments } + state.pickerDraft?.attachments.orEmpty()

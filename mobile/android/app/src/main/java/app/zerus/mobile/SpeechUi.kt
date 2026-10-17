@@ -21,6 +21,14 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Subject
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material3.*
@@ -70,48 +78,62 @@ import androidx.compose.ui.unit.dp
     val selected = speech.computers.find { it.id == choice.host?.computerId }
     val profiles = selected?.profiles.orEmpty()
     val profile = profiles.find { it.id == choice.profileId }
-    LaunchedEffect(speech.ready, target, currentPreview) { if (speech.ready && currentPreview) speech.refreshProfiles(target) }
+    LaunchedEffect(speech.ready, target, currentPreview) { if (speech.ready && currentPreview && target != null) speech.refreshProfiles(target) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Voice messages", style = MaterialTheme.typography.titleLarge)
         if (!currentPreview) {
             Text("This recording is no longer available.")
             return@Column
         }
-        Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.", style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = { manage = true }, enabled = !model.demo && model.storageReady && !model.updateInstallPreparing) { Text("Manage speech providers") }
-        Box {
-            OutlinedButton(onClick = { hostsOpen = true }, enabled = speech.ready && !speech.loading && speech.computers.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
-                modifier = Modifier.fillMaxWidth()) {
-                Text(selected?.name ?: if (choice.host == null) "Choose voice computer" else "Selected computer unavailable", maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Preview before sending")
+                Text("Review audio and video recordings, then tap Send. Applies on this device.", style = MaterialTheme.typography.bodySmall)
             }
-            DropdownMenu(expanded = hostsOpen, onDismissRequest = { hostsOpen = false }) {
-                speech.computers.forEach { machine ->
-                    DropdownMenuItem(text = { Text(machine.name) }, onClick = {
-                        hostsOpen = false
-                        target?.let { speech.chooseHost(MachineKey(it.connectionId, machine.id), it, choicePreview?.audio?.id) }
-                    })
+            Switch(checked = speech.previewBeforeSend, onCheckedChange = speech::setPreviewBeforeSend,
+                enabled = speech.ready && !speech.recording && !speech.savingRecording && !model.updateInstallPreparing,
+                modifier = Modifier.semantics { contentDescription = "Preview before sending" })
+        }
+        Text(if (target == null) "Choose the computer and profile for new recordings. Saved recordings keep their selected provider."
+            else "Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.", style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = { manage = true }, enabled = !model.demo && model.storageReady && !model.updateInstallPreparing) { Text("Manage speech providers") }
+        if (target == null) DefaultVoiceProviderSettings(model, active = !manage)
+        else {
+            Box {
+                OutlinedButton(onClick = { hostsOpen = true }, enabled = speech.ready && !speech.loading && speech.computers.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text(selected?.name ?: if (choice.host == null) "Choose voice computer" else "Selected computer unavailable", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                DropdownMenu(expanded = hostsOpen, onDismissRequest = { hostsOpen = false }) {
+                    speech.computers.forEach { machine ->
+                        DropdownMenuItem(text = { Text(machine.name) }, onClick = {
+                            hostsOpen = false
+                            speech.chooseHost(MachineKey(target.connectionId, machine.id), target, choicePreview?.audio?.id)
+                        })
+                    }
+                }
+            }
+            Box {
+                OutlinedButton(onClick = { profilesOpen = true }, enabled = !speech.loading && profiles.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text(profile?.name ?: choice.profileId.ifBlank { "Choose voice profile" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                DropdownMenu(expanded = profilesOpen, onDismissRequest = { profilesOpen = false }) {
+                    profiles.forEach { profile -> DropdownMenuItem(text = { Column {
+                        Text(profile.name)
+                        if (profile.model.isNotBlank()) Text(profile.model, style = MaterialTheme.typography.bodySmall)
+                        if (!profile.available) Text(profile.reason.ifBlank { "Unavailable" }, style = MaterialTheme.typography.bodySmall)
+                    } }, onClick = { profilesOpen = false; speech.chooseProfile(profile.id, target, choicePreview?.audio?.id) }) }
                 }
             }
         }
-        Box {
-            OutlinedButton(onClick = { profilesOpen = true }, enabled = !speech.loading && profiles.isNotEmpty() && !speech.recording && !model.updateInstallPreparing,
-                modifier = Modifier.fillMaxWidth()) {
-                Text(profile?.name ?: choice.profileId.ifBlank { "Choose voice profile" }, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            DropdownMenu(expanded = profilesOpen, onDismissRequest = { profilesOpen = false }) {
-                profiles.forEach { profile -> DropdownMenuItem(text = { Column {
-                    Text(profile.name)
-                    if (profile.model.isNotBlank()) Text(profile.model, style = MaterialTheme.typography.bodySmall)
-                    if (!profile.available) Text(profile.reason.ifBlank { "Unavailable" }, style = MaterialTheme.typography.bodySmall)
-                } }, onClick = { profilesOpen = false; speech.chooseProfile(profile.id, target, choicePreview?.audio?.id) }) }
-            }
-        }
-        Text("Hold to record and release to send; slide up to lock, or left to cancel. Stop a locked recording to preview it. Zerus keeps the media in conversation history, transcribes it, then sends the recognized text to the agent. Your typed draft is kept separately. Your gateway can read the recordings.", style = MaterialTheme.typography.bodySmall)
-        if (speech.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if (speech.profileNotice.isNotBlank()) Text(speech.profileNotice, style = MaterialTheme.typography.bodySmall)
+        Text((if (speech.previewBeforeSend) "Hold to record and release to preview; tap Send when ready. " else "Hold to record and release to send. ") +
+            "Slide up to lock, or left to cancel. Stop always keeps a preview. Zerus keeps the media in conversation history, transcribes it, then sends the recognized text to the agent. Your typed draft is kept separately. Your gateway can read the recordings.", style = MaterialTheme.typography.bodySmall)
+        if (target != null && speech.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (target != null && speech.profileNotice.isNotBlank()) Text(speech.profileNotice, style = MaterialTheme.typography.bodySmall)
         if (speech.notice.isNotBlank()) Text(speech.notice, style = MaterialTheme.typography.bodySmall)
         if (speech.statistics.isNotBlank()) Text(speech.statistics, style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = { speech.refreshProfiles(target) }, enabled = !speech.loading) { Text("Refresh voice profiles") }
+        if (target != null) TextButton(onClick = { speech.refreshProfiles(target) }, enabled = !speech.loading) { Text("Refresh voice profiles") }
         if (showPreview) SpeechComposerStatus(model)
         speech.legacyResult?.let { legacy ->
             Text("An earlier dictation result remains saved on this phone. It has not been sent.", style = MaterialTheme.typography.bodySmall)
@@ -123,6 +145,52 @@ import androidx.compose.ui.unit.dp
         }
     }
     if (manage) SpeechConfigurationScreen(model, choice) { manage = false }
+}
+
+@Composable private fun DefaultVoiceProviderSettings(model: ZerusViewModel, active: Boolean) {
+    val catalog = model.defaultVoiceProviders
+    val speech = model.speech
+    val selected = catalog.host
+    var hostsOpen by remember { mutableStateOf(false) }
+    var profilesOpen by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    val hosts = catalog.hosts(query)
+    val hasHosts = catalog.hosts().isNotEmpty()
+    val connection = model.connections.find { it.id == selected?.key?.connectionId }
+    val profiles = catalog.profiles
+    val editable = speech.ready && !speech.recording && !speech.savingRecording && !model.updateInstallPreparing && !model.demo
+    LaunchedEffect(speech.ready, model.storageReady, selected, connection, hasHosts, selected?.let(catalog::reason), active) {
+        if (speech.ready && active) catalog.refresh()
+    }
+    Box {
+        OutlinedButton(onClick = { hostsOpen = true }, enabled = editable && hasHosts, modifier = Modifier.fillMaxWidth()) {
+            Text(selected?.name ?: if (speech.selection.host == null) "Choose voice computer" else "Selected computer unavailable")
+        }
+        DropdownMenu(expanded = hostsOpen, onDismissRequest = { hostsOpen = false }) {
+            OutlinedTextField(query, { query = it }, label = { Text("Find computer") }, singleLine = true)
+            hosts.forEach { host -> DropdownMenuItem(text = { Column {
+                Text(host.name)
+                if (model.connections.size > 1) Text(model.connections.find { it.id == host.key.connectionId }?.displayName.orEmpty(), style = MaterialTheme.typography.bodySmall)
+                catalog.reason(host).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            } }, enabled = catalog.reason(host).isBlank(), onClick = { hostsOpen = false; catalog.chooseHost(host) }) }
+            if (hosts.size == 100) Text("Showing up to 100 matches. Refine the computer name.", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    Box {
+        OutlinedButton(onClick = { profilesOpen = true }, enabled = editable && !catalog.loading && profiles.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
+            Text(profiles.find { it.id == speech.selection.profileId }?.name ?: speech.selection.profileId.ifBlank { "Choose voice profile" })
+        }
+        DropdownMenu(expanded = profilesOpen, onDismissRequest = { profilesOpen = false }) {
+            profiles.forEach { profile -> DropdownMenuItem(text = { Column {
+                Text(profile.name)
+                if (profile.model.isNotBlank()) Text(profile.model, style = MaterialTheme.typography.bodySmall)
+                if (!profile.available) Text(profile.reason.ifBlank { "Unavailable" }, style = MaterialTheme.typography.bodySmall)
+            } }, onClick = { profilesOpen = false; catalog.chooseProfile(profile) }) }
+        }
+    }
+    if (catalog.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+    if (catalog.notice.isNotBlank()) Text(catalog.notice, style = MaterialTheme.typography.bodySmall)
+    TextButton(onClick = catalog::refresh, enabled = speech.ready && !catalog.loading && !model.updateInstallPreparing && !model.demo) { Text("Refresh voice profiles") }
 }
 
 @Composable internal fun SpeechComposerButton(model: ZerusViewModel, target: Target, saveEditor: () -> Unit) {
@@ -194,7 +262,8 @@ import androidx.compose.ui.unit.dp
     val cancelDistance = with(LocalDensity.current) { 80.dp.toPx() }
     val lockDistance = with(LocalDensity.current) { 57.dp.toPx() }
     val gesture = remember(target, navigation, cancelDistance, lockDistance) { VoiceGesture(cancelDistance, lockDistance) }
-    val label = if (speech.recordingLocked) "Send recording" else if (speech.recording) "Recording" else if (speech.videoMode) "Video input" else "Voice input"
+    val finishLabel = if (speech.captureNeedsPreview) "Stop and preview" else "Send recording"
+    val label = if (speech.recordingLocked) finishLabel else if (speech.recording) "Recording" else if (speech.videoMode) "Video input" else "Voice input"
     val actionCapture = speech.activeCaptureId
     val actionColor = if (speech.recording) MaterialTheme.colorScheme.errorContainer else if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val actionContent = if (speech.recording) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimary
@@ -213,9 +282,11 @@ import androidx.compose.ui.unit.dp
             }
         }.focusable(enabled).semantics {
             role = Role.Button; contentDescription = label
-            stateDescription = if (speech.recordingLocked) "Recording locked. Send or stop to preview." else if (speech.recording) "Slide left to cancel, up to lock." else "Tap to switch microphone and camera. Hold to record, release to send."
+            stateDescription = if (speech.recordingLocked) "Recording locked. $finishLabel." else if (speech.recording) "Slide left to cancel, up to lock."
+                else if (speech.previewBeforeSend) "Tap to switch microphone and camera. Hold to record, release to preview."
+                else "Tap to switch microphone and camera. Hold to record, release to send."
             if (!enabled) disabled()
-            onClick(label = if (speech.recording) "Send recording" else "Start locked recording") {
+            onClick(label = if (speech.recording) finishLabel else "Start locked recording") {
                 currentActivate(actionCapture)
             }
             customActions = if (actionCapture != null) listOf(
@@ -248,6 +319,8 @@ import androidx.compose.ui.unit.dp
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         val pointer = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (event.changes.any { it.id != down.id && it.pressed }) break
+                        // Compose cancellation synthesizes an already-consumed up; it cannot Send.
+                        if (pointer.isConsumed) break
                         pointer.consume()
                         if (!pointer.pressed) {
                             if (speech.recordingLocked && pointer.position.x in 0f..size.width.toFloat() &&
@@ -268,6 +341,8 @@ import androidx.compose.ui.unit.dp
                         if (event == null) { waiting = false; apply(gesture.hold()); continue }
                         val pointer = event.changes.firstOrNull { it.id == down.id }
                         if (pointer == null || event.changes.any { it.id != down.id && it.pressed }) break
+                        // Test incoming consumption before our own consume/move/release handling.
+                        if (pointer.isConsumed) break
                         apply(gesture.move(pointer.position.x - down.position.x, pointer.position.y - down.position.y))
                         ownedCapture?.let { speech.moveGesture(it, gesture.progress, gesture.lockProgress) }
                         pointer.consume()
@@ -278,7 +353,7 @@ import androidx.compose.ui.unit.dp
         }) {
         Box(contentAlignment = Alignment.Center) {
             ComposerActionFace(actionColor, actionContent, focused) {
-                Icon(if (speech.recordingLocked) Icons.AutoMirrored.Filled.Send else if (speech.videoMode) Icons.Default.Videocam else Icons.Default.Mic, null,
+                Icon(if (speech.recordingLocked) (if (speech.captureNeedsPreview) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send) else if (speech.videoMode) Icons.Default.Videocam else Icons.Default.Mic, null,
                     Modifier.size(22.dp).graphicsLayer { translationX = -12.dp.toPx() * speech.gestureCancelProgress })
             }
         }
@@ -353,8 +428,9 @@ import androidx.compose.ui.unit.dp
     var providerSettings by remember { mutableStateOf<VoiceDraft?>(null) }
     if (!speech.recording && !speech.savingRecording && draft == null) return
     if (speech.touchRecording && speech.videoRecorder == null) return
+    // The live camera has a dedicated layer above history, beside the unchanged pointer owner.
+    if (speech.recording && speech.videoRecorder != null) return
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        speech.videoRecorder?.let { LiveVideoCircle(it) }
         when {
             speech.recording -> {
                 val recordingId = speech.activeCaptureId
@@ -365,7 +441,7 @@ import androidx.compose.ui.unit.dp
                 else FlowRow(Modifier.fillMaxWidth()) {
                     TextButton(onClick = { recordingId?.let(speech::stopCapture) }) { Text("Stop recording") }
                     TextButton(onClick = { recordingId?.let(speech::cancelCapture) }) { Text("Cancel") }
-                    TextButton(onClick = { recordingId?.let(speech::sendCapture) }) { Text("Send") }
+                    if (!speech.captureNeedsPreview) TextButton(onClick = { recordingId?.let(speech::sendCapture) }) { Text("Send") }
                 }
             }
             speech.savingRecording -> { Text("Saving recording…"); LinearProgressIndicator(Modifier.fillMaxWidth()) }
@@ -390,11 +466,11 @@ import androidx.compose.ui.unit.dp
                                 }, enabled = sendReason.isBlank(),
                                     containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary,
                                     disabledContainerColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .12f), disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant) {
-                                    Icon(Icons.AutoMirrored.Filled.Send, "Send voice message", Modifier.size(22.dp))
+                                    Icon(Icons.AutoMirrored.Filled.Send, if (draft.video == null) "Send voice message" else "Send video message", Modifier.size(22.dp))
                                 }
                             }
                         }
-                        if (draft.video != null) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (draft.video != null) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             VideoCircle(model, draft.target, draft.video.displayed(draft.audio.id), diameter = 160.dp)
                             Column { Text("Pending", style = MaterialTheme.typography.labelSmall); actions() }
                         } else VoiceAudio(model, draft.target, draft.audio.displayed(), draft.durationMs, status = "Pending", trailing = actions)
@@ -446,7 +522,9 @@ import androidx.compose.ui.unit.dp
 }
 
 @Composable internal fun VoiceAudio(model: ZerusViewModel, target: Target?, audio: DisplayedAttachment, durationMs: Int,
-    waveform: List<Int> = emptyList(), status: String? = null, trailing: (@Composable () -> Unit)? = null) {
+    waveform: List<Int> = emptyList(), status: String? = null, trailing: (@Composable () -> Unit)? = null,
+    metadata: (@Composable () -> Unit)? = null, leading: (@Composable () -> Unit)? = null,
+    endControl: (@Composable () -> Unit)? = null) {
     val viewer = model.attachments
     val key = AttachmentIdentity.playbackKey(target, audio)
     val row = viewer.state(target, audio)
@@ -454,28 +532,119 @@ import androidx.compose.ui.unit.dp
     VoicePlayer(key, waveform, durationMs, if (active) viewer.audioPositionMs else 0,
         active && viewer.playing, row?.loading == true,
         onToggle = { viewer.toggleAudio(target, audio) },
-        onSeek = { viewer.seekAudio(target, audio, it, durationMs) }, status = status, trailing = trailing)
+        onSeek = { viewer.seekAudio(target, audio, it, durationMs) }, status = status, trailing = trailing,
+        metadata = metadata, leading = leading, endControl = endControl)
     row?.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 }
 
-@Composable internal fun VoiceMessageContent(model: ZerusViewModel, target: Target?, voice: VoiceMessage) {
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable internal fun VoiceMessageContent(model: ZerusViewModel, target: Target?, voice: VoiceMessage,
+    at: Double = voice.createdAt, videoBubbleColor: Color? = null) {
     var expanded by rememberSaveable(voice.id) { mutableStateOf(false) }
+    var actionsOpen by remember(voice.id) { mutableStateOf(false) }
     val local = model.speech.outgoing.find { it.id == voice.id && target?.let(it::belongsTo) == true }
-    Text(if (voice.video != null) "Video message" else "Voice message", style = MaterialTheme.typography.labelMedium)
-    if (voice.video != null) VideoCircle(model, target, voice.video) else VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform)
-    Text(VoiceProtocol.label(voice.state), style = MaterialTheme.typography.bodySmall)
+    val delivery = RecordingDelivery.of(voice.state)
+    val pending = local != null && voice.state !in setOf("submitted", "failed", "cancelled")
+    val restorable = local?.canRestoreUnsent == true
+    val transcriptControl: @Composable () -> Unit = {
+        IconToggleButton(checked = expanded, onCheckedChange = {
+            // A video changes between its circular player and its derived-audio player.
+            // Retire only this recording's decoder; another message keeps its playback.
+            if (voice.video != null && model.attachments.playingKey in listOf(
+                    AttachmentIdentity.playbackKey(target, voice.audio),
+                    AttachmentIdentity.playbackKey(target, voice.video.file))) model.attachments.stopAudio()
+            expanded = it
+        }) {
+            Box(Modifier.size(36.dp).background(
+                if (voice.video != null && !expanded) MaterialTheme.colorScheme.surface else Color.Transparent,
+                CircleShape), contentAlignment = Alignment.Center) {
+                Icon(if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.Subject,
+                    if (expanded) "Hide recognized text" else "Show recognized text", Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+    val metadata: @Composable () -> Unit = {
+        Row(Modifier.background(if (voice.video != null && !expanded) MaterialTheme.colorScheme.surface.copy(alpha = .92f)
+            else Color.Transparent, RoundedCornerShape(12.dp)), verticalAlignment = Alignment.CenterVertically) {
+            if (voice.video == null && voice.transcript.isNotBlank()) transcriptControl()
+            if (pending || restorable) Box {
+                IconButton(onClick = { actionsOpen = true }) { Icon(Icons.Default.MoreVert, "Recording actions", Modifier.size(20.dp)) }
+                DropdownMenu(expanded = actionsOpen, onDismissRequest = { actionsOpen = false }) {
+                    if (pending && local != null) {
+                        DropdownMenuItem(text = { Text("Check status") }, enabled = local.id !in model.speech.activeRequests,
+                            onClick = { actionsOpen = false; model.speech.checkStatus(local) })
+                        DropdownMenuItem(text = { Text("Cancel delivery") }, enabled = voice.state != "uploading",
+                            onClick = { actionsOpen = false; model.speech.cancel(local) })
+                    }
+                    if (restorable && local != null) DropdownMenuItem(text = { Text("Return to recording") },
+                        enabled = model.speech.draft == null && !model.speech.savingRecording,
+                        onClick = { actionsOpen = false; model.speech.restoreUnsent(local) })
+                }
+            }
+            if (at > 0) Text(remember(at) { java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date((at * 1000).toLong())) }, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TooltipBox(positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                tooltip = { PlainTooltip { Text(VoiceProtocol.label(voice.state)) } }, state = rememberTooltipState()) {
+                val color = if (delivery in setOf(RecordingDelivery.Failed, RecordingDelivery.Uncertain)) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                Box(Modifier.heightIn(min = 24.dp).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+                    if (delivery == RecordingDelivery.Processing) CircularProgressIndicator(Modifier.size(16.dp)
+                        .semantics { contentDescription = VoiceProtocol.label(voice.state) }, color = color, strokeWidth = 1.5.dp)
+                    else Icon(when (delivery) {
+                        RecordingDelivery.Sent -> Icons.Default.Check
+                        RecordingDelivery.Failed -> Icons.Default.ErrorOutline
+                        RecordingDelivery.Cancelled -> Icons.Default.Close
+                        RecordingDelivery.Uploading -> Icons.Default.CloudUpload
+                        else -> Icons.Default.HelpOutline
+                    }, delivery.description, Modifier.size(18.dp), tint = color)
+                }
+            }
+        }
+    }
     val error = local?.error?.ifBlank { voice.error } ?: voice.error
-    if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-    if (voice.transcript.isNotBlank()) {
-        TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide recognized text" else "Show recognized text") }
-        if (expanded) SelectionContainer { Text(voice.transcript) }
+    val video = voice.video
+    if (video == null) {
+        VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform, metadata = metadata)
+        if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        if (expanded && voice.transcript.isNotBlank()) SelectionContainer { Text(voice.transcript) }
+    } else if (expanded && voice.transcript.isNotBlank()) {
+        Surface(color = videoBubbleColor ?: MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(17.dp)) {
+            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform,
+                    leading = { VideoAudioThumbnail(model, target, voice) }, endControl = transcriptControl, metadata = {})
+                SelectionContainer { Text(voice.transcript) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { metadata() }
+                if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    } else Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+        Column(Modifier.widthIn(max = 288.dp).fillMaxWidth()) {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val diameter = (maxWidth - 48.dp).coerceIn(48.dp, 240.dp)
+                Box(Modifier.fillMaxWidth().height(diameter + 8.dp)) {
+                    Box(Modifier.align(Alignment.TopEnd)) { VideoCircle(model, target, video, diameter, showFooter = false) }
+                    Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (voice.transcript.isNotBlank()) transcriptControl()
+                            val viewer = model.attachments
+                            val active = viewer.playingKey == AttachmentIdentity.playbackKey(target, video.file)
+                            Text(VoiceWaveform.time(if (active) viewer.audioPositionMs else video.durationMs),
+                                Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = .9f), RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall)
+                        }
+                        metadata()
+                    }
+                }
+            }
+            model.attachments.state(target, video.file)?.error?.takeIf(String::isNotBlank)?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+            if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
     }
-    if (local != null && voice.state !in setOf("submitted", "failed", "cancelled")) Row {
-        TextButton(onClick = { model.speech.checkStatus(local) }, enabled = local.id !in model.speech.activeRequests) { Text("Check status") }
-        TextButton(onClick = { model.speech.cancel(local) }, enabled = voice.state != "uploading") { Text("Cancel delivery") }
-    }
-    if (local?.canRestoreUnsent == true) TextButton(onClick = { model.speech.restoreUnsent(local) },
-        enabled = model.speech.draft == null && !model.speech.savingRecording) { Text("Return to recording") }
 }
 
 @Composable internal fun VoiceSavedMessages(model: ZerusViewModel) {

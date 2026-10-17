@@ -82,7 +82,8 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             // still running. Keep it unread, but wait for confirmed idleness
             // before posting a banner. Retain delivered identities below so
             // a working/idle cycle cannot notify again for the same reply.
-            const bool idle = s.activity == "idle" && s.phase == "idle" && s.backgroundProcesses <= 0 && s.subagentActiveCount == 0 && !s.needsAction();
+            const bool idle = s.activity == "idle" && s.phase == "idle" && s.backgroundProcesses <= 0 && s.subagentActiveCount == 0
+                && !s.hasCoordinationWait() && !s.needsAction();
             // Hosts do not report routine ticks of a recurring scheduled job as
             // replies; consume any that arrive. The reply after the schedule
             // ends, or once its count is known, notifies as usual.

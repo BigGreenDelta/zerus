@@ -5,3 +5,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "ZerusAndroid"
 include(":app")
+include(":camera-video-fixed")

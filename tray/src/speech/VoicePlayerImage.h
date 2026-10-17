@@ -8,10 +8,34 @@
 #include <QJsonObject>
 #include <QPainter>
 #include <QPainterPath>
+#include <QStringList>
 #include <QtMath>
 
 // A fixed-size journal resource: changing playback never edits or lays out text.
 namespace VoicePlayerImage {
+// Small original vector glyphs; media state never claims reading or agent completion.
+inline QImage deliveryIcon(const QString &state,qreal scale,qreal ratio,bool dark) {
+    QImage image(qCeil(18*scale*ratio),qCeil(18*scale*ratio),QImage::Format_ARGB32_Premultiplied);
+    image.setDevicePixelRatio(ratio);image.fill(Qt::transparent);
+    QPainter p(&image);p.setRenderHint(QPainter::Antialiasing);p.scale(scale,scale);
+    const bool issue=state=="failed" || state=="uncertain" || !QStringList{"uploading","queued","transcribing","ready","waiting_agent","delivering","submitted","cancelled"}.contains(state);
+    p.setPen(QPen(QColor(issue?(dark?"#f2ad94":"#a83f27"):(dark?"#9eabba":"#657487")),1.5,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+    if(state=="submitted")p.drawPolyline(QPolygonF{{3,9},{7,13},{15,5}});
+    else if(state=="cancelled"){p.drawLine(5,5,13,13);p.drawLine(13,5,5,13);}
+    else {p.drawEllipse(QRectF(2.5,2.5,13,13));
+        if(issue){p.drawLine(9,5,9,10);p.drawPoint(9,13);}
+        else {p.drawLine(9,5,9,9);p.drawLine(9,9,12,10);}}
+    return image;
+}
+inline QImage transcriptIcon(qreal scale,qreal ratio,bool dark,bool expanded) {
+    QImage image(qCeil(32*scale*ratio),qCeil(32*scale*ratio),QImage::Format_ARGB32_Premultiplied);
+    image.setDevicePixelRatio(ratio);image.fill(Qt::transparent);
+    QPainter p(&image);p.setRenderHint(QPainter::Antialiasing);p.scale(scale,scale);
+    p.setPen(QPen(QColor(dark?"#8bdfc0":"#167357"),1.5,Qt::SolidLine,Qt::RoundCap));
+    p.drawLine(7,10,24,10);p.drawLine(7,15,24,15);p.drawLine(7,20,16,20);
+    p.drawPolyline(expanded?QPolygonF{{20,23},{23,20},{26,23}}:QPolygonF{{20,20},{23,23},{26,20}});
+    return image;
+}
 inline QString time(qint64 milliseconds) {
     const auto seconds=qMax<qint64>(0,milliseconds)/1000;
     return QStringLiteral("%1:%2").arg(seconds/60).arg(seconds%60,2,10,QLatin1Char('0'));

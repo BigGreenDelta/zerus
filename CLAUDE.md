@@ -6,6 +6,11 @@ The Rust mobile relay lives in `services/mobile/relay/`; the outbound Python
 connector remains in `services/mobile/zerus_mobile/`. Keep API v1 and durable
 request identities compatible; see `services/mobile/relay/README.md` for relay
 contracts, isolated PostgreSQL tests and container memory qualification.
+The Android client lives in `mobile/android/`; the native iOS client (Swift
+package `ZerusKit` plus SwiftUI app) lives in `mobile/ios/`. Install iOS Dev
+builds with `mobile/ios/scripts/dev-install.sh` or `remote-dev-install.sh`; never
+commit team IDs, device identifiers or signing material. TestFlight uploads run
+only from trusted main; see `docs/ios-distribution.md`.
 `design/` contains prototypes and original artwork, not runtime dependencies.
 
 The repository language is English. Write documentation and other project-facing
@@ -75,6 +80,16 @@ Retain unread reply identity and defer reply-only badges/notifications until the
 work completes. Historical, unknown and offline jobs never establish current work.
 Keep this contract aligned across desktop, Android, shared fixtures and docs;
 changes to these status semantics need explicit owner direction.
+
+Owner-approved independent-agent waits use `hgs wait`, separately from native
+work. Before handing off work whose acceptance or result you will wait for,
+declare the wait and give the producer its scoped reply ticket. Acknowledge
+acceptance explicitly; deliver the result through the normal guarded send before
+finishing the wait with that exact submission receipt. Cancel abandoned waits.
+Never infer acknowledgement or completion from prose, Beads status, a native Stop
+or peer idleness. Preserve exact waiter identity, native work/attention priority,
+bounded previews and paged journals. Check the selected installed CLI's help
+marker before using `wait` on an older peer. See `docs/agent-coordination.md`.
 
 Use non-interactive filesystem commands and `ssh/scp -o BatchMode=yes` in automation.
 On Windows, reach `ssh.exe` only through `hgs.exe`: Windows OpenSSH hangs after

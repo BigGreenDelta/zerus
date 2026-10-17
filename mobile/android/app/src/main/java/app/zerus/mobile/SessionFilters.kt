@@ -38,9 +38,33 @@ object SessionFilters {
     fun working(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
         (session.raw.string("activity") == "busy" || backgroundIdle(session)) && !needsAction(session)
     private fun positiveCount(value: Any?) = (value as? Number)?.toDouble()?.let { it.isFinite() && it > 0 && it % 1.0 == 0.0 } == true
+    fun hasCoordinationWait(session: Session): Boolean {
+        val wait = session.raw.optJSONObject("coordination_wait") ?: return false
+        return wait.optInt("schema") == 1 && wait.string("status") == "ok" && session.target.run.isNotBlank() &&
+            session.target.conversation.isNotBlank() && wait.string("run_id") == session.target.run &&
+            wait.string("conversation_id") == session.target.conversation && positiveCount(wait.opt("count")) && wait.optDouble("count") <= 1024
+    }
+    fun waitingIdle(session: Session) = session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" &&
+        state(session) == "running" && session.raw.string("process_state") != "exited" && !backgroundIdle(session) &&
+        !positiveCount(session.raw.opt("subagent_active_count") as? Number ?: session.raw.opt("subagent_count")) && hasCoordinationWait(session)
+    fun waitingLabel(session: Session, includeProducer: Boolean = true, compact: Boolean = false): String {
+        val wait = session.raw.optJSONObject("coordination_wait") ?: return "Waiting for agent"
+        val item = wait.optJSONArray("items")?.optJSONObject(0)
+        val producer = item?.optJSONObject("producer")
+        val label = if(compact) "Waiting" else if(item?.string("state") == "awaiting_result") "Waiting for result" else "Waiting for acceptance"
+        val name = producer?.string("name").orEmpty().split('/').drop(2).joinToString("/")
+        val host = producer?.string("host").orEmpty()
+        val elapsed = item?.optDouble("created_at", 0.0)?.takeIf { it.isFinite() && it > 0 }?.let {
+            val seconds = ((System.currentTimeMillis()/1000.0)-it).toLong().coerceAtLeast(0)
+            if(seconds < 60) "${seconds}s" else if(seconds < 3600) "${seconds/60}m" else "${seconds/3600}h ${seconds/60%60}m"
+        }.orEmpty()
+        return label + (if(includeProducer && name.isNotBlank()) " from $name" else "") + (if(includeProducer && host.isNotBlank()) " on $host" else "") +
+            (if(wait.optInt("count") > 1) " (+${wait.optInt("count")-1})" else "") + (if(elapsed.isNotBlank()) " ($elapsed)" else "")
+    }
     fun replyInProgress(session: Session, online: Boolean) = currentActivity(session, online) &&
         (session.raw.string("activity") == "busy" || positiveCount(session.raw.optJSONObject("process_work")?.opt("count")) ||
-            positiveCount(session.raw.opt("subagent_active_count") as? Number ?: session.raw.opt("subagent_count")))
+            positiveCount(session.raw.opt("subagent_active_count") as? Number ?: session.raw.opt("subagent_count")) ||
+            session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" && hasCoordinationWait(session))
     /** Keep the read identity while postponing reply badges and reply-only attention. */
     fun visibleUnreadReply(session: Session, online: Boolean) = !archived(session) && !replyInProgress(session, online) &&
         (session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply"))
@@ -54,7 +78,7 @@ object SessionFilters {
         return session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" && (jobs?.toInt() ?: 0) > 0
     }
     fun scheduled(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
-        !needsAction(session) && !backgroundIdle(session) && scheduledIdle(session)
+        !needsAction(session) && !backgroundIdle(session) && !waitingIdle(session) && scheduledIdle(session)
     /** The next run as a time of day, "due" once it has passed, or empty if unknown. */
     fun nextScheduledRun(session: Session, now: Long = System.currentTimeMillis(), locale: Locale = Locale.getDefault(),
         zone: TimeZone = TimeZone.getDefault()): String {
@@ -138,6 +162,7 @@ object SessionFilters {
             raw.string("phase") == "tool" -> "Using a tool"
             raw.string("activity") == "busy" -> "Working"
             backgroundIdle(session) -> "Background"
+            waitingIdle(session) -> waitingLabel(session)
             scheduledIdle(session) -> nextScheduledRun(session).let { if (it.isEmpty()) "Scheduled" else "Scheduled · $it" }
             raw.string("activity") == "idle" -> "Ready"
             raw.string("activity") in listOf("ended", "unknown") -> "Status unknown"

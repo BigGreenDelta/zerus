@@ -209,6 +209,7 @@ impl Candidate {
         };
         if self.kind == "completed" {
             return v["activity"] == "busy"
+                || crate::registry::explicit_wait(v)
                 || current("reply_id") != self.reply_id.as_deref()
                 || (self.reply_id.is_some()
                     && read["reply_id"].as_str() == self.reply_id.as_deref());

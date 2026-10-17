@@ -6,16 +6,14 @@ Apple Silicon Macs install Zerus from the tap
 [ufna/homebrew-zerus](https://github.com/ufna/homebrew-zerus):
 
 ```sh
-brew install --cask ufna/zerus/zerus@nightly   # daily verified builds from main
+brew install --cask ufna/zerus/zerus
 zerus-setup
 ```
 
-The first public macOS build is
-[nightly 0.42.2.r1291.g5d2e5d0.n17](https://github.com/ufna/zerus/releases/tag/nightly-38794972859).
-For Dev builds from successful main CI, install `ufna/zerus/zerus@dev` instead.
-The stable `zerus` cask will appear with the first owner-triggered signed stable
-release; it is not yet available. After that, install it with
-`brew install --cask ufna/zerus/zerus`.
+Signed stable builds begin with
+[0.43.0](https://github.com/ufna/zerus/releases/tag/v0.43.0).
+For daily verified builds, install `ufna/zerus/zerus@nightly`; for Dev builds
+from successful main CI, install `ufna/zerus/zerus@dev`.
 
 | Cask | Built by | Version | Download |
 | --- | --- | --- | --- |
@@ -434,12 +432,33 @@ the self-tests with the exact clean source and Dev identity. `brew fetch --cask
 ufna/zerus/zerus@dev` verified the public package without installing it. The
 compiled desktop update controller also parsed the live Dev catalog and exposed
 its correct ZIP and DMG links. The shared developer GUI was left unchanged;
-its coordinated installation remains a separate rollout. The stable `zerus`
-cask remains unavailable until an owner-triggered signed stable release.
+its coordinated installation remained a separate rollout.
+
+The first signed macOS Stable release, [0.43.0](https://github.com/ufna/zerus/releases/tag/v0.43.0),
+was published on 2026-10-16 with hgs 1.52.0 from clean source
+`48dff262f46be71bbd9cd114577239ee85f55573`.
+[Candidate 38908051629](https://github.com/ufna/zerus/actions/runs/38908051629)
+passed the complete platform matrix, all 75 production Qt suites, the pinned
+real-agent matrix without skips, both Arch package builds, Apple signing and
+notarization, and clean Homebrew installation. Retries kept the same source;
+the CLI lifecycle and transcript-polling test races remain tracked separately
+in `zerus-d84a`. The final source archive matched `git archive` exactly. Gitleaks
+8.30.1 passed the complete Git history, tracked working tree and candidate source.
+
+[Publisher 38920602130](https://github.com/ufna/zerus/actions/runs/38920602130)
+published the candidate unchanged as the latest Stable release and synchronized
+the AUR packages and `zerus` cask. Independent anonymous downloads matched the
+candidate, GitHub asset digests and checksums. The public DMG and its read-only
+mounted application passed signature, ticket, Gatekeeper, exact source identity
+and isolated CLI/GUI self-tests. `brew fetch --cask ufna/zerus/zerus` verified the
+public cask without installing it. The Stable mirror synchronized successfully;
+the compiled desktop update controller accepted its live catalog and exposed the
+correct ZIP and DMG links. Stable, Nightly and Dev are now published Homebrew
+channels. Shared developer GUI replacement remains a separate coordinated action.
 
 Still requiring interactive or subsequent release qualification:
 
 - Terminal automation in the signed application.
 - Installation from the public tap on a clean account, and an upgrade from one
   cask version to the next with running GUI, tmux session and native agent.
-- The channel switch between stable and nightly once both casks are published.
+- The channel switch between stable and nightly from the public tap.

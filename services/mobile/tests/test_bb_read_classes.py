@@ -14,7 +14,7 @@ import uuid
 
 from bb_operations import (CONVERSATION, READ_OPERATIONS, RECEIPTS, RUN, SESSION, OperationCase, help_text,
                            listing)
-from connector_harness import RESTART_ERROR, BlackBoxCase, default_rules, implemented
+from connector_harness import RESTART_ERROR, BlackBoxCase, default_rules, implemented, journal_bytes
 
 SCREEN = "BB-SCREEN-SENTINEL"
 FILE = b"BB-FILE-SENTINEL " * 4
@@ -173,7 +173,7 @@ class ReadClassTests(OperationCase, BlackBoxCase):
         self.assertEqual(self.work(mark), [], "a mutation executed again")
 
     def journal_bytes(self) -> bytes:
-        return b"".join(path.read_bytes() for path in self.state_dir.iterdir() if path.name.startswith("journal"))
+        return journal_bytes(self.state_dir)
 
     async def test_a_restart_fails_an_interrupted_read_and_doubts_an_interrupted_mutation(self):
         for request, argv, state in (

@@ -20,6 +20,7 @@ struct SessionInfo {
     QJsonObject providerError;
     QJsonObject gitStatus;
     QJsonObject goal;
+    QJsonObject coordinationWait;
     QString name;      // полное имя: cmd/project[/tag]
     QString cmd;
     QString project;   // может быть null -> isNull()
@@ -77,7 +78,15 @@ struct SessionInfo {
     bool replyInProgress() const {
         return state == QLatin1String("running") && processState != QLatin1String("exited")
             && activity != QLatin1String("unknown") && !(conversationState == QLatin1String("ended") && activity != QLatin1String("idle"))
-            && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0);
+            && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0
+                || (activity == QLatin1String("idle") && phase == QLatin1String("idle") && hasCoordinationWait()));
+    }
+    bool hasCoordinationWait() const {
+        return coordinationWait.value("schema").toInt() == 1 && coordinationWait.value("status") == "ok"
+            && !runId.isEmpty() && !conversationId.isEmpty() && coordinationWait.value("run_id") == runId
+            && coordinationWait.value("conversation_id") == conversationId && coordinationWait.value("count").toInt() > 0
+            && coordinationWait.value("count").toInt() <= 1024
+            && coordinationWait.value("count").toDouble() == coordinationWait.value("count").toInt();
     }
     // Intermediate replies remain unread; only their notification presentation waits.
     bool visibleUnreadReply(bool online = true) const {
@@ -176,9 +185,6 @@ public:
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
-    quint64 requestGraph(const QString &host, bool changes, const QString &cursor = {});
-    quint64 requestGraphTarget(const QString &host,const QString &name,const QString &run,const QString &conversation,
-        const QString &archive,const QString &agent,const QString &machine,const QString &message = {});
     // `hgs session-host <action> --json` on this computer (Windows, spec D2):
     // install enables local sessions and stages the stable CLI and a host image.
     quint64 requestSessionHost(const QString &action);
@@ -318,10 +324,6 @@ signals:
     void subagentInspectionReady(const QString &host, const QString &name, const QString &agentId, const QString &archiveId, const QJsonObject &data);
     void subagentInspectionFailed(const QString &host, const QString &name, const QString &agentId, const QString &archiveId, const QString &error);
     void localReady(const BoxState &box);
-    void graphReady(quint64 request, const QString &host, const QJsonObject &page);
-    void graphTargetReady(quint64 request,const QJsonObject &reply);
-    void graphTargetFailed(quint64 request,const QString &error);
-    void graphFailed(quint64 request, const QString &host, const QString &error);
     void peerReady(const BoxState &box);
     void projectsReady(const QList<ProjectInfo> &projects);
     void projectsForHostReady(const QString &host, const QList<ProjectInfo> &projects);
@@ -398,7 +400,6 @@ private:
     quint64 m_recoveryRequest = 0;
     quint64 m_machineRequest = 0;
     quint64 m_swarmRequest = 0;
-    quint64 m_graphRequest = 0;
     quint64 m_sessionHostRequest = 0;
     quint64 m_accountRequest = 0;
     bool m_machineSetupInFlight = false;

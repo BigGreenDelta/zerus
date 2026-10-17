@@ -12,11 +12,14 @@ and Telegram Desktop
 
 A short press switches microphone/camera mode without opening a device. Holding
 starts the selected capture after a short threshold. Releasing an owned,
-unlocked recording requests sending. On Android a left drag cancels and an
+unlocked recording requests sending by default. **Preview before sending** in
+Voice settings instead retains both audio and video for review and a separate
+**Send**. The device-local preference defaults off and is captured at recording
+start; changing it cannot send an existing recording. On Android a left drag cancels and an
 upward drag locks; on desktop releasing outside the recording area cancels and
 dragging up locks. A locked recording continues after release, with separate
 Stop/preview, Send and Cancel controls. Stop retains a reviewable draft. These
-explicit gestures replace the earlier release-to-preview behavior;
+explicit gestures keep release-to-send as the default;
 system cancellation, lost focus, navigation, permission callbacks and capture
 limits cannot submit. Completed, explicitly stopped recordings retain a preview. Provider discovery cannot
 silently resume a deferred send, and cold-context confirmation remains explicit.
@@ -69,7 +72,7 @@ slide left to cancel, or slide up to lock. Stop a locked capture to retain a
 preview without sending. A compact **Pending**
 card identifies the unsent preview, with playback and seeking followed by Delete
 and Send icon buttons. The buttons retain accessible **Discard** and **Send voice
-message** names and 48 dp touch targets; deletion still requires confirmation.
+message** / **Send video message** names and 48 dp touch targets; deletion still requires confirmation.
 Provider settings appear only when the preview needs provider recovery, and a
 recording for a different conversation identifies that original destination.
 Text or attachments restore the ordinary Send action.
@@ -86,6 +89,24 @@ stops into the preview. A permission result requires a fresh recording action. L
 the pointer or leaving the composer must end capture without submission; a late
 release or permission callback must never start another recording or affect a
 newer one. Capture stays pinned to its original conversation and provider.
+Canceled or claimed Android pointer input cannot send or switch modes; canceling
+a second click on a locked recording leaves that capture running.
+
+Round-video capture opens a large live circular preview over the conversation,
+with a progress ring and remaining-time countdown. The timer follows captured
+media statistics and the camera's actual 59-second recording limit; a file-size
+limit can finish earlier. The preview adapts to the available viewport above
+the retained composer and keyboard. Locked recording exposes camera switching,
+Cancel, Stop and, when preview-before-send is off, Send. Stop always retains the
+preview. The same-window layer preserves the held pointer and window focus;
+release or cancellation starts a short fade and shrink without delaying camera
+Finalize or cleanup. Covered history stays out of accessibility and does not
+accrue visible-read progress until the closing animation has finished.
+
+The recording-screen behavior was inspected in Telegram Android's
+[InstantCameraView](https://github.com/DrKLO/Telegram/blob/f32ffeec763f0bdbf4bec25b52d654f77bff733d/TMessagesProj/src/main/java/org/telegram/ui/Components/InstantCameraView.java#L620-L635)
+and its [opening/closing animation](https://github.com/DrKLO/Telegram/blob/f32ffeec763f0bdbf4bec25b52d654f77bff733d/TMessagesProj/src/main/java/org/telegram/ui/Components/InstantCameraView.java#L881-L943).
+The Compose implementation is original Zerus code; no Telegram source is copied.
 
 With a narrow screen, large system text and an expanded editor, the open keyboard
 can leave no space for the retained preview. Close the keyboard to reach its
@@ -102,6 +123,29 @@ The interaction was checked against Telegram Android's
 [recording row](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java#L9742-L9766)
 and [recording feedback](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java#L4706-L5005).
 Zerus implements these interactions in its existing Compose components with the explicit Stop/preview path described above.
+
+## Message presentation
+
+Audio and video use one compact media block with aligned metadata and icon
+controls. Recognized text is collapsed behind its transcript icon. Android's
+recording menu contains status checks, cancellation and unsent recovery actions;
+errors remain visible. Status icons preserve the actual workflow: pending or
+processing, one check for confirmed native submission, cancellation, failure or
+unconfirmed delivery. There are no read/completion ticks. An unfamiliar state
+remains unconfirmed. Icon controls retain accessible names and touch targets.
+
+Android round videos sit directly in the conversation with compact duration,
+time and delivery indicators. Their transcript icon opens a text card with a
+small circular poster and the existing seekable derived-audio player; the large
+video is replaced while the exact recognized text is visible. The up-arrow
+returns to the circle. Each message remembers its own disclosure state. Changing
+this view never opens media or submits a message; it stops only that recording's
+current player, preserving playback of other messages.
+
+The visual reference is Telegram Android's
+[ChatMessageCell](https://github.com/DrKLO/Telegram/blob/f2908b14133bbffbf7ab04f641ecb5bfaf533242/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java),
+which groups media time and delivery glyphs. Zerus uses its own UI components
+and state model; no Telegram source is copied.
 
 ## Authority and processing
 

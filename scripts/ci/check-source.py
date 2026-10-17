@@ -274,6 +274,11 @@ def main():
         dev = path.read_text().strip()
         if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', dev) or tuple(map(int, dev.split('.'))) <= tuple(map(int, stable.split('.'))):
             raise SystemExit(f"{path.relative_to(ROOT)} must name a release newer than stable.")
+    ios_version = (ROOT / "mobile/ios/DEV_VERSION").read_text().strip()
+    ios_config = (ROOT / "mobile/ios/Config/Base.xcconfig").read_text()
+    if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', ios_version) or \
+            not re.search(rf'(?m)^MARKETING_VERSION = {re.escape(ios_version)}$', ios_config):
+        raise SystemExit("mobile/ios/DEV_VERSION must be X.Y.Z and equal MARKETING_VERSION in Config/Base.xcconfig.")
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
     if cargo["package"]["license"] != "MIT":
         raise SystemExit("Review the package license and notices.")

@@ -587,6 +587,42 @@ private slots:
         QCOMPARE(QJsonDocument::fromJson(lines[0]).object().value("action").toString(),"submit");
         QTRY_VERIFY(voice->isEnabled());QCOMPARE(recorder->stops,1);
     }
+    void previewPreferencePersistsOnThisDevice() {
+        QTemporaryDir dir;const auto executable=fixture(dir.path());
+        { SpeechSettings settings(executable);auto *option=settings.findChild<QCheckBox *>("speechPreviewBeforeSend");
+          QVERIFY(option);QVERIFY(!option->isChecked());option->click();QVERIFY(QSettings().value("speech/preview_before_send").toBool()); }
+        SpeechSettings restored(executable);QVERIFY(restored.findChild<QCheckBox *>("speechPreviewBeforeSend")->isChecked());
+        QVERIFY(!QSettings().contains("speech/profile"));QVERIFY(!QSettings().contains("speech/video_mode"));
+    }
+    void releaseUsesCapturedPreviewPreference_data() {
+        QTest::addColumn<bool>("videoMode");QTest::addColumn<bool>("preview");
+        QTest::newRow("audio-preview")<<false<<true;QTest::newRow("video-preview")<<true<<true;
+        QTest::newRow("audio-send")<<false<<false;QTest::newRow("video-send")<<true<<false;
+    }
+    void releaseUsesCapturedPreviewPreference() {
+        QFETCH(bool,videoMode);QFETCH(bool,preview);QTemporaryDir dir;
+        QSettings().setValue("speech/video_mode",videoMode);QSettings().setValue("speech/preview_before_send",preview);
+        MessageComposer composer;composer.setSessionKey("fixture\npreview-option");composer.show();
+        auto *audio=new FixtureRecorder;auto *video=new FixtureVideoRecorder;
+        SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},audio,{},video);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());
+        QTest::mousePress(voice,Qt::LeftButton);QTRY_COMPARE(videoMode?video->starts:audio->starts,1);
+        QTRY_COMPARE(composer.findChild<QComboBox *>("voiceProvider")->count(),1);
+        // Preferences changed elsewhere cannot turn an in-flight review into an upload, or vice versa.
+        QSettings().setValue("speech/preview_before_send",!preview);
+        QTest::mouseRelease(voice,Qt::LeftButton);
+        if(preview){
+            auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());
+            QVERIFY(composer.findChild<QWidget *>("voicePreview")->isVisible());QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+            ComposerDraftStore::flushWrites();const auto saved=ComposerDraftStore().load("voice-message-draft\n"+composer.sessionKey());
+            QCOMPARE(saved.attachments.size(),videoMode?2:1);QVERIFY(!saved.formState.value("submitted").toBool());
+            const auto id=saved.formState.value("id").toString();QVERIFY(!id.isEmpty());send->click();
+            QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));QFile file(dir.path()+"/voice-actions");QVERIFY(file.open(QIODevice::ReadOnly));
+            const auto calls=file.readAll().trimmed().split('\n');QCOMPARE(calls.size(),1);
+            QCOMPARE(QJsonDocument::fromJson(calls[0]).object().value("request_id").toString(),id);
+        }else{QTRY_VERIFY(QFile::exists(dir.path()+"/voice-actions"));}
+        QTRY_VERIFY(voice->isEnabled());QCOMPARE(videoMode?video->stops:audio->stops,1);
+    }
     void telegramUpwardLockRetainsCaptureUntilExplicitStop() {
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\nlock");composer.show();
         auto *recorder=new FixtureRecorder;SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},recorder);

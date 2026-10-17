@@ -1559,17 +1559,42 @@ class ActivitySummary(Harness):
         self.counts(inspected, 0, 2, 2)
         self.assertEqual(inspected["subagent_previews"], final["subagent_previews"])
 
-    def test_unknown_child_status_is_not_reported_as_completed(self):
+    def test_failed_claude_child_settles_with_its_error(self):
+        # Claude sends no SubagentStop after a child's StopFailure, such as a
+        # usage limit. The child ends as an error and never keeps the parent busy.
         name = self.start()
         self.send_event(name, "SubagentStart", agent_id="worker", agent_type="Research")
-        self.send_event(name, "StopFailure", agent_id="worker", error_message="Provider disconnected")
+        self.send_event(name, "StopFailure", agent_id="worker", error="rate_limit",
+                        error_message="You've hit your weekly limit")
+        row = self.row(name)
+        self.counts(row, 0, 1, 1)
+        self.assertEqual(row["subagent_previews"], [])
+        child = json.loads(self.hgs("inspect", name))["subagents"]["worker"]
+        self.assertEqual((child["state"], child["display_state"]), ("finished", "error"))
+        self.assertIn("weekly limit", child["detail"])
+        self.send_event(name, "Stop", last_assistant_message="The worker hit its limit")
+        self.assertEqual(self.binding(name)["activity"], "idle")
+        self.assertEqual(self.row(name)["activity"], "idle")
+        # A resumed child is current work again.
+        self.send_event(name, "PreToolUse", agent_id="worker", tool_name="Bash", tool_use_id="later")
+        self.counts(self.row(name), 1, 0, 1)
+        self.send_event(name, "SubagentStop", agent_id="worker")
+        self.counts(self.row(name), 0, 1, 1)
+        self.assertNotIn("display_state", self.binding(name)["subagents"]["worker"])
+
+    def test_unknown_child_status_is_not_reported_as_completed(self):
+        name = self.start("codex")
+        self.send_event(name, "SubagentStart", agent_id="worker", agent_type="Research")
+        self.send_event(name, "Interrupt", agent_id="worker", error_message="Provider disconnected")
         row = self.row(name)
         child = self.preview(row, "worker")
         self.assertEqual(child["state"], "unknown")
         self.assertIn("Provider disconnected", child["detail"])
         self.assertEqual(row["subagent_completed_count"], 0)
         self.assertEqual(row["subagent_total_count"], 1)
-        self.hgs("pause", name, rc=1)
+        # Unknown is not current work: the finished parent is Ready.
+        self.send_event(name, "Stop", last_assistant_message="Done")
+        self.assertEqual(self.binding(name)["activity"], "idle")
         self.send_event(name, "SubagentStop", agent_id="worker")
         self.counts(self.row(name), 0, 1, 1)
 

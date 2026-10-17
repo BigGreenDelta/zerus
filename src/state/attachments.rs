@@ -232,6 +232,20 @@ pub(super) fn graph_receipt(record: &Value, id: &str) -> Result<Value> {
     )
 }
 
+/// Body-free proof that a result was actually submitted to the exact waiter.
+/// A scoped reply ticket declares its meaning; this receipt proves delivery.
+pub(super) fn wait_result(waiter: &Value, id: &str, after: f64) -> Result<Value> {
+    let request = uuid::Uuid::parse_str(id).map_err(|_| "Invalid result request UUID")?;
+    if request.is_nil() || request.to_string()!=id {return Err("Invalid result request UUID".into());}
+    let record=json!({"agent":waiter["endpoint"]["provider"],"run_id":waiter["run_id"],"conversation_id":waiter["endpoint"]["conversation"]});
+    let value=receipt(&directory(&record).join(format!("{id}.json")))?;
+    let at=value.get("submitted_at").or_else(||value.get("at")).and_then(Value::as_f64).filter(|at|at.is_finite() && *at>=after);
+    if !belongs(&value,&record,"") || value["request_id"]!=id || value["run_id"]!=record["run_id"] || at.is_none() {
+        return Err("Result delivery is not confirmed for this exact wait; preserve the wait and check the original send".into());
+    }
+    Ok(json!({"request_id":id,"submitted_at":at}))
+}
+
 pub(super) fn stage_native(request: &Value) -> Result<Value> {
     if request["attachments"].is_null() {
         return Ok(json!([]));

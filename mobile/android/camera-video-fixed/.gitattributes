@@ -1,0 +1,6 @@
+# Keep source and fixture digests reproducible across checkout platforms.
+* text eol=lf
+# Preserve pinned upstream data and the exact-preimage patch verbatim.
+LICENSE.txt -text -whitespace
+upstream.module.json -text
+patches/*.patch -text -whitespace

@@ -436,6 +436,9 @@ download a model and never falls back to another provider.
 
 On desktop, use **Voice** in the message toolbar. Tap to switch voice/video,
 hold to record, release to send, drag up to lock or release outside to cancel.
+Enable **Preview before sending** in Voice input settings to keep both audio
+and video for a separate Send instead. The setting is local to this device and
+applies to the next recording; existing drafts and deliveries are unchanged.
 Stop a locked recording to review it with **Play**, **Discard** or **Send**. Audio recordings
 are limited to two minutes and remain separate from the typed draft. Capture
 opens the local microphone without waiting for speech computers or providers.
@@ -599,6 +602,10 @@ their parent session active. Drafts and explicit review-later reminders remain
 active offline; stale work alone does not. Archives stay in Archive. Active also
 applies to desktop content search, and the Dashboard's Active counter opens this
 same filter. Creating, clearing or sending a draft updates the filter and count.
+Cards with an unsent draft have a blue edge in the Draft color, including the
+open conversation, offline sessions and Saved drafts inspection. Collapsed tiles use
+the same color around their frame. Attention and errors retain their warning
+colors; working indicators and unread identity remain unchanged.
 
 The **+** in the session list header opens **New session**, like the one in the
 side rail. The button beside **⋯** collapses the list into a strip. Every project
@@ -863,11 +870,24 @@ recently edited drafts first; each row names the draft's session and computer
 (and whether it is a subagent message, question answer or voice message), with
 its time and first line. **Go to session** opens the session that owns the
 selected draft, or its subagent, while that session is in the session list.
-Rows have visible outlines and spacing in both desktop themes; hovering and
-selection use the workspace colors. The preview follows the same theme.
+Double-clicking a draft opens the same owning session; unavailable sessions
+remain in the draft browser for preview, copying or explicit restoration.
+Rows reuse the Sessions cards, including provider and computer badges, with
+the last-edited date beside the model footer. Long fields stay within the card;
+rows have no hover tooltip because the selected draft's full text appears in
+the preview below. Both desktop themes use the workspace colors. Metadata uses
+separate fields or slashes, without dot separators.
 Copying keeps the dialog open; restoring never sends anything and replacing an
 existing draft requires confirmation. A source draft remains available after
 copying it to another session.
+
+Independent sessions can explicitly declare **Waiting for acceptance** and
+**Waiting for result** through `hgs wait`. The idle card names the producer and
+computer and shows elapsed time; the session stays in Active. Native work and
+attention take precedence, while reply-only completion badges wait. Settlement requires the scoped reply ticket
+and, for a result, a confirmed delivery receipt in the exact waiting conversation.
+The durable journal has bounded previews and stable pages. See
+[Agent coordination](agent-coordination.md).
 Confirmed sends clear the outgoing draft; failures retain it. After an interrupted
 or uncertain send, check Activity or Terminal before explicitly allowing another
 send. Saving failures are shown in the editor and retried locally; sending starts
@@ -1298,8 +1318,13 @@ prompt. Ready does not complete a goal.
 
 Subagents open their own Activity and return through **Main activity**, preserving
 the parent's draft. Individual child IDs and profile groups are distinguished;
-unknown counts remain unknown. Ordinary child results/errors stay out of the
-attention count, while explicit input/approval requests remain visible. DeepSeek
+unknown counts remain unknown. An unknown child never keeps its parent from Ready.
+A Claude child that stops on a provider error, such as a usage limit, gets no
+SubagentStop: its StopFailure, or a `failed` entry for its current start in the
+workflow journal with no newer child event, settles it as **Error** with that
+message, and a later event of the same child resumes it. Ordinary child
+results/errors stay out of the attention count, while explicit input/approval
+requests remain visible. DeepSeek
 continuable children can receive messages through the native API with parent
 verification; other adapters and one-shot children may expose history only.
 The expanded session tree hides children whose latest reported turn is finished
@@ -1383,15 +1408,22 @@ catalog assignments and unresolved conflicts remain available for review.
 
 Folder entries contain a machine, path and optional label. Browse works for local
 and remote folders, including ordinary non-Git directories. The desktop folder
-browser offers **New folder…** on the selected remote computer. Enter a new
-folder path and explicitly choose **Create folder**; the parent must already
-exist. A missing path entered in the browser is carried into that form. Once
+browser offers **New folder** on the selected remote computer. Enter only the
+child folder name directly in the list and press **Create** or Enter; Escape
+cancels the inline entry. The list context menu and Ctrl+Shift+N (Command+Shift+N
+on macOS) open the same entry. The arrow beside **New folder** offers a separate
+name-only dialog with the parent shown above it. A missing path entered in the
+browser supplies that form's parent and initial name; the parent must already
+exist. Once
 creation is confirmed, choose **Use this folder** to select it for the project
 or session. Browsing and cancelling the creation form do not create anything,
 and existing paths are never replaced. This requires an updated `hgs` on the
 selected computer; older peers can still browse existing folders. If creation
-cannot be confirmed, open the path with **Go** before deciding whether to try
-again. Creating a folder does not initialize Git or start an agent.
+cannot be confirmed, the browser checks that exact path without repeating
+creation. An available folder can be selected immediately, including an empty
+folder or one that already existed; an unsuccessful check retains the creation
+error and **Go** remains available. Creating a folder does not initialize Git
+or start an agent.
 
 The CLI equivalent is `hgs [@host] dirs --create <path> [--request-id UUID]`.
 It creates one directory and returns the canonical path plus the exact request
@@ -1490,7 +1522,10 @@ sync service. Windows has no service manager for the worker; the desktop app run
 it there ([Windows](#windows)).
 
 **Swarm → Conflicts** explains the affected session, archived session, project or
-folder. Compare the values and the computers that saved them. **Shown now** marks
+folder. Compare the values and the computers that saved them: projects, project
+names and colors appear as the project labels and computers as the machine badges
+used elsewhere, with **this computer** beside this desktop's badge. A computer the
+catalog does not list stays text with its identifier. **Shown now** marks
 the temporary display choice; it does not mean the conflict has been resolved.
 Select a row to preview the result, then use **Keep this project** or the matching
 action. Project assignments change catalog placement without restarting agents
@@ -1762,7 +1797,9 @@ Zerus lists a machine's sessions and connection state under its alias, even when
 that machine calls itself something else (its `HGS_SELF` or host name).
 
 Multiple machine filters narrow both sessions and content search. Label color,
-Bright/Soft mode and appearance previews are local. **All machines** clears the
+Bright/Soft mode and appearance previews are local. Color pickers cancel on an
+outside click or Escape; only explicit confirmation saves a color. Project
+color changes remain staged until **Apply**. **All machines** clears the
 restriction. A temporary connectivity error retains the last snapshot and makes
 unavailable controls explicit.
 
@@ -2523,29 +2560,17 @@ and the v2 Dev catalogs have no Windows artifact.
 
 ## JSON and external clients
 
-### Session and agent Graph
+### Retained session metadata API
 
-`hgs [@host] graph snapshot --json` reads a derived, host-owned metadata index.
-The desktop Graph destination combines saved conversation/run identities,
-archived bindings, persisted native child rosters, current native API children,
-confirmed forks and verified Zerus submission receipts. Cards reuse Sessions'
-status, provider, computer, branch, Draft and unread presentation. Search and
-project/machine filters keep cross-project neighbors visible as context. Archived
-sessions and completed children have explicit filters. A list provides the same
-inspection and exact-target actions without using the canvas.
+The desktop Graph destination has been [retired](retired-features/session-graph.md).
+Its last implementation is preserved by a named Git tag for a separate future
+iteration. The desktop no longer collects or renders Graph data.
 
-Dragging a node immediately resizes its project's region; overlap never changes
-project membership. Positions and camera are saved locally per device, including
-when a provisional native identity becomes confirmed. Refresh, filters and reopen
-do not rearrange manual positions. New nodes use free space. Fit changes only the
-camera; Arrange visible is explicit, has Undo and reserves hidden positions.
-
-The collector reads metadata rather than prompt bodies or provider transcripts.
-It never launches an agent, sends input or changes read marks. Source bindings are
-unchanged. Selection only inspects Graph. Open Activity performs a fresh native
-identity read before opening the exact current run, archive or child; old hosts
-without that read fail visibly. Graph can open an archive outside the currently
-loaded Archive page without listing the whole archive catalog.
+`hgs [@host] graph snapshot --json`, `graph changes --json` and `graph receipt
+--json` remain bounded native compatibility APIs for released clients. The
+host-owned metadata index covers exact saved conversation/run identities,
+archives, native children, confirmed forks and verified submission receipts.
+It does not change source bindings, send input or change read marks.
 
 Each call reads at most 32 new or changed metadata records and checks at most
 512 cached stamps, with a 2 MiB ordinary input budget and a
@@ -2575,19 +2600,13 @@ stores no message or attachment bodies, retains 30 days and cannot replay input.
 Old, uncertain or unattributed attempts remain explicit coverage gaps. Existing
 quoted message envelopes are not retrospectively treated as verified edges.
 
-One directed line aggregates distinct confirmed submissions between its endpoints;
-its inspector pages 50 receipts at a time. Submission does not imply a reply or
-completed work, and local timestamps do not establish cross-computer causal order.
-Unavailable computers remain boundary nodes with no borrowed actions. Explicit
-Open delivered message reads only the selected native receipt, not the transcript:
 `hgs [@host] graph receipt --json` accepts JSON stdin with `name`,
 `expected_run_id`, `expected_conversation_id`, `message_request_id` and optional
 `archive_id`. Every identity is checked again; the response contains one bounded
-public delivery event. Graph metadata polling never fetches message bodies.
-
-Desktop transport uses configured native hosts directly. The first desktop
-preview does not add an Android Graph destination or a mobile relay operation.
-
+public delivery event. Metadata reads never fetch provider transcript bodies.
+Submission does not imply a reply or completed work, and local timestamps do not
+establish cross-computer causal order. Independent-agent waits remain a separate
+explicit protocol; see [Agent coordination](agent-coordination.md).
 
 ### Existing session snapshots
 

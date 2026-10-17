@@ -738,6 +738,17 @@ class Journal:
         return self.query(f"PRAGMA {name}")[0][0]
 
 
+def journal_bytes(state_dir: Path) -> bytes:
+    """Every journal file's bytes, for scans for private text. A rollback
+    journal exists only during a transaction and may vanish meanwhile."""
+    found = []
+    for path in sorted(state_dir.iterdir()):
+        if path.name.startswith("journal"):
+            with contextlib.suppress(FileNotFoundError):
+                found.append(path.read_bytes())
+    return b"".join(found)
+
+
 @contextlib.contextmanager
 def stopped_journal(state_dir: Path):
     """A writable journal connection, only while no connector holds it. The

@@ -137,9 +137,10 @@ The **Android app** brings your projects and agents to your phone:
 
 Pair your phone with a computer to reach it and its directly connected Zerus peers
 through a **self-hostable HTTPS relay**. Notifications use Firebase Cloud Messaging,
-with a foreground live connection for phones without it. **iOS is planned.**
+with a foreground live connection for phones without it. A native **iOS app** with
+the same features is in development ([mobile/ios](mobile/ios/README.md)).
 
-[Download the Android APK](https://github.com/ufna/zerus/releases?q=android-dev-&expanded=true) |
+[Download the Android APK](https://zerus.dev/#download) |
 [Connect your phone](docs/mobile-deployment.md#pair-the-phone) |
 [Architecture and trust model](docs/mobile-architecture.md)
 
@@ -188,7 +189,8 @@ the window. [Integration details](docs/reference.md#deepseek).
 On Arch Linux x86_64, install the stable bundle with `yay -S zerus-ade-bin`, then
 run `zerus-setup` as your normal user.
 [Source and development packages](docs/installation.md#arch-linux) are also available.
-On Apple Silicon macOS, use the [signed DMG or Homebrew cask](docs/installation.md#macos-dmg).
+On Apple Silicon macOS, install with `brew install --cask ufna/zerus/zerus`, then
+run `zerus-setup`, or use the [signed DMG](docs/installation.md#macos-dmg).
 Other Linux distributions [build from source](docs/installation.md#local-installation);
 see [other platforms](#other-platforms).
 
@@ -206,7 +208,7 @@ hgs status                            # versions and running services here and t
 hgs a codex/orbit/api                  # attach from any terminal
 ```
 
-**On Android:** [download the APK](https://github.com/ufna/zerus/releases?q=android-dev-&expanded=true),
+**On Android:** [download the APK](https://zerus.dev/#download),
 then [pair your phone](docs/mobile-deployment.md#pair-the-phone).
 **Try demo** lets you explore the interface before connecting a computer.
 
@@ -218,12 +220,12 @@ the same installer. Zerus is open source: apt, dnf and other packages are welcom
 as pull requests.
 
 **macOS**: Apple Silicon Macs running macOS 14 or later can install a signed and
-notarized nightly from the [DMG](docs/installation.md#macos-dmg) or
+notarized stable release from the [DMG](docs/installation.md#macos-dmg) or
 [Homebrew tap](docs/installation.md#macos-homebrew):
-`brew install --cask ufna/zerus/zerus@nightly`, then `zerus-setup`.
-For Dev builds from successful main CI, use `ufna/zerus/zerus@dev` instead.
+`brew install --cask ufna/zerus/zerus`, then `zerus-setup`.
+Daily Nightly and successful main CI Dev builds use `ufna/zerus/zerus@nightly`
+and `ufna/zerus/zerus@dev`, respectively.
 **Settings > Updates** checks versions and provides the update command or DMG.
-The stable `zerus` cask will appear with the first signed stable release.
 Source builds remain available through the same installer.
 
 **Windows**: nightly releases include a portable x86_64

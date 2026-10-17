@@ -1,6 +1,8 @@
 #include <QtTest>
 #include "ProjectsDialog.h"
+#include "PopupMouse.h"
 #include <QInputDialog>
+#include <QColorDialog>
 #include <QCheckBox>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -23,6 +25,10 @@ class TestProjectsDialog : public QObject {
     Q_OBJECT
 private slots:
     void worktreeOverviewIsVisibleWithoutSelectingAProjectFolder();
+    void projectColorChangesRequireApply_data();
+    void projectColorChangesRequireApply();
+    void customProjectColorRemainsStaged_data();
+    void customProjectColorRemainsStaged();
     void emptyListContextCreatesProject();
     void sortingKeepsFolderIdentityAndLaunchTarget();
     void folderTransfersKeepMenuTargetsAndPersist_data();
@@ -39,6 +45,83 @@ private slots:
     void warnsOnDotOrColon();
     void nameDefaultsToBasename();
 };
+
+void TestProjectsDialog::projectColorChangesRequireApply_data()
+{
+    QTest::addColumn<QString>("action");
+    for(const auto &action:{"outside","escape","cancel","apply"})QTest::newRow(action)<<QString(action);
+}
+void TestProjectsDialog::projectColorChangesRequireApply()
+{
+    QFETCH(QString,action);
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-color-test");QCoreApplication::setApplicationName("projects");
+    SessionOrganization projects;const auto id=projects.createGroup("Work");
+    const auto original=projects.group(id)->color;const bool vivid=projects.group(id)->vivid;
+    HgsClient client("/nonexistent/hgs");ProjectsDialog view(&client,nullptr,false,&projects);view.resize(900,650);view.selectProject(id);view.show();QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QSignalSpy changed(&view,&ProjectsDialog::organizationChanged);bool expired=false,handled=false;
+    QTimer::singleShot(0,&view,[&]{
+        auto *dialog=view.findChild<QDialog *>("projectColorDialog");QVERIFY(dialog);
+        QTimer::singleShot(5000,dialog,[&,dialog]{expired=true;dialog->reject();});
+        dialog->findChild<QLineEdit *>("projectColorHex")->setText("#e05999");
+        dialog->findChild<QComboBox *>("projectColorStyle")->setCurrentIndex(vivid?0:1);
+        QCOMPARE(projects.group(id)->color,original);QCOMPARE(changed.size(),0);
+        auto *buttons=dialog->findChild<QDialogButtonBox *>();
+        if(action=="outside"){
+            const QPoint point(view.width()-8,view.height()-8);QVERIFY(!dialog->frameGeometry().contains(view.mapToGlobal(point)));
+            QVERIFY(PopupMouse::click(&view,Qt::LeftButton,point));
+        }else if(action=="escape")QTest::keyClick(dialog,Qt::Key_Escape);
+        else buttons->button(action=="apply"?QDialogButtonBox::Apply:QDialogButtonBox::Cancel)->click();
+        QTRY_VERIFY(!dialog->isVisible());handled=true;
+    });
+    view.findChild<QPushButton *>("projectColor")->click();QVERIFY(handled);QVERIFY(!expired);
+    QCOMPARE(projects.group(id)->color,action=="apply"?QString("#e05999"):original);
+    QCOMPARE(projects.group(id)->vivid,action=="apply"?!vivid:vivid);QCOMPARE(changed.size(),action=="apply"?1:0);
+    QVERIFY(view.isVisible());
+}
+
+void TestProjectsDialog::customProjectColorRemainsStaged_data()
+{
+    QTest::addColumn<bool>("acceptPicker");QTest::addColumn<bool>("applyProject");
+    QTest::newRow("outside-picker-then-apply")<<false<<true;
+    QTest::newRow("accept-picker-then-cancel")<<true<<false;
+    QTest::newRow("accept-picker-then-apply")<<true<<true;
+}
+void TestProjectsDialog::customProjectColorRemainsStaged()
+{
+    QFETCH(bool,acceptPicker);QFETCH(bool,applyProject);
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-color-test");QCoreApplication::setApplicationName("projects");
+    SessionOrganization projects;const auto id=projects.createGroup("Work");const auto original=projects.group(id)->color;
+    HgsClient client("/nonexistent/hgs");ProjectsDialog view(&client,nullptr,false,&projects);view.resize(900,650);view.selectProject(id);view.show();QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QSignalSpy changed(&view,&ProjectsDialog::organizationChanged);bool expired=false,handled=false;
+    QTimer::singleShot(0,&view,[&]{
+        auto *dialog=view.findChild<QDialog *>("projectColorDialog");QVERIFY(dialog);
+        QTimer::singleShot(10000,dialog,[&,dialog]{expired=true;dialog->reject();});
+        auto *hex=dialog->findChild<QLineEdit *>("projectColorHex");hex->setText("#2299aa");
+        QTimer::singleShot(0,dialog,[&,dialog]{
+            auto *picker=dialog->findChild<QColorDialog *>();QVERIFY(picker);
+            QTimer::singleShot(5000,picker,[&,picker]{expired=true;picker->reject();});
+            picker->setCurrentColor(QColor("#ee55aa"));
+            if(acceptPicker)picker->accept();
+            else{
+                picker->move(dialog->frameGeometry().right()+15,dialog->frameGeometry().top());
+                const QPoint point(8,8);QVERIFY(!picker->frameGeometry().contains(dialog->mapToGlobal(point)));
+                QVERIFY(PopupMouse::click(dialog,Qt::LeftButton,point));
+            }
+            QTRY_VERIFY(!picker->isVisible());
+        });
+        dialog->findChild<QPushButton *>("projectCustomColor")->click();QVERIFY(!expired);QVERIFY(dialog->isVisible());
+        QCOMPARE(hex->text(),acceptPicker?QString("#ee55aa"):QString("#2299aa"));
+        QCOMPARE(projects.group(id)->color,original);QCOMPARE(changed.size(),0);
+        dialog->findChild<QDialogButtonBox *>()->button(applyProject?QDialogButtonBox::Apply:QDialogButtonBox::Cancel)->click();handled=true;
+    });
+    view.findChild<QPushButton *>("projectColor")->click();QVERIFY(handled);QVERIFY(!expired);
+    QCOMPARE(projects.group(id)->color,applyProject?(acceptPicker?QString("#ee55aa"):QString("#2299aa")):original);
+    QCOMPARE(changed.size(),applyProject?1:0);
+}
 
 void TestProjectsDialog::worktreeOverviewIsVisibleWithoutSelectingAProjectFolder()
 {
@@ -330,9 +413,8 @@ void TestProjectsDialog::emptyListContextCreatesProject()
     QVERIFY(std::any_of(projects.groups().cbegin(),projects.groups().cend(),[](const auto &p){return p.name=="Created from empty space";}));
     auto *item=list->currentItem();QVERIFY(item);list->customContextMenuRequested(list->visualItemRect(item).center());
     menu=qobject_cast<QMenu*>(QApplication::activePopupWidget());QVERIFY(menu);QCOMPARE(menu->actions().first()->objectName(),"addProjectAction");
-    QVERIFY(menu->findChild<QAction*>("addProjectAction"));QCOMPARE(menu->actions().size(),5);
-    auto *graph=menu->findChild<QAction*>("projectShowInGraph");QVERIFY(graph);QSignalSpy showGraph(&dialog,&ProjectsDialog::graphRequested);
-    graph->trigger();QCOMPARE(showGraph.size(),1);QCOMPARE(showGraph[0][0].toString(),item->data(Qt::UserRole).toString());menu->close();
+    QVERIFY(menu->findChild<QAction*>("addProjectAction"));QCOMPARE(menu->actions().size(),4);
+    QVERIFY(!menu->findChild<QAction*>("projectShowInGraph")); menu->close();
 }
 
 void TestProjectsDialog::acceptsPlainName()

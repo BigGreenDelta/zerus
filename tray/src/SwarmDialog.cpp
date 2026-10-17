@@ -89,6 +89,7 @@ void showSwarmDialog(HgsClient *client,SwarmController *controller,const FleetSt
     auto *conflictTitle=new QLabel(QObject::tr("These changes need your decision. Review one item at a time; each choice is shared with the swarm."));conflictTitle->setWordWrap(true);conflictLayout->addWidget(conflictTitle);
     auto *conflictSplit=new QSplitter;conflictSplit->setObjectName("swarmConflictSplit");conflictSplit->setHandleWidth(14);conflictLayout->addWidget(conflictSplit,1);
     auto *conflicts=new QListWidget;conflicts->setObjectName("swarmConflicts");conflicts->setWordWrap(true);conflicts->setResizeMode(QListView::Adjust);conflicts->setMinimumWidth(190);conflicts->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);conflicts->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);conflictSplit->addWidget(conflicts);
+    conflicts->setItemDelegate(SwarmConflictReview::createDelegate(conflicts));conflicts->setUniformItemSizes(false);
     auto *review=new SwarmConflictReview(fleet);review->setObjectName("swarmConflictDetails");conflictSplit->addWidget(review);conflictSplit->setChildrenCollapsible(false);conflictSplit->setStretchFactor(1,1);conflictSplit->setSizes({210,480});
     conflictStack->addWidget(conflictPage);
     const int conflictTab=tabs->addTab(conflictStack,QObject::tr("Conflicts (0)"));
@@ -136,7 +137,7 @@ void showSwarmDialog(HgsClient *client,SwarmController *controller,const FleetSt
         const auto selectedConflict=conflicts->currentItem()?conflicts->currentItem()->data(Qt::UserRole).toString():QString();
         conflictSnapshot=snapshot;conflictData=snapshot.value("conflicts").toArray();conflicts->clear();
         for(const auto &entry:conflictData){const auto c=entry.toObject();
-            const auto label=review->conflictLabel(c,snapshot);auto *item=new QListWidgetItem(label,conflicts);item->setToolTip(label);item->setData(Qt::UserRole,c.value("key").toString());if(c.value("key").toString()==selectedConflict)conflicts->setCurrentItem(item);}
+            const auto label=review->conflictLabel(c,snapshot);auto *item=new QListWidgetItem(label,conflicts);item->setToolTip(label);item->setData(Qt::UserRole,c.value("key").toString());item->setData(SwarmConflictReview::PresentationRole,review->conflictPresentation(c,snapshot));if(c.value("key").toString()==selectedConflict)conflicts->setCurrentItem(item);}
         if(!conflicts->currentItem()&&conflicts->count())conflicts->setCurrentRow(0);
         review->setConflict(conflicts->currentRow()<0?QJsonObject{}:conflictData[conflicts->currentRow()].toObject(),snapshot);
         tabs->setTabText(conflictTab,QObject::tr("Conflicts (%1)").arg(conflicts->count()));

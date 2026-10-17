@@ -17,7 +17,19 @@ pub struct Push {
     store: Store,
     client: reqwest::Client,
     fcm: Option<Fcm>,
+    apns: Option<Apns>,
 }
+/// APNs token authentication: an ES256 provider token, refreshed well inside
+/// Apple's one-hour limit, for HTTP/2 requests to the production or sandbox host.
+struct Apns {
+    key_id: String,
+    team_id: String,
+    topic: String,
+    key: ring::signature::EcdsaKeyPair,
+    token: Mutex<Option<(String, Instant)>>,
+}
+/// iOS registrations: production builds and development (sandbox) builds.
+pub const APNS_PROVIDERS: [&str; 2] = ["apns", "apns_sandbox"];
 struct Fcm {
     email: String,
     project: String,
@@ -74,17 +86,67 @@ impl Push {
         } else {
             None
         };
-        Ok(Self { store, client, fcm })
+        let cfg = &store.db.cfg;
+        let apns = match (&cfg.apns_key, &cfg.apns_key_id, &cfg.apns_team_id) {
+            (Some(path), Some(key_id), Some(team_id)) => {
+                let mut pem = std::io::Cursor::new(read_private(Path::new(path), 16384)?);
+                let Some(rustls_pemfile::Item::Pkcs8Key(k)) = rustls_pemfile::read_one(&mut pem)?
+                else {
+                    return Err(Error::BAD);
+                };
+                let key = ring::signature::EcdsaKeyPair::from_pkcs8(
+                    &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+                    k.secret_pkcs8_der(),
+                    &ring::rand::SystemRandom::new(),
+                )
+                .map_err(|_| Error::BAD)?;
+                Some(Apns {
+                    key_id: key_id.clone(),
+                    team_id: team_id.clone(),
+                    topic: cfg
+                        .apns_topic
+                        .clone()
+                        .unwrap_or_else(|| "app.zerus.mobile".into()),
+                    key,
+                    token: Mutex::new(None),
+                })
+            }
+            _ => None,
+        };
+        Ok(Self {
+            store,
+            client,
+            fcm,
+            apns,
+        })
     }
     pub fn fcm_enabled(&self) -> bool {
         self.fcm.is_some()
     }
+    pub fn apns_enabled(&self) -> bool {
+        self.apns.is_some()
+    }
     pub fn providers(&self) -> Vec<&str> {
+        let mut providers = vec![];
         if self.fcm.is_some() {
-            vec!["fcm"]
-        } else {
-            vec![]
+            providers.push("fcm");
         }
+        if self.apns.is_some() {
+            providers.extend(APNS_PROVIDERS);
+        }
+        providers
+    }
+    async fn apns_token(&self, apns: &Apns) -> Result<String> {
+        let mut cache = apns.token.lock().await;
+        if let Some((t, expires)) = &*cache {
+            if *expires > Instant::now() {
+                return Ok(t.clone());
+            }
+        }
+        let token = apns_jwt(&apns.key, &apns.key_id, &apns.team_id, now() as u64)?;
+        // Apple rejects tokens older than an hour and throttles refreshes faster than 20 minutes.
+        *cache = Some((token.clone(), Instant::now() + Duration::from_secs(40 * 60)));
+        Ok(token)
     }
     async fn oauth(&self, fcm: &Fcm) -> Result<String> {
         let mut cache = fcm.token.lock().await;
@@ -176,8 +238,43 @@ impl Push {
                 return Ok((false, fcm_unregistered(&body)));
             }
         }
+        if let (Some(apns), true) = (&self.apns, APNS_PROVIDERS.contains(&provider)) {
+            let host = if provider == "apns" {
+                "api.push.apple.com"
+            } else {
+                "api.sandbox.push.apple.com"
+            };
+            let token = self.apns_token(apns).await?;
+            let response = self
+                .client
+                .post(format!("https://{host}/3/device/{target}"))
+                .bearer_auth(token)
+                .header("apns-topic", &apns.topic)
+                .header("apns-push-type", "alert")
+                .header("apns-priority", "10")
+                .header("apns-expiration", (now() as u64 + 300).to_string())
+                .header("apns-collapse-id", "zerus-wake")
+                .json(&apns_message(payload)?)
+                .send()
+                .await
+                .map_err(|_| Error::UNAVAILABLE)?;
+            let status = response.status().as_u16();
+            if status == 200 {
+                return Ok((true, false));
+            }
+            let body = bounded_response(response, 4096).await.unwrap_or_default();
+            let reason = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let reason = reason["reason"].as_str().unwrap_or("");
+            if status == 403 && matches!(reason, "ExpiredProviderToken" | "InvalidProviderToken") {
+                *apns.token.lock().await = None;
+            }
+            return Ok((false, apns_unregistered(status, reason)));
+        }
         // Registrations from retired providers such as UnifiedPush can never deliver.
-        Ok((false, provider != "fcm"))
+        Ok((
+            false,
+            provider != "fcm" && !APNS_PROVIDERS.contains(&provider),
+        ))
     }
     async fn one(&self, job: Value) -> Result<()> {
         let registration = self.store.push_registration(s(&job, "device_id")).await?;
@@ -216,6 +313,56 @@ pub fn fcm_message(target: &str, payload: &Value) -> Result<Value> {
         );
     }
     Ok(json!({"message":{"token":target,"data":data,"android":{"priority":"high","ttl":"300s"}}}))
+}
+/// The APNs alert for one wake. Its visible text is fixed and generic; the app
+/// decides any detailed local card after authenticated reads.
+pub fn apns_message(payload: &Value) -> Result<Value> {
+    let data = payload.as_object().ok_or(Error::BAD)?;
+    Ok(json!({
+        "aps": {
+            "alert": {"title": "Zerus", "body": "New session activity."},
+            "sound": "default",
+            "thread-id": "zerus-wake",
+            "mutable-content": 1,
+            "content-available": 1
+        },
+        "zerus": data
+    }))
+}
+/// An ES256 APNs provider token for `iat` (seconds since the epoch).
+pub fn apns_jwt(
+    key: &ring::signature::EcdsaKeyPair,
+    key_id: &str,
+    team_id: &str,
+    iat: u64,
+) -> Result<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let header = serde_json::to_vec(&json!({"alg": "ES256", "kid": key_id}))?;
+    let claims = serde_json::to_vec(&json!({"iss": team_id, "iat": iat}))?;
+    let message = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header),
+        URL_SAFE_NO_PAD.encode(claims)
+    );
+    let signature = key
+        .sign(&ring::rand::SystemRandom::new(), message.as_bytes())
+        .map_err(|_| Error::BAD)?;
+    Ok(format!(
+        "{message}.{}",
+        URL_SAFE_NO_PAD.encode(signature.as_ref())
+    ))
+}
+/// Whether an APNs response says the device token can never be delivered again.
+pub fn apns_unregistered(status: u16, reason: &str) -> bool {
+    status == 410
+        || (status == 400 && matches!(reason, "BadDeviceToken" | "DeviceTokenNotForTopic"))
+}
+/// A device token as iOS reports it: hexadecimal, normalized to lowercase.
+pub fn apns_token(value: &str) -> Option<String> {
+    ((64..=200).contains(&value.len())
+        && value.len() % 2 == 0
+        && value.bytes().all(|b| b.is_ascii_hexdigit()))
+    .then(|| value.to_ascii_lowercase())
 }
 /// Whether an FCM error response says the registration token is gone.
 pub fn fcm_unregistered(body: &Value) -> bool {

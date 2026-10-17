@@ -112,6 +112,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.scheduledJobs = schedules.value("count").toInt(-1);
     s.recurringSchedules = schedules.value("recurring").toInt(-1);
     s.nextScheduledAt = schedules.value("next_at").toDouble();
+    s.coordinationWait = obj.value("coordination_wait").toObject();
     const auto work = obj.value("process_work").toObject();
     s.backgroundProcesses = work.value("count").toInt(-1);
     s.backgroundStarted = work.value("started_at").toDouble();
@@ -481,59 +482,6 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
         }, [this, request](const QString &, const QString &error) { emit swarmFailed(request, error); },
         input.isEmpty() ? QByteArray() : QJsonDocument(input).toJson(QJsonDocument::Compact));
     return request;
-}
-
-quint64 HgsClient::requestGraph(const QString &host,bool changes,const QString &cursor)
-{
-    const auto request=++m_graphRequest;
-    if(cursor.size()>2048 || cursor.contains(QChar::Null) || host.contains(QChar::Null)) {
-        QTimer::singleShot(0,this,[this,request,host]{emit graphFailed(request,host,tr("Invalid graph request"));});
-        return request;
-    }
-    // --json is mandatory even on an old CLI: its generic launch parser rejects
-    // this option before resolving a folder or creating a session.
-    QStringList args{"graph",changes?"changes":"snapshot","--json","--limit","200"};
-    if(!cursor.isEmpty())args<< (changes?"--after":"--cursor") <<cursor;
-    if(!host.isEmpty())args.prepend('@'+host);
-    runHgs(m_hgs,args,host.isEmpty()?6000:15000,this,
-        [this,request,host](const QByteArray &bytes){
-            QJsonParseError error;
-            const auto document=bytes.size()<=1024*1024?QJsonDocument::fromJson(bytes,&error):QJsonDocument();
-            if(document.isNull()||!document.isObject()||error.error!=QJsonParseError::NoError)
-                emit graphFailed(request,host,tr("This computer returned an invalid graph response"));
-            else emit graphReady(request,host,document.object());
-        },[this,request,host](const QString &,const QString &error){emit graphFailed(request,host,error);});
-    return request;
-}
-
-quint64 HgsClient::requestGraphTarget(const QString &host,const QString &name,const QString &run,const QString &conversation,
-    const QString &archive,const QString &agent,const QString &machine,const QString &message)
-{
-    const auto id=++m_graphRequest;
-    QStringList args;QByteArray input;
-    if(message.isEmpty()){
-        args={"reference",name,"--json","--run",run,"--conversation",conversation};
-        if(!archive.isEmpty())args<<"--archive"<<archive;if(!agent.isEmpty())args<<"--agent"<<agent;
-    }else{
-        args={"graph","receipt","--json"};
-        input=QJsonDocument(QJsonObject{{"name",name},{"expected_run_id",run},{"expected_conversation_id",conversation},
-            {"archive_id",archive},{"message_request_id",message}}).toJson(QJsonDocument::Compact);
-    }
-    if(!host.isEmpty())args.prepend('@'+host);
-    runHgs(m_hgs,args,host.isEmpty()?15000:25000,this,
-        [this,id,name,run,conversation,archive,agent,machine,message](const QByteArray&out){
-            QJsonParseError error;const auto doc=out.size()<=256*1024?QJsonDocument::fromJson(out,&error):QJsonDocument();const auto data=doc.object();
-            if(doc.isNull()||!doc.isObject()||error.error!=QJsonParseError::NoError||data["schema"]!=1||data["name"]!=name||data["run_id"]!=run||
-                data["conversation_id"]!=conversation||data["archive_id"].toString()!=archive||data["machine_id"]!=machine||
-                (message.isEmpty()?data["agent_id"].toString()!=agent:data["message_request_id"]!=message)){
-                emit graphTargetFailed(id,tr("The exact Graph target could not be verified. Refresh Graph."));return;
-            }
-            if(!message.isEmpty()&&(!data["event"].isObject()||data["event"].toObject()["message_id"]!=message||data["event"].toObject()["source"]!="hgs_delivery")){
-                emit graphTargetFailed(id,tr("This delivery receipt is unavailable for the exact conversation."));return;
-            }
-            emit graphTargetReady(id,data);
-        },[this,id](const QString&,const QString&error){emit graphTargetFailed(id,error);},input);
-    return id;
 }
 
 quint64 HgsClient::requestSessionHost(const QString &action)

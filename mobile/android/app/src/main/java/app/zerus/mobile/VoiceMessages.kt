@@ -38,7 +38,7 @@ internal data class VoiceOutgoing(val id: String, val target: Target, val machin
     }
 }
 internal data class VoiceState(val selection: SpeechSelection = SpeechSelection(), val draft: VoiceDraft? = null,
-    val outgoing: List<VoiceOutgoing> = emptyList(), val videoMode: Boolean = false)
+    val outgoing: List<VoiceOutgoing> = emptyList(), val videoMode: Boolean = false, val previewBeforeSend: Boolean = false)
 
 object VoiceProtocol {
     val operations = setOf("voice_profiles", "voice_submit", "voice_status", "voice_cancel")
@@ -158,6 +158,7 @@ internal object VoiceCodec {
         Attachment.fromJson(raw.getJSONObject("audio")), raw.getInt("duration_ms"), raw.getDouble("created"), SpeechProtocol.revision(raw), raw.optJSONObject("video")?.let(VideoProtocol::draft))
     fun encode(value: VoiceState) = JSONObject().put("schema", 1)
         .put("selection", SpeechProtocol.encode(SpeechState(value.selection)).getJSONObject("selection")).put("video_mode", value.videoMode)
+        .put("preview_before_send", value.previewBeforeSend)
         .put("draft", value.draft?.let(::draft)).put("outgoing", JSONArray(value.outgoing.map { entry ->
             MessageCodec.targetJson(entry.target).put("id", entry.id).put("machine", entry.machineId).put("profile", entry.profileId).put("profile_revision", entry.profileRevision)
                 .put("audio", entry.audio?.toJson()).put("duration_ms", entry.durationMs).put("created", entry.createdAt)
@@ -174,7 +175,7 @@ internal object VoiceCodec {
                 val message = row.optJSONObject("message")?.let { VoiceProtocol.response(JSONObject().put("schema", 1).put("message", it), target, id) }
                 VoiceOutgoing(id, target, row.getString("machine"), row.getString("profile"), row.optJSONObject("audio")?.let(Attachment::fromJson),
                     row.getInt("duration_ms"), row.getDouble("created"), message, row.getString("upload_state"), row.string("error"), SpeechProtocol.revision(row), row.optJSONObject("video")?.let(VideoProtocol::draft)).recover()
-            }.also { require(it.map(VoiceOutgoing::id).distinct().size == it.size) }, raw.optBoolean("video_mode"))
+            }.also { require(it.map(VoiceOutgoing::id).distinct().size == it.size) }, raw.optBoolean("video_mode"), raw.optBoolean("preview_before_send"))
     }
 }
 

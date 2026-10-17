@@ -28,6 +28,7 @@ internal class SpeechController(private val context: Context, private val model:
     private var value by mutableStateOf(VoiceState())
     val selection get() = value.selection
     val videoMode get() = value.videoMode
+    val previewBeforeSend get() = value.previewBeforeSend
     val draft get() = value.draft
     val outgoing get() = value.outgoing
     val recorded get() = draft != null
@@ -47,12 +48,13 @@ internal class SpeechController(private val context: Context, private val model:
     var legacyResult by mutableStateOf<SpeechAttempt?>(null); private set
     val busy get() = recording || savingRecording || activeRequests.isNotEmpty()
     private class Capture(val id: Long, val recorder: CaptureDevice, val feedback: VoiceCaptureFeedback, val gesture: Boolean,
-        val target: Target, val machine: String, val profile: String, val revision: Long?) {
+        val target: Target, val machine: String, val profile: String, val revision: Long?, val previewBeforeSend: Boolean) {
         var discarded = false; var stopping = false; var sendWhenSaved = false; var finishNotice = ""
     }
     private var capture: Capture? = null
     private var captureSequence = 0L
     val activeCaptureId get() = capture?.id.takeIf { recording }
+    val captureNeedsPreview get() = capture?.previewBeforeSend == true
     var recordingLocked by mutableStateOf(false); private set
     var videoRecorder by mutableStateOf<RoundVideoRecorder?>(null); private set
     val touchRecording get() = recording && capture?.gesture == true && !recordingLocked
@@ -188,6 +190,11 @@ internal class SpeechController(private val context: Context, private val model:
         value = value.copy(videoMode = !value.videoMode)
         scope.launch { runCatching { persist() }.onFailure { notice = "Could not save the recording mode." } }
     }
+    fun setPreviewBeforeSend(enabled: Boolean) {
+        if (!ready || recording || savingRecording || model.updateInstallPreparing || enabled == value.previewBeforeSend) return
+        value = value.copy(previewBeforeSend = enabled)
+        scope.launch { runCatching { persist() }.onFailure { notice = "Could not save the recording preview preference." } }
+    }
     fun start(target: Target, feedback: (VoiceCaptureFeedback.Event) -> Unit = {}): Long? = start(target, gesture = false, feedback)
     fun startGesture(target: Target, feedback: (VoiceCaptureFeedback.Event) -> Unit = {}): Long? = start(target, gesture = true, feedback)
     fun startVideo(target: Target, gesture: Boolean, recorder: RoundVideoRecorder, feedback: (VoiceCaptureFeedback.Event) -> Unit = {}): Long? =
@@ -201,7 +208,7 @@ internal class SpeechController(private val context: Context, private val model:
         val profileRevision = if (profileTarget == target && !loading && profile != null) profile?.profileRevision else selection.profileRevision
         model.attachments.stopAudio()
         seconds = 0; elapsedMs = 0; notice = ""; captureFailure = null; recording = true
-        val owned = Capture(++captureSequence, device, VoiceCaptureFeedback(feedback), gesture, target, machine, profileId, profileRevision); capture = owned
+        val owned = Capture(++captureSequence, device, VoiceCaptureFeedback(feedback), gesture, target, machine, profileId, profileRevision, previewBeforeSend); capture = owned
         recordingLocked = !gesture; videoRecorder = device as? RoundVideoRecorder
         gestureCaptureId = owned.id.takeIf { gesture }; gestureCancelProgress = 0f; gestureLockProgress = 0f
         scope.launch {
@@ -263,6 +270,9 @@ internal class SpeechController(private val context: Context, private val model:
     }
     fun sendCapture(id: Long) {
         val owned = capture?.takeIf { it.id == id && recording && !it.discarded && !it.stopping } ?: return
+        // Both media types use the preference captured before recording started.
+        // Only the retained preview's separate Send can authorize delivery in this mode.
+        if (owned.previewBeforeSend) { stopCapture(id); return }
         val profile = computers.find { it.id == owned.machine }?.profiles?.find { it.id == owned.profile }
         // The explicit send gesture cannot be revived by a later discovery result.
         owned.sendWhenSaved = profileTarget == owned.target && !loading && profile?.available == true && profile.profileRevision == owned.revision

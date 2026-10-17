@@ -56,7 +56,6 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
-#include "GraphWorkspace.h"
 #include "ProcessView.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
@@ -88,6 +87,8 @@
 #include "WorktreePanel.h"
 #include "AccountUsageStore.h"
 #include "MachinesPage.h"
+#include "WorkspaceColorDialog.h"
+#include "PopupMouse.h"
 #include "AccountsPage.h"
 #include "FakeCli.h"
 #include "LaunchWarnings.h"
@@ -200,6 +201,8 @@ private slots:
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
     void updatesEntryOpensExactSettingsPage();
     void fileCacheSettingsNavigation();
+    void colorPickerUsesWorkspaceThemeAndCancelsOutside_data();
+    void colorPickerUsesWorkspaceThemeAndCancelsOutside();
     void automaticApprovalSettingsNavigation_data();
     void automaticApprovalSettingsNavigation();
     void mobileConnectionSettingsOfferTheSharedDeliveryChoice();
@@ -216,11 +219,15 @@ private slots:
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
     void savedDraftsGoToTheirSession_data();
     void savedDraftsGoToTheirSession();
+    void independentWaitRemainsVisibleWithoutExpandingHeader_data();
+    void independentWaitRemainsVisibleWithoutExpandingHeader();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void groupsPersistFilterAndRevealAttention();
     void emptyProjectsSettingPreservesArchiveAndProjects();
     void contentScaleLeavesWorkspaceChrome();
     void activityReadingColumnFollowsSettingsAndEdges();
+    void activitySurfaceRemainsOpaque_data();
+    void activitySurfaceRemainsOpaque();
     void settingsSlidersResetToDefaults();
     void projectSwarmFollowsWorkspaceTheme();
     void alwaysOnTopSettingKeepsWindowAbove();
@@ -246,8 +253,7 @@ private slots:
     void projectFilterCombinesScopesCountsAndNavigation();
     void pagedArchiveSearchJoinsExactProjectBeforeFiltering();
     void projectHeaderFiltersOnlyThisProject();
-    void graphNavigationKeepsSharedCardsAndRejectsReusedRun();
-    void graphOpensExactArchiveOutsideLoadedPageAndPreservesLiveDraft();
+    void retiredGraphHasNoNavigationOrContextActions();
     void hiddenPagesRenderWhenShown();
     void pollsKeepUnchangedActivity();
     void multiSelectionKeepsConversationAndGroupMenu_data();
@@ -620,16 +626,45 @@ void TestSessionsWindow::workspaceRestoresDraftAcrossRestartAndSessionRemoval()
     restored.findChild<QPushButton *>("savedDrafts")->click();
 }
 
+void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark")<<QString("dark");QTest::newRow("light")<<QString("light");
+}
+void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside()
+{
+    QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);
+    SessionsWindow window(program());window.setFleet(fleet());window.resize(1100,760);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
+    WorkspaceColorDialog picker(QColor("#5c9abf"),&window);picker.setWindowTitle("Color (synthetic preview)");
+    bool expired=false,handled=false;
+    QTimer::singleShot(5000,&picker,[&]{expired=true;picker.reject();});
+    QTimer::singleShot(0,&picker,[&]{
+        QCOMPARE(picker.palette().color(QPalette::Window),QColor(theme=="dark"?"#161b21":"#f5f7f9"));
+        auto *buttons=picker.findChild<QDialogButtonBox *>();QVERIFY(buttons);
+        auto *cancel=buttons->button(QDialogButtonBox::Cancel);QVERIFY(cancel);
+        QTRY_VERIFY(cancel->geometry().left()>buttons->button(QDialogButtonBox::Ok)->geometry().right());
+        const auto previews=qEnvironmentVariable("HGS_COLOR_PICKER_PREVIEW");
+        if(!previews.isEmpty()){QDir().mkpath(previews);QVERIFY(picker.grab().save(previews+"/color-"+theme+".png"));}
+        const QPoint point(window.width()-8,window.height()-8);QVERIFY(!picker.frameGeometry().contains(window.mapToGlobal(point)));
+        QVERIFY(PopupMouse::click(&window,Qt::LeftButton,point));
+        QTRY_VERIFY(!picker.isVisible());handled=true;
+    });
+    QCOMPARE(picker.exec(),int(QDialog::Rejected));QVERIFY(handled);QVERIFY(!expired);QVERIFY(!picker.selectedColor().isValid());
+}
+
 void TestSessionsWindow::savedDraftsGoToTheirSession_data()
 {
     QTest::addColumn<QString>("theme");
-    QTest::newRow("dark") << QString("dark");
-    QTest::newRow("light") << QString("light");
+    QTest::addColumn<bool>("doubleClick");
+    QTest::newRow("dark") << QString("dark") << false;
+    QTest::newRow("light") << QString("light") << false;
+    QTest::newRow("dark-double-click") << QString("dark") << true;
+    QTest::newRow("light-double-click") << QString("light") << true;
 }
 
 void TestSessionsWindow::savedDraftsGoToTheirSession()
 {
-    QFETCH(QString, theme); QSettings().setValue("workspace/theme", theme);
+    QFETCH(QString, theme); QFETCH(bool, doubleClick); QSettings().setValue("workspace/theme", theme);
     auto state = fleet(); auto box = state.local();
     box.sessions[1].conversationId = "conversation-one"; box.sessions[1].subagentSource = "hooks";
     box.sessions[1].subagents = {{"worker", QJsonObject{{"name", "Worker"}, {"state", "working"}}}};
@@ -647,10 +682,19 @@ void TestSessionsWindow::savedDraftsGoToTheirSession()
         QTimer::singleShot(0, &window, [&, key, available] {
             auto *dialog = window.findChild<QDialog *>("savedDraftsDialog"); QVERIFY(dialog);
             auto *list = dialog->findChild<QListWidget *>("savedDraftList"); QTRY_COMPARE(list->count(), 3);
+            QVERIFY(dynamic_cast<SessionDelegate *>(list->itemDelegate()));
             for (int i = 0; i < list->count(); ++i) {
                 const auto *item = list->item(i);
                 QVERIFY(!item->text().section('\n', 0, 0).trimmed().isEmpty());
                 QVERIFY(list->visualItemRect(item).height() >= 2 * list->fontMetrics().height());
+                QVERIFY(item->toolTip().isEmpty());QVERIFY(!item->text().contains(QChar(0x00b7)));
+                QVERIFY(!item->data(SessionRoles::ModifiedAt).toString().isEmpty());
+                if(item->data(Qt::UserRole).toString()==remote){
+                    QCOMPARE(item->data(SessionRoles::Title).toString(),QString("review"));
+                    QCOMPARE(item->data(SessionRoles::Agent).toString(),QString("claude"));
+                    QCOMPARE(item->data(SessionRoles::Host).toString(),QString("mac"));
+                    QCOMPARE(item->data(SessionRoles::Model).toString(),state.peer("mac")->sessions[0].model);
+                }
             }
             list->setFocus(); list->setCurrentRow(0);
             QTest::keyClick(list, Qt::Key_Down); QCOMPARE(list->currentRow(), 1);
@@ -660,13 +704,22 @@ void TestSessionsWindow::savedDraftsGoToTheirSession()
             auto *open = dialog->findChild<QPushButton *>("openSavedDraftSession"); QCOMPARE(open->isEnabled(), available);
             const auto preview = qEnvironmentVariable("HGS_SAVED_DRAFTS_PREVIEW");
             if (key == ended && !preview.isEmpty()) {
+                dialog->setWindowTitle("Saved drafts (synthetic preview)");
                 QTRY_COMPARE(dialog->findChild<QPlainTextEdit *>("savedDraftPreview")->toPlainText(), QString("From an ended session"));
+                list->scrollToItem(list->currentItem());
                 QDir().mkpath(preview); QTest::qWait(50);
                 QVERIFY(dialog->grab().save(preview + "/drafts-" + theme + ".png"));
-                dialog->resize(620, 460); QTest::qWait(50);
+                dialog->resize(620, 460); list->scrollToItem(list->currentItem()); QTest::qWait(50);
                 QVERIFY(dialog->grab().save(preview + "/drafts-narrow-" + theme + ".png"));
             }
-            if (available) open->click(); else dialog->reject();
+            if (doubleClick) {
+                list->scrollToItem(list->currentItem());
+                const auto point = list->visualItemRect(list->currentItem()).center();
+                QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+                QTest::mouseDClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+                QCOMPARE(dialog->isVisible(), !available);
+                if (!available) dialog->reject();
+            } else if (available) open->click(); else dialog->reject();
         });
         window.findChild<QPushButton *>("savedDrafts")->click();
     };
@@ -679,6 +732,37 @@ void TestSessionsWindow::savedDraftsGoToTheirSession()
     QCOMPARE(window.findChild<SessionList *>("sessionList")->currentItem()->data(SessionRoles::ChildId).toString(), QString("worker"));
     choose(remote, true); QCOMPARE(composer->sessionKey(), remote);
     QVERIFY(window.findChild<SessionList *>("sessionList")->currentItem()->data(SessionRoles::ChildId).toString().isEmpty());
+}
+
+void TestSessionsWindow::independentWaitRemainsVisibleWithoutExpandingHeader_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark")<<QString("dark"); QTest::newRow("light")<<QString("light");
+}
+
+void TestSessionsWindow::independentWaitRemainsVisibleWithoutExpandingHeader()
+{
+    QFETCH(QString,theme); QSettings().setValue("workspace/theme",theme);
+    auto state=fleet(); auto box=state.local(); auto &s=box.sessions[0];
+    s.tracked=true; s.activity="idle"; s.phase="idle"; s.runId="waiting-run";s.conversationId="waiting-conversation";
+    s.backgroundProcesses=0;s.subagentActiveCount=0;s.subagentCount=0;
+    s.coordinationWait=QJsonObject{{"schema",1},{"status","ok"},{"revision",1},{"run_id",s.runId},{"conversation_id",s.conversationId},{"count",1},
+        {"items",QJsonArray{QJsonObject{{"state","awaiting_result"},{"created_at",QDateTime::currentSecsSinceEpoch()-300},
+            {"producer",QJsonObject{{"name","claude/project/worker-"+QString(100,'w')},{"host","peer"}}},{"label","Review the patch"}}}}};
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.resize(1000,800);window.setFleet(state);window.show();window.showSession({},s.name);
+    auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(list->currentItem());
+    QVERIFY(list->currentItem()->data(SessionRoles::Waiting).toBool());
+    QVERIFY(list->currentItem()->data(SessionRoles::Detail).toString().contains("Review the patch"));
+    auto *badge=window.findChild<QLabel *>("badge");QVERIFY(badge);
+    QTRY_VERIFY(badge->text().startsWith("Waiting for result ("));
+    QVERIFY(!badge->text().contains("worker"));
+    QVERIFY(window.width()<=1100);QVERIFY(badge->width()<=300);
+    const auto preview=qEnvironmentVariable("ZERUS_WAIT_QA_DIR");
+    if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(window.grab().save(preview+"/wait-"+theme+".png"));}
+    s.coordinationWait["revision"]=2;s.coordinationWait["count"]=0;s.coordinationWait["items"]=QJsonArray{};
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QVERIFY(!list->currentItem()->data(SessionRoles::Waiting).toBool());
 }
 
 void TestSessionsWindow::workingCardsKeepTurnClockAcrossUpdates()
@@ -734,7 +818,7 @@ void TestSessionsWindow::machineChooserCountsFollowStateScopeWithoutMachineOrTex
     local.sessions.append(archive); state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     BoxState empty; empty.host="empty"; empty.ok=true; state.setPeer(empty,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(state); window.show();
-    auto *filter=window.findChild<MachineFilter *>(); auto *menu=filter->button()->menu();
+    auto *filter=window.findChild<MachineFilter *>("machineFilterChips"); auto *menu=filter->button()->menu();
     menu->popup(window.mapToGlobal(QPoint(100,100))); QTRY_VERIFY(menu->isVisible());
     const auto count=[&](const QString &host) {
         for (auto *choice : menu->findChildren<QCheckBox *>("machineFilterChoice"))
@@ -755,117 +839,29 @@ void TestSessionsWindow::machineChooserCountsFollowStateScopeWithoutMachineOrTex
     QCOMPARE(count("@local"),3); QCOMPARE(count("mac"),1); QVERIFY(menu->isVisible()); menu->hide();
 }
 
-void TestSessionsWindow::graphNavigationKeepsSharedCardsAndRejectsReusedRun()
+void TestSessionsWindow::retiredGraphHasNoNavigationOrContextActions()
 {
-    FleetState state; auto local = fleet().local();
-    auto &session = local.sessions[0]; session.runId = "graph-run"; session.conversationId = "conversation-one";
-    session.gitBranch = "feat/graph"; session.cwd = "/work/project";
-    state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
-    const QString node = "node:" + QString(64, 'a'), binding = "binding:" + QString(64, 'b');
-    const QString machine = "11111111-1111-4111-8111-111111111111";
-    QJsonObject page{{"schema",1},{"machine_id",machine},
-        {"epoch",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"revision",2},{"cursor","end"},
-        {"has_more",false},{"reset_required",false},{"coverage",QJsonObject{{"bindings_complete",true}}},
-        {"items",QJsonArray{
-            QJsonObject{{"id",node},{"revision",1},{"deleted",false},{"item",QJsonObject{{"kind","node"},{"value",QJsonObject{
-                {"endpoint",QJsonObject{{"machine",machine},{"provider",session.cmd},{"namespace","default"},
-                    {"conversation",session.conversationId},{"provisional_run",""}}}}}}}},
-            QJsonObject{{"id",binding},{"revision",2},{"deleted",false},{"item",QJsonObject{{"kind","binding"},{"value",QJsonObject{
-                {"node",node},{"name",session.name},{"run_id",session.runId},{"conversation_id",session.conversationId},{"provider",session.cmd}}}}}}
-        }}};
-    QMap<QString,QJsonObject> sorted;
-    for (const auto &row : page["items"].toArray()) sorted[row.toObject()["id"].toString()]=row.toObject();
-    QJsonArray ordered; for (const auto &row : sorted) ordered.append(row); page["items"]=ordered;
-    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
-    const auto fixture = m_dir->filePath("graph-navigation");
-    const QByteArray answer = "elif c in ('graph','reference') and sys.argv[1].startswith('@'):\n sys.exit(1)\n"
-        "elif c=='graph':\n open(__file__+'.calls','a').write(json.dumps(sys.argv[1:])+'\\n')\n print(" +
-        FakeCli::pythonString(QString::fromUtf8(QJsonDocument(page).toJson(QJsonDocument::Compact))) + ")\n"+
-        "elif c=='reference':\n print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(QJsonObject{{"schema",1},{"machine_id",machine},{"name",session.name},{"run_id",session.runId},{"conversation_id",session.conversationId},{"archive_id",""},{"agent_id",""}}).toJson(QJsonDocument::Compact)))+")\n";
-    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
-    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window);
-    window.setFleet(state); window.resize(1100,760); window.show(); window.showSession({},session.name);
-    auto *list = window.findChild<SessionList *>("sessionList");
-    QVERIFY(list->currentItem());
+    SessionsWindow window(script()); keepDetailsPollsOut(window);
+    window.setFleet(fleet()); window.resize(1100,760); window.show();
+    const auto name=fleet().local().sessions[0].name; window.showSession({},name);
+    auto *list=window.findChild<SessionList *>("sessionList"); QVERIFY(list && list->currentItem());
     auto *composer=window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
-    setComposerText(composer,"Keep my graph draft");
-    QTRY_VERIFY(list->currentItem()->data(SessionRoles::Draft).toBool());
-    QMap<int,QVariant> roles;
-    for (const int role : {SessionRoles::Title,SessionRoles::Agent,SessionRoles::Host,SessionRoles::Status,
-            SessionRoles::Meta,SessionRoles::MetaIcon,SessionRoles::MachineColor,SessionRoles::Working,
-            SessionRoles::Unread,SessionRoles::Scheduled,SessionRoles::Draft}) roles[role]=list->currentItem()->data(role);
-    QVERIFY(!QFile::exists(fixture+".calls"));
-    auto *graph = window.findChild<GraphWorkspace *>(); QVERIFY(graph);
-    QPushButton *nav = nullptr;
-    for (auto *button : window.findChildren<QPushButton *>("railButton"))
-        if (button->property("glyph")=="graph") nav=button;
-    QVERIFY(nav); nav->click(); QTRY_VERIFY(graph->isVisible());
-    QTRY_COMPARE_WITH_TIMEOUT(graph->page()->canvas()->nodeCount(),1,10000);
-    auto *model = graph->page()->canvas()->nodeModel();
-    for (auto it=roles.cbegin();it!=roles.cend();++it) QCOMPARE(model->index(0,0).data(it.key()),it.value());
-    QSignalSpy read(&window,&SessionsWindow::replyViewed);
-    graph->page()->focusNode(node); QCoreApplication::processEvents(); QCOMPARE(read.size(),0);
-    if (qEnvironmentVariableIsSet("ZERUS_GRAPH_WORKSPACE_PREVIEW")) {
-        QTest::qWait(100);
-        QVERIFY(window.grab().save(qEnvironmentVariable("ZERUS_GRAPH_WORKSPACE_PREVIEW")+"-current.png"));
-    }
-    QVERIFY(graph->isVisible());
-    graph->openRequested({},session.name,"stale-run",session.conversationId,{},{});
-    QVERIFY(graph->isVisible());
-    auto *open = graph->findChild<QPushButton *>("graphOpenActivity"); QVERIFY(open);
-    QTRY_VERIFY(open->isEnabled()); QTest::mouseClick(open,Qt::LeftButton);
-    QTRY_VERIFY(!graph->isVisible()); QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(),'\n'+session.name);
-    QCOMPARE(composer->editor()->toPlainText(),QString("Keep my graph draft"));
-    nav->click(); QTRY_VERIFY(graph->isVisible());
-    local.sessions[0].runId="replacement"; state.setLocal(local,QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
-    graph->openRequested({},session.name,"graph-run",session.conversationId,{},{});
-    QVERIFY(graph->isVisible()); // Exact same name and conversation are not enough.
-    if (qEnvironmentVariableIsSet("ZERUS_GRAPH_WORKSPACE_PREVIEW")) {
-        graph->page()->focusNode(node);
-        QTest::qWait(100);
-        QVERIFY(window.grab().save(qEnvironmentVariable("ZERUS_GRAPH_WORKSPACE_PREVIEW")));
-    }
-}
-
-void TestSessionsWindow::graphOpensExactArchiveOutsideLoadedPageAndPreservesLiveDraft()
-{
-    auto state=fleet();auto local=state.local();local.archivePaging=true;
-    auto &live=local.sessions[0];live.runId="current-run";live.conversationId="current-native";
-    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
-    const QString machine="11111111-1111-4111-8111-111111111111",archive="33333333-3333-4333-8333-333333333333";
-    const QString node="node:"+QString(64,'a'),binding="binding:"+QString(64,'b');
-    QJsonObject summary{{"name",live.name},{"cmd",live.cmd},{"run_id","archived-run"},{"conversation_id","archived-native"},
-        {"state","archived"},{"archive_id",archive},{"archived_at",100},{"tracked",true},{"resumable",false},{"title","Retained archive"}};
-    QJsonObject graph{{"schema",1},{"machine_id",machine},{"epoch",QUuid::createUuid().toString(QUuid::WithoutBraces)},
-        {"revision",2},{"cursor","end"},{"has_more",false},{"reset_required",false},{"coverage",QJsonObject()},
-        {"items",QJsonArray{
-            QJsonObject{{"id",binding},{"revision",1},{"deleted",false},{"item",QJsonObject{{"kind","binding"},{"value",QJsonObject{
-                {"node",node},{"name",live.name},{"provider",live.cmd},{"run_id","archived-run"},{"conversation_id","archived-native"},
-                {"archived",true},{"archive_id",archive},{"summary",summary}}}}}},
-            QJsonObject{{"id",node},{"revision",2},{"deleted",false},{"item",QJsonObject{{"kind","node"},{"value",QJsonObject{{"endpoint",QJsonObject{
-                {"machine",machine},{"provider",live.cmd},{"namespace","fixture"},{"conversation","archived-native"},{"provisional_run",""}}}}}}}}
-        }}};
-    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));const auto fixture=m_dir->filePath("graph-archive");
-    const QJsonObject reference{{"schema",1},{"machine_id",machine},{"name",live.name},{"run_id","archived-run"},
-        {"conversation_id","archived-native"},{"archive_id",archive},{"agent_id",""}};
-    const QByteArray branch="elif c in ('graph','reference') and sys.argv[1].startswith('@'):\n sys.exit(1)\n"
-        "elif c=='graph':\n print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(graph).toJson(QJsonDocument::Compact)))+")\n"+
-        "elif c=='reference':\n open(__file__+'.reference','w').write(json.dumps(sys.argv[1:]))\n print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(reference).toJson(QJsonDocument::Compact)))+")\n";
-    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+branch)));
-    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.resize(1100,760);window.show();window.showSession({},live.name);
-    auto *composer=window.findChild<MessageComposer*>("messageComposer");setComposerText(composer,"Keep the current run draft");
-    auto *workspace=window.findChild<GraphWorkspace*>();
-    QSignalSpy targetRead(window.findChild<HgsClient*>(),&HgsClient::graphTargetReady);
-    for(auto *button:window.findChildren<QPushButton*>("railButton"))if(button->property("glyph")=="graph")button->click();
-    QTRY_VERIFY_WITH_TIMEOUT(workspace->page()->target({},live.name,"archived-run","archived-native",archive,{}).has_value(),10000);
-    QVERIFY(!QFile::exists(fixture+".reference"));workspace->page()->focusNode(node);
-    auto *open=workspace->findChild<QPushButton*>("graphOpenActivity");QTRY_VERIFY(open->isEnabled());QTest::mouseClick(open,Qt::LeftButton);
-    QTRY_VERIFY_WITH_TIMEOUT(targetRead.size()>0,5000);
-    QTRY_VERIFY(!workspace->isVisible());auto *list=window.findChild<SessionList*>("sessionList");
-    QTRY_VERIFY(list->currentItem());QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(),'\n'+live.name+'\n'+archive);
-    QFile calls(fixture+".reference");QVERIFY(calls.open(QIODevice::ReadOnly));const auto args=QJsonDocument::fromJson(calls.readAll()).array();
-    QVERIFY(args.contains(archive));QVERIFY(args.contains("archived-run"));QVERIFY(args.contains("archived-native"));
-    window.showSession({},live.name);QTRY_COMPARE(composer->editor()->toPlainText(),QString("Keep the current run draft"));
+    setComposerText(composer,"Keep the current conversation draft");
+    for(auto *button:window.findChildren<QPushButton *>("railButton"))
+        QVERIFY(button->property("glyph")!="graph");
+    auto *dashboard=window.findChild<DashboardPage *>(); QVERIFY(dashboard);
+    auto *pages=qobject_cast<QStackedWidget *>(dashboard->parentWidget()); QVERIFY(pages);
+    QCOMPARE(pages->count(),6);
+    list->customContextMenuRequested(list->visualItemRect(list->currentItem()).center());
+    auto *menu=window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
+    QVERIFY(!menu->findChild<QAction *>("contextShowInGraph"));
+    QVERIFY(menu->findChild<QAction *>("contextCopyCommand")); menu->close();
+    auto *projects=window.findChild<ProjectsDialog *>(); QVERIFY(projects);
+    for(auto *button:window.findChildren<QPushButton *>("railButton"))
+        if(button->property("glyph")=="projects") button->click();
+    QTRY_VERIFY(projects->isVisible());
+    window.showSession({},name);
+    QTRY_COMPARE(composer->editor()->toPlainText(),QString("Keep the current conversation draft"));
 }
 
 void TestSessionsWindow::pagedArchiveSearchJoinsExactProjectBeforeFiltering()
@@ -893,7 +889,7 @@ else:print('{}')
 )PY"));
     auto state=fleet();auto local=state.local();local.archivePaging=true;local.sessions[0].runId="live-run";local.sessions[0].prompt.clear();state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(FakeCli::program(cli));keepDetailsPollsOut(window);window.setFleet(state);window.resize(1100,760);window.show();
-    auto *projects=window.findChild<ProjectFilter *>();QVERIFY(projects);projects->setSelection({first});
+    auto *projects=window.findChild<ProjectFilter *>("projectFilterChips");QVERIFY(projects);projects->setSelection({first});
     auto *query=window.findChild<QLineEdit*>("search");auto *results=window.findChild<QListWidget*>("searchResults");QVERIFY(query&&results);query->setText("needle");
     QTRY_COMPARE(results->count(),1);QVERIFY(SessionSearch::sessionKey(results->item(0)).endsWith(a));
     for(auto *filter:window.findChildren<QPushButton*>("sessionFilter"))if(filter->property("filter")=="archived"){QCOMPARE(filter->property("count").toInt(),1);QVERIFY(filter->text().startsWith("1"));}
@@ -910,7 +906,7 @@ void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
     org.moveSession(org.observe("arch", "codex/website/navigation", ""), saved);
     QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.resize(1100,760); window.show();
-    auto *projects = window.findChild<ProjectFilter *>(); auto *machines = window.findChild<MachineFilter *>();
+    auto *projects = window.findChild<ProjectFilter *>("projectFilterChips"); auto *machines = window.findChild<MachineFilter *>("machineFilterChips");
     auto *list = window.findChild<SessionList *>("sessionList");
     const auto parents = [&] { int count=0; for(int i=0;i<list->count();++i) if(!list->item(i)->data(SessionRoles::Header).toBool()) ++count; return count; };
     projects->setSelection({work}); QCOMPARE(parents(),2);
@@ -962,7 +958,7 @@ void TestSessionsWindow::projectHeaderFiltersOnlyThisProject()
     org.moveSession(org.observe("arch","codex/hgs/dashboard",""),work); org.moveSession(org.observe("mac","claude/infra/review",""),docs);
     QSettings().setValue("workspace/organization",QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
-    auto *list=window.findChild<SessionList *>("sessionList"); auto *projects=window.findChild<ProjectFilter *>();
+    auto *list=window.findChild<SessionList *>("sessionList"); auto *projects=window.findChild<ProjectFilter *>("projectFilterChips");
     const auto openMenu=[&](const QString &id) -> QMenu * {
         for(int i=0;i<list->count();++i) if(list->item(i)->data(SessionRoles::Header).toBool()&&list->item(i)->data(SessionRoles::Group)==id) {
             list->scrollToItem(list->item(i)); list->customContextMenuRequested(list->visualItemRect(list->item(i)).center());
@@ -990,7 +986,7 @@ void TestSessionsWindow::dashboardAndMultiMachineNavigation()
 {
     SessionsWindow window(program()); auto state=fleet(); auto third=state.local(); third.host="build"; state.setPeer(third,0);
     window.setFleet(state); window.show();
-    auto *filter=window.findChild<MachineFilter *>(); auto *list=window.findChild<SessionList *>("sessionList");
+    auto *filter=window.findChild<MachineFilter *>("machineFilterChips"); auto *list=window.findChild<SessionList *>("sessionList");
     QVERIFY(filter); QVERIFY(list); filter->setSelection({"mac","build"}); QCOMPARE(list->count(),5);
     for(int i=0;i<list->count();++i) QVERIFY(!list->item(i)->data(SessionRoles::Identity).toString().startsWith("arch\n"));
     auto *brand=window.findChild<QPushButton *>("brandMark"); QVERIFY(brand); brand->click();
@@ -1195,8 +1191,8 @@ void TestSessionsWindow::clearArchiveKeepsLiveAndNewEntries()
         QMetaObject::invokeMethod(batch,"aboutToShow");QVERIFY(batch->actions().contains(clear));
     }
     window.showSession({},box.sessions.first().name);
-    window.findChild<MachineFilter *>()->setSelection({"mac"});QVERIFY(clear->isVisible());QVERIFY(!clear->isEnabled());
-    window.findChild<MachineFilter *>()->setSelection({});QVERIFY(clear->isEnabled());
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({"mac"});QVERIFY(clear->isVisible());QVERIFY(!clear->isEnabled());
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({});QVERIFY(clear->isEnabled());
     auto *client=window.findChild<HgsClient *>();QSignalSpy writes(client,&HgsClient::writeDone);
     QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("confirmSelectionAction");QVERIFY(dialog);dialog->reject();});clear->trigger();QCOMPARE(writes.size(),0);
     QTimer::singleShot(0,&window,[&]{
@@ -1323,6 +1319,29 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     window.findChild<QPushButton *>("workspaceSettings")->click(); slider->setValue(20);
     QTRY_COMPARE(editorPixels(), 13);
     QCOMPARE(pixels("activity"), 13); QCOMPARE(pixels("terminalScreen"), 13);
+}
+
+void TestSessionsWindow::activitySurfaceRemainsOpaque_data()
+{
+    QTest::addColumn<QString>("theme"); QTest::addColumn<double>("scale");
+    for (const QString theme : {QString("dark"), QString("light")})
+        for (double scale : {1.0, 1.25})
+            QTest::newRow(qPrintable(theme+QString::number(scale))) << theme << scale;
+}
+
+void TestSessionsWindow::activitySurfaceRemainsOpaque()
+{
+    QFETCH(QString,theme); QFETCH(double,scale);
+    QSettings().setValue("workspace/theme",theme); QSettings().setValue("workspace/contentScale",scale);
+    SessionsWindow window(program()); window.resize(1180,820); window.setFleet(fleet()); window.show();
+    window.showSession({},"codex/hgs/dashboard");
+    const auto views=window.findChildren<ActivityView *>(); QVERIFY(views.size()>=2);
+    for (auto *view : views) {
+        auto *browser=view->browser(); browser->ensurePolished(); browser->viewport()->ensurePolished();
+        const auto base=browser->viewport()->palette().brush(QPalette::Base);
+        QVERIFY2(base.isOpaque(),"Workspace CSS disabled the fast Activity canvas renderer");
+        QCOMPARE(base.color(),view->palette().color(QPalette::Window));
+    }
 }
 
 void TestSessionsWindow::activityReadingColumnFollowsSettingsAndEdges()
@@ -1709,9 +1728,9 @@ void TestSessionsWindow::unsentDraftBecomesARowStatus()
     window.showSession({}, box.sessions[1].name);
     window.setFleet(state);   // rows are refreshed in place; the draft stays marked
     QVERIFY(draft(box.sessions[0].name)); QVERIFY(!draft(box.sessions[1].name));
-    window.findChild<MachineFilter *>()->setSelection({"@local"});   // other rows go: the list is rebuilt from scratch
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({"@local"});   // other rows go: the list is rebuilt from scratch
     QVERIFY(draft(box.sessions[0].name));
-    window.findChild<MachineFilter *>()->setSelection({});
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({});
     window.showSession({}, box.sessions[0].name); composer->editor()->clear();
     QVERIFY(!draft(box.sessions[0].name));
 }
@@ -1730,7 +1749,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     org.moveSession(org.observe("arch", box.sessions[1].name, box.sessions[1].runId), group); org.setCollapsed(group, true);
     QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
     SessionsWindow window(program()); window.setFleet(state); window.show(); window.showSession({}, box.sessions[0].name);
-    window.findChild<MachineFilter *>()->setSelection({"@local"});
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({"@local"});
     for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "attention") button->click();
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Keep this draft");
     auto *list = window.findChild<SessionList *>("sessionList"); const auto selectedKey = composer->sessionKey();
@@ -1758,7 +1777,7 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     // Overview renders when shown.
     window.findChild<QPushButton *>("brandMark")->click();
     QVERIFY(window.findChild<DashboardPage *>()->findChild<QPushButton *>("dashboardAttention")->text().startsWith("1"));
-    window.showSessionList(); window.findChild<MachineFilter *>()->setSelection({});
+    window.showSessionList(); window.findChild<MachineFilter *>("machineFilterChips")->setSelection({});
     window.findChild<QLineEdit *>("search")->setText("review");
     QCOMPARE(window.findChild<QListWidget *>("searchResults")->count(), 1); // The real approval still needs attention.
     FleetState restarted; restarted.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
@@ -3213,7 +3232,7 @@ void TestSessionsWindow::listFiltersKeepTheOpenConversation()
     auto cursor = composer->editor()->textCursor(); cursor.setPosition(qMin(5, int(draft.size())));
     cursor.setPosition(qMin(12, int(draft.size())), QTextCursor::KeepAnchor); composer->editor()->setTextCursor(cursor);
     const auto selection = cursor.selectedText();
-    auto *machines = window.findChild<MachineFilter *>(); auto *projects = window.findChild<ProjectFilter *>();
+    auto *machines = window.findChild<MachineFilter *>("machineFilterChips"); auto *projects = window.findChild<ProjectFilter *>("projectFilterChips");
     QHash<QString, QPushButton *> filters;
     for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) filters[button->property("filter").toString()] = button;
     const auto applyScope = [&] {
@@ -3375,8 +3394,8 @@ void TestSessionsWindow::activeFilterDraftsRestoreOfflineAndFollowEditsAndDelive
     for (int i = 0; i < list->count(); ++i)
         if (list->item(i)->data(SessionRoles::ChildId).toString().isEmpty()) keys.insert(list->item(i)->data(SessionRoles::Key).toString());
     QCOMPARE(keys, QSet<QString>({"\n" + box.sessions[2].name, "\n" + parent.name, "mac\n" + peer.sessions[0].name}));
-    window.findChild<MachineFilter *>()->setSelection({"@local"}); QCOMPARE(active->property("count").toInt(), 2);
-    window.findChild<MachineFilter *>()->setSelection({}); QCOMPARE(active->property("count").toInt(), 3);
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({"@local"}); QCOMPARE(active->property("count").toInt(), 2);
+    window.findChild<MachineFilter *>("machineFilterChips")->setSelection({}); QCOMPARE(active->property("count").toInt(), 3);
     window.showSession({}, staleParent.name); QTest::qWait(50);
     QCOMPARE(active->property("count").toInt(), 3); // An older inspection cannot bind a child draft to a new parent conversation.
     window.showSession({}, box.sessions[1].name);
@@ -6872,7 +6891,7 @@ void TestSessionsWindow::blankListContextMenu()
 void TestSessionsWindow::contextMenuAcrossSessionPanelBackground()
 {
     SessionsWindow window(program()); window.setFleet(fleet()); window.resize(1000, 750); window.show();
-    auto *filter = window.findChild<MachineFilter *>(); filter->setSelection({"mac"});
+    auto *filter = window.findChild<MachineFilter *>("machineFilterChips"); filter->setSelection({"mac"});
     QTest::qWait(20);
     auto *list = window.findChild<SessionList *>("sessionList");
     auto *panel = window.findChild<QWidget *>("sessionListPanel");
@@ -7054,8 +7073,8 @@ void TestSessionsWindow::collapsingKeepsRowsInPlace()
     SessionsWindow window(program()); window.resize(1280, 860); window.setFleet(fleet()); window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     auto *panel = window.findChild<QWidget *>("sessionListPanel"); auto *list = window.findChild<SessionList *>("sessionList");
-    auto *toggle = window.findChild<QPushButton *>("sessionPanelToggle"); auto *chips = window.findChild<MachineFilter *>();
-    auto *projects = window.findChild<ProjectFilter *>();
+    auto *toggle = window.findChild<QPushButton *>("sessionPanelToggle"); auto *chips = window.findChild<MachineFilter *>("machineFilterChips");
+    auto *projects = window.findChild<ProjectFilter *>("projectFilterChips");
     const auto top = [&] { return list->mapTo(panel, QPoint()).y(); };
     for (bool filtered : {false, true}) {
         if (filtered) { chips->setSelection({"mac"}); projects->setSelection({"ungrouped"}); QVERIFY(chips->isVisible()); QVERIFY(projects->isVisible()); }
@@ -9021,9 +9040,10 @@ void TestSessionsWindow::projectColorsApplyOrCancel()
     auto *page=window.findChild<ProjectsDialog *>();page->selectProject(id);
     bool opened=false;
     const auto edit=[&](bool apply){
-        QTimer::singleShot(0,[&]{
-            auto *dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());
-            if(!dialog)return;
+        opened=false;bool expired=false;QTimer watchdog;watchdog.setSingleShot(true);
+        connect(&watchdog,&QTimer::timeout,&window,[&]{expired=true;if(auto *dialog=page->findChild<QDialog *>("projectColorDialog"))dialog->reject();});watchdog.start(5000);
+        QTimer::singleShot(0,&window,[&]{
+            auto *dialog=page->findChild<QDialog *>("projectColorDialog");QVERIFY(dialog);
             auto *hex=dialog->findChild<QLineEdit *>("projectColorHex");
             opened=hex&&dialog->findChild<QWidget *>("projectFillPreview");
             if(hex)hex->setText("#ffe100");
@@ -9032,6 +9052,7 @@ void TestSessionsWindow::projectColorsApplyOrCancel()
             if(apply)dialog->accept();else dialog->reject();
         });
         page->findChild<QPushButton *>("projectColor")->click();
+        watchdog.stop();QVERIFY(!expired);QVERIFY(opened);
     };
     edit(false);QVERIFY(opened);
     auto restored=SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());

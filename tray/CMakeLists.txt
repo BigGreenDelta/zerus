@@ -7,7 +7,7 @@ if(APPLE AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VER
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(hgs-tray VERSION 0.42.2 LANGUAGES CXX)
+project(hgs-tray VERSION 0.44.0 LANGUAGES CXX)
 set(CMAKE_AUTORCC ON)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -137,7 +137,7 @@ if(LINUX)
     target_link_libraries(hgs-tray-gui PRIVATE Qt6::DBus)
 endif()
 
-add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp src/GraphCanvas.cpp src/GraphPage.cpp src/GraphController.cpp src/SessionGraphStore.cpp src/GraphViewStateStore.cpp src/GraphProjection.cpp src/GraphWorkspace.cpp
+add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp
     src/MachineFilter.cpp src/ProjectFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp

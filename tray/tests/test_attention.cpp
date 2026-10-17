@@ -27,6 +27,7 @@ private slots:
     void actualApplicationFocusSuppressesBanners();
     void scheduledTicksStayUnreadUntilTheScheduleEnds();
     void replyWaitsForLiveBackgroundShellToFinish();
+    void replyWaitsForExplicitIndependentResult();
     void nativeChildCountersPreserveUnknownEvidence();
     void optionalQuestionsNotifyOncePerQuestionWhenEnabled();
     void optionalQuestionsSurviveUnknownCountsAndResume();
@@ -179,6 +180,18 @@ void TestAttention::replyWaitsForLiveBackgroundShellToFinish()
     BoxState box; box.ok=true; box.sessions={s}; AttentionTracker tracker;
     QVERIFY(tracker.observe({},box,1000,false).raised.isEmpty());
     box.sessions[0].backgroundProcesses=0;
+    QCOMPARE(tracker.observe({},box,1001,false).raised.size(),1);
+    QVERIFY(tracker.observe({},box,1002,false).raised.isEmpty());
+}
+
+void TestAttention::replyWaitsForExplicitIndependentResult()
+{
+    SessionInfo s; s.name="codex/project/session";s.runId="run";s.conversationId="conversation";
+    s.phase="idle";s.activity="idle";s.replyId="progress";s.unreadReply=true;s.subagentActiveCount=0;
+    s.coordinationWait={{"schema",1},{"status","ok"},{"revision",1},{"run_id",s.runId},{"conversation_id",s.conversationId},{"count",1}};
+    BoxState box;box.ok=true;box.sessions={s};AttentionTracker tracker;
+    QVERIFY(tracker.observe({},box,1000,false).raised.isEmpty());
+    box.sessions[0].coordinationWait["count"]=0;
     QCOMPARE(tracker.observe({},box,1001,false).raised.size(),1);
     QVERIFY(tracker.observe({},box,1002,false).raised.isEmpty());
 }

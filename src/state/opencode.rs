@@ -1271,7 +1271,9 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     if let Some(id) = agent_id {
         return child(&record, id);
     }
-    parent_view(name, &record, true)
+    let mut value = parent_view(name, &record, true)?;
+    waits::decorate(std::slice::from_mut(&mut value));
+    Ok(value)
 }
 // Delivery, answer, interrupt and lifecycle checks need only the parent's
 // own state; they never wait for the bounded child roster.

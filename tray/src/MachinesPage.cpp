@@ -7,9 +7,9 @@
 #include "WorkspacePageHeader.h"
 #include "IdentityBadge.h"
 #include "WorkspaceList.h"
+#include "WorkspaceColorDialog.h"
 #include <QStyledItemDelegate>
 #include <QCheckBox>
-#include <QColorDialog>
 #include <QComboBox>
 #include <QSignalBlocker>
 #include <QDateTime>
@@ -108,7 +108,10 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     body->addWidget(scroll, 3); layout->addLayout(body, 1);
     connect(m_color, &QPushButton::clicked, this, [this] {
         const auto machine = appearanceMachine(); if (m_new || machine.isEmpty()) return;
-        const auto color = QColorDialog::getColor(MachineAppearance::color(machine), this, tr("Label color for %1").arg(machine));
+        WorkspaceColorDialog dialog(MachineAppearance::color(machine), this);
+        dialog.setWindowTitle(tr("Label color for %1").arg(machine));
+        if (dialog.exec() != QDialog::Accepted) return;
+        const auto color = dialog.selectedColor();
         if (!color.isValid()) return;
         MachineAppearance::setColor(machine, color); updateAppearance(); renderRows(); emit appearanceChanged();
     });

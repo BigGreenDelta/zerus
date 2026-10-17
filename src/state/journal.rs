@@ -767,6 +767,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     // The pane folders go by the session IDs, which a rename keeps, to the name
     // this inspection reports (zerus-byyw, as in `merge_listing`).
     workspace::enrich(std::slice::from_mut(&mut output), &workspace::snapshot_cwds(&names));
+    waits::decorate(std::slice::from_mut(&mut output));
     Ok(output)
 }
 
@@ -841,7 +842,12 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 info["reply_id"] = json!(format!("{timestamp}"));
             }
         }
-        info["state"] = json!(if ["SubagentStop", "SessionEnd", "Stop"].contains(&kind) {
+        // A Claude child's StopFailure ends its turn with a provider error, such
+        // as a usage limit; Claude sends no SubagentStop after it. The child is
+        // settled as an error, which never keeps its parent working. A newer
+        // event of the same child resumes it as usual.
+        let failed = kind == "StopFailure" && string(record, "agent") == "claude";
+        info["state"] = json!(if failed || ["SubagentStop", "SessionEnd", "Stop"].contains(&kind) {
             "finished"
         } else {
             "working"
@@ -850,7 +856,9 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
         if !snippet.is_empty() {
             info["detail"] = json!(snippet);
         }
-        if ["StopFailure", "Interrupt"].contains(&kind) {
+        if failed {
+            info["display_state"] = json!("error");
+        } else if ["StopFailure", "Interrupt"].contains(&kind) {
             info["display_state"] = json!("unknown");
         } else {
             info.as_object_mut().unwrap().remove("display_state");

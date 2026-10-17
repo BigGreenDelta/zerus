@@ -63,15 +63,6 @@ inline QStringList twoLines(const QString &text, const QFontMetrics &metrics, in
 class SessionDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
-    // Standalone graph cards need an opaque surface over connecting lines.
-    // Content, status/identity badges and selection remain the list renderer.
-    void paintStandalone(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const {
-        const bool dark = !option.widget || option.widget->property("hgsDark").toBool();
-        p->save(); p->setPen(QPen(QColor(dark ? "#29313a" : "#dfe5eb"), 1));
-        p->setBrush(SessionStrip::surface(dark));
-        p->drawRoundedRect(QRectF(sessionCardRect(option.rect)).adjusted(.5,.5,-.5,-.5),8,8);p->restore();
-        paint(p,option,index);
-    }
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
         // List rows are as wide as the view but never narrower than the hint.
         const int width = SessionStrip::expansion(option.widget) < 1 ? 1 : 280;
@@ -123,18 +114,25 @@ public:
         const bool error = index.data(SessionRoles::Failure).toBool() || s.state == "Error";
         s.working = index.data(SessionRoles::Working).toInt() > 0;
         s.paused = s.state == "Paused";
-        s.draft = index.data(SessionRoles::Draft).toBool() && !selected && !s.attention && !s.working && s.state != "Offline";
-        s.emphasis = s.attention ? (error ? IdentityBadges::Error : IdentityBadges::Attention) : s.unread ? IdentityBadges::Unread : IdentityBadges::Normal;
+        const bool hasDraft = index.data(SessionRoles::Draft).toBool();
+        s.draft = hasDraft && !selected && !s.attention && !s.working && s.state != "Offline";
+        s.emphasis = s.attention ? (error ? IdentityBadges::Error : IdentityBadges::Attention)
+            : hasDraft ? IdentityBadges::Draft : s.unread ? IdentityBadges::Unread : IdentityBadges::Normal;
         s.kind = s.attention ? (error ? SessionStatusBadge::Error : SessionStatusBadge::Attention)
             : s.working ? (s.state == "Background" ? SessionStatusBadge::Background : SessionStatusBadge::Working) : s.draft ? SessionStatusBadge::Draft : s.unread ? SessionStatusBadge::Unread
             : index.data(SessionRoles::Scheduled).toBool() ? SessionStatusBadge::Scheduled
+            : index.data(SessionRoles::Waiting).toBool() ? SessionStatusBadge::Waiting
             : s.paused ? SessionStatusBadge::Paused : SessionStatusBadge::Neutral;
         s.caption = s.working ? SessionElapsed::status(s.state == "Compacting" ? tr("Compacting") : s.state == "Background" ? tr("Background") : tr("Working"), index.data(SessionRoles::WorkingSince).toDouble()) : s.draft ? tr("Draft") : s.unread && !s.attention ? tr("New reply")
             : s.state == "Not tracked" ? tr("Untracked") : s.state;
+        if (s.kind == SessionStatusBadge::Waiting) {
+            const auto items=index.data(SessionRoles::CoordinationWait).toJsonObject().value("items").toArray();
+            s.caption=SessionElapsed::status(tr("Waiting"),items.isEmpty()?0:items.first().toObject().value("created_at").toDouble());
+        }
         s.additionalUnread = s.unread && (s.working || s.attention || s.draft);
         return s;
     }
-    // Selecting a graph/list inspection row does not open its composer. Keep
+    // Selecting a list inspection row does not open its composer. Keep
     // its draft badge until the ordinary Sessions editor actually owns it.
     static CardStatus statusForView(const QStyleOptionViewItem &option, const QModelIndex &index) {
         const bool opensEditor = !option.widget || !option.widget->property("selectionIsInspection").toBool();
@@ -455,16 +453,25 @@ private:
             }
         }
         font.setPixelSize(10); p->setFont(font);
+        const QString modified = index.data(SessionRoles::ModifiedAt).toString();
+        const int modifiedWidth = modified.isEmpty() ? 0 : qMin(width / 2, qCeil(CachedText::advance(font, modified)));
+        const int footerWidth = width - (modifiedWidth ? modifiedWidth + 10 : 0) - (childWidth ? childWidth + 10 : 0);
         const QString effort = index.data(SessionRoles::Effort).toString();
-        const bool hasEffort = !effort.isEmpty() && effort != "—";
+        const bool hasEffort = !effort.isEmpty() && effort != "—"
+            && (modified.isEmpty() || CachedText::width(font, effort) + 10 <= footerWidth);
         const int effortWidth = hasEffort ? CachedText::width(font, effort) + 10 : 0;
-        const int modelWidth = qMax(0, width - (childWidth ? childWidth + 10 : 0) - (hasEffort ? effortWidth + 7 : 0));
+        const int modelWidth = qMax(0, footerWidth - (hasEffort ? effortWidth + 7 : 0));
         const QString model = CachedText::elided(font, index.data(SessionRoles::Model).toString(), Qt::ElideMiddle, modelWidth);
         p->setPen(muted); CachedText::draw(p, QRect(textX, modelY, modelWidth, 20), Qt::AlignVCenter, model);
         if (hasEffort) {
             const QRect effortBadge(textX + CachedText::width(font, model) + 7, modelY + 2, effortWidth, 16);
             p->setPen(Qt::NoPen); p->setBrush(QColor(dark ? "#2b343e" : "#e7edf2")); p->drawRoundedRect(effortBadge, 3, 3);
             p->setPen(muted); CachedText::draw(p, effortBadge, Qt::AlignCenter, effort);
+        }
+        if (modifiedWidth) {
+            p->setPen(muted);
+            CachedText::draw(p, QRect(right - modifiedWidth, modelY, modifiedWidth, 20), Qt::AlignVCenter | Qt::AlignRight,
+                CachedText::elided(font, modified, Qt::ElideMiddle, modifiedWidth));
         }
         p->restore();
     }
@@ -514,7 +521,7 @@ private:
         IdentityBadges::paintRow(p, cardOption, dark);
         // A tile shows its state in the color of its frame, with a faint glow
         // inward; the card's attention edge appears only as it grows.
-        const QColor edge = SessionStatusBadge::edge(status.kind, dark);
+        const QColor edge = SessionStatusBadge::edge(status.emphasis == IdentityBadges::Draft ? SessionStatusBadge::Draft : status.kind, dark);
         if (strip > 0) {
             p->save(); p->setOpacity(strip); p->setBrush(Qt::NoBrush);
             for (int i = 1; edge.isValid() && i <= 7; ++i) {
@@ -532,7 +539,7 @@ private:
         }
         if (status.emphasis != IdentityBadges::Normal && full > 0) {
             p->save(); p->setOpacity(full);
-            IdentityBadges::paintEdge(p, cardOption.rect, IdentityBadges::attentionColor(dark, status.emphasis == IdentityBadges::Error));
+            IdentityBadges::paintEdge(p, cardOption.rect, IdentityBadges::emphasisColor(dark, status.emphasis));
             p->restore();
         }
         SharedBadges shared;

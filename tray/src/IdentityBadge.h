@@ -1,5 +1,6 @@
 #pragma once
 #include "CachedText.h"
+#include "SessionStatusBadge.h"
 #include "MachineAppearance.h"
 #include <QFontMetrics>
 #include <QFontMetricsF>
@@ -62,11 +63,14 @@ inline void paint(QPainter *p, const QRect &rect, Kind kind, const QString &valu
         CachedText::elided(f, text, kind == Machine ? Qt::ElideMiddle : Qt::ElideRight, qMax(0, textRect.width())));
     p->restore();
 }
-enum RowEmphasis { Normal, Attention, Error, Unread };
+enum RowEmphasis { Normal, Attention, Error, Unread, Draft };
 inline QColor attentionColor(bool dark, bool error = false) {
     return QColor(error ? (dark ? "#ffabb6" : "#a32238") : (dark ? "#ffda76" : "#805000"));
 }
-// The edge mark of an actionable or unread row.
+inline QColor emphasisColor(bool dark, RowEmphasis emphasis) {
+    return emphasis == Draft ? SessionStatusBadge::edge(SessionStatusBadge::Draft, dark) : attentionColor(dark, emphasis == Error);
+}
+// The edge mark of an actionable, unread or draft row.
 inline void paintEdge(QPainter *p, const QRect &row, const QColor &color) {
     const QRect r = row.adjusted(2, 2, -2, -2);
     p->save(); p->setRenderHint(QPainter::Antialiasing); p->setPen(Qt::NoPen); p->setBrush(color);
@@ -78,16 +82,15 @@ inline void paintRow(QPainter *p, const QStyleOptionViewItem &option, bool dark,
     const QRect r = option.rect.adjusted(2, 2, -2, -2);
     const bool selected = option.state & QStyle::State_Selected;
     const bool hovered = option.state & QStyle::State_MouseOver;
-    const bool attention = emphasis == Attention || emphasis == Error, error = emphasis == Error;
     // Selection has the same neutral surface in every list and every state.
-    // State belongs to the status badge; only actionable/unread rows get an edge.
-    const QColor accent = attentionColor(dark, error);
+    // The edge retains draft ownership even when its composer is open.
+    const QColor accent = emphasisColor(dark, emphasis);
     const QColor border = selected ? QColor(dark ? "#8295a9" : "#7a91a6") : Qt::transparent;
     const QColor background = selected ? QColor(dark ? "#303b47" : "#dde7ef")
         : hovered ? QColor(dark ? "#242c34" : "#edf1f4") : Qt::transparent;
     p->setPen(QPen(border, 1)); p->setBrush(background);
     p->drawRoundedRect(r, 8, 8);
-    if (attention || emphasis == Unread) paintEdge(p, option.rect, accent);
+    if (emphasis != Normal) paintEdge(p, option.rect, accent);
     if ((option.state & QStyle::State_HasFocus) && (option.state & QStyle::State_KeyboardFocusChange)) {
         p->setPen(QPen(QColor(dark ? "#8bdfc0" : "#167357"), 1, Qt::DotLine)); p->setBrush(Qt::NoBrush);
         p->drawRoundedRect(r.adjusted(2, 2, -2, -2), 6, 6);

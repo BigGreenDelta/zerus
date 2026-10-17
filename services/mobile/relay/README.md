@@ -242,10 +242,11 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   PostgreSQL startup never retires another worker's claims. A failing alert
   pass at startup is logged and left to the background loop. A wake job that
   receives a newer alert while leased is sent again instead of deleted.
-- `push.rs` sends generic wake hints through FCM HTTP v1. Provider requests run
-  outside transactions and never target client-supplied URLs. FCM uses
-  short-lived service-account OAuth tokens and an RS256 signature from `ring`;
-  tokens and provider errors are never logged. Registrations from the removed
+- `push.rs` sends generic wake hints through FCM HTTP v1 and APNs. Provider
+  requests run outside transactions and never target client-supplied URLs. FCM
+  uses short-lived service-account OAuth tokens and an RS256 signature from
+  `ring`; APNs uses an ES256 provider token from `ring`, refreshed every 40
+  minutes, over HTTP/2. Tokens and provider errors are never logged. Registrations from the removed
   UnifiedPush provider are deleted on their next delivery attempt.
 
 Idle polls hold no query-pool connection. Each PostgreSQL worker has one dedicated

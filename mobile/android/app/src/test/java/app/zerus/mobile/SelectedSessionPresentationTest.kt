@@ -5,6 +5,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SelectedSessionPresentationTest {
+    @Test fun olderInspectionCannotResurrectSettledWaitOrDropNewerWait() {
+        val wait=JSONObject("""{"schema":1,"status":"ok","revision":3,"run_id":"run","conversation_id":"conversation","count":0}""")
+        val current=selected.copy(raw=raw().put("coordination_wait",wait))
+        val stale=raw().put("coordination_wait",JSONObject(wait.toString()).put("revision",2).put("count",1))
+        assertEquals(0,SelectedSessionPresentation.session(current,stale).raw.getJSONObject("coordination_wait").getInt("count"))
+        val awaiting=current.copy(raw=raw().put("coordination_wait",JSONObject(wait.toString()).put("count",1)))
+        assertEquals(1,SelectedSessionPresentation.session(awaiting,raw()).raw.getJSONObject("coordination_wait").getInt("count"))
+        assertEquals(0,SelectedSessionPresentation.session(awaiting,raw().put("coordination_wait",JSONObject(wait.toString()).put("revision",4))).raw.getJSONObject("coordination_wait").getInt("count"))
+    }
     private val target = Target("computer","codex/example/mobile","run","conversation","workspace")
     private val selected = Session(target,"Mobile","codex","","example","",0,JSONObject().put("name",target.session))
     private fun raw() = JSONObject().put("name",target.session).put("run_id",target.run).put("conversation_id",target.conversation)

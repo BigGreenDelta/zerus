@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>app.zerus.mobile.pairing</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>zerus</string>
+			</array>
+		</dict>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>app.zerus.mobile.refresh</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>remote-notification</string>
+	</array>
+	<key>ZerusApnsEnvironment</key>
+	<string>$(ZERUS_APNS_ENVIRONMENT)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>ZerusBuildChannel</key>
+	<string>$(ZERUS_BUILD_CHANNEL)</string>
+	<key>ZerusSourceRevision</key>
+	<string>$(ZERUS_SOURCE_REVISION)</string>
+</dict>
+</plist>

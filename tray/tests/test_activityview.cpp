@@ -198,6 +198,8 @@ private slots:
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive();
+    void tableReplyScrollingKeepsQueuedInputResponsive_data();
+    void tableReplyScrollingKeepsQueuedInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive_data();
     void staleIdentityAndPresentationResultsAreRejected();
     void streamingSnapshotsMakeProgress();
@@ -249,6 +251,8 @@ private slots:
     void voiceWaveformSeeksWithoutRelayout();
     void voiceWaveformAppearance_data();
     void voiceWaveformAppearance();
+    void recordingMetadataAppearance_data();
+    void recordingMetadataAppearance();
     void attachmentThumbnailArrivesWithoutMovingTranscript();
     void liveCompactionProgressPreservesTranscriptAndClears();
     void sessionClearIsAColoredBoundaryAndSurvivesReload();
@@ -362,17 +366,61 @@ void TestActivityView::longUpdatesKeepQueuedEditorInputResponsive()
     QVERIFY2(bestCpu < 200, qPrintable(QString("GUI CPU including first paint: %1 ms").arg(bestCpu)));
 }
 
+void TestActivityView::tableReplyScrollingKeepsQueuedInputResponsive_data()
+{
+    QTest::addColumn<bool>("dark");QTest::addColumn<double>("scale");
+    for(bool dark:{false,true})for(double scale:{1.,1.25})
+        QTest::newRow(qPrintable(QString("%1-%2").arg(dark?"dark":"light").arg(scale)))<<dark<<scale;
+}
+void TestActivityView::tableReplyScrollingKeepsQueuedInputResponsive()
+{
+    QFETCH(bool,dark);QFETCH(double,scale);
+    ActivityView view;view.setStyleSheet("QTextBrowser { background:transparent; border:0; padding-top:12px; }");
+    view.resize(900,700);view.show();view.setTheme(dark);view.setContentScale(scale);view.setSessionKey("synthetic-table");
+    QString body="## Synthetic comparison\n\nA wrapped table keeps **readable results** and `tool settings`.\n\n"
+        "| Scenario | Result | Notes |\n| --- | --- | --- |\n";
+    for(int i=0;i<32;++i)body+=QString("| Scenario %1 | Preserve `field_%1` and `example/cache/catalog.json` beside wrapped prose. | "
+        "**Reviewed** text with `native value` and a longer explanation. Текст для проверки переноса строк. |\n").arg(i);
+    view.setActivity({}, {journalEvent(1,"Stop",body)});settle(view);
+    auto *browser=view.browser();auto *bar=browser->verticalScrollBar();QVERIFY(bar->maximum()>700);
+    QVERIFY(browser->viewport()->palette().brush(QPalette::Base).isOpaque());
+    auto cursor=browser->document()->find("field_0");QVERIFY(!cursor.isNull());browser->setTextCursor(cursor);
+    const auto selected=cursor.selectedText();
+    const auto previews=qEnvironmentVariable("HGS_ACTIVITY_TABLE_PREVIEW");
+    if(!previews.isEmpty()){QDir().mkpath(previews);QVERIFY(view.grab().save(previews+QString("/table-%1-%2.png").arg(dark?"dark":"light").arg(scale)));}
+    QLineEdit editor;editor.show();qint64 bestCpu=std::numeric_limits<qint64>::max();int delivered=0;
+    for(int run=0;run<3;++run){
+        bar->setValue(bar->maximum()/4);const int before=bar->value();const auto start=threadCpuMs();
+        for(int frame=0;frame<20;++frame){
+            QTimer::singleShot(0,&editor,[&]{QTest::keyClicks(&editor,"x");++delivered;});
+            QWheelEvent wheel(QPointF(40,200),browser->viewport()->mapToGlobal(QPoint(40,200)),{},QPoint(0,-60),Qt::NoButton,Qt::NoModifier,Qt::ScrollUpdate,false);
+            QApplication::sendEvent(browser->viewport(),&wheel);browser->viewport()->repaint();QCoreApplication::processEvents();
+            QCOMPARE(delivered,run*20+frame+1);
+        }
+        bestCpu=std::min(bestCpu,threadCpuMs()-start);QVERIFY(bar->value()>before);
+    }
+    QCOMPARE(browser->textCursor().selectedText(),selected);QCOMPARE(editor.text(),QString(60,'x'));
+    QVERIFY2(bestCpu<1000,qPrintable(QString("%1 ms GUI CPU for 20 table scroll/input frames").arg(bestCpu)));
+}
+
 void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive_data()
 {
     QTest::addColumn<bool>("paragraph");
-    QTest::newRow("bullets") << false;
-    QTest::newRow("dense-paragraph") << true;
+    QTest::addColumn<bool>("workspaceStyle");
+    QTest::newRow("bullets") << false << false;
+    QTest::newRow("dense-paragraph") << true << false;
+    QTest::newRow("styled-bullets") << false << true;
+    QTest::newRow("styled-dense-paragraph") << true << true;
 }
 
 void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive()
 {
-    QFETCH(bool, paragraph);
-    ActivityView view; view.resize(900, 700); view.show(); view.setSessionKey("rich-scroll"); view.setTheme(true);
+    QFETCH(bool, paragraph); QFETCH(bool, workspaceStyle);
+    ActivityView view;
+    // SessionsWindow's general browser style must not disable Activity's
+    // opaque-canvas painting path (Qt gives transparent CSS a NoBrush base).
+    if (workspaceStyle) view.setStyleSheet("QTextBrowser { background:transparent; border:0; padding-top:12px; }");
+    view.resize(900, 700); view.show(); view.setSessionKey("rich-scroll"); view.setTheme(true);
     QString body = "## Configuration example\n\nReadable `tool settings` for the `current_session`.\n\n";
     for (int i = 0; i < 18; ++i)
         body += QString("- Preserve `option_%1` and `example/cache/model-catalog/long-catalog-file.json` beside longer prose "
@@ -382,6 +430,7 @@ void TestActivityView::richReplyScrollingKeepsQueuedInputResponsive()
     for (int i = 0; i < 50; ++i) events.append(journalEvent(i + 1, "Stop", QString("Reply %1\n\n").arg(i) + body));
     view.setActivity({}, events); settle(view);
     auto *browser = view.browser(); auto *bar = browser->verticalScrollBar();
+    QVERIFY(browser->viewport()->palette().brush(QPalette::Base).isOpaque());
     bar->setValue(bar->maximum() / 2); browser->viewport()->repaint();
     auto cursor = browser->cursorForPosition(QPoint(80, 150));
     cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 5);
@@ -1359,7 +1408,12 @@ void TestActivityView::voiceMessageRetainsAudioAndExpandableTranscript()
     QJsonObject voice{{"id",id},{"run_id","run"},{"conversation_id","conversation"},{"state","transcribing"},{"audio",audio}};
     QJsonObject row{{"type","UserMessage"},{"source","hgs_voice"},{"message_id",id},{"request_id",id},{"at",1791018002.0},{"voice",voice},{"attachments",QJsonArray{audio}}};
     view.setActivity({{"voice_messages",QJsonArray{row}}},{});
-    auto text=view.browser()->toPlainText();QVERIFY(text.contains("You (voice)"));QVERIFY(text.contains("Recognizing"));
+    auto imageLabel=[&](const QString &label){
+        for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it)
+            if(it.fragment().charFormat().property(QTextFormat::ImageAltText).toString()==label)return true;
+        return false;
+    };
+    auto text=view.browser()->toPlainText();QVERIFY(text.contains("You (voice)"));QVERIFY(!text.contains("Recognizing"));QVERIFY(imageLabel("Recognizing…"));
     bool accessiblePlayer=false;
     for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it)
         accessiblePlayer|=it.fragment().charFormat().property(QTextFormat::ImageAltText).toString().contains("Play or pause voice message (0:01)");
@@ -1373,12 +1427,12 @@ void TestActivityView::voiceMessageRetainsAudioAndExpandableTranscript()
     voice["state"]="submitted";voice["transcript"]="Recognized voice fixture";row["voice"]=voice;row["detail"]="Recognized voice fixture";
     auto local=row;local["id"]="voice-local";local["submitted_at"]=1791018002.0;local["status"]="sent";
     view.setTimeline({{"voice_messages",QJsonArray{row}}},{row,journalEvent(3,"UserPromptSubmit","Recognized voice fixture")},{local});
-    text=view.browser()->toPlainText();QCOMPARE(text.count("You (voice)"),1);QVERIFY(text.contains("Show transcript"));
+    text=view.browser()->toPlainText();QCOMPARE(text.count("You (voice)"),1);QVERIFY(!text.contains("Show transcript"));QVERIFY(imageLabel("Show transcript"));QVERIFY(imageLabel("Sent to agent"));
     // Similar native text without an exact correlation remains a separate message.
     QCOMPARE(text.count("Recognized voice fixture"),1);
     QString toggle;for(const auto &url:links(view.browser()))if(url.startsWith("hgs-activity:voice-text-"))toggle=url;
     QVERIFY(!toggle.isEmpty());activate(view.browser(),toggle);settle(view);
-    QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),2);QVERIFY(view.browser()->toPlainText().contains("Hide transcript"));
+    QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),2);QVERIFY(imageLabel("Hide transcript"));
     voice["native_binding"]=QJsonObject{{"journal_seq",3}};row["voice"]=voice;
     view.setTimeline({{"voice_messages",QJsonArray{row}},{"prompt","Recognized voice fixture"}},{journalEvent(3,"UserPromptSubmit","Recognized voice fixture")},{});
     QCOMPARE(view.browser()->toPlainText().count("You (voice)"),1);QCOMPARE(view.browser()->toPlainText().count("Recognized voice fixture"),1);
@@ -1512,6 +1566,37 @@ void TestActivityView::voiceWaveformAppearance()
     const auto placeholder=VoicePlayerImage::draw(240,1,1,dark,invalid,0,false,false);QVERIFY(!placeholder.isNull());
     const auto screenshots=qEnvironmentVariable("ZERUS_VOICE_PLAYER_SCREENSHOTS");
     if(!screenshots.isEmpty()){QDir().mkpath(screenshots);QVERIFY(view.grab().save(screenshots+"/"+QString::fromLatin1(QTest::currentDataTag())+".png"));}
+}
+
+void TestActivityView::recordingMetadataAppearance_data()
+{
+    QTest::addColumn<bool>("dark");QTest::addColumn<bool>("videoMode");QTest::addColumn<int>("width");QTest::addColumn<QString>("state");
+    for(bool dark:{true,false})for(bool video:{true,false})for(int width:{340,620})for(const auto &state:QStringList{"submitted","transcribing","uncertain"})
+        QTest::newRow(qPrintable(QString("%1-%2-%3-%4").arg(dark?"dark":"light",video?"video":"audio",QString::number(width),state)))<<dark<<video<<width<<state;
+}
+void TestActivityView::recordingMetadataAppearance()
+{
+    QFETCH(bool,dark);QFETCH(bool,videoMode);QFETCH(int,width);QFETCH(QString,state);
+    SettledActivityView view;view.resize(width,540);view.setTheme(dark);view.setSessionKey("fixture/media-icons");view.show();
+    auto row=waveformMessage();auto voice=row["voice"].toObject();voice["state"]=state;
+    if(state=="uncertain")voice["error"]="Delivery is unconfirmed. Check the original conversation.";
+    if(videoMode)voice["video"]=QJsonObject{{"request_id",voice["id"]},{"index",1},{"mime","video/mp4"},{"duration_ms",10000},{"width",480},{"height",480}};
+    row["voice"]=voice;view.setActivity({{"voice_messages",QJsonArray{row}}},{});settle(view);
+    const auto text=view.browser()->toPlainText();QVERIFY(!text.contains("Sent"));QVERIFY(!text.contains("Show transcript"));QVERIFY(!text.contains("Recognizing"));
+    bool status=false,transcript=false;
+    for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it){
+        const auto format=it.fragment().charFormat();if(!format.isImageFormat())continue;
+        const QUrl resource(format.toImageFormat().name());
+        if(resource.scheme()=="hgs-voice-status"){
+            status=true;QCOMPARE(format.property(QTextFormat::ImageAltText).toString(),state=="submitted"?"Sent to agent":state=="transcribing"?"Recognizing…":"Delivery not confirmed");
+            QVERIFY(!view.browser()->document()->resource(QTextDocument::ImageResource,resource).value<QImage>().isNull());
+        }
+        if(resource.scheme()=="hgs-voice-transcript"){transcript=true;QCOMPARE(format.property(QTextFormat::ImageAltText).toString(),"Show transcript");}
+    }
+    QVERIFY(status && transcript);QVERIFY(view.browser()->horizontalScrollBar()->maximum()==0);
+    if(state=="uncertain")QVERIFY(text.contains(voice["error"].toString()));
+    const auto directory=qEnvironmentVariable("ZERUS_RECORDING_MESSAGE_SCREENSHOTS");
+    if(!directory.isEmpty()){QDir().mkpath(directory);QVERIFY(view.grab().save(directory+"/"+QString::fromLatin1(QTest::currentDataTag())+".png"));}
 }
 
 void TestActivityView::attachmentsStayWithTheirMessageAndOpenExactFile()

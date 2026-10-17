@@ -1,5 +1,12 @@
 # Zerus Android
 
+Independent-session waits declared through `hgs wait` appear as **Waiting for
+acceptance** or **Waiting for result**, with producer, computer and elapsed time.
+They remain in Active while the exact waiter is live and online; work and
+attention retain priority, and intermediate reply badges wait for settlement.
+The additive snapshot metadata uses the shared desktop filter contract. See
+[Agent coordination](../../docs/agent-coordination.md).
+
 Settings → About shows the Android app version and each connected computer's
 reported `hgs` CLI version. Offline reports are marked `last known`; older CLIs
 without version metadata show `version unavailable`, and an unreachable peer
@@ -81,9 +88,16 @@ and long text scrolls within the field rather than covering its actions.
 
 The message composer clears after the text and immutable attachment snapshots
 are atomically saved in the private outgoing queue. It stays editable while the
-previous message is sending. Each bubble shows Sending, Sent, Not sent, or
+previous message is sending. The field keeps its **Message** placeholder; routine
+sending feedback belongs to the outgoing bubble rather than repeated composer
+notices. The send action explains a blocked submission on request; unknown
+delivery and saved-draft recovery remain visible. Each bubble shows Sending, Sent, Not sent, or
 Delivery unknown; unknown delivery blocks another send to the same conversation
-until an explicit receipt check or review. Sent means the computer accepted the
+until its exact receipt or native delivery row confirms it, or an explicit review.
+Opening a verified conversation checks an uncertain message's saved receipt once;
+an unavailable receipt leaves it saved and never resends it. The composer identifies
+that original message with **Check delivery** and **Review**, leaving the next
+message's input hint clear. Sent means the computer accepted the
 input, not that the model read or answered it. New text is never cleared by an
 older receipt. Native user delivery rows reconcile bubbles by exact request UUID.
 Without such a row, reconciliation requires an unambiguous exact text/time match
@@ -94,18 +108,29 @@ card. Expand it to read and select the full text. Send now remains a manual
 action, available only when the current agent and queued message allow it.
 
 Attach files through the system document picker. The app copies and encrypts
-selected bytes privately rather than sending document URIs or trusting mutable
-files. The supported gateway limits are eight files, 10 MiB per file, 20 MiB total,
+selected bytes privately before adding them to the original draft, rather than
+sending document URIs or trusting mutable files. A restored picker
+callback waits for private drafts to load and stays bound to its exact launch
+identity. A fresh app launch clears an interrupted selection without discarding
+the draft or its existing files. Pending selection can also be canceled from
+Updates, Saved drafts, or any open conversation; a late canceled result cannot
+attach to a newer selection. Active imports continue to block installation.
+The supported gateway limits are eight files, 10 MiB per file, 20 MiB total,
 and 64 KiB of message text. The picker remains bound to its original composition
-if navigation or typing changes; interrupted selection can be canceled in Saved
-drafts. Files remain recoverable with unsent and uncertain messages.
+if navigation or typing changes. Files remain recoverable with unsent and
+uncertain messages.
 
 An unopened conversation immediately shows “Loading conversation…” while its
 messages load. A resolved empty conversation keeps “No messages yet.” during
-background reads instead of returning to the initial placeholder. Background loading status and spinners appear only after five
-seconds; manual refresh shows progress immediately and reuses any matching
-in-flight read. A thin progress bar accompanies the existing circular refresh
-indicator in catalogs and conversations. Navigation cancels
+background reads instead of returning to the initial placeholder. Opening cached
+messages immediately animates the existing **Refresh** action until the initial
+inspection and history reads settle. Cached messages remain readable, and the
+indicator never inserts a row or moves the transcript. Later background reads
+show progress only after five seconds; manual refresh shows it immediately and
+reuses any matching in-flight read. Catalogs retain their thin progress bar.
+Pulling a conversation up past its newest
+message, as far as a list's downward pull, is the toolbar's explicit refresh; its
+indicator rises from the bottom. Short pulls and flings do not refresh. Navigation cancels
 ownership of earlier reads so stale results cannot replace a new conversation.
 Matching history reads continue in a bounded shared queue and are reused on
 reopening. Exact-target encrypted history is cached for seven days, up to 20
@@ -253,6 +278,9 @@ The conversation keeps a bounded hot window rather than imposing a total chat
 length limit. Nodes advertising canonical history support can fetch older and
 newer pages and restore an opaque saved reading anchor. Native page order and
 exact aliases distinguish repeated messages, even with identical timestamps.
+When a reply read from recent inspection later gains a canonical history ID,
+unambiguous native-provided aliases carry its existing read position forward.
+A later unseen reply remains unread; equal text never establishes this identity.
 Initial indexing keeps the recent inspected conversation visible; incomplete
 sources and shortened message bodies are disclosed. Search covers the loaded
 window. A confirmed own message stays visible when it falls out of the native
@@ -331,13 +359,26 @@ request identity.
 ## Voice and video messages
 
 Settings includes **Voice messages**, with an independently selected transcription
-computer and host-configured profile. Open a conversation to discover the computers
-reachable from its owner. An unavailable saved selection never silently switches
-providers. Both the relay and conversation computer must advertise `voice_profiles`,
+computer and host-configured profile. Global settings lists verified online computers
+and reads the selected computer's `speech_profiles` directly, without opening a
+conversation. **Refresh voice profiles** reloads those profiles and reports progress
+or a read failure. Computer choices are scoped to their workspace; their searchable
+picker shows at most 100 matches. Choosing a default affects new recordings only.
+Existing recordings retain their computer, profile and reviewed revision.
+
+Inside a conversation, discovery still comes from its owner and lists the computers
+it can reach. An unavailable saved selection never silently switches providers.
+Both the relay and conversation computer must advertise `voice_profiles`,
 `voice_submit`, `voice_status` and `voice_cancel`. When supported, `speech_stats`
 displays the selected processing computer's aggregate local counts. Audio and
 transcription are excluded from Firebase events. See [mobile architecture](../../docs/mobile-architecture.md#voice-input)
 and [analytics](../../docs/analytics.md).
+
+`DefaultVoiceProvidersSmokeInstrumentation` exercises the real settings controls
+without a selected conversation: initial discovery, Refresh, computer/profile
+selection, explicit revision changes, failed reads and retry, and stale response
+rejection. A retained recording keeps its original route throughout. It uses only
+computer-scoped reads intercepted at a reserved synthetic endpoint.
 
 **Manage speech providers** works without an open conversation. Choose the processing
 computer, then add or edit **Local GigaAM** or an **OpenAI-compatible server**. Local
@@ -365,7 +406,10 @@ sending. See [provider configuration](../../docs/speech-providers.md).
 
 With an empty message and no attachments, the composer shows a microphone in the
 Send position. Tap to switch microphone/camera, hold to record and release to send. Slide left
-to cancel or up to lock. Stop a locked recording to retain a preview. Typing text or adding an attachment restores the Send
+to cancel or up to lock. **Preview before sending** in Voice settings keeps both
+audio and video after release for playback and a separate Send. It defaults off
+on this device; an active capture keeps the preference it started with.
+Stop a locked recording to retain a preview. Typing text or adding an attachment restores the Send
 button. While holding, a compact recording row replaces the empty editor: a red
 indicator, elapsed time with tenths of a second, and **Slide to cancel** with a
 left chevron. When the full instruction cannot fit at the current font size, the
@@ -518,6 +562,21 @@ steps. It opens synthetic history with a pending question, measures the inline
 card from a screenshot and checks the card limit, the whole answer field, the
 footer gap, scrolling to the last option and a compact short question. It sends
 no answers.
+
+Multi-part questions show **Question 1/2** and an explicit **Next** action after
+the current answer is valid. Only the final **Send all** submits the complete
+request. The Other field's keyboard action follows the same steps. Earlier
+selections and custom text remain editable while navigating; an incomplete earlier
+answer is offered for review before submission. Existing exact-request, approval
+and cold-context consent checks still apply to the final send.
+
+`QuestionDeliverySmokeInstrumentation` exercises physical Next/Enter/Send all controls,
+retained per-question answers, one complete synthetic answer, confirmed and missing
+receipt recovery, and native-to-canonical read progress with a later unseen reply.
+Use fresh private emulator data and repeat at a narrow width with font scale 1.8.
+The narrow run exercises recovery inline and opens the full-height question editor
+through its physical **Expand** action before answering.
+Its reserved endpoint is intercepted in-process; no agent receives a message.
 
 Private previews may override only their build identity using
 `-PzerusVersionName=0.1.31-voice.245 -PzerusVersionCode=10245`. Choose a code greater

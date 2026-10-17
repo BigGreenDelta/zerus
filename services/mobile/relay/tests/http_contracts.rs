@@ -1024,7 +1024,92 @@ async fn push_registration_needs_a_configured_provider() {
     assert_eq!(register(retired).await.unwrap().status(), 400);
     let fcm = json!({"provider":"fcm","token":"example"});
     assert_eq!(register(fcm).await.unwrap().status(), 503);
+    let apns = json!({"provider":"apns","token":"ab".repeat(32)});
+    assert_eq!(register(apns).await.unwrap().status(), 503);
     assert_eq!(f.count("pushes").await, 0);
+    server.stop().await;
+    f.close().await;
+}
+
+/// A synthetic P-256 signing key in a private PEM file, as Apple issues `.p8` keys.
+fn apns_key(dir: &std::path::Path) -> String {
+    use std::os::unix::fs::OpenOptionsExt;
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &random,
+    )
+    .unwrap();
+    // Assembled at run time so the source holds no key-shaped block.
+    let label = ["PRIVATE", "KEY"].join(" ");
+    let pem = format!(
+        "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+        STANDARD.encode(pkcs8.as_ref())
+    );
+    let path = dir.join("apns.p8");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, pem.as_bytes()).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[tokio::test]
+async fn ios_registrations_need_apns_and_an_exact_device_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = apns_key(dir.path());
+    let f = Fixture::config(config(|c| {
+        c.apns_key = Some(key);
+        c.apns_key_id = Some("ABCDEFGHIJ".into());
+        c.apns_team_id = Some("TEAM123456".into());
+    }))
+    .await;
+    let server = Server::start(&f.store).await;
+    let client = Client::new();
+    let register = |body: Value| {
+        client
+            .post(server.at("/v1/push"))
+            .bearer_auth(phone(&f))
+            .json(&body)
+            .send()
+    };
+    for bad in [
+        json!({"provider":"apns","token":"not-hex"}),
+        json!({"provider":"apns","token":"ab"}),
+        json!({"provider":"apns","token":"ab".repeat(32),"environment":"production"}),
+        json!({"provider":"apns_other","token":"ab".repeat(32)}),
+    ] {
+        assert_eq!(register(bad.clone()).await.unwrap().status(), 400, "{bad}");
+    }
+    let token = "AB".repeat(32);
+    let ok = register(json!({"provider":"apns_sandbox","token":token}))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    let reg = f
+        .store
+        .push_registration(&f.phone.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reg["provider"], "apns_sandbox");
+    assert_eq!(reg["target"], "ab".repeat(32));
+    let capabilities: Value = client
+        .get(server.at("/v1/capabilities"))
+        .bearer_auth(phone(&f))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        capabilities["push_providers"],
+        json!(["apns", "apns_sandbox"])
+    );
     server.stop().await;
     f.close().await;
 }

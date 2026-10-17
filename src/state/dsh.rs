@@ -996,6 +996,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         if let [row] = rows.as_slice() { Some(*row) } else { None }
     })).filter(|_| listed["generation"] == inspected["generation"]);
     let mut result = normalize(&record, child_row.unwrap_or(row), &inspected);
+    if agent_id.is_none() { waits::decorate(std::slice::from_mut(&mut result)); }
     child_summaries(&record, &mut result, &listed, &inspected["generation"]);
     let mut events = native_events(&inspected["page"]["records"]);
     let process_snapshot=if include_processes { processes::dsh_snapshot(&record,&inspected) } else { Value::Null };

@@ -1,6 +1,10 @@
 # Session and agent graph
 
-Date: 2026-10-15. Status: owner-approved implementation in progress, not shipped.
+> Archived experiment: the desktop Graph was retired on 2026-10-16. See the
+> [retirement record](../../retired-features/session-graph.md) and preserved Git tag.
+> This document records the historical design, not the current product.
+
+Date: 2026-10-15. Desktop shipped in Dev 773; owner usability revision 2026-10-16 follows below.
 Design task: zerus-4rkz. Source audit: `669101d2`.
 Interactive, synthetic preview: [Graph workspace](../../../design/session-graph/index.html).
 
@@ -63,9 +67,11 @@ delegation and verification gates are a later, separate product extension.
   conversation and its one-hop neighborhood; the latter applies the project
   scope while retaining outside collaborators. **Back to Graph** restores the
   prior camera and selection after opening Activity.
-- Keep the main header to one ordinary row: title, search, scope summary,
-  **Filters**, last refresh/coverage and Refresh. A second row appears only for
-  active filter chips. No permanently expanded matrix of filtering controls.
+- Keep the main header to title, search, List and Refresh. Use the ordinary
+  Sessions quick icon strip for All, Needs attention, Active, Saved sessions and
+  Archive; share its machine/project selectors and selected chips. Completed
+  agents and leaving an explicitly focused neighborhood have compact icon actions.
+  Do not hide everyday filters behind a generic Filters menu.
 - The center takes all remaining space. Bottom-corner controls: zoom, Fit,
   Center selection and Reset layout. A compact legend explains relation types.
 - A resizable inspector opens on selection; desktop target width 320–440 logical
@@ -78,13 +84,17 @@ delegation and verification gates are a later, separate product extension.
 
 ### Initial scope
 
-Default: **All current sessions**, all configured accessible computers/projects;
-message relations within the **last 24 hours**. Parent and fork structure is not
-removed by this event-time filter. Ready, paused and disconnected known sessions
-remain included; Active is an optional filter using the existing shared contract.
-Archives are opt-in, except archived endpoints required to explain a visible edge.
-Completed native children collapse under their parent by default, consistently
-with Sessions; attention, unknown children and local drafts remain discoverable.
+Owner revision 2026-10-16: default to **Active**, with the exact existing Sessions
+membership (working, scheduled, attention or unsent drafts). Recorded/unknown
+children without current work do not fill this view. All keeps inactive current
+sessions discoverable, Saved sessions selects retained stopped/paused sessions,
+and Archive is explicit. Completed agents have a separate toggle; attention and
+drafts remain discoverable. Cross-project neighbors respect state/machine scope.
+
+On first use without saved positions, Arrange and Fit once after nonempty data
+and local state loading. Subsequent refreshes do not rearrange existing nodes.
+Preserve legacy pins when upgrading the default filter. Native trackpad pinch
+zooms around the gesture position; regular two-finger scrolling pans.
 
 Time choices: 1 hour, 24 hours, 7 days, retained history, custom range. Changing
 the range filters evidence, not the current status of a session. The header says
@@ -149,11 +159,12 @@ reopening. Use these complementary controls:
 - **Drag a card:** keep its new position. The project's region grows, shrinks
   and moves around its currently visible members during the drag, with padding.
   Crossing another region never changes project membership. No force simulation
-  or refresh moves an existing card; new nodes find unoccupied space, reserving
-  the saved positions of temporarily hidden nodes too.
+  or refresh moves an existing card; new nodes find unoccupied space among
+  visible cards. Hidden saved positions do not reserve space in this scope.
 - **Fit:** change only the camera and zoom to show the visible scope.
-- **Arrange visible:** explicitly arrange the current filtered nodes; hidden
-  positions stay reserved. **Undo arrange** restores the previous positions and
+- **Arrange visible:** explicitly pack the current filtered nodes using actual
+  parent/child card heights. Hidden positions stay saved, but are not obstacles.
+  **Undo arrange** restores the previous positions and
   camera during this visit, including if new nodes arrived meanwhile. A later
   manual drag starts a new layout decision and retires that one-step undo.
 
@@ -179,7 +190,7 @@ Collapsed group edges show aggregate counts; expansion reveals their endpoints.
 | Message / result transfer | Solid mint arrow, sender to recipient | Recorded exchange with identified endpoints; click for evidence |
 | Fork | Thin branching connector, origin to new conversation | Confirmed native fork lineage; not delegation or continued identity |
 | Referenced conversation | Dotted neutral arrow, containing message to referenced conversation | Exact parsed reference only; optional layer, never counted as a sent message |
-| Waiting for result | Dashed amber arrow, waiting session to expected producer | Later: explicit scoped declaration with a clear settlement event |
+| Waiting for result | Dashed amber arrow, waiting session to expected producer | Explicit `hgs wait` declaration, scoped acceptance ticket and confirmed result delivery; see `docs/agent-coordination.md` |
 | User annotation | Dotted connector labeled Manual | Later: authored note, visibly different from observed facts |
 
 Color is redundant with line pattern, arrow and text. Amber remains meaningful
@@ -490,8 +501,8 @@ communication, edge evidence, Activity navigation, cache/freshness, list alterna
 and honest partial coverage. Structured provenance for new Zerus-mediated sends is
 part of the data work, not postponed until after a decorative canvas ships.
 
-**Following releases:** wider native/external event coverage, explicit wait/handoff
-metadata and history browsing; Android parity on the deployed read contract;
+**Following releases:** wider native/external event coverage and handoff history
+browsing; Android Graph parity on the deployed read contract;
 workflow authoring only after a separate owner-reviewed specification.
 
 Qualify at least these synthetic scenarios before product delivery:

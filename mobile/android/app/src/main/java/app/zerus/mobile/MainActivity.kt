@@ -13,7 +13,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
@@ -33,6 +32,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.material.icons.Icons
@@ -59,6 +59,8 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -119,24 +121,33 @@ class MainActivity : ComponentActivity() {
     private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) SessionNotifications.initialize(this)
     }
-    private val fileLaunchers = mutableMapOf<String, ActivityResultLauncher<Array<String>>>()
-    private fun fileLauncher(selectionId: String): ActivityResultLauncher<Array<String>> = fileLaunchers.getOrPut(selectionId) {
-        activityResultRegistry.register("zerus-files:$selectionId", ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-            model.finishAttachmentPick(uris, selectionId)
-        }
-    }
+    private lateinit var filePicker: AttachmentPickerHost
+    private companion object { const val FILE_SELECTION = "zerus.fileSelection" }
     override fun onStop() { model.speech.background(); model.attachments.stopAudio(); super.onStop() }
-    override fun onDestroy() { fileLaunchers.values.forEach { it.unregister() }; super.onDestroy() }
+    override fun onDestroy() { if (::filePicker.isInitialized) filePicker.close(); super.onDestroy() }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(FILE_SELECTION, filePicker.launchedId)
+        super.onSaveInstanceState(outState)
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         sanitizeLaunchIntent(intent)
         super.onCreate(savedInstanceState)
+        filePicker = AttachmentPickerHost(activityResultRegistry, savedInstanceState?.getString(FILE_SELECTION).orEmpty()) { uris, id ->
+            model.finishAttachmentPick(uris, id)
+        }
         AppTelemetry.opened()
         SessionNotifications.initialize(this)
         enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.rgb(16, 21, 23)))
         readIntent(intent)
-        model.pickerId.takeIf { it.isNotBlank() }?.let { fileLauncher(it) }
         setContent { MaterialTheme(colorScheme = Scheme) {
+            LaunchedEffect(model.storageReady, model.pickerId) {
+                if (model.storageReady) {
+                    val id = model.pickerId
+                    if (model.pickerDraft == null || !filePicker.restore(id)) model.recoverAttachmentPick(id, filePicker.launchedId)
+                    filePicker.retain(model.pickerId)
+                }
+            }
             ZerusApp(model, invitation, updateRequest, onInvitationUsed = { invitation = null }, onNotifications = {
                 if (Build.VERSION.SDK_INT >= 33) requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
             }, onLive = { enabled ->
@@ -144,9 +155,9 @@ class MainActivity : ComponentActivity() {
                 if (enabled) startForegroundService(service) else stopService(service)
             }, onAttach = { target ->
                 model.beginAttachmentPick(target) { selectionId ->
-                    if (isDestroyed || isFinishing) return@beginAttachmentPick
-                    try { fileLauncher(selectionId).launch(arrayOf("*/*")) }
-                    catch (_: Exception) { model.cancelAttachmentPick() }
+                    if (isDestroyed || isFinishing) { model.cancelAttachmentPick(selectionId); return@beginAttachmentPick }
+                    try { filePicker.launch(selectionId) }
+                    catch (_: Exception) { model.cancelAttachmentPick(selectionId) }
                 }
             })
         } }
@@ -232,6 +243,8 @@ class MainActivity : ComponentActivity() {
     }
     BackHandler(model.selected != null || tab == 1 && model.selectedProject != null || tab == 0 && model.sessionProjectScope != null) { back() }
     val selected = model.selected
+    val conversationLoad = selected?.let { rememberConversationLoad(model, it.target) }
+    val conversationObscured = LocalConversationObscuration.current?.obscured == true
     var sessionDetails by remember(selected?.target?.key) { mutableStateOf(false) }
     if (selected != null && sessionDetails) {
         ObscureConversation()
@@ -260,8 +273,14 @@ class MainActivity : ComponentActivity() {
                     IconButton(onClick = { stopRequest = selected to model.activity!!.optDouble("turn_started") }) {
                         Icon(Icons.Default.StopCircle, "Stop turn")
                     }
-                IconButton(onClick = { if (selected == null) model.refresh(explicit = true) else model.refreshActivity(explicit = true) }) {
-                    Icon(Icons.Default.Refresh, "Refresh")
+                IconButton(onClick = { if (selected == null) model.refresh(explicit = true) else model.refreshActivity(explicit = true) },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Refresh"
+                        if (!conversationObscured) conversationLoad?.let { stateDescription = it.text; liveRegion = LiveRegionMode.Polite }
+                    }) {
+                    if (conversationLoad?.spinner == true && !conversationObscured)
+                        CircularProgressIndicator(Modifier.size(24.dp), color = Mint, strokeWidth = 2.dp)
+                    else Icon(Icons.Default.Refresh, null)
                 }
                 if (selected == null) IconButton(onClick = { keyboard?.hide(); settings = true }, modifier = Modifier.semantics {
                     if (updateState.sessionId >= 0) stateDescription = "Installation pending"
@@ -292,7 +311,7 @@ class MainActivity : ComponentActivity() {
                     IconButton(onClick = { model.clearError() }) { Icon(Icons.Default.Close, "Dismiss error") }
                 }
             }
-            if (selected != null) Conversation(model, selected, onReview = { review = it }, onReviewOutgoing = { reviewOutgoing = it }, onAttach = onAttach, positions = readingPositions,jumpRequest = messageJump,onJumpConsumed = { messageJump = null })
+            if (selected != null) Conversation(model, selected, conversationLoad, onReview = { review = it }, onReviewOutgoing = { reviewOutgoing = it }, onAttach = onAttach, positions = readingPositions,jumpRequest = messageJump,onJumpConsumed = { messageJump = null })
             else MainListsRefresh(model,tab to project?.key?.key) { when (tab) {
                 0 -> SessionsScreen(model, onPair = { tab = 3 })
                 1 -> if (project != null) ProjectDetails(model, project, onViewSessions = { model.viewProjectSessions(project); tab = 0 })
@@ -358,11 +377,11 @@ class MainActivity : ComponentActivity() {
         Text(text, Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = color, style = MaterialTheme.typography.labelSmall)
     }
 }
-@Composable private fun SessionBadge(session: Session, online: Boolean) {
+@Composable private fun SessionBadge(session: Session, online: Boolean, modifier: Modifier = Modifier) {
     val badge = DesktopSessionPalette.badge(session, online)
     val dark = MaterialTheme.colorScheme.background.luminance() < .5f
     val colors = DesktopSessionPalette.colors(badge.kind, dark)
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier,horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         Surface(color = Color(colors.background), shape = RoundedCornerShape(5.dp)) {
             Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically) {
@@ -372,10 +391,12 @@ class MainActivity : ComponentActivity() {
                         fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                     DesktopBadgeKind.Paused -> Icon(DesktopIcons.Paused, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Unread -> Icon(Icons.Default.MarkEmailUnread, null, Modifier.size(12.dp), tint = Color(colors.foreground))
-                    DesktopBadgeKind.Scheduled -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
+                    DesktopBadgeKind.Scheduled, DesktopBadgeKind.Waiting -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Neutral -> Unit
                 }
-                Text(badge.caption, color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall)
+                Text(badge.caption, color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall,
+                    maxLines=if(badge.kind==DesktopBadgeKind.Waiting) 1 else Int.MAX_VALUE,
+                    overflow=if(badge.kind==DesktopBadgeKind.Waiting) TextOverflow.Ellipsis else TextOverflow.Clip)
             }
         }
         if (badge.additionalUnread) {
@@ -656,7 +677,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             Icon(Icons.Default.ChevronRight, "Open", tint = Muted, modifier = Modifier.size(20.dp))
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            SessionBadge(session, online)
+                            SessionBadge(session, online, if(online && SessionFilters.waitingIdle(session)) Modifier.weight(1.5f,fill=false) else Modifier)
                             Box(Modifier.weight(1f)) { MachineLabel(machine?.name ?: session.target.computerId,colorHex = model.machineColor(MachineKey(session.target.connectionId,session.target.computerId))) }
                             SessionSubagentCounter(model, session, online)
                         }
@@ -664,7 +685,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         SessionFilters.archiveDate(session).takeIf { it.isNotBlank() }?.let { archivedDate ->
                             Text("Archived $archivedDate", color = Muted, style = MaterialTheme.typography.labelSmall)
                         }
-                        Text(session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)
+                        Text(if(online && SessionFilters.waitingIdle(session)) SessionFilters.waitingLabel(session) else session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)
                         if (model.connections.size > 1) Text(model.connections.find { it.id == session.target.connectionId }?.displayName.orEmpty(), color = Muted, style = MaterialTheme.typography.labelSmall)
                         SessionSubagentRows(model, session, online)
                     }
@@ -693,7 +714,30 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         } }, confirmButton = { TextButton(onClick = { machineDialog = false }) { Text("Done") } })
 }
 
-@Composable private fun Conversation(model: ZerusViewModel, session: Session, onReview: (Draft) -> Unit,
+@Composable private fun rememberConversationLoad(model: ZerusViewModel, target: Target): ConversationLoadPresentation.Status? {
+    var opening by remember(target.key) { mutableStateOf(true) }
+    // The opening inspection and canonical history can finish in either order.
+    // Keep their first refresh visible until the owned window is ready; later
+    // automatic polls retain the ordinary five-second progress threshold.
+    LaunchedEffect(target.key, model.detailBusy, model.olderLoading, model.readPositionReady, model.activityVerified) {
+        if (model.activityVerified && model.readPositionReady && !model.detailBusy && !model.olderLoading) opening = false
+    }
+    val historyGate = remember(target.key) { LoadingGate(android.os.SystemClock::elapsedRealtime) }
+    var historyProgress by remember(target.key) { mutableStateOf(false) }
+    LaunchedEffect(target.key, model.olderLoading, model.demo) {
+        historyProgress = false
+        if (!model.olderLoading || model.demo) { historyGate.cancel(); return@LaunchedEffect }
+        val operation = historyGate.begin(target.key).operation
+        delay(historyGate.remaining(operation.id))
+        if (historyGate.owns(operation.id)) historyProgress = historyGate.visible()
+    }
+    val hasContent = model.conversationEvents.isNotEmpty() ||
+        target.archiveId.isBlank() && model.conversationQuestions.isNotEmpty() || model.speech.outgoing.any { it.belongsTo(target) }
+    return ConversationLoadPresentation.status(hasContent, model.detailBusy, model.detailProgress,
+        model.olderLoading, historyProgress, model.demo, resolved = model.activity != null, opening = opening)
+}
+
+@Composable private fun Conversation(model: ZerusViewModel, session: Session, loadStatus: ConversationLoadPresentation.Status?, onReview: (Draft) -> Unit,
     onReviewOutgoing: (OutgoingMessage) -> Unit, onAttach: (Target) -> Unit,
     positions: MutableMap<String, ConversationAnchor>,jumpRequest: ConversationMessageJump?,onJumpConsumed: () -> Unit) {
     val target = session.target
@@ -730,17 +774,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val boundedNotice = if(model.historyEpoch.isNotBlank()) {
         if(model.hasOlder || model.hasNewer) "Showing part of the conversation. Use the history controls to load more messages." else ""
     } else if(model.conversationHistoryTruncated) "Showing recent activity. Older messages may be outside the available history." else ""
-    val historyGate = remember(target.key) { LoadingGate(android.os.SystemClock::elapsedRealtime) }
-    var historyProgress by remember(target.key) { mutableStateOf(false) }
-    LaunchedEffect(target.key, model.olderLoading, model.demo) {
-        historyProgress = false
-        if (!model.olderLoading || model.demo) { historyGate.cancel(); return@LaunchedEffect }
-        val operation = historyGate.begin(target.key).operation
-        delay(historyGate.remaining(operation.id))
-        if (historyGate.owns(operation.id)) historyProgress = historyGate.visible()
-    }
-    val loadStatus = ConversationLoadPresentation.status(events.isNotEmpty() || questions.isNotEmpty(),
-        model.detailBusy, model.detailProgress, model.olderLoading, historyProgress, model.demo, resolved = raw != null)
     val conversationLoading = loadStatus?.initial == true
     val context = LocalContext.current
     val keys = buildList {
@@ -890,8 +923,10 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LaunchedEffect(settledAtTail,listState.isScrollInProgress,programmatic,follow.opened,follow.following,follow.anchor,model.hasNewer) {
         if(!listState.isScrollInProgress && !programmatic) follow = ConversationViewport.settled(follow,settledAtTail,model.hasNewer)
     }
+    val videoCapture = model.speech.recording && model.speech.videoRecorder != null
+    var videoOverlayVisible by remember { mutableStateOf(false) }
     val readable = foreground && window.isWindowFocused && follow.opened && readReady &&
-        !obscured
+        !obscured && !videoCapture && !videoOverlayVisible
     LaunchedEffect(target.key,listState,readable,model.hasOlder,model.olderLoading,model.olderError) {
         if(!readable || !model.hasOlder || model.olderLoading || model.olderError.isNotBlank()) return@LaunchedEffect
         snapshotFlow { listState.isScrollInProgress && !programmatic && listState.firstVisibleItemIndex <= 3 }
@@ -927,18 +962,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
     }
     Column(Modifier.fillMaxSize().imePadding()) {
-        Box(Modifier.fillMaxWidth().height(4.dp)) {
-            if (!obscured && !model.demo && (model.detailProgress || historyProgress))
-                LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
-        }
-        val stripStatus = loadStatus?.takeIf { !it.initial || queueVisible }
-        if (stripStatus != null || unread != null || offeredQuestionCount > 0) {
+        if (unread != null || offeredQuestionCount > 0) {
             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (stripStatus?.spinner == true && !obscured) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                Text(stripStatus?.text ?: unread?.let { "${it.text} unread" }.orEmpty(),
-                    Modifier.weight(1f).semantics { if (!obscured && stripStatus != null) liveRegion = LiveRegionMode.Polite },
-                    color = if (stripStatus == null && unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
+                Text(unread?.let { "${it.text} unread" }.orEmpty(), Modifier.weight(1f),
+                    color = if (unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
                 if (offeredQuestionCount > 0) TextButton(onClick = {
                     if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
                 }) { Text("Questions ($offeredQuestionCount)") }
@@ -950,6 +978,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         }
         Box(Modifier.weight(1f).fillMaxWidth().onSizeChanged { viewportHeight = it.height }
             .onGloballyPositioned { viewportBounds = it.boundsInWindow() }) {
+            Box(Modifier.fillMaxSize().semantics { if (videoCapture || videoOverlayVisible) hideFromAccessibility() }) {
+            ConversationTailRefresh(model, target.key, Modifier.fillMaxSize()) {
             // The tail item already adds one item gap above the composer.
             LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1006,9 +1036,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
                 item(key = "history:tail") { Spacer(Modifier.height(1.dp)) }
             }
+            }
             if (loadStatus?.initial == true && !queueVisible) Column(Modifier.align(Alignment.Center).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (loadStatus.spinner && !obscured) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                 Text(loadStatus.text, Modifier.semantics { if (!obscured) liveRegion = LiveRegionMode.Polite }, color = Muted, style = MaterialTheme.typography.bodyMedium)
             }
             if ((!follow.following || model.hasNewer || latestPending) && (events.isNotEmpty() || questions.isNotEmpty()) &&
@@ -1025,35 +1055,43 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     Text(if(latestPending) "Loading latest…" else unread?.let { "${it.text} unread" } ?: "Latest",
                         Modifier.padding(start = 4.dp),style = MaterialTheme.typography.labelMedium)
                 }
+            }
+            RoundVideoRecordingOverlay(model.speech, Modifier.matchParentSize()) { videoOverlayVisible = it }
         }
         if (archived) {
             ContextFooter(model, session)
             Text("Archived conversation. Read-only.", color = Muted, style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.fillMaxWidth().background(Surface).padding(16.dp))
         }
-        else MessageComposer(model, session, online, onReview, onAttach)
+        else MessageComposer(model, session, online, onReview, onAttach, onReviewOutgoing)
     }
     ExpandedQuestionHost(model, target, questions, online && model.activityVerified && !model.contextBlocked(target),
         questionDisplay, ::updateQuestionDisplay, onReview)
 }
 
-@Composable private fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
+@Composable internal fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
     model: ZerusViewModel, onReview: (OutgoingMessage) -> Unit) {
     val own = QuestionReplyPresentation.isOwnRole(event.role)
     val parsedReply by produceState<Pair<String, List<PresentedQuestionReply>?>>(event.text to null, event.text, own) {
         value = event.text to if (own) withContext(Dispatchers.Default) { QuestionReplyPresentation.parse(event.text) } else null
     }
     val replies = parsedReply.takeIf { it.first == event.text }?.second
+    val roundVideo = event.voice?.video != null
+    val messageColor = if (roundVideo && own) MaterialTheme.colorScheme.primary.copy(alpha = .14f)
+        .compositeOver(MaterialTheme.colorScheme.surface) else if (own) Color(0xFF203733) else Surface
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (own) Arrangement.End else Arrangement.Start) {
-        Surface(color = if (own) Color(0xFF203733) else Surface, shape = RoundedCornerShape(17.dp),
+        Surface(color = if (roundVideo) Color.Transparent else messageColor,
+            shape = if (roundVideo) RectangleShape else RoundedCornerShape(17.dp),
             modifier = Modifier.fillMaxWidth(if (own) .92f else 1f).semantics {
                 contentDescription = if (own) "You" else agent.ifBlank { "Agent" }
             }) {
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(Modifier.padding(horizontal = if (roundVideo) 0.dp else 12.dp,
+                vertical = if (roundVideo) 0.dp else 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (!own) Text(agent.ifBlank { event.role }, color = Muted, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                 if (replies == null && event.role == "You (answer)") Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                 if (event.voice != null) {
-                    ProvideTextStyle(conversationTextStyle()) { VoiceMessageContent(model, model.selected?.target, event.voice) }
+                    ProvideTextStyle(conversationTextStyle()) { VoiceMessageContent(model, target, event.voice,
+                        at = event.at, videoBubbleColor = messageColor) }
                 } else if (replies != null) {
                     Text("You (answer)", color = Muted, style = MaterialTheme.typography.labelMedium)
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1076,7 +1114,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
                 if (event.voice == null) AttachmentRows(event.attachments, model.selected?.target, model)
                 if(event.detailTruncated) Text("Message text shortened",color = Amber,style = MaterialTheme.typography.labelSmall)
-                if (event.delivery.isNotBlank() || event.at > 0) Row(Modifier.fillMaxWidth(),
+                if (event.voice == null && (event.delivery.isNotBlank() || event.at > 0)) Row(Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                     if (event.at > 0) Text(java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
                         .format(java.util.Date((event.at * 1000).toLong())), color = Muted, style = MaterialTheme.typography.labelSmall)
@@ -1101,7 +1139,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
 }
 
 @Composable private fun MessageComposer(model: ZerusViewModel, session: Session, online: Boolean,
-    onReview: (Draft) -> Unit, onAttach: (Target) -> Unit) {
+    onReview: (Draft) -> Unit, onAttach: (Target) -> Unit, onReviewOutgoing: (OutgoingMessage) -> Unit) {
     val target = session.target
     val draft = model.draft(target)
     val recording = model.speech.recording
@@ -1197,13 +1235,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             } }
         }
-        if (model.pickerDraft?.target == target) Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(if (model.attachmentImporting) "Saving selected files…" else "File selection is pending.", Modifier.weight(1f), color = Muted, style = MaterialTheme.typography.labelSmall)
-            TextButton(onClick = { model.cancelAttachmentPick() }) { Text("Cancel") }
-        }
-        if (previous?.status == "sending") Text("Sending… You can write the next message.", color = Muted, style = MaterialTheme.typography.labelSmall)
-        else if (previous?.status == "uncertain") Text("Delivery unknown. Check the previous message before sending again.", color = Amber, style = MaterialTheme.typography.labelSmall)
-        CompactMessageInput(state = editor, placeholder = sendReason.ifBlank { "Message" },
+        PendingAttachmentSelection(model, target)
+        if (previous?.status == "uncertain") OutgoingRecovery(previous,
+            "outgoing:${previous.requestId}" in model.receiptFlights,
+            { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) })
+        CompactMessageInput(state = editor, placeholder = "Message",
             recordingContent = if (recording) ({ SpeechRecordingRow(model.speech) }) else null,
             // Keep an already-open IME session in place during capture. The hidden
             // editor remains locked by the synchronous text-and-selection filter.
@@ -1213,7 +1249,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             focusRequester = focusRequester, onFocusChanged = { focused = it },
             leading = {
                 IconButton(onClick = { restorePickerFocus = focused; pickerStarted = false; onAttach(target) },
-                    enabled = !recording && !model.demo && model.storageReady && model.attachmentReason(target).isBlank() && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
+                    enabled = !recording && !model.demo && model.storageReady && !model.updateInstallPreparing && model.attachmentReason(target).isBlank() && draft.status == "editing" && model.pickerDraft == null && !model.attachmentPreparing && !model.attachmentImporting) {
                     Icon(Icons.Default.AttachFile, "Attach files", Modifier.size(24.dp).rotate(45f), tint = Muted)
                 }
             }, action = {
@@ -1299,10 +1335,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 }
             } }
         }
-        if (model.pickerDraft != null) item { Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("A file selection was interrupted or is pending.", Modifier.weight(1f), color = Muted)
-            TextButton(onClick = { model.cancelAttachmentPick() }) { Text("Cancel selection") }
-        } }
+        if (model.pickerDraft != null) item { PendingAttachmentSelection(model) }
         if (unresolved.isNotEmpty()) item { Text("Outgoing messages", style = MaterialTheme.typography.titleMedium) }
         items(unresolved.sortedByDescending { it.createdAt }, key = { "outgoing:${it.requestId}" }) { message ->
             Card(colors = CardDefaults.cardColors(containerColor = Surface)) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
