@@ -1577,7 +1577,10 @@ swarm catalog, and leaves it untouched, until hgs is updated again.
 
 `~/.config/hgs/projects.local` retains `NAME=FOLDER` aliases for CLI compatibility.
 The old infrastructure-owned `~/.config/hgs/projects` is no longer read. Aliases
-import into Zerus once per machine; later project edits belong in Projects.
+import into Zerus once per machine; later project edits belong in Projects. An
+alias whose folder that machine cannot take (not an absolute path in its form)
+starts no project. Projects names it, and the machine imports again at the next
+start of Zerus.
 
 ```sh
 hgs project ls --json
