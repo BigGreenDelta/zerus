@@ -451,7 +451,8 @@ sys.exit(result.returncode)
   closed=json.loads((folder/'closed.json').read_text())
   self.assertIn(closed['reason'],['terminated','answered in Terminal','question resolved']);self.assertFalse(closed['emitted'])
   self.assertFalse((folder/'emitted.json').exists())
-  self.assertRegex(self.answer(success=False),'already answered|rejected the question response')
+  # Before Claude writes its transcript the panel is simply gone; either way nothing is sent.
+  self.assertRegex(self.answer(success=False),'already answered|rejected the question response|not fully visible')
  def test_channel_single_killed_falls_back_to_screen(self):
   self.channel_card();waiting,folder=self.channel();os.kill(waiting['pid'],signal.SIGKILL)
   self.wait_for(lambda:not self.running(waiting['pid']))
