@@ -133,6 +133,7 @@ impl Host {
                 "integrity": hello.integrity.name,
                 "windows_session": hello.windows_session,
                 "in_job": hello.in_job,
+                "desktop_job": hello.desktop_job,
                 "image": hello.image,
                 "sessions": status.sessions,
                 "clients": status.clients,
@@ -147,7 +148,7 @@ impl Host {
             Self::NotInstalled => "not installed".into(),
             Self::Stopped => "stopped".into(),
             Self::Running { hello, status } => format!(
-                "running (PID {}, hgs {}, protocol {}, {}, {}, {} ConPTY, {} integrity, Windows session {})",
+                "running (PID {}, hgs {}, protocol {}, {}, {}, {} ConPTY, {} integrity, Windows session {}{})",
                 hello.pid,
                 hello.version,
                 hello.protocol,
@@ -155,7 +156,12 @@ impl Host {
                 count(status.clients, "client"),
                 status.conpty,
                 hello.integrity.name,
-                hello.windows_session
+                hello.windows_session,
+                match (hello.in_job, hello.desktop_job) {
+                    (false, _) => "",
+                    (true, true) => ", in the desktop's job",
+                    (true, false) => ", in a job",
+                }
             ),
             Self::Unavailable(error) => format!("unavailable: {error}"),
         }
@@ -630,6 +636,7 @@ mod tests {
             integrity: Integrity::from_rid(Integrity::MEDIUM),
             windows_session: 1,
             in_job: false,
+            desktop_job: false,
         }
     }
 
@@ -688,7 +695,8 @@ mod tests {
             running.json("1.2.3")["host"],
             json!({"state": "running", "pid": 4242, "version": "1.2.3", "protocol": 1,
                    "conpty": "bundled", "integrity": "medium", "windows_session": 1,
-                   "in_job": false, "image": hello().image, "sessions": 2, "clients": 1})
+                   "in_job": false, "desktop_job": false, "image": hello().image, "sessions": 2,
+                   "clients": 1})
         );
         assert!(running
             .text()

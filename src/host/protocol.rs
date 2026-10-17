@@ -319,8 +319,13 @@ pub struct HelloReply {
     /// The Windows session the host runs in.
     pub windows_session: u32,
     /// Whether the host was inside any job when it started, before it created its
-    /// own (D4): a launcher fails closed when it was.
+    /// own (D4): a launcher fails closed when it was, unless `desktop_job`.
     pub in_job: bool,
+    /// Whether that job also holds the shell of the host's desktop, so that the
+    /// host ends no earlier than the desktop (D4). Sent only when true, so the
+    /// hello of every other host is unchanged; older hosts send none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub desktop_job: bool,
 }
 
 /// The host's answer to a hello: `{"ok": HelloReply}` or `{"error": ErrorBody}`.
@@ -1163,6 +1168,7 @@ mod tests {
             integrity: Integrity::from_rid(Integrity::MEDIUM),
             windows_session: 1,
             in_job: false,
+            desktop_job: false,
         };
         golden(
             &HelloAnswer::Accepted(reply.clone()),

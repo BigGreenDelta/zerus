@@ -673,6 +673,7 @@ mod windows_tests {
             integrity: Integrity::from_rid(Integrity::MEDIUM),
             windows_session: 0,
             in_job: false,
+            desktop_job: false,
         };
         let (client, server) = memory_pair();
         {

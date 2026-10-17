@@ -368,6 +368,13 @@ another Windows session, where agents cannot open windows on your desktop, such 
 a browser sign-in; Zerus asks before it starts or resumes a session there
 (**Launch anyway**).
 
+A session host must not run in a job that ends it early, such as an agent's
+sandbox or a terminal that starts it, so `hgs` refuses one that cannot leave such
+a job (*the session host runs inside a job that does not let it break away*).
+Some desktops run every process in a job, Explorer included; there the host shares
+Explorer's job and ends with the desktop at sign-out, as sessions do anyway, and
+`hgs.exe session-host status` reports it *in the desktop's job*.
+
 To disable local sessions again, end the sessions on this computer and run
 `hgs.exe session-host uninstall`, which refuses while one runs. It removes the
 marker, so the computer is a control console again; the staged CLI and host images

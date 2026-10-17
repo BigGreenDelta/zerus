@@ -431,7 +431,10 @@ process that first joins kill-on-close jobs, as a shell inside sshd's job runs
 `hgs`: from a job that allows breakaway, the host (`in_job` false) and its session
 outlive the job; a job that forbids breakaway starts no host; when breakaway leaves
 the host in an outer job that forbids it, the host reports `in_job` true, its
-launcher refuses it and it exits once idle. A host also outlives the short-lived
+launcher refuses it and it exits once idle. When that outer job also holds the
+desktop's shell, a helper whose hidden window it makes the shell window with
+`SetShellWindow` (only where no shell runs, as over SSH or on a CI runner), the host
+reports `desktop_job` true and its launcher accepts it. A host also outlives the short-lived
 client that started it. `Ownership` terminates a host and checks that every process
 of its sessions ends with it, a process with a hidden console of its own included.
 `StableCli` installs another build (the build under test with a few bytes appended,
