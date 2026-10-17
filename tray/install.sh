@@ -78,15 +78,9 @@ fi
 
 # --- 2. .app bundle -------------------------------------------------------------
 echo "[2/4] Installing the .app bundle to ~/Applications..."
-# Ad-hoc-подпись обязательна, а не гигиена: на macOS 26 launchd убивает приложение, у
-# которого есть только подпись от линковщика (OS_REASON_CODESIGNING). Подпись на уровне
-# бандла привязывает Info.plist и запечатывает ресурсы -- такое launchd принимает; тем же
-# и по той же причине лечится соседний TrustTunnelAgent (см. его install.sh). Цена
-# известна: amfid вправе писать в лог "signature not valid: -67050" на каждый запуск, и
-# будущая macOS может закрутить гайки -- тогда нужен настоящий сертификат разработчика.
-# Подписываем ДО копирования, прямо в build/: тогда установленный бандл побайтово равен
-# собранному, и cdhash-сравнение ниже честно отвечает "ничего не изменилось".
-codesign --force --deep --sign - "${BUILD_APP}"
+# Sign before copying. Certificate signing keeps privacy identity stable across
+# source rebuilds; incompatible or missing identities stop before replacement.
+python3 "${SCRIPT_DIR}/sign-local-macos.py" "${BUILD_APP}" "${APP_DEST}"
 mkdir -p "${HOME}/Applications"
 if [ "$(bundle_cdhash "${BUILD_APP}")" != "$(bundle_cdhash "${APP_DEST}")" ]; then
     if [ "${RESTART_RUNNING}" = "1" ]; then

@@ -292,6 +292,52 @@ Check the leaf certificate's issuer and expiration during each rotation; select
 **G2 Sub-CA** when the portal offers a choice. See
 [Apple's replacement procedure](https://developer.apple.com/help/account/certificates/replace-developer-id-certificates/).
 
+### Local source builds
+
+`tray/install.sh` signs the source bundle with a stable certificate through
+`tray/sign-local-macos.py` before copying or restarting anything. It uses a valid
+application-signing identity already in the local keychain; it never imports or
+unlocks credentials and never falls back to ad hoc signing. `mac-install.sh`
+uses the destination Mac's keychain and forwards the optional
+`HGS_MACOS_SIGN_IDENTITY` exact certificate name or SHA-1 selector.
+
+When a certificate-signed app is already installed, selection follows its team
+and signing class. A local rebuild of the published app therefore needs a
+compatible Developer ID Application identity. Apple Development can retain its
+own local identity, but has a different default designated requirement from
+Developer ID. Without an installed certificate identity, selection prefers one
+unambiguous Developer ID Application certificate, then Apple Development.
+Missing or ambiguous identities stop installation with setup instructions.
+
+The keychain must be unlocked in the signing context and allow `codesign` to use
+the private key. An SSH login does not unlock it. For `errSecInternalComponent`
+or a key-access error, test from Terminal on the Mac and respond to the system's
+unlock or key-access dialog. Follow [Apple's signing troubleshooting](https://developer.apple.com/forums/thread/712005)
+before testing SSH again. Do not put keychain passwords in environment variables,
+repository files or command arguments; the installer never edits key ACLs.
+
+The helper verifies the candidate signature and checks that each app satisfies
+the other's designated requirement, as described in
+[Apple TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
+A shared bundle identifier or team alone is insufficient. An incompatible
+signature stops before the maintained GUI updater can replace the installed app.
+An old ad hoc installation can move to certificate signing with fresh consent
+once; the installer does not reset TCC or grant permissions.
+
+The source bundle contains one executable and links external Homebrew Qt.
+It is signed without the hardened runtime or a network timestamp, for local
+development. Unexpected nested code or symbolic links are refused. Public
+distribution continues to use the separate inside-out hardened-runtime signer,
+entitlements, timestamp and notarization checks above.
+
+An opt-in native regression uses two different synthetic executables to verify
+mutual designated-requirement compatibility, compares them to the installed app
+read-only, and proves that an ad hoc replacement is rejected:
+
+```sh
+ZERUS_TEST_LOCAL_MACOS_SIGNING=1 python3 -m unittest discover -s tests -p test_macos_local_signing.py -v
+```
+
 ### macOS privacy permissions after a signature change
 
 macOS attributes agent-launched Apple Events, Accessibility and screen capture
