@@ -43,9 +43,9 @@ peers through gateways.
 
 | Method and path | Role | Result |
 | --- | --- | --- |
-| `POST /v1/node/invitations` | Computer | `{pair_code, expires_at, workspace_id, workspace_name}` |
+| `POST /v1/node/invitations` | Computer | `{workspace_id?}` → `{pair_code, expires_at, workspace_id, workspace_name}`; 409 for another workspace |
 | `GET /v1/node/devices` | Computer | `{workspace_id, workspace_name, devices: [{id, name, platform, paired_at, last_seen_at, added_by}]}` |
-| `DELETE /v1/node/devices/{id}` | Computer | `{revoked: true}`; 404 outside the workspace or already revoked |
+| `DELETE /v1/node/devices/{id}?workspace_id=` | Computer | `{revoked: true}`; 404 outside the workspace or already revoked, 409 for another named workspace |
 
 - `devices` gains nullable `paired_at`, `last_seen` and `added_by` (node ID);
   `invitations` gains nullable `added_by`. Older rows report `null`.
@@ -70,11 +70,17 @@ a peer like other read-only machine commands.
   so callers can probe every machine. Otherwise it prints the relay response plus
   `server_url` and `gateway` (this computer's name).
 - `invite` adds `pair_url`: `zerus://pair?server=<form-encoded server_url>&code=<code>`.
-- HTTPS goes through the system `curl`. The bearer token travels on curl's
+- HTTPS goes through the system `curl`, started with `-q` first so no `.curlrc`
+  can add redirects, traces or other defaults. The bearer token travels on curl's
   standard input configuration, never in arguments; proxies from the
   environment are ignored like in the connector; only `https` is allowed, except
   loopback `http` when `HGS_MOBILE_ALLOW_INSECURE_LOCALHOST=1` (tests). Bounded
   connect/total timeouts and response size.
+- `invite` and `revoke-phone` take `--workspace ID --server URL` from the list the
+  desktop shows. hgs refuses a changed relay before any request and sends the
+  workspace to the relay, which answers 409 for another workspace before creating
+  or revoking anything; the desktop also checks the returned workspace and relay
+  before it shows a code. (Independent review of PR #192, zerus-735w.1.)
 - A relay without the routes (404) reports "The relay does not support phone
   management yet; update it."
 
@@ -86,7 +92,9 @@ a peer like other read-only machine commands.
   workspaces the dialog first asks which one.
 - **Machines → Phones.** A section listing phones grouped by workspace, with
   "via <computer>" when reached through a peer, **Pair a phone…**, **Refresh**
-  and per-phone **Revoke…** with a destructive confirmation naming the phone.
+  and per-phone **Revoke…** with a destructive confirmation naming the phone. A
+  failed or unconfirmed revocation stays reported until **Refresh** and is never
+  retried automatically.
   Machines without a connector are skipped; unreachable or outdated peers are
   reported in one line.
 - **Settings → Mobile connection** gains **Pair a phone…**, opening the same

@@ -61,6 +61,7 @@ private:
     QPushButton *m_copyCode, *m_copyLink, *m_again;
     QTimer *m_timer;
     QString m_link, m_codeText;
+    Target m_current;
     double m_expires = 0;
     quint64 m_request = 0;
 };
@@ -89,6 +90,8 @@ private:
     QList<QJsonObject> m_lists;
     QStringList m_hostOrder;
     QStringList m_problems;
+    // Kept until an explicit refresh: a failed or unconfirmed revocation is never retried.
+    QString m_notice, m_revokingName;
     QSet<quint64> m_pending;
     quint64 m_machines = 0, m_revoking = 0;
     bool m_loaded = false;

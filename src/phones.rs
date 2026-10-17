@@ -12,19 +12,40 @@ use std::{
     process::{Command, Stdio},
 };
 
-const USAGE: &str = "usage: hgs [@host] mobile phones|invite|revoke-phone <id> --json";
+const USAGE: &str = "usage: hgs [@host] mobile phones|invite|revoke-phone <id> [--workspace ID --server URL] --json";
+const CHANGED_RELAY: &str =
+    "The mobile connection on this computer now uses another relay; refresh the phone list";
+const CHANGED_WORKSPACE: &str =
+    "The mobile connection on this computer now belongs to another workspace; refresh the phone list";
 const MAX_CONFIG_BYTES: u64 = 65_536;
 const MAX_RESPONSE_BYTES: u64 = 1_048_576;
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
-    let action = match args {
-        [action, json] if json == "--json" && action == "phones" => Action::Phones,
-        [action, json] if json == "--json" && action == "invite" => Action::Invite,
-        [action, id, json] if json == "--json" && action == "revoke-phone" => {
+    let (action, rest) = match args {
+        [action, rest @ ..] if action == "phones" => (Action::Phones, rest),
+        [action, rest @ ..] if action == "invite" => (Action::Invite, rest),
+        [action, id, rest @ ..] if action == "revoke-phone" => {
             if !device_id(id) {
                 return Err(Error::new(1, "Choose a phone by its device ID"));
             }
-            Action::Revoke(id.clone())
+            (Action::Revoke(id.clone()), rest)
+        }
+        _ => return Err(Error::new(1, USAGE)),
+    };
+    // The desktop names the relay and workspace it listed, so a changed
+    // connection never issues or revokes for another one.
+    let pin = match rest {
+        [json] if json == "--json" => None,
+        [w, workspace, s, server, json]
+            if w == "--workspace"
+                && s == "--server"
+                && json == "--json"
+                && !matches!(action, Action::Phones) =>
+        {
+            if !workspace_id(workspace) {
+                return Err(Error::new(1, "Choose a workspace by its ID"));
+            }
+            Some((workspace.clone(), server.trim_end_matches('/').to_owned()))
         }
         _ => return Err(Error::new(1, USAGE)),
     };
@@ -41,9 +62,16 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             "This computer has no mobile connection; set it up in Settings → Mobile connection",
         ));
     };
+    if pin
+        .as_ref()
+        .is_some_and(|(_, server)| *server != connection.server)
+    {
+        return Err(Error::new(1, CHANGED_RELAY));
+    }
+    let workspace = pin.map(|(workspace, _)| workspace);
     let output = match action {
         Action::Phones => {
-            let mut value = connection.call("GET", "/v1/node/devices", false)?;
+            let mut value = connection.call("GET", "/v1/node/devices", None, false)?;
             object(&mut value)?;
             let mut out = json!({"configured": true, "server_url": connection.server});
             out.as_object_mut()
@@ -52,7 +80,22 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             out
         }
         Action::Invite => {
-            let mut value = connection.call("POST", "/v1/node/invitations", false)?;
+            let body = match &workspace {
+                Some(workspace) => json!({"workspace_id": workspace}),
+                None => json!({}),
+            };
+            let mut value = connection.call(
+                "POST",
+                "/v1/node/invitations",
+                Some(&body.to_string()),
+                false,
+            )?;
+            if workspace
+                .as_ref()
+                .is_some_and(|workspace| value["workspace_id"] != json!(workspace))
+            {
+                return Err(Error::new(1, CHANGED_WORKSPACE));
+            }
             let code = object(&mut value)?
                 .get("pair_code")
                 .and_then(Value::as_str)
@@ -72,7 +115,15 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             value
         }
         Action::Revoke(id) => {
-            connection.call("DELETE", &format!("/v1/node/devices/{id}"), true)?;
+            let scope = workspace
+                .map(|workspace| format!("?workspace_id={workspace}"))
+                .unwrap_or_default();
+            connection.call(
+                "DELETE",
+                &format!("/v1/node/devices/{id}{scope}"),
+                None,
+                true,
+            )?;
             json!({"revoked": true, "device_id": id})
         }
     };
@@ -149,11 +200,19 @@ fn connection(config: &Config) -> Result<Option<Connection>> {
 }
 
 impl Connection {
-    /// One bounded request: no environment proxies (like the connector), no
-    /// redirects, and the bearer token only in curl's configuration on stdin.
-    fn call(&self, method: &str, path: &str, revoke: bool) -> Result<Value> {
+    /// One bounded request: no curlrc (`-q` must come first), so no redirects
+    /// or traces from a user's defaults; no environment proxies (like the
+    /// connector); and the bearer token only in curl's configuration on stdin.
+    fn call(&self, method: &str, path: &str, body: Option<&str>, revoke: bool) -> Result<Value> {
         let mut command = Command::new("curl");
-        command.args(["--silent", "--show-error", "--noproxy", "*", "--proto"]);
+        command.args([
+            "-q",
+            "--silent",
+            "--show-error",
+            "--noproxy",
+            "*",
+            "--proto",
+        ]);
         command.arg(if self.insecure {
             "=http,https"
         } else {
@@ -175,8 +234,8 @@ impl Connection {
             "--request",
             method,
         ]);
-        if method == "POST" {
-            command.args(["--header", "Content-Type: application/json", "--data", "{}"]);
+        if let Some(body) = body {
+            command.args(["--header", "Content-Type: application/json", "--data", body]);
         }
         command.arg(format!("{}{path}", self.server));
         command
@@ -233,6 +292,7 @@ impl Connection {
                 1,
                 "The relay does not support phone management yet; update it",
             )),
+            "409" => Err(Error::new(1, CHANGED_WORKSPACE)),
             "429" => Err(Error::new(
                 1,
                 "Too many requests to the relay; try again in a minute",
@@ -247,6 +307,10 @@ fn object(value: &mut Value) -> Result<&serde_json::Map<String, Value>> {
     value
         .as_object()
         .ok_or_else(|| Error::new(1, "The relay returned an invalid response"))
+}
+
+fn workspace_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 fn device_id(id: &str) -> bool {

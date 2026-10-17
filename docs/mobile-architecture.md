@@ -878,9 +878,9 @@ API errors carry an `error` string. Relay health reports the protocol version.
 | `POST /v1/push` | Device | `{provider: "fcm" \| "apns" \| "apns_sandbox", token}`; an unconfigured provider returns 503, others 400 |
 | `DELETE /v1/push` | Device | Remove this device's push registration |
 | `DELETE /v1/device` | Device | Revoke this device, its queued requests and push registration |
-| `POST /v1/node/invitations` | Computer | `{}` → `{pair_code, expires_at, workspace_id, workspace_name}`: a ten-minute, single-use phone invitation; 10 per minute per computer |
+| `POST /v1/node/invitations` | Computer | `{workspace_id?}` → `{pair_code, expires_at, workspace_id, workspace_name}`: a ten-minute, single-use phone invitation; 10 per minute per computer; 409 when `workspace_id` names another workspace |
 | `GET /v1/node/devices` | Computer | `{workspace_id, workspace_name, devices: [{id, name, platform, paired_at, last_seen_at, added_by}]}`, at most 200 active phones, newest pairing first |
-| `DELETE /v1/node/devices/{id}` | Computer | Revoke a phone of this workspace exactly like `DELETE /v1/device`; 404 when it is not an active phone of the workspace |
+| `DELETE /v1/node/devices/{id}?workspace_id=` | Computer | Revoke a phone of this workspace exactly like `DELETE /v1/device`; 404 when it is not an active phone of the workspace, 409 when the optional `workspace_id` names another workspace |
 | `POST /v1/node/heartbeat` | Computer | `{snapshot, presence?}` using local `hgs ls --json --local` output; its `desktop_presence` travels as `presence` beside the snapshot |
 | `GET /v1/node/requests?wait=25` | Computer | `{requests: [{request_id, operation, session, payload}]}` |
 | `POST /v1/node/requests/{id}/result` | Computer | `{state, result, error}` |

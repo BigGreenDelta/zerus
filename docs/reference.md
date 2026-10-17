@@ -1810,7 +1810,13 @@ of the workspace at once. A computer whose hgs predates phone management is name
 and never asked. The same operations are available as
 `hgs [@host] mobile phones|invite|revoke-phone <id> --json`; a computer without
 a mobile connection answers `{"configured": false}`. Requests go to the relay
-through the system `curl` with the computer credential on its standard input.
+through the system `curl` with the computer credential on its standard input;
+curl ignores the user's `.curlrc` and environment proxies and never follows
+redirects. The desktop passes `--workspace ID --server URL` from the list it
+shows, so a gateway whose mobile connection changed meanwhile refuses to invite
+or revoke for another relay or workspace, and a code for another workspace is
+never shown. A revocation that fails or cannot be confirmed stays reported until
+**Refresh**; it is never retried automatically.
 
 Multiple machine filters narrow both sessions and content search. Label color,
 Bright/Soft mode and appearance previews are local. Color pickers cancel on an

@@ -306,7 +306,7 @@ async fn phone_management_needs_a_computer_credential_and_strict_input() {
         reqwest::Method::POST,
         "/v1/node/invitations",
         node(&f),
-        Some(json!({"workspace_id":"x"})),
+        Some(json!({"workspace":"x"})),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -384,6 +384,77 @@ async fn phones_paired_before_these_fields_report_them_as_unknown() {
         ),
         (Value::Null, Value::Null, Value::Null, Value::Null)
     );
+    server.stop().await;
+    f.close().await;
+}
+
+#[tokio::test]
+async fn invitations_and_revocations_are_pinned_to_the_selected_workspace() {
+    let f = Fixture::new().await;
+    let server = Server::start(&f.store).await;
+    let client = Client::new();
+    let invitations = f.count("invitations").await;
+    // A desktop that listed another workspace must not receive this one's code.
+    let (status, _) = call(
+        &client,
+        &server,
+        reqwest::Method::POST,
+        "/v1/node/invitations",
+        node(&f),
+        Some(json!({"workspace_id":"00000000-0000-4000-8000-0000000000aa"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(f.count("invitations").await, invitations);
+    let (status, invitation) = call(
+        &client,
+        &server,
+        reqwest::Method::POST,
+        "/v1/node/invitations",
+        node(&f),
+        Some(json!({"workspace_id":f.node.workspace})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(invitation["workspace_id"], f.node.workspace);
+    let path = format!(
+        "/v1/node/devices/{}?workspace_id=00000000-0000-4000-8000-0000000000aa",
+        f.phone.id
+    );
+    let (status, _) = call(
+        &client,
+        &server,
+        reqwest::Method::DELETE,
+        &path,
+        node(&f),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = call(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        "/v1/computers",
+        phone(&f),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let path = format!(
+        "/v1/node/devices/{}?workspace_id={}",
+        f.phone.id, f.node.workspace
+    );
+    let (status, _) = call(
+        &client,
+        &server,
+        reqwest::Method::DELETE,
+        &path,
+        node(&f),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     server.stop().await;
     f.close().await;
 }

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """hgs mobile: phone pairing and management through the connector credential."""
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -101,6 +104,8 @@ class MobilePhones(unittest.TestCase):
         self.assertIn('header = "Authorization: Bearer synthetic-node-token"', call["config"])
         for flag in ("--noproxy", "--proto", "--max-time", "--connect-timeout"):
             self.assertIn(flag, call["args"])
+        # curl ignores its default configuration only when -q comes first.
+        self.assertEqual(call["args"][0], "-q")
         self.assertEqual(call["args"][call["args"].index("--proto") + 1], "=https")
 
     def test_an_invitation_carries_the_pairing_link(self):
@@ -153,6 +158,72 @@ class MobilePhones(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         [call] = self.calls()
         self.assertEqual(call["args"][call["args"].index("--proto") + 1], "=http,https")
+
+    def test_invite_and_revoke_stay_with_the_relay_and_workspace_that_were_listed(self):
+        self.connect()
+        pin = ["--workspace", "w1", "--server", "https://relay.example.test"]
+        invitation = {"workspace_id": "w1", "workspace_name": "Example workspace",
+                      "pair_code": "synthetic_pair-code_0123456789", "expires_at": 1000.5}
+        self.respond({"POST /v1/node/invitations": [200, invitation],
+                      "DELETE /v1/node/devices/" + DEVICE + "?workspace_id=w1": [200, {"revoked": True}]})
+        result = self.hgs("mobile", "invite", "--workspace", "w1", "--server", "https://other.example.test", "--json")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("another relay", result.stderr)
+        self.assertEqual(self.calls(), [])
+        result = self.hgs("mobile", "invite", *pin, "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [call] = self.calls()
+        self.assertEqual(json.loads(call["args"][call["args"].index("--data") + 1]), {"workspace_id": "w1"})
+        result = self.hgs("mobile", "revoke-phone", DEVICE, *pin, "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.calls()[-1]["args"][-1].endswith("/v1/node/devices/" + DEVICE + "?workspace_id=w1"))
+        # A relay answering for another workspace never yields a usable code.
+        self.respond({"POST /v1/node/invitations": [200, {**invitation, "workspace_id": "w2"}]})
+        result = self.hgs("mobile", "invite", *pin, "--json")
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("another workspace", result.stderr)
+        self.respond({"POST /v1/node/invitations": [409, {"error": "request identity or route conflicts"}]})
+        result = self.hgs("mobile", "invite", *pin, "--json")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("another workspace", result.stderr)
+
+    @unittest.skipUnless(shutil.which("curl"), "needs the system curl")
+    def test_a_hostile_curlrc_cannot_redirect_or_trace_the_credential(self):
+        (self.bin / "curl").unlink()
+        seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                seen.append((self.server.server_port, self.headers.get("Authorization")))
+                if self.server is relay:
+                    self.send_response(302)
+                    self.send_header("Location", "http://127.0.0.1:%d/v1/node/devices" % other.server_port)
+                    self.end_headers()
+                else:
+                    body = json.dumps({"devices": []}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+        relay, other = HTTPServer(("127.0.0.1", 0), Handler), HTTPServer(("127.0.0.1", 0), Handler)
+        for server in (relay, other):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+        trace = self.root / "trace.txt"
+        (self.home / ".curlrc").write_text("location\ntrace = \"%s\"\n" % trace)
+        self.connect(server="http://127.0.0.1:%d" % relay.server_port)
+        result = self.hgs("mobile", "phones", "--json",
+                          env={**self.env, "CURL_HOME": str(self.home), "HGS_MOBILE_ALLOW_INSECURE_LOCALHOST": "1"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("HTTP 302", result.stderr)
+        self.assertEqual(seen, [(relay.server_port, "Bearer synthetic-node-token")])
+        self.assertFalse(trace.exists())
+        self.assertNotIn("synthetic-node-token", result.stderr)
 
     def test_a_peer_manages_phones_through_its_gateway(self):
         remote = self.root / "remote-peer/.local/bin"

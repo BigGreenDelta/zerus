@@ -25,11 +25,20 @@
 namespace PhonePairing {
 namespace {
 constexpr int QuietZone = 4;
-enum Role { KindRole = Qt::UserRole, IdRole, HostRole, WorkspaceRole, TargetRole };
+enum Role { KindRole = Qt::UserRole, IdRole, HostRole, WorkspaceRole, TargetRole, WorkspaceIdRole, ServerRole };
 QString hostName(const QString &host) { return host.isEmpty() ? QCoreApplication::translate("PhonePairing", "this computer") : host; }
 QString when(const QJsonValue &seconds) {
     if (!seconds.isDouble() || seconds.toDouble() <= 0) return QStringLiteral("—");
     return QLocale().toString(QDateTime::fromMSecsSinceEpoch(qint64(seconds.toDouble() * 1000)), QLocale::ShortFormat);
+}
+QString origin(QString url) { while (url.endsWith('/')) url.chop(1); return url; }
+// Pins the relay and workspace the user saw, so a gateway whose connection
+// changed meanwhile neither issues nor revokes for another workspace.
+QStringList pinned(const QString &action, const QString &id, const QString &workspace, const QString &server) {
+    QStringList args{action};
+    if (!id.isEmpty()) args << id;
+    if (!workspace.isEmpty() && !server.isEmpty()) args << QStringLiteral("--workspace") << workspace << QStringLiteral("--server") << server;
+    return args << QStringLiteral("--json");
 }
 QString platform(const QString &value) {
     if (value == QLatin1String("ios")) return QStringLiteral("iOS");
@@ -132,13 +141,13 @@ Dialog::Dialog(const QString &executable, const QList<Target> &targets, int sele
 
 void Dialog::request() {
     if (m_targets.isEmpty()) return;
-    const auto &target = m_targets.value(m_workspace ? m_workspace->currentIndex() : 0);
+    const auto target = m_current = m_targets.value(m_workspace ? m_workspace->currentIndex() : 0);
     m_link.clear(); m_codeText.clear(); m_expires = 0; m_timer->stop();
     m_code->setText({}); m_code->setFaded(false);
     m_server->setText(target.serverUrl); m_pairCode->setText(QStringLiteral("…")); m_expiry->clear();
     m_status->setText(tr("Requesting a pairing code from %1…").arg(hostName(target.host)));
     m_copyCode->setEnabled(false); m_copyLink->setEnabled(false); m_again->setEnabled(false);
-    m_request = m_client->requestMobile(target.host, {QStringLiteral("invite"), QStringLiteral("--json")});
+    m_request = m_client->requestMobile(target.host, pinned(QStringLiteral("invite"), {}, target.workspaceId, target.serverUrl));
 }
 
 void Dialog::showInvitation(const QJsonObject &invitation) {
@@ -146,7 +155,13 @@ void Dialog::showInvitation(const QJsonObject &invitation) {
     m_expires = invitation.value("expires_at").toDouble();
     m_again->setEnabled(true);
     if (!m_link.startsWith(QLatin1String("zerus://pair?")) || m_codeText.isEmpty()) {
-        m_status->setText(tr("The relay returned an invalid pairing code.")); return;
+        m_link.clear(); m_codeText.clear(); m_status->setText(tr("The relay returned an invalid pairing code.")); return;
+    }
+    if (invitation.value("workspace_id").toString() != m_current.workspaceId
+        || origin(invitation.value("server_url").toString()) != origin(m_current.serverUrl)) {
+        m_link.clear(); m_codeText.clear();
+        m_status->setText(tr("This pairing code belongs to another workspace or relay than the one listed. Refresh the phone list and try again."));
+        return;
     }
     m_code->setText(m_link);
     m_server->setText(invitation.value("server_url").toString());
@@ -190,7 +205,7 @@ Panel::Panel(const QString &executable, QWidget *parent, std::function<bool(cons
     m_pair->setEnabled(false); m_revoke->setEnabled(false);
     connect(m_pair, &QPushButton::clicked, this, [this] { pair(); });
     connect(m_revoke, &QPushButton::clicked, this, [this] { revoke(); });
-    connect(m_refresh, &QPushButton::clicked, this, [this] { refresh(); });
+    connect(m_refresh, &QPushButton::clicked, this, [this] { m_notice.clear(); refresh(); });
     connect(m_tree, &QTreeWidget::itemSelectionChanged, this, [this] {
         const auto *item = m_tree->currentItem();
         m_revoke->setEnabled(!m_revoking && item && item->data(0, KindRole).toString() == QLatin1String("phone"));
@@ -213,13 +228,18 @@ Panel::Panel(const QString &executable, QWidget *parent, std::function<bool(cons
         m_pending.insert(m_client->requestMobile(QString(), {QStringLiteral("phones"), QStringLiteral("--json")}));
     });
     connect(m_client, &HgsClient::mobileReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
-        if (request && request == m_revoking) { m_revoking = 0; m_status->setText(tr("Phone revoked.")); refresh(); return; }
+        if (request && request == m_revoking) { m_revoking = 0; m_notice = tr("%1 revoked.").arg(m_revokingName); refresh(); return; }
         if (!m_pending.remove(request)) return;
         if (result.value("configured").toBool()) { auto list = result; list.insert("host", host); m_lists << list; }
         if (m_pending.isEmpty()) finish();
     });
     connect(m_client, &HgsClient::mobileFailed, this, [this](quint64 request, const QString &host, const QString &error) {
-        if (request && request == m_revoking) { m_revoking = 0; m_status->setText(error); render(); return; }
+        if (request && request == m_revoking) {
+            m_revoking = 0;
+            m_notice = tr("Could not confirm revoking %1: %2. Refresh to check whether it is still listed before trying again.")
+                           .arg(m_revokingName, error);
+            render(); return;
+        }
         if (!m_pending.remove(request)) return;
         m_problems << tr("%1: %2").arg(hostName(host), error);
         if (m_pending.isEmpty()) finish();
@@ -269,12 +289,14 @@ void Panel::render() {
             if (added.isEmpty()) item->setToolTip(4, tr("Paired with an administrator invitation, or before Zerus recorded it"));
             item->setData(0, KindRole, "phone"); item->setData(0, IdRole, device.value("id").toString());
             item->setData(0, HostRole, host); item->setData(0, WorkspaceRole, workspace); item->setData(0, TargetRole, index);
+            item->setData(0, WorkspaceIdRole, list.value("workspace_id").toString()); item->setData(0, ServerRole, list.value("server_url").toString());
             if (item->data(0, IdRole).toString() == selected) m_tree->setCurrentItem(item);
             ++phones;
         }
     }
     m_tree->expandAll();
     QStringList lines;
+    if (!m_notice.isEmpty()) lines << m_notice;
     if (m_targets.isEmpty()) lines << tr("No computer here has a mobile connection. Set one up in Settings → Mobile connection on a computer that connects to the relay.");
     else lines << (phones == 1 ? tr("1 phone") : tr("%1 phones").arg(phones));
     for (const auto &problem : std::as_const(m_problems)) lines << problem;
@@ -289,6 +311,7 @@ void Panel::revoke() {
     if (m_revoking || !item || item->data(0, KindRole).toString() != QLatin1String("phone")) return;
     const auto phone = item->text(0), workspace = item->data(0, WorkspaceRole).toString();
     const auto id = item->data(0, IdRole).toString(), host = item->data(0, HostRole).toString();
+    const auto workspaceId = item->data(0, WorkspaceIdRole).toString(), server = item->data(0, ServerRole).toString();
     const bool confirmed = m_confirm ? m_confirm(phone, workspace) : [&] {
         QMessageBox box(QMessageBox::Warning, tr("Revoke %1?").arg(phone),
             tr("%1 loses access to every computer of %2 at once, and its queued requests are cancelled. "
@@ -298,8 +321,9 @@ void Panel::revoke() {
         return box.clickedButton() == revoke;
     }();
     if (!confirmed) return;
+    m_notice.clear(); m_revokingName = phone;
     m_status->setText(tr("Revoking %1…").arg(phone)); m_revoke->setEnabled(false);
-    m_revoking = m_client->requestMobile(host, {QStringLiteral("revoke-phone"), id, QStringLiteral("--json")});
+    m_revoking = m_client->requestMobile(host, pinned(QStringLiteral("revoke-phone"), id, workspaceId, server));
 }
 
 void Panel::pair() {
@@ -307,7 +331,7 @@ void Panel::pair() {
     const auto *item = m_tree->currentItem();
     Dialog dialog(m_executable, m_targets, item ? item->data(0, TargetRole).toInt() : 0, this);
     dialog.exec();
-    refresh();
+    m_notice.clear(); refresh();
 }
 
 } // namespace PhonePairing

@@ -29,7 +29,7 @@ class TestPhonePairing : public QObject {
 private slots:
     void init() {
         QVERIFY(m_dir.isValid());
-        for (const auto *name : {"calls", "revoked", "old-peer", "no-connection"}) QFile::remove(m_dir.filePath(name));
+        for (const auto *name : {"calls", "revoked", "old-peer", "no-connection", "other-workspace", "fail-revoke"}) QFile::remove(m_dir.filePath(name));
         m_hgs = m_dir.filePath("hgs");
         QVERIFY(FakeCli::install(m_hgs, R"PY(#!/usr/bin/env python3
 import json, pathlib, sys, time
@@ -54,11 +54,12 @@ elif args == ['mobile', 'phones', '--json']:
         if (root / 'revoked').exists(): devices = devices[1:]
         print(json.dumps({'configured': True, 'server_url': 'https://relay.example.test', 'workspace_id': 'w1',
                           'workspace_name': 'Example workspace', 'devices': devices}))
-elif args == ['mobile', 'invite', '--json']:
-    print(json.dumps({'workspace_id': 'w1', 'workspace_name': 'Example workspace', 'pair_code': 'synthetic_pair-code_0123456789',
+elif args[:2] == ['mobile', 'invite'] and args[2:] in (['--json'], ['--workspace', 'w1', '--server', 'https://relay.example.test', '--json']):
+    print(json.dumps({'workspace_id': 'w2' if (root / 'other-workspace').exists() else 'w1', 'workspace_name': 'Example workspace', 'pair_code': 'synthetic_pair-code_0123456789',
                       'expires_at': float((root / 'expires').read_text()), 'server_url': 'https://relay.example.test',
                       'pair_url': 'zerus://pair?server=https%3A%2F%2Frelay.example.test&code=synthetic_pair-code_0123456789'}))
-elif args[:2] == ['mobile', 'revoke-phone'] and args[3:] == ['--json']:
+elif args[:2] == ['mobile', 'revoke-phone'] and args[3:] in (['--json'], ['--workspace', 'w1', '--server', 'https://relay.example.test', '--json']):
+    if (root / 'fail-revoke').exists(): print('hgs: The relay is temporarily unavailable', file=sys.stderr); sys.exit(1)
     (root / 'revoked').write_text(args[2]); print(json.dumps({'revoked': True, 'device_id': args[2]}))
 else:
     print('unexpected', args, file=sys.stderr); sys.exit(2)
@@ -107,7 +108,37 @@ else:
         for (const auto &call : calls()) QVERIFY(!call.contains("revoke-phone"));
         accept = true; revoke->click();
         QTRY_COMPARE(children(tree, 0), QStringList{"Zerus Android"});
-        QVERIFY(calls().contains(QString("@peer mobile revoke-phone %1 --json").arg(Device)));
+        QVERIFY(calls().contains(QString("@peer mobile revoke-phone %1 --workspace w1 --server https://relay.example.test --json").arg(Device)));
+    }
+    void aFailedRevocationStaysVisibleAndIsNotRetried() {
+        touch("fail-revoke");
+        PhonePairing::Panel panel(FakeCli::program(m_hgs), nullptr, [](const QString &, const QString &) { return true; });
+        auto *tree = panel.findChild<QTreeWidget *>("linkedPhones"); auto *status = panel.findChild<QLabel *>("phonesStatus");
+        panel.refresh();
+        QTRY_COMPARE(children(tree, 0).size(), 2);
+        tree->setCurrentItem(tree->topLevelItem(0)->child(0));
+        panel.findChild<QPushButton *>("revokePhone")->click();
+        QTRY_VERIFY(status->text().contains("Could not confirm revoking Zerus iOS"));
+        QVERIFY(status->text().contains("The relay is temporarily unavailable"));
+        QTest::qWait(500);
+        QVERIFY(status->text().contains("Could not confirm revoking Zerus iOS"));
+        QCOMPARE(children(tree, 0).size(), 2);
+        int revokes = 0; for (const auto &call : calls()) revokes += call.contains("revoke-phone");
+        QCOMPARE(revokes, 1);
+        // An explicit refresh shows the current list and clears the notice.
+        panel.findChild<QPushButton *>("refreshPhones")->click();
+        QTRY_COMPARE(status->text(), QString("2 phones"));
+    }
+    void thePairingDialogNeverShowsAnotherWorkspacesCode() {
+        touch("other-workspace");
+        QFile expires(m_dir.filePath("expires")); QVERIFY(expires.open(QIODevice::WriteOnly)); expires.write("4000000000"); expires.close();
+        PhonePairing::Dialog dialog(FakeCli::program(m_hgs), {{"peer", "w1", "Example workspace", "https://relay.example.test"}}, 0);
+        auto *status = dialog.findChild<QLabel *>("phonePairingStatus");
+        QTRY_VERIFY(status->text().contains("another workspace"));
+        auto *code = dynamic_cast<PhonePairing::QrCodeView *>(dialog.findChild<QWidget *>("phonePairingCode"));
+        QVERIFY(code->text().isEmpty());
+        QVERIFY(!dialog.findChild<QPushButton *>("copyPairingCode")->isEnabled());
+        QVERIFY(dialog.findChild<QLabel *>("phonePairingCodeText")->text() != QString("synthetic_pair-code_0123456789"));
     }
     void anOlderComputerIsNeverAskedToRunMobile() {
         touch("old-peer");
@@ -130,7 +161,7 @@ else:
         QCOMPARE(dialog.findChild<QLabel *>("phonePairingCodeText")->text(), QString("synthetic_pair-code_0123456789"));
         QCOMPARE(dialog.findChild<QLabel *>("phonePairingServer")->text(), QString("https://relay.example.test"));
         QCOMPARE(dialog.findChild<QLabel *>("phonePairingExpiry")->text(), QString("Expires in 10:00"));
-        QVERIFY(calls().contains("@peer mobile invite --json"));
+        QVERIFY(calls().contains("@peer mobile invite --workspace w1 --server https://relay.example.test --json"));
         auto *copy = dialog.findChild<QPushButton *>("copyPairingCode"); QVERIFY(copy->isEnabled());
         now = 1'000'601;
         QTRY_VERIFY_WITH_TIMEOUT(dialog.findChild<QLabel *>("phonePairingExpiry")->text().contains("expired"), 3000);
