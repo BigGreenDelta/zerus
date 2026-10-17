@@ -121,8 +121,8 @@ pub(super) fn offered_model(
     value: &str,
     effort: &str,
 ) -> Result<Value> {
-    let models = service.call("GET", &query("/api/model", location), None)?;
-    model_ref(&project(&models), value, effort)
+    let (rows, _) = offered_rows(service, location)?;
+    model_ref(&rows, value, effort)
 }
 
 fn cache_path() -> PathBuf {
@@ -206,11 +206,30 @@ fn include_selected(rows: &mut Vec<Value>, models: &Value, default: &Value, sele
     rows.push(extra.remove(0));
 }
 
-fn fetch(service: &Service, location: &Path) -> Result<(Vec<Value>, String, bool)> {
+/// The one place that turns the service's model list and default into
+/// offered rows plus the selected value; the default is always included.
+fn rows_from(models: &Value, default: &Value) -> (Vec<Value>, String) {
+    let mut rows = project(models);
+    let selected = match (
+        default["data"]["providerID"].as_str(),
+        default["data"]["id"].as_str(),
+    ) {
+        (Some(p), Some(m)) if safe_id(p) && safe_id(m) => format!("{p}/{m}"),
+        _ => String::new(),
+    };
+    include_selected(&mut rows, models, default, &selected);
+    (rows, selected)
+}
+
+fn offered_rows(service: &Service, location: &Path) -> Result<(Vec<Value>, String)> {
     let models = service.call("GET", &query("/api/model", location), None)?;
-    let providers = service.call("GET", &query("/api/provider", location), None)?;
     let default = service.call("GET", &query("/api/model/default", location), None)?;
-    let mut rows = project(&models);
+    Ok(rows_from(&models, &default))
+}
+
+fn fetch(service: &Service, location: &Path) -> Result<(Vec<Value>, String, bool)> {
+    let (mut rows, selected) = offered_rows(service, location)?;
+    let providers = service.call("GET", &query("/api/provider", location), None)?;
     let mut labels = std::collections::HashMap::new();
     for provider in providers["data"].as_array().into_iter().flatten() {
         if let Some(id) = provider["id"].as_str().filter(|id| safe_id(id)) {
@@ -222,13 +241,6 @@ fn fetch(service: &Service, location: &Path) -> Result<(Vec<Value>, String, bool
             row["provider_label"] = json!(label);
         }
     }
-    let selected = match (
-        default["data"]["providerID"].as_str(),
-        default["data"]["id"].as_str(),
-    ) {
-        (Some(p), Some(m)) if safe_id(p) && safe_id(m) => format!("{p}/{m}"),
-        _ => String::new(),
-    };
     let loaded = providers["data"].as_array().is_some_and(|p| !p.is_empty());
     Ok((rows, selected, loaded))
 }
@@ -442,5 +454,21 @@ mod tests {
         std::fs::write(&path, record.to_string()).unwrap();
         assert!(cached_at(&path, Path::new("/srv/a")).is_some());
         assert!(cached_at(&path, Path::new("/srv/b")).is_none());
+    }
+
+    #[test]
+    fn shared_rows_list_and_accept_a_default_beyond_the_bound() {
+        let mut many = json!({"data": []});
+        for i in 0..300 {
+            many["data"].as_array_mut().unwrap().push(
+                json!({"id": format!("m{i}"), "providerID": "p", "name": "M", "enabled": true}),
+            );
+        }
+        let default = json!({"data": {"id": "m290", "providerID": "p"}});
+        let (rows, selected) = rows_from(&many, &default);
+        assert_eq!(selected, "p/m290");
+        assert_eq!(rows.len(), 256);
+        assert!(rows.iter().any(|r| r["id"] == "p/m290"));
+        assert!(model_ref(&rows, "p/m290", "").is_ok());
     }
 }
