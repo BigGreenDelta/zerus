@@ -518,3 +518,37 @@ Still requiring interactive or subsequent release qualification:
 - Installation from the public tap on a clean account, and an upgrade from one
   cask version to the next with running GUI, tmux session and native agent.
 - The channel switch between stable and nightly from the public tap.
+
+### Public cask upgrade qualification
+
+The manual **macOS public cask upgrade qualification** workflow tests already
+published bytes on a disposable standard `macos-15` runner. It has no signing,
+publication, deployment or cache credentials. Supply three full commits from
+`ufna/homebrew-zerus`: an older Stable recipe, a newer Stable recipe and the
+signed Nightly recipe. The defaults retain the public 0.43.0 and 0.44.0 Stable
+recipes; after publishing 0.45.0, repeat with the exact 0.44.0 and 0.45.0 commits.
+The Nightly commit must also be supplied explicitly.
+
+Before Homebrew evaluates a cask, the script checks its complete bytes against
+the current or retained pre-connector template, public release metadata and
+seals, bounded ZIP paths and the native Developer ID signature, Gatekeeper and
+stapled ticket. It installs from the real public tap, performs `brew upgrade`
+between the Stable versions and switches Stable to Nightly and back using
+ordinary uninstall/install, without `--zap` or `zerus-setup --remove`.
+
+An official SHA-512-pinned Claude executable runs against the existing
+localhost-only keyless fixture in a private tmux server. Its exact process start,
+pane, run and conversation must survive every package operation, together with
+synthetic saved preferences and an immutable attachment draft. The old private
+GUI must remain running during package operations; the fixture then explicitly
+restarts only that GUI and checks retained state. The receipt distinguishes this
+from interactive editor input. Native-format preferences belong to the disposable
+runner account; setting `HOME` alone is not claimed to isolate CFPreferences.
+
+This job must never run on an owner's account. It does not grant or reset TCC
+permissions and does not qualify Terminal automation. That remaining case needs
+an actual signed application's explicit **Open in Terminal** action against an
+owned synthetic session in a user-authorized interactive test: accept any normal
+Apple Events consent explicitly, verify the new owned Terminal window attaches
+the exact private tmux session, then close only that window. An `osascript`
+response over SSH or a fake Terminal backend is not that evidence.
