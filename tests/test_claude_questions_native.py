@@ -67,7 +67,7 @@ class NativeClaudeQuestions(unittest.TestCase):
   self.tool_name=getattr(self,'tool_name','AskUserQuestion');self.tool_input=self.native_tool_input(work) if hasattr(self,'native_tool_input') else getattr(self,'tool_input',None);self.message_fixture=getattr(self,'message_fixture',False);self.approval_fixture=self.tool_name!='AskUserQuestion' and not self.message_fixture
   wrapped=self._testMethodName.startswith('test_wrapped_')
   # Claude's own PermissionRequest hook answers test_channel_* questions.
-  channel=self._testMethodName.startswith('test_channel_');tall=self._testMethodName.startswith('test_channel_tall_')
+  channel=self._testMethodName.startswith('test_channel_');tall='_tall_' in self._testMethodName
   if self._testMethodName.startswith('test_channel_single_deadline_'):self.channel_seconds=4
   self.items=TALL_ITEMS if tall else ITEMS[:1] if self._testMethodName.startswith(('test_single_','test_channel_single_')) else WRAPPED_ITEMS if wrapped else ITEMS
   (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
@@ -424,7 +424,10 @@ sys.exit(result.returncode)
   try:os.kill(pid,0);return True
   except ProcessLookupError:return False
  def test_channel_tall_question_answered_at_80x24_without_growth(self):
-  card=self.channel_card();self.assertTrue(card['can_answer']);self.assertEqual(self.height(),'24')
+  card=self.channel_card();self.assertTrue(card['can_answer'])
+  # A listing before the channel bound may have grown the pane; the channel needs no growth.
+  self.tmux('resize-window','-t',self.pane,'-y','24');self.tmux('set-option','-w','-u','-t',self.pane,'window-size')
+  self.assertEqual(self.channel_card()['answer_transport'],'claude_hook');self.assertEqual(self.height(),'24')
   payload=self.payload(answers=[dict(question_id='q_0',selected_option_ids=['opt_0_0','opt_0_2'],text='')])
   receipt=self.answer(payload);self.assertEqual((receipt['status'],receipt['transport']),('answered','claude_hook'))
   self.assert_native_answer(payload);self.assertEqual(self.height(),'24');self.assertEqual(self.answer(payload),receipt)
@@ -466,6 +469,15 @@ sys.exit(result.returncode)
   self.assertEqual(card['answer_transport'],'claude_tui')
   receipt=self.answer();self.assertEqual((receipt['status'],receipt['transport']),('answered','claude_tui'))
   self.assert_native_answer(self.payload())
+ def test_tall_question_grows_its_unviewed_80x24_pane(self):
+  # Without the answer channel, inspection grows the pane no client views
+  # until the exact screen match can run.
+  card=self.wait_for(lambda:next((card for card in self.inspect()['pending_questions'] if card['can_answer']),None))
+  self.assertEqual(card['answer_transport'],'claude_tui');self.assertGreater(int(self.height()),24)
+  self.assertEqual(self.tmux('display-message','-p','-t',self.pane,'#{window_width}').strip(),'80')
+  payload=self.payload(answers=[dict(question_id='q_0',selected_option_ids=['opt_0_1','opt_0_3'],text='')])
+  receipt=self.answer(payload);self.assertEqual((receipt['status'],receipt['transport']),('answered','claude_tui'))
+  self.assert_native_answer(payload)
  def test_missing_native_receipt_is_uncertain_and_never_retried(self):
   self.enable_gutter_capture(False)
   other=self.root/'unconfirmed';other.mkdir();path=other/(self.conversation_id+'.jsonl');path.write_text('')

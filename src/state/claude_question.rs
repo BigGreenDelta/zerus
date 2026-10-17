@@ -1009,6 +1009,24 @@ fn submit_review<T: Transport>(io: &mut T, card: &Value, wanted: &[String]) -> R
     io.key("Enter")
 }
 
+/// Grow the pane no client views until this recorded question's clipped panel
+/// shows completely (`question_terminal::fit_unviewed`); the exact match in
+/// `available` still decides. Only a question listing calls it.
+pub(super) fn fit(record: &Value, card: &Value) {
+    if string(card, "source") != "hook"
+        || record["pending_questions"]
+            .get(string(card, "tool_call_id"))
+            .is_none()
+    {
+        return;
+    }
+    let Ok(current) = Native::new(record, card).identity() else {
+        return;
+    };
+    if let Ok(screen) = Native::capture(&current) {
+        question_terminal::fit_unviewed(&current, screen, Native::capture, clipped, complete);
+    }
+}
 pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
     if string(record, "agent") != "claude" || string(card, "source") != "hook" {
         return Err("Not a Claude question".into());

@@ -402,6 +402,7 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
                     // Claude's own hook waits beside the panel; the screen is not needed.
                     card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_hook"); card["answer_unavailable_reason"]=json!("");
                 } else if string(record,"agent")=="claude" && string(card,"source")=="hook" {
+                    claude_question::fit(record, card);
                     match claude_question::available(record,card) {
                         Ok(()) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_tui"); card["answer_unavailable_reason"]=json!(""); }
                         Err(error) => card["answer_unavailable_reason"]=json!(error),
