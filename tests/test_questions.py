@@ -95,6 +95,72 @@ finally: termios.tcsetattr(fd,termios.TCSANOW,original)
 '''
 
 
+FAKE_PLAN = fixtures.SIGNAL_SAFE_READ + r'''
+import json, os, pathlib, signal, sys, termios, time, tty
+root=pathlib.Path(os.environ['INPUT_FIXTURE'])
+fd=sys.stdin.fileno(); original=termios.tcgetattr(fd); tty.setraw(fd)
+os.write(1,b'\x1b[?2004h')
+config=None; selected=0; feedback=None; buffer=b''
+def choices():
+    options=config['request']['display'].get('options') or [{'label':'Approve'}]
+    return [option['label'] for option in options]+['Reject','Revise']
+def render():
+    if config is None: return
+    rule='─'*75; labels=choices()
+    lines=['  │ '+config['request']['display']['plan'].splitlines()[0]+' │',' '+rule,'   ▶ Ready to build with this plan?','']
+    for index,label in enumerate(labels):
+        row=str(index+1)+'. '+label
+        if index==selected and feedback is not None: lines.append('   \x1b[1m▶ '+row+'\x1b[0m  '+feedback+'\x1b[7m \x1b[27m')
+        elif index==selected: lines.append('   \x1b[1m▶ '+row+'\x1b[0m')
+        else: lines.append('     '+row)
+    hint='/'.join(str(index+1) for index in range(len(labels)))
+    lines+=['','   Type feedback · ↵ submit.' if feedback is not None else '   ↑/↓ select · '+hint+' choose · ↵ confirm',' '+rule,' Ask When Needed plan  K3']
+    os.write(1,b'\x1b[2J\x1b[H'+'\r\n'.join(lines).encode())
+def reload(*args):
+    global config
+    config=json.loads((root/'question-config').read_text()); render()
+signal.signal(signal.SIGUSR1,reload)
+(root/'agent-pid').write_text(str(os.getpid()))
+def resolve(label,decision,text=''):
+    global config
+    response={'decision':decision,'selectedLabel':label}
+    if text: response['feedback']=text
+    if (root/'wrong-ack').exists(): response['selectedLabel']='Reject'
+    event={'type':'interaction.resolved','id':config['id'],'agentId':'main','response':response,'time':int(time.time()*1000)}
+    with open(config['wire'],'a') as file: file.write(json.dumps(event)+'\n')
+    (root/'submitted').write_text(json.dumps(response))
+    config=None; os.write(1,b'\x1b[2J\x1b[HAgent working')
+def handle(value):
+    global selected,feedback
+    labels=choices()
+    if feedback is not None:
+        if value==b'\r': resolve('Revise','rejected',feedback); feedback=None
+        return
+    if value.isdigit() and 0<int(value)<=len(labels):
+        selected=int(value)-1
+        if labels[selected]=='Revise': feedback=''
+        else: resolve(labels[selected],'rejected' if labels[selected]=='Reject' else 'approved')
+try:
+    while True:
+        value=read_input(fd)
+        if not value: break
+        with (root/'received').open('ab') as file: file.write(value)
+        buffer+=value
+        while buffer:
+            if buffer.startswith(b'\x1b[200~'):
+                end=buffer.find(b'\x1b[201~')
+                if end<0: break
+                if feedback is not None: feedback+=buffer[6:end].decode()
+                buffer=buffer[end+6:]
+            elif buffer[0]==27 and len(buffer)<6: break
+            else:
+                value,buffer=buffer[:1],buffer[1:]
+                if config: handle(value)
+            render()
+finally: termios.tcsetattr(fd,termios.TCSANOW,original)
+'''
+
+
 def terminal_only(test, title):
     """An unrecognized startup chooser stays visible and read-only."""
     state=test.inspect()
@@ -266,6 +332,97 @@ os.execv('/bin/sh',['sh','-c',sys.argv[-1]])
         self.assertEqual(sorted([first.returncode,second.returncode]),[0,1],err1+err2)
         records=[json.loads(line) for line in self.wire.read_text().splitlines()]
         self.assertEqual(sum(row['type']=='interaction.resolved' for row in records),1)
+
+
+class PlanReview(unittest.TestCase):
+    """Kimi's ExitPlanMode approval: the wire holds the plan, the TUI its choices."""
+    script=fixtures.InputTransport.script
+    tmux=fixtures.InputTransport.tmux
+    wait_for=fixtures.InputTransport.wait_for
+    received=fixtures.InputTransport.received
+    write_record=fixtures.InputTransport.write_record
+    tearDown=fixtures.InputTransport.tearDown
+    inspect=Questions.inspect
+    answer=Questions.answer
+    plan='# Rotate fixture keys\n\n1. Add the rotation script.\n2. Verify it.'
+
+    def setUp(self):
+        original=fixtures.FAKE_AGENT
+        try:
+            fixtures.FAKE_AGENT=FAKE_PLAN
+            fixtures.InputTransport.setUp(self)
+        finally: fixtures.FAKE_AGENT=original
+        old_path=self.record_path
+        self.tmux('rename-session','-t','='+self.name,'kimi/plan-test')
+        self.name='kimi/plan-test'
+        self.conversation_id='session_'+str(uuid.uuid4())
+        self.record_path=self.state/(hashlib.sha256(self.name.encode()).hexdigest()+'.json')
+        old_path.unlink()
+        self.record.update(name=self.name,agent='kimi',conversation_id=self.conversation_id,
+                           agent_home=str(self.root/'.kimi-code'),activity='busy',phase='approval',
+                           active_tools={'tool_plan':{'name':'ExitPlanMode'}})
+        self.write_record()
+        self.wire=self.root/'.kimi-code/sessions/wd_fixture'/self.conversation_id/'agents/main/wire.jsonl'
+        self.wire.parent.mkdir(parents=True)
+        self.event=dict(type='interaction.request',id='approval_'+str(uuid.uuid4()),kind='approval',agentId='main',
+                        toolCallId='tool_plan',request=dict(toolName='ExitPlanMode',toolCallId='tool_plan',
+                        action='Presenting plan and exiting plan mode',display=dict(kind='plan_review',plan=self.plan,
+                        path=str(self.root/'plans/example.md'))),time=int(time.time()*1000))
+        self.wire.write_text(json.dumps(self.event)+'\n')
+        self.show(self.event)
+        self.card=self.inspect()['pending_questions'][0]
+
+    def show(self,event):
+        (self.root/'question-config').write_text(json.dumps(dict(event,wire=str(self.wire))))
+        os.kill(self.record['pid'],signal.SIGUSR1)
+        self.wait_for(lambda:'Ready to build' in self.tmux('capture-pane','-p','-t',self.pane))
+
+    def payload(self,selected=('approve',),text=''):
+        return dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id,
+                    question_id=self.card['question_id'],expected_question_hash=self.card['question_hash'],
+                    answers=[dict(question_id='plan',selected_option_ids=list(selected),text=text)])
+
+    def test_shows_the_plan_and_native_choices_without_input(self):
+        card=self.card
+        self.assertEqual((card['source'],card['plan_review'],card['can_answer']),('kimi_plan_review',True,True),card)
+        item=card['questions'][0]
+        self.assertEqual((item['question'],item['body'],item['other_label']),('Ready to build with this plan?',self.plan,'Revise'))
+        self.assertEqual([option['label'] for option in item['options']],['Approve','Reject'])
+        self.assertEqual(self.received(),b'')
+
+    def test_approve_uses_one_number_key_and_confirms_the_wire(self):
+        receipt=self.answer(self.payload())
+        self.assertEqual(receipt['status'],'answered')
+        self.assertEqual(self.received(),b'1')
+        self.assertEqual(json.loads((self.root/'submitted').read_text()),{'decision':'approved','selectedLabel':'Approve'})
+        inspection=self.inspect()
+        self.assertEqual(inspection['pending_questions'],[])
+        answered=[event for event in inspection['events'] if event['type']=='QuestionAnswered']
+        self.assertEqual(len(answered),1)
+        self.assertIn('Ready to build with this plan? → Approve',answered[0]['detail'])
+
+    def test_revise_pastes_exact_feedback(self):
+        feedback='Добавь шаг отката'
+        receipt=self.answer(self.payload(selected=(),text=feedback))
+        self.assertEqual(receipt['status'],'answered')
+        self.assertEqual(self.received(),b'3\x1b[200~'+feedback.encode()+b'\x1b[201~\r')
+        self.assertEqual(json.loads((self.root/'submitted').read_text()),
+                         {'decision':'rejected','selectedLabel':'Revise','feedback':feedback})
+
+    def test_different_chooser_or_acknowledgement_is_never_accepted(self):
+        # The screen proposes approaches this request does not have.
+        options=[dict(label='Script',description=''),dict(label='Manual',description='')]
+        self.show(dict(self.event,request=dict(self.event['request'],display=dict(self.event['request']['display'],options=options))))
+        card=self.inspect()['pending_questions'][0]
+        self.assertFalse(card['can_answer'])
+        self.assertIn('differ',card['answer_unavailable_reason'])
+        self.answer(self.payload(),success=False)
+        self.assertEqual(self.received(),b'')
+        self.show(self.event)
+        (self.root/'wrong-ack').touch()
+        self.assertIn('delivery uncertain',self.answer(self.payload(),success=False))
+        self.assertEqual(self.received(),b'1')
+        self.assertFalse(any(event['type']=='QuestionAnswered' for event in self.inspect()['events']))
 
 
 if __name__=='__main__': unittest.main()

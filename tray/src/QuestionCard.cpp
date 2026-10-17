@@ -469,7 +469,7 @@ void QuestionCard::rebuild()
     m_loading = true; m_forms.clear(); m_fileLinks.clear();
     // Questions the agent wrote are its Markdown. Approval and trust disclosures
     // and panels read from a terminal, such as a folder path, stay as reported.
-    static const QSet<QString> authored{"hook", "codex_async", "kimi_wire", "dsh_native", "opencode_native", "claude_native_question"};
+    static const QSet<QString> authored{"hook", "codex_async", "kimi_wire", "kimi_plan_review", "dsh_native", "opencode_native", "claude_native_question"};
     const bool literal = m_question.value("approval").toBool() || m_question.value("trust_request").toBool()
         || !authored.contains(m_question.value("source").toString());
     while (m_pages->count()) { auto *page = m_pages->widget(0); m_pages->removeWidget(page); delete page; }
@@ -527,7 +527,11 @@ void QuestionCard::rebuild()
         }
         if (form.allowOther) {
             if (!form.options.isEmpty()) {
-                auto *other = new Choice(form.multi, tr("Other"), tr("Write your own answer"), page);
+                // A provider can name its own free-text choice, such as Kimi's plan Revise.
+                const auto otherLabel = question.value("other_label").toString().simplified();
+                const auto otherDescription = question.value("other_description").toString().simplified();
+                auto *other = new Choice(form.multi, otherLabel.isEmpty() ? tr("Other") : otherLabel,
+                    otherDescription.isEmpty() ? tr("Write your own answer") : otherDescription, page);
                 form.other = other->button; form.other->setObjectName("questionOther"); form.other->setProperty("questionId", form.id);
                 group->addButton(form.other); form.other->setChecked(answer.other); column->addWidget(other);
                 connect(form.other, &QAbstractButton::toggled, this, [this] { capture(); });
@@ -541,7 +545,7 @@ void QuestionCard::rebuild()
                 if (m_submit->isVisible()) submit();
             });
         }
-        mode->setVisible(!form.options.isEmpty()&&listed); column->addStretch(); scroll->setWidget(page);
+        mode->setVisible(!form.options.isEmpty()&&listed&&!m_question.value("plan_review").toBool()); column->addStretch(); scroll->setWidget(page);
         m_pages->addWidget(formPage); m_forms.append(form);
         const auto header = question.value("header").toString().simplified();
         const auto title = header.isEmpty() ? tr("Question %1").arg(++index) : QString::number(++index) + QStringLiteral(": ") + header.left(32);
@@ -717,7 +721,8 @@ void QuestionCard::updateControls()
     m_next->setVisible(page>=0&&page<m_forms.size()-1);
     m_next->setEnabled(!locked);
     const bool optional=m_question.value("optional").toBool();
-    m_heading->setText((approval||m_question.value("trust_request").toBool())?tr("Agent needs your approval"):optional?tr("Optional question"):tr("Agent needs your answer"));
+    const bool planReview=m_question.value("plan_review").toBool();
+    m_heading->setText((approval||m_question.value("trust_request").toBool()||planReview)?tr("Agent needs your approval"):optional?tr("Optional question"):tr("Agent needs your answer"));
     if(optional && !approval && m_queueCount>1 && m_queueIndex>=0 && m_queueIndex<m_queueCount)
         m_heading->setText(tr("Optional question #%1/%2").arg(m_queueIndex+1).arg(m_queueCount));
     m_skip->setVisible(optional);
@@ -740,7 +745,7 @@ void QuestionCard::updateControls()
         m_tabs->setTabText(i, (filled ? QStringLiteral("✓ ") : QString()) + m_tabs->tabData(i).toString());
     }
     m_progress->setText(draft.submitted && !draft.answered ? tr("Awaiting agent") : m_forms.isEmpty() ? QString() : tr("%1 of %2 answered").arg(answered).arg(m_forms.size()));
-    m_progress->setVisible(!approval);
+    m_progress->setVisible(!approval&&(!planReview||(draft.submitted&&!draft.answered)));
     QString notice = draft.storageError.isEmpty() ? draft.notice : draft.storageError;
     if (notice.isEmpty() && !m_available) notice = m_unavailableReason;
     if (notice.isEmpty() && !supported) notice = m_question.value("answer_unavailable_reason").toString(tr("Answer this request in Terminal."));
@@ -753,6 +758,7 @@ void QuestionCard::updateControls()
     if (notice.isEmpty() && confirming)
         notice = tr("“%1” changes Claude's permissions beyond this request. Select Confirm to send it.").arg(broader);
     if (notice.isEmpty() && choices) notice = tr("Review the request, then choose one of Claude's options.");
+    if (notice.isEmpty() && planReview && !complete) notice = tr("Review the plan, then choose how the agent continues.");
     if (notice.isEmpty()) notice = approval?tr("Approval applies only to this command. Review it before continuing."):
         optional ? tr("The agent can continue. Answer when ready or skip this question.") :
         complete ? tr("Your choices are ready to send.") : tr("Answer each question to continue.");

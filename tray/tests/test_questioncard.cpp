@@ -155,6 +155,7 @@ private slots:
     void terminalOnlyChoicesDoNotPretendToAcceptAnswers();
     void claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes();
     void unreadableApprovalPointsToTerminal();
+    void kimiPlanReviewShowsPlanAndNamedRevise();
     void optionalQuestionsHaveExplicitSkipAndKeepDrafts();
     void submittedAnswersRestoreAndIgnoreLateErrors();
     void submittedCallbacksAndMetadataKeepExactIdentity();
@@ -515,6 +516,43 @@ void TestQuestionCard::unreadableApprovalPointsToTerminal()
     QVERIFY(card.findChild<QPushButton *>("approveToolRequest")->isHidden());QVERIFY(card.findChild<QPushButton *>("denyToolRequest")->isHidden());
     QVERIFY(card.findChild<QPushButton *>("questionOpenTerminal")->isVisible());
     QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(),approval["answer_unavailable_reason"].toString());
+}
+
+namespace {
+QJsonObject planReview()
+{
+    return {{"question_id", "approval_plan"}, {"question_hash", "plan-hash"}, {"run_id", "run"}, {"conversation_id", "conversation"},
+        {"source", "kimi_plan_review"}, {"plan_review", true}, {"can_answer", true}, {"questions", QJsonArray{
+            QJsonObject{{"id", "plan"}, {"header", "Plan"}, {"question", "Ready to build with this plan?"},
+                {"body", "# Rotate fixture keys\n\n1. **Add** the `rotate.py` script.\n2. Verify the rotation."},
+                {"allow_other", true}, {"other_label", "Revise"}, {"other_description", "Send feedback and keep planning"},
+                {"options", QJsonArray{QJsonObject{{"id", "approve"}, {"label", "Approve"}, {"description", ""}},
+                    QJsonObject{{"id", "reject"}, {"label", "Reject"}, {"description", ""}}}}}}}};
+}
+}
+
+void TestQuestionCard::kimiPlanReviewShowsPlanAndNamedRevise()
+{
+    QuestionCard card; card.resize(620, 480); card.show(); setQuestionReady(card, "session", planReview());
+    QCOMPARE(card.findChild<QLabel *>("questionHeading")->text(), QString("Agent needs your approval"));
+    // The agent's plan is its Markdown, not a literal disclosure.
+    auto *body = card.findChild<MarkdownText *>("questionBody"); QVERIFY(body);
+    QVERIFY(body->toPlainText().contains("Rotate fixture keys")); QVERIFY(!body->toPlainText().contains("**"));
+    QVERIFY(card.findChild<QPushButton *>("approveToolRequest")->isHidden());
+    auto *revise = other(card, "plan"); QVERIFY(revise);
+    QStringList titles; for (auto *title : card.findChildren<QLabel *>("questionChoiceTitle")) titles << title->text();
+    QCOMPARE(titles, QStringList({"Approve", "Reject", "Revise"}));
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    option(card, "approve")->click(); QVERIFY(submit(card)->isEnabled()); submit(card)->click();
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0][2].toJsonArray()[0].toObject()["selected_option_ids"].toArray(), QJsonArray{"approve"});
+    QuestionCard feedback; feedback.show(); setQuestionReady(feedback, "other-session", planReview());
+    QSignalSpy revised(&feedback, &QuestionCard::answerRequested);
+    other(feedback, "plan")->click(); QVERIFY(!submit(feedback)->isEnabled());
+    text(feedback, "plan")->setText("Add a rollback step"); submit(feedback)->click();
+    QCOMPARE(revised.size(), 1);
+    const auto answer = revised[0][2].toJsonArray()[0].toObject();
+    QVERIFY(answer["selected_option_ids"].toArray().isEmpty()); QCOMPARE(answer["text"].toString(), QString("Add a rollback step"));
 }
 
 void TestQuestionCard::allRequiredQuestionsAndStableAnswerIds()
@@ -941,6 +979,9 @@ void TestQuestionCard::preview()
         optional["questions"]=QJsonArray{optional["questions"].toArray().first()};
         setQuestionReady(card, "arch/session",optional,3);card.setQueueNavigation(1,3);QTest::qWait(20);
         QVERIFY(card.grab().save(directory + (dark ? "/question-dark-queue.png" : "/question-light-queue.png")));
+        QuestionCard plan; plan.resize(620, 460); plan.setTheme(dark); setQuestionReady(plan, "kimi/session", planReview());
+        plan.show(); QTest::qWait(25);
+        QVERIFY(plan.grab().save(directory + (dark ? "/question-dark-plan.png" : "/question-light-plan.png")));
     }
 }
 
