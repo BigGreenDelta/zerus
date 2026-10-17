@@ -36,7 +36,9 @@ checks the archived bundle ID, versions and channel before uploading.
   testers receive it. Dev uploads are therefore no longer marked
   internal-testing-only; only promoted builds leave the internal group.
 - **Stable:** dispatch **iOS TestFlight** from `main` with channel `stable`
-  after adding `mobile/ios/VERSION`. The uploaded build is then submitted for
+  after adding `mobile/ios/VERSION` and once that commit's main CI has succeeded:
+  the candidate's build number is that CI run number, so it is higher than every
+  Dev build uploaded with the same version before the Dev base advanced. The uploaded build is then submitted for
   review in App Store Connect, together with the store listing.
 
 The upload job runs in the `ios-testflight` environment and verifies that it runs
