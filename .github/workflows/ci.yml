@@ -136,7 +136,8 @@ jobs:
       APPLE_NOTARY_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
   dev-ios:
     name: iOS TestFlight Dev build
-    # Independent of the zerus.dev Dev catalog: TestFlight delivers it to internal testers.
+    # Independent of the zerus.dev Dev catalog: TestFlight delivers it to internal testers;
+    # a maintainer promotes chosen builds to the public beta through Beta App Review.
     needs: [gate, automatic]
     if: >-
       !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' &&

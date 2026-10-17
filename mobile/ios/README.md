@@ -95,7 +95,8 @@ Debug builds accept `-zerus-demo` (open the read-only preview) and
 
 ## TestFlight and the App Store
 
-Dev builds reach TestFlight internal testers from every successful main CI run;
+Dev builds reach TestFlight internal testers from every successful main CI run,
+and promoted ones the [public beta](https://testflight.apple.com/join/fywRuW6y);
 Stable builds are uploaded on demand and submitted for review. Uploads use an App
 Store Connect API key in a main-only environment. See
 [iOS distribution](../../docs/ios-distribution.md) for the channels, the one-time
