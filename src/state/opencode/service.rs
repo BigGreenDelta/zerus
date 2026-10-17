@@ -133,15 +133,42 @@ pub(super) fn missing_operations(openapi: &Value) -> Vec<String> {
             missing.push(format!("{} {path}", method.to_uppercase()));
             continue;
         }
-        let properties =
-            &operation["requestBody"]["content"]["application/json"]["schema"]["properties"];
+        let schema = &operation["requestBody"]["content"]["application/json"]["schema"];
         for field in *fields {
-            if properties.get(*field).is_none() {
+            if !schema_has_field(openapi, schema, field, 8) {
                 missing.push(format!("{} {path} field {field}", method.to_uppercase()));
             }
         }
     }
     missing
+}
+
+/// Whether a request schema offers `field`: inline properties, local
+/// `#/components/schemas/<Name>` references (bounded depth, so cycles end),
+/// `allOf` merged, and any `anyOf`/`oneOf` variant.
+fn schema_has_field(openapi: &Value, schema: &Value, field: &str, depth: u8) -> bool {
+    if depth == 0 || !schema.is_object() {
+        return false;
+    }
+    if let Some(reference) = schema["$ref"].as_str() {
+        let Some(name) = reference.strip_prefix("#/components/schemas/") else {
+            return false;
+        };
+        return schema_has_field(
+            openapi,
+            &openapi["components"]["schemas"][name],
+            field,
+            depth - 1,
+        );
+    }
+    schema["properties"].get(field).is_some()
+        || ["allOf", "anyOf", "oneOf"].iter().any(|key| {
+            schema[*key].as_array().is_some_and(|variants| {
+                variants
+                    .iter()
+                    .any(|v| schema_has_field(openapi, v, field, depth - 1))
+            })
+        })
 }
 
 pub(super) struct Response {
@@ -450,7 +477,11 @@ impl Unavailable {
 }
 
 pub(super) fn connect() -> std::result::Result<Service, Unavailable> {
-    let Ok(bytes) = fs::read(registration_path()) else {
+    let bytes = fs::File::open(registration_path()).ok().and_then(|file| {
+        let mut bytes = Vec::new();
+        file.take(16385).read_to_end(&mut bytes).ok().map(|_| bytes)
+    });
+    let Some(bytes) = bytes else {
         return Err(if service_disabled() {
             Unavailable::Disabled
         } else {
@@ -469,8 +500,14 @@ pub(super) fn connect() -> std::result::Result<Service, Unavailable> {
         Instant::now() + Duration::from_secs(2),
     )
     .map_err(|_| Unavailable::Unreachable("OpenCode is not responding".into()))?;
-    let version = info.body["version"].as_str().unwrap_or("");
-    if info.status != 200 || !version_at_least(version, MINIMUM) {
+    if info.status != 200 {
+        return Err(Unavailable::Unreachable(
+            "OpenCode is not responding correctly".into(),
+        ));
+    }
+    let version = clipped_version(info.body["version"].as_str().unwrap_or(""));
+    let version = version.as_str();
+    if !version_at_least(version, MINIMUM) {
         return Err(Unavailable::Incompatible(format!(
             "OpenCode {version} is not supported; install OpenCode {}.{}.{} or newer 2.x",
             MINIMUM.0, MINIMUM.1, MINIMUM.2
@@ -486,31 +523,60 @@ pub(super) fn connect() -> std::result::Result<Service, Unavailable> {
     Ok(service)
 }
 
-/// The OpenAPI verdict, cached per service identity in private state.
+/// Digest of the requirement table, so a Zerus with new requirements
+/// re-checks a service whose verdict was cached by an older one.
+fn requirement_digest() -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(json!(REQUIRED).to_string().as_bytes())
+    )
+}
+
+fn verdict(openapi: &Value) -> Result<Vec<String>> {
+    if !openapi["paths"].is_object() {
+        return Err("OpenCode returned an invalid API description".into());
+    }
+    Ok(missing_operations(openapi))
+}
+
+/// The OpenAPI verdict, cached per service identity and requirement digest in
+/// private state. The cache write is best effort.
 fn compatibility(service: &Service) -> Result<Vec<String>> {
+    compatibility_in(
+        &root().join("opencode/compat"),
+        &service.reg,
+        &requirement_digest(),
+        || service.call("GET", "/openapi.json", None),
+    )
+}
+
+fn compatibility_in(
+    dir: &Path,
+    reg: &Registration,
+    digest: &str,
+    fetch: impl FnOnce() -> Result<Value>,
+) -> Result<Vec<String>> {
     let key = format!(
         "{:x}",
         Sha256::digest(
-            json!([
-                service.reg.id,
-                service.reg.pid,
-                service.reg.version,
-                service.reg.port
-            ])
-            .to_string()
-            .as_bytes()
+            json!([reg.id, reg.pid, reg.version, reg.port, digest])
+                .to_string()
+                .as_bytes()
         )
     );
-    let cache = root().join("opencode/compat").join(format!("{key}.json"));
+    let cache = dir.join(format!("{key}.json"));
     if let Ok(bytes) = fs::read(&cache) {
         if let Ok(value) = serde_json::from_slice::<Vec<String>>(&bytes) {
             return Ok(value);
         }
     }
-    let openapi = service.call("GET", "/openapi.json", None)?;
-    let missing = missing_operations(&openapi);
-    atomic(&cache, &json!(missing).to_string())?;
+    let missing = verdict(&fetch()?)?;
+    let _ = atomic(&cache, &json!(missing).to_string());
     Ok(missing)
+}
+
+fn clipped_version(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(64).collect()
 }
 
 /// OpenCode 2.0.32 keeps `disabled` in the service configuration file
@@ -630,5 +696,129 @@ mod tests {
         let response = decode_response(bytes).unwrap();
         assert_eq!(response.status, 404);
         assert_eq!(response.body["_tag"], "MessageNotFoundError");
+    }
+
+    #[test]
+    fn schema_refs_allof_and_variants_are_resolved() {
+        let openapi = json!({
+            "paths":{"/x":{"post":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Form.Reply"}}}}}}},
+            "components":{"schemas":{
+                "Form.Reply":{"type":"object","properties":{"answer":{}}},
+                "Merged":{"allOf":[{"$ref":"#/components/schemas/Form.Reply"},{"properties":{"extra":{}}}]},
+                "Either":{"oneOf":[{"properties":{"a":{}}},{"properties":{"b":{}}}]},
+                "Loop":{"$ref":"#/components/schemas/Loop"}
+            }}
+        });
+        let schema =
+            &openapi["paths"]["/x"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+        assert!(schema_has_field(&openapi, schema, "answer", 8));
+        assert!(!schema_has_field(&openapi, schema, "decision", 8));
+        let merged = json!({"$ref":"#/components/schemas/Merged"});
+        assert!(schema_has_field(&openapi, &merged, "answer", 8));
+        assert!(schema_has_field(&openapi, &merged, "extra", 8));
+        let either = json!({"$ref":"#/components/schemas/Either"});
+        assert!(schema_has_field(&openapi, &either, "b", 8));
+        assert!(!schema_has_field(
+            &openapi,
+            &json!({"$ref":"#/components/schemas/Loop"}),
+            "a",
+            8
+        ));
+        assert!(!schema_has_field(
+            &openapi,
+            &json!({"$ref":"https://x/y"}),
+            "a",
+            8
+        ));
+    }
+
+    #[test]
+    fn missing_field_in_a_referenced_schema_is_reported() {
+        let mut openapi = json!({"paths":{}, "components":{"schemas":{
+            "Body":{"allOf":[{"properties":{"answer":{}}}]},
+            "Thin":{"type":"object","properties":{}}
+        }}});
+        for (method, path, fields) in REQUIRED {
+            openapi["paths"][*path][*method] = if fields.is_empty() {
+                json!({})
+            } else {
+                let name = if *path == "/api/session/{sessionID}/form/{formID}/reply" {
+                    "Thin"
+                } else {
+                    "Full"
+                };
+                json!({"requestBody":{"content":{"application/json":{"schema":{"$ref":format!("#/components/schemas/{name}")}}}}})
+            };
+        }
+        let properties: serde_json::Map<String, Value> = REQUIRED
+            .iter()
+            .flat_map(|(_, _, f)| f.iter())
+            .map(|f| ((*f).to_owned(), json!({})))
+            .collect();
+        openapi["components"]["schemas"]["Full"] = json!({"allOf":[{"properties":properties}]});
+        assert_eq!(
+            missing_operations(&openapi),
+            vec!["POST /api/session/{sessionID}/form/{formID}/reply field answer".to_owned()]
+        );
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hgs-compat-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn reg() -> Registration {
+        Registration {
+            id: "a".into(),
+            version: "2.0.32".into(),
+            port: 4096,
+            pid: 5,
+            password: None,
+        }
+    }
+
+    #[test]
+    fn requirement_digest_change_misses_the_cache() {
+        let dir = temp_dir("digest");
+        let body = || Ok(json!({"paths":{}}));
+        let first = compatibility_in(&dir, &reg(), "d1", body).unwrap();
+        assert!(!first.is_empty());
+        // Same digest hits: the fetch must not run.
+        assert_eq!(
+            compatibility_in(&dir, &reg(), "d1", || Err("no".into())).unwrap(),
+            first
+        );
+        // A different digest misses and fetches again.
+        assert!(compatibility_in(&dir, &reg(), "d2", || Err("fetched".into())).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_api_description_is_rejected_and_not_cached() {
+        let dir = temp_dir("invalid");
+        for bad in [json!("html"), json!([]), json!({"paths":[]}), json!({})] {
+            let err = compatibility_in(&dir, &reg(), "d", || Ok(bad)).unwrap_err();
+            assert_eq!(err, "OpenCode returned an invalid API description");
+        }
+        assert!(!dir.exists() || fs::read_dir(&dir).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_write_failure_keeps_the_verified_verdict() {
+        let dir = temp_dir("blocked");
+        fs::write(&dir, b"a file where the directory should be").unwrap();
+        let missing = compatibility_in(&dir, &reg(), "d", || Ok(json!({"paths":{}}))).unwrap();
+        assert!(!missing.is_empty());
+        let _ = fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn reported_versions_are_clipped_and_control_free() {
+        let long = format!("2.0.\u{7}{}", "9".repeat(200));
+        let clipped = clipped_version(&long);
+        assert_eq!(clipped.chars().count(), 64);
+        assert!(!clipped.chars().any(char::is_control));
     }
 }
