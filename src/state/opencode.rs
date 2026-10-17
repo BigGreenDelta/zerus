@@ -3,6 +3,7 @@
 use super::*;
 #[allow(dead_code)] // the OpenCode 2 gate is consumed by later phase 1 tasks
 mod catalog;
+mod forms;
 mod history;
 mod service;
 pub(crate) use catalog::{catalog, install_state, start_from_accounts};
@@ -463,39 +464,6 @@ fn exact_session(record: &Value, answer: Value) -> Result<Value> {
     }
     Ok(answer["data"].clone())
 }
-fn cards(record: &Value, questions: &Value, permissions: &Value) -> Vec<Value> {
-    let mut cards = Vec::new();
-    for (kind, pending) in [("question", questions), ("permission", permissions)] {
-        for native in pending.as_array().into_iter().flatten() {
-            if native["sessionID"] != record["conversation_id"] {
-                continue;
-            }
-            let mut items = Vec::new();
-            if kind == "permission" {
-                items.push(json!({"id":"permission","header":"Permission","prompt":format!("{}\n{}",string(native,"action"),native["resources"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")),"allow_multiple":false,"multi_select":false,"required":true,"question":format!("{}\n{}",string(native,"action"),native["resources"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")),"allow_other":false,"options":[{"id":"once","label":"Allow once"},{"id":"always","label":"Always allow"},{"id":"reject","label":"Reject"}]}));
-            } else {
-                for (i, q) in native["questions"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .enumerate()
-                {
-                    items.push(json!({"id":i.to_string(),"header":q["header"],"prompt":q["question"],"question":q["question"],"multi_select":q["multiple"].as_bool().unwrap_or(false),"required":true,"allow_multiple":q["multiple"].as_bool().unwrap_or(false),"allow_other":q["custom"].as_bool().unwrap_or(true),"options":q["options"].as_array().into_iter().flatten().enumerate().map(|(j,o)|json!({"id":j.to_string(),"label":o["label"],"description":o["description"]})).collect::<Vec<_>>() }));
-                }
-            }
-            let hash = format!(
-                "{:x}",
-                Sha256::digest(
-                    json!([record["run_id"], record["conversation_id"], native])
-                        .to_string()
-                        .as_bytes()
-                )
-            );
-            cards.push(json!({"question_id":native["id"],"question_hash":hash,"run_id":record["run_id"],"conversation_id":record["conversation_id"],"kind":format!("opencode_{kind}"),"status":"pending","answerable":true,"can_answer":true,"approval":kind=="permission","answer_transport":"native_opencode","agent_id":"main","questions":items,"source":"opencode_native"}));
-        }
-    }
-    cards
-}
 /// What one inspection read from the service for one session.
 struct Observed {
     /// The session object.
@@ -515,7 +483,7 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     let session = observed.map_or(&null, |o| &o.session);
     let active = observed.is_some_and(|o| o.active);
     let messages: &[Value] = observed.map_or(&[], |o| &o.page.messages);
-    let pending = observed.map_or_else(Vec::new, |o| cards(record, &o.forms, &o.permissions));
+    let pending = observed.map_or_else(Vec::new, |o| forms::cards(record, &o.forms, &o.permissions));
     let failure = history::last_error(messages);
     let phase = if !available {
         "unknown"
@@ -1208,6 +1176,24 @@ fn verify_native(native: &dyn Native, record: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// The route and body of one reply, from the pending card, the exact native
+/// request it was made from, and the answers.
+fn reply_for(card: &Value, native: &Value, answers: &[Value]) -> Result<(String, Value)> {
+    let id = string(card, "question_id");
+    if card["kind"] == "opencode_permission" {
+        let decision = forms::permission_decision(answers)?;
+        Ok((
+            format!("/permission/{id}/reply"),
+            json!({"decision": decision}),
+        ))
+    } else {
+        Ok((
+            format!("/form/{id}/reply"),
+            forms::form_answer(card, native, answers)?,
+        ))
+    }
+}
+const CHANGED: &str = "This question changed or is no longer pending";
 fn answer(record: &Value, request: &Value) -> Result<Value> {
     let current = own_state(string(record, "name"))?;
     let card = current["pending_questions"]
@@ -1218,7 +1204,7 @@ fn answer(record: &Value, request: &Value) -> Result<Value> {
             q["question_id"] == request["question_id"]
                 && q["question_hash"] == request["expected_question_hash"]
         })
-        .ok_or("This question changed or is no longer pending")?;
+        .ok_or(CHANGED)?;
     let path = root()
         .join("opencode/answers")
         .join(format!("{}.json", string(request, "request_id")));
@@ -1228,68 +1214,44 @@ fn answer(record: &Value, request: &Value) -> Result<Value> {
     let raw = request["answers"]
         .as_array()
         .ok_or("Answers are required")?;
-    let mut labels = Vec::new();
-    let items = card["questions"]
-        .as_array()
-        .ok_or("Invalid native question schema")?;
-    if raw.len() != items.len() {
-        return Err("Answer every question exactly once".into());
-    }
-    for item in items {
-        let matches = raw
-            .iter()
-            .filter(|a| a["question_id"] == item["id"])
-            .collect::<Vec<_>>();
-        if matches.len() != 1 {
-            return Err("Question answers are missing or duplicated".into());
-        }
-        let answer = matches[0];
-        let selected = answer["selected_option_ids"]
-            .as_array()
-            .ok_or("Invalid selected answers")?;
-        if item["allow_multiple"] != true && selected.len() > 1 {
-            return Err("This question accepts one answer".into());
-        }
-        let mut values = Vec::new();
-        for id in selected {
-            let option = item["options"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|o| o["id"] == *id)
-                .ok_or("Unknown answer option")?;
-            values.push(option["label"].clone());
-        }
-        if !string(answer, "text").is_empty() {
-            if item["allow_other"] != true {
-                return Err("Choose an offered permission outcome".into());
-            }
-            values.push(answer["text"].clone());
-        }
-        if values.is_empty() {
-            return Err("An answer is required".into());
-        }
-        labels.push(json!(values));
-    }
-    let id = string(card, "question_id");
-    let (suffix, body) = if card["kind"] == "opencode_permission" {
-        let id = raw[0]["selected_option_ids"][0]
-            .as_str()
-            .ok_or("Choose a permission outcome")?;
-        if raw[0]["selected_option_ids"].as_array().unwrap().len() != 1 {
-            return Err("Choose one permission outcome".into());
-        }
-        (
-            format!("/permission/{}/reply", string(card, "question_id")),
-            json!({"reply":id}),
-        )
+    let service = running_service()?;
+    // The exact native request the card was made from, read again now.
+    let suffix = if card["kind"] == "opencode_permission" {
+        "/permission"
     } else {
-        (format!("/question/{id}/reply"), json!({"answers":labels}))
+        "/form"
     };
+    let pending = pending_requests(&service, record, suffix)?;
+    let native = pending
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|n| n["id"] == card["question_id"])
+        .ok_or(CHANGED)?;
+    let none = json!([]);
+    let one = json!([native]);
+    let again = if suffix == "/form" {
+        forms::cards(record, &one, &none)
+    } else {
+        forms::cards(record, &none, &one)
+    };
+    if again.first().map(|c| &c["question_hash"]) != Some(&card["question_hash"]) {
+        return Err(CHANGED.into());
+    }
+    let (route, body) = reply_for(card, native, raw)?;
     let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"status":"pending"});
     atomic(&path, &receipt.to_string())?;
-    // Task 7 replaces these OpenCode 1 reply bodies with form answers.
-    running_service()?.call("POST", &session_path(record, &suffix), Some(&body))?;
+    // A 4xx is a definite refusal; anything else leaves the delivery unknown
+    // and the pending journal blocks a replay.
+    let reply = service.raw("POST", &session_path(record, &route), Some(&body))?;
+    if (400..500).contains(&reply.status) {
+        receipt["status"] = json!("refused");
+        atomic(&path, &receipt.to_string())?;
+        return Err(CHANGED.into());
+    }
+    if !successful(&reply) {
+        return Err(refusal_text(&reply));
+    }
     receipt["status"] = json!("answered");
     atomic(&path, &receipt.to_string())?;
     Ok(receipt)
@@ -2055,6 +2017,32 @@ mod tests {
         );
         assert_eq!(value["events"].as_array().unwrap().len(), 3);
         assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
+    }
+    #[test]
+    fn replies_route_to_the_form_or_permission_with_validated_bodies() {
+        let record = json!({"run_id":"run","conversation_id":"ses_A"});
+        let form = json!({"id":"frm_1","sessionID":"ses_A","title":"Q","fields":[{"key":"q0","title":"C","type":"string"}]});
+        let card = forms::cards(&record, &json!([form]), &json!([])).remove(0);
+        let ask = [json!({"question_id":"q0","selected_option_ids":[],"text":"hi"})];
+        assert_eq!(
+            reply_for(&card, &form, &ask).unwrap(),
+            (
+                "/form/frm_1/reply".to_owned(),
+                json!({"answer":{"q0":"hi"}})
+            )
+        );
+        let permission =
+            json!({"id":"per_1","sessionID":"ses_A","action":"shell","resources":["x"]});
+        let card = forms::cards(&record, &json!([]), &json!([permission])).remove(0);
+        let ok = [json!({"question_id":"permission","selected_option_ids":["reject"],"text":""})];
+        assert_eq!(
+            reply_for(&card, &permission, &ok).unwrap(),
+            (
+                "/permission/per_1/reply".to_owned(),
+                json!({"decision":"reject"})
+            )
+        );
+        assert!(reply_for(&card, &permission, &ask).is_err());
     }
     #[test]
     fn pending_forms_or_permissions_need_attention_before_work() {

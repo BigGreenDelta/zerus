@@ -397,7 +397,7 @@ mod tests {
             answers(&opencode).unwrap()[0]["selected_option_ids"],
             json!(["once"])
         );
-        opencode["kind"] = json!("opencode_question");
+        opencode["kind"] = json!("opencode_form");
         assert!(answers(&opencode).is_none());
         let mut dsh = question();
         dsh["source"] = json!("dsh_native");
