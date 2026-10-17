@@ -241,7 +241,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         check(!SpeechMicrophoneAccess.granted(targetContext))
         tap("Voice input")
         tap("Don't allow")
-        node("Microphone access is off")
+        node("Recording access is off")
         check(main { !model.speech.busy && model.draft(target).text.isEmpty() })
         tap("Open app settings")
         node("App info"); node("Zerus"); node("Permissions")
@@ -253,10 +253,10 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         // recover to settings even when the native permission dialog no longer appears.
         tap("Voice input")
         tap("Don't allow")
-        node("Microphone access is off")
+        node("Recording access is off")
         tap("Not now")
         tap("Voice input")
-        node("Microphone access is off")
+        node("Recording access is off")
         tap("Open app settings")
         tap("Permissions")
         tap("Microphone")
@@ -492,7 +492,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         complete.set(true)
         await("voice delivery") { model.speech.outgoing.single().state == "submitted" && model.speech.activeRequests.isEmpty() }
         check(main { model.draft(target).text } == "Edited while voice is processing.")
-        node("Voice message"); tap("Show recognized text"); node("Проверка голоса.")
+        node("Sent to agent"); tap("Show recognized text"); node("Проверка голоса.")
         check(submitted.get() == 1 && statusReads.get() > 0)
         val first = main { model.speech.outgoing.single() }
         // Download without this phone's encrypted local ID to exercise another device's history playback.
