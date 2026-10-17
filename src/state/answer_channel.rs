@@ -175,6 +175,70 @@ pub(super) fn emitted(dir: &Path) -> bool {
     dir.join(EMITTED).exists()
 }
 
+/// The answers object Claude's AskUserQuestion takes, for validated `answers`
+/// to `card`: each exact question text with the text Claude records.
+pub(super) fn native_answers(card: &Value, answers: &Value) -> Value {
+    let mut result = serde_json::Map::new();
+    for (question, answer) in card["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .zip(answers.as_array().into_iter().flatten())
+    {
+        result.insert(
+            string(question, "question").into(),
+            json!(questions::answer_text(question, answer)),
+        );
+    }
+    json!(result)
+}
+
+/// Whether the waiting process recorded in `dir` still runs.
+fn waiting_runs(dir: &Path) -> bool {
+    read(dir, WAITING)
+        .and_then(|value| serde_json::from_value::<Waiting>(value).ok())
+        .is_some_and(|waiting| {
+            !waiting.process_start.is_empty() && process_start(waiting.pid) == waiting.process_start
+        })
+}
+
+/// Deliver `offer` through the live channel in `dir`. Returns the transport
+/// that carried it. An offer that the channel did not take within `claim_wait`,
+/// or a claim it closed (or died) before writing emitted.json, never reached
+/// Claude, so `screen` delivers instead. A claim with no outcome within
+/// `handover` may have reached Claude: that is uncertain and never resent.
+pub(super) fn deliver(
+    dir: &Path,
+    offer: &Value,
+    claim_wait: Duration,
+    handover: Duration,
+    screen: impl FnOnce() -> Result<()>,
+) -> Result<&'static str> {
+    self::offer(dir, offer)?;
+    match await_claim(dir, claim_wait) {
+        Ok(Taken::Retracted) => return screen().map(|()| "claude_tui"),
+        Ok(Taken::Claimed) => {}
+        Err(error) => return Err(format!("delivery uncertain: {error}")),
+    }
+    let deadline = Instant::now() + handover;
+    loop {
+        if emitted(dir) {
+            return Ok("claude_hook");
+        }
+        if closed(dir).is_some() || !waiting_runs(dir) {
+            // emitted.json precedes any output; re-read it after the close.
+            if emitted(dir) {
+                return Ok("claude_hook");
+            }
+            return screen().map(|()| "claude_tui");
+        }
+        if Instant::now() >= deadline {
+            return Err("delivery uncertain: Claude's answer channel took the answer but did not report handing it over; inspect Terminal before retrying".into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// How long a waiting process accepts an answer. Shorter than the hook timeout
 /// hgs registers, so it closes itself where no SIGTERM arrives (Windows).
 const LIFETIME: f64 = 86_000.;
@@ -662,5 +726,101 @@ mod tests {
         prune(&root, Duration::from_secs(30 * 86400), 64);
         assert!(!root.join("old").exists());
         assert!(root.join("new").exists());
+    }
+
+    /// A stand-in waiting process: waiting.json for this test process, then `act`.
+    fn channel(act: impl FnOnce(&Path) + Send + 'static) -> (tempfile::TempDir, std::thread::JoinHandle<()>) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        write(&dir, WAITING, &json!(Waiting::new(&record(), &card(), std::process::id(), 60.))).unwrap();
+        (temp, std::thread::spawn(move || act(&dir)))
+    }
+    fn delivered(dir: &Path, screen: &std::cell::Cell<u32>) -> Result<&'static str> {
+        deliver(dir, &json!({"request_id":"one","answers":{}}), Duration::from_millis(300),
+            Duration::from_millis(300), || { screen.set(screen.get() + 1); Ok(()) })
+    }
+
+    #[test]
+    fn answer_uses_claimed_channel() {
+        let (temp, waiting) = channel(|dir| {
+            while claim(dir).unwrap().is_none() { std::thread::sleep(Duration::from_millis(10)); }
+            write(dir, EMITTED, &json!({"request_id":"one"})).unwrap();
+        });
+        let screen = std::cell::Cell::new(0);
+        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_hook");
+        assert_eq!(screen.get(), 0);
+        waiting.join().unwrap();
+    }
+
+    #[test]
+    fn unclaimed_offer_retracts_then_uses_screen() {
+        let (temp, waiting) = channel(|_| {});
+        let screen = std::cell::Cell::new(0);
+        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_tui");
+        assert_eq!(screen.get(), 1);
+        assert!(temp.path().join(RETRACTED).exists());
+        waiting.join().unwrap();
+    }
+
+    #[test]
+    fn channel_closed_before_emitting_uses_screen() {
+        let (temp, waiting) = channel(|dir| {
+            while claim(dir).unwrap().is_none() { std::thread::sleep(Duration::from_millis(10)); }
+            close(dir, "question changed before delivery");
+        });
+        let screen = std::cell::Cell::new(0);
+        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_tui");
+        assert_eq!(screen.get(), 1);
+        waiting.join().unwrap();
+    }
+
+    #[test]
+    fn dead_channel_uses_screen() {
+        let (temp, waiting) = channel(|dir| {
+            while claim(dir).unwrap().is_none() { std::thread::sleep(Duration::from_millis(10)); }
+            let mut gone = Waiting::new(&record(), &card(), std::process::id(), 60.);
+            gone.process_start = "not this process".into();
+            write(dir, WAITING, &json!(gone)).unwrap();
+        });
+        let screen = std::cell::Cell::new(0);
+        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_tui");
+        assert_eq!(screen.get(), 1);
+        waiting.join().unwrap();
+    }
+
+    #[test]
+    fn claimed_without_handover_is_uncertain() {
+        let (temp, waiting) = channel(|dir| {
+            while claim(dir).unwrap().is_none() { std::thread::sleep(Duration::from_millis(10)); }
+        });
+        let screen = std::cell::Cell::new(0);
+        let error = delivered(temp.path(), &screen).unwrap_err();
+        assert!(error.contains("delivery uncertain"), "{error}");
+        assert_eq!(screen.get(), 0);
+        waiting.join().unwrap();
+    }
+
+    #[test]
+    fn emitted_after_closing_is_never_resent() {
+        let (temp, waiting) = channel(|dir| {
+            while claim(dir).unwrap().is_none() { std::thread::sleep(Duration::from_millis(10)); }
+            write(dir, EMITTED, &json!({"request_id":"one"})).unwrap();
+            close(dir, "terminated");
+        });
+        let screen = std::cell::Cell::new(0);
+        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_hook");
+        assert_eq!(screen.get(), 0);
+        waiting.join().unwrap();
+    }
+
+    #[test]
+    fn native_answers_key_each_question_text() {
+        let card = json!({"questions": questions::normalize(&json!([
+            {"question":"Which release?","header":"Release","options":[{"label":"Stable"},{"label":"Preview"}]},
+            {"question":"Which checks?","header":"Checks","multiSelect":true,"options":[{"label":"Unit"},{"label":"UI"}]}])).unwrap()});
+        let answers = json!([
+            {"question_id":"q_0","selected_option_ids":["opt_0_1"],"text":""},
+            {"question_id":"q_1","selected_option_ids":["opt_1_0","opt_1_1"],"text":"Lint"}]);
+        assert_eq!(native_answers(&card, &answers), json!({"Which release?":"Preview","Which checks?":"Unit, UI, Lint"}));
     }
 }

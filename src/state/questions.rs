@@ -396,7 +396,12 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
                         Err(error)=>card["answer_unavailable_reason"]=json!(error),
                     }
                 }
-                if string(record,"agent")=="claude" && string(card,"source")=="hook" {
+                if string(record,"agent")=="claude" && string(card,"source")=="hook"
+                    && answer_channel::live(record, card).is_some()
+                {
+                    // Claude's own hook waits beside the panel; the screen is not needed.
+                    card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_hook"); card["answer_unavailable_reason"]=json!("");
+                } else if string(record,"agent")=="claude" && string(card,"source")=="hook" {
                     match claude_question::available(record,card) {
                         Ok(()) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_tui"); card["answer_unavailable_reason"]=json!(""); }
                         Err(error) => card["answer_unavailable_reason"]=json!(error),
@@ -694,7 +699,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             }
             if answers[0]["skip"]!=true {codex_questions::available(&record,&question)?;}
         } else if string(&record,"agent")=="claude" && string(&question,"source")=="hook" {
-            claude_question::available(&record,&question)?;
+            if answer_channel::live(&record, &question).is_none() {
+                claude_question::available(&record,&question)?;
+            }
         } else if string(&question, "source") == "claude_tool_approval" {
             claude_approval::available(&record,&question)?;
         } else if string(&question, "source") == "claude_permission_mode" {
@@ -747,7 +754,19 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     // Update now says whether Codex still runs its installer.
     let mut update_phase = None;
     let delivery = if string(&record,"agent")=="claude" && string(&question,"source")=="hook" {
-        claude_question::answer(&record,&question,&answers)
+        let screen = || {
+            claude_question::available(&record, &question)?;
+            claude_question::answer(&record, &question, &answers)
+        };
+        match answer_channel::live(&record, &question) {
+            Some(_) => {
+                let offer = json!({"request_id":request_id,"answers":answer_channel::native_answers(&question,&answers)});
+                answer_channel::deliver(&answer_channel::directory(&record, &question)?, &offer,
+                    Duration::from_secs(3), Duration::from_secs(3), screen)
+                    .map(|transport| receipt["transport"] = json!(transport))
+            }
+            None => screen().map(|()| receipt["transport"] = json!("claude_tui")),
+        }
     } else if string(&question, "source") == "claude_tool_approval" {
         claude_approval::answer(&record,&question,&answers)
     } else if string(&question, "source") == "claude_permission_mode" {
