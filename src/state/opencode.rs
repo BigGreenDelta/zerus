@@ -1,10 +1,11 @@
 //! OpenCode's reviewed native API, authenticated on loopback. Native hosts
 //! outlive HGS and the GUI; manifests contain bindings, never provider keys.
 use super::*;
-use base64::{engine::general_purpose::STANDARD, Engine};
+#[allow(dead_code)] // the OpenCode 2 gate is consumed by later phase 1 tasks
+mod service;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -94,188 +95,24 @@ fn host(record: &Value) -> Result<Value> {
     }
     Ok(value)
 }
-struct Frame {
-    header_end: usize,
-    end: usize,
-    status: u16,
-    chunked: bool,
-}
-fn frame(bytes: &[u8]) -> Result<Option<Frame>> {
-    let Some(split) = bytes.windows(4).position(|p| p == b"\r\n\r\n") else {
-        if bytes.len() > 32768 {
-            return Err("Native HTTP headers exceed bounds".into());
-        }
-        return Ok(None);
-    };
-    if split > 32768 {
-        return Err("Native HTTP headers exceed bounds".into());
-    }
-    let header = std::str::from_utf8(&bytes[..split]).map_err(|_| "Invalid native HTTP headers")?;
-    let mut lines = header.split("\r\n");
-    let mut status_line = lines
-        .next()
-        .ok_or("Missing native HTTP status")?
-        .split_whitespace();
-    if !matches!(status_line.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
-        return Err("Invalid native HTTP protocol".into());
-    }
-    let status = status_line
-        .next()
-        .and_then(|s| s.parse::<u16>().ok())
-        .filter(|s| (100..600).contains(s))
-        .ok_or("Invalid native HTTP status")?;
-    let mut length = None;
-    let mut chunked = false;
-    for line in lines {
-        let (name, value) = line.split_once(':').ok_or("Invalid native HTTP header")?;
-        if name.eq_ignore_ascii_case("content-length") {
-            if length.is_some() {
-                return Err("Duplicate native Content-Length".into());
-            }
-            let n = value.trim();
-            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-                return Err("Invalid native Content-Length".into());
-            }
-            length = Some(
-                n.parse::<usize>()
-                    .map_err(|_| "Native Content-Length exceeds bounds")?,
-            );
-        }
-        if name.eq_ignore_ascii_case("transfer-encoding") {
-            if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
-                return Err("Unsupported native Transfer-Encoding".into());
-            }
-            chunked = true;
-        }
-    }
-    if chunked && length.is_some() {
-        return Err("Conflicting native HTTP framing".into());
-    }
-    let body_start = split + 4;
-    let end = if chunked {
-        let mut offset = body_start;
-        loop {
-            let rest = &bytes[offset..];
-            let Some(n) = rest.windows(2).position(|p| p == b"\r\n") else {
-                return Ok(None);
-            };
-            if n > 1024 {
-                return Err("Native HTTP chunk header exceeds bounds".into());
-            }
-            let raw = std::str::from_utf8(&rest[..n]).map_err(|_| "Invalid native chunk size")?;
-            let size_text = raw.split(';').next().unwrap_or("");
-            if size_text.is_empty() || !size_text.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err("Invalid native chunk size".into());
-            }
-            let size = usize::from_str_radix(size_text, 16)
-                .map_err(|_| "Native chunk size exceeds bounds")?;
-            offset += n + 2;
-            if size == 0 {
-                let trailers = &bytes[offset..];
-                if trailers.starts_with(b"\r\n") {
-                    break offset + 2;
-                }
-                let Some(trailer_end) = trailers.windows(4).position(|p| p == b"\r\n\r\n") else {
-                    return Ok(None);
-                };
-                if trailer_end > 32768 {
-                    return Err("Native HTTP trailers exceed bounds".into());
-                }
-                let trailer = std::str::from_utf8(&trailers[..trailer_end])
-                    .map_err(|_| "Invalid native HTTP trailer")?;
-                if trailer.split("\r\n").any(|line| !line.contains(':')) {
-                    return Err("Invalid native HTTP trailer".into());
-                }
-                break offset + trailer_end + 4;
-            }
-            let next = offset
-                .checked_add(size)
-                .and_then(|n| n.checked_add(2))
-                .ok_or("Native chunk size exceeds bounds")?;
-            if next > 32 * 1024 * 1024 {
-                return Err("Native chunk body exceeds bounds".into());
-            }
-            if next > bytes.len() {
-                return Ok(None);
-            }
-            if &bytes[next - 2..next] != b"\r\n" {
-                return Err("Invalid native chunk boundary".into());
-            }
-            offset = next;
-        }
-    } else if let Some(length) = length {
-        let end = body_start
-            .checked_add(length)
-            .filter(|n| *n <= 32 * 1024 * 1024)
-            .ok_or("Native HTTP body exceeds bounds")?;
-        if bytes.len() < end {
-            return Ok(None);
-        }
-        end
-    } else if status == 204 {
-        body_start
-    } else {
-        return Err("Missing native HTTP body framing".into());
-    };
-    Ok(Some(Frame {
-        header_end: body_start,
-        end,
-        status,
-        chunked,
-    }))
-}
+use service::{Registration, Response};
+#[cfg(test)]
 fn decode_response(bytes: &[u8]) -> Result<Value> {
-    let framing = frame(bytes)?.ok_or("Incomplete native HTTP response; delivery uncertain")?;
-    if framing.end != bytes.len() {
-        return Err("Unexpected bytes after native HTTP response".into());
+    legacy_value(service::decode_response(bytes)?)
+}
+/// OpenCode 1 callers expect failures as errors and strict JSON on success.
+fn legacy_value(response: Response) -> Result<Value> {
+    if !(200..300).contains(&response.status) {
+        let reason = response.body["message"]
+            .as_str()
+            .or(response.body["data"]["message"].as_str())
+            .unwrap_or("Native operation refused");
+        return Err(format!("OpenCode HTTP {}: {reason}", response.status));
     }
-    let raw = &bytes[framing.header_end..framing.end];
-    let mut decoded = Vec::new();
-    let body = if framing.chunked {
-        let mut rest = raw;
-        loop {
-            let n = rest
-                .windows(2)
-                .position(|p| p == b"\r\n")
-                .ok_or("Invalid native chunk")?;
-            let size = usize::from_str_radix(
-                std::str::from_utf8(&rest[..n])
-                    .map_err(|_| "Invalid native chunk")?
-                    .split(';')
-                    .next()
-                    .unwrap_or(""),
-                16,
-            )
-            .map_err(|_| "Invalid native chunk")?;
-            rest = &rest[n + 2..];
-            if size == 0 {
-                break;
-            }
-            decoded.extend_from_slice(&rest[..size]);
-            rest = &rest[size + 2..];
-        }
-        decoded.as_slice()
-    } else {
-        raw
-    };
-    if !(200..300).contains(&framing.status) {
-        let reason = serde_json::from_slice::<Value>(body)
-            .ok()
-            .map(|v| {
-                v["message"]
-                    .as_str()
-                    .or(v["data"]["message"].as_str())
-                    .unwrap_or("Native operation refused")
-                    .to_owned()
-            })
-            .unwrap_or_else(|| "Native operation refused".into());
-        return Err(format!("OpenCode HTTP {}: {reason}", framing.status));
+    if response.body.is_string() {
+        return Err("Invalid native JSON response; delivery uncertain".into());
     }
-    if body.is_empty() {
-        return Ok(Value::Null);
-    }
-    serde_json::from_slice(body)
-        .map_err(|_| "Invalid native JSON response; delivery uncertain".into())
+    Ok(response.body)
 }
 fn http(host: &Value, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
     http_until(
@@ -293,60 +130,17 @@ fn http_until(
     body: Option<&Value>,
     deadline: Instant,
 ) -> Result<Value> {
-    let address = std::net::SocketAddr::from((
-        [127, 0, 0, 1],
-        host["port"].as_u64().ok_or("Missing native endpoint")? as u16,
-    ));
-    let mut socket = TcpStream::connect_timeout(
-        &address,
-        deadline
-            .checked_duration_since(Instant::now())
-            .ok_or("Native HTTP deadline exceeded")?
-            .min(Duration::from_secs(2)),
-    )
-    .map_err(|_| "OpenCode host is unavailable; explicitly resume the session".to_owned())?;
-    socket
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| e.to_string())?;
-    socket
-        .set_write_timeout(Some(
-            deadline
-                .checked_duration_since(Instant::now())
-                .ok_or("Native HTTP deadline exceeded")?
-                .min(Duration::from_secs(5)),
-        ))
-        .map_err(|e| e.to_string())?;
-    let body = body.map(Value::to_string).unwrap_or_default();
-    let auth = STANDARD.encode(format!("opencode:{}", string(host, "password")));
-    let headers=format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic {auth}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len());
-    socket
-        .write_all(headers.as_bytes())
-        .and_then(|_| socket.write_all(body.as_bytes()))
-        .map_err(|e| format!("Native request delivery uncertain: {e}"))?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or("Native HTTP deadline exceeded; delivery uncertain")?;
-        socket
-            .set_read_timeout(Some(remaining))
-            .map_err(|e| e.to_string())?;
-        let n = socket
-            .read(&mut chunk)
-            .map_err(|e| format!("Native response delivery uncertain: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..n]);
-        if bytes.len() > 32 * 1024 * 1024 {
-            return Err("Native response exceeds bounds; delivery uncertain".into());
-        }
-        if frame(&bytes)?.is_some() {
-            break;
-        }
-    }
-    decode_response(&bytes)
+    let registration = Registration {
+        id: String::new(),
+        version: String::new(),
+        port: host["port"]
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .ok_or("Missing native endpoint")?,
+        pid: 0,
+        password: Some(string(host, "password").to_owned()).filter(|p| !p.is_empty()),
+    };
+    legacy_value(service::request(&registration, method, path, body, deadline)?)
 }
 fn rpc(record: &Value, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
     http(&host(record)?, method, path, body)
@@ -1789,6 +1583,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     #[test]
     fn jsonc_preserves_literal_urls_and_handles_comments_and_trailing_commas() {
         let value=configuration_json(br#"{ // visible model config
