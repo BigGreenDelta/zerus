@@ -34,7 +34,7 @@ pub(super) fn binding(name: &str) -> Result<Value> {
     }
     Ok(record)
 }
-fn native_id(id: &str, prefix: &str) -> bool {
+pub(super) fn native_id(id: &str, prefix: &str) -> bool {
     id.starts_with(prefix)
         && id.len() <= 128
         && id
@@ -536,7 +536,7 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
         _ => ("unknown", "Inspection unavailable"),
     };
     let delivered = history::rows(messages);
-    // A message admitted between the history and inbox reads is shown once.
+    // A message admitted between the inbox and history reads is shown once.
     let ids: std::collections::HashSet<&str> = messages.iter().map(|m| string(m, "id")).collect();
     let queued: Vec<Value> = observed
         .map_or_else(Vec::new, |o| history::queued_rows(&o.inbox, !active))
@@ -545,15 +545,10 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
         .collect();
     // A reply becomes the session's reply once OpenCode completed it, so a
     // read mark taken while it streams never covers its final text.
-    let completed: std::collections::HashSet<&str> = messages
-        .iter()
-        .filter(|m| m["type"] == "assistant" && m["time"]["completed"].is_number())
-        .map(|m| string(m, "id"))
-        .collect();
     let reply = delivered
         .iter()
         .rev()
-        .find(|e| e["type"] == "AgentMessage" && completed.contains(string(e, "message_id")));
+        .find(|e| e["type"] == "AgentMessage" && e["streaming"] != true);
     let prompt = delivered
         .iter()
         .rev()
@@ -624,22 +619,34 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     }
     value
 }
+/// A row without a reading of the session: no events, so clients keep the
+/// transcript they already show, and the reason as its detail.
+fn unread(record: &Value, reason: &str) -> Value {
+    let mut row = normalize(record, None);
+    if let Some(map) = row.as_object_mut() {
+        map.remove("events");
+        map.remove("replace_events");
+    }
+    row["activity_detail"] = json!(reason);
+    row["inspection_reason"] = json!(reason);
+    row
+}
 /// A binding whose service could not be read: unknown, with the reason.
 fn unavailable(record: &Value, reason: String) -> Value {
-    let mut row = normalize(record, None);
+    let mut row = unread(record, &reason);
     row["inspection_unavailable"] = json!(true);
-    row["inspection_reason"] = json!(reason);
     row
 }
 /// A binding that OpenCode 2 did not migrate: stopped, and only Forget.
 fn legacy_row(record: &Value) -> Value {
-    let mut row = normalize(record, None);
+    let mut row = unread(
+        record,
+        "This conversation belongs to OpenCode 1, which Zerus no longer supports",
+    );
     row["state"] = json!("stopped");
     row["process_state"] = json!("exited");
     row["runtime_state"] = json!("stopped");
     row["activity_summary"] = json!("OpenCode 1 conversation");
-    row["inspection_reason"] =
-        json!("This conversation belongs to OpenCode 1, which Zerus no longer supports");
     row
 }
 /// One GET that must succeed.
@@ -683,11 +690,13 @@ fn observe(
     let session = exact_session(record, get(native, &session_path(record, ""))?)?;
     let forms = pending_requests(native, record, "/form")?;
     let permissions = pending_requests(native, record, "/permission")?;
-    let page = history()?;
+    // The inbox first: an item admitted meanwhile is then in the history
+    // read; one listed in both is shown once.
     let inbox = get(native, &session_path(record, "/inbox"))?;
     if !inbox["data"].is_array() {
         return Err("Invalid OpenCode inbox".into());
     }
+    let page = history()?;
     Ok(Observed {
         session,
         active: active.get(string(record, "conversation_id")).is_some(),
@@ -2109,10 +2118,20 @@ mod tests {
             value["inspection_reason"],
             "OpenCode is not running on fixture"
         );
+        assert_eq!(
+            value["activity_detail"],
+            "OpenCode is not running on fixture"
+        );
         let legacy = legacy_row(&record);
         assert_eq!(legacy["state"], "stopped");
         assert_eq!(legacy["allowed_actions"], json!(["forget"]));
         assert!(legacy.get("inspection_unavailable").is_none());
+        assert_eq!(legacy["activity_detail"], legacy["inspection_reason"]);
+        // Without a reading, clients keep the transcript they already show.
+        for row in [&value, &legacy] {
+            assert!(row.get("events").is_none());
+            assert!(row.get("replace_events").is_none());
+        }
     }
     #[test]
     fn a_streaming_reply_is_shown_but_not_yet_the_session_reply() {
@@ -2157,6 +2176,11 @@ mod tests {
                 json!({"data": []}),
             ),
             (
+                format!("GET /api/session/{id}/inbox"),
+                200,
+                opencode2("inbox_busy"),
+            ),
+            (
                 format!("GET /api/session/{id}/message?limit=100&order=desc"),
                 200,
                 messages,
@@ -2165,11 +2189,6 @@ mod tests {
                 format!("GET /api/session/{id}/message?limit=100&cursor={next}"),
                 200,
                 json!({"data": [], "cursor": {"next": null}}),
-            ),
-            (
-                format!("GET /api/session/{id}/inbox"),
-                200,
-                opencode2("inbox_busy"),
             ),
         ]));
         let active = opencode2("active_busy")["data"].clone();
@@ -2196,14 +2215,14 @@ mod tests {
                 json!({"data": []}),
             ),
             (
-                format!("GET /api/session/{id}/message?limit=100&order=desc"),
-                200,
-                opencode2("messages"),
-            ),
-            (
                 format!("GET /api/session/{id}/inbox"),
                 200,
                 json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/message?limit=100&order=desc"),
+                200,
+                opencode2("messages"),
             ),
         ]));
         let seen = observe(&native, &record, &json!({}), || {

@@ -269,6 +269,8 @@ pub(super) fn rows(messages: &[Value]) -> Vec<Value> {
                 Value::Null,
             )),
             "assistant" => {
+                let first = rows.len();
+                let completed = message["time"]["completed"].as_f64();
                 let mut reply_at = None;
                 let mut texts = Vec::new();
                 for (index, part) in message["content"]
@@ -323,10 +325,18 @@ pub(super) fn rows(messages: &[Value]) -> Vec<Value> {
                 }
                 let text = texts.join("\n");
                 if let Some(index) = reply_at.filter(|_| !text.trim().is_empty()) {
+                    let done = completed.map_or(at, |t| t / 1000.0);
                     rows.insert(
                         index,
-                        event("AgentMessage", text, "", at, id.to_owned(), json!(id)),
+                        event("AgentMessage", text, "", done, id.to_owned(), json!(id)),
                     );
+                }
+                // OpenCode still changes this message; history must not keep
+                // these rows until it completes.
+                if completed.is_none() {
+                    for row in &mut rows[first..] {
+                        row["streaming"] = json!(true);
+                    }
                 }
             }
             "idle" => {
@@ -486,6 +496,24 @@ mod tests {
         assert_eq!(rows[0]["reply_id"], "msg_A");
         assert_eq!(rows[0]["at"], 2.0);
         assert_eq!(rows[2]["detail"], "denied");
+    }
+
+    #[test]
+    fn rows_of_a_streaming_reply_are_marked_until_it_completes() {
+        let mut message = json!({"id":"msg_A","type":"assistant","time":{"created":2000},"content":[
+            {"type":"text","text":"Partial"},
+            {"type":"tool","id":"call_1","name":"bash","state":{"status":"running","input":{}}}]});
+        let streaming = rows(std::slice::from_ref(&message));
+        assert_eq!(streaming.len(), 2);
+        assert!(streaming.iter().all(|r| r["streaming"] == true));
+        message["time"]["completed"] = json!(3500);
+        let done = rows(&[message]);
+        assert!(done.iter().all(|r| r.get("streaming").is_none()));
+        // A finished reply is dated when it completed; its tools when it started.
+        assert_eq!(done[0]["at"], 3.5);
+        assert_eq!(done[1]["at"], 2.0);
+        let user = rows(&[json!({"id":"msg_U","type":"user","text":"x","time":{"created":1}})]);
+        assert!(user[0].get("streaming").is_none());
     }
 
     #[test]
