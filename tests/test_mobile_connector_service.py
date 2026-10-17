@@ -361,10 +361,45 @@ class InstallAgent(unittest.TestCase):
 
     def test_a_foreign_agent_is_kept(self):
         self.plist.parent.mkdir(parents=True)
-        self.plist.write_text("not a plist")
+        for original in ("not a plist", '<?xml version="1.0"?><plist><dict>'):
+            with self.subTest(original=original):
+                self.plist.write_text(original)
+                result = self.run_agent("install", code=1)
+                self.assertIn("is not a zerus-mobile-connector agent", result.stderr)
+                self.assertEqual(self.plist.read_text(), original)
+
+    def test_a_manual_connector_agent_keeps_its_configuration(self):
+        import plistlib
+        self.plist.parent.mkdir(parents=True)
+        original = plistlib.dumps({
+            "Label": "com.hgdev.zerus-mobile-connector",
+            "ProgramArguments": [str(self.rust), "--config", str(self.root / "private-connector.json")],
+            "AbandonProcessGroup": True,
+        })
+        self.plist.write_bytes(original)
         result = self.run_agent("install", code=1)
         self.assertIn("is not a zerus-mobile-connector agent", result.stderr)
-        self.assertEqual(self.plist.read_text(), "not a plist")
+        self.assertEqual(self.plist.read_bytes(), original)
+
+    def test_an_app_path_with_spaces_is_one_plist_argument(self):
+        import plistlib
+        app = self.root / "Company Tools/Zerus.app/Contents/MacOS/zerus-mobile-connector"
+        app.parent.mkdir(parents=True)
+        app.write_text("#!/bin/sh\n")
+        app.chmod(0o755)
+        self.run_agent("install", "--binary", str(app))
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())["ProgramArguments"][0], str(app))
+
+    def test_printed_bootstrap_quotes_a_home_path_with_spaces(self):
+        import shlex
+        previous = self.home
+        self.home = self.root / "home with spaces"
+        previous.rename(self.home)
+        self.rust = self.home / ".local/bin/zerus-mobile-connector"
+        self.plist = self.home / "Library/LaunchAgents/com.hgdev.zerus-mobile-connector.plist"
+        result = self.run_agent("install")
+        command = shlex.split(result.stdout.split("When ready: ", 1)[1].strip())
+        self.assertEqual(command, ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(self.plist)])
 
 
 if __name__ == "__main__":
