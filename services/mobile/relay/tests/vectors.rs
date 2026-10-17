@@ -72,22 +72,17 @@ const CODEC_DIFFERENCES: &[(&str, &str)] = &[
 /// column of the Python reference relay decide differently, and why. Every
 /// other case agrees on the decision and the status.
 ///
-/// `protocol::text` refuses DEL with the C0 controls, as the connector's
+/// DEL is a control character in every identity (owner decision, zerus-3rqx.6):
+/// `protocol::text` refuses it with the C0 controls, as the connector's
 /// identity checks do; the reference relay's `text()` refused only C0 controls.
 /// The Python connector itself accepts DEL in a send's `expected_run_id` and
 /// never reads `computer_id`, which the relay removes before a claim.
 const ORACLE_DIFFERENCES: &[(&str, &str)] = &[
-    (
-        "session/delete",
-        "the relay refuses DEL in session (zerus-3rqx.6)",
-    ),
-    (
-        "computer-id/delete",
-        "the relay refuses DEL in computer_id (zerus-3rqx.6)",
-    ),
+    ("session/delete", "the relay refuses DEL in session"),
+    ("computer-id/delete", "the relay refuses DEL in computer_id"),
     (
         "payload/run-delete",
-        "the relay refuses DEL in expected_run_id (zerus-3rqx.6)",
+        "the relay refuses DEL in expected_run_id",
     ),
 ];
 

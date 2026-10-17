@@ -1007,10 +1007,15 @@ async fn retained_bodies_reach_the_budget_while_exact_retries_and_controls_fit()
         .result(&f.node, s(&first, "request_id"), &done, None)
         .await
         .unwrap();
-    // The completed body is still retained, so another upload is over budget.
+    // The completed body is still retained, so another upload is over budget,
+    // which the phone shows as such rather than as a busy relay (zerus-3rqx.8).
+    let over = f
+        .submit(&upload(&n, vec![attachment(3000, json!({}))]))
+        .await
+        .unwrap_err();
     assert_eq!(
-        status(&f, &upload(&n, vec![attachment(3000, json!({}))])).await,
-        429
+        (over.0.as_u16(), over.1),
+        (429, "workspace retained payload budget is full")
     );
     // Its exact retry is a receipt, and a small control has its own allowance.
     assert_eq!(f.submit(&first).await.unwrap()["state"], "completed");
@@ -1038,7 +1043,10 @@ async fn many_large_results_reach_the_workspace_budget() {
         match f.submit(&b).await {
             Ok(_) => {}
             Err(e) => {
-                assert_eq!(e.0.as_u16(), 429);
+                assert_eq!(
+                    (e.0.as_u16(), e.1),
+                    (429, "workspace retained payload budget is full")
+                );
                 break;
             }
         }
