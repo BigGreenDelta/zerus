@@ -567,7 +567,7 @@ pub(crate) fn launch(
     let service = service::ensure_started()?;
     if present {
         let mut record = binding(name)?;
-        if record["creation_pending"] == true {
+        if resumes_pending(&record) {
             return resume_pending(&service, record);
         }
         let (verdict, _) = legacy_state(&service, &record, &mut None)?;
@@ -607,6 +607,11 @@ fn creation_body(record: &Value) -> Value {
     let name = string(record, "name");
     let tag = name.rsplit('/').next().unwrap_or(name);
     json!({"id":record["conversation_id"],"location":{"directory":record["cwd"]},"title":tag,"metadata":{"zerus":{"run_id":record["run_id"],"launch_id":record["launch_id"]}}})
+}
+/// Only OpenCode 2 bindings are reconciled against the service; an OpenCode 1
+/// binding goes through the legacy verdict and is never POSTed or deleted.
+fn resumes_pending(record: &Value) -> bool {
+    record["creation_pending"] == true && record["service"] == "opencode2"
 }
 /// A binding left with creation_pending (crash or lost reply) is reconciled
 /// instead of blocking its name.
@@ -1466,37 +1471,134 @@ fn checked_request(record: &Value) -> Result<Value> {
     }
     Ok(request)
 }
-pub(super) fn reconcile_receipt(record: &Value, receipt: &mut Value) -> Result<bool> {
-    if receipt["status"] == "submitted" {
-        return Ok(true);
+/// The native OpenCode 2 operations that delivery needs.
+trait Native {
+    fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response>;
+}
+impl Native for service::Service {
+    fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+        service::Service::raw(self, method, path, body)
     }
-    legacy_verify_session(record)?;
-    let id = string(receipt, "native_message_id");
-    if !native_id(id, "msg_")
+}
+#[derive(Debug)]
+enum Delivery {
+    Delivered,
+    Queued,
+    #[allow(dead_code)]
+    Unknown,
+}
+const UNCERTAIN: &str = "Native message ID has conflicting text; delivery uncertain";
+const UNCERTAIN_REPLAY: &str = "Delivery uncertain; this request will not be replayed. Inspect native history before creating a new request";
+/// Resolve one message ID exactly: look it up, then the inbox, and only then
+/// repost the same ID, which the service admits at most once.
+fn reconcile(
+    native: &dyn Native,
+    record: &Value,
+    message_id: &str,
+    text: &str,
+) -> Result<Delivery> {
+    let found = native.raw(
+        "GET",
+        &session_path(record, &format!("/message/{message_id}")),
+        None,
+    )?;
+    match found.status {
+        200 => {
+            let data = &found.body["data"];
+            if data["type"] == "user" && data["id"] == message_id && data["text"] == text {
+                return Ok(Delivery::Delivered);
+            }
+            return Err(UNCERTAIN.into());
+        }
+        404 => {}
+        _ => return Err("Native delivery state is uncertain".into()),
+    }
+    let inbox = native.raw("GET", &session_path(record, "/inbox"), None)?;
+    if inbox.status != 200 {
+        return Err("Native delivery state is uncertain".into());
+    }
+    if let Some(item) = inbox.body["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["id"] == message_id)
+    {
+        if item["payload"]["text"] == text {
+            return Ok(Delivery::Queued);
+        }
+        return Err(UNCERTAIN.into());
+    }
+    let posted = native.raw(
+        "POST",
+        &session_path(record, "/prompt"),
+        Some(&json!({"id":message_id,"text":text,"delivery":"queue"})),
+    )?;
+    if posted.status == 200
+        && posted.body["data"]["id"] == message_id
+        && posted.body["data"]["payload"]["text"] == text
+    {
+        return Ok(Delivery::Delivered);
+    }
+    Err("Native delivery state is uncertain".into())
+}
+fn receipt_path(receipt: &Value) -> PathBuf {
+    root()
+        .join("opencode/receipts")
+        .join(format!("{}.json", string(receipt, "request_id")))
+}
+fn running_service() -> Result<service::Service> {
+    // Sending is explicit, but phase 1 does not start the service for it.
+    service::connect().map_err(|why| why.reason(&crate::platform::hostname()))
+}
+fn check_receipt_identity(record: &Value, receipt: &Value) -> Result<()> {
+    if !native_id(string(receipt, "native_message_id"), "msg_")
         || receipt["conversation_id"] != record["conversation_id"]
         || receipt["run_id"] != record["run_id"]
     {
         return Err("Native receipt identity changed".into());
     }
-    let native = history(record)?;
-    let admission = native
-        .iter()
-        .find(|e| e["type"] == "session.next.prompt.admitted" && e["data"]["messageID"] == id);
-    if let Some(event) = admission {
-        if event["data"]["prompt"]["text"] != receipt["text"] {
-            return Err("Native message ID has conflicting text; delivery uncertain".into());
+    Ok(())
+}
+fn settle(native: &dyn Native, record: &Value, receipt: &mut Value) -> Result<bool> {
+    check_receipt_identity(record, receipt)?;
+    let id = string(receipt, "native_message_id").to_owned();
+    let text = string(receipt, "text").to_owned();
+    match reconcile(native, record, &id, &text)? {
+        Delivery::Delivered | Delivery::Queued => {
+            receipt["status"] = json!("submitted");
+            atomic(&receipt_path(receipt), &receipt.to_string())?;
+            Ok(true)
         }
-        receipt["status"] = json!("submitted");
-        receipt["native_seq"] = event["durable"]["seq"].clone();
-        atomic(
-            &root()
-                .join("opencode/receipts")
-                .join(format!("{}.json", string(receipt, "request_id"))),
-            &receipt.to_string(),
-        )?;
+        Delivery::Unknown => Ok(false),
+    }
+}
+pub(super) fn reconcile_receipt(record: &Value, receipt: &mut Value) -> Result<bool> {
+    if receipt["status"] == "submitted" {
         return Ok(true);
     }
+    let service = running_service()?;
+    verify_session(&service, record)?;
+    settle(&service, record, receipt)
+}
+/// Whether a form or permission is waiting on the user for this session.
+fn waiting_for_user(native: &dyn Native, record: &Value) -> Result<bool> {
+    for suffix in ["/form", "/permission"] {
+        let answer = native.raw("GET", &session_path(record, suffix), None)?;
+        if answer.status != 200 {
+            return Err("OpenCode pending requests could not be read; no message was sent".into());
+        }
+        if answer.body["data"].as_array().is_none_or(|v| !v.is_empty()) {
+            return Ok(true);
+        }
+    }
     Ok(false)
+}
+fn session_active(native: &dyn Native, record: &Value) -> bool {
+    native
+        .raw("GET", "/api/session/active", None)
+        .ok()
+        .filter(|r| r.status == 200)
+        .is_some_and(|r| r.body["data"].get(string(record, "conversation_id")).is_some())
 }
 fn send(record: &Value, request: &Value) -> Result<Value> {
     if !string(request, "agent_id").is_empty() {
@@ -1527,45 +1629,53 @@ fn send(record: &Value, request: &Value) -> Result<Value> {
         "{:x}",
         Sha256::digest(json!([record["name"], request]).to_string().as_bytes())
     );
-    let message_id = format!("msg_{}", string(request, "request_id").replace('-', ""));
+    let service = running_service()?;
     if path.exists() {
         let mut prior: Value = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         if prior["digest"] != digest {
             return Err("This request ID was already used for another message".into());
         }
-        if reconcile_receipt(record, &mut prior)? {
+        if prior["status"] == "submitted" {
             return Ok(prior);
         }
-        return Err("Delivery uncertain; this request will not be replayed. Inspect native history before creating a new request".into());
+        verify_session(&service, record)?;
+        if settle(&service, record, &mut prior)? {
+            return Ok(prior);
+        }
+        return Err(UNCERTAIN_REPLAY.into());
     }
-    let current = own_state(string(record, "name"))?;
-    if current["send_available"] != true {
+    verify_session(&service, record)?;
+    if waiting_for_user(&service, record)? {
         return Err(
-            "OpenCode is stopped, working or waiting for an exact question; no message was sent"
-                .into(),
+            "OpenCode is waiting for an exact question or permission; no message was sent".into(),
         );
     }
+    let message_id = new_id("msg_");
     let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"digest":digest,"native_message_id":message_id,"text":text,"submitted_text":text,"submitted_at":now(),"at":now(),"status":"pending","attachments":[],"transport":"native_opencode"});
     if let Some(target) = session_graph::target_receipt(record) {
         receipt["graph_target"] = target;
     }
+    let queued = session_active(&service, record);
     atomic(&path, &receipt.to_string())?;
-    let answer = rpc(
-        record,
+    let posted = service.raw(
         "POST",
-        &endpoint(record, "/prompt"),
-        Some(&json!({"id":message_id,"prompt":{"text":text},"delivery":"queue"})),
-    )?;
-    if answer["data"]["id"] != message_id
-        || answer["data"]["sessionID"] != record["conversation_id"]
-        || answer["data"]["prompt"]["text"] != text
-        || answer["data"]["admittedSeq"].as_u64().is_none()
-    {
-        return Err("Native message acknowledgement did not match; delivery uncertain".into());
+        &session_path(record, "/prompt"),
+        Some(&json!({"id":message_id,"text":text,"delivery":"queue"})),
+    );
+    let acknowledged = posted.is_ok_and(|answer| {
+        answer.status == 200
+            && answer.body["data"]["id"] == message_id
+            && answer.body["data"]["sessionID"] == record["conversation_id"]
+            && answer.body["data"]["payload"]["text"] == text
+    });
+    if !acknowledged && !matches!(settle(&service, record, &mut receipt), Ok(true)) {
+        return Err(UNCERTAIN_REPLAY.into());
     }
     receipt["status"] = json!("submitted");
-    receipt["native_seq"] = answer["data"]["admittedSeq"].clone();
+    if queued {
+        receipt["queued"] = json!(true);
+    }
     atomic(&path, &receipt.to_string())?;
     Ok(receipt)
 }
@@ -2347,5 +2457,96 @@ mod tests {
         let mut moved = reply;
         moved["info"]["sessionID"] = json!("ses_other");
         assert!(child_events(child, &[user, moved]).is_err());
+    }
+    struct Scripted(std::cell::RefCell<Vec<(String, u16, Value)>>);
+    impl Native for Scripted {
+        fn raw(&self, method: &str, path: &str, _: Option<&Value>) -> Result<Response> {
+            let mut script = self.0.borrow_mut();
+            let (expected, status, body) = script.remove(0);
+            assert_eq!(expected, format!("{method} {path}"));
+            Ok(Response { status, body })
+        }
+    }
+    fn fixture(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).unwrap()
+    }
+    #[test]
+    fn a_queued_message_is_found_in_the_inbox_after_a_lost_response() {
+        let record = json!({"conversation_id": "ses_A"});
+        let inbox = fixture(include_bytes!("../../tests/fixtures/opencode2/inbox_busy.json"));
+        let queued = inbox["data"][0]["id"].as_str().unwrap().to_owned();
+        let native = Scripted(std::cell::RefCell::new(vec![
+            (
+                format!("GET /api/session/ses_A/message/{queued}"),
+                404,
+                fixture(include_bytes!("../../tests/fixtures/opencode2/message_not_found.json")),
+            ),
+            ("GET /api/session/ses_A/inbox".into(), 200, inbox.clone()),
+        ]));
+        assert!(matches!(
+            reconcile(&native, &record, &queued, "queued later").unwrap(),
+            Delivery::Queued
+        ));
+    }
+    #[test]
+    fn an_unknown_message_is_reposted_with_the_same_id_and_never_twice() {
+        let record = json!({"conversation_id": "ses_A"});
+        let prompt = fixture(include_bytes!("../../tests/fixtures/opencode2/prompt.json"));
+        let id = prompt["data"]["id"].as_str().unwrap().to_owned();
+        let native = Scripted(std::cell::RefCell::new(vec![
+            (
+                format!("GET /api/session/ses_A/message/{id}"),
+                404,
+                json!({"_tag": "MessageNotFoundError"}),
+            ),
+            ("GET /api/session/ses_A/inbox".into(), 200, json!({"data": []})),
+            ("POST /api/session/ses_A/prompt".into(), 200, prompt.clone()),
+        ]));
+        assert!(matches!(
+            reconcile(&native, &record, &id, "hello").unwrap(),
+            Delivery::Delivered
+        ));
+        assert!(native.0.borrow().is_empty());
+    }
+    #[test]
+    fn conflicting_text_for_the_same_id_is_uncertain() {
+        let record = json!({"conversation_id": "ses_A"});
+        let native = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/ses_A/message/msg_X".into(),
+            200,
+            json!({"data": {"id": "msg_X", "type": "user", "text": "other"}}),
+        )]));
+        assert!(reconcile(&native, &record, "msg_X", "hello").is_err());
+    }
+    #[test]
+    fn pending_forms_or_permissions_block_sending_but_a_busy_session_does_not() {
+        let record = json!({"conversation_id": "ses_A"});
+        let empty = || json!({"data": []});
+        let native = Scripted(std::cell::RefCell::new(vec![
+            ("GET /api/session/ses_A/form".into(), 200, empty()),
+            ("GET /api/session/ses_A/permission".into(), 200, empty()),
+        ]));
+        assert!(!waiting_for_user(&native, &record).unwrap());
+        let permissions = fixture(include_bytes!("../../tests/fixtures/opencode2/permissions.json"));
+        let native = Scripted(std::cell::RefCell::new(vec![
+            ("GET /api/session/ses_A/form".into(), 200, empty()),
+            ("GET /api/session/ses_A/permission".into(), 200, permissions),
+        ]));
+        assert!(waiting_for_user(&native, &record).unwrap());
+        let busy = fixture(include_bytes!("../../tests/fixtures/opencode2/active_busy.json"));
+        let record = json!({"conversation_id": "ses_IycejmWY8RpJq1aeBnnIpbaNAt"});
+        let native = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/active".into(),
+            200,
+            busy,
+        )]));
+        assert!(session_active(&native, &record));
+    }
+    #[test]
+    fn only_opencode2_bindings_resume_a_pending_creation() {
+        assert!(resumes_pending(&json!({"service":"opencode2","creation_pending":true})));
+        assert!(!resumes_pending(&json!({"creation_pending":true})));
+        assert!(!resumes_pending(&json!({"service":"opencode1","creation_pending":true})));
+        assert!(!resumes_pending(&json!({"service":"opencode2"})));
     }
 }
