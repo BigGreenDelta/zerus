@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub(crate) const MINIMUM: (u64, u64, u64) = (2, 0, 32);
@@ -476,11 +477,17 @@ impl Unavailable {
     }
 }
 
+/// The registration file's bytes, read with the same bound the parser
+/// enforces, or None when there is no readable file.
+fn read_registration() -> Option<Vec<u8>> {
+    let file = fs::File::open(registration_path()).ok()?;
+    let mut bytes = Vec::new();
+    file.take(16385).read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
 pub(super) fn connect() -> std::result::Result<Service, Unavailable> {
-    let bytes = fs::File::open(registration_path()).ok().and_then(|file| {
-        let mut bytes = Vec::new();
-        file.take(16385).read_to_end(&mut bytes).ok().map(|_| bytes)
-    });
+    let bytes = read_registration();
     let Some(bytes) = bytes else {
         return Err(if service_disabled() {
             Unavailable::Disabled
@@ -591,6 +598,113 @@ fn service_disabled() -> bool {
         .ok()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .is_some_and(|v| v["disabled"] == true)
+}
+
+pub(super) enum StartDecision {
+    AlreadyRunning,
+    Start,
+    Refuse(String),
+}
+
+/// Start runs only when no registration exists or its process is gone; it
+/// never runs while a registered process lives, however slow.
+pub(super) fn start_decision(
+    registration: Option<&Registration>,
+    pid_alive: bool,
+    disabled: bool,
+) -> StartDecision {
+    if registration.is_some() && pid_alive {
+        return StartDecision::AlreadyRunning;
+    }
+    if disabled {
+        return StartDecision::Refuse(
+            "The OpenCode background service is disabled; start it in OpenCode".into(),
+        );
+    }
+    StartDecision::Start
+}
+
+/// Variables the shared service must not inherit from `hgs`, the connector
+/// or an SSH login.
+pub(super) fn start_environment(vars: Vec<(String, String)>) -> Vec<(String, String)> {
+    vars.into_iter()
+        .filter(|(k, _)| {
+            !(k.starts_with("HGS_")
+                || k.starts_with("SSH_")
+                || k.starts_with("OPENCODE_SERVER_")
+                || k.starts_with("ZERUS_MOBILE_")
+                || k == "OPENCODE_CONFIG_CONTENT")
+        })
+        .collect()
+}
+
+/// Connect, starting `opencode service start` only when no service runs.
+/// A live registered process that does not answer is reported, never replaced.
+#[allow(dead_code)]
+pub(super) fn ensure_started() -> Result<Service> {
+    let lock_path = root().join("opencode/service-start.lock");
+    let _guard = lock(Some(&lock_path))?;
+    match connect() {
+        Ok(service) => return Ok(service),
+        Err(Unavailable::NotRunning | Unavailable::Disabled) => {}
+        Err(other) => return Err(other.reason(&crate::platform::hostname())),
+    }
+    let reg = read_registration().and_then(|b| parse_registration(&b).ok());
+    let alive = reg
+        .as_ref()
+        .is_some_and(|r| crate::platform::process_alive(r.pid));
+    match start_decision(reg.as_ref(), alive, service_disabled()) {
+        StartDecision::AlreadyRunning => {
+            return Err("OpenCode is starting; try again shortly".into())
+        }
+        StartDecision::Refuse(why) => return Err(why),
+        StartDecision::Start => {}
+    }
+    let mut command = Command::new("opencode");
+    #[cfg(target_os = "linux")]
+    let mut runtime_dir = None;
+    #[cfg(target_os = "linux")]
+    {
+        let runtime = PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }));
+        if runtime.join("systemd/private").exists() && crate::platform::available("systemd-run") {
+            command = Command::new("systemd-run");
+            command
+                .args([
+                    "--user",
+                    "--scope",
+                    "--quiet",
+                    "--collect",
+                    "--expand-environment=no",
+                    "--unit",
+                ])
+                .arg(format!("hgs-opencode-{}", uuid::Uuid::new_v4()))
+                .args(["--", "opencode"]);
+            runtime_dir = Some(runtime);
+        }
+    }
+    command
+        .args(["service", "start"])
+        .env_clear()
+        .envs(start_environment(std::env::vars().collect()))
+        .current_dir(home())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "linux")]
+    if let Some(runtime) = runtime_dir {
+        command.env("XDG_RUNTIME_DIR", runtime);
+    }
+    let mut child = crate::platform::spawn_detached(&mut command)
+        .map_err(|_| "OpenCode could not be started; install OpenCode 2".to_owned())?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Ok(service) = connect() {
+            let _ = child.try_wait();
+            return Ok(service);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err("OpenCode is still starting; try again shortly".into())
 }
 
 #[cfg(test)]
@@ -830,5 +944,49 @@ mod tests {
         .unwrap();
         assert_eq!(missing_operations(&openapi), Vec::<String>::new());
         assert!(verdict(&openapi).unwrap().is_empty());
+    }
+
+    #[test]
+    fn start_is_refused_while_any_registered_process_lives() {
+        let reg = parse_registration(include_bytes!(
+            "../../../tests/fixtures/opencode2/registration.json"
+        ))
+        .unwrap();
+        assert!(matches!(
+            start_decision(Some(&reg), true, false),
+            StartDecision::AlreadyRunning
+        ));
+        assert!(matches!(
+            start_decision(Some(&reg), true, true),
+            StartDecision::AlreadyRunning
+        ));
+        assert!(matches!(
+            start_decision(Some(&reg), false, false),
+            StartDecision::Start
+        ));
+        assert!(matches!(
+            start_decision(None, false, false),
+            StartDecision::Start
+        ));
+        assert!(matches!(
+            start_decision(None, false, true),
+            StartDecision::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn start_environment_drops_session_ssh_and_server_variables() {
+        let kept = start_environment(vec![
+            ("PATH".into(), "/usr/bin".into()),
+            ("HGS_SESSION".into(), "x".into()),
+            ("SSH_AUTH_SOCK".into(), "/s".into()),
+            ("SSH_CONNECTION".into(), "1".into()),
+            ("OPENCODE_SERVER_PASSWORD".into(), "p".into()),
+            ("OPENCODE_CONFIG_CONTENT".into(), "{}".into()),
+            ("ZERUS_MOBILE_TOKEN".into(), "t".into()),
+            ("HOME".into(), "/home/example".into()),
+        ]);
+        let names: Vec<_> = kept.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names, vec!["PATH", "HOME"]);
     }
 }
