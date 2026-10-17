@@ -119,7 +119,10 @@ class NativeClaudeStatusLine(test_pause.Harness):
         self.assertNotIn('--settings', self.binding(self.name)['base'])
         context = self.wait_until(lambda: self.capacity(conversation, 'claude-opus-5-5'), 'the reported window')
         self.assertGreater(context['limit'], 0)
-        self.assertEqual(self.reported()['version'], '2.1.296')
+        # The input comes from the Claude Code under test: the pin in the reviewed matrix,
+        # the latest release in the upstream canary.
+        tested = subprocess.check_output([CLAUDE, '--version'], env=self.env, text=True).split()[0]
+        self.assertEqual(self.reported()['version'], tested)
         # A reply adds the used context; the window stays the model's.
         self.json_command('send', self.name, payload=self.request(text='Fixture request.', attachments=[]))
         self.wait_until(lambda: 'Fixture reply.' in self.screen(), 'the reply')
