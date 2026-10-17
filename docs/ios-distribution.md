@@ -89,11 +89,14 @@ through `ZERUS_IOS_ASC_KEY_PATH`, `ZERUS_IOS_ASC_KEY_ID` and
 
 ## App Store submission checklist
 
-- **Privacy:** the app declares no tracking and collects no data for its own
-  use (`PrivacyInfo.xcprivacy`); session content travels between the phone, the
-  user's own relay and computers. The App Privacy answers in App Store Connect
-  are "Data Not Collected". The privacy policy URL must describe the relay trust
-  model in [the mobile architecture](mobile-architecture.md#trust-and-authorization).
+- **Privacy:** the app has no tracking, ads or analytics. Messages, voice
+  recordings and photos or videos travel through the relay, which keeps them
+  until delivery and in its seven-day backups, so the published App Privacy
+  label is **User Content** (Other User Content, Audio Data, Photos or Videos):
+  App Functionality only, linked to the paired device, not used for tracking.
+  `PrivacyInfo.xcprivacy` declares the same types, and `scripts/ci/check-source.py`
+  keeps them in step. The privacy policy at `https://zerus.dev/privacy` describes
+  the relay trust model in [the mobile architecture](mobile-architecture.md#trust-and-authorization).
 - **Export compliance:** `ITSAppUsesNonExemptEncryption` is `false`; the app uses
   only standard HTTPS and the operating system's encryption.
 - **App Review access:** reviewers cannot pair a computer. The review notes point
