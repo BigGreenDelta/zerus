@@ -819,10 +819,22 @@ os.execv('/bin/sh', ['sh', '-c', sys.argv[-1]])
         self.assertEqual(events[0]['source']['endpoint']['conversation'],origin['conversation_id'])
         self.assertEqual(events[0]['target'],receipt['graph_target'])
         self.assertNotIn(payload['text'],json.dumps(events))
-        graph = subprocess.run([str(HGS),'graph','snapshot','--json'],env=self.env,
-                               capture_output=True,text=True,timeout=5)
-        self.assertEqual(graph.returncode,0,graph.stderr)
-        rows=json.loads(graph.stdout)['items']
+        def snapshot(*args):
+            graph = subprocess.run([str(HGS),'graph','snapshot',*args,'--json'],env=self.env,
+                                   capture_output=True,text=True,timeout=5)
+            self.assertEqual(graph.returncode,0,graph.stderr)
+            return json.loads(graph.stdout)
+        # A bounded native slice may stop before the send ledger under slow I/O:
+        # continue until the scan is complete, then read every page.
+        deadline = time.monotonic() + 60
+        value = snapshot()
+        while not value['coverage']['bindings_complete'] and time.monotonic() < deadline:
+            value = snapshot()
+        self.assertTrue(value['coverage']['bindings_complete'])
+        rows = value['items'][:]
+        while value['has_more']:
+            value = snapshot('--cursor',value['cursor'])
+            rows += value['items']
         exchange=[r['item']['value'] for r in rows if r['item']['kind']=='event']
         self.assertEqual(len(exchange),1)
         self.assertEqual(exchange[0]['request_id'],payload['request_id'])
