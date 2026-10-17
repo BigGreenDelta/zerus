@@ -75,10 +75,15 @@ def event(kind, **fields):
     else:
         commands = [h["command"] for g in hooks.get(kind, []) for h in g["hooks"]]
     for command in commands:
+        started = time.time()
         p = subprocess.run(command, shell=True, input=json.dumps(payload), text=True)
+        with open(home / "hook-trace.jsonl", "a") as trace:
+            trace.write(json.dumps({"pid": os.getpid(), "kind": kind, "start": started, "end": time.time(), "rc": p.returncode}) + "\n")
         if p.returncode == 2:
             return
 def stop(*args):
+    with open(home / "term-trace.jsonl", "a") as trace:
+        trace.write(json.dumps({"pid": os.getpid(), "sid": sid, "term": time.time()}) + "\n")
     if (home / "ignore-term").exists():
         return
     delay = home / ("delay-term-" + sid)
@@ -210,10 +215,30 @@ class Harness(unittest.TestCase):
         path.chmod(0o755)
 
     def hgs(self, *args, rc=0, cwd=None):
+        started = time.time()
         p = subprocess.run([str(HGS), *args], env=self.env,
                            capture_output=True, text=True, timeout=20, cwd=cwd)
+        if args[:1] == ("pause",):
+            self.pause_diagnostics(args, started, p)
         self.assertEqual(p.returncode, rc, p.stdout + p.stderr)
         return p.stdout
+
+    def pause_diagnostics(self, args, started, p):
+        # Temporary diagnostics for zerus-d84a: the timeline of every pause.
+        ended = time.time()
+        def lines(name):
+            path = self.root / name
+            return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        names = [a for a in args[1:] if not a.startswith("-")]
+        report = {"test": self.id(), "seconds": round(ended - started, 3), "rc": p.returncode,
+                  "stderr": p.stderr[-300:], "started": started, "ended": ended,
+                  "bindings": {n: {k: self.binding(n).get(k) for k in ("pid", "supervisor", "session_end", "exited_at", "completion_reason", "updated", "activity")} for n in names},
+                  "term": [t for t in lines("term-trace.jsonl") if t["term"] >= started - 1],
+                  "hooks": [h for h in lines("hook-trace.jsonl") if h["end"] >= started - 1]}
+        if p.returncode or ended - started > 1:
+            report["ps"] = [l for l in subprocess.run(["ps", "-axo", "pid=,ppid=,stat=,etime=,command="], capture_output=True, text=True).stdout.splitlines() if str(self.root) in l][:40]
+            report["panes"] = subprocess.run([str(self.bin / "tmux"), "list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid} #{pane_dead}"], env=self.env, capture_output=True, text=True).stdout
+        print("PAUSE-DIAG " + json.dumps(report), file=sys.stderr, flush=True)
 
     def t(self, *args):
         return subprocess.run([str(self.bin / "tmux"), *args], env=self.env,

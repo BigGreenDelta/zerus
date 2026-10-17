@@ -62,6 +62,13 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
         self.assertEqual((self.root/'cfg/accounts/work/anthropic').stat().st_mode & 0o777,0o700)
         self.assertFalse((self.root/'.config/anthropic').exists())
 
+    def test_zz_pause_timing_samples(self):
+        # Temporary diagnostics for zerus-d84a: repeat the failing pauses.
+        self.hgs('account','add','work','--provider','claude','--label','Work')
+        source=self.start('claude','one','--account','work','--new')
+        for _ in range(12):
+            self.hgs('pause',source); self.resume(source)
+
     def test_default_changes_only_new_launches_not_existing_resume_or_fork(self):
         for id in ('work','next'):self.hgs('account','add',id,'--provider','claude')
         self.hgs('account','default','work')
