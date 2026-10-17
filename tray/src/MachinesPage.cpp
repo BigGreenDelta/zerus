@@ -141,19 +141,18 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
         if (m_loading || row < 0) return;
         const auto next = m_list->item(row)->data(Qt::UserRole).toString();
         if(next==(m_new?QStringLiteral("@new"):m_selected))return;
-        if (!discardChanges()) {
-            renderRows();
-            const auto key=m_selected;const bool draft=m_new;
-            // The original mouse press still applies its selection after the
-            // nested dialog returns. Restore the highlight once it finishes.
-            QTimer::singleShot(0,this,[this,key,draft]{
-                if(m_selected!=key||m_new!=draft)return;
-                const QSignalBlocker blocked(m_list);
-                m_list->setCurrentRow(m_list->currentRow(),QItemSelectionModel::ClearAndSelect);
-            });
-            return;
-        }
-        m_selected = next; m_new = false; renderRows();loadSelection();
+        if (discardChanges()) { m_selected = next; m_new = false; renderRows();loadSelection(); }
+        else renderRows();
+        const auto key=m_selected;const bool draft=m_new;
+        // The original mouse press still applies its selection after this
+        // returns, also after a nested dialog, at the row now under its old
+        // position: a discarded draft can scroll the list. Restore the
+        // highlight once it finishes.
+        QTimer::singleShot(0,this,[this,key,draft]{
+            if(m_selected!=key||m_new!=draft)return;
+            const QSignalBlocker blocked(m_list);
+            m_list->setCurrentRow(m_list->currentRow(),QItemSelectionModel::ClearAndSelect);
+        });
     });
     for (auto *field : {m_alias, m_hostname, m_user, m_key}) connect(field, &QLineEdit::textChanged, this, &MachinesPage::changed);
     connect(m_port, &QSpinBox::valueChanged, this, &MachinesPage::changed); connect(m_enabled, &QCheckBox::toggled, this, &MachinesPage::changed);

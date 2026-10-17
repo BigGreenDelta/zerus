@@ -14,6 +14,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTemporaryDir>
@@ -215,8 +216,12 @@ void TestMachinesPage::newMachineDraftCancelAndDiscard()
 {
     QFETCH(QString,answer);MachinesPage page(FakeCli::program(m_script));start(page);
     auto *list=widget<QListWidget>(page,"machineProfiles");auto *alias=widget<QLineEdit>(page,"machineAlias");
+    // Only two rows fit, so the draft scrolls the list and discarding it
+    // scrolls back while the click that asked is still pressed. Otherwise the
+    // phone panel decides the height whenever its own requests finish.
+    const int twoRows=list->sizeHintForRow(0)*2+2*list->frameWidth();list->setFixedHeight(twoRows);QTRY_COMPARE(list->height(),twoRows);
     widget<QPushButton>(page,"addMachine")->click();QCOMPARE(list->count(),3);
-    QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),QString("@new"));
+    QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),QString("@new"));QTRY_VERIFY(list->verticalScrollBar()->value()>0);
     alias->setText("studio");widget<QLineEdit>(page,"machineHostname")->setText("draft.example");
     widget<QPushButton>(page,"addMachine")->click();QCOMPARE(list->count(),3);QCOMPARE(alias->text(),QString("studio"));
     FleetState state;BoxState local;local.host="arch";local.ok=true;state.setLocal(local,0);
@@ -231,10 +236,13 @@ void TestMachinesPage::newMachineDraftCancelAndDiscard()
         else dialog->button(answer=="discard"?QMessageBox::Discard:QMessageBox::Cancel)->click();
     });respond.start();
     QTest::mouseClick(list->viewport(),Qt::LeftButton,{},list->visualItemRect(list->item(1)).center());
-    QTest::qWait(30);respond.stop();QCOMPARE(prompts,1);QVERIFY(draftSelectedDuringPoll);
+    respond.stop();QCOMPARE(prompts,1);QVERIFY(draftSelectedDuringPoll);
     const bool discarded=answer=="discard";
     QCOMPARE(list->count(),discarded?2:3);QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),discarded?QString("mac"):QString("@new"));
-    QCOMPARE(list->selectedItems().size(),1);QCOMPARE(list->selectedItems().first(),list->currentItem());
+    // The press selects the row under its old position after the dialog; the
+    // highlight returns to the current row once that press has finished.
+    const auto highlighted=[list]{QStringList keys;for(auto *item:list->selectedItems())keys<<item->data(Qt::UserRole).toString();return keys;};
+    QTRY_COMPARE(highlighted(),QStringList{list->currentItem()->data(Qt::UserRole).toString()});
     if(!discarded){
         QCOMPARE(alias->text(),QString("studio"));QCOMPARE(widget<QLineEdit>(page,"machineHostname")->text(),QString("draft.example"));
         QVERIFY(widget<QPushButton>(page,"saveMachine")->isEnabled());

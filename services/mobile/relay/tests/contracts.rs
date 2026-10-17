@@ -2707,7 +2707,7 @@ async fn http_rate_and_lane_refusals_are_answered_after_bounded_drain() {
 
 #[tokio::test]
 async fn http_streamed_body_over_limit_releases_lane_before_bounded_drain() {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let f = Fixture::new().await;
     let app = App::new(f.store.clone()).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2741,8 +2741,19 @@ async fn http_streamed_body_over_limit_releases_lane_before_bounded_drain() {
     // A stream that stops after crossing the cap is answered at the discard
     // deadline. Its discard no longer holds the sole large payload lane: an
     // unknown-length upload is admitted meanwhile and fails only as JSON.
+    // Linux loopback buffers this whole upload before the relay reads it, so
+    // finishing the writes does not prove admission and a probe could take
+    // the lane first, refusing the stalled stream as busy. The relay sends
+    // 100 Continue only when it first reads the body, after admission.
     let mut stalled = tokio::net::TcpStream::connect(address).await.unwrap();
-    stalled.write_all(head.as_bytes()).await.unwrap();
+    let expect = head.replace("\r\n\r\n", "\r\nExpect: 100-continue\r\n\r\n");
+    stalled.write_all(expect.as_bytes()).await.unwrap();
+    let mut interim = [0u8; 25];
+    tokio::time::timeout(Duration::from_secs(10), stalled.read_exact(&mut interim))
+        .await
+        .expect("the relay admits the stalled stream")
+        .unwrap();
+    assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
     for _ in 0..17 {
         stalled.write_all(&piece).await.unwrap();
     }
