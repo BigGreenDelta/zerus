@@ -272,6 +272,11 @@ fn speech(op: &str, p: &Value, id: &str) -> Result<()> {
     }
 }
 pub fn request(v: &Value) -> Result<()> {
+    // The connector refuses what Python's json cannot read, so a request
+    // holding such an integer would only expire unclaimed on the computer.
+    if !json::python_integers(v) {
+        return Err(Error::BAD);
+    }
     fields(
         v,
         &[
