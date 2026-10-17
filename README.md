@@ -11,9 +11,9 @@
 <p align="center">
   <a href="docs/installation.md">Install</a> &nbsp; | &nbsp;
   <a href="#features">Features</a> &nbsp; | &nbsp;
-  <a href="#your-fleet-from-your-phone">Android</a> &nbsp; | &nbsp;
+  <a href="#your-fleet-from-your-phone">Android and iOS</a> &nbsp; | &nbsp;
   <a href="docs/reference.md">Reference</a><br />
-  <sub>Linux and macOS &nbsp; | &nbsp; Android &nbsp; | &nbsp; Windows &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
+  <sub>Linux and macOS &nbsp; | &nbsp; Android and iOS &nbsp; | &nbsp; Windows &nbsp; | &nbsp; P2P &nbsp; | &nbsp; MIT</sub>
 </p>
 
 <p align="center">
@@ -122,7 +122,7 @@ to run the model. Agent choice and speech provider choice are independent.
 
 ### Your fleet from your phone
 
-The **Android app** brings your projects and agents to your phone:
+The **Android and iOS apps** bring your projects and agents to your phone:
 
 - **Conversations and tasks.** Read replies, follow goals, task lists and subagents,
   answer questions and approvals, and send messages with files and images.
@@ -136,11 +136,14 @@ The **Android app** brings your projects and agents to your phone:
   check account limits. Private drafts and cached conversations stay available offline.
 
 Pair your phone with a computer to reach it and its directly connected Zerus peers
-through a **self-hostable HTTPS relay**. Notifications use Firebase Cloud Messaging,
-with a foreground live connection for phones without it. A native **iOS app** with
-the same features is in development ([mobile/ios](mobile/ios/README.md)).
+through a **self-hostable HTTPS relay**. Notifications use Firebase Cloud Messaging
+on Android, with a foreground live connection for phones without it, and Apple Push
+Notifications on iPhone. The native **iOS app** (SwiftUI, iOS 18 or later) has the
+same features as Android and is open to everyone through the TestFlight public beta
+until its App Store release.
 
 [Download the Android APK](https://zerus.dev/#download) |
+[Join the iOS beta on TestFlight](https://testflight.apple.com/join/fywRuW6y) |
 [Connect your phone](docs/mobile-deployment.md#pair-the-phone) |
 [Architecture and trust model](docs/mobile-architecture.md)
 
@@ -154,6 +157,16 @@ the same features is in development ([mobile/ios](mobile/ios/README.md)).
     <td><a href="docs/assets/readme/android-sessions.webp"><img src="docs/assets/readme/android-sessions.webp" alt="Android session overview with agents on a workstation, MacBook and build server" width="280" /></a></td>
     <td><a href="docs/assets/readme/android-conversation.webp"><img src="docs/assets/readme/android-conversation.webp" alt="A conversation with Codex in the Android client" width="280" /></a></td>
     <td><a href="docs/assets/readme/android-accounts.webp"><img src="docs/assets/readme/android-accounts.webp" alt="Shared Codex, Claude and Kimi accounts with usage limits across machines" width="280" /></a></td>
+  </tr>
+  <tr>
+    <th>Sessions on iPhone</th>
+    <th>Conversations on iPhone</th>
+    <th>Projects on iPhone</th>
+  </tr>
+  <tr>
+    <td><a href="docs/assets/readme/ios-sessions.webp"><img src="docs/assets/readme/ios-sessions.webp" alt="iPhone session overview with Codex, Claude and Kimi sessions on a design workstation" width="280" /></a></td>
+    <td><a href="docs/assets/readme/ios-conversation.webp"><img src="docs/assets/readme/ios-conversation.webp" alt="A Codex conversation with a table, code and a task list in the iOS client" width="280" /></a></td>
+    <td><a href="docs/assets/readme/ios-projects.webp"><img src="docs/assets/readme/ios-projects.webp" alt="A project with folders on two machines in the iOS client" width="280" /></a></td>
   </tr>
 </table>
 
@@ -186,13 +199,46 @@ the window. [Integration details](docs/reference.md#deepseek).
 
 ## Quick start
 
-On Arch Linux x86_64, install the stable bundle with `yay -S zerus-ade-bin`, then
-run `zerus-setup` as your normal user.
-[Source and development packages](docs/installation.md#arch-linux) are also available.
-On Apple Silicon macOS, install with `brew install --cask ufna/zerus/zerus`, then
-run `zerus-setup`, or use the [signed DMG](docs/installation.md#macos-dmg).
-Other Linux distributions [build from source](docs/installation.md#local-installation);
-see [other platforms](#other-platforms).
+### macOS — Homebrew or DMG
+
+For Apple Silicon Macs running macOS 14 or later:
+
+```sh
+brew install --cask ufna/zerus/zerus
+zerus-setup
+```
+
+Run `zerus-setup` once as your normal user, without `sudo`. Prefer a download?
+[Get the signed, notarized DMG](https://zerus.dev/#download-macos), then follow
+the [DMG installation steps](docs/installation.md#macos-dmg).
+
+### Windows — portable ZIP
+
+[Download Zerus for Windows](https://zerus.dev/#download-windows).
+Extract the whole `zerus-<version>-windows-x86_64.zip` archive and launch
+**`hgs-tray.exe`** from the extracted folder. The CLI, **`hgs.exe`**, is included;
+keep the bundled files together. No installer or WSL is required.
+
+Requires Windows 10 version 1903 or later, or Windows 11, on x86_64. Connect to
+Linux/macOS agents over SSH, or enable **local sessions** in Machines to run
+agents on Windows itself. See the [Windows guide](docs/installation.md#windows)
+for setup and supported features. The ZIP is also on the
+[latest stable release page](https://github.com/ufna/zerus/releases/latest).
+
+### Linux — Arch package or source
+
+On Arch Linux x86_64:
+
+```sh
+yay -S zerus-ade-bin
+zerus-setup
+```
+
+Run setup as your normal user. [Source and development packages](docs/installation.md#arch-linux)
+are also available. Other Linux distributions
+[build from source](docs/installation.md#local-installation).
+
+### Start a session
 
 [Install Zerus and the CLI](docs/installation.md), then use **New session** to
 choose an agent, machine, project and folder. Ordinary folders without Git work
@@ -210,6 +256,8 @@ hgs a codex/orbit/api                  # attach from any terminal
 
 **On Android:** [download the APK](https://zerus.dev/#download),
 then [pair your phone](docs/mobile-deployment.md#pair-the-phone).
+**On iPhone:** [join the TestFlight beta](https://testflight.apple.com/join/fywRuW6y),
+then pair it the same way, from **Pair a phone…** in Machines on a computer.
 **Try demo** lets you explore the interface before connecting a computer.
 
 ## Other platforms
@@ -228,12 +276,9 @@ and `ufna/zerus/zerus@dev`, respectively.
 **Settings > Updates** checks versions and provides the update command or DMG.
 Source builds remain available through the same installer.
 
-**Windows**: nightly releases include a portable x86_64
-[control console](docs/installation.md#windows) that manages agents on your
-Linux and macOS machines over SSH. With local sessions enabled on its Machines
-page, it also runs agents on the Windows computer itself, in a native session
-host on ConPTY without WSL. Stable releases after 0.42.2 include it too; Dev
-builds have none. Contributions that follow the plan are welcome.
+**Windows**: stable and nightly releases include the portable x86_64 ZIP
+described [above](#windows--portable-zip). Dev builds have no Windows asset.
+Local sessions use a native ConPTY session host; remote sessions use SSH.
 
 [Windows support plan](docs/superpowers/specs/2026-10-10-windows-support-design.md)
 

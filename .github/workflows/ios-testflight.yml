@@ -10,7 +10,7 @@ on:
   workflow_call:
     inputs:
       channel:
-        description: dev (TestFlight internal testing) or stable (App Store candidate)
+        description: dev (TestFlight internal testers and promoted public beta) or stable (App Store candidate)
         type: string
         required: true
     secrets:
@@ -59,10 +59,29 @@ jobs:
           persist-credentials: false
       - name: Select Xcode 26 or later
         run: bash mobile/ios/scripts/select-xcode.sh
+      - name: Resolve the build number
+        id: build
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          RUN_NUMBER: ${{ github.run_number }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Dev runs inside ci.yml, whose run number is the Dev sequence. A Stable
+          # candidate takes the sequence of its commit's successful main CI run, so
+          # build numbers keep growing across both channels of one version.
+          if [ "$CHANNEL" = dev ]; then
+            number=$RUN_NUMBER
+          else
+            number=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SOURCE_COMMIT&event=push&branch=main&status=success" \
+              --jq '.workflow_runs[0].run_number // empty')
+            test -n "$number" || { echo "Main CI has not succeeded for $SOURCE_COMMIT yet." >&2; exit 1; }
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
       - name: Archive, sign and upload
         env:
           CHANNEL: ${{ inputs.channel }}
-          BUILD_NUMBER: ${{ github.run_number }}
+          BUILD_NUMBER: ${{ steps.build.outputs.number }}
           SOURCE_COMMIT: ${{ github.sha }}
           TEAM_ID: ${{ vars.IOS_TEAM_ID }}
           ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}

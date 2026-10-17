@@ -7,7 +7,7 @@ Keychain pairing across them.
 | Channel | Source | Version shown in About |
 | --- | --- | --- |
 | Local Dev | `mobile/ios/scripts/dev-install.sh` on the Mac the phone is attached to | `X.Y.Z-local` and the Git revision |
-| Dev | Every successful main CI run, uploaded to TestFlight for internal testers | `X.Y.Z-dev.N`, N = the CI run number |
+| Dev | Every successful main CI run, uploaded to TestFlight for internal testers; chosen builds also reach the public beta | `X.Y.Z-dev.N`, N = the CI run number |
 | Stable | A maintainer-dispatched upload, submitted for App Store review | `X.Y.Z` |
 
 `mobile/ios/DEV_VERSION` names the next planned release. `mobile/ios/VERSION`
@@ -27,11 +27,18 @@ checks the archived bundle ID, versions and channel before uploading.
 
 - **Dev:** `ci.yml` job `dev-ios` calls the workflow after the CI gate of a main
   push succeeds, when the repository variable `IOS_TESTFLIGHT_ENABLED` is `true`.
-  Dev builds are marked for TestFlight internal testing only, so they never reach
-  external testers or review. Internal testers with automatic distribution enabled
-  receive each processed build.
+  Internal testers with automatic distribution enabled receive each processed
+  build.
+- **Public beta:** until the App Store release, anyone can join through the
+  public TestFlight link of the external group **Public beta**. A maintainer
+  promotes a chosen processed Dev build by adding it to that group (App Store
+  Connect → TestFlight); Apple's Beta App Review approves it before external
+  testers receive it. Dev uploads are therefore no longer marked
+  internal-testing-only; only promoted builds leave the internal group.
 - **Stable:** dispatch **iOS TestFlight** from `main` with channel `stable`
-  after adding `mobile/ios/VERSION`. The uploaded build is then submitted for
+  after adding `mobile/ios/VERSION` and once that commit's main CI has succeeded:
+  the candidate's build number is that CI run number, so it is higher than every
+  Dev build uploaded with the same version before the Dev base advanced. The uploaded build is then submitted for
   review in App Store Connect, together with the store listing.
 
 The upload job runs in the `ios-testflight` environment and verifies that it runs
@@ -59,7 +66,10 @@ access.
    `APP_STORE_CONNECT_API_KEY_ID` and `APP_STORE_CONNECT_API_ISSUER_ID`, and the
    environment or repository variable `IOS_TEAM_ID` (the Apple Developer team ID).
 4. **TestFlight.** Add yourself to an internal testing group with automatic
-   distribution, and install TestFlight on the phone.
+   distribution, and install TestFlight on the phone. For the public beta, create
+   an external group with a public link and fill in Test Information (beta
+   description, feedback email, the privacy policy URL) and the Beta App Review
+   contact; the review notes point to **Try demo** as for App Review.
 5. **Enable Dev uploads.** Set the repository variable `IOS_TESTFLIGHT_ENABLED`
    to `true`. The next main push uploads a Dev build.
 6. **Push notifications.** In Certificates, Identifiers & Profiles enable Push
@@ -81,11 +91,14 @@ through `ZERUS_IOS_ASC_KEY_PATH`, `ZERUS_IOS_ASC_KEY_ID` and
 
 ## App Store submission checklist
 
-- **Privacy:** the app declares no tracking and collects no data for its own
-  use (`PrivacyInfo.xcprivacy`); session content travels between the phone, the
-  user's own relay and computers. The App Privacy answers in App Store Connect
-  are "Data Not Collected". The privacy policy URL must describe the relay trust
-  model in [the mobile architecture](mobile-architecture.md#trust-and-authorization).
+- **Privacy:** the app has no tracking, ads or analytics. Messages, voice
+  recordings and photos or videos travel through the relay, which keeps them
+  until delivery and in its seven-day backups, so the published App Privacy
+  label is **User Content** (Other User Content, Audio Data, Photos or Videos):
+  App Functionality only, linked to the paired device, not used for tracking.
+  `PrivacyInfo.xcprivacy` declares the same types, and `scripts/ci/check-source.py`
+  keeps them in step. The privacy policy at `https://zerus.dev/privacy` describes
+  the relay trust model in [the mobile architecture](mobile-architecture.md#trust-and-authorization).
 - **Export compliance:** `ITSAppUsesNonExemptEncryption` is `false`; the app uses
   only standard HTTPS and the operating system's encryption.
 - **App Review access:** reviewers cannot pair a computer. The review notes point
