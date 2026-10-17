@@ -51,6 +51,9 @@ public:
     static bool plainStableIsNewer(const QString &installed,const QString &released);
     // The portable Windows build (Phase 1: stable and nightly zips, none in Dev) against a catalog.
     static bool portableUpdateAvailable(const QString &appVersion,const DesktopUpdateFeed &feed);
+    // The winget package identifier when `executable` lies in a WinGet package folder
+    // (WinGet\Packages\<identifier>_<source>), else empty: winget installs the portable zip there.
+    static QString wingetPackage(const QString &executable);
     // Whether the stable release `version` carries the Windows zip: those after 0.42.2 do.
     static bool stableHasWindowsBuild(const QString &version);
     static bool devBuildIsNewer(const DesktopUpdateFeed &feed,qint64 installedBuild,const QString &installedCommit);

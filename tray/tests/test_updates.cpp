@@ -244,7 +244,7 @@ private slots:
             value["artifacts"]=artifacts;QVERIFY2(!UpdateController::parseFeed(QJsonDocument(value).toJson(),channel).valid,qPrintable(channel));
         }
     }
-    void portableBuildDefaultsToNightlyAndFollowsStableNeverDev(){
+    void portableBuildDefaultsToStableAndFollowsNightlyNeverDev(){
 #ifdef Q_OS_WIN
         QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
         const auto version=QCoreApplication::applicationVersion();QCoreApplication::setApplicationVersion("0.42.2");const auto restore=qScopeGuard([version]{QCoreApplication::setApplicationVersion(version);});
@@ -255,14 +255,15 @@ private slots:
         const auto fetch=[&](const QNetworkRequest &request){requested<<request.url().fileName();auto *reply=new FixtureReply;const auto name=request.url().fileName();const auto bytes=name=="nightly.json"?nightlyFeed:name=="dev.json"?devFeed:stableFeed;QTimer::singleShot(0,reply,[reply,bytes]{reply->finish(bytes);});return reply;};
         {
             UpdateController controller(nullptr,executable.fileName(),fetch);QSignalSpy notified(&controller,&UpdateController::newerReleaseVerified);
-            // The zip cannot tell a stable from a nightly release; nightly stays the portable default.
-            QTRY_COMPARE(controller.installation().kind,QString("portable"));QCOMPARE(controller.channel(),QString("nightly"));
-            controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested,QStringList{"nightly.json"});
-            QVERIFY(controller.updateAvailable());QCOMPARE(notified.size(),1);QCOMPARE(controller.feed().releaseUrl,QString("https://github.com/ufna/zerus/releases/tag/nightly-123"));
-            // A stable release that carries the zip is announced on the stable channel.
-            controller.setChannel("stable");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("stable.json"));
-            QVERIFY(controller.updateAvailable());QCOMPARE(notified.size(),2);QCOMPARE(controller.feed().releaseUrl,QString("https://github.com/ufna/zerus/releases/tag/v0.42.3"));
+            // Stable releases carry the same tested zip as nightlies: a new portable installation follows stable.
+            QTRY_COMPARE(controller.installation().kind,QString("portable"));QCOMPARE(controller.channel(),QString("stable"));
+            QVERIFY(!QSettings().contains("updates/channel"));
+            controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested,QStringList{"stable.json"});
+            QVERIFY(controller.updateAvailable());QCOMPARE(notified.size(),1);QCOMPARE(controller.feed().releaseUrl,QString("https://github.com/ufna/zerus/releases/tag/v0.42.3"));
             QVERIFY(controller.comparison().contains("Download its Windows zip"));
+            // A nightly with a newer product version is announced on the nightly channel.
+            controller.setChannel("nightly");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("nightly.json"));
+            QVERIFY(controller.updateAvailable());QCOMPARE(notified.size(),2);QCOMPARE(controller.feed().releaseUrl,QString("https://github.com/ufna/zerus/releases/tag/nightly-123"));
             // Dev builds carry no Windows zip: never an update, never polled every 15 minutes.
             controller.setChannel("dev");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("dev.json"));
             QVERIFY(controller.feed().valid);QVERIFY(!controller.updateAvailable());QCOMPARE(notified.size(),2);QVERIFY(controller.comparison().contains("Dev builds do not include"));
@@ -272,9 +273,9 @@ private slots:
             controller.setChannel("stable");controller.check();QTRY_VERIFY(!controller.busy());QCOMPARE(requested.last(),QString("stable.json"));
             QCOMPARE(controller.feed().version,QString("0.42.2"));QVERIFY(!controller.updateAvailable());QCOMPARE(notified.size(),2);QVERIFY(controller.comparison().contains("nightly channel"));
         }
-        // A channel the user chose is kept.
-        QSettings().setValue("updates/channel","stable");
-        UpdateController restarted(nullptr,executable.fileName(),fetch);QTRY_COMPARE(restarted.installation().kind,QString("portable"));QCOMPARE(restarted.channel(),QString("stable"));
+        // A channel already saved, including the nightly default of earlier builds, is kept.
+        QSettings().setValue("updates/channel","nightly");
+        UpdateController restarted(nullptr,executable.fileName(),fetch);QTRY_COMPARE(restarted.installation().kind,QString("portable"));QCOMPARE(restarted.channel(),QString("nightly"));
 #else
         QSKIP("Only Windows builds are portable");
 #endif
@@ -285,6 +286,47 @@ private slots:
         DesktopInstallation portable;portable.kind="portable";DesktopInstallation source;source.kind="source";
         QVERIFY(UpdateController::comparisonMessage(portable,dev,"0.39.0",0,false).contains("stable or nightly channel"));
         QVERIFY(UpdateController::comparisonMessage(source,dev,"0.39.0",0,false).contains("main build 50"));
+    }
+    void wingetPortableInstallationsUpdateThroughWinget(){
+        // winget extracts the stable zip under WinGet\Packages\<identifier>_<source>, per user or machine-wide.
+        for(const QString &path:{QString("C:\\Users\\example\\AppData\\Local\\Microsoft\\WinGet\\Packages\\ufna.Zerus_Microsoft.Winget.Source_8wekyb3d8bbwe\\zerus-windows-x86_64\\hgs-tray.exe"),
+                                 QString("C:/Program Files/WinGet/Packages/ufna.Zerus_Microsoft.Winget.Source_8wekyb3d8bbwe/zerus-windows-x86_64/hgs-tray.exe"),
+                                 QString("D:\\winget\\packages\\UFNA.ZERUS_DefaultSource\\zerus-windows-x86_64\\hgs-tray.exe")})
+            QCOMPARE(UpdateController::wingetPackage(path),QString("ufna.Zerus"));
+        for(const QString &path:{QString("C:\\Users\\example\\Downloads\\zerus-windows-x86_64\\hgs-tray.exe"),
+                                 QString("C:\\Tools\\ufna.Zerus_Microsoft.Winget.Source_8wekyb3d8bbwe\\hgs-tray.exe"),
+                                 QString("C:\\WinGet\\Packages\\ufna.ZerusExtra_Microsoft.Winget.Source\\hgs-tray.exe"),
+                                 QString("C:\\WinGet\\Packages\\ufna.Zerus_\\hgs-tray.exe"),
+                                 QString("C:\\WinGet\\Packages\\other.App_Microsoft.Winget.Source\\hgs-tray.exe"),
+                                 QString("C:\\Packages\\WinGet\\ufna.Zerus_Microsoft.Winget.Source\\hgs-tray.exe"),QString()})
+            QVERIFY2(UpdateController::wingetPackage(path).isEmpty(),qPrintable(path));
+        auto stable=UpdateController::parseFeed(QJsonDocument(stableRaw("0.42.3")).toJson(),"stable");QVERIFY(stable.valid);
+        auto nightly=UpdateController::parseFeed(QJsonDocument(nightlyRaw("0.43.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
+        DesktopInstallation winget{"portable","ufna.Zerus",{}},portable{"portable",{},{}};
+        // winget carries stable releases only: the command exists on Stable and nowhere else.
+        QCOMPARE(UpdateController::updateCommand(winget,"stable"),QString("winget upgrade --id ufna.Zerus --exact"));
+        QVERIFY(UpdateController::updateCommand(winget,"nightly").isEmpty());QVERIFY(UpdateController::updateCommand(winget,"dev").isEmpty());
+        QVERIFY(UpdateController::updateCommand(portable,"stable").isEmpty());
+        QVERIFY(UpdateController::updateCommand(DesktopInstallation{"portable","other.App",{}},"stable").isEmpty());
+        auto guide=UpdateController::installationGuide(winget,"stable",stable);
+        QVERIFY(guide.ownership.startsWith("winget package ufna.Zerus\nPortable Windows build "));
+        QCOMPARE(guide.command,QString("winget: winget upgrade --id ufna.Zerus --exact"));QCOMPARE(guide.copyName,QString("Copy winget command"));
+        QVERIFY(guide.instructions.contains("Quit Zerus"));QVERIFY(guide.instructions.contains("keep running"));
+        guide=UpdateController::installationGuide(winget,"nightly",nightly);
+        QVERIFY(guide.command.isEmpty());QVERIFY(guide.instructions.contains("stable releases only"));
+        guide=UpdateController::installationGuide(portable,"stable",stable);
+        QVERIFY(guide.command.isEmpty());QVERIFY(guide.instructions.isEmpty());QVERIFY(guide.ownership.contains("Download newer builds from the release page"));
+        QCOMPARE(UpdateController::comparisonMessage(winget,stable,"0.42.2",0,false),QString("Zerus 0.42.3 is available. Quit Zerus, then update it with winget."));
+        QCOMPARE(UpdateController::comparisonMessage(portable,stable,"0.42.2",0,false),QString("Zerus 0.42.3 is available. Download its Windows zip from the release page."));
+        // A winget installation following nightlies downloads nightly zips like any portable build.
+        QVERIFY(UpdateController::comparisonMessage(winget,nightly,"0.42.3",0,false).contains("Download its Windows zip"));
+#ifdef Q_OS_WIN
+        QTemporaryDir dir;QVERIFY(dir.isValid());const QString folder="WinGet/Packages/ufna.Zerus_Microsoft.Winget.Source_8wekyb3d8bbwe/zerus-windows-x86_64";
+        QVERIFY(QDir(dir.path()).mkpath(folder));
+        for(const char *file:{"hgs-tray.exe","build-info.json"}){QFile created(dir.filePath(folder+"/"+file));QVERIFY(created.open(QIODevice::WriteOnly));}
+        UpdateController installed(nullptr,dir.filePath(folder+"/hgs-tray.exe"),[](const QNetworkRequest &){return new FixtureReply;});
+        QTRY_COMPARE(installed.installation().kind,QString("portable"));QCOMPARE(installed.installation().package,QString("ufna.Zerus"));
+#endif
     }
     void installationKindFollowsTheFolderLayout(){
         QTemporaryDir dir;QVERIFY(dir.isValid());

@@ -2571,9 +2571,12 @@ Windows Error Reporting restarts the app with the same settings in the backgroun
 would be a surprise.
 
 **Updates.** The portable zip has no installer or self-update. Stable releases
-after 0.42.2 and nightly releases carry the same tested zip. The zip cannot tell
-which of them it came from, so a portable installation starts on the nightly
-channel; choose Stable to follow stable releases only. Settings → Updates reports
+after 0.42.2 and nightly releases carry the same tested zip. A portable
+installation starts on the stable channel; choose Nightly to hear about nightly
+builds too. Earlier portable builds saved Nightly as their default, and that saved
+choice is kept. A zip that winget installed as `ufna.Zerus` offers its
+`winget upgrade` command on the stable channel instead of the download link;
+winget carries stable releases only. Settings → Updates reports
 a stable release or nightly with a newer product version than the running app and
 links to its release page; nightlies of the same product version cannot be told
 apart. Stable 0.42.2 and earlier have no Windows build and are never reported as

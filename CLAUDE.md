@@ -152,7 +152,8 @@ Retry publishers with the same verified candidate; never rebuild or overwrite it
 assets. Pure VCS version bumps do not create AUR commits. Stable releases after
 0.42.2 and nightly prereleases also carry the tested Windows x86_64 portable zip
 unchanged; it stays GitHub-only (not mirrored or in the v1 feed). Dev builds have
-no Windows asset.
+no Windows asset. `publish.yml` proposes each stable zip to winget as `ufna.Zerus`;
+its manifest relies on the zip's `zerus-windows-x86_64/hgs-tray.exe` layout.
 The Homebrew casks `zerus` (stable), `zerus@nightly` and `zerus@dev` (tap
 `ufna/homebrew-zerus`) ship signed, notarized Apple Silicon `Zerus.app` once
 `MACOS_CASKS_ENABLED` is set. Dev also requires `DEV_UPDATES_ENABLED`, follows

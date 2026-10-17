@@ -336,6 +336,27 @@ carries a zip: older mirror code accepts it only in nightlies and fails the whol
 catalog and, in a job that also runs `--dev-platform desktop`, the previous
 desktop Dev catalog.
 
+<a id="winget"></a>
+Stable releases also reach the Windows Package Manager community repository as
+`ufna.Zerus`. After **Publish release** succeeds, its `winget` job runs
+`scripts/publish-winget.py`, which reads the published release, requires the zip's
+`SHA256SUMS` line to equal GitHub's asset digest, and proposes three manifests
+(`scripts/winget_manifest.py`, schema 1.12.0) to `microsoft/winget-pkgs` from the
+`winget-pkgs` fork of the token's account. The manifest installs the immutable
+GitHub asset as a portable zip whose `zerus-windows-x86_64` folder winget puts on
+`PATH` (`ArchiveBinariesDependOnPath`), because `hgs-tray.exe` loads Qt and the
+app-local runtime from that folder; keep the zip's top folder and executable names.
+A winget installation has no Start menu entry; start it with `hgs-tray`. Nightly and
+Dev builds are not published to winget. A version already in `winget-pkgs`, or
+already proposed there by anyone, is never proposed again, so rerunning the failed
+`winget` job is safe; a proposal closed without merging stops the job for a person
+to inspect. Moderators review new packages, and each version passes the
+repository's validation pipeline, so winget can list a release some time after
+GitHub. Without the `release` environment secret `WINGET_TOKEN` (a classic token
+with the `public_repo` scope of the account that owns the fork) the job only
+warns. Run `scripts/publish-winget.py --version VERSION --output DIR` to write the
+manifests of a published release locally without submitting them.
+
 AUR versions are read from the published recipe archive, including epoch and
 package release. In particular `zerus-git` is a VCS recipe, not an invented copy
 of the stable version. The feed describes the release recipes; live AUR
@@ -382,10 +403,14 @@ switches casks; a `zerus@nightly` installation starts on the nightly channel.
 Nightlies compare by Nightly run number. Zerus offers **Restart to finish update**
 once the bundle's `ZerusReleaseVersion` differs from the one the GUI started with.
 The Windows portable build has no installer or self-update: it starts on the
-nightly channel (the zip cannot tell a stable from a nightly release), and links a
-newer stable release or nightly to its GitHub release page. Stable 0.42.2 and
-earlier have no Windows build: they are never reported as an update, and the
-message points to the nightly channel. On Dev it reports that the channel has no
+stable channel, because stable releases after 0.42.2 carry the same tested zip as
+nightlies, and links a newer stable release or nightly to its GitHub release page.
+Earlier portable builds saved Nightly as their default; that saved choice is kept.
+Stable 0.42.2 and earlier have no Windows build: they are never reported as an
+update, and the message points to the nightly channel. A zip that winget extracted
+(a folder under `WinGet\Packages\ufna.Zerus_<source>`) offers
+`winget upgrade --id ufna.Zerus --exact` on the stable channel instead of the
+download link. On Dev it reports that the channel has no
 Windows build and never reports an update. Updates never stop agents, tmux or
 resident adapters.
 

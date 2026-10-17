@@ -1245,6 +1245,12 @@ with a zip: older mirror code accepts a zip only in nightlies and fails the whol
 where the same job also runs `--dev-platform desktop`, the previous desktop Dev
 catalog too.
 
+A separate `winget` job then proposes that zip to `microsoft/winget-pkgs` as
+`ufna.Zerus` ([winget](public-distribution.md#winget)). It runs after the release
+is public, reads only published assets and never proposes a version twice, so a
+failed submission is retried with **Re-run failed jobs** without repeating the
+release, AUR or Homebrew steps.
+
 The VCS flavor follows `main` automatically when users rebuild. Release-time sync
 updates its recipe when dependencies/build/package logic change; pure `pkgver`
 bumps (including the corresponding versioned provides) do not create AUR commits.
@@ -1277,7 +1283,10 @@ The dedicated AUR SSH public key is registered to **ufna** and SSH authenticatio
 was verified on **2026-10-08**. Its private key is configured as the GitHub
 **release environment** secret `AUR_SSH_PRIVATE_KEY`. That environment permits
 only the `main` branch. CI/candidate jobs receive no AUR key. Publication jobs use
-`actions: read` and `contents: write`; no separate GitHub personal token is needed.
+`actions: read` and `contents: write`; only the `winget` job needs a personal token:
+the `release` secret `WINGET_TOKEN`, a classic token with the `public_repo` scope of
+the account that owns the `microsoft/winget-pkgs` fork. Without it the job warns
+and stable publication still succeeds.
 The owner starts publication manually; environment reviewers may be added later.
 
 `packaging/aur/known_hosts` pins AUR's Ed25519 host key, independently verified
