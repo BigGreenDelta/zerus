@@ -91,6 +91,17 @@ fn preference(config: &Config, args: &[String]) -> Result<Value> {
     }
 }
 
+/// Live catalog projects as (ID, name), in the shared order.
+pub(crate) fn projects(config: &Config) -> Result<Vec<(String, String)>> {
+    let snapshot = LockedStore::load(config)?.snapshot(config);
+    Ok(snapshot["organization"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p["id"].as_str()?.to_owned(), p["name"].as_str().unwrap_or_default().to_owned())))
+        .collect())
+}
+
 /// Persist and return the machine identity without retaining the catalog lock.
 pub(crate) fn local_node_id(config: &Config) -> Result<String> {
     let mut store = LockedStore::load(config)?;
