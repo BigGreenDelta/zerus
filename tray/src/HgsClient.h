@@ -164,6 +164,9 @@ public:
     explicit HgsClient(QString hgsPath, QObject *parent = nullptr);
     ~HgsClient() override;
     QString executable() const { return m_hgs; }
+    // Tests only: an empty program fails inside QProcess::start() on every
+    // platform, as a missing executable does on Windows.
+    void setExecutableForTests(const QString &program) { m_hgs = program; }
     // Read the configured executable, including older CLIs without snapshot metadata.
     void requestVersion();
     void requestSessionReference(const QString &host, const QString &name, const QString &run,

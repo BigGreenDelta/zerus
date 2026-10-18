@@ -86,4 +86,39 @@ final class VoiceQueuePresentationTests: XCTestCase {
         XCTAssertEqual([], rows.first { $0.voice != nil }?.originalIds)
         XCTAssertEqual(3, RollingConversationHistory.merge(target: target, previousTarget: target, previous: [], incoming: rows, inspection: true).events.count)
     }
+
+    func testANativeRowNamingTheVoiceRequestLeavesVoiceRowsAsBefore() throws {
+        // hgs sends the transcript with the voice ID as its request, so OpenCode's row of it names that request.
+        func unnamed(_ rows: [Event]) -> [Event] {
+            rows.map { row in
+                var copy = row
+                if copy.source == "opencode_native" { copy.requestId = "" }
+                return copy
+            }
+        }
+        var canonical = try XCTUnwrap(NativeEvents.events(raw(voice())).first)
+        canonical.id = "history:voice"; canonical.historyId = "voice"; canonical.historyCursor = "cursor"; canonical.historyEpoch = "epoch"
+        let head = HistoryWindow(target: target, epoch: "epoch", events: [canonical], before: nil, after: "cursor", hasBefore: false, hasAfter: false, atHead: true)
+        for state in ["queued", "not_delivered", nil] as [String?] {
+            let label = state ?? "accepted"
+            let rows = NativeEvents.events(raw(voice(), native(state).putting("request_id", .string(id))))
+            let before = NativeEvents.events(raw(voice(), native(state)))
+            XCTAssertEqual(rows.count, state == nil ? 1 : 2, label)
+            XCTAssertEqual(rows.filter { $0.voice != nil }, before.filter { $0.voice != nil }, label)
+            XCTAssertEqual(unnamed(rows), before, label)
+            XCTAssertEqual(unnamed(VoiceHistory.merge(target, native: rows, outgoing: [])), VoiceHistory.merge(target, native: before, outgoing: []), label)
+            XCTAssertEqual(unnamed(RollingConversationHistory.merge(target: target, previousTarget: target, previous: [], incoming: rows, inspection: true).events),
+                           RollingConversationHistory.merge(target: target, previousTarget: target, previous: [], incoming: before, inspection: true).events, label)
+            XCTAssertEqual(unnamed(head.inspection(rows).events), head.inspection(before).events, label)
+            // The row of this voice send is still its card, as ConversationView looks it up.
+            let shown = VoiceHistory.merge(target, native: rows, outgoing: [])
+            XCTAssertNotNil(shown.last { $0.outgoingId == id || $0.receiptRequestId == id }?.voice, label)
+            // A typed message with the same text never takes the transcript row of the voice request.
+            let typed = OutgoingMessage(requestId: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb", target: target, text: "Repeated text", attachments: [],
+                                        createdAt: 50, status: "submitted", submittedAt: 50)
+            let merged = ConversationMerge.merge(target: target, native: rows, outgoing: [typed])
+            XCTAssertEqual(merged.events.count, rows.count + 1, label)
+            XCTAssertTrue(merged.recordedRequestIds.isEmpty, label)
+        }
+    }
 }

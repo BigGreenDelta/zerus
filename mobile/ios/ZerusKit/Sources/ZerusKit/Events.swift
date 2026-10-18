@@ -54,6 +54,10 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
         self.deliveryState = deliveryState
     }
 
+    /// The request of a row Zerus recorded itself: a delivery or voice receipt, or this phone's outbox. A native OpenCode
+    /// prompt names the request that sent it only so `ConversationMerge` can match this phone's message; it stays a native row.
+    public var receiptRequestId: String { source == "opencode_native" ? "" : requestId }
+
     /// Serialized-size estimate used for the bounded history window.
     public var approximateBytes: Int {
         // Separate statements: one long `+` chain takes the type checker tens of seconds.
@@ -115,6 +119,9 @@ public struct Prompt: Codable, Hashable, Sendable {
     public var defaultOptionIds: [String] = []
     /// The prefilled answer of a native OpenCode text item (`default_text`), bounded like a typed answer; "" otherwise.
     public var defaultText = ""
+    /// An item of an OpenCode form (not a permission): its text reaches the native form reply, never a terminal, so text
+    /// starting with / or ! is an ordinary answer. Every other card keeps such text on the computer.
+    public var literalText = false
 }
 
 public struct NativeQuestionAnswer: Codable, Hashable, Sendable {
@@ -422,8 +429,12 @@ public enum NativeEvents {
                 if case .string(let id) = item { return id }
                 return nil
             }
+            // A prompt Zerus sent to OpenCode names its request: OpenCode dates a queued prompt by its delivery, so text and time cannot match it.
+            var requestId = ""
+            if role == "You" && ["hgs_delivery", "hgs_voice"].contains(source) { requestId = value.string("message_id") }
+            if role == "You" && source == "opencode_native" && AttachmentPolicy.validId(value.string("request_id")) { requestId = value.string("request_id") }
             return Event(id: historyId.isEmpty ? originalId : "history:\(historyId)", role: role, text: text, time: value.string("at", "timestamp"), at: at,
-                         requestId: ["hgs_delivery", "hgs_voice"].contains(source) && role == "You" ? value.string("message_id") : "",
+                         requestId: requestId,
                          attachments: files, source: source, nativeType: type,
                          submittedText: source == "hgs_delivery" ? value.string("submitted_text") : "", originalId: originalId, historyId: historyId,
                          historyCursor: value.string("history_cursor"), historyEpoch: raw.string("history_epoch"), incomingSeq: incoming,
@@ -447,7 +458,7 @@ public enum NativeEvents {
         let receipts = raw.objects("attachment_messages").compactMap { parse($0, "attachment") }
         for metadata in receipts {
             let candidates = rows.indices.filter { index in
-                !used.contains(index) && rows[index].role == "You" && rows[index].requestId.isEmpty && userTypes.contains(rows[index].nativeType) &&
+                !used.contains(index) && rows[index].role == "You" && rows[index].receiptRequestId.isEmpty && userTypes.contains(rows[index].nativeType) &&
                     AttachmentReceiptMatch.matches(metadata, rows[index])
             }
             if candidates.count == 1, receipts.filter({ AttachmentReceiptMatch.matches($0, rows[candidates[0]]) }).count == 1 {
@@ -457,7 +468,7 @@ public enum NativeEvents {
                 replaced.at = rows[exact].at
                 replaced.originalIds = Array(unique(metadata.originalIds + [rows[exact].id]).prefix(8))
                 rows[exact] = replaced
-            } else if !rows.contains(where: { $0.role == "You" && $0.requestId == metadata.requestId && !metadata.requestId.isEmpty }) {
+            } else if !rows.contains(where: { $0.role == "You" && $0.receiptRequestId == metadata.requestId && !metadata.requestId.isEmpty }) {
                 rows.append(metadata)
             }
         }
@@ -580,7 +591,8 @@ public enum NativeEvents {
                                        inputKind: ["choice", "text"].contains(prompt.string("input_kind")) ? prompt.string("input_kind") : "",
                                        minLength: limit(prompt, "min_length"), maxLength: limit(prompt, "max_length"),
                                        minItems: limit(prompt, "min_items"), maxItems: limit(prompt, "max_items"),
-                                       defaultOptionIds: prompt.strings("default_option_ids"), defaultText: defaultText(prompt, source: card.string("source")))
+                                       defaultOptionIds: prompt.strings("default_option_ids"), defaultText: defaultText(prompt, source: card.string("source")),
+                                       literalText: card.string("source") == "opencode_native" && !card.bool("approval"))
                             },
                             canAnswer: card.bool("can_answer"), canSkip: card.bool("can_skip"), optional: card.bool("optional"),
                             delivery: delivery?.status ?? "", createdAt: created, source: card.string("source"), approval: card.bool("approval"),

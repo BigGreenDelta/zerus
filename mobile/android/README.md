@@ -81,7 +81,17 @@ counter; `default_option_ids` start selected, and length and `min_items`/`max_it
 bounds are checked before Send; an item that is not `required` may stay empty.
 A card with `can_answer: false` is read-only and shows its `unavailable_reason`,
 such as **Answer this form in OpenCode**, and no Send, also when the computer
-omitted its items.
+omitted its items. Form text may start with `/` or `!`: the computer sends it
+through the OpenCode form reply, never to a terminal. Other cards, approvals
+included, still ask for such answers on the computer.
+An OpenCode permission card offers **Reject**, which rejects every pending
+request in that session, and **Allow once** after the approval review. When the
+request offers it, **Always allow…** follows the same review and then asks for a
+separate confirmation, which shows what it saves when the computer describes it
+(for example `Allows without asking again: printf *`). The confirmation sends
+nothing and closes if the request changed, can no longer be answered, or the app
+left the foreground meanwhile; opening it again needs a fresh review. Other
+approvals without Allow and Deny remain answerable only on the computer.
 
 Conversation messages use 16 sp text and a 20 sp baseline; the editor uses 18 sp
 text and a 22 sp baseline. Both keep natural character spacing. Compact Markdown
@@ -114,7 +124,10 @@ A message waiting in the agent's native queue appears as one compact expandable
 card. Expand it to read and select the full text. Send now remains a manual
 action, available only when the current agent and queued message allow it.
 An OpenCode message in the session inbox is a user bubble labelled **Queued**;
-after Stop it is labelled **Not delivered**. Inbox rows are not history: with
+after Stop it is labelled **Not delivered**. OpenCode dates a queued message by
+its delivery, so a phone message matches the OpenCode row that names its exact
+request UUID, queued, delivered or in paged history; a row naming another request never matches,
+and rows that name none keep the text/time rule. Inbox rows are not history: with
 paged history they follow the newest loaded message while the inspection reports
 them and never become a page, cursor or unread reply. Phones do not remove
 undelivered messages.

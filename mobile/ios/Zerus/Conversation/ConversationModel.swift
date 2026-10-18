@@ -469,7 +469,7 @@ final class ConversationModel {
                 let incoming = NativeEvents.events(raw)
                 let retained = RollingConversationHistory.merge(target: resolved, previousTarget: previousTarget, previous: previousEvents, incoming: incoming,
                                                                 inspection: true)
-                let window = currentWindow.flatMap { $0.atHead ? $0.inspection(incoming, previous: previousInspected) : nil }
+                let window = currentWindow.flatMap { $0.atHead ? $0.inspection(incoming, previous: previousInspected, scope: resolved) : nil }
                 let rows = window?.events ?? retained.events
                 let unknown = currentWindow.map { HistoryInspection.changed($0, incoming, previousInspected) } ?? false
                 let bytes = JSON.object(raw).compact.utf8.count + rows.reduce(0) { $0 + $1.approximateBytes }
@@ -483,7 +483,7 @@ final class ConversationModel {
             // A history page can publish while parsing. Rebase on the latest window so it is never erased.
             let latest = self.historyWindows[resolved.key]
             if latest != currentWindow || (latest != nil && frame.window == nil) {
-                let guarded = latest.map { HistoryInspection.retain($0, nil, frame.inspectedEvents, previousInspected) }
+                let guarded = latest.map { HistoryInspection.retain($0, nil, frame.inspectedEvents, previousInspected, scope: frame.target) }
                 let changed = latest.map { HistoryInspection.changed($0, frame.inspectedEvents, previousInspected) } ?? false
                 frame = frame.with(events: guarded?.events ?? frame.events, truncated: frame.truncated, window: guarded,
                                    indexComplete: self.historyComplete && !changed, indexing: self.historyIndexing)
@@ -522,7 +522,7 @@ final class ConversationModel {
         let priorInspection = activeFrame.flatMap { $0.target == incoming.target ? $0.inspectedEvents : nil } ?? []
         let changed = window.map { incoming.window != $0 && HistoryInspection.changed($0, incoming.inspectedEvents, priorInspection) } ?? false
         if changed { currentHistoryHeads.remove(ConversationReadPolicies.key(incoming.target)) }
-        let guarded = window.map { HistoryInspection.retain($0, incoming.window, incoming.inspectedEvents, priorInspection) }
+        let guarded = window.map { HistoryInspection.retain($0, incoming.window, incoming.inspectedEvents, priorInspection, scope: incoming.target) }
         var frame = incoming
         if let guarded, incoming.window != guarded || incoming.events != guarded.events {
             frame = incoming.with(events: guarded.events, truncated: incoming.truncated || guarded.hasBefore || guarded.hasAfter, window: guarded,
@@ -612,17 +612,7 @@ final class ConversationModel {
             }
             if messages.contains(where: { merged.recordedRequestIds.contains($0.requestId) && $0.status != "recorded" }) {
                 let recorded = merged.recordedRequestIds
-                self.app.editMessages { state in
-                    var copy = state
-                    copy.outgoing = state.outgoing.map { message in
-                        guard recorded.contains(message.requestId), message.status != "reviewed" else { return message }
-                        var updated = message
-                        updated.status = "recorded"
-                        updated.error = ""
-                        return updated
-                    }
-                    return copy
-                }
+                self.app.editMessages { MessageChanges.recorded($0, recorded) }
             }
             // One status-only receipt read per navigation for the newest unconfirmed message; it never resends.
             if let message = messages.last(where: { $0.status == "uncertain" && !merged.recordedRequestIds.contains($0.requestId) }),

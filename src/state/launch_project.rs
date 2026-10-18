@@ -9,7 +9,7 @@ pub(crate) fn with_launch_binding<T>(
     local_sessions().map_err(anyhow::Error::msg)?;
     let _writer = lock(None).map_err(anyhow::Error::msg)?;
     let _dsh = lock(Some(&root().join("dsh/bindings.lock"))).map_err(anyhow::Error::msg)?;
-    let _opencode=lock(Some(&root().join("opencode/bindings.lock"))).map_err(anyhow::Error::msg)?;
+    let _opencode=opencode::lock_bindings().map_err(anyhow::Error::msg)?;
     let record = if opencode::exists(name) {
         let record=opencode::binding(name).map_err(anyhow::Error::msg)?;
         let inspected=opencode::own_state(name).map_err(anyhow::Error::msg)?;

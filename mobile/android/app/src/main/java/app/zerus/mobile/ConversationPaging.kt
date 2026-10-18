@@ -105,10 +105,14 @@ data class HistoryWindow(val target:Target,val epoch:String,val events:List<Even
         val known=events.flatMap { HistoryInspection.identities(it) }.toSet()
         val updated=events.map { canonical ->
             val exact=incoming.filter { row -> row.id in HistoryInspection.identities(canonical) && row.source==canonical.source && row.nativeType==canonical.nativeType && row.role==canonical.role }.singleOrNull()
-            if(exact!=null && (!exact.detailTruncated || canonical.detailTruncated)) {
+            val refreshed=if(exact!=null && (!exact.detailTruncated || canonical.detailTruncated)) {
                 val voice = exact.voice?.let { VoiceProtocol.newer(canonical.voice, it) } ?: canonical.voice
                 canonical.copy(text=voice?.transcript ?: exact.text,attachments=if (voice == null) exact.attachments else listOf(voice.audio),detailTruncated=exact.detailTruncated,voice=voice)
             } else canonical
+            // An OpenCode prompt indexed before hgs could name its sending request keeps none in
+            // history; this conversation's inspection row of the same message may name it now.
+            if(exact!=null && exact.source=="opencode_native" && canonical.requestId.isBlank() && exact.requestId.isNotBlank())
+                refreshed.copy(requestId=exact.requestId) else refreshed
         }
         val watermark=HistoryInspection.journalWatermark(events+previousInspection)
         val newer=incoming.filter { row -> row.id !in known && watermark!=null && HistoryInspection.journalSequence(row)?.let { it>watermark }==true }

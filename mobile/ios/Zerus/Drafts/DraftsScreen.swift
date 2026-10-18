@@ -188,7 +188,7 @@ struct DraftsScreen: View {
                 if message.status == "uncertain" {
                     Button("Check delivery") { Task { await model.checkOutgoing(message) } }.disabled(flight)
                 }
-                if ["failed", "uncertain"].contains(message.status) { Button("Review") { reviewOutgoing = message }.disabled(flight) }
+                if message.recoverable { Button("Review") { reviewOutgoing = message }.disabled(flight) }
             }
             .buttonStyle(.borderless)
             .font(.footnote.weight(.semibold))
