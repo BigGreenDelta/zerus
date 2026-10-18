@@ -476,4 +476,7 @@ independent of the screen.
    start.
 3. Exact multi-choice and Other result formatting through `updatedInput`.
 4. Windows: hook process lifetime and parent-exit detection under the
-   Windows host.
+   Windows host. Answered for Claude Code 2.1.296 (`zerus-sser`, 2026-10-18):
+   in the native Windows suite a Terminal Yes or Esc ended the waiting
+   worker, a killed worker left the approval to the verified screen, and no
+   worker outlived its session or the suite's host.
