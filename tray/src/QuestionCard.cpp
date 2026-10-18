@@ -104,6 +104,26 @@ QString customAnswerProblem(const QString &text)
     return {};
 }
 
+// Keep a preferred body height while allowing the parent to reserve room for
+// queued input and the composer. A fixed height makes Qt overlap the card's
+// status and action rows when the complete Activity pane is constrained.
+class QuestionPages final : public QStackedWidget {
+public:
+    QSize sizeHint() const override {
+        auto size = QStackedWidget::sizeHint(); size.setHeight(m_preferredHeight); return size;
+    }
+    QSize minimumSizeHint() const override {
+        auto size = QStackedWidget::minimumSizeHint(); size.setHeight(0); return size;
+    }
+    void setBodyHeight(int preferred, int minimum) {
+        if (m_preferredHeight == preferred && minimumHeight() == minimum) return;
+        m_preferredHeight = preferred;
+        setMinimumHeight(minimum); setMaximumHeight(preferred); updateGeometry();
+    }
+private:
+    int m_preferredHeight = 0;
+};
+
 class Choice final : public QFrame {
 public:
     // A Markdown description replaces the plain one.
@@ -174,8 +194,8 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     m_tabs = new QTabBar; m_tabs->setObjectName("questionTabs");
     m_tabs->setExpanding(false); m_tabs->setDrawBase(false); m_tabs->setUsesScrollButtons(true); m_tabs->setElideMode(Qt::ElideNone);
     layout->addWidget(m_tabs);
-    m_pages = new QStackedWidget; m_pages->setObjectName("questionPages");
-    m_pages->setFixedHeight(0); layout->addWidget(m_pages);
+    m_pages = new QuestionPages; m_pages->setObjectName("questionPages");
+    m_pages->setMaximumHeight(0); layout->addWidget(m_pages);
     m_status = new QLabel; m_status->setObjectName("questionStatus"); m_status->setWordWrap(true); m_status->setTextFormat(Qt::PlainText);
     m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     layout->addWidget(m_status);
@@ -847,13 +867,10 @@ void QuestionCard::sizeToContent()
     const int editorHeight = editor && !editor->isHidden()
         ? qMax(editor->minimumHeight(), editor->sizeHint().height()) + page->layout()->spacing() : 0;
     layout()->activate();
-    const int chrome = layout()->totalHeightForWidth(width()) - m_pages->height();
+    const int chrome = layout()->totalHeightForWidth(width()) - m_pages->sizeHint().height();
     const int limit = parentWidget() ? qMin(600, parentWidget()->height() * 60 / 100) : 600;
     const int bodyHeight = qMin(contentHeight + editorHeight, qMax(editorHeight + 40, limit - chrome));
-    if (m_pages->height() != bodyHeight) {
-        m_pages->setFixedHeight(bodyHeight);
-        updateGeometry();
-    }
+    static_cast<QuestionPages *>(m_pages)->setBodyHeight(bodyHeight, qMin(bodyHeight, editorHeight + 40));
 }
 
 bool QuestionCard::event(QEvent *event)
