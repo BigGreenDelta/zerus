@@ -938,5 +938,36 @@ class OpenCodeNative(unittest.TestCase):
         self.assertFalse(cache.exists())
         self.assertIn((sent['native_message_id'], 'Cached turn'), self.user_messages(conversation))
 
+    def test_13_a_long_queued_prompt_names_its_request(self):
+        # OpenCode 2.0.32 dates a queued message by its delivery: one queued for 12 s was
+        # dated 12.0 s after its submission. Phones then cannot match their own Sent
+        # message by text and time, so every prompt Zerus sent names its request, while
+        # queued and after delivery.
+        b = self.create()
+        name = b['name']
+        self.hgs(['send', name, '--json'], self.payload(b, text='HOLD_NATIVE first turn'))
+        self.assertTrue(self.model.holding.wait(30), 'the model never received the held turn')
+        self.wait(name, lambda v: v['phase'] == 'working')
+        request = self.payload(b, text='Waited in the queue')
+        queued = self.hgs(['send', name, '--json'], request)
+        self.assertTrue(queued.get('queued'))
+        message_id = queued['native_message_id']
+
+        def row(view):
+            return next((e for e in view['events'] if e.get('message_id') == message_id), None)
+        view = self.wait(name, lambda v: row(v) is not None)
+        self.assertEqual((row(view)['delivery_state'], row(view)['request_id']), ('queued', request['request_id']))
+        time.sleep(12)
+        self.model.release.set()
+        view = self.wait(name, lambda v: v['phase'] == 'idle' and row(v) and not row(v).get('delivery_state'))
+        self.assertEqual((row(view)['detail'], row(view)['request_id']), ('Waited in the queue', request['request_id']))
+        self.assertGreater(row(view)['at'] - queued['submitted_at'], 10)
+        # A prompt sent outside Zerus names no request.
+        status, _ = self.api('POST', f"/api/session/{b['conversation_id']}/prompt",
+                             {'id': 'msg_' + native_suffix(), 'text': 'Typed in OpenCode', 'delivery': 'queue'})
+        self.assertLess(status, 300)
+        view = self.wait(name, lambda v: v['phase'] == 'idle' and any(e.get('detail') == 'Typed in OpenCode' for e in v['events']))
+        self.assertEqual([e.get('request_id') for e in view['events'] if e.get('detail') == 'Typed in OpenCode'], [None])
+
 if __name__ == '__main__':
     unittest.main()

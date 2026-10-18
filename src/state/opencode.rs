@@ -485,6 +485,9 @@ struct Observed {
     inbox: Value,
     forms: Value,
     permissions: Value,
+    /// The Zerus request that sent each of the newest user messages, from the
+    /// receipt index (message ID to request ID).
+    requests: std::collections::HashMap<String, String>,
 }
 /// The status of one binding; `None` when the service could not be read,
 /// which keeps native state unknown rather than stopped.
@@ -563,6 +566,15 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     let idle = available && pending.is_empty();
     let mut events = delivered.clone();
     events.extend(queued);
+    // A prompt Zerus sent names its request, so a client can match its own
+    // message even when OpenCode dates a queued prompt by its delivery.
+    if let Some(observed) = observed {
+        for row in events.iter_mut().filter(|e| e["type"] == "UserPromptSubmit") {
+            if let Some(request) = observed.requests.get(string(row, "message_id")) {
+                row["request_id"] = json!(request);
+            }
+        }
+    }
     let mut value = json!({"name":record["name"],"cmd":"opencode","agent":"opencode","backend":"opencode","project":parts.get(1),"tag":parts.get(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],"launch_id":record["launch_id"],"created":record["created"],"cwd":record["cwd"],"cwd_source":"native_session","tracked":true,"resumable":true,"attached":0,"clients":[],
         "state":state,"process_state":process_state,"runtime_state":runtime_state,"conversation_state":"active","phase":phase,"activity":activity,"activity_summary":summary,
         "activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
@@ -669,6 +681,7 @@ fn observe(
         return Err("Invalid OpenCode inbox".into());
     }
     let page = history()?;
+    let requests = sent_requests(&Ledger::current(), record, &page.messages, &inbox);
     Ok(Observed {
         session,
         active: active.get(string(record, "conversation_id")).is_some(),
@@ -676,7 +689,32 @@ fn observe(
         inbox,
         forms,
         permissions,
+        requests,
     })
+}
+/// At most this many of the newest user messages are looked up.
+const SENT_LOOKUPS: usize = 100;
+/// The Zerus requests that sent the newest user messages of this session:
+/// queued ones first, then history newest first.
+fn sent_requests(
+    ledger: &Ledger,
+    record: &Value,
+    messages: &[Value],
+    inbox: &Value,
+) -> std::collections::HashMap<String, String> {
+    let queued = inbox["data"].as_array().into_iter().flatten();
+    queued
+        .chain(messages.iter().rev())
+        .filter(|m| m["type"] == "user")
+        .map(|m| string(m, "id"))
+        .filter(|id| native_id(id, "msg_"))
+        .take(SENT_LOOKUPS)
+        .filter_map(|id| {
+            let index = ledger.indexed(id)?;
+            (index["conversation_id"] == record["conversation_id"])
+                .then(|| (id.to_owned(), string(&index, "request_id").to_owned()))
+        })
+        .collect()
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Detail {
@@ -2818,6 +2856,7 @@ mod tests {
             inbox,
             forms: json!([]),
             permissions: json!([]),
+            requests: Default::default(),
         }
     }
     fn status_record(id: &str) -> Value {
@@ -2894,6 +2933,71 @@ mod tests {
         assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
         // Queued text is not the prompt the agent is working on.
         assert_eq!(value["prompt"], "hello");
+    }
+    #[test]
+    fn prompts_zerus_sent_name_their_request() {
+        let mut observed = observed("messages", true, opencode2("inbox_busy"));
+        observed.requests = [
+            ("msg_6kezDqwZEklnh8eFGVy3UbP6iX", "request-delivered"),
+            ("msg_gVmstesSuU81H2vTHdmxp65tNI", "request-queued"),
+            ("msg_14bb2d63e001NhfRTKy4frROM8", "request-not-a-prompt"),
+        ]
+        .map(|(id, request)| (id.to_owned(), request.to_owned()))
+        .into();
+        let value = normalize(&status_record("ses_A"), Some(&observed));
+        let named: Vec<(&str, &str, &str)> = value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (string(e, "type"), string(e, "message_id"), string(e, "request_id")))
+            .filter(|(_, _, request)| !request.is_empty())
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("UserPromptSubmit", "msg_6kezDqwZEklnh8eFGVy3UbP6iX", "request-delivered"),
+                ("UserPromptSubmit", "msg_gVmstesSuU81H2vTHdmxp65tNI", "request-queued"),
+            ]
+        );
+    }
+    #[test]
+    fn sent_requests_come_only_from_this_sessions_receipt_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let index = |id: &str, request: &str, conversation: &str| {
+            atomic(
+                &ledger.index(id),
+                &json!({"request_id": request, "conversation_id": conversation}).to_string(),
+            )
+            .unwrap()
+        };
+        let a = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a01";
+        let b = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02";
+        index("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "ses_A");
+        index("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "ses_A");
+        // Another session's message and an index that names no request.
+        index("msg_14bb2d63e001NhfRTKy4frROM8", a, "ses_B");
+        index("msg_14bb2d652001wyzMESFNncEtnf", "not-a-uuid", "ses_A");
+        let observed = observed("messages", true, opencode2("inbox_busy"));
+        let found = sent_requests(&ledger, &status_record("ses_A"), &observed.page.messages, &observed.inbox);
+        let expected: std::collections::HashMap<String, String> = [
+            ("msg_6kezDqwZEklnh8eFGVy3UbP6iX".to_owned(), a.to_owned()),
+            ("msg_gVmstesSuU81H2vTHdmxp65tNI".to_owned(), b.to_owned()),
+        ]
+        .into();
+        assert_eq!(found, expected);
+        // Only the newest user messages are looked up: the queued one first.
+        let many: Vec<Value> = (0..SENT_LOOKUPS + 5)
+            .map(|n| json!({"id": format!("msg_{n:026}"), "type": "user"}))
+            .collect();
+        for n in 0..SENT_LOOKUPS + 5 {
+            index(&format!("msg_{n:026}"), a, "ses_A");
+        }
+        let found = sent_requests(&ledger, &status_record("ses_A"), &many, &observed.inbox);
+        assert_eq!(found.len(), SENT_LOOKUPS);
+        assert!(found.contains_key("msg_gVmstesSuU81H2vTHdmxp65tNI"));
+        assert!(found.contains_key(&format!("msg_{:026}", SENT_LOOKUPS + 4)));
+        assert!(!found.contains_key(&format!("msg_{:026}", 5)));
     }
     #[test]
     fn after_stop_queued_messages_are_not_delivered_and_removable() {
