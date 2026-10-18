@@ -54,6 +54,11 @@ public:
     // The winget package identifier when `executable` lies in a WinGet package folder
     // (WinGet\Packages\<identifier>_<source>), else empty: winget installs the portable zip there.
     static QString wingetPackage(const QString &executable);
+    // Whether `data`, read from installation.json next to hgs-tray.exe, is the record the
+    // per-user Windows installer writes (scripts/windows_installer.py): then the
+    // installation's kind is "installer" rather than "portable".
+    static bool installerRecord(const QByteArray &data);
+    static constexpr qint64 installerRecordLimit=4096;
     // Whether the stable release `version` carries the Windows zip: those after 0.42.2 do.
     static bool stableHasWindowsBuild(const QString &version);
     static bool devBuildIsNewer(const DesktopUpdateFeed &feed,qint64 installedBuild,const QString &installedCommit);
