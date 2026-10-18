@@ -68,9 +68,9 @@ class SharedReadTest {
         }
         assertFalse(SharedReadPolicies.canAdoptReply(fleet,target.copy(run="new-run"),selected.raw,true))
         assertFalse(SharedReadPolicies.canAdoptReply(row(mark("R1",signature),reply="R2"),target,selected.raw,true))
-        // Another open conversation must not block a legitimate same-reply fleet mark.
-        assertTrue(SharedReadPolicies.canAdoptReply(fleet,target.copy(session="other"),null,false))
-        assertTrue(SharedReadPolicies.canAdoptReply(fleet,null,null,false))
+        // Matching fleet hints do not independently bind a nonselected canonical prefix.
+        assertFalse(SharedReadPolicies.canAdoptReply(fleet,target.copy(session="other"),null,false))
+        assertFalse(SharedReadPolicies.canAdoptReply(fleet,null,null,false))
     }
     @Test fun readAllSendsOneMarkAtATimeAndSkipsTargetsThatNoLongerQualify() = runBlocking {
         val qualifying=mutableSetOf("a","b","c")

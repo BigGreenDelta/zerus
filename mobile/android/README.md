@@ -324,7 +324,12 @@ When the computer advertises `mark_read`, reaching the newest reply (a fresh
 complete head read through on this phone), Mark read and Read all also send the
 exact run, conversation, reply and attention signature to the session's
 computer, which shares them with every desktop and phone. A reply or request read
-elsewhere is shown as read here. Review later stays on this phone.
+elsewhere can be adopted here for the exact verified selected reply. Automatic
+adoption for a nonselected conversation is deferred: fleet hints do not prove
+which canonical incoming prefix belongs to that shared reply. Its unread indicator
+may stay stale until a verified selection or explicit Mark read / Read all.
+Review later stays on this phone. This interim guard does not add native prefix
+proof or change explicit reading and Read all.
 Bounded background metadata probes can prepare canonical heads for live sessions
 with reported reply evidence, without opening their conversations or fetching
 full history. Previously unvisited sessions with unknown evidence are not
@@ -469,8 +474,10 @@ or sends automatically. The conversation must have a confirmed run and conversat
 identity before recording.
 The composer preview scrolls within a bounded area while the software keyboard is
 open, keeping the typed draft visible and editable after capture stops.
-With a narrow screen, large system text and an expanded editor, you may need to
-close the keyboard to reach the preview controls.
+The retained preview and expanded editor share that available height; when two
+stacked controls cannot fit, Collapse moves beside Attach with its 48 dp target.
+The 280 dp / 180% system-text native fixture reaches playback, seeking, Discard
+and Send with the IME open, preserving the editor object, text and selection.
 
 Video mode records up to 60 seconds and 10 MiB with CameraX, with an owned circular
 preview and a camera switch. The phone extracts mono 16 kHz speech audio on a
