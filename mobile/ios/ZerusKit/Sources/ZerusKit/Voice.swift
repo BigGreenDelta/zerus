@@ -158,6 +158,9 @@ public struct VoiceOutgoing: Codable, Hashable, Sendable {
 
     public var state: String { message?.state ?? uploadState }
     public var terminal: Bool { ["submitted", "failed", "cancelled", "uncertain"].contains(state) }
+    /// Confirmed submitted recordings stay in conversation history as a local cache, not as unsent drafts.
+    /// An upload state alone is never an authoritative submission receipt.
+    public var needsDraftReview: Bool { message?.state != "submitted" }
     public var needsStatus: Bool { (message == nil && uploadState == "uncertain") || !terminal }
     public var canRestoreUnsent: Bool { message == nil && uploadState == "failed" && audio != nil }
 
@@ -245,16 +248,21 @@ public enum RecordingDelivery: String, Sendable {
         case .processing: "Processing recording"
         case .sent: "Accepted by native app"
         case .failed: "Recording failed"
-        case .cancelled: "Delivery cancelled"
+        case .cancelled: "Not sent"
         case .uncertain: "Delivery unconfirmed"
         }
     }
 
+    /// The plain-language status shown when the status is tapped.
     public var explanation: String {
-        if self == .sent {
-            return "The native app accepted the recognized text. Queue status, when present, is shown alongside this recording. This does not confirm model delivery, reading or completion."
+        switch self {
+        case .uploading: "Your recording is being uploaded. Its recognized text is not confirmed as sent to the agent yet."
+        case .processing: "Your recording is being processed. Its recognized text is not confirmed as sent to the agent yet."
+        case .sent: "The native app accepted the recognized text. Queue status, when present, is shown alongside this recording. This does not confirm model delivery, reading or completion."
+        case .failed: "The recording could not be sent. Your recording and any recognized text are kept for review."
+        case .cancelled: "Delivery was cancelled. This recording was not sent to the agent."
+        case .uncertain: "Delivery has not been confirmed. Check this recording's status before trying to send again."
         }
-        return description
     }
 
     public static func of(_ state: String) -> RecordingDelivery {
@@ -360,14 +368,6 @@ extension VoiceProtocol {
     }
 }
 
-public enum VoiceRoutes {
-    public static func providerReason(_ draft: VoiceDraft, confirmedTarget: Target?, loading: Bool, computers: [VoiceComputer]) -> String {
-        if loading { return "Loading voice profiles. Your recording is saved." }
-        if confirmedTarget != draft.target { return "Refresh voice profiles for this recording's conversation before sending." }
-        if draft.machineId.isEmpty || draft.profileId.isEmpty { return "Choose a voice computer and profile before sending." }
-        guard let computer = computers.first(where: { $0.id == draft.machineId }) else {
-            return "The selected voice computer is unavailable. Choose a provider or refresh."
-        }
 /// Global voice defaults come from computer-scoped reads; they never authorize a conversation or alter a saved recording.
 public enum DefaultVoiceRoutes {
     static func eligible(_ machine: Machine, _ connections: [Connection]) -> Bool {
@@ -398,6 +398,14 @@ public enum DefaultVoiceRoutes {
     }
 }
 
+public enum VoiceRoutes {
+    public static func providerReason(_ draft: VoiceDraft, confirmedTarget: Target?, loading: Bool, computers: [VoiceComputer]) -> String {
+        if loading { return "Loading voice profiles. Your recording is saved." }
+        if confirmedTarget != draft.target { return "Refresh voice profiles for this recording's conversation before sending." }
+        if draft.machineId.isEmpty || draft.profileId.isEmpty { return "Choose a voice computer and profile before sending." }
+        guard let computer = computers.first(where: { $0.id == draft.machineId }) else {
+            return "The selected voice computer is unavailable. Choose a provider or refresh."
+        }
         guard let profile = computer.profiles.first(where: { $0.id == draft.profileId }) else {
             return "The selected voice profile is unavailable. Choose a provider or refresh."
         }

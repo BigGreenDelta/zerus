@@ -184,7 +184,7 @@ struct VoiceMessageContent: View {
                     .accessibilityLabel("Recording actions")
                 }
                 Spacer()
-                DeliveryIcon(state: voice.state)
+                DeliveryIcon(state: voice.state, local: local)
             }
             .font(.footnote)
             .buttonStyle(.borderless)
@@ -194,26 +194,51 @@ struct VoiceMessageContent: View {
     }
 }
 
+/// A clock while uploading or processing, one accent check for native submission, an exclamation for failure or
+/// unconfirmed delivery, and "Not sent" for cancelled delivery. Tapping explains the status; there are no read ticks.
 struct DeliveryIcon: View {
+    @Environment(AppModel.self) private var app
     let state: String
+    var local: VoiceOutgoing? = nil
+    @State private var explaining = false
+    @State private var removing = false
 
     var body: some View {
         let delivery = RecordingDelivery.of(state)
-        let color = [.failed, .uncertain].contains(delivery) ? Theme.amber : Theme.muted
-        Group {
-            switch delivery {
-            case .processing: ProgressView().controlSize(.mini)
-            case .sent: Image(systemName: "checkmark")
-            case .failed: Image(systemName: "exclamationmark.circle")
-            case .cancelled: Image(systemName: "xmark")
-            case .uploading: Image(systemName: "icloud.and.arrow.up")
-            case .uncertain: Image(systemName: "questionmark.circle")
+        Button { explaining = true } label: {
+            Group {
+                switch delivery {
+                case .uploading, .processing: Image(systemName: "clock").foregroundStyle(Theme.muted)
+                case .sent: Image(systemName: "checkmark").foregroundStyle(Theme.mint)
+                case .failed, .uncertain: Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.amber)
+                case .cancelled: Text("Not sent").foregroundStyle(Theme.muted)
+                }
             }
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
         }
-        .foregroundStyle(color)
+        .buttonStyle(.borderless)
         .accessibilityLabel(delivery.description)
-        .help(state == "submitted" ? delivery.explanation : VoiceProtocol.label(state))
-        .accessibilityHint(state == "submitted" ? delivery.explanation : "")
+        .accessibilityHint("Explains this recording's status")
+        .alert(delivery.description, isPresented: $explaining) {
+            // A terminal local copy can still be removed here, with confirmation; delivery is not affected.
+            if let local, local.terminal {
+                Button("Remove local copy", role: .destructive) { removing = true }
+                    .disabled(app.voice.activeRequests.contains(local.id))
+            }
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(delivery.explanation)
+        }
+        .alert("Remove local voice copy?", isPresented: $removing, presenting: local) { entry in
+            Button("Remove local copy", role: .destructive) {
+                app.playback.stop()
+                app.voice.dismiss(entry)
+            }
+            Button("Keep", role: .cancel) {}
+        } message: { entry in
+            Text("Remove this phone's saved audio and receipt for \(entry.target.session)? This does not cancel delivery or remove the message from the computer's conversation history.")
+        }
     }
 }
 
@@ -714,7 +739,7 @@ struct VoiceSavedMessages: View {
 
     var body: some View {
         let voice = app.voice!
-        ForEach(voice.outgoing.sorted { $0.createdAt > $1.createdAt }, id: \.id) { entry in
+        ForEach(voice.outgoing.filter(\.needsDraftReview).sorted { $0.createdAt > $1.createdAt }, id: \.id) { entry in
             VStack(alignment: .leading, spacing: 6) {
                 Text(entry.target.session).font(.subheadline.weight(.semibold)).lineLimit(1)
                 VoiceMessageContent(target: entry.effectiveTarget, voice: entry.displayed())
