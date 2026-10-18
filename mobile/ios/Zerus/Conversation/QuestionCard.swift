@@ -211,11 +211,14 @@ struct QuestionCard: View {
         .onChange(of: identity) { load(identity: identity, draft: draft, native: native) }
         .onChange(of: eligible, initial: true) { observeReview(eligible: eligible, card: reviewCard) }
         .onChange(of: reviewCard) { observeReview(eligible: eligible, card: reviewCard) }
+        // The countdown clock only advances a review that eligibility started; once cancelled it stops without another tick.
         .task(id: "\(eligible && question.approval)|\(reviewCard)") {
             guard eligible && question.approval else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(200))
-                observeReview(eligible: true, card: reviewCard)
+            while true {
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                guard !Task.isCancelled else { return }
+                now = ProcessInfo.processInfo.systemUptime
+                review = review.tick(now: now, card: reviewCard)
             }
         }
     }

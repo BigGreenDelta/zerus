@@ -331,6 +331,55 @@ final class QuestionPoliciesTests: XCTestCase {
         XCTAssertNil(confirm(ApprovalReview(), now: 20), "never reviewed")
     }
 
+    /// Leaving eligibility (background, out of view) resets the review, and a late tick from the stopping clock cannot
+    /// re-arm it: after three or more seconds away, Approve once, Allow once and Always allow wait for three new seconds.
+    func testReturningAfterTimeAwayNeedsAFullNewReview() throws {
+        let allowDeny = try card("claude_tool_approval", approval: true,
+                                 items: [permissionItem.putting("id", "approval").putting("options", options(["allow", "deny"]))])
+        let permission = try card(approval: true, items: [permissionItem])
+        XCTAssertTrue(QuestionPolicies.approvalSupported(allowDeny))
+        XCTAssertTrue(QuestionPolicies.openCodePermission(permission))
+        let confirmation = try XCTUnwrap(PermissionConfirmation(permission))
+        for question in [allowDeny, permission] {
+            let key = ApprovalReview.key(target, question)
+            func reviewed(_ review: ApprovalReview, _ now: Double) -> Bool { review.secondsRemaining(now: now, card: key) == 0 }
+            var review = ApprovalReview().observe(eligible: true, now: 1, card: key)
+            for now in [1.2, 2.5, 4.0] { review = review.tick(now: now, card: key) }
+            XCTAssertTrue(reviewed(review, 4), question.id)
+            // The card leaves; the clock that stops may still deliver one more tick.
+            review = review.observe(eligible: false, now: 5, card: key).tick(now: 5.2, card: key)
+            XCTAssertFalse(reviewed(review, 9), "\(question.id): time away is not review time")
+            // Back after four seconds away: three new eligible seconds before any approving button.
+            review = review.observe(eligible: true, now: 9, card: key)
+            for now in [9.0, 9.2, 10.4, 11.8] {
+                review = review.tick(now: now, card: key)
+                XCTAssertFalse(reviewed(review, now), "\(question.id) at \(now)")
+                XCTAssertFalse(PermissionAction.allowOnce.enabled(answerable: true, reviewed: reviewed(review, now)), "\(question.id) at \(now)")
+            }
+            review = review.tick(now: 12, card: key)
+            XCTAssertTrue(reviewed(review, 12), question.id)
+            if question == permission {
+                XCTAssertNil(confirmation.confirm(permission, target: target, editing: true, available: true, foreground: true, visible: true,
+                                                  review: review, now: 11.9))
+                XCTAssertNotNil(confirmation.confirm(permission, target: target, editing: true, available: true, foreground: true, visible: true,
+                                                     review: review, now: 12))
+            }
+        }
+    }
+
+    func testClockTicksNeverStartOrRearmAReview() {
+        let a = "a", b = "b"
+        XCTAssertEqual(3, ApprovalReview(card: a).tick(now: 10, card: a).secondsRemaining(now: 20, card: a), "a tick never starts a review")
+        let started = ApprovalReview().observe(eligible: true, now: 1, card: a)
+        XCTAssertEqual(started.tick(now: 2, card: a), started)
+        XCTAssertEqual(started.tick(now: 2, card: b), started, "a late tick for another card leaves this review alone")
+        XCTAssertEqual(3, started.tick(now: 0.5, card: a).secondsRemaining(now: 10, card: a), "a clock that went back resets it")
+        // The defect: observing as eligible after leaving re-armed the review at the moment the card left.
+        let left = started.observe(eligible: false, now: 5, card: a)
+        XCTAssertEqual(0, left.observe(eligible: true, now: 5.2, card: a).secondsRemaining(now: 9, card: a))
+        XCTAssertEqual(3, left.tick(now: 5.2, card: a).secondsRemaining(now: 9, card: a))
+    }
+
     func testAlwaysAllowIsSentOnlyForTheExactCardThatStillOffersIt() throws {
         let permission = try card(approval: true, items: [permissionItem])
         let confirmation = try XCTUnwrap(PermissionConfirmation(permission))
