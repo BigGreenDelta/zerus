@@ -5954,7 +5954,10 @@ void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
         }
         QVERIFY(!pasted.contains('\r'));QVERIFY(!pasted.contains('\n'));
         // A peer's staged copies keep POSIX quoting whatever this computer runs.
+        // Retain the original four-file remote fixture within its eight-file cap.
+        mime.setUrls(urls.mid(0,4));
         const auto remote=QString::fromUtf8(drop(window,"mac","claude/infra/review"));
+        mime.setUrls(urls);
         QVERIFY2(remote.contains("'/srv/inbox/report'\\''s draft.pdf' '/srv/inbox/report'\\''s draft.pdf' '/srv/inbox/report'\\''s draft.pdf' "),
                  qPrintable(remote));
         QVERIFY(!remote.contains('"'));QVERIFY(!remote.contains('\\'+QString("srv")));
