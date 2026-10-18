@@ -4,7 +4,7 @@ Production HTTP runs in services/mobile/relay. The supported zerus-mobile CLI
 executes that Rust binary; this module remains an independent protocol oracle.
 """
 from __future__ import annotations
-from . import file_reads, hook_health
+from . import file_reads, hook_health, session_projects
 
 import asyncio
 from collections import OrderedDict, deque
@@ -257,7 +257,7 @@ async def pair(request):
 async def capabilities(request):
     await auth(request, "devices")
     providers = ["fcm"] if request.app[PUSH_WORKER].fcm is not None else []
-    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES | {voice.video.FEATURE, CLEAR_CONTEXT_DISMISS_FEATURE})})
+    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES | {voice.video.FEATURE, CLEAR_CONTEXT_DISMISS_FEATURE, session_projects.FEATURE})})
 
 
 def small_response(request):
@@ -325,6 +325,9 @@ def validate_request(value):
         return
     if op == "recovery_action":
         validate_recovery(payload,request_id)
+        return
+    if op in session_projects.OPERATIONS:
+        session_projects.validate(op,payload,request_id)
         return
     if op == "hooks_status":
         hook_health.validate(payload,request_id)

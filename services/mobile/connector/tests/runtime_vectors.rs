@@ -179,7 +179,14 @@ fn parse(text: &str) -> Value {
 fn validation_matches_the_python_connector_for_implemented_operations() {
     let mut checked = 0;
     let mut refused = 0;
-    for family in ["control", "conversation", "envelope", "launch", "speech"] {
+    for family in [
+        "control",
+        "conversation",
+        "envelope",
+        "launch",
+        "project",
+        "speech",
+    ] {
         let rows = records(&format!("validation/{family}.jsonl"));
         let base = rows.iter().find(|row| row["kind"] == "context").unwrap()["context"].clone();
         for case in rows.iter().filter(|row| row["kind"] == "case") {

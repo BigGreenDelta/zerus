@@ -34,6 +34,7 @@ INSERT INTO requests VALUES('04edf468-2579-5d0a-bfa3-8c056be7c1ab','speech_profi
 INSERT INTO requests VALUES('87bb327a-4a9b-5086-816c-868fcaeec20e','terminal_snapshot','completed','{"state": "completed", "result": {"text": "private native content terminal_snapshot-119"}, "error": null}',1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1759999881.0,1759999881.0,1759999881.0,0);
 INSERT INTO requests VALUES('75ef017f-55c8-5b36-ac24-4bda5c1c16ec','attachment_read','completed','{"state": "completed", "result": {"text": "private native content attachment_read-119"}, "error": null}',1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1759999881.0,1759999881.0,1759999881.0,0);
 CREATE INDEX delivered_history ON requests(delivered,delivered_at);
+CREATE INDEX project_assignment_delivered_v1 ON requests(delivered_at) WHERE operation='project_assignment' AND delivered=1 AND state!='running';
 CREATE INDEX analytics_delivered_reads ON requests(delivered_at) WHERE operation='analytics_read' AND delivered=1 AND state!='running';
 CREATE INDEX terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running';
 CREATE INDEX archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running';

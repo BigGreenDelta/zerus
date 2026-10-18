@@ -113,9 +113,9 @@ class GoldenVectorTests(unittest.TestCase):
     def test_operation_tables_have_the_reviewed_sizes(self):
         counts = json.loads(self.files["operations.json"])["counts"]
         self.assertEqual((counts["OPERATIONS"], counts["READ_OPERATIONS"], counts["MUTATIONS"], counts["CONTEXT_KEYS"]),
-                         (49, 20, 29, 23))
+                         (51, 21, 30, 23))
         operations = set(json.loads(self.files["operations.json"])["sets"]["OPERATIONS"])
-        self.assertTrue({"hooks_status", "analytics_read"} <= operations)
+        self.assertTrue({"hooks_status", "analytics_read", "project_assignment", "project_assign"} <= operations)
         self.assertNotIn("remove_queued", operations)  # Rust-only table, never Python's.
         self.assertNotIn("git_status", operations)  # Its separate read marker is Rust-only too.
 
