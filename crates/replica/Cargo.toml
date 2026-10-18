@@ -1,0 +1,21 @@
+[package]
+name = "zerus-replica"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Replicated Zerus documents on Loro: the task schema, its rules and storage"
+publish = false
+
+[dependencies]
+# The only crate in Zerus that imports Loro. Raise this pin deliberately: the
+# golden vectors in tests/vectors must still decode (see tests/vectors.rs).
+loro = { version = "=1.16.2", default-features = false }
+fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
