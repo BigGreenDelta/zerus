@@ -1,0 +1,55 @@
+// Gradle init script: record exactly what the published Android release build ships.
+//
+//   ./gradlew -q --init-script ../../scripts/android-resolved-artifacts.gradle \
+//       -PzerusFirebase=true :app:zerusResolvedNotices
+//
+// Writes app/build/zerus-notices/resolved.json for scripts/android-notices.py: every
+// resolved module component of releaseRuntimeClasspath with its category, the
+// component its variant redirects to (Gradle "available-at") and the files of its
+// artifacts. It changes no build configuration and adds no dependency.
+import groovy.json.JsonOutput
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.attributes.Category
+
+allprojects {
+    if (path != ":app") return
+    tasks.register("zerusResolvedNotices") {
+        def output = layout.buildDirectory.file("zerus-notices/resolved.json")
+        outputs.file(output)
+        outputs.upToDateWhen { false }
+        doLast {
+            def configuration = configurations.getByName("releaseRuntimeClasspath")
+            def category = Attribute.of(Category.CATEGORY_ATTRIBUTE.name, String)
+            def name = { id -> "${id.group}:${id.module}:${id.version}" }
+            def files = [:].withDefault { [] as Set }
+            configuration.incoming.artifactView { view ->
+                view.lenient(false)
+                view.componentFilter { it instanceof ModuleComponentIdentifier }
+            }.artifacts.each { artifact ->
+                files[name(artifact.id.componentIdentifier)] << artifact.file.absolutePath
+            }
+            def components = []
+            def projects = []
+            configuration.incoming.resolutionResult.allComponents.each { component ->
+                def id = component.id
+                if (!(id instanceof ModuleComponentIdentifier)) {
+                    if (component != configuration.incoming.resolutionResult.root) projects << id.displayName
+                    return
+                }
+                def categories = component.variants.collect { it.attributes.getAttribute(category) }.findAll { it } as Set
+                def redirects = component.variants.collect { it.externalVariant.orElse(null)?.owner }
+                    .findAll { it instanceof ModuleComponentIdentifier }.collect { name(it) } as Set
+                // Resolution is not lenient, so a component without files publishes none
+                // for this variant, or redirects to the component that does.
+                components << [id: name(id), categories: categories.sort(), redirects: redirects.sort(),
+                               files: files[name(id)].sort()]
+            }
+            def target = output.get().asFile
+            target.parentFile.mkdirs()
+            target.text = JsonOutput.prettyPrint(JsonOutput.toJson([
+                configuration: configuration.name, projects: projects.sort(),
+                components: components.sort { it.id }])) + "\n"
+            println "Resolved ${components.size()} components of ${configuration.name} into ${target}"
+        }
+    }
+}

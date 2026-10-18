@@ -122,8 +122,9 @@ The Android application also contains AndroidX, Jetpack Compose, Kotlin,
 kotlinx, OkHttp, Okio, CameraX, ZXing, Guava and other libraries, almost all
 under Apache-2.0, and in the published build Firebase and Google Play services.
 `scripts/android-notices.py` generates the list of every library in the
-published release configuration with its license from the dependency report and
-the libraries' POM files: `mobile/android/app/src/main/assets/licenses/libraries.tsv`.
+published release configuration with its license from Gradle's resolution of that
+configuration, the exact artifacts it resolved and the libraries' POM files:
+`mobile/android/app/src/main/assets/licenses/libraries.tsv`.
 Libraries under BSD or MIT licenses point to reviewed texts with their copyright
 notices in the same folder, including Checker Framework qualifiers (MIT) and the
 Protocol Buffers code that DataStore repackages (BSD-3-Clause, from the

@@ -616,14 +616,18 @@ After a dependency change, regenerate them from that configuration (a synthetic
 `google-services.json` like CI's is enough) and commit the changed assets:
 
 ```sh
-./gradlew -q :app:dependencies --configuration releaseRuntimeClasspath -PzerusFirebase=true > deps.txt
-python3 ../../scripts/android-notices.py deps.txt
+./gradlew -q --init-script ../../scripts/android-resolved-artifacts.gradle -PzerusFirebase=true :app:zerusResolvedNotices
+python3 ../../scripts/android-notices.py
 ```
 
-`--check` compares instead of writing. The script fails when a library declares
-no recognized license or needs a license text that has not been reviewed into
-`app/src/main/assets/licenses`. `ThirdPartyNoticesTest` fails when a declared
-library or platform version is missing from the generated list.
+The init script only records the resolved `releaseRuntimeClasspath`, with the exact
+artifact files Gradle resolved, in `app/build/zerus-notices/resolved.json`; it
+changes no build setting. `--check` compares instead of writing. The script
+writes nothing when a shipped library has no artifact, when a library declares no
+recognized license or needs a license text that has not been reviewed into
+`app/src/main/assets/licenses`.
+`ThirdPartyNoticesTest` also fails locally when a declared library or platform
+version is missing from the generated list.
 
 For distribution and device performance validation, run
 `./gradlew assembleRelease lintRelease`. It produces
