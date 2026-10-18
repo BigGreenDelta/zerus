@@ -16,7 +16,7 @@ an exactly matching chooser. The clipped cases resize the private pane
 themselves. Not covered: an older unresolved request, repeated request IDs or
 an unfinished wire in a real Kimi; their refusals are unit-tested.
 """
-import hashlib, http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest, uuid
+import hashlib, http.server, io, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest, uuid
 from pathlib import Path
 from unittest import mock
 import test_pause as lifecycle
@@ -46,20 +46,120 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+# hgs's private routing, all chosen by lifecycle.Harness itself.
+HGS_KEYS = ('SHELL', 'HGS_CONFIG_DIR', 'HGS_STATE_DIR', 'HGS_SELF', 'HGS_PEERS', 'HGS_TAB', 'HGS_TRACKING')
+FOLDERS = (('XDG_CONFIG_HOME', '.config'), ('XDG_DATA_HOME', '.local/share'), ('XDG_CACHE_HOME', '.cache'),
+           ('XDG_STATE_HOME', '.local/state'), ('USERPROFILE', '.'), ('APPDATA', 'AppData/Roaming'),
+           ('LOCALAPPDATA', 'AppData/Local'), ('TMPDIR', 'tmp'))
+# How long one cleanup helper (ps, tmux list-panes or kill-server) may take.
+HELPER_SECONDS = 10
+
+
 def private_environment(root, home, bin_folder, platform, hgs_keys):
     """Built from nothing: the fixture's own folders, hgs's private routing and
-    a PATH of the private bin plus system folders that offer no kimi."""
+    a PATH of the private bin plus system folders that offer no kimi. Only a
+    dictionary: making its folders is separate, so it cannot fail halfway."""
     path = [str(bin_folder), *(folder for folder in SYSTEM_PATH if not (Path(folder) / 'kimi').exists())]
     env = dict(hgs_keys, PATH=os.pathsep.join(path), HOME=str(root), KIMI_CODE_HOME=str(home),
                KIMI_CODE_BASE_URL=platform, KIMI_CODE_NO_AUTO_UPDATE='1', KIMI_DISABLE_TELEMETRY='1',
                DISABLE_AUTOUPDATER='1', TERM='xterm-256color', LANG='C.UTF-8', PYTHONUTF8='1')
-    for key, folder in (('XDG_CONFIG_HOME', '.config'), ('XDG_DATA_HOME', '.local/share'),
-                        ('XDG_CACHE_HOME', '.cache'), ('XDG_STATE_HOME', '.local/state'),
-                        ('USERPROFILE', '.'), ('APPDATA', 'AppData/Roaming'),
-                        ('LOCALAPPDATA', 'AppData/Local'), ('TMPDIR', 'tmp')):
-        (root / folder).mkdir(parents=True, exist_ok=True)
+    for key, folder in FOLDERS:
         env[key] = str(root / folder)
     return env
+
+
+def make_private_folders(env):
+    for key, _ in FOLDERS:
+        Path(env[key]).mkdir(parents=True, exist_ok=True)
+
+
+def seals(paths):
+    """Every path's sha256, or why it could not be read: one unreadable file
+    never hides the others."""
+    found = {}
+    for path in paths:
+        try:
+            found[str(path)] = digest(path)
+        except OSError as error:
+            found[str(path)] = 'unreadable: ' + type(error).__name__
+    return found
+
+
+def seal_problems(before, after, copy=None):
+    """Each guarded file that differs from its sealed hash, and a copy that is
+    no longer the reviewed pin."""
+    problems = [f'{path}: {after.get(path, "missing")} after {expected} before'
+                for path, expected in before.items() if after.get(path) != expected]
+    if copy is not None and copy != KIMI_SHA256:
+        problems.append(f'private copy: {copy}, pinned {KIMI_SHA256}')
+    return problems
+
+
+def bounded(run, seconds=HELPER_SECONDS):
+    """subprocess.run with a timeout unless the caller chose one. Cooperative:
+    on timeout the helper is killed and reaped, which still blocks if the
+    kernel cannot reap it."""
+    def call(*args, **options):
+        options.setdefault('timeout', seconds)
+        return run(*args, **options)
+    return call
+
+
+def proc_start(pid):
+    """The process's start in clock ticks since boot (/proc/PID/stat field 22)."""
+    return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+
+
+def stop_client(client, start, start_of=proc_start, seconds=5):
+    """Stop the fixture's own control client: end its input and wait, then
+    signal only that exact unreaped child while its start is unchanged. None
+    once it is reaped, otherwise why it is unknown."""
+    if client is None:
+        return None
+    try:
+        client.stdin.close()
+    except OSError:
+        pass
+    for signal_name in (None, 'terminate', 'kill'):
+        if signal_name:
+            try:
+                same = start is not None and start_of(client.pid) == start
+            except OSError:
+                same = False
+            if not same:
+                return f'control client {client.pid}: start identity unknown, not signalled'
+            getattr(client, signal_name)()
+        try:
+            client.wait(seconds)
+            return None
+        except subprocess.TimeoutExpired:
+            continue
+    return f'control client {client.pid} did not stop'
+
+
+def close(retain, stop_client, stop, seal, remove):
+    """Owned cleanup in a fixed order, whatever fails: keep evidence, stop the
+    fixture's own client, then every owned process, check every seal, and
+    remove private state only when all of that succeeded. Every problem."""
+    problems = []
+    try:
+        retain()
+    except BaseException as error:
+        problems.append(f'evidence: {error!r}')
+    unknown = stop_client()
+    if unknown:
+        problems.append(unknown)
+    try:
+        stop()
+    except BaseException as error:
+        problems.append(f'owned processes: {error!r}')
+    problems.extend(seal())
+    if not problems:
+        try:
+            remove()
+        except BaseException as error:
+            problems.append(f'removal: {error!r}')
+    return problems
 
 
 def environment_findings(actual, expected):
@@ -163,19 +263,33 @@ class NativeKimiApprovals(lifecycle.Harness):
         self.assertIn(KIMI_SHA256, REVIEWED, 'HGS_KIMI_TEST_SHA256 must be a reviewed pin')
         self.version = REVIEWED[KIMI_SHA256]
         source = Path(KIMI).resolve()
-        self.assertEqual(digest(source), KIMI_SHA256)
-        self.guards = {str(path): digest(path) for path in [source, *GUARDED]}
-        self.source = source
+        self.guards = seals([source, *GUARDED])
+        self.assertEqual(self.guards[str(source)], KIMI_SHA256)
+        self.assertFalse([path for path, sealed in self.guards.items() if sealed.startswith('unreadable')], self.guards)
+        self.source, self.client, self.client_start = source, None, None
+        self.server = server = serve(self.command)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
         # A short private root keeps the trust chooser's folder on one row.
         with mock.patch.object(tempfile, 'tempdir', '/tmp'):
             super().setUp()
+        # The base copied the caller's environment: replace it before anything
+        # can fail, so every cleanup helper runs with private values only.
+        self.home = self.root / '.kimi-code'
+        self.env = private_environment(self.root, self.home, self.bin,
+                                       'http://127.0.0.1:%d%s' % (server.server_port, PLATFORM),
+                                       {key: self.env[key] for key in HGS_KEYS})
         try:
             self.prepare()
-        except BaseException:
-            self.tearDown()
+        except BaseException as error:
+            try:
+                self.tearDown()
+            except BaseException as cleanup:
+                error.add_note('fixture cleanup: ' + repr(cleanup))
             raise
 
     def prepare(self):
+        make_private_folders(self.env)
         # The copy lives outside the home tearDown removes: its bytes are
         # checked after every owned process stopped, and kept on any doubt.
         self.images = Path(tempfile.mkdtemp(prefix='hgs-kimi-image-'))
@@ -186,10 +300,7 @@ class NativeKimiApprovals(lifecycle.Harness):
         (self.bin / 'kimi').unlink()
         (self.bin / 'kimi').symlink_to(self.image)
         (self.project / 'scratch-fixture').mkdir()
-        self.server = server = serve(self.command)
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-        self.home = home = self.root / '.kimi-code'
+        server, home = self.server, self.home
         home.mkdir()
         (home / 'config.toml').write_text(
             'default_model = "fixture"\ntelemetry = false\ndefault_permission_mode = "default"\n'
@@ -197,21 +308,14 @@ class NativeKimiApprovals(lifecycle.Harness):
             '[models.fixture]\nprovider = "fixture"\nmodel = "fixture"\nmax_context_size = 32768\n'
             '[loop_control]\nmax_attempts_per_step = 1\n' % server.server_port)
         (home / 'tui.toml').write_text('[upgrade]\nauto_install = false\n')
-        hgs_keys = {key: self.env[key] for key in ('SHELL', 'HGS_CONFIG_DIR', 'HGS_STATE_DIR', 'HGS_SELF', 'HGS_PEERS',
-                                                    'HGS_TAB', 'HGS_TRACKING')}
-        self.env = private_environment(self.root, home, self.bin, 'http://127.0.0.1:%d%s' % (server.server_port, PLATFORM),
-                                       hgs_keys)
         self.assertEqual(Path(shutil.which('kimi', path=self.env['PATH'])).resolve(), self.image)
         self.name = 'kimi/p/approval'
         self.launch()
 
     # -- process proof ---------------------------------------------------
-    def stat_start(self, pid):
-        stat = Path(f'/proc/{pid}/stat').read_text()
-        return stat.rsplit(')', 1)[1].split()[19]
-
     def assert_process(self, stage):
-        pid = self.binding(self.name)['pid']
+        record = self.binding(self.name)
+        pid = record['pid']
 
         def running():
             try:
@@ -219,45 +323,56 @@ class NativeKimiApprovals(lifecycle.Harness):
             except OSError:
                 return False  # The supervisor may not have exec'd its image yet.
         self.until(running)
-        start = self.stat_start(pid)
+        start = proc_start(pid)
         data = Path(f'/proc/{pid}/environ').read_bytes()
-        same = self.stat_start(pid) == start and Path(os.readlink(f'/proc/{pid}/exe')).resolve() == self.image
+        same = proc_start(pid) == start and Path(os.readlink(f'/proc/{pid}/exe')).resolve() == self.image
+        # The start hgs recorded is this process's own, as ps reports it in UTC.
+        observed = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart='], env=dict(self.env, LC_ALL='C', TZ='UTC'),
+                                  capture_output=True, text=True, timeout=HELPER_SECONDS).stdout
         actual = dict(row.split('=', 1) for row in data.decode(errors='replace').split('\0') if '=' in row)
         findings = environment_findings(actual, self.env)
         print('ZERUS_KIMI_PROCESS=' + json.dumps(dict(case=self.id(), stage=stage, pid=pid, start_ticks=start,
               same_process=same, image=str(self.image), sha256=KIMI_SHA256, version=self.version, **findings)), flush=True)
         self.assertTrue(same, 'the process changed while its environment was read')
+        self.assertEqual(' '.join(observed.split()), ' '.join(str(record.get('process_start', '')).split()),
+                         'hgs recorded the start of another process')
         self.assertEqual(digest(f'/proc/{pid}/exe'), KIMI_SHA256)
         self.assertEqual(findings['keys'], {key: 'match' for key in REQUIRED})
         self.assertEqual(findings['forbidden'], [])
         self.assertEqual(findings['unexpected_kimi'], [])
 
-    def assert_images(self):
-        """The given pin, every guarded executable and, once made, the private
-        copy: unchanged, whether or not evidence is kept."""
-        after = {str(path): digest(path) for path in [self.source, *GUARDED]}
+    def seal(self):
+        """Every after-hash, printed and compared; never raises."""
+        after = seals([self.source, *GUARDED])
         image = getattr(self, 'image', None)
-        copy = digest(image) if image and image.exists() else None
+        copy = seals([image])[str(image)] if image else None
         print('ZERUS_KIMI_IMAGE_GUARDS=' + json.dumps(dict(case=self.id(), before=self.guards, after=after, copy=copy)),
               flush=True)
-        self.assertEqual(after, self.guards, 'a given or guarded Kimi executable changed')
-        if image:
-            self.assertEqual(copy, KIMI_SHA256, 'the fixture changed its own Kimi executable')
+        return seal_problems(self.guards, after, copy)
+
+    def stop_owned(self):
+        """The base stops this socket's panes, recorded processes and their
+        descendants. Its removal of the home is deferred until the client and
+        every seal are known, and each of its helpers is bounded."""
+        self.deferred = []
+        with mock.patch.object(shutil, 'rmtree', lambda path, *args, **options: self.deferred.append(path)), \
+                mock.patch.object(subprocess, 'run', bounded(subprocess.run)):
+            super().tearDown()
+
+    def remove(self):
+        for path in self.deferred:
+            shutil.rmtree(path)
+        if getattr(self, 'images', None):
+            shutil.rmtree(self.images)
 
     def tearDown(self):
-        self.retain()
-        try:
-            super().tearDown()
-        except BaseException:
-            # Unknown survivors: keep the private home and image for inspection.
+        problems = close(self.retain, lambda: stop_client(self.client, self.client_start), self.stop_owned,
+                         self.seal, self.remove)
+        if problems:
+            # Unknown or failed cleanup keeps the private home and image.
             print('ZERUS_KIMI_PRESERVED=' + json.dumps(dict(case=self.id(), home=str(self.root),
-                  image=str(getattr(self, 'images', '')))), flush=True)
-            self.assert_images()
-            raise
-        # Every owned process stopped: only now may the copy go.
-        self.assert_images()
-        if hasattr(self, 'images'):
-            shutil.rmtree(self.images)
+                  image=str(getattr(self, 'images', '')), problems=problems)), flush=True)
+            raise AssertionError('Kimi fixture cleanup: ' + '; '.join(problems))
 
     def retain(self):
         """Keep this run's screens, logs, wire and record before cleanup."""
@@ -366,7 +481,12 @@ class NativeKimiApprovals(lifecycle.Harness):
         """A control-mode client at the same short height: tmux counts the pane as viewed."""
         client = subprocess.Popen([str(self.bin / 'tmux'), '-C', 'attach', '-t', '=' + self.name], env=self.env,
                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(lambda: (client.stdin.close(), client.wait(5)))
+        # tearDown stops this exact child before the home goes, by its start.
+        self.client = client
+        try:
+            self.client_start = proc_start(client.pid)
+        except OSError:
+            self.client_start = None
         client.stdin.write(f'refresh-client -C 80x{self.rows}\n'.encode())
         client.stdin.flush()
         self.until(lambda: self.t('display-message', '-p', '-t', '=' + self.name + ':', '#{session_attached}').strip() == '1')
@@ -498,6 +618,139 @@ class FixtureControls(unittest.TestCase):
             self.assertFalse(trust_chooser_2_2(changed, folder), changed)
         self.assertFalse(trust_chooser_2_2(self.CHOOSER, '/tmp/hgs-pause-x/project'))
 
+    def test_an_early_failure_cleans_up_with_private_values_only(self):
+        module = sys.modules[__name__]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            pin = root / 'pin'
+            pin.write_bytes(b'synthetic kimi')
+            sha = digest(pin)
+            seen = []
+
+            def base_setup(case):
+                # What lifecycle.Harness does first: copy the caller's environment.
+                case.root = root / 'home'
+                case.bin = case.root / '.local/bin'
+                case.bin.mkdir(parents=True)
+                case.project = case.root / 'project'
+                case.project.mkdir()
+                case.env = dict(os.environ, OPENAI_API_KEY='synthetic', SSH_AUTH_SOCK='/synthetic',
+                                SHELL=str(case.bin / 'shell'), HGS_CONFIG_DIR=str(case.root / 'cfg'),
+                                HGS_STATE_DIR=str(case.root / 'state'), HGS_SELF='test', HGS_PEERS='', HGS_TAB='0',
+                                HGS_TRACKING='1')
+
+            def prepare(case):
+                raise OSError('synthetic copy failure')
+
+            with mock.patch.multiple(module, KIMI=str(pin), KIMI_SHA256=sha, REVIEWED={sha: '2.1.1'}, GUARDED=[]), \
+                    mock.patch.object(lifecycle.Harness, 'setUp', base_setup), \
+                    mock.patch.object(NativeKimiApprovals, 'prepare', prepare), \
+                    mock.patch.object(NativeKimiApprovals, 'tearDown', lambda case: seen.append(dict(case.env))):
+                case = NativeKimiApprovals('test_approve_once_runs_the_command')
+                with self.assertRaises(OSError):
+                    case.setUp()
+                case.doCleanups()
+            self.assertEqual(len(seen), 1)
+            self.assertFalse({'OPENAI_API_KEY', 'SSH_AUTH_SOCK'} & set(seen[0]))
+            self.assertFalse(set(seen[0]) - {*HGS_KEYS, *REQUIRED, 'PATH', 'DISABLE_AUTOUPDATER', 'TERM', 'LANG',
+                                             'PYTHONUTF8'})
+            self.assertEqual(seen[0]['HOME'], str(root / 'home'))
+
+    def test_cleanup_runs_every_step_whatever_fails(self):
+        calls = []
+
+        def step(name, error=None, result=None):
+            def run():
+                calls.append(name)
+                if error:
+                    raise error
+                return result
+            return run
+        # Evidence that cannot be kept never skips the owned stop or the seals.
+        problems = close(step('retain', TimeoutError('capture')), step('client'), step('stop'), step('seal', result=[]),
+                         step('remove'))
+        self.assertEqual((calls, len(problems)), (['retain', 'client', 'stop', 'seal'], 1))
+        self.assertIn('evidence', problems[0])
+        # An unknown client still lets the owned processes stop, and an unknown
+        # stop still checks every seal; either keeps all private state.
+        for client, stop in (('control client 7 did not stop', None), (None, AssertionError('survivors'))):
+            calls.clear()
+            problems = close(step('retain'), step('client', result=client), step('stop', stop),
+                             step('seal', result=['copy changed']), step('remove'))
+            self.assertEqual((calls, len(problems)), (['retain', 'client', 'stop', 'seal'], 2))
+        calls.clear()
+        self.assertEqual(close(step('retain'), step('client'), step('stop'), step('seal', result=[]), step('remove')), [])
+        self.assertEqual(calls, ['retain', 'client', 'stop', 'seal', 'remove'])
+
+    def test_the_base_stop_removes_nothing_and_its_helpers_are_bounded(self):
+        original = subprocess.run
+        observed = {}
+
+        def base_teardown(case):
+            observed['bounded'] = subprocess.run is not original
+            shutil.rmtree(case.root)
+        with tempfile.TemporaryDirectory() as folder:
+            case = NativeKimiApprovals('test_approve_once_runs_the_command')
+            case.root = Path(folder) / 'home'
+            case.root.mkdir()
+            with mock.patch.object(lifecycle.Harness, 'tearDown', base_teardown):
+                case.stop_owned()
+            self.assertTrue(observed['bounded'] and case.root.exists())
+            self.assertEqual(case.deferred, [case.root])
+        self.assertIs(subprocess.run, original)
+        seen = []
+        run = bounded(lambda *args, **options: seen.append(options['timeout']), seconds=3)
+        run(['ps'])
+        run(['tmux'], timeout=1)
+        self.assertEqual(seen, [3, 1])
+
+    def test_every_seal_is_read_even_after_an_unreadable_one(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(sys.modules[__name__], 'KIMI_SHA256', 'a' * 64):
+            root = Path(folder)
+            missing, changed, intact = root / 'missing', root / 'changed', root / 'intact'
+            for path in (missing, changed, intact):
+                path.write_bytes(b'before')
+            before = seals([missing, changed, intact])
+            missing.unlink()
+            changed.write_bytes(b'after')
+            after = seals([missing, changed, intact])
+            self.assertEqual((list(after), after[str(missing)]), ([str(missing), str(changed), str(intact)],
+                                                                   'unreadable: FileNotFoundError'))
+            problems = seal_problems(before, after, copy='0' * 64)
+            self.assertEqual(len(problems), 3, problems)
+            self.assertTrue(problems[0].startswith(str(missing)) and problems[1].startswith(str(changed)))
+            self.assertIn('private copy', problems[2])
+            self.assertEqual(seal_problems(before, before, copy='a' * 64), [])
+
+    def test_the_control_client_is_signalled_only_while_its_start_is_unchanged(self):
+        class Client:
+            def __init__(self, exits_after):
+                self.pid, self.signals, self.exits_after, self.stdin = 4242, [], exits_after, io.BytesIO()
+
+            def wait(self, seconds):
+                if self.exits_after is not None and len(self.signals) >= self.exits_after:
+                    return 0
+                raise subprocess.TimeoutExpired('tmux', seconds)
+
+            def terminate(self):
+                self.signals.append('terminate')
+
+            def kill(self):
+                self.signals.append('kill')
+        same, other = (lambda pid: '100'), (lambda pid: '200')
+        for exits_after, start_of, start, problem, signals in (
+                (0, same, '100', None, []),
+                (1, same, '100', None, ['terminate']),
+                (None, same, '100', 'did not stop', ['terminate', 'kill']),
+                (None, other, '100', 'start identity unknown', []),
+                (None, same, None, 'start identity unknown', [])):
+            client = Client(exits_after)
+            result = stop_client(client, start, start_of=start_of, seconds=0)
+            self.assertTrue(client.stdin.closed)
+            self.assertEqual(client.signals, signals)
+            self.assertTrue(result is None if problem is None else problem in result, result)
+        self.assertIsNone(stop_client(None, None))
+
     def test_kimis_platform_answers_404_and_never_reaches_the_model(self):
         server = serve(MARKER)
         self.addCleanup(server.server_close)
@@ -508,6 +761,7 @@ class FixtureControls(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(request, timeout=5)
         self.assertEqual(error.exception.code, 404)
+        error.exception.close()
         deadline = time.monotonic() + 5
         while not server.platform_completed and time.monotonic() < deadline:
             time.sleep(0.02)
