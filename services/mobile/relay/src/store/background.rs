@@ -297,6 +297,13 @@ impl Store {
                 "requests INDEXED BY hook_health_history"
             };
             rows.extend(t.all(&format!("SELECT id,workspace_id FROM {diagnostics} WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![at-120.0,batch]).await?);
+            // Keep the new read class separate from the persisted read_history_v3 predicate.
+            let git_reads = if self.db.postgres {
+                "requests"
+            } else {
+                "requests INDEXED BY git_status_history_v1"
+            };
+            rows.extend(t.all(&format!("SELECT id,workspace_id FROM {git_reads} WHERE operation='git_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![at-self.db.cfg.retention.min(3600) as f64,batch]).await?);
             rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation='archive_list' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?",args![at-3600.0,batch]).await?);
             // Attachment bytes are carried, never kept: a result leaves shortly
             // after the phone read it, or after a short TTL if it never does.

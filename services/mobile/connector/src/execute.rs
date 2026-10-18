@@ -437,6 +437,9 @@ impl<N: Native + 'static> Connector<N> {
 
     /// The capability checks of `_execute_claimed`, in Python's order.
     fn gate(&self, operation: &str, flags: Flags) -> Result<(), Failure> {
+        if operation == crate::git_status::OPERATION && !flags.git_status {
+            return Err(Failure::text(crate::git_status::UNAVAILABLE));
+        }
         if operation == "analytics_read" && !flags.analytics {
             return Err(Failure::text("native analytics read ABI is unavailable"));
         }
@@ -475,6 +478,16 @@ impl<N: Native + 'static> Connector<N> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref();
         match validated.operation.as_str() {
+            crate::git_status::OPERATION => {
+                let payload = payload.expect("validated");
+                let result = self.call(crate::git_status::call(payload)).await?;
+                crate::git_status::project(
+                    &result,
+                    request_id,
+                    payload["path"].as_str().expect("validated"),
+                )
+                .map_err(Failure::text)
+            }
             "analytics_read" => {
                 let mut payload = payload.expect("validated").clone();
                 payload["action"] = json!("summary");

@@ -327,7 +327,12 @@ fn journal_operation_sets_match_the_python_connector() {
         items.sort();
         items
     };
-    assert_eq!(sorted(zerus_relay::protocol::READS), set("READ_OPERATIONS"));
+    let python_reads: Vec<&str> = zerus_relay::protocol::READS
+        .iter()
+        .copied()
+        .filter(|operation| !capabilities::connector_only(operation))
+        .collect();
+    assert_eq!(sorted(&python_reads), set("READ_OPERATIONS"));
     // The relay's set adds the operations only this connector executes, each
     // journaled by its class: a mutation recovers as uncertain.
     let only = capabilities::CONNECTOR_ONLY;

@@ -509,3 +509,22 @@ coordinated runtime replacement (fresh backup and isolated restore qualification
 Update the native CLI and connector before enabling the relay capability, then
 update clients; an older relay/CLI is reported as unavailable, not an empty page.
 No native agent or phone read-mark migration is needed.
+
+### Git checkout status reads
+
+`git_status` is a sessionless computer read offered by the Rust connector only
+when the native help contains `Mobile Git status ABI: git-status-v1`. A request
+has an empty session and exactly `{request_id,path}` as its payload; no
+run, conversation, agent or archive identity is accepted. The path must be an
+absolute POSIX path with a leading slash, control-free and at most 4096 UTF-8
+bytes, matching the existing mobile folder contract. Windows Git transport is
+unsupported and unqualified in v1. Normal verified
+local and one-hop routes apply; the read grants no forwarding or mutation
+authority. Exact duplicate receipts retain their existing identities.
+
+The operation shares the 5000-row workspace read quota and has a separate
+`git_status_history_v1` partial index for bounded terminal-row maintenance,
+with a retention ceiling of one hour. Existing `READ_SQL`, `read_history_v3`,
+other index definitions and mutation retention predicates remain unchanged.
+Deploy the additive index through the normal root-coordinated rollout; source
+qualification does not switch any existing gateway to the Rust connector.

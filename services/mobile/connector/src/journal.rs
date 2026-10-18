@@ -62,6 +62,10 @@ pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_sta
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
 pub const VOICE_READ_SQL: &str = "('voice_profiles','voice_status')";
 
+/// Additive Rust-only reads stay outside the frozen Python class predicate.
+pub const GIT_STATUS_COUNT_SQL: &str = "SELECT count(*) FROM requests WHERE operation='git_status'";
+pub const GIT_STATUS_PRUNE_SQL: &str = "DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation='git_status' AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)";
+
 /// Delivered short-lived reads go after two minutes, other reads after an
 /// hour; a delivered mutation becomes a tombstone after seven days.
 pub const SHORT_READ_SECONDS: f64 = 120.0;
@@ -270,6 +274,9 @@ impl Journal {
         )?;
         tx.execute(&format!("DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND {delivered}"),
                    [now - READ_SECONDS])?;
+        // This class shares the read cap, but must expire before the unchanged
+        // legacy NOT-IN mutation tombstone selector can see it.
+        tx.execute(GIT_STATUS_PRUNE_SQL, [now - READ_SECONDS])?;
         let expired: Vec<(String, String)> = tx
             .prepare(&format!("SELECT request_id,state FROM requests WHERE operation NOT IN {READ_CLASS_SQL} AND {delivered} AND response IS NOT NULL AND response_expired=0"))?
             .query_map([now - MUTATION_SECONDS], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -324,6 +331,14 @@ impl Journal {
             [reads as i64],
             |row| row.get(0),
         )?;
+        // The legacy NOT-IN count includes new Rust-only reads. Correct only
+        // this additive class, in the same transaction as admission.
+        let git_reads: i64 = tx.query_row(GIT_STATUS_COUNT_SQL, [], |row| row.get(0))?;
+        let count = if reads {
+            count + git_reads
+        } else {
+            count - git_reads
+        };
         if count >= if reads { READ_CAP } else { MUTATION_CAP } {
             return Err(refused(RETAINED_LIMIT));
         }

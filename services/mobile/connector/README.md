@@ -35,6 +35,21 @@ native trust/effective settings remain unknown. No account-wide or repair call
 is transported; CLI hook repair remains explicit and native-only. The connector's
 `src/hooks.rs` is unrelated: it contains non-default black-box test seams.
 
+With native `Mobile Git status ABI: git-status-v1`, the Rust connector also
+advertises the computer-scoped `git_status` read. Its exact payload is
+`{request_id,path}` with an empty session; v1 uses the existing POSIX mobile
+folder contract: a leading slash, no controls and at most 4096 UTF-8 bytes.
+Windows Git transport is unsupported and unqualified in this version. It invokes only
+`hgs git-status --path PATH --json`, without stdin, within five seconds. A
+32 KiB whitelist projection keeps checkout/publication metadata, with absent
+counts remaining absent and no file lists or remote URLs. The result is
+`{schema:1,request_id,requested_path,snapshot}`: `requested_path` preserves the
+original argument while the native snapshot may report a canonical path.
+The read uses the existing verified one-hop route and a separate indexed
+journal class within the shared read quota. Delivered terminal rows expire
+after one hour; existing persisted SQL predicates and mutation tombstones stay
+unchanged. The Python connector does not list or advertise this operation.
+
 With a CLI that pages archives (`archives --json` in its help), heartbeats
 list live sessions only (`ls --json --local --no-archives`) plus a bounded
 preview of recent archives, read again when the listing's archive revision

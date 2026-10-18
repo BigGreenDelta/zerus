@@ -117,6 +117,7 @@ class GoldenVectorTests(unittest.TestCase):
         operations = set(json.loads(self.files["operations.json"])["sets"]["OPERATIONS"])
         self.assertTrue({"hooks_status", "analytics_read"} <= operations)
         self.assertNotIn("remove_queued", operations)  # Rust-only table, never Python's.
+        self.assertNotIn("git_status", operations)  # Its separate read marker is Rust-only too.
 
     def test_every_operation_has_a_valid_case_and_an_envelope(self):
         operations = set(json.loads(self.files["operations.json"])["sets"]["OPERATIONS"])

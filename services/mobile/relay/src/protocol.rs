@@ -17,6 +17,7 @@ pub const READS: &[&str] = &[
     "inspect",
     "history",
     "hooks_status",
+    "git_status",
     "process_output",
     "terminal_snapshot",
     "catalog",
@@ -94,6 +95,7 @@ pub const OPERATIONS: &[&str] = &[
     "fork",
     "history",
     "hooks_status",
+    "git_status",
     "inspect",
     "interrupt",
     "launch",
@@ -388,13 +390,28 @@ pub fn request(v: &Value) -> Result<()> {
     text(
         &v["session"],
         1024,
-        op == "analytics_read"
+        op == "git_status"
+            || op == "analytics_read"
             || op == "archive_list"
             || LAUNCH.contains(&op)
             || COMPUTER.contains(&op)
             || SPEECH.contains(&op),
     )?;
-    if op == "analytics_read" {
+    if op == "git_status" {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        fields(p, &["request_id", "path"], &[])?;
+        let path = p["path"].as_str().ok_or(Error::BAD)?;
+        if p["request_id"] != id
+            || path.is_empty()
+            || path.len() > 4096
+            || !path.starts_with('/')
+            || path.chars().any(char::is_control)
+        {
+            return Err(Error::BAD);
+        }
+    } else if op == "analytics_read" {
         if v["session"] != "" {
             return Err(Error::BAD);
         }

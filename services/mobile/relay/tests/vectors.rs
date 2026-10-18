@@ -328,7 +328,16 @@ fn operation_tables_match_the_python_connector() {
             assert!(!set(&[name]).contains(operation), "{name} {operation}");
         }
     }
-    assert_eq!(sorted(protocol::READS), set(&["READ_OPERATIONS"]));
+    let python_reads: Vec<&str> = protocol::READS
+        .iter()
+        .copied()
+        .filter(|operation| !rust_only.iter().any(|(name, _)| name == operation))
+        .collect();
+    assert_eq!(
+        python_reads.len() + rust_only.iter().filter(|(_, read)| *read).count(),
+        protocol::READS.len()
+    );
+    assert_eq!(sorted(&python_reads), set(&["READ_OPERATIONS"]));
     assert_eq!(sorted(protocol::LAUNCH), set(&["LAUNCH_OPERATIONS"]));
     assert_eq!(sorted(protocol::COMPUTER), set(&["COMPUTER_OPERATIONS"]));
     assert_eq!(

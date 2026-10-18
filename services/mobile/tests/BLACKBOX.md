@@ -184,13 +184,15 @@ Python connector never advertises `opencode_launch_effort`; the Rust connector
 must advertise exactly that additional feature when its operations include
 `launch`, and must omit it otherwise. Python also never advertises an operation
 of `rust-only-operations.json`, the relay operations only the Rust connector
-executes (`remove_queued`, OpenCode queue removal). Rust must advertise such an
+executes (`remove_queued`, OpenCode queue removal, and the separate `git_status`
+read). Rust must advertise such an
 operation exactly when its operations include every operation its frozen
 marker gates in Python: `remove_queued` comes with the session actions
 (`forget` and the others), under the session-action marker. An operation behind
 a marker the vectors do not know is left out of the Rust shape, since a Python
 shape cannot show that marker; `session_harness.advertised()` checks it in the
-suites instead. The comparison checks complete local and
+suites instead. In particular, the exact `git-status-v1` help line gates only
+the Rust Git read; it adds no operation to Python's frozen tables. The comparison checks complete local and
 peer heartbeat shapes, rejects malformed or duplicate arrays and keeps all
 other body/snapshot keys, operations and features exact. Raw traces stay intact.
 Native work and journal rows must match in number; result

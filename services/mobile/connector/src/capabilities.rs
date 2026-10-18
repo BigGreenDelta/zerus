@@ -28,6 +28,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "catalog",
     "dirs",
     "file_read",
+    "git_status",
     "history",
     "hooks_status",
     "inspect",
@@ -85,6 +86,8 @@ pub enum Class {
 pub enum Gate {
     /// `session-action <session> --json`, the scoped session actions.
     Lifecycle,
+    /// The bounded, computer-scoped Git checkout projection.
+    GitStatus,
 }
 
 impl Gate {
@@ -92,6 +95,7 @@ impl Gate {
     pub fn open(self, flags: &Flags) -> bool {
         match self {
             Gate::Lifecycle => flags.lifecycle,
+            Gate::GitStatus => flags.git_status,
         }
     }
 
@@ -100,6 +104,7 @@ impl Gate {
     pub fn name(self) -> &'static str {
         match self {
             Gate::Lifecycle => "lifecycle",
+            Gate::GitStatus => "git_status",
         }
     }
 
@@ -107,6 +112,7 @@ impl Gate {
     pub fn help_line(self) -> &'static str {
         match self {
             Gate::Lifecycle => "hgs session-action <session> --json",
+            Gate::GitStatus => crate::git_status::HELP_MARKER,
         }
     }
 }
@@ -125,14 +131,21 @@ pub struct ConnectorOnly {
 /// [`Flags::python_operations`]. The tests of the relay, of this connector and
 /// of the black-box suites read the same table from
 /// `services/mobile/tests/rust-only-operations.json`.
-pub const CONNECTOR_ONLY: &[ConnectorOnly] = &[ConnectorOnly {
-    // The session-action marker predates queue removal: an older hgs prints it
-    // and refuses the request. Only `remove_queued` in the session's
-    // `allowed_actions` shows that hgs can remove the message.
-    operation: "remove_queued",
-    gate: Gate::Lifecycle,
-    class: Class::Mutation,
-}];
+pub const CONNECTOR_ONLY: &[ConnectorOnly] = &[
+    ConnectorOnly {
+        // The session-action marker predates queue removal: an older hgs prints it
+        // and refuses the request. Only `remove_queued` in the session's
+        // `allowed_actions` shows that hgs can remove the message.
+        operation: "remove_queued",
+        gate: Gate::Lifecycle,
+        class: Class::Mutation,
+    },
+    ConnectorOnly {
+        operation: "git_status",
+        gate: Gate::GitStatus,
+        class: Class::Read,
+    },
+];
 
 /// Whether only this connector executes the operation.
 pub fn connector_only(operation: &str) -> bool {
@@ -199,6 +212,7 @@ pub struct Flags {
     pub preference: bool,
     pub attachment_read: bool,
     pub file_read: bool,
+    pub git_status: bool,
     pub speech: bool,
     pub voice: bool,
     pub voice_video: bool,
@@ -229,6 +243,9 @@ impl Flags {
             preference: has("swarm preference set mobile_delivery"),
             attachment_read: has("attachment <session> --request ID --index N"),
             file_read: has("file-read <session> --json"),
+            git_status: help
+                .lines()
+                .any(|line| line.trim() == crate::git_status::HELP_MARKER),
             speech: has("speech --json"),
             voice: has("voice <session> --json"),
             voice_video: has("voice-video-v1"),
@@ -493,7 +510,11 @@ mod tests {
             }
         }
         assert_eq!(
-            CONNECTOR_ONLY,
+            CONNECTOR_ONLY
+                .iter()
+                .filter(|row| row.operation == "remove_queued")
+                .copied()
+                .collect::<Vec<_>>(),
             [ConnectorOnly {
                 operation: "remove_queued",
                 gate: Gate::Lifecycle,
