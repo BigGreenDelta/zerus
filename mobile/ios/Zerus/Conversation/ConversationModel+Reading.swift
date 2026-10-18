@@ -240,16 +240,34 @@ extension ConversationModel {
             return
         }
         if SharedReadPolicies.applied(receipt, payload: request.payload) {
-            sharedReadsUnapplied[request.key] = nil
+            sharedReadRetries.applied(request.key)
             return
         }
         // Completed without applying: the same mark may go again only after a delay, without holding Read all.
-        let unapplied = sharedReadsUnapplied[request.key] ?? 0
-        sharedReadsUnapplied[request.key] = unapplied + 1
-        let key = request.key
-        Task { [weak self] in
-            try? await Task.sleep(for: SharedReadPolicies.retryDelay(unapplied))
-            self?.sharedReadsSent.remove(key)
+        // At capacity it stays sent, so nothing is ever resent beyond the bound.
+        if sharedReadRetries.unapplied(request.key, connectionId: request.target.connectionId, now: sharedReadNow()) != nil {
+            scheduleSharedReadRetries()
+        }
+    }
+
+    /// Monotonic seconds that keep running while the phone sleeps, like the timer's own sleep.
+    private func sharedReadNow() -> Double {
+        let elapsed = ContinuousClock.now - sharedReadClock
+        return Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+    }
+
+    /// The one owned timer: it wakes at the earliest due mark and allows exactly the released marks to be sent again.
+    /// Rescheduling cancels it; a cancelled or stale wakeup releases nothing.
+    func scheduleSharedReadRetries() {
+        sharedReadRetryTimer?.cancel()
+        sharedReadRetryTimer = nil
+        guard let due = sharedReadRetries.nextDue else { return }
+        let wait = max(0, due - sharedReadNow())
+        sharedReadRetryTimer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard !Task.isCancelled, let self else { return }
+            for key in self.sharedReadRetries.release(now: self.sharedReadNow()) { self.sharedReadsSent.remove(key) }
+            self.scheduleSharedReadRetries()
         }
     }
 

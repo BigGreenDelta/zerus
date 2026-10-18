@@ -213,8 +213,10 @@ final class ConversationModel {
     @ObservationIgnored var historySnapshotHints: [String: String] = [:]
     @ObservationIgnored let historyHeadScheduler = HistoryHeadScheduler()
     @ObservationIgnored var sharedReadsSent: Set<String> = []
-    /// How often each mark completed without being applied; its next attempt waits longer.
-    @ObservationIgnored var sharedReadsUnapplied: [String: Int] = [:]
+    /// Marks completed without being applied wait in one bounded table, released by one owned timer.
+    @ObservationIgnored var sharedReadRetries = SharedReadRetries()
+    @ObservationIgnored var sharedReadRetryTimer: Task<Void, Never>?
+    @ObservationIgnored let sharedReadClock = ContinuousClock.now
     @ObservationIgnored var readAllShares: Task<Void, Never>?
     @ObservationIgnored var readWriter: OrderedStatePersistence<ConversationReadState>?
     @ObservationIgnored var emptyDrafts: [String: Draft] = [:]
@@ -737,6 +739,8 @@ final class ConversationModel {
     // MARK: Workspace removal
 
     func forget(connection: String) async {
+        sharedReadRetries.forget(connection: connection)
+        scheduleSharedReadRetries()
         for (_, flight) in inspections where flight.target.connectionId == connection { flight.task.cancel() }
         inspections = inspections.filter { $0.value.target.connectionId != connection }
         frames.removeAll { $0.target.connectionId == connection }
