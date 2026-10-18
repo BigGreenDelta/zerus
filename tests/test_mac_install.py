@@ -1,5 +1,6 @@
 """Installer configuration checks with fake transports and an isolated home."""
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -76,6 +77,17 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
         result = self.run_install()
         self.assertEqual(result.returncode, 2)
         self.assertFalse((self.root / 'transport.log').exists())
+
+    def test_local_signing_selector_travels_as_one_literal_value(self):
+        selector = "Developer ID Application: Example's $(touch unexpected) `id` (ABCDE12345)"
+        result = self.run_install('fixture-mac', HGS_MACOS_SIGN_IDENTITY=selector)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = [line[len('remote '):] for line in (self.root / 'transport.log').read_text().splitlines()
+                    if 'tray/install.sh' in line]
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(shlex.split(commands[0]), ['HGS_MACOS_SIGN_IDENTITY=' + selector,
+                                                  'bash', '~/.local/src/hgs/tray/install.sh'])
+        self.assertFalse((self.root / 'unexpected').exists())
 
     def test_default_does_not_create_ssh_or_reverse_peer(self):
         result = self.run_install('fixture-mac', '--no-tray')

@@ -125,5 +125,6 @@ REMOTE
 tar czf - -C "$here" --exclude='tray/build' --exclude='tray/.cache' tray DEV_VERSION \
   | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && tar xzf - -C ~/.local/src/hgs'
 # PATH неинтерактивного ssh на маке — без Homebrew; cmake/brew tray/install.sh ищет сам
-# (find_tool в его маковской ветке), поэтому подставлять окружение здесь не нужно.
-ssh -o BatchMode=yes "$host" 'bash ~/.local/src/hgs/tray/install.sh'
+# (find_tool в его маковской ветке). Signing uses the Mac's existing keychain;
+# an optional exact identity selector travels as one literal environment value.
+ssh -o BatchMode=yes "$host" "HGS_MACOS_SIGN_IDENTITY=$(shq "${HGS_MACOS_SIGN_IDENTITY:-}") bash ~/.local/src/hgs/tray/install.sh"
