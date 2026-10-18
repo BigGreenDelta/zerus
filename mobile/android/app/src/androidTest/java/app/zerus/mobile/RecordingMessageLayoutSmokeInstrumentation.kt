@@ -185,6 +185,7 @@ class RecordingMessageLayoutSmokeInstrumentation : Instrumentation() {
                     val baseWindows = windows()
                     val raster = "media-${if (light) "light" else "dark"}-${if (narrow) "narrow" else "normal"}-${if (video) "video" else "audio"}-${voice.state}"
                     node(if (voice.state == "transcribing") VoiceProtocol.label(voice.state) else RecordingDelivery.of(voice.state).description)
+                    check(find("Queue status, when present, is shown alongside this recording.") == null) { "A status detail became a persistent media paragraph" }
                     check(find("Sent") == null && find("Voice message") == null && find("Video message") == null)
                     check(find("Check status") == null && find("Cancel delivery") == null)
                     if (voice.transcript.isNotBlank()) {

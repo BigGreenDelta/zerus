@@ -267,6 +267,8 @@ private slots:
     void openCodeQueuedMessagesShowDeliveryAndRemove();
     void openCodeVoiceQueueRemainsVisible_data();
     void openCodeVoiceQueueRemainsVisible();
+    void submittedRecordingKeepsCompactGeometry_data();
+    void submittedRecordingKeepsCompactGeometry();
     void searchResultIsolatedFromLiveUpdatesAndReturnsToLatest();
     void searchResultClearsOnConversationChange();
     void searchToolExcerptIsExpandedAndClearlyMarked();
@@ -2326,6 +2328,37 @@ void TestActivityView::openCodeVoiceQueueRemainsVisible_data()
     QTest::newRow("video") << true;
 }
 
+void TestActivityView::submittedRecordingKeepsCompactGeometry_data()
+{
+    QTest::addColumn<bool>("video");QTest::addColumn<int>("width");
+    for(bool video:{false,true})for(int width:{340,620})
+        QTest::newRow(qPrintable(QString("%1-%2").arg(video?"video":"audio").arg(width)))<<video<<width;
+}
+
+void TestActivityView::submittedRecordingKeepsCompactGeometry()
+{
+    QFETCH(bool,video);QFETCH(int,width);
+    SettledActivityView view;view.resize(width,540);view.setSessionKey("fixture/compact-media");
+    auto row=waveformMessage();auto voice=row["voice"].toObject();
+    if(video)voice["video"]=QJsonObject{{"request_id",voice["id"]},{"index",1},{"mime","video/mp4"},{"duration_ms",10000},{"width",480},{"height",480}};
+    voice["state"]="transcribing";row["voice"]=voice;view.setActivity({{"voice_messages",QJsonArray{row}}},{});
+    const auto compactHeight=view.browser()->document()->size().height();
+    const auto compactBlocks=view.browser()->document()->blockCount();
+    voice["state"]="submitted";row["voice"]=voice;view.setActivity({{"voice_messages",QJsonArray{row}}},{});
+    QCOMPARE(view.browser()->document()->size().height(),compactHeight);
+    QCOMPARE(view.browser()->document()->blockCount(),compactBlocks);
+    QVERIFY(!view.plainText().contains("Queue status"));QVERIFY(!view.plainText().contains("Queued"));
+    bool detail=false;
+    for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it){
+        const auto format=it.fragment().charFormat();
+        if(format.property(QTextFormat::ImageAltText).toString()=="Accepted by native app"){
+            const auto title=format.property(QTextFormat::ImageTitle).toString();
+            QVERIFY(title.contains("Queue status"));QVERIFY(title.contains("does not confirm model delivery"));detail=true;
+        }
+    }
+    QVERIFY(detail);QCOMPARE(view.browser()->horizontalScrollBar()->maximum(),0);
+}
+
 void TestActivityView::openCodeVoiceQueueRemainsVisible()
 {
     QFETCH(bool,video);
@@ -2347,7 +2380,11 @@ void TestActivityView::openCodeVoiceQueueRemainsVisible()
     };
     view.setActivity(details,{native});
     QVERIFY(view.plainText().contains("Queued"));QVERIFY(removeLinks().isEmpty());
-    QVERIFY(admitted());QVERIFY(view.plainText().contains("Queue status, when present, is shown alongside this recording."));
+    QVERIFY(admitted());QVERIFY(!view.plainText().contains("Queue status"));
+    bool queueDetail=false;
+    for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it)
+        queueDetail|=it.fragment().charFormat().property(QTextFormat::ImageTitle).toString().contains("Queue status");
+    QVERIFY(queueDetail);
     QCOMPARE(view.plainText().count(video?"You (video)":"You (voice)"),1);
     native["delivery_state"]="not_delivered";view.setActivity(details,{native});
     QVERIFY(view.plainText().contains("Not delivered"));QCOMPARE(removeLinks().size(),1);

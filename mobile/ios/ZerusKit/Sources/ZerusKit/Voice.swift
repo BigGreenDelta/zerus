@@ -250,6 +250,13 @@ public enum RecordingDelivery: String, Sendable {
         }
     }
 
+    public var explanation: String {
+        if self == .sent {
+            return "The native app accepted the recognized text. Queue status, when present, is shown alongside this recording. This does not confirm model delivery, reading or completion."
+        }
+        return description
+    }
+
     public static func of(_ state: String) -> RecordingDelivery {
         switch state {
         case "uploading": .uploading

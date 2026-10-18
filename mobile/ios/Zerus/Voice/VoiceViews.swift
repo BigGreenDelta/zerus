@@ -188,10 +188,6 @@ struct VoiceMessageContent: View {
             }
             .font(.footnote)
             .buttonStyle(.borderless)
-            if voice.state == "submitted" {
-                Text("Queue status, when present, is shown alongside this recording.")
-                    .font(.caption).foregroundStyle(Theme.muted)
-            }
             if expanded && !voice.transcript.isEmpty { Text(voice.transcript).textSelection(.enabled) }
             if !error.isEmpty { Text(error).font(.caption).foregroundStyle(Theme.amber) }
         }
@@ -216,7 +212,8 @@ struct DeliveryIcon: View {
         }
         .foregroundStyle(color)
         .accessibilityLabel(delivery.description)
-        .help(VoiceProtocol.label(state))
+        .help(state == "submitted" ? delivery.explanation : VoiceProtocol.label(state))
+        .accessibilityHint(state == "submitted" ? delivery.explanation : "")
     }
 }
 

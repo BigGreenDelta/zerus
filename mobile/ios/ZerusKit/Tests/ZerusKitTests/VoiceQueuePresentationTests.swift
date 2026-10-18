@@ -3,6 +3,15 @@ import XCTest
 
 /// Native admission of a voice job does not consume OpenCode's transient inbox.
 final class VoiceQueuePresentationTests: XCTestCase {
+    func testSubmittedStatusDetailsExplainQueueAndNativeAdmissionOnly() {
+        let status = RecordingDelivery.of("submitted")
+        XCTAssertEqual("Accepted by native app", status.description)
+        XCTAssertTrue(status.explanation.contains("native app accepted the recognized text"))
+        XCTAssertTrue(status.explanation.contains("Queue status"))
+        XCTAssertTrue(status.explanation.contains("does not confirm model delivery, reading or completion"))
+        XCTAssertEqual(RecordingDelivery.failed.description, RecordingDelivery.failed.explanation)
+    }
+
     private let id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
     private let target = Target(computerId: "computer", session: "opencode/example/local", run: "run", conversation: "conversation", connectionId: "workspace")
     private var message: VoiceMessage {

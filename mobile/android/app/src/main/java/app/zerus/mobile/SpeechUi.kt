@@ -621,8 +621,6 @@ import androidx.compose.ui.unit.dp
         dismissButton = { TextButton(onClick = { statusOpen = false }) { Text("Close") } })
     if (removeLocal && local != null) VoiceLocalCopyConfirmation(model, local) { removeLocal = false }
     val video = voice.video
-    if (voice.state == "submitted") Text("Queue status, when present, is shown alongside this recording.",
-        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     if (video == null) {
         VoiceAudio(model, target, voice.audio, voice.durationMs, voice.waveform, metadata = metadata)
         if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)

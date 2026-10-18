@@ -926,13 +926,12 @@ struct ActivityRenderResult {
                     transcriptAction=QString("<a href='hgs-activity:%1' title='%2'><img src='%3' width='32' height='32' style='vertical-align:middle;' alt='%2'></a>").arg(toggle,label,icon.toString());
                 }
                 const auto statusLabel=escaped(labels.value(state,tr("Delivery not confirmed")));
+                const auto statusDetail=state=="submitted"?escaped(tr("The native app accepted the recognized text. Queue status, when present, is shown alongside this recording. This does not confirm model delivery, reading or completion.")):statusLabel;
                 const QUrl statusIcon("hgs-voice-status:"+key);
                 document->addResource(QTextDocument::ImageResource,statusIcon,VoicePlayerImage::deliveryIcon(state,m_scale,document->pixelRatio,m_dark));
                 const auto mediaTime=video.isEmpty()?QString():VoicePlayerImage::time(video.value("duration_ms").toInteger());
-                body+=QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin:0;'><tr><td valign='middle' style='font-size:11px;color:%3;'>%1%2</td><td align='right' valign='middle' style='font-size:11px;color:%3;'>%4 &nbsp;<img src='%5' width='18' height='18' style='vertical-align:middle;' alt='%6' title='%6'></td></tr></table>")
-                    .arg(transcriptAction,escaped(mediaTime),muted,escaped(timeText(event)),statusIcon.toString(),statusLabel);
-                if(state=="submitted")body+=QString("<p style='font-size:11px;color:%1;'>%2</p>")
-                    .arg(muted,escaped(tr("Queue status, when present, is shown alongside this recording.")));
+                body+=QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin:0;'><tr><td valign='middle' style='font-size:11px;color:%3;'>%1%2</td><td align='right' valign='middle' style='font-size:11px;color:%3;'>%4 &nbsp;<img src='%5' width='18' height='18' style='vertical-align:middle;' alt='%6' title='%7'></td></tr></table>")
+                    .arg(transcriptAction,escaped(mediaTime),muted,escaped(timeText(event)),statusIcon.toString(),statusLabel,statusDetail);
                 if(!transcript.isEmpty() && m_expanded.value("voice-text-"+key))body+=userMessage(transcript);
                 if(!voice.value("error").toString().isEmpty())body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(voice.value("error").toString()));
                 if(!m_voiceError.isEmpty() && m_voiceError.startsWith(key+"\n"))body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(m_voiceError.mid(key.size()+1)));

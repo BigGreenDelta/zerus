@@ -7,6 +7,14 @@ import org.junit.Test
 
 /** Native admission of a voice job does not consume OpenCode's transient inbox. */
 class VoiceQueuePresentationTest {
+    @Test fun submittedStatusDetailsExplainQueueAndNativeAdmissionOnly() {
+        val status = RecordingDelivery.of("submitted")
+        assertEquals("Accepted by native app", status.description)
+        assertTrue(status.explanation.contains("native app accepted the recognized text"))
+        assertTrue(status.explanation.contains("Queue status"))
+        assertTrue(status.explanation.contains("does not confirm model delivery, reading or completion"))
+    }
+
     private val id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
     private val target = Target("computer", "opencode/example/local", "run", "conversation", "workspace")
     private val message = VoiceMessage(id, target.run, target.conversation, 50.0, 2, "submitted",

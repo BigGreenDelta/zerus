@@ -318,9 +318,11 @@ message or associate it with a native user prompt.
 it does not prove delivery to the model, reading or completion. The recording's
 status says **Accepted by native app**. If OpenCode still reports the exact
 bound message as `queued` or `not_delivered`, clients retain that native text
-row alongside the playable recording and explain where to find its queue
-status. This deliberately permits temporary duplicate text rather than merging
-inspection-only queue state into durable voice history. After Stop the row
+row alongside the playable recording. Existing status details or tooltips explain
+native admission and where to find queue status, without adding persistent text
+or height to ordinary recording cards. This deliberately permits temporary
+duplicate text rather than merging inspection-only queue state into durable
+voice history. After Stop the row
 shows **Not delivered**; desktop retains its existing **Remove** action only
 with the reported permission and explicit confirmation for that exact message,
 run and conversation. Phones offer no queue removal. Removal or accepted native
