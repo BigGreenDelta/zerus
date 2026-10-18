@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Terminal
