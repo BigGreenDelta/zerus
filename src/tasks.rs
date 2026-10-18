@@ -169,8 +169,8 @@ fn list(config: &Config, args: &[String]) -> Result<i32> {
         .map(Stage::parse)
         .transpose()
         .map_err(fail)?;
-    let store = store(config, &id)?;
-    let (_, damaged) = store.tasks().map_err(fail)?;
+    // One load of the project; each stage is then a filter of the sorted list.
+    let (tasks, damaged) = store(config, &id)?.listing().map_err(fail)?;
     let mut out = Vec::new();
     for stage in [
         Stage::Review,
@@ -182,8 +182,8 @@ fn list(config: &Config, args: &[String]) -> Result<i32> {
         if only.is_some_and(|s| s != stage) {
             continue;
         }
-        for task in store.ordered(stage).map_err(fail)? {
-            out.push(view(&task, &name, false)?);
+        for task in tasks.iter().filter(|t| t.stage().ok() == Some(stage)) {
+            out.push(view(task, &name, false)?);
         }
     }
     print(json!({"project": {"id": id, "name": name}, "tasks": out, "damaged": damaged}))

@@ -303,13 +303,19 @@ impl ProjectStore {
 
     /// The tasks of `stage` in their order: rank, then UUID for equal ranks.
     pub fn ordered(&self, stage: Stage) -> Result<Vec<TaskDoc>> {
-        let (tasks, _) = self.tasks()?;
-        let mut list: Vec<TaskDoc> = tasks
+        let (tasks, _) = self.listing()?;
+        Ok(tasks
             .into_iter()
             .filter(|t| t.stage().ok() == Some(stage))
-            .collect();
-        list.sort_by(|a, b| (a.rank(), a.uuid()).cmp(&(b.rank(), b.uuid())));
-        Ok(list)
+            .collect())
+    }
+
+    /// Every task, loaded once and sorted by rank then UUID (so each stage is
+    /// in its order), and the ones that do not load.
+    pub fn listing(&self) -> Result<(Vec<TaskDoc>, Vec<Damaged>)> {
+        let (mut tasks, damaged) = self.tasks()?;
+        tasks.sort_by(|a, b| (a.rank(), a.uuid()).cmp(&(b.rank(), b.uuid())));
+        Ok((tasks, damaged))
     }
 
     /// The rank that puts a task at `position` in `stage`, leaving out the
@@ -602,6 +608,23 @@ mod tests {
         assert!(store
             .rank_for(Stage::Backlog, &Position::Before(last), None)
             .is_err());
+    }
+
+    #[test]
+    fn a_listing_loads_every_task_once_in_rank_order() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let mut ids = Vec::new();
+        for rank in ["X", "V", "W"] {
+            let mut task = new_task(&store, rank);
+            store.save(&mut task).unwrap();
+            ids.push(task.id());
+        }
+        fs::write(store.snapshot_path(&ids::new_uuid()), b"not loro").unwrap();
+        let (tasks, damaged) = store.listing().unwrap();
+        let order: Vec<String> = tasks.iter().map(TaskDoc::id).collect();
+        assert_eq!(order, [ids[1].clone(), ids[2].clone(), ids[0].clone()]);
+        assert_eq!(damaged.len(), 1);
     }
 
     #[test]
