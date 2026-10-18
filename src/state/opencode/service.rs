@@ -472,6 +472,14 @@ pub(super) enum Unavailable {
     Unreachable(String),
 }
 
+/// This computer as hgs names itself in listings (`host`): its first
+/// `HGS_SELF` name, by default its host name.
+pub(super) fn computer() -> String {
+    crate::config::Config::load()
+        .map(|config| config.host().to_owned())
+        .unwrap_or_else(|_| crate::platform::hostname())
+}
+
 impl Unavailable {
     pub(super) fn reason(&self, computer: &str) -> String {
         match self {
@@ -676,7 +684,7 @@ fn may_start(
     match connected {
         Ok(service) => return Ok(Some(service)),
         Err(Unavailable::NotRunning | Unavailable::Disabled) => {}
-        Err(other) => return Err(other.reason(&crate::platform::hostname())),
+        Err(other) => return Err(other.reason(&computer())),
     }
     let read = read();
     let alive = matches!(&read, RegistrationRead::Present(r) if alive(r.pid));

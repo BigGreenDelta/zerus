@@ -772,7 +772,7 @@ impl Inspector {
     fn connect() -> Self {
         Inspector {
             service: service::connect(),
-            computer: crate::platform::hostname(),
+            computer: service::computer(),
             active: None,
             migration: None,
             verdicts: None,
@@ -1153,7 +1153,7 @@ fn reconcile(
 }
 fn running_service() -> Result<service::Service> {
     // Sending is explicit, but phase 1 does not start the service for it.
-    service::connect().map_err(|why| why.reason(&crate::platform::hostname()))
+    service::connect().map_err(|why| why.reason(&service::computer()))
 }
 fn check_receipt_identity(record: &Value, receipt: &Value) -> Result<()> {
     if !native_id(string(receipt, "native_message_id"), "msg_")

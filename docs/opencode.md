@@ -35,8 +35,9 @@ it. Without a registered live service, Zerus shows "OpenCode is not running on
 <computer>" and offers Start OpenCode; a registered service that does not answer
 shows "OpenCode is not responding" and is never restarted. When OpenCode's
 background service is disabled, Zerus shows "The OpenCode background service is
-disabled on <computer>" and starts nothing. You can also start it yourself with
-`opencode service start`.
+disabled on <computer>" and starts nothing. `<computer>` is the computer's first
+`HGS_SELF` name (by default its host name), the name the desktop uses for it.
+You can also start it yourself with `opencode service start`.
 
 Connect providers in a terminal on that computer with `opencode auth login`.
 `hgs account login native-opencode` does not run it; it prints that instruction.

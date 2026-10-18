@@ -456,7 +456,8 @@ class OpenCodeNative(unittest.TestCase):
         name = binding['name']
         row = self.hgs(['inspect', name])
         self.assertTrue(row['inspection_unavailable'])
-        self.assertIn(NOT_RUNNING, row['inspection_reason'])
+        # The computer is named as hgs names itself (HGS_SELF), like the desktop does.
+        self.assertEqual(row['inspection_reason'], NOT_RUNNING + ' on fixture')
         # Native state stays unknown, never stopped; clients keep the transcript they show.
         self.assertEqual((row['state'], row['phase'], row['activity']), ('unknown', 'unknown', 'unknown'))
         self.assertEqual(row['allowed_actions'], ['forget'])
@@ -464,14 +465,14 @@ class OpenCodeNative(unittest.TestCase):
         self.assertFalse(row['send_supported'])
         listed = self.listing()[name]
         self.assertEqual((listed['state'], listed['phase']), ('unknown', 'unknown'))
-        self.assertIn(NOT_RUNNING, listed['inspection_reason'])
+        self.assertEqual(listed['inspection_reason'], NOT_RUNNING + ' on fixture')
         account = self.account()
         self.assertEqual(account['catalog_state'], 'not_running')
-        self.assertIn(NOT_RUNNING, account['catalog_reason'])
+        self.assertEqual(account['catalog_reason'], NOT_RUNNING + ' on fixture')
         # Sending is explicit, but it never starts the service either.
         request = self.payload(binding, text='never sent')
         failure = self.hgs(['send', name, '--json'], request, success=False)
-        self.assertIn(NOT_RUNNING, failure.stderr)
+        self.assertIn(NOT_RUNNING + ' on fixture', failure.stderr)
         self.assertFalse(self.receipt_path(request).exists())
         self.assertFalse(self.registration_path().exists())
         self.assertEqual(self.native_processes(), [])
