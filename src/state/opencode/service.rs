@@ -1010,15 +1010,23 @@ mod tests {
         let _ = fs::remove_file(&dir);
     }
 
+    /// A registered port that no service can answer on any platform. Nothing
+    /// can listen on port 0, so connecting fails before a byte is sent. A
+    /// freed ephemeral port is not safe: a parallel test's server may bind it
+    /// and turn the expected refusal into an uncertain delivery.
+    fn refusing_port() -> u16 {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        assert!(TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_err());
+        0
+    }
+
     #[test]
     fn a_service_that_stopped_answering_is_reported_without_opencode_1_wording() {
         // A port that refuses connections: the registered service went away.
-        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let gone = Registration { port, ..reg() };
+        let gone = Registration {
+            port: refusing_port(),
+            ..reg()
+        };
         let error = request(
             &gone,
             "GET",
@@ -1033,6 +1041,34 @@ mod tests {
         assert!(!error.to_lowercase().contains("resume"), "{error}");
     }
 
+    /// A service that accepted the connection and then reset it may have
+    /// received the request: that stays an uncertain delivery and is never
+    /// reported as a service that refused to connect.
+    #[test]
+    fn a_reset_after_connecting_stays_uncertain() {
+        let server = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = server.local_addr().unwrap().port();
+        let worker = std::thread::spawn(move || {
+            let (peer, _) = server.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            // Closing with the request unread resets the connection.
+            drop(peer);
+        });
+        let accepted = Registration { port, ..reg() };
+        let error = request(
+            &accepted,
+            "GET",
+            "/api/session/active",
+            None,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .err()
+        .unwrap();
+        worker.join().unwrap();
+        assert_ne!(error, NOT_RESPONDING);
+        assert!(error.contains("delivery uncertain"), "{error}");
+    }
+
     /// The desktop's Start OpenCode banner keys on the "OpenCode is not
     /// running on " prefix, and the documentation quotes both texts.
     #[test]
@@ -1044,11 +1080,7 @@ mod tests {
         assert!(Unavailable::NotRunning
             .reason("fixture")
             .starts_with("OpenCode is not running on "));
-        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = refusing_port();
         // A registration whose process is gone: not running.
         let gone = Registration {
             port,
