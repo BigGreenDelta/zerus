@@ -26,6 +26,8 @@ struct TaskSession {
     bool running = true;  // whether its agent runs, for the cancel dialog
 };
 
+struct TaskEdits;
+
 // The Tasks tab label's counts: In review as an attention badge, then To do.
 class TaskTabBadge : public QWidget {
     Q_OBJECT
@@ -77,6 +79,7 @@ private:
     // One `hgs task` call of a sequence; `then` sees its reply.
     struct Step { QStringList arguments; QString input; std::function<void(const QJsonObject &)> then = {}; };
     QList<Step> steps(const TaskItem &task, TaskAction action) const;
+    QList<Step> editSteps(const TaskItem &task, const TaskEdits &edits) const;
     // Runs the steps in order and stops at the first failure; refreshes after.
     void run(QList<Step> steps);
     void act(const TaskItem &task, TaskAction action);

@@ -1,11 +1,13 @@
 #include "TasksView.h"
 #include "HgsClient.h"
+#include "TaskDialogs.h"
 #include "MessageComposer.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
 #include <QAbstractButton>
 #include <QDateTime>
 #include <QHBoxLayout>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QPainter>
 #include <QPushButton>
@@ -308,6 +310,17 @@ QList<TasksView::Step> TasksView::steps(const TaskItem &task, TaskAction action)
     return {};
 }
 
+QList<TasksView::Step> TasksView::editSteps(const TaskItem &task, const TaskEdits &edits) const {
+    QList<Step> out;
+    if (edits.text) out << Step{withProject({"edit", task.uuid}), *edits.text};
+    if (edits.target) {
+        QStringList arguments{"target", task.uuid, edits.target->any ? QStringLiteral("any") : edits.target->session};
+        if (!edits.target->any && !edits.target->host.isEmpty()) arguments << "--host" << edits.target->host;
+        out << Step{withProject(arguments), {}};
+    }
+    return out;
+}
+
 void TasksView::run(QList<Step> steps) {
     if (steps.isEmpty()) return refresh();
     auto step = steps.takeFirst();
@@ -338,13 +351,61 @@ void TasksView::addTask(const QString &key, const QString &text) {
     });
 }
 
-// The task settings, the cancel confirmation and the project settings come with
-// their dialogs (TaskDialogs.h).
-void TasksView::openTask(const TaskItem &) {}
+void TasksView::openTask(const TaskItem &task) {
+    request(withProject({"get", task.uuid}), {}, [this, task](const QJsonObject &reply) {
+        for (auto *open : findChildren<TaskDialog *>()) open->reject();
+        auto *dialog = new TaskDialog(reply.value("task").toObject(), m_sessions, sendBlocker(task), m_dark, this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        connect(dialog, &TaskDialog::saveRequested, this, [this, task](const TaskEdits &edits) { run(editSteps(task, edits)); });
+        connect(dialog, &TaskDialog::actionRequested, this, [this, task](const TaskEdits &edits, TaskAction action) {
+            // The action meets the task as the edits leave it.
+            auto edited = task;
+            if (edits.target) { edited.targetSession = edits.target->any ? QString() : edits.target->session; edited.targetHost = edits.target->host; }
+            if (action == TaskAction::Cancel) { run(editSteps(task, edits)); return confirmCancel(edited); }
+            run(editSteps(task, edits) + steps(edited, action));
+        });
+        QPointer<TaskDialog> guard(dialog);
+        connect(dialog, &TaskDialog::commentRequested, this, [this, guard, uuid = task.uuid](const QString &text) {
+            request(withProject({"comment", uuid}), text, [guard](const QJsonObject &reply) {
+                if (!guard) return;
+                guard->clearComment(); guard->setHistory(reply.value("task").toObject().value("log").toArray());
+            });
+        });
+        dialog->open();
+    });
+}
 
-void TasksView::confirmCancel(const TaskItem &) {}
+void TasksView::confirmCancel(const TaskItem &task) {
+    const auto *ran = session(task.sessionHost, task.sessionName);
+    auto *dialog = new TaskCancelDialog(task, ran ? ran->status : QString(), ran && ran->running, this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &QDialog::accepted, this, [this, dialog, task] {
+        QStringList arguments{"cancel", task.uuid};
+        if (!dialog->reason().isEmpty()) arguments << "--reason" << dialog->reason();
+        run({{withProject(arguments), {}, [this, task](const QJsonObject &reply) {
+            // The task is cancelled even when hgs refused the cancel message.
+            const auto message = reply.value("cancel_message").toObject();
+            if (!message.value("sent").toBool(true))
+                emit notice(tr("%1 is cancelled; its session did not get the cancel message: %2").arg(task.id, message.value("error").toString()), true);
+        }}});
+    });
+    dialog->open();
+}
 
-void TasksView::openSettings() {}
+void TasksView::openSettings() {
+    if (m_projectId.isEmpty()) return;
+    request({"settings", "--project", m_projectId}, {}, [this](const QJsonObject &reply) {
+        auto *dialog = new TaskSettingsDialog(m_projectName, reply.value("settings").toObject(), this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        connect(dialog, &QDialog::accepted, this, [this, dialog] {
+            const auto changes = dialog->changes();
+            if (!changes.isEmpty())
+                request({"settings", "--project", m_projectId, "--set"}, QString::fromUtf8(QJsonDocument(changes).toJson(QJsonDocument::Compact)),
+                        [](const QJsonObject &) {});
+        });
+        dialog->open();
+    });
+}
 
 void TasksView::setTheme(bool dark) {
     m_dark = dark; const auto colors = TaskColors::of(dark);

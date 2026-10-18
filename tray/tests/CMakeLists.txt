@@ -249,6 +249,12 @@ target_link_libraries(test_tasksview PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(tasksview test_tasksview)
 set_tests_properties(tasksview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_taskdialogs test_taskdialogs.cpp)
+target_include_directories(test_taskdialogs PRIVATE ../src)
+target_link_libraries(test_taskdialogs PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(taskdialogs test_taskdialogs)
+set_tests_properties(taskdialogs PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_processview test_processview.cpp)
 target_include_directories(test_processview PRIVATE ../src)
 target_link_libraries(test_processview PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
