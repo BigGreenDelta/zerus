@@ -11,8 +11,10 @@ case uninstalls it again. Local sessions are enabled from the installed folder
 in the case's temporary profile, so the session host runs from its staged
 image. An upgrade must leave that host, its session, the staged CLI and the
 images alone, install the zip's files byte for byte and remove files an older
-version left; the uninstaller removes only the installed files. Run it outside
-the CI step's job (scripts/ci/outside-job.py), as the host suites run.
+version left; the uninstaller removes only the installed files. A junction
+inside the folder stops an upgrade before anything changes, and never leads
+its clean-up to files outside. Run it outside the CI step's job
+(scripts/ci/outside-job.py), as the host suites run.
 """
 import json
 import os
@@ -71,14 +73,18 @@ class Installer(windows_host.HostCase):
     # The installer and the uninstaller run with the runner's own environment:
     # Inno Setup finds the profile's folders through the shell, not HGS_*.
 
-    def install(self):
+    def setup(self):
+        """Setup's exit code and log."""
         self.logs += 1
         log = self.root / f"setup-{self.logs}.log"
         result = subprocess.run([str(self.setup_exe), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
                                  f"/DIR={self.app}", f"/LOG={log}"], stdin=subprocess.DEVNULL, capture_output=True,
                                 timeout=SETUP_LIMIT, creationflags=HIDDEN)
-        text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else "(no log)"
-        self.assertEqual(result.returncode, 0, text[-4000:])
+        return result.returncode, log.read_text(encoding="utf-8", errors="replace") if log.is_file() else "(no log)"
+
+    def install(self):
+        code, text = self.setup()
+        self.assertEqual(code, 0, text[-4000:])
         return text
 
     def uninstall(self):
@@ -157,6 +163,41 @@ class Installer(windows_host.HostCase):
         self.assertEqual((status["pid"], status["created"]), (hello["pid"], hello["created"]))
         self.responds(pane, f"{self.unique}-after-uninstall")
         self.assertEqual(self.staged(), before)
+
+    def test_an_upgrade_never_follows_a_junction_out_of_its_folder(self):
+        # The stale-file sweep must stay inside the folder: a junction there may
+        # lead anywhere the user can write, such as configuration or state.
+        self.install()
+        outside = self.root / "outside"
+        (outside / "nested").mkdir(parents=True)
+        sentinels = {outside / "keep.txt": b"outside the installation", outside / "nested" / "deep.dll": b"also outside"}
+        for path, data in sentinels.items():
+            path.write_bytes(data)
+        link = self.app / "linked"
+        made = subprocess.run([os.environ.get("ComSpec", "cmd.exe"), "/d", "/c", "mklink", "/J", str(link), str(outside)],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=LIMIT, creationflags=HIDDEN)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        # Removing a junction never touches its target; runs before the uninstall.
+        self.addCleanup(lambda: link.exists() and os.rmdir(link))
+        self.assertTrue(os.path.isjunction(link))
+
+        code, log = self.setup()
+        for path, data in sentinels.items():
+            self.assertTrue(path.is_file() and path.read_bytes() == data, f"{path} was changed through the junction")
+        # Setup refuses before it changes anything (exit code 7: Preparing to Install
+        # determined that Setup cannot proceed), and the installation stays as it was.
+        self.assertEqual(code, 7, log[-4000:])
+        self.assertIn(str(link), log)
+        self.assertTrue(os.path.isjunction(link))
+        self.assertEqual(registered()["DisplayVersion"], self.manifest["version"])
+        self.assertTrue((self.app / "hgs-tray.exe").is_file())
+
+        # Without the junction the upgrade proceeds; the outside files stay.
+        os.rmdir(link)
+        self.install()
+        self.assertEqual(windows_installer.problems(self.app, self.expected), [])
+        for path, data in sentinels.items():
+            self.assertEqual(path.read_bytes(), data)
 
 
 if __name__ == "__main__":
