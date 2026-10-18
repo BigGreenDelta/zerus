@@ -403,6 +403,78 @@ fn panel_empty(screen: &str, card: &Value) -> Result<bool> {
         row == format!("{index}. Other") || row == format!("{index}. Other (write an answer)")
     }))
 }
+/// What a paste left in this card's panel, wrapped rows joined: the selected
+/// Other row, or a free-form question's answer field. None while another row
+/// is selected; an option label with the same text is not a draft.
+fn other_draft(screen: &str, card: &Value) -> Result<Option<String>> {
+    let Some(body) = panel_body(screen, card)? else {
+        return Ok(None);
+    };
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let options = card["questions"][0]["options"].as_array().map_or(0, Vec::len);
+    if options == 0 {
+        return Ok(Some(words(&body)));
+    }
+    let label = format!("{}. ", options + 1);
+    let rows: Vec<_> = body.lines().collect();
+    let Some(start) = rows.iter().rposition(|row| {
+        row.trim_start()
+            .strip_prefix('›')
+            .is_some_and(|rest| rest.trim_start().starts_with(&label))
+    }) else {
+        return Ok(None);
+    };
+    let draft = words(&rows[start..].join("\n"));
+    Ok(draft.strip_prefix('›').map(str::trim_start).and_then(|row| row.strip_prefix(&label)).map(str::to_owned))
+}
+/// The key hints below an open question panel: its last row offering submit and skip.
+fn hints(screen: &str) -> Option<String> {
+    let plain = question_terminal::plain(screen).ok()?;
+    plain
+        .lines()
+        .rev()
+        .find(|line| {
+            line.contains("enter submit") && (line.contains("ctrl+] skip") || line.contains("^] skip"))
+        })
+        .map(str::to_owned)
+}
+/// Whether key hints name the visible row of a scrolled answer list ("option 1/6").
+fn scrolled(hints: &str) -> bool {
+    let words: Vec<_> = hints.split_whitespace().collect();
+    words.windows(2).any(|pair| {
+        pair[0] == "option"
+            && pair[1].split_once('/').is_some_and(|(row, rows)| {
+                !row.is_empty()
+                    && !rows.is_empty()
+                    && row.chars().chain(rows.chars()).all(|c| c.is_ascii_digit())
+            })
+    })
+}
+/// Codex 0.160.1 and 0.162.0 fit an open question panel taller than the pane
+/// by scrolling its answer list below the whole title, and name the visible
+/// row in the key hints. Such a panel is clipped; once the pane holds every
+/// answer, the hints drop that name and the panel is complete.
+fn clipped(screen: &str) -> bool {
+    hints(screen).is_some_and(|row| scrolled(&row))
+}
+fn complete(screen: &str) -> bool {
+    hints(screen).is_some_and(|row| !scrolled(&row))
+}
+/// Grow the pane no client views until this question's scrolled panel shows
+/// every answer (`question_terminal::fit_unviewed`); the exact match in
+/// `available` still decides. Only a question listing calls it. A title taller
+/// than the pane pushes the key hints off screen, so that panel stays in Terminal.
+pub(super) fn fit(record: &Value, card: &Value) {
+    if card["answer_delivery"]["status"] == "submitted" {
+        return;
+    }
+    let Ok(current) = Native::new(record, card).identity() else {
+        return;
+    };
+    if let Ok(screen) = Native::capture(&current) {
+        question_terminal::fit_unviewed(&current, screen, Native::capture, clipped, complete);
+    }
+}
 pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
     if card["answer_delivery"]["status"] == "submitted" {
         return Err("An answer was already submitted. Wait for Codex to record it.".into());
@@ -595,8 +667,9 @@ pub(super) fn answer(
             terminal.paste(&text)?;
             std::thread::sleep(Duration::from_millis(180));
             let screen = terminal.screen()?;
-            if !visible_panel(&screen, card)? || !question_terminal::plain(&screen)?.contains(&text)
-            {
+            // Codex wraps a long answer onto indented rows of its Other field.
+            let pasted = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if other_draft(&screen, card)? != Some(pasted) {
                 return Err("question or answer draft changed before submission".into());
             }
             terminal.key("Enter")
@@ -771,6 +844,53 @@ mod tests {
             assert!(!visible_panel(&wrong, card).unwrap());
         }
         assert!(visible_panel(&notes.replace("  Any notes?", "  2 of 2\n  Any notes?"), freeform).unwrap());
+    }
+    #[test]
+    fn a_scrolled_answer_list_grows_until_the_whole_panel_shows() {
+        // Captured from Codex 0.160.1 and 0.162.0 at 80x24, then grown to 80x48.
+        let scrolled = [
+            include_str!("../../tests/fixtures/codex-question-scrolled-0.160.1.txt"),
+            include_str!("../../tests/fixtures/codex-question-scrolled-0.162.0.txt"),
+        ];
+        let grown = [
+            include_str!("../../tests/fixtures/codex-question-complete-0.160.1.txt"),
+            include_str!("../../tests/fixtures/codex-question-complete-0.162.0.txt"),
+        ];
+        let title = ["Before I continue with the release preparation, which distribution channel should this build target, considering that the stable channel requires the full CI matrix, signed artifacts and the owner-triggered publication step, while nightly and dev channels publish automatically after verification?"; 3].join(" ");
+        let options: Vec<_> = (1..=5).map(|i| format!("Option {i}: publish to this channel after the complete matrix, package checks and signed asset verification succeed on the exact candidate")).collect();
+        let mut cache = json!({"items":{}});
+        let arguments = json!({"questions":[{"title":title,"options":options}]}).to_string();
+        observe(&json!({}), &mut cache, &json!({"type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"call_tall","arguments":arguments}}));
+        let card = &cache["items"]["codex-async:call_tall:0"];
+        for screen in scrolled {
+            assert!(clipped(screen) && !complete(screen));
+            assert!(!visible_panel(screen, card).unwrap());
+        }
+        for screen in grown {
+            assert!(complete(screen) && !clipped(screen));
+            assert!(visible_panel(screen, card).unwrap());
+        }
+        // A pasted answer is the selected Other row, its wrapped rows joined;
+        // the same text as an option label elsewhere in the panel is not.
+        let answer = &options[1];
+        for screen in [
+            include_str!("../../tests/fixtures/codex-question-other-draft-0.160.1.txt"),
+            include_str!("../../tests/fixtures/codex-question-other-draft-0.162.0.txt"),
+        ] {
+            assert!(!question_terminal::plain(screen).unwrap().contains(answer.as_str()));
+            assert_eq!(other_draft(screen, card).unwrap().as_deref(), Some(answer.as_str()));
+        }
+        for screen in grown {
+            assert_eq!(other_draft(screen, card).unwrap(), None);
+        }
+        // Only Codex's key hints name the scrolled row; elsewhere it is text.
+        for other in [
+            "› Ask Codex to do anything\n",
+            "• Working (3s • esc to interrupt)\n  option 1/6\n",
+            "  Press enter to confirm or esc to cancel   option 1/6\n",
+        ] {
+            assert!(!clipped(other) && !complete(other), "{other}");
+        }
     }
     #[test]
     fn working_status_above_a_codex_panel_does_not_change_it() {

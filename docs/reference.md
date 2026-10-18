@@ -1326,7 +1326,12 @@ Terminal.
 Optional Codex questions preserve the regular composer and support **Skip**.
 When Codex's own question panel is open, Zerus answers or skips there. Codex's
 animated working status above the panel does not block an answer; any change
-to the panel itself does.
+to the panel itself does. An open panel taller than its pane keeps its title
+and scrolls the answers, naming the visible row in its key hints (`option 1/6`).
+In a pane no client views, a question listing grows the pane as it does for
+Claude until the whole list shows; a title taller than the pane stays in
+Terminal. A long answer wraps in Codex's Other field, and Zerus compares that
+field, wrapped rows joined, with the text it pasted.
 Queue arrows navigate optional requests from newest to oldest while retaining
 answers and the current multipart section. A required approval temporarily takes
 priority. Confirmed answers appear as **You (answer)** in Activity. Codex optional
