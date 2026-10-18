@@ -15,6 +15,7 @@ use crate::runtime::Connector;
 use serde_json::{json, Map, Value};
 use std::cell::Cell;
 use std::time::Duration;
+use zerus_relay::protocol::opencode_effort_id;
 
 /// How long a launch is looked for in the listing by its launch UUID.
 pub const VERIFY_SECONDS: f64 = 5.0;
@@ -426,12 +427,8 @@ fn validate_launch(payload: &Map<String, Value>) -> PyResult<()> {
         }
     }
     if let Some(effort) = payload.get("effort") {
-        let effort = bounded(Some(effort), 64, false)?;
-        if !payload.contains_key("model")
-            || !effort
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
-        {
+        // The native id shape; the fresh projection decides membership.
+        if !payload.contains_key("model") || !effort.as_str().is_some_and(opencode_effort_id) {
             return Err(invalid("effort requires a model and a valid effort"));
         }
     }

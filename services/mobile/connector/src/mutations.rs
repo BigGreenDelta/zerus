@@ -28,6 +28,7 @@ use crate::runtime::Connector;
 use crate::validate::{checked_uuid, Validated};
 use serde_json::{json, Map, Value};
 use std::cell::Cell;
+use zerus_relay::protocol::opencode_effort_id;
 
 /// The operations of this module. Every one but `answer`, `interrupt` and
 /// `send` needs a native capability or a fresh native preflight.
@@ -319,14 +320,10 @@ pub fn validate_core(operation: &str, payload: &Value, request_id: &str) -> Resu
     validate_core_with(operation, payload, request_id, false)
 }
 
-/// An OpenCode effort is a bounded variant identifier, checked against the
-/// model's offered `effort_options` before the write.
+/// An OpenCode effort is empty (the default) or a native effort id, checked
+/// against the model's offered `effort_options` before the write.
 fn opencode_effort(effort: &str) -> bool {
-    effort.is_empty()
-        || (effort.len() <= 64
-            && effort
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b)))
+    effort.is_empty() || opencode_effort_id(effort)
 }
 
 fn validate_core_with(
@@ -1270,7 +1267,7 @@ mod tests {
         assert!(accepts("opencode/p/t", ""));
         assert!(!accepts("codex/p/t", "thinking-8k"));
         assert!(accepts("codex/p/t", "high"));
-        for bad in ["a b", "x/y", &"a".repeat(65)] {
+        for bad in ["a b", "x/y", &"a".repeat(41)] {
             assert!(!accepts("opencode/p/t", bad), "{bad}");
         }
         let detail = json!({"settings_model": "fixture/local", "model_options": [

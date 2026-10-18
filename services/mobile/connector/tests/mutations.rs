@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use zerus_mobile_connector::capabilities::Flags;
 use zerus_mobile_connector::execute::{Outcome, GENERIC};
 use zerus_mobile_connector::journal::{Journal, RESTART_ERROR};
+use zerus_mobile_connector::mutations::validate_for_session;
 use zerus_mobile_connector::native::{self, Call, Native, NativeError, NativeResult, Output};
 use zerus_mobile_connector::runtime::{Connector, Settings};
 
@@ -23,11 +24,13 @@ const CONVERSATION: &str = "fixture-conversation";
 struct Scripted {
     answers: RefCell<HashMap<Vec<String>, Value>>,
     calls: RefCell<Vec<Vec<String>>>,
+    payloads: RefCell<Vec<Option<Value>>>,
 }
 
 impl Native for Scripted {
     async fn call(&self, call: Call) -> NativeResult {
         self.calls.borrow_mut().push(call.argv.clone());
+        self.payloads.borrow_mut().push(call.payload.clone());
         match self.answers.borrow().get(&call.argv) {
             Some(answer) => Ok(Output::Json(answer.clone())),
             None => Err(NativeError::Failed(native::FAILED)),
@@ -305,6 +308,135 @@ async fn an_opencode_settings_effort_must_be_offered_for_the_model() {
     );
     let applied = run("38eafb0c-1d2e-5f34-8051-627384950617", "high").await;
     assert_eq!(applied["state"], "completed", "{applied}");
+}
+
+/// The OpenCode effort shape contract every layer shares with the native
+/// catalog projection; `effort_options` membership stays authoritative.
+const EFFORT_IDS: &str = include_str!("../../../../tests/fixtures/opencode-effort-ids.json");
+const FIXED_EFFORTS: [&str; 11] = [
+    "", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on",
+];
+
+fn effort_ids(kind: &str) -> Vec<String> {
+    let fixture: Value = serde_json::from_str(EFFORT_IDS).unwrap();
+    let ids: Vec<String> = fixture[kind]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect();
+    assert!(!ids.is_empty(), "{kind}");
+    ids
+}
+
+#[test]
+fn the_shared_fixture_decides_every_settings_effort_shape() {
+    let accepts = |session: &str, effort: &str| {
+        let mut payload = identity();
+        payload["request_id"] = json!("r");
+        payload["effort"] = json!(effort);
+        validate_for_session("settings", session, &payload, "r").is_ok()
+    };
+    for id in effort_ids("accept") {
+        assert!(accepts("opencode/p/t", &id), "{id:?}");
+    }
+    for id in effort_ids("reject") {
+        // An empty effort selects the model's default.
+        assert_eq!(accepts("opencode/p/t", &id), id.is_empty(), "{id:?}");
+    }
+    // Every other session keeps the fixed list.
+    for session in ["codex/p/t", "claude/p/t", "kimi/p/t", "dsh/p/t"] {
+        for fixed in FIXED_EFFORTS {
+            assert!(accepts(session, fixed), "{session} {fixed}");
+        }
+        for id in effort_ids("accept")
+            .into_iter()
+            .chain(effort_ids("reject"))
+            .filter(|id| !FIXED_EFFORTS.contains(&id.as_str()))
+        {
+            assert!(!accepts(session, &id), "{session} {id:?}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn only_an_effort_the_session_model_offers_reaches_the_settings_payload() {
+    let harness = Harness::new("mutation-opencode-effort-ids");
+    const OPENCODE: &str = "opencode/example/session";
+    harness
+        .connector
+        .state
+        .borrow_mut()
+        .sessions
+        .insert(OPENCODE.into());
+    harness.answer(
+        &["inspect", OPENCODE],
+        json!({"name": OPENCODE, "run_id": RUN, "conversation_id": CONVERSATION,
+               "settings_change_supported": true, "settings_model": "fixture/local",
+               "model_options": [{"id": "fixture/local", "effort_options": ["think:deep", "caf\u{e9}"]},
+                                 {"id": "fixture/other", "effort_options": ["low"]}]}),
+    );
+    let run = |id: &'static str, extra: Value| {
+        let harness = &harness;
+        async move {
+            let mut payload = identity();
+            for (key, value) in extra.as_object().unwrap() {
+                payload[key] = value.clone();
+            }
+            payload["request_id"] = json!(id);
+            let request = json!({"request_id": id, "operation": "settings",
+                                 "session": OPENCODE, "payload": payload});
+            match harness.connector.execute(request).await.unwrap() {
+                Outcome::Finished(receipt) => receipt,
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    // Well formed but not offered by the current or the requested model:
+    // refused from the session's own inspection before any native write.
+    let refusals = [
+        (
+            "49fb0c1d-2e3f-5045-9162-738495061728",
+            json!({"effort": "low\u{2014}deep"}),
+        ),
+        (
+            "5a0c1d2e-3f40-5156-a273-849506172839",
+            json!({"effort": "low"}),
+        ),
+        (
+            "6b1d2e3f-4051-5267-b384-95061728394a",
+            json!({"model": "fixture/other", "effort": "think:deep"}),
+        ),
+    ];
+    for (id, extra) in refusals {
+        let before = harness.calls().len();
+        let refused = run(id, extra.clone()).await;
+        let expected = receipt("failed", "effort is not offered for this model");
+        assert_eq!(refused, expected, "{extra}");
+        assert_eq!(
+            harness.calls()[before..],
+            [["inspect", OPENCODE]],
+            "{extra}"
+        );
+        let stored: Value =
+            serde_json::from_str(&harness.connector.journal.replay(id).unwrap()).unwrap();
+        assert_eq!(stored, expected, "{extra}");
+    }
+    // An offered colon id reaches native hgs unchanged, in the JSON payload only.
+    let id = "7c2e3f40-5162-5378-8495-061728394a5b";
+    harness.answer(
+        &["settings", OPENCODE, "--json"],
+        json!({"request_id": id, "name": OPENCODE, "run_id": RUN,
+               "conversation_id": CONVERSATION, "status": "applied", "effort": "think:deep"}),
+    );
+    let applied = run(id, json!({"effort": "think:deep"})).await;
+    assert_eq!(applied["state"], "completed", "{applied}");
+    assert_eq!(
+        harness.calls().last().unwrap(),
+        &["settings", OPENCODE, "--json"]
+    );
+    let written = harness.connector.native.payloads.borrow().last().cloned();
+    assert_eq!(written.unwrap().unwrap()["effort"], "think:deep");
 }
 
 #[test]
