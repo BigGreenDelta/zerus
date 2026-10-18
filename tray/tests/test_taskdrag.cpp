@@ -11,6 +11,8 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -21,6 +23,15 @@ namespace {
 QList<TaskSession> sessions() { return {{"", "codex/api", "Ready", ""}, {"", "codex/web", "Working", ""}, {"orchard-mac", "codex/ios", "Ready", ""}}; }
 TaskItem item(int n, const QString &stage, const QJsonObject &extra = {}) { return TaskBoard::item(FakeTasksCli::task(n, stage, extra)); }
 QAbstractButton *tile(TasksView &view, const QString &stage) { return view.findChild<QAbstractButton *>("taskTile:" + stage); }
+QWidget *row(TasksView &view, int n) { return view.findChild<QWidget *>(QString("taskRow:T-%1").arg(n, 6, 10, QLatin1Char('0'))); }
+QStringList visibleRows(TasksView &view) {
+    QStringList out;
+    for (auto *w : view.findChildren<QWidget *>()) if (w->objectName().startsWith("taskRow:") && w->isVisibleTo(&view)) out << w->objectName().mid(8);
+    std::sort(out.begin(), out.end(), [&](const QString &a, const QString &b) {
+        return view.findChild<QWidget *>("taskRow:" + a)->y() < view.findChild<QWidget *>("taskRow:" + b)->y(); });
+    return out;
+}
+TaskDrag todo(int n) { return TaskDrag::of("project-1", TaskBoard::item(FakeTasksCli::task(n, "todo"))); }
 // Drags `drag` into `target` and over `point` (its centre by default); true when the target takes it there.
 bool dragOver(QWidget *target, const TaskDrag &drag, QPoint point = {}) {
     if (point.isNull()) point = target->rect().center();
@@ -58,6 +69,9 @@ private slots:
     void thePayloadNamesTheTaskAndItsProject();
     void toDoAndBacklogRowsStartADrag();
     void theOtherListsTileTakesADroppedTask();
+    void toDoRowsAreReorderedByDropping();
+    void theFunnelReordersAmongTheRowsItShows();
+    void aLongToDoListScrollsAtItsEdgesWhileDragging();
 };
 
 void TestTaskDrag::initTestCase() {
@@ -137,6 +151,81 @@ void TestTaskDrag::theOtherListsTileTakesADroppedTask() {
     QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("stage"); fail.close();
     QVERIFY(drop(tile(view, "backlog"), TaskDrag::of("project-1", item(1, "todo"))));
     QTRY_COMPARE(notices.size(), 1); QCOMPARE(notices[0][0].toString(), QString("hgs refused: stage")); QVERIFY(notices[0][1].toBool());
+}
+
+void TestTaskDrag::toDoRowsAreReorderedByDropping() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "todo"),
+        FakeTasksCli::task(3, "todo"), FakeTasksCli::task(4, "todo"), FakeTasksCli::task(5, "backlog")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_COMPARE(visibleRows(view), (QStringList{"T-000001", "T-000002", "T-000003", "T-000004"}));
+    auto *page = view.findChild<QWidget *>("taskListPage"); auto *line = view.findChild<QWidget *>("taskDropLine");
+    QVERIFY(page && line && page->acceptDrops());
+    const auto at = [&](int n, double share) { auto *r = row(view, n); return r->mapTo(page, QPoint(r->width() / 2, int(r->height() * share))); };
+    const auto top = [&](int n) { return row(view, n)->mapTo(page, QPoint()).y(); };
+    const auto bottom = [&](int n) { return top(n) + row(view, n)->height(); };
+    const auto moves = [&] { int n = 0; for (const auto &call : FakeTasksCli::calls(dir.path())) n += call.value(1) == "move"; return n; };
+    // Over a row's upper half the line shows above it, over its lower half below it.
+    QVERIFY(dragOver(page, todo(4), at(1, 0.25))); QVERIFY(line->isVisible()); QVERIFY(qAbs(line->geometry().center().y() - top(1)) <= 1);
+    QVERIFY(dragOver(page, todo(4), at(2, 0.75))); QVERIFY(qAbs(line->geometry().center().y() - bottom(2)) <= 1);
+    // Where the task already is, no line: nothing would change.
+    QVERIFY(dragOver(page, todo(2), at(2, 0.25))); QVERIFY(!line->isVisible());
+    QVERIFY(dragOver(page, todo(2), at(1, 0.75))); QVERIFY(!line->isVisible());
+    QVERIFY(dragOver(page, todo(2), at(3, 0.25))); QVERIFY(!line->isVisible());
+    QVERIFY(dragOver(page, todo(4), at(1, 0.25))); leave(page); QVERIFY(!line->isVisible());
+    // A drop goes before the row below the line, or after the last one.
+    QVERIFY(drop(page, todo(4), at(1, 0.25))); QVERIFY(!line->isVisible());
+    QTRY_COMPARE(visibleRows(view), (QStringList{"T-000004", "T-000001", "T-000002", "T-000003"}));
+    QVERIFY(called(dir.path(), {"task", "move", "uuid-4", "--before", "uuid-1", "--project", "project-1"}));
+    QVERIFY(drop(page, todo(4), at(2, 0.75)));
+    QTRY_COMPARE(visibleRows(view), (QStringList{"T-000001", "T-000002", "T-000004", "T-000003"}));
+    QVERIFY(called(dir.path(), {"task", "move", "uuid-4", "--before", "uuid-3", "--project", "project-1"}));
+    QVERIFY(drop(page, todo(1), QPoint(page->width() / 2, bottom(3) + 20)));
+    QTRY_COMPARE(visibleRows(view), (QStringList{"T-000002", "T-000004", "T-000003", "T-000001"}));
+    QVERIFY(called(dir.path(), {"task", "move", "uuid-1", "--after", "uuid-3", "--project", "project-1"}));
+    // A drop where it already is asks nothing of hgs.
+    const int before = moves(); QVERIFY(drop(page, todo(4), at(4, 0.6))); QTest::qWait(100); QCOMPARE(moves(), before);
+    // Backlog tasks and other projects' tasks do not join To do here, and Backlog is not reordered.
+    QVERIFY(!dragOver(page, TaskDrag::of("project-1", TaskBoard::item(FakeTasksCli::task(5, "backlog"))), at(1, 0.25)));
+    QVERIFY(!dragOver(page, TaskDrag::of("project-2", TaskBoard::item(FakeTasksCli::task(1, "todo"))), at(1, 0.25)));
+    tile(view, "backlog")->click(); QTRY_COMPARE(visibleRows(view), QStringList{"T-000005"});
+    QVERIFY(!dragOver(page, TaskDrag::of("project-1", TaskBoard::item(FakeTasksCli::task(5, "backlog"))), at(5, 0.25)));
+    QVERIFY(!line->isVisible());
+}
+
+void TestTaskDrag::theFunnelReordersAmongTheRowsItShows() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"),
+        FakeTasksCli::task(2, "todo", {{"target", FakeTasksCli::pinned("codex/web")}}), FakeTasksCli::task(3, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_COMPARE(visibleRows(view).size(), 3);
+    view.findChild<QAbstractButton *>("taskOnlySession")->click(); QCOMPARE(visibleRows(view), (QStringList{"T-000001", "T-000003"}));
+    // The hidden task of another session keeps its place; the drop names a row that shows.
+    auto *page = view.findChild<QWidget *>("taskListPage");
+    QVERIFY(drop(page, todo(3), row(view, 1)->mapTo(page, QPoint(40, 6))));
+    QTRY_VERIFY(called(dir.path(), {"task", "move", "uuid-3", "--before", "uuid-1", "--project", "project-1"}));
+    QTRY_COMPARE(visibleRows(view), (QStringList{"T-000003", "T-000001"}));
+}
+
+void TestTaskDrag::aLongToDoListScrollsAtItsEdgesWhileDragging() {
+    QJsonArray tasks; for (int n = 1; n <= 30; ++n) tasks << FakeTasksCli::task(n, "todo");
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), tasks));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 420); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_COMPARE(visibleRows(view).size(), 30);
+    auto *scroll = view.findChild<QScrollArea *>("taskList"); auto *bar = scroll->verticalScrollBar(); auto *page = view.findChild<QWidget *>("taskListPage");
+    QTRY_VERIFY(bar->maximum() > 0); QCOMPARE(bar->value(), 0);
+    const auto viewport = [&](int y) { return page->mapFrom(scroll->viewport(), QPoint(scroll->viewport()->width() / 2, y)); };
+    // Held at the bottom edge the list scrolls down, and the line follows the rows.
+    QVERIFY(dragOver(page, todo(1), viewport(scroll->viewport()->height() - 6)));
+    QTRY_VERIFY(bar->value() > 40);
+    // Away from the edges it stops.
+    QVERIFY(dragOver(page, todo(1), viewport(scroll->viewport()->height() / 2)));
+    int still = bar->value(); QTest::qWait(150); QCOMPARE(bar->value(), still);
+    // At the top edge it scrolls back up, and it stops when the drag leaves.
+    QVERIFY(dragOver(page, todo(1), viewport(6))); QTRY_VERIFY(bar->value() < still);
+    leave(page); still = bar->value(); QTest::qWait(150); QCOMPARE(bar->value(), still);
+    QVERIFY(!view.findChild<QWidget *>("taskDropLine")->isVisible());
 }
 
 QTEST_MAIN(TestTaskDrag)

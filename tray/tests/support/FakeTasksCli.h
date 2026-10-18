@@ -55,7 +55,11 @@ if cmd=='get': out({'project':project,'task':t}); sys.exit(0)
 if cmd=='stage':
     t['stage']=a[3]; t['stage_at']=now; log(t,'stage',a[3])
     if a[3] in ('todo','backlog'): top(t)
-elif cmd=='move': top(t)
+elif cmd=='move':
+    anchor=opt('--before') or opt('--after')
+    if not anchor: top(t)
+    else:
+        data['tasks'].remove(t); i=data['tasks'].index(find(anchor)); data['tasks'].insert(i if '--before' in a else i+1,t)
 elif cmd=='send':
     session=opt('--session') or t['target']['session']
     t['stage']='active'; t['stage_at']=now; t['session']={'machine':'m-here','session':session,'host':''}; log(t,'sent')

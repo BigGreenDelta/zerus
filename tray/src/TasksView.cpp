@@ -7,6 +7,7 @@
 #include <QAbstractButton>
 #include <QDateTime>
 #include <QDrag>
+#include <QFrame>
 #include <QDropEvent>
 #include <QHBoxLayout>
 #include <QJsonDocument>
@@ -14,6 +15,7 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSet>
 #include <QSettings>
 #include <QToolButton>
@@ -132,13 +134,22 @@ TasksView::TasksView(HgsClient *client, QWidget *parent) : QWidget(parent), m_cl
     m_damaged->hide(); layout->addWidget(m_damaged);
     m_scroll = new QScrollArea; m_scroll->setObjectName("taskList"); m_scroll->setWidgetResizable(true); m_scroll->setFrameShape(QFrame::NoFrame);
     // The list's surface holds only its rows; the spare height below stays the page's.
-    auto *page = new QWidget; page->setObjectName("taskListPage");
-    auto *pageLayout = new QVBoxLayout(page); pageLayout->setContentsMargins(0, 0, 0, 0); pageLayout->setSpacing(0);
+    m_listPage = new QWidget; m_listPage->setObjectName("taskListPage");
+    auto *pageLayout = new QVBoxLayout(m_listPage); pageLayout->setContentsMargins(0, 0, 0, 0); pageLayout->setSpacing(0);
     m_listHost = new QWidget; m_listHost->setObjectName("taskListHost"); pageLayout->addWidget(m_listHost); pageLayout->addStretch();
+    // The page takes To do rows dropped on it; the line shows where one would go.
+    m_listPage->setAcceptDrops(true); m_listPage->installEventFilter(this);
+    m_dropLine = new QFrame(m_listPage); m_dropLine->setObjectName("taskDropLine"); m_dropLine->hide();
+    m_autoScroll.setInterval(30);
+    connect(&m_autoScroll, &QTimer::timeout, this, [this] {
+        auto *bar = m_scroll->verticalScrollBar(); bar->setValue(bar->value() + m_scrollStep);
+        // The rows moved under the pointer.
+        followDrag(m_drag, m_listPage->mapFrom(m_scroll->viewport(), m_dragAt));
+    });
     m_list = new QVBoxLayout(m_listHost); m_list->setContentsMargins(0, 0, 0, 0); m_list->setSpacing(0);
     m_empty = new QLabel; m_empty->setObjectName("taskEmpty"); m_empty->setAlignment(Qt::AlignCenter); m_empty->setMargin(18);
     m_list->addWidget(m_empty);
-    m_scroll->setWidget(page); layout->addWidget(m_scroll, 1);
+    m_scroll->setWidget(m_listPage); layout->addWidget(m_scroll, 1);
     m_older = new QPushButton; m_older->setObjectName("showOlderTasks"); m_older->setFlat(true); m_older->setCursor(Qt::PointingHandCursor); m_older->hide();
     connect(m_older, &QPushButton::clicked, this, [this] { m_showOlder = !m_showOlder; render(); });
     layout->addWidget(m_older, 0, Qt::AlignLeft);
@@ -386,6 +397,7 @@ void TasksView::startDrag(TaskRow *row, const QPoint &hotSpot) {
     row->setDragging(true);
     drag->exec(Qt::MoveAction);
     if (source) source->setDragging(false);
+    endListDrag();
 }
 
 bool TasksView::takesOnTile(const TaskDrag &drag, const QString &stage) const {
@@ -393,10 +405,64 @@ bool TasksView::takesOnTile(const TaskDrag &drag, const QString &stage) const {
     return drag.projectId == m_projectId && list(stage) && list(drag.stage) && drag.stage != stage;
 }
 
+bool TasksView::takesInList(const TaskDrag &drag) const {
+    return drag.projectId == m_projectId && m_stage == QLatin1String("todo") && drag.stage == QLatin1String("todo") && !shownRows().isEmpty();
+}
+
+QList<TaskRow *> TasksView::shownRows() const {
+    QList<TaskRow *> rows;
+    for (int i = 0; i < m_list->count(); ++i)
+        if (auto *row = qobject_cast<TaskRow *>(m_list->itemAt(i)->widget()); row && !row->isHidden()) rows << row;
+    return rows;
+}
+
+int TasksView::dropGap(const QString &uuid, const QPoint &point) const {
+    const auto rows = shownRows(); int gap = int(rows.size()), from = -1;
+    for (int i = 0; i < rows.size(); ++i) {
+        if (rows[i]->task().uuid == uuid) from = i;
+        if (gap == rows.size() && point.y() < rows[i]->mapTo(m_listPage, QPoint()).y() + rows[i]->height() / 2) gap = i;
+    }
+    return from >= 0 && (gap == from || gap == from + 1) ? -1 : gap;
+}
+
+void TasksView::followDrag(const TaskDrag &drag, const QPoint &point) {
+    m_drag = drag; m_dragAt = m_listPage->mapTo(m_scroll->viewport(), point);
+    const auto rows = shownRows(); const int gap = rows.isEmpty() ? -1 : dropGap(drag.uuid, point);
+    if (gap < 0) m_dropLine->hide();
+    else {
+        const auto *edge = gap < rows.size() ? rows[gap] : rows.last();
+        const int y = edge->mapTo(m_listPage, QPoint(0, gap < rows.size() ? 0 : edge->height())).y();
+        m_dropLine->setGeometry(m_listHost->x() + 8, y - 1, m_listHost->width() - 16, 2); m_dropLine->show(); m_dropLine->raise();
+    }
+    // Near the top or bottom of the visible list it scrolls that way.
+    const int margin = 28, height = m_scroll->viewport()->height();
+    m_scrollStep = m_dragAt.y() < margin ? -8 : m_dragAt.y() > height - margin ? 8 : 0;
+    if (!m_scrollStep) m_autoScroll.stop(); else if (!m_autoScroll.isActive()) m_autoScroll.start();
+}
+
+void TasksView::reorder(const TaskDrag &drag, const QPoint &point) {
+    const auto rows = shownRows(); const int gap = rows.isEmpty() ? -1 : dropGap(drag.uuid, point);
+    if (gap < 0) return;
+    run({{withProject(gap < rows.size() ? QStringList{"move", drag.uuid, "--before", rows[gap]->task().uuid}
+                                        : QStringList{"move", drag.uuid, "--after", rows.last()->task().uuid}), {}}});
+}
+
+void TasksView::endListDrag() { m_autoScroll.stop(); m_scrollStep = 0; m_dropLine->hide(); }
+
 bool TasksView::eventFilter(QObject *watched, QEvent *event) {
     const auto type = event->type();
     if (type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::DragLeave && type != QEvent::Drop)
         return QWidget::eventFilter(watched, event);
+    if (watched == m_listPage) {
+        if (type == QEvent::DragLeave) { endListDrag(); return true; }
+        auto *drop = static_cast<QDropEvent *>(event);
+        const auto drag = TaskDrag::from(drop->mimeData());
+        if (!drag || !takesInList(*drag)) { endListDrag(); drop->ignore(); return true; }
+        drop->setDropAction(Qt::MoveAction); drop->accept();
+        if (type == QEvent::Drop) { endListDrag(); reorder(*drag, drop->position().toPoint()); }
+        else followDrag(*drag, drop->position().toPoint());
+        return true;
+    }
     for (auto it = m_tiles.cbegin(); it != m_tiles.cend(); ++it) {
         if (it.value() != watched) continue;
         auto *tile = it.value();
@@ -491,6 +557,7 @@ void TasksView::setTheme(bool dark) {
     }
     setWorkspaceStyle(m_scroll, QStringLiteral("QScrollArea,#taskListPage{background:transparent;}") + workspaceScrollbars(dark));
     setWorkspaceStyle(m_listHost, QStringLiteral("#taskListHost{background:%1;border-radius:10px;}").arg(colors.surface.name()));
+    setWorkspaceStyle(m_dropLine, QStringLiteral("background:%1;border-radius:1px;").arg(colors.stage(QStringLiteral("todo")).name()));
     setWorkspaceStyle(m_empty, QStringLiteral("color:%1;").arg(colors.muted.name()));
     setWorkspaceStyle(m_errorLabel, QStringLiteral("color:%1;padding:0 0 10px 0;").arg(dark ? "#f4ab9b" : "#a13224"));
     setWorkspaceStyle(m_damaged, QStringLiteral("color:%1;padding:0 0 10px 0;").arg(colors.warn.name()));

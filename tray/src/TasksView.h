@@ -76,13 +76,23 @@ signals:
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
-    // Drops on the stage tiles.
+    // Drops on the stage tiles and on the To do list.
     bool eventFilter(QObject *watched, QEvent *event) override;
 private:
     // Drags a To do or Backlog row; the tiles and the session list take it.
     void startDrag(TaskRow *row, const QPoint &hotSpot);
     // The To do and Backlog tiles take a task of this project from the other list.
     bool takesOnTile(const TaskDrag &drag, const QString &stage) const;
+    // The To do list takes its own tasks to reorder them.
+    bool takesInList(const TaskDrag &drag) const;
+    QList<TaskRow *> shownRows() const;
+    // Where a To do task dropped at `point` of the list page goes: the index of the
+    // shown row it goes before, or their count below the last one; -1 where it is now.
+    int dropGap(const QString &uuid, const QPoint &point) const;
+    // Shows where the task would go and scrolls while the pointer is at an edge.
+    void followDrag(const TaskDrag &drag, const QPoint &point);
+    void reorder(const TaskDrag &drag, const QPoint &point);
+    void endListDrag();
     void request(const QStringList &arguments, const QString &input, std::function<void(const QJsonObject &)> done,
                  std::function<void(const QString &)> failed = {});
     void received(const QJsonObject &listing, quint64 generation);
@@ -115,13 +125,16 @@ private:
     QToolButton *m_only, *m_settings;
     QLabel *m_errorLabel, *m_damaged, *m_empty;
     QScrollArea *m_scroll;
-    QWidget *m_listHost;
+    QWidget *m_listPage, *m_listHost, *m_dropLine;
     QVBoxLayout *m_list;
     QHash<QString, TaskRow *> m_rows;
     QPushButton *m_older;
     MessageComposer *m_composer;
     QHash<quint64, std::pair<std::function<void(const QJsonObject &)>, std::function<void(const QString &)>>> m_pending;
-    QTimer m_timer;
+    QTimer m_timer, m_autoScroll;
+    TaskDrag m_drag;
+    QPoint m_dragAt;   // the pointer in the list's viewport while a task is dragged over it
+    int m_scrollStep = 0;
     quint64 m_generation = 0, m_listing = 0;
     int m_visibleMs = 2500, m_hiddenMs = 15000;
     bool m_polling = true, m_dark = true, m_showOlder = false, m_loaded = false, m_failing = false;
