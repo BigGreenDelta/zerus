@@ -284,9 +284,18 @@ delivery. The channel is only another transport.
   same identity and capture as `hgs answer`. Until then the offer stays
   unclaimed, and `hgs answer` retracts it with nothing sent.
   - A retraction retires that channel, so the request continues on the screen.
-  - A capture that fails in the hook proves nothing and never blocks the claim.
-    Claude ignores a decision that arrives after a Terminal answer.
-- A hook binds only to a request recorded in the last ten seconds.
+  - A refused agent identity never lets a decision go, before or after the
+    claim. This covers a pause, a provider error, another process and a
+    terminal of another run. After a claim the answer then stays uncertain and
+    locked.
+  - Only a capture that fails after the identity holds proves nothing and never
+    blocks the claim. Claude ignores a decision that arrives after a Terminal
+    answer.
+- A hook binds only to a request recorded in the last ten seconds, and only to
+  the one active tool call with the event's tool and input in the first record
+  it reads. PreToolUse is journaled before Claude asks. Without exactly one
+  such call the hook exits and the screen remains. A later identical call is
+  never adopted.
 - The card's options:
   - With a complete matching panel, it lists Claude's options verbatim, and
     `panel_verified` is true.

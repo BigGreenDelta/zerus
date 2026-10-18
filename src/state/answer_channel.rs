@@ -134,6 +134,31 @@ fn claim(dir: &Path) -> Result<Option<Value>> {
         .ok_or_else(|| "claimed answer is unreadable".into())
 }
 
+/// Why a claimed answer must not go out: its question changed or was answered
+/// in Terminal, or an approval is no longer shown waiting by an agent whose
+/// identity holds (`waits`). Nothing is printed then; the answer stays the
+/// channel's, so `hgs answer` reports it uncertain and never sends it again.
+fn withheld(
+    kind: Kind,
+    current: Option<&Value>,
+    bound: &Value,
+    card: &Value,
+    event: &Value,
+    answered: bool,
+    waits: impl FnOnce(&Value) -> bool,
+) -> Option<&'static str> {
+    let changed = should_close(kind, current, bound, card).is_some()
+        || answered
+        || kind == Kind::Question && current.and_then(|current| bind(current, event)).as_ref() != Some(card);
+    if changed {
+        Some("question changed before delivery")
+    } else if kind == Kind::Approval && !current.is_some_and(waits) {
+        Some("approval not shown before delivery")
+    } else {
+        None
+    }
+}
+
 /// Take an offered answer to `kind` only when `ready`. An approval waits for
 /// the screen to show its request; until then the offer stays unclaimed, and
 /// `hgs answer` retracts it with nothing sent.
@@ -306,14 +331,6 @@ fn kind(event: &Value) -> Option<Kind> {
         Some(Kind::Approval)
     } else {
         None
-    }
-}
-
-/// The card or approval identity `event` asks about, if exactly one.
-fn bind_kind(kind: Kind, record: &Value, event: &Value) -> Option<Value> {
-    match kind {
-        Kind::Question => bind(record, event),
-        Kind::Approval => claude_approval::channel::bind(record, event),
     }
 }
 
@@ -522,9 +539,20 @@ fn wait() -> Result<()> {
         libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t);
     }
     let until = Instant::now() + BIND;
+    // An approval stays with the one active tool call that the first record
+    // shows for it; without one it never binds, and a later call with the same
+    // input is another request.
+    let mut asked: Option<Option<String>> = None;
     let (record, card) = loop {
         if let Some(record) = read_run(&name, &token)? {
-            if let Some(card) = bind_kind(kind, &record, &event) {
+            let card = match kind {
+                Kind::Question => bind(&record, &event),
+                Kind::Approval => match asked.get_or_insert_with(|| claude_approval::channel::asked_use(&record, &event)) {
+                    Some(tool_use) => claude_approval::channel::bind_to(&record, &event, tool_use),
+                    None => return Ok(()),
+                },
+            };
+            if let Some(card) = card {
                 break (record, card);
             }
         }
@@ -576,15 +604,12 @@ fn wait() -> Result<()> {
             // Claude tells the hook nothing of a Terminal approval: only the
             // screen still showing the request proves it waits.
             let current = read_run(&name, &token)?;
-            let unchanged = should_close(kind, current.as_ref(), &record, &card).is_none()
-                && current.as_ref().is_some_and(|current| match kind {
-                    Kind::Question => bind(current, &event).as_ref() == Some(&card),
-                    Kind::Approval => claude_approval::channel::waits_now(current),
-                })
-                && !transcript.answered(current.as_ref().unwrap_or(&record), &tool);
+            let answered = transcript.answered(current.as_ref().unwrap_or(&record), &tool);
+            let withheld = withheld(kind, current.as_ref(), &record, &card, &event, answered,
+                claude_approval::channel::waits_now);
             let output = decision_kind(kind, &event, &card, &offer);
-            if !unchanged || output.is_err() || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
-                close(&dir, if unchanged { "invalid answer" } else { "question changed before delivery" });
+            if withheld.is_some() || output.is_err() || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
+                close(&dir, withheld.unwrap_or("invalid answer"));
                 return Ok(());
             }
             write(&dir, EMITTED, &json!({"request_id":offer["request_id"],"at":now()}))?;
@@ -1008,6 +1033,64 @@ mod tests {
         gone.process_start = "not this process".into();
         write(dir, WAITING, &json!(gone)).unwrap();
         assert_eq!(route_in(dir, &record(), &card()), Route::Screen);
+    }
+
+    /// A main-agent approval bound to its one active tool call, in this process.
+    fn approval() -> (Value, Value, Value) {
+        let input = json!({"command":"printf hi > out.txt"});
+        let pid = std::process::id();
+        let record = json!({"agent":"claude","run_id":"run-1","conversation_id":"conversation-1","pid":pid,
+            "process_start":process_start(pid),"phase":"approval","pending_approval_at":now(),
+            "pending_approval":{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":input},
+            "claude_tool_uses":{"toolu_1":{"tool_name":"Bash","input":format!("{:x}", Sha256::digest(input.to_string().as_bytes())),"at":now()-1.}}});
+        let event = json!({"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":input,"session_id":"conversation-1"});
+        let card = claude_approval::channel::bind(&record, &event).unwrap();
+        (record, event, card)
+    }
+
+    #[test]
+    fn a_claimed_approval_goes_out_only_while_its_agent_still_waits() {
+        let (record, event, card) = approval();
+        assert_eq!(withheld(Kind::Approval, Some(&record), &record, &card, &event, false, |_| true), None);
+        // What a refused identity gives after the claim: nothing printed.
+        let refused = |_: &Value| claude_approval::channel::waits(Err("Session identity changed; open Terminal".into()), |_| unreachable!());
+        assert_eq!(withheld(Kind::Approval, Some(&record), &record, &card, &event, false, refused),
+            Some("approval not shown before delivery"));
+        assert_eq!(withheld(Kind::Approval, Some(&record), &record, &card, &event, true, |_| true),
+            Some("question changed before delivery"), "answered in Terminal");
+        assert_eq!(withheld(Kind::Approval, None, &record, &card, &event, false, |_| true),
+            Some("question changed before delivery"));
+        let mut finished = record.clone();
+        finished["claude_tool_uses"] = json!({});
+        assert_eq!(withheld(Kind::Approval, Some(&finished), &record, &card, &event, false, |_| true),
+            Some("question changed before delivery"));
+        // A question never asks the screen, and still needs its exact card.
+        let question = live_record();
+        let card = hook_card("toolu_1");
+        assert_eq!(withheld(Kind::Question, Some(&question), &question, &card, &self::event(), false, |_| unreachable!()), None);
+        let mut changed = question.clone();
+        changed["pending_questions"]["toolu_2"] = hook_card("toolu_2");
+        assert_eq!(withheld(Kind::Question, Some(&changed), &question, &card, &self::event(), false, |_| unreachable!()),
+            Some("question changed before delivery"), "identical questions are ambiguous");
+        assert_eq!(withheld(Kind::Question, Some(&question), &question, &card, &self::event(), true, |_| unreachable!()),
+            Some("question changed before delivery"));
+    }
+
+    #[test]
+    fn a_refused_identity_leaves_an_offer_unclaimed() {
+        let (temp, waiting) = channel(|dir| {
+            for _ in 0..40 {
+                let ready = || claude_approval::channel::waits(Err("Session identity changed; open Terminal".into()), |_| unreachable!());
+                assert!(take_offer(Kind::Approval, dir, ready).unwrap().is_none());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let screen = std::cell::Cell::new(0);
+        let error = deliver(temp.path(), &json!({"request_id":"one","decision":"allow"}), Duration::from_millis(200),
+            Duration::from_millis(200), || { screen.set(screen.get() + 1); Err("Nothing was sent".into()) }).unwrap_err();
+        assert_eq!((error.as_str(), screen.get()), ("Nothing was sent", 1));
+        assert!(!temp.path().join(CLAIMED).exists() && !temp.path().join(EMITTED).exists());
+        waiting.join().unwrap();
     }
 
     #[test]

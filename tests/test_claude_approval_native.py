@@ -1,5 +1,5 @@
 """Native Claude permissions, using only a localhost API and temporary files."""
-import glob, hashlib, json, os, re, shlex, subprocess, sys, tempfile, threading, time, unittest, uuid
+import glob, hashlib, json, os, re, shlex, signal, subprocess, sys, tempfile, threading, time, unittest, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import test_claude_questions_native as native
@@ -406,6 +406,41 @@ class NativeClaudeApprovalChannel(unittest.TestCase):
         self.answer(self.payload(card, 'No'), success=False)
         self.wait_for(self.approved)
         self.assertEqual(len(self.channels('emitted.json')), 1)
+
+    def refused_offer(self, refuse):
+        # An offer made while all was well, then a refusal the agent's identity
+        # check knows about before the hook would take it.
+        self.channel_card()
+        directory = Path(self.channels('waiting.json')[0]).parent
+        worker = json.loads((directory / 'waiting.json').read_text())['pid']
+        refuse()
+        staged = directory / 'offer.new'
+        staged.write_text(json.dumps(dict(request_id=str(uuid.uuid4()), decision='allow', message='')))
+        staged.replace(directory / 'answer.json')
+        time.sleep(2.5)
+        self.assertFalse((directory / 'claimed.json').exists(), 'a refused identity never takes the offer')
+        self.assertFalse((directory / 'emitted.json').exists())
+        self.assertFalse(self.approved())
+        os.kill(worker, signal.SIGTERM)
+        self.wait_for(lambda: (directory / 'closed.json').exists())
+        closed = json.loads((directory / 'closed.json').read_text())
+        self.assertEqual((closed['reason'], closed['emitted']), ('terminated', False))
+        self.assertIn('Esc to cancel', self.screen())
+        self.assertFalse(self.approved())
+
+    def mutate(self, **fields):
+        record = json.loads(self.record_path.read_text()); record.update(fields)
+        staged = self.record_path.with_suffix('.new'); staged.write_text(json.dumps(record)); staged.replace(self.record_path)
+
+    def test_paused_session_never_takes_an_offered_decision(self):
+        start = subprocess.check_output(['ps', '-p', str(os.getpid()), '-o', 'lstart='], env=dict(self.env, LC_ALL='C', TZ='UTC'), text=True).strip()
+        self.refused_offer(lambda: self.mutate(pausing=dict(pid=os.getpid(), start=start)))
+
+    def test_failed_session_never_takes_an_offered_decision(self):
+        self.refused_offer(lambda: self.mutate(error='Synthetic provider failure'))
+
+    def test_terminal_of_another_run_never_takes_an_offered_decision(self):
+        self.refused_offer(lambda: self.tmux('set-option', '-t', '=' + self.name + ':', '@hgs_run', str(uuid.uuid4())))
 
     def test_claimed_decision_is_never_sent_again_through_any_transport(self):
         card = self.channel_card()

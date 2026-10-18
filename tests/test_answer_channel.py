@@ -110,5 +110,64 @@ class AnswerChannelApproval(AnswerChannelConversation):
         self.assertEqual(self.bound(self.event(),late),[],'a call after the request is not its call')
 
 
+class AnswerChannelApprovalBinding(unittest.TestCase):
+    """A hook binds to the tool call its first record shows, never to a later
+    identical one; the request may be journaled after the hook starts."""
+    NAME='claude/project/task';RUN='run-1';CONVERSATION='6f1f6a3e-6c55-4c55-9a55-1c2b3d4e5f60'
+    INPUT=dict(command='printf same')
+
+    def digest(self):
+        return hashlib.sha256(json.dumps(self.INPUT,separators=(',',':'),sort_keys=True).encode()).hexdigest()
+
+    def run_worker(self,first_uses,later):
+        """Start a hook for one PermissionRequest on a record holding only
+        `first_uses`, then 0.35 s later write `later` (uses, pending call)."""
+        event=dict(hook_event_name='PermissionRequest',tool_name='Bash',session_id=self.CONVERSATION,tool_input=self.INPUT)
+        with tempfile.TemporaryDirectory(prefix='hgs-answer-channel-') as state:
+            path=Path(state)/(hashlib.sha256(self.NAME.encode()).hexdigest()+'.json')
+            record=dict(version=1,name=self.NAME,agent='claude',run_id=self.RUN,conversation_id=self.CONVERSATION,pid=1,
+                        process_start='not this process',phase='tool',claude_tool_uses=first_uses)
+            def write(value):
+                temporary=path.with_suffix('.new');temporary.write_text(json.dumps(value));temporary.replace(path)
+            write(record)
+            values=dict(os.environ,HGS_STATE_DIR=state,HGS_CONFIG_DIR=os.path.join(state,'config'),HGS_SESSION=self.NAME,HGS_RUN_ID=self.RUN)
+            for name in ('TMUX','TMUX_PANE'):values.pop(name,None)
+            worker=subprocess.Popen([str(HGS),'__state','answer-channel'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,text=True,env=values)
+            worker.stdin.write(json.dumps(event));worker.stdin.close();worker.stdin=None
+            time.sleep(.35)
+            started=worker.poll() is None
+            if later is not None:
+                uses,tool=later;at=int(time.time())
+                write(dict(record,phase='approval',pending_approval=event,pending_approval_at=at,
+                           claude_tool_uses={name:dict(use,at=at-1) for name,use in uses.items()}))
+            stdout,stderr=worker.communicate(timeout=30)
+            self.assertEqual((worker.returncode,stdout,stderr),(0,'',''))
+            channels=[json.loads(Path(p).read_text()) for p in glob.glob(os.path.join(state,'native_answers','*','*','waiting.json'))]
+            return started,[c['question_id'] for c in channels],(at if later is not None else None)
+
+    def identity(self,tool,at):
+        key=[self.RUN,self.CONVERSATION,None,1,'not this process',tool,'Bash',self.INPUT,at]
+        return 'claude-approval:'+hashlib.sha256(json.dumps(key,separators=(',',':'),sort_keys=True).encode()).hexdigest()
+
+    def use(self):
+        return dict(tool_name='Bash',input=self.digest(),at=int(time.time())-1)
+
+    def test_a_later_identical_call_is_never_adopted(self):
+        started,channels,_=self.run_worker(dict(toolu_A=self.use()),(dict(toolu_B=self.use()),'toolu_B'))
+        self.assertTrue(started,'the hook waited for the journal')
+        self.assertEqual(channels,[],'the call that replaced A is not the one this hook asks about')
+
+    def test_the_same_call_journaled_late_binds(self):
+        started,channels,at=self.run_worker(dict(toolu_A=self.use()),(dict(toolu_A=self.use()),'toolu_A'))
+        self.assertTrue(started)
+        self.assertEqual(channels,[self.identity('toolu_A',at)])
+
+    def test_no_or_two_first_calls_never_bind(self):
+        for first in ({},dict(toolu_A=self.use(),toolu_A2=self.use())):
+            started,channels,_=self.run_worker(first,(dict(toolu_A=self.use()),'toolu_A'))
+            self.assertEqual(channels,[],first)
+
+
 if __name__=='__main__':
     unittest.main()

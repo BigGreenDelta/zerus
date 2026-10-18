@@ -96,6 +96,25 @@ pub(in crate::state) fn bind(record:&Value,event:&Value)->Option<Value> {
     identity(record)
 }
 
+/// The one active main-agent tool call with the event's tool and input in
+/// `record`. Claude journals PreToolUse before it asks, so in the first record
+/// a new hook reads, this is the call the event asks about. None when there is
+/// none or more than one.
+pub(in crate::state) fn asked_use(record:&Value,event:&Value)->Option<String> {
+    if !requested(event)||record[OVERFLOW]==true {return None;}
+    let input=digest(&event["tool_input"]);
+    let mut found=record[USES].as_object()?.iter()
+        .filter(|(_,used)|used["tool_name"]==event["tool_name"]&&used["input"]==input.as_str()).map(|(id,_)|id);
+    let id=found.next()?.clone();
+    found.next().is_none().then_some(id)
+}
+
+/// `bind`, only to the tool call `tool_use` that the hook captured first: a
+/// later call with the same input is another request.
+pub(in crate::state) fn bind_to(record:&Value,event:&Value,tool_use:&str)->Option<Value> {
+    bind(record,event).filter(|card|card["tool_call_id"]==tool_use)
+}
+
 /// Whether `current` still records the exact request that `card` was bound to.
 /// Another request with the same input may begin later; it is not this one.
 pub(in crate::state) fn pending(current:&Value,card:&Value)->bool {
@@ -116,12 +135,21 @@ pub(super) fn shown(record:&Value,screen:&str)->bool {
 }
 
 /// The same proof, read from the terminal now through the same identity and
-/// capture as `hgs answer`. A capture that fails proves nothing: it never
-/// overrides the proof that let `hgs answer` offer, since a retracted offer
-/// leaves this request to the screen for good. Claude ignores a decision that
-/// arrives after a Terminal answer.
+/// capture as `hgs answer`.
 pub(in crate::state) fn waits_now(record:&Value)->bool {
-    kimi_tui_choice::identity(record).and_then(|live|kimi_tui_choice::capture(&live)).map_or(true,|screen|shown(record,&screen))
+    waits(kimi_tui_choice::identity(record),kimi_tui_choice::capture)
+}
+/// A refused identity (another process or pane, a pause, a provider error, a
+/// terminal the agent does not own) never lets a decision go. Only a capture
+/// that fails after the identity holds proves nothing either way: it never
+/// overrides the proof that let `hgs answer` offer, since a retracted offer
+/// leaves the request to the screen for good, and Claude ignores a decision
+/// that arrives after a Terminal answer.
+pub(in crate::state) fn waits(live:Result<Value>,capture:impl FnOnce(&Value)->Result<String>)->bool {
+    match live {
+        Ok(live) => capture(&live).map_or(true,|screen|shown(&live,&screen)),
+        Err(_) => false,
+    }
 }
 
 /// Claude's PermissionRequest decision for an offered approval. Allow carries
@@ -167,6 +195,33 @@ pub(in crate::state) fn decision(offer:&Value)->Result<Value> {
         }
         let mut unsaved=r.clone();unsaved["conversation_id"]=json!("");
         assert!(bind(&unsaved,&event("PermissionRequest",json!({"session_id":""}))).is_none());
+    }
+
+    #[test] fn a_hook_binds_only_the_call_its_first_record_shows() {
+        let request=event("PermissionRequest",json!({}));
+        // PreToolUse is journaled; the PermissionRequest is not yet.
+        let mut lag=json!({"agent":"claude","phase":"tool","run_id":"run","conversation_id":"conversation","pane":"%1","pid":1,"process_start":"start"});
+        observe(&mut lag,&event("PreToolUse",json!({"tool_use_id":"toolu_one"})));
+        assert_eq!(asked_use(&lag,&request).as_deref(),Some("toolu_one"));
+        assert!(bind_to(&lag,&request,"toolu_one").is_none(),"nothing to bind before the journal");
+        let journaled=waiting();
+        assert_eq!(bind_to(&journaled,&request,"toolu_one"),identity(&journaled),"the same call, once journaled");
+        // That call ended and a later identical one is pending now.
+        let mut later=journaled.clone();
+        observe(&mut later,&event("PostToolUse",json!({"tool_use_id":"toolu_one"})));
+        observe(&mut later,&event("PreToolUse",json!({"tool_use_id":"toolu_two"})));
+        later[USES]["toolu_two"]["at"]=json!(later["pending_approval_at"].as_f64().unwrap()-1.);
+        assert_eq!(bind(&later,&request).unwrap()["tool_call_id"],"toolu_two");
+        assert!(bind_to(&later,&request,"toolu_one").is_none(),"never the later call");
+        // No call, two identical calls, an overflow, a child or another input.
+        let mut none=lag.clone();observe(&mut none,&event("PostToolUse",json!({"tool_use_id":"toolu_one"})));
+        assert!(asked_use(&none,&request).is_none());
+        let mut twice=lag.clone();observe(&mut twice,&event("PreToolUse",json!({"tool_use_id":"toolu_two"})));
+        assert!(asked_use(&twice,&request).is_none());
+        let mut overflow=lag.clone();overflow[OVERFLOW]=json!(true);
+        assert!(asked_use(&overflow,&request).is_none());
+        assert!(asked_use(&lag,&event("PermissionRequest",json!({"agent_id":"child"}))).is_none());
+        assert!(asked_use(&lag,&event("PermissionRequest",json!({"tool_input":{"command":"rm"}}))).is_none());
     }
 
     #[test] fn missing_stale_ambiguous_or_overflowing_tool_uses_never_bind() {
@@ -240,6 +295,19 @@ pub(in crate::state) fn decision(offer:&Value)->Result<Value> {
         assert!(!shown(&other,clipped));
         let mut overflow=r.clone();overflow["child_approval_overflow"]=json!(true);
         assert!(!shown(&overflow,PANEL));
+    }
+
+    #[test] fn a_refused_identity_never_waits_but_an_unknown_capture_does() {
+        const PANEL:&str="────────────────────────────────────────\n Bash command\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n printf hi > out.txt\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend\n";
+        let r=waiting();
+        // What kimi_tui_choice::identity refuses: a pause, a provider error,
+        // a changed process, a terminal this agent does not own.
+        for refusal in ["Session identity changed; open Terminal","terminal is not in the expected agent input mode; open Terminal"] {
+            assert!(!waits(Err(refusal.into()),|_|Ok(PANEL.into())),"{refusal}");
+        }
+        assert!(waits(Ok(r.clone()),|_|Ok(PANEL.into())));
+        assert!(waits(Ok(r.clone()),|_|Err("Terminal snapshot is too large".into())),"a failed capture proves nothing");
+        assert!(!waits(Ok(r.clone()),|_|Ok("────────────────────────────────────────\n❯ \n".into())),"no chooser shown");
     }
 
     #[test] fn decisions_grant_once_deny_or_pass_feedback() {

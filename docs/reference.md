@@ -1135,8 +1135,11 @@ for such a request reads its terminal for this.
 While hgs's `PermissionRequest` hook waits beside a main-agent approval, the
 card answers through it, so a clipped panel no longer needs a larger Terminal.
 - The hook is bound to one exact request: the saved conversation, and the one
-  active tool call whose tool and input equal the request. Without exactly one
-  such call, the request is answered on screen as above.
+  active tool call whose tool and input equal the request when the hook
+  starts. Without exactly one such call, the request is answered on screen as
+  above; a later identical call is another request.
+- A paused session, a provider error, or a terminal that no longer belongs to
+  the agent never lets a decision go through the hook.
 - Claude sends the hook no signal for an answer in Terminal, so the card and
   the hook act only while Terminal still shows a chooser. A complete panel must
   be this request.
