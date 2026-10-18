@@ -39,7 +39,7 @@ class PinnedQt(unittest.TestCase):
         qt.validate_pin(self.pin)
         self.assertEqual(self.pin["qt_version"], "6.11.2")
         names = " ".join(archive["path"] for archive in self.pin["archives"])
-        for module in ("qtbase", "qtsvg", "qtmultimedia"):
+        for module in ("qtbase", "qtsvg", "qtmultimedia", "qttools"):
             self.assertIn(module + "-", names)
         # Qt WebEngine and the modules only it needs are not part of the bundle.
         for module in ("qtdeclarative", "qtwebchannel", "qtpositioning", "qtwebengine"):

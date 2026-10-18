@@ -9,6 +9,7 @@ pkgbase = zerus-git
 	makedepends = rust
 	makedepends = cmake
 	makedepends = ninja
+	makedepends = qt6-tools
 	makedepends = qt6-webengine
 	depends = qt6-base
 	depends = qt6-multimedia

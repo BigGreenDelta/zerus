@@ -108,9 +108,12 @@ object ConversationMerge {
         val used = mutableSetOf<Int>()
         val recorded = mutableSetOf<String>()
         outgoing.filter { it.belongsTo(target) && it.status != "reviewed" }.sortedBy { it.createdAt }.forEach { message ->
-            // Only a user row from durable native receipt metadata is authoritative by request ID.
-            var match = result.indices.firstOrNull { index -> index !in used && result[index].role == "You" &&
-                result[index].source == "hgs_delivery" && result[index].requestId == message.requestId }
+            // Only a user row from durable native receipt metadata is authoritative by request ID,
+            // then an OpenCode prompt naming the exact request that sent it: OpenCode dates a
+            // queued prompt by its delivery, which can be far outside the text and time window.
+            fun named(source: String) = result.indices.firstOrNull { index -> index !in used && result[index].role == "You" &&
+                result[index].source == source && result[index].requestId.isNotBlank() && result[index].requestId == message.requestId }
+            var match = named("hgs_delivery") ?: named("opencode_native")
             if (match == null && message.status in listOf("submitted", "recorded") && message.submittedAt > 0) {
                 val text = message.submittedText.ifBlank { message.text }.trim()
                 if (text.isNotBlank()) match = result.indices.filter { index ->

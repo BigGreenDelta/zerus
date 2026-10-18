@@ -456,7 +456,8 @@ class OpenCodeNative(unittest.TestCase):
         name = binding['name']
         row = self.hgs(['inspect', name])
         self.assertTrue(row['inspection_unavailable'])
-        self.assertIn(NOT_RUNNING, row['inspection_reason'])
+        # The computer is named as hgs names itself (HGS_SELF), like the desktop does.
+        self.assertEqual(row['inspection_reason'], NOT_RUNNING + ' on fixture')
         # Native state stays unknown, never stopped; clients keep the transcript they show.
         self.assertEqual((row['state'], row['phase'], row['activity']), ('unknown', 'unknown', 'unknown'))
         self.assertEqual(row['allowed_actions'], ['forget'])
@@ -464,14 +465,14 @@ class OpenCodeNative(unittest.TestCase):
         self.assertFalse(row['send_supported'])
         listed = self.listing()[name]
         self.assertEqual((listed['state'], listed['phase']), ('unknown', 'unknown'))
-        self.assertIn(NOT_RUNNING, listed['inspection_reason'])
+        self.assertEqual(listed['inspection_reason'], NOT_RUNNING + ' on fixture')
         account = self.account()
         self.assertEqual(account['catalog_state'], 'not_running')
-        self.assertIn(NOT_RUNNING, account['catalog_reason'])
+        self.assertEqual(account['catalog_reason'], NOT_RUNNING + ' on fixture')
         # Sending is explicit, but it never starts the service either.
         request = self.payload(binding, text='never sent')
         failure = self.hgs(['send', name, '--json'], request, success=False)
-        self.assertIn(NOT_RUNNING, failure.stderr)
+        self.assertIn(NOT_RUNNING + ' on fixture', failure.stderr)
         self.assertFalse(self.receipt_path(request).exists())
         self.assertFalse(self.registration_path().exists())
         self.assertEqual(self.native_processes(), [])
@@ -924,6 +925,50 @@ class OpenCodeNative(unittest.TestCase):
         self.assertEqual([t for _, t in users].count(left_text), 1)
         self.assertEqual([r for r in self.model.requests if r['last_user'] == left_text and r['tools']][1:], [])
 
+
+    def test_12_forget_drops_the_history_cache_and_keeps_native_history(self):
+        b = self.create()
+        name, conversation = b['name'], b['conversation_id']
+        sent = self.hgs(['send', name, '--json'], self.payload(b, text='Cached turn'))
+        self.wait(name, lambda v: v['phase'] == 'idle' and any(
+            e.get('message_id') == sent['native_message_id'] for e in v['events']))
+        cache = self.state / 'opencode/history' / (hashlib.sha256(conversation.encode()).hexdigest() + '.json')
+        self.assertTrue(cache.is_file())
+        self.action(b, 'forget')
+        self.assertFalse(self.binding_path(name).exists())
+        self.assertFalse(cache.exists())
+        self.assertIn((sent['native_message_id'], 'Cached turn'), self.user_messages(conversation))
+
+    def test_13_a_long_queued_prompt_names_its_request(self):
+        # OpenCode 2.0.32 dates a queued message by its delivery: one queued for 12 s was
+        # dated 12.0 s after its submission. Phones then cannot match their own Sent
+        # message by text and time, so every prompt Zerus sent names its request, while
+        # queued and after delivery.
+        b = self.create()
+        name = b['name']
+        self.hgs(['send', name, '--json'], self.payload(b, text='HOLD_NATIVE first turn'))
+        self.assertTrue(self.model.holding.wait(30), 'the model never received the held turn')
+        self.wait(name, lambda v: v['phase'] == 'working')
+        request = self.payload(b, text='Waited in the queue')
+        queued = self.hgs(['send', name, '--json'], request)
+        self.assertTrue(queued.get('queued'))
+        message_id = queued['native_message_id']
+
+        def row(view):
+            return next((e for e in view['events'] if e.get('message_id') == message_id), None)
+        view = self.wait(name, lambda v: row(v) is not None)
+        self.assertEqual((row(view)['delivery_state'], row(view)['request_id']), ('queued', request['request_id']))
+        time.sleep(12)
+        self.model.release.set()
+        view = self.wait(name, lambda v: v['phase'] == 'idle' and row(v) and not row(v).get('delivery_state'))
+        self.assertEqual((row(view)['detail'], row(view)['request_id']), ('Waited in the queue', request['request_id']))
+        self.assertGreater(row(view)['at'] - queued['submitted_at'], 10)
+        # A prompt sent outside Zerus names no request.
+        status, _ = self.api('POST', f"/api/session/{b['conversation_id']}/prompt",
+                             {'id': 'msg_' + native_suffix(), 'text': 'Typed in OpenCode', 'delivery': 'queue'})
+        self.assertLess(status, 300)
+        view = self.wait(name, lambda v: v['phase'] == 'idle' and any(e.get('detail') == 'Typed in OpenCode' for e in v['events']))
+        self.assertEqual([e.get('request_id') for e in view['events'] if e.get('detail') == 'Typed in OpenCode'], [None])
 
 if __name__ == '__main__':
     unittest.main()

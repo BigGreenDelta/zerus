@@ -23,6 +23,7 @@ public:
     QMenu *menu = nullptr;
     int shows = 0;
     int messages = 0;
+    QList<qint64> pictures;
 
     void setIcon(const QIcon &icon) override { iconKeys << icon.cacheKey(); }
     void setToolTip(const QString &text) override { toolTips << text; }
@@ -31,6 +32,11 @@ public:
                      int) override
     {
         ++messages;
+    }
+    void showClickableIconMessage(const QString &, const QString &, const QIcon &icon, int,
+                                  std::function<void()>) override
+    {
+        pictures << icon.cacheKey();
     }
     void show() override { ++shows; }
     void primaryClick() { activate(); }
@@ -187,6 +193,11 @@ void TestQuietTrayIcon::showAndMessageAreNeverDeferred()
     r.quiet.show();
     r.quiet.showMessage(QStringLiteral("t"), QStringLiteral("b"), QSystemTrayIcon::Warning, 1);
     QCOMPARE(r.inner->shows, 1);
+    QCOMPARE(r.inner->messages, 1);
+    // A message with a picture reaches the inner icon with that picture.
+    const QIcon picture = makeIcon();
+    r.quiet.showClickableIconMessage(QStringLiteral("t"), QStringLiteral("b"), picture, 1, {});
+    QCOMPARE(r.inner->pictures, QList<qint64>{picture.cacheKey()});
     QCOMPARE(r.inner->messages, 1);
 }
 

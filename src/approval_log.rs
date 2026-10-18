@@ -436,7 +436,8 @@ mod tests {
         opencode["answer_transport"] = json!("native_opencode");
         opencode["kind"] = json!("opencode_permission");
         opencode["questions"][0]["id"] = json!("permission");
-        opencode["questions"][0]["options"] = json!([{"id":"once","label":"Allow once"},{"id":"always","label":"Always allow"},{"id":"reject","label":"Reject"}]);
+        opencode["approval_choices"] = json!(true);
+        opencode["questions"][0]["options"] = json!([{"id":"once","label":"Allow once","scope":"once"},{"id":"always","label":"Always allow","scope":"broader"},{"id":"reject","label":"Reject","scope":"once"}]);
         assert_eq!(
             answers(&opencode).unwrap()[0]["selected_option_ids"],
             json!(["once"])

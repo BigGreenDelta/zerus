@@ -62,7 +62,7 @@ extension QuestionPolicies {
                 return "Answers must be one line and at most 4096 UTF-8 bytes."
             }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("/") || trimmed.hasPrefix("!") { return "Enter command-like answers on your computer." }
+            if !prompt.literalText && (trimmed.hasPrefix("/") || trimmed.hasPrefix("!")) { return "Enter command-like answers on your computer." }
             if selected.contains(where: { id in !prompt.choices.contains { $0.id == id } }) { return "An answer option changed. Review this request again." }
             if !trimmed.isEmpty && !prompt.other { return "This request does not accept an Other answer." }
             if !prompt.multi && selected.count + (trimmed.isEmpty ? 0 : 1) > 1 { return "Choose one answer for this question." }
@@ -141,6 +141,100 @@ extension QuestionPolicies {
     public static func approvalSupported(_ question: Question) -> Bool {
         guard question.approval, question.prompts.count == 1, let prompt = question.prompts.first, !prompt.multi else { return false }
         return prompt.choices.contains { $0.id == "allow" } && prompt.choices.contains { $0.id == "deny" }
+    }
+
+    /// An answerable OpenCode permission: Allow once, Reject and optionally Always allow, answered with those native ids.
+    /// Other approvals with native choices (Claude) stay on the computer; allow/deny approvals keep `approvalSupported`.
+    public static func openCodePermission(_ question: Question) -> Bool {
+        guard question.approval, question.source == "opencode_native", question.canAnswer, question.prompts.count == 1,
+              let prompt = question.prompts.first, prompt.id == "permission", !prompt.multi else { return false }
+        let ids = prompt.choices.map(\.id)
+        return ids.contains("once") && ids.contains("reject") && ids.allSatisfy { ["once", "always", "reject"].contains($0) }
+    }
+
+    /// The single answer row of an approval decision: one native option of its one prompt.
+    public static func approvalAnswers(_ question: Question, _ option: String) -> JSON? {
+        guard let prompt = question.prompts.first else { return nil }
+        return .array([["question_id": .string(prompt.id), "selected_option_ids": [.string(option)], "text": ""]])
+    }
+}
+
+/// One OpenCode permission button: its label, the native option it sends and what it needs first. Allow once and
+/// Always allow wait for the card's approval review; Always allow then asks for a `PermissionConfirmation`.
+public enum PermissionAction: CaseIterable, Hashable, Sendable {
+    case reject, allowOnce, alwaysAllow
+
+    public var option: String {
+        switch self {
+        case .reject: "reject"
+        case .allowOnce: "once"
+        case .alwaysAllow: "always"
+        }
+    }
+
+    /// Always allow reaches beyond this request, so it is confirmed separately.
+    public var confirmation: Bool { self == .alwaysAllow }
+    var review: Bool { self != .reject }
+
+    /// Allow once shows the remaining review seconds, as Approve once does.
+    public func label(remaining: Int) -> String {
+        switch self {
+        case .reject: "Reject"
+        case .allowOnce: remaining > 0 ? "Allow once (\(remaining))" : "Allow once"
+        case .alwaysAllow: "Always allow…"
+        }
+    }
+
+    /// `answerable`: the card can be answered and edited here now; `reviewed`: its review countdown has finished.
+    public func enabled(answerable: Bool, reviewed: Bool) -> Bool { answerable && (!review || reviewed) }
+
+    /// The buttons of a card that passes `openCodePermission`, in order; none for any other card.
+    public static func actions(_ question: Question) -> [PermissionAction] {
+        guard QuestionPolicies.openCodePermission(question) else { return [] }
+        let always = question.prompts[0].choices.contains { $0.id == PermissionAction.alwaysAllow.option }
+        return allCases.filter { $0 != .alwaysAllow || always }
+    }
+}
+
+/// "Always allow" on an OpenCode permission reaches beyond this one request, so it needs its own confirmation. That
+/// confirmation belongs to the exact card that offered it and sends only while that card still offers it and can be
+/// answered and edited here; otherwise it closes without sending.
+public struct PermissionConfirmation: Hashable, Sendable {
+    public let questionId: String
+    public let questionHash: String
+    /// The offered option's description, verbatim: hgs names the patterns Always allow saves there.
+    public let saved: String
+
+    /// The confirmation an "Always allow…" tap opens, or nil when this card does not offer Always allow.
+    public init?(_ question: Question) {
+        guard Self.offered(question) else { return nil }
+        questionId = question.id
+        questionHash = question.hash
+        saved = question.prompts[0].choices.first { $0.id == PermissionAction.alwaysAllow.option }?.description ?? ""
+    }
+
+    static func offered(_ question: Question) -> Bool { PermissionAction.actions(question).contains(.alwaysAllow) }
+
+    /// The dialog text: what Always allow does, then what it saves when the computer names it.
+    public var message: String {
+        let general = "OpenCode will allow matching requests without asking again."
+        return saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? general : general + "\n\n" + saved
+    }
+
+    /// The card-level part of `confirm`: this exact card still offers Always allow and can be answered and edited here.
+    func answers(_ current: Question, editing: Bool, available: Bool) -> JSON? {
+        guard current.id == questionId, current.hash == questionHash, Self.offered(current), editing, available else { return nil }
+        return QuestionPolicies.approvalAnswers(current, PermissionAction.alwaysAllow.option)
+    }
+
+    /// The answer to send when the person confirms, or nil to send nothing; the dialog is shown only while this is non-nil.
+    /// It rechecks everything the Always allow… button needed: the same card, answerable and editable, in the foreground
+    /// and visible, with that card's own review complete. Background or a hidden card restarts the review, so a dialog
+    /// left open across them cannot confirm until a new review completes.
+    public func confirm(_ current: Question, target: Target, editing: Bool, available: Bool, foreground: Bool, visible: Bool,
+                        review: ApprovalReview, now: Double) -> JSON? {
+        guard foreground, visible, review.secondsRemaining(now: now, card: ApprovalReview.key(target, current)) == 0 else { return nil }
+        return answers(current, editing: editing, available: available)
     }
 }
 
@@ -395,18 +489,39 @@ public struct QuestionDisplayState: Hashable, Sendable {
     }
 }
 
-/// Three continuous foreground, visible seconds; background time never approves an action.
+/// Three continuous foreground, visible seconds of one card; background time never approves an action. Another card
+/// shown in the same place (another target, ID or hash) starts its own review. Only `observe`, called when the card's
+/// eligibility or identity changes, starts a review; clock ticks in between only let it run, so leaving (background,
+/// out of view) always means a full new review after returning.
 public struct ApprovalReview: Hashable, Sendable {
     public var startedAt: Double?
-    public init(startedAt: Double? = nil) { self.startedAt = startedAt }
-
-    public func observe(eligible: Bool, now: Double) -> ApprovalReview {
-        if !eligible || (startedAt.map { now < $0 } ?? false) { return ApprovalReview() }
-        return startedAt == nil ? ApprovalReview(startedAt: now) : self
+    /// The reviewed card, `key(_:_:)`; "" where only one card is reviewed.
+    public var card: String
+    public init(startedAt: Double? = nil, card: String = "") {
+        self.startedAt = startedAt
+        self.card = card
     }
 
-    public func secondsRemaining(now: Double) -> Int {
-        guard let startedAt else { return 3 }
+    public static func key(_ target: Target, _ question: Question) -> String {
+        JSON.array([.string(target.key), .string(question.id), .string(question.hash)]).compact
+    }
+
+    public func observe(eligible: Bool, now: Double, card: String = "") -> ApprovalReview {
+        if !eligible || (startedAt.map { now < $0 } ?? false) { return ApprovalReview(card: card) }
+        return startedAt == nil || card != self.card ? ApprovalReview(startedAt: now, card: card) : self
+    }
+
+    /// A clock tick while the card stays eligible: it lets this card's started review run on and never starts or
+    /// re-arms one. A late tick from a clock stopped because the card left therefore cannot complete a review that
+    /// leaving reset; a tick for another card leaves this review alone, and a clock that went back resets it.
+    public func tick(now: Double, card: String) -> ApprovalReview {
+        guard card == self.card, let startedAt, now < startedAt else { return self }
+        return ApprovalReview(card: card)
+    }
+
+    /// A card this review did not observe has its full review ahead, even before the next observation.
+    public func secondsRemaining(now: Double, card: String = "") -> Int {
+        guard let startedAt, card == self.card else { return 3 }
         return min(max(3 - Int(max(now - startedAt, 0)), 0), 3)
     }
 }

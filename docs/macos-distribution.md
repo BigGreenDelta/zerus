@@ -92,7 +92,9 @@ no prompt appeared (`zerus-nbzl.23`).
 ## Pinned Qt
 
 `packaging/macos/qt.json` pins official Qt **6.11.2** (`qtbase`, `qtsvg`,
-`qtmultimedia`) by archive size and SHA-256. Qt WebEngine and the modules only it
+`qtmultimedia`, `qttools`) by archive size and SHA-256. `qttools` supplies the
+build-time `lrelease` compiler for the optional interface catalog; it does not
+change the English default. Qt WebEngine and the modules only it
 needs (`qtdeclarative`, `qtwebchannel`, `qtpositioning`) are not part of the
 bundle: the embedded DeepSeek Native UI is an optional Linux plugin, so on macOS
 Native UI opens in the browser. `check-macos-bundle.py` rejects any Qt WebEngine

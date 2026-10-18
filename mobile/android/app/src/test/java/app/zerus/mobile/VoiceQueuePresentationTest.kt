@@ -62,6 +62,34 @@ class VoiceQueuePresentationTest {
         assertEquals("Accepted by native app", VoiceProtocol.label("submitted"))
     }
 
+    @Test fun aBoundOpenCodeRowNamingTheVoiceRequestKeepsVoiceRowsAndIsNeverATypedMessage() {
+        // hgs names the voice job's request on the OpenCode prompt it bound, queued or delivered.
+        fun shape(rows: List<Event>) = rows.map { listOf(it.id, it.delivery, it.voice, it.originalIds, it.outgoingId, it.text) }
+        val typedId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        val unrelated = OutgoingMessage(typedId, target, "Something else", emptyList(), 50.5, "submitted", 51.0)
+        val typed = unrelated.copy(text = message.transcript)
+        for (state in listOf("queued", "not_delivered", null)) {
+            val plain = NativeParser.events(raw(voice(), native(state)))
+            val named = NativeParser.events(raw(voice(), native(state).put("request_id", id)))
+            assertEquals(shape(plain), shape(named))
+            assertEquals(shape(VoiceHistory.merge(target, plain, emptyList())), shape(VoiceHistory.merge(target, named, emptyList())))
+            assertEquals(shape(RollingConversationHistory.merge(target, target, plain, plain).events),
+                shape(RollingConversationHistory.merge(target, target, named, named).events))
+            // An unrelated phone message merges the same either way.
+            assertEquals(shape(ConversationMerge.merge(target, plain, listOf(unrelated)).events),
+                shape(ConversationMerge.merge(target, named, listOf(unrelated)).events))
+            // One typed with the transcript's text inside the window: the text fallback took the unnamed
+            // inbox row; the row naming the voice request is never another message, and the voice rows stay.
+            assertEquals(if (state == null) emptySet() else setOf(typedId), ConversationMerge.merge(target, plain, listOf(typed)).recordedRequestIds)
+            val separate = ConversationMerge.merge(target, named, listOf(typed))
+            assertTrue(separate.recordedRequestIds.isEmpty())
+            assertEquals(shape(named) + listOf(listOf("outgoing:$typedId", "submitted", null, emptyList<String>(), typedId, message.transcript)),
+                shape(separate.events))
+            // Bringing the own send into view still lands on the voice card, not the inbox row after it.
+            assertEquals("voice:$id", ConversationViewport.own(VoiceHistory.merge(target, named, emptyList()), id)?.id)
+        }
+    }
+
     @Test fun wrongTargetMessageSourceAndAmbiguousBindingsNeverSuppressQueueRows() {
         val foreign = native().put("agent_id", "other-child")
         assertEquals(1, NativeParser.events(raw(voice(), foreign)).size)

@@ -221,8 +221,17 @@ object NativeParser {
             } else "native:$nativeId"
             val originalId = value.string("original_id").ifBlank { "$stream:$source:$role:$fallback" }
             val historyId = value.string("history_id")
+            val requestId = when {
+                role != "You" -> ""
+                source in setOf("hgs_delivery", "hgs_voice") -> value.string("message_id")
+                // OpenCode dates a queued prompt by its delivery; hgs names the Zerus send
+                // that admitted it, so the phone can match its own message exactly.
+                source == "opencode_native" -> value.string("request_id").takeIf {
+                    runCatching { UUID.fromString(it).toString() == it }.getOrDefault(false) }.orEmpty()
+                else -> ""
+            }
             return Event(if (historyId.isBlank()) originalId else "history:$historyId", role,
-                text, value.string("at", "timestamp"), at, if (source in setOf("hgs_delivery", "hgs_voice") && role == "You") value.string("message_id") else "", files, source,
+                text, value.string("at", "timestamp"), at, requestId, files, source,
                 delivery = if (role == "You") MessageDeliveryPresentation.inboxState(value) else "",
                 nativeType = type, submittedText = if (source == "hgs_delivery") value.string("submitted_text") else "",
                 originalId = originalId, historyId = historyId, historyCursor = value.string("history_cursor"),
@@ -240,7 +249,7 @@ object NativeParser {
         val used = mutableSetOf<Int>()
         val receipts = raw.optJSONArray("attachment_messages")?.objects().orEmpty().mapNotNull { parse(it, "attachment") }
         receipts.forEach { metadata ->
-            val candidate = rows.indices.filter { it !in used && rows[it].role == "You" && rows[it].requestId.isBlank() &&
+            val candidate = rows.indices.filter { it !in used && rows[it].role == "You" && AttachmentReceiptMatch.replaceable(metadata, rows[it]) &&
                 rows[it].nativeType in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted") &&
                 AttachmentReceiptMatch.matches(metadata, rows[it]) }.singleOrNull()
             val exact = candidate?.takeIf { index -> receipts.count { AttachmentReceiptMatch.matches(it, rows[index]) } == 1 }
@@ -248,7 +257,7 @@ object NativeParser {
                 used += exact
                 rows[exact] = metadata.copy(at = rows[exact].at, originalIds = (metadata.originalIds + rows[exact].id).distinct().take(8))
             }
-            else if (rows.none { it.role == "You" && it.requestId == metadata.requestId && metadata.requestId.isNotBlank() }) rows += metadata
+            else if (rows.none { it.role == "You" && it.receiptRequestId == metadata.requestId && metadata.requestId.isNotBlank() }) rows += metadata
         }
         raw.optJSONArray("voice_messages")?.objects().orEmpty().forEach { item ->
             val metadata = parse(item, "voice") ?: return@forEach
