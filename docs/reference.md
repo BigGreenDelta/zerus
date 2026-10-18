@@ -84,12 +84,17 @@ matched identifier and expose its complete value in the tooltip.
 
 The desktop session header keeps frequent actions as icons: open the session
 folder, open a shell there, **Copy session ID** and **Clear session**. Its **⋯**
-menu holds **Rename…**, **Fork session…**, **Copy connect command** (**Open
-externally** without clipboard mode, or the native DeepSeek UI), **Pause
+menu names the same actions (**Open folder**, **Open shell in session folder**,
+**Copy session ID** and **Clear session…**, each available exactly when its icon
+is) and also holds **Rename…**, **Fork session…**, **Copy connect command**
+(**Open externally** without clipboard mode, or the native DeepSeek UI), **Pause
 session** or **Resume session**, **Start fresh…**, **Move to archive** and
 **Terminate session…**. A stopped session hides the Clear session icon and offers
 **Start fresh…** in the menu; an archived session shows **Restore session** in its
-place.
+place. The session list context menu offers **Clear session…** for a live session
+where a stopped one offers **Start fresh…**. For a session that is not open, it
+becomes available once that session's own inspection confirms the conversation
+listed for it; choosing it opens the session and asks the same confirmation.
 
 Identifiers such as `zerus-ab12` are Beads task numbers, not session IDs. Desktop
 message search finds their public mentions; Android session search finds mentions
