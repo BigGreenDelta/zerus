@@ -201,6 +201,30 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             }
             else { p.drawLine(6, 9, 12, 15); p.drawLine(12, 15, 18, 9); }
         } else if (name == "more") { p.drawPoint(5, 12); p.drawPoint(12, 12); p.drawPoint(19, 12); }
+        // Project tasks (TasksView): a stage's icon is the icon of the action that moves a task there.
+        else if (name == "task-inbox") {
+            QPainterPath tray; tray.moveTo(4, 13.5); tray.lineTo(6.5, 6); tray.lineTo(17.5, 6); tray.lineTo(20, 13.5);
+            tray.lineTo(20, 19); tray.lineTo(4, 19); tray.closeSubpath(); p.drawPath(tray);
+            QPainterPath slot; slot.moveTo(4, 13.5); slot.lineTo(8.5, 13.5); slot.lineTo(10, 16); slot.lineTo(14, 16);
+            slot.lineTo(15.5, 13.5); slot.lineTo(20, 13.5); p.drawPath(slot);
+        } else if (name == "task-list") {
+            p.drawLine(4, 6, 20, 6); p.drawLine(4, 11, 20, 11); p.drawLine(4, 16, 14, 16);
+        } else if (name == "task-list-add") {
+            p.drawLine(4, 6, 16, 6); p.drawLine(4, 11, 16, 11); p.drawLine(4, 16, 11, 16);
+            p.drawLine(QPointF(17.5, 14), QPointF(17.5, 21)); p.drawLine(QPointF(14, 17.5), QPointF(21, 17.5));
+        } else if (name == "task-clock") {
+            p.drawEllipse(QPointF(12, 12), 8.5, 8.5); p.drawLine(QPointF(12, 7.5), QPointF(12, 12)); p.drawLine(12, 12, 15, 14);
+        } else if (name == "task-check") {
+            p.setPen(QPen(color, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.drawLine(5, 12, 10, 17); p.drawLine(10, 17, 19, 7);
+        } else if (name == "task-funnel") {
+            QPainterPath funnel; funnel.moveTo(4, 5); funnel.lineTo(20, 5); funnel.lineTo(14, 12.5); funnel.lineTo(14, 19);
+            funnel.lineTo(10, 17); funnel.lineTo(10, 12.5); funnel.closeSubpath(); p.drawPath(funnel);
+        } else if (name == "task-edit") {
+            QPainterPath pencil; pencil.moveTo(4, 20); pencil.lineTo(8, 20); pencil.lineTo(19, 9); pencil.lineTo(15, 5);
+            pencil.lineTo(4, 16); pencil.closeSubpath(); p.drawPath(pencil); p.drawLine(13, 7, 17, 11);
+        } else if (name == "task-top") {
+            p.drawLine(7, 12, 12, 7); p.drawLine(12, 7, 17, 12); p.drawLine(7, 18, 12, 13); p.drawLine(12, 13, 17, 18);
+        }
         p.end(); icon.addPixmap(pm);
     }
     cache->insert(key, icon);
