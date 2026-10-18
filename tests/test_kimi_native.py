@@ -11,6 +11,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,10 +24,46 @@ import uuid
 import test_pause as lifecycle
 
 KIMI = os.environ.get('HGS_KIMI_TEST_BIN')
+GUARDS = [Path(path).resolve() for path in os.environ.get('ZERUS_KIMI_GUARD', '').split(os.pathsep) if path]
 
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def executable(pid):
+    """The running image, not its command line or the PATH that started it."""
+    if sys.platform.startswith('linux'):
+        return Path(os.readlink(f'/proc/{pid}/exe')).resolve()
+    if sys.platform == 'darwin':
+        import ctypes
+        library = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+        path = library.proc_pidpath
+        path.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+        path.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+        if path(pid, buffer, len(buffer)) <= 0:
+            raise OSError(ctypes.get_errno(), 'proc_pidpath failed')
+        return Path(os.fsdecode(buffer.value)).resolve()
+    raise RuntimeError('Native Kimi image proof is supported only on Linux and macOS')
+
+
+def private_environment(env, root, home):
+    """Keep only the lifecycle fixture's own routing and executable selection.
+    No inherited account, provider, proxy, key, agent socket or profile override."""
+    keep = ('PATH', 'SHELL', 'HGS_CONFIG_DIR', 'HGS_STATE_DIR', 'HGS_SELF', 'HGS_PEERS', 'HGS_TAB', 'HGS_TRACKING')
+    clean = {key: env[key] for key in keep if key in env}
+    clean.update(HOME=str(root), KIMI_CODE_HOME=str(home), KIMI_CODE_NO_AUTO_UPDATE='1',
+                 KIMI_DISABLE_TELEMETRY='1', DISABLE_AUTOUPDATER='1', TERM='xterm-256color',
+                 LANG='en_US.UTF-8' if sys.platform == 'darwin' else 'C.UTF-8', PYTHONUTF8='1')
+    for key, folder in (('XDG_CONFIG_HOME', '.config'), ('XDG_DATA_HOME', '.local/share'),
+                        ('XDG_CACHE_HOME', '.cache'), ('XDG_STATE_HOME', '.local/state'),
+                        ('USERPROFILE', '.'), ('APPDATA', 'AppData/Roaming'),
+                        ('LOCALAPPDATA', 'AppData/Local'), ('TMPDIR', 'tmp')):
+        path = root / folder
+        path.mkdir(parents=True, exist_ok=True)
+        clean[key] = str(path)
+    return clean
 
 
 class Model(http.server.BaseHTTPRequestHandler):
@@ -67,6 +104,7 @@ class NativeKimi(lifecycle.Harness):
             super().setUp()
         source = Path(KIMI).resolve()
         before = digest(source)
+        guards = {str(path): digest(path) for path in [source, *GUARDS]}
         # The copy lives outside the fixture's home, which tearDown removes, so
         # its bytes are checked once every process of the private socket ended.
         images = Path(tempfile.mkdtemp(prefix='hgs-kimi-image-'))
@@ -74,19 +112,22 @@ class NativeKimi(lifecycle.Harness):
         image = images / 'kimi'
         shutil.copyfile(source, image)
         image.chmod(0o755)
+        self.image, self.image_digest = image.resolve(), before
+        self.assertEqual(digest(image), before)
         (self.bin / 'kimi').unlink()
         (self.bin / 'kimi').symlink_to(image)
 
         def unchanged():
+            after = {str(path): digest(path) for path in [source, *GUARDS]}
             self.assertEqual(digest(image), before, 'the fixture changed its own Kimi executable')
-            self.assertEqual(digest(source), before, 'the given Kimi executable changed')
+            self.assertEqual(after, guards, 'a given or guarded Kimi executable changed')
+            print('ZERUS_KIMI_IMAGE_GUARDS=' + json.dumps(dict(case=self.id(), before=guards, after=after)))
         self.addCleanup(unchanged)
         # Only the copy is reachable: hgs puts this home's folders first, and no
         # other folder on the PATH may offer a kimi of its own.
         folders = [folder for folder in os.environ['PATH'].split(os.pathsep)
                    if folder and not (Path(folder) / 'kimi').exists()]
-        self.env.update(PATH=os.pathsep.join([str(self.bin), *folders]), KIMI_CODE_NO_AUTO_UPDATE='1',
-                        TERM='xterm-256color')
+        self.env['PATH'] = os.pathsep.join([str(self.bin), *folders])
         self.assertEqual(Path(shutil.which('kimi', path=self.env['PATH'])).resolve(), image.resolve())
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Model)
         server.requests = []
@@ -103,6 +144,7 @@ class NativeKimi(lifecycle.Harness):
             '[loop_control]\nmax_attempts_per_step = 1\n' % server.server_port)
         (home / 'tui.toml').write_text('[upgrade]\nauto_install = false\n')
         self.home = home
+        self.env = private_environment(self.env, self.root, home)
 
     def screen(self, name):
         return self.t('capture-pane', '-p', '-J', '-t', '=' + name + ':')
@@ -137,8 +179,8 @@ class NativeKimi(lifecycle.Harness):
         conversation only with that message."""
         name = 'kimi/p/native'
         self.hgs('kimi', 'p', '-n', 'native', '-d')
-        process = self.until(lambda: self.binding(name).get('pid'), name)
-        self.assertIn('KIMI_CODE_NO_AUTO_UPDATE=1', self.environment(process).splitlines())
+        self.until(lambda: self.binding(name).get('pid'), name)
+        self.assert_process(name, 'initial')
         answered = []
 
         def ready():
@@ -157,9 +199,39 @@ class NativeKimi(lifecycle.Harness):
 
     def environment(self, pid):
         if sys.platform.startswith('linux'):
-            return Path(f'/proc/{pid}/environ').read_bytes().decode(errors='replace').replace('\0', '\n')
-        return subprocess.run(['ps', '-E', '-ww', '-o', 'command=', '-p', str(pid)], capture_output=True,
-                              text=True, check=True).stdout.replace(' ', '\n')
+            rows = Path(f'/proc/{pid}/environ').read_bytes().decode(errors='replace').split('\0')
+            return dict(row.split('=', 1) for row in rows if '=' in row)
+        output = subprocess.run(['/bin/ps', '-E', '-ww', '-o', 'command=', '-p', str(pid)], capture_output=True,
+                                text=True, check=True).stdout
+        # The checked values are fixture paths without whitespace. Never log the
+        # whole output or inherited environment values, even on assertion failure.
+        return dict(re.findall(r'(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s]*)', output))
+
+    def assert_process(self, name, stage):
+        process = self.binding(name)['pid']
+
+        def running():
+            try:
+                return executable(process) == self.image
+            except OSError:
+                return False  # The supervisor may not have exec'd its image yet.
+        self.until(running, name)
+        self.assertEqual(digest(executable(process)), self.image_digest)
+        actual = self.environment(process)
+        keys = ('HOME', 'KIMI_CODE_HOME', 'KIMI_CODE_NO_AUTO_UPDATE', 'KIMI_DISABLE_TELEMETRY',
+                'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME',
+                'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TMPDIR')
+        for key in keys:
+            self.assertTrue(actual.get(key) == self.env[key], 'unexpected private child environment key: ' + key)
+        forbidden = ('OPENAI_', 'ANTHROPIC_', 'CODEX_', 'CLAUDE', 'DEEPSEEK_', 'OPENCODE_',
+                     'AWS_', 'AZURE_', 'GOOGLE_', 'GCP_', 'GITHUB_', 'GH_', 'NPM_', 'npm_', 'SSH_', 'SOPS_', 'AGE_')
+        # hgs explicitly clears the other agents' homes with empty values.
+        self.assertFalse([key for key in actual if actual[key] and key.startswith(forbidden)],
+                         'a child inherited credential keys')
+        self.assertFalse([key for key in actual if actual[key] and key.startswith('KIMI_') and key not in keys],
+                         'a child inherited an unexpected Kimi override')
+        print('ZERUS_KIMI_PROCESS=' + json.dumps(dict(case=self.id(), stage=stage, pid=process,
+              image=str(self.image), sha256=self.image_digest, private_environment_keys=list(keys))))
 
     def payload(self, name, text):
         state = self.inspect(name)
@@ -221,6 +293,7 @@ class NativeKimi(lifecycle.Harness):
         self.hgs('resume', name, '-d')
         self.until(lambda: self.binding(name).get('run_id') != before['run_id'] and
                    self.inspect(name).get('activity') == 'idle', name)
+        self.assert_process(name, 'resumed')
         self.assertEqual(self.binding(name)['conversation_id'], before['conversation_id'])
 
 
