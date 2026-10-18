@@ -333,6 +333,13 @@ impl TaskDoc {
     pub fn set_stage(&mut self, to: Stage, actor: &Actor, now: i64) -> Result<()> {
         self.writable()?;
         let from = self.stage()?;
+        if from == to {
+            return Err(Error::new(format!(
+                "{} is already in {}",
+                self.id(),
+                to.label()
+            )));
+        }
         let allowed = matches!(
             (from, to),
             (Stage::Backlog, Stage::Todo)
@@ -551,6 +558,13 @@ mod tests {
         let mut t = task(Stage::Backlog);
         t.set_stage(Stage::Todo, &Actor::Person, 2).unwrap();
         assert!(t.set_stage(Stage::Done, &Actor::Person, 3).is_err());
+        // A stage the task is already in is named as such.
+        assert_eq!(
+            t.set_stage(Stage::Todo, &Actor::Person, 3)
+                .unwrap_err()
+                .to_string(),
+            "T-a1b2c3 is already in To do"
+        );
         t.record_send(&api(), "r1", &Actor::Person, 4).unwrap();
         assert_eq!(t.stage().unwrap(), Stage::Active);
         assert_eq!(

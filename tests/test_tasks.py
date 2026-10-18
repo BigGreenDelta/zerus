@@ -118,6 +118,7 @@ class TaskCommands(Fixture):
         self.hgs("stage", ref, "backlog")
         self.hgs("stage", ref, "todo")
         self.assertIn("cannot go from To do to Done", self.hgs("stage", ref, "done", ok=False))
+        self.assertIn(ref.split("/")[1] + " is already in To do", self.hgs("stage", ref, "todo", ok=False))
         self.hgs("target", ref, "codex/api")
         task = self.hgs("comment", ref, text="Use Redis")["task"]
         self.assertEqual(task["text"], "Final text")
