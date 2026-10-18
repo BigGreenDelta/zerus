@@ -38,9 +38,12 @@ to import one.
 
 If an archive reports that the account has reached the maximum number of
 certificates, some run archived without the dedicated identity. Revoke only an
-`Apple Development: Created via API` certificate whose fingerprint matches the
-`codesign --sign` leaf in a CI archive log. Never revoke the dedicated CI identity
-or a personal, distribution or Developer ID certificate.
+`Apple Development: Created via API` certificate after proving that it belongs
+to an ephemeral CI archive, its private key was not retained or reused, and no
+retained signing identity or profile depends on it. Matching its fingerprint to
+the `codesign --sign` leaf in an archive log establishes attribution, not safe
+revocation by itself. Never revoke the dedicated CI identity or a personal,
+distribution or Developer ID certificate.
 
 - **Dev:** `ci.yml` job `dev-ios` calls the workflow after the CI gate of a main
   push succeeds, when the repository variable `IOS_TESTFLIGHT_ENABLED` is `true`.
