@@ -130,7 +130,7 @@ pub(super) fn from_hook(record: &Value, event: &Value) -> Option<Value> {
 }
 
 pub(super) fn observe(record: &mut Value, event: &Value) {
-    claude_approval::observe_children(record,event);
+    claude_approval::observe(record,event);
     if !string(event, "agent_id").is_empty() {
         return;
     }
@@ -777,7 +777,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             Err(error) => Err(error),
         }
     } else if string(&question, "source") == "claude_tool_approval" {
-        claude_approval::answer(&record,&question,&answers)
+        claude_approval::answer(&record,&question,&answers,&request_id)
+            .map(|transport| receipt["transport"] = json!(transport))
     } else if string(&question, "source") == "claude_permission_mode" {
         claude_permission::answer(&record, &question, &answers)
     } else if string(&question, "source") == "claude_resume" {
@@ -832,6 +833,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             .find(|o| string(o, "id") == id)
             .map(|o| string(o, "label"))
             .unwrap_or("");
+        // A denial with feedback is the person's own text.
+        let label = if label.is_empty() { string(&answers[0], "text") } else { label };
         if question["source"] == "claude_usage_limit" && ["Switch to usage credits", "Switch to extra usage"].contains(&label) {
             receipt["open_terminal"] = json!(true);
         }

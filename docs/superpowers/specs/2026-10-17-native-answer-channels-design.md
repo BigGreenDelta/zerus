@@ -76,7 +76,7 @@ specific reason.
 | Panel (card `source`) | Agent | Channel C | Layer A |
 |---|---|---|---|
 | `hook` (AskUserQuestion) | Claude | PermissionRequest hook, verified by spike | fallback |
-| `claude_tool_approval` | Claude | PermissionRequest hook (allow or deny), to verify | in `zerus-6uhz` |
+| `claude_tool_approval` | Claude | PermissionRequest hook (allow or deny), main agent (P3) | in `zerus-6uhz` |
 | Claude's own questions (`refusal_fallback_preference`) | Claude | PermissionRequest without PreToolUse, to verify | fallback |
 | `claude_folder_trust`, `claude_permission_mode`, `claude_resume`, `claude_usage_limit`, terminal safety, auto-mode chooser | Claude | none known | only path |
 | `codex_async` | Codex | to investigate (hooks, app-server) | fallback |
@@ -262,6 +262,37 @@ owns this adapter (`zerus-pdmm`). Its spike verified the following on Claude
 
 Automatic approvals keep their durable private audit reservation before
 delivery. The channel is only another transport.
+
+### Implementation (P3, `zerus-pdmm`)
+
+- One channel worker serves both kinds. The registered group has no matcher,
+  and an AskUserQuestion-only group from an earlier hgs is widened in place.
+  Protocol files and `route`, `deliver`, `own`, `offer` and `claim` are
+  unchanged.
+- hgs records each active main-agent `PreToolUse` as the tool name and a
+  digest of its input, keyed by `tool_use_id`. Turn boundaries clear the
+  records, and more than 64 make every binding ambiguous. A request binds only
+  to the one record that began before it.
+- Each poll and the claim check the exact bound identity: process, run,
+  conversation, tool use, input and request time. A later identical request is
+  not the bound one and does not close it.
+- A Terminal answer sends the hook no signal. Inspection, `hgs answer` and the
+  worker's claim therefore also require Terminal to show a chooser. A complete
+  panel must match the request.
+- The card's options:
+  - With a complete matching panel, it lists Claude's options verbatim, and
+    `panel_verified` is true.
+  - Otherwise it shows the whole request with Yes and No.
+  - Its free-text field, "Tell Claude what to do instead", maps to deny with
+    the message.
+  - Broader options always go through the verified screen.
+- Automatic approvals accept `claude_hook` only with `panel_verified`. This is
+  the same one-time grant as on the screen path.
+- Children are not answered through the channel. In Claude 2.1.296 they run in
+  the background, their requests appear only in the agents view, and switching
+  that view terminates the waiting hook. Claude then repeats `PreToolUse` and
+  `PermissionRequest` for the same tool use. No screen proof can show that a
+  child's request still waits.
 
 ## A, unviewed-terminal growth
 

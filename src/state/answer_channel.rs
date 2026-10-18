@@ -1,6 +1,7 @@
 //! Native answer channel: a waiting Claude `PermissionRequest` hook process and
 //! `hgs answer` meet through atomic files in one private directory per pending
-//! question, without the terminal. Exactly one of claim or retract wins an offer.
+//! question or tool approval, without the terminal. Exactly one of claim or
+//! retract wins an offer.
 
 use super::*;
 use serde::{Deserialize, Serialize};
@@ -279,6 +280,40 @@ const LIFETIME: f64 = 86_000.;
 const BIND: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(150);
 
+/// What a waiting process answers: an AskUserQuestion card, or a main-agent
+/// tool approval (`claude_approval::channel`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    Question,
+    Approval,
+}
+
+fn kind(event: &Value) -> Option<Kind> {
+    if asks(event) {
+        Some(Kind::Question)
+    } else if claude_approval::channel::requested(event) {
+        Some(Kind::Approval)
+    } else {
+        None
+    }
+}
+
+/// The card or approval identity `event` asks about, if exactly one.
+fn bind_kind(kind: Kind, record: &Value, event: &Value) -> Option<Value> {
+    match kind {
+        Kind::Question => bind(record, event),
+        Kind::Approval => claude_approval::channel::bind(record, event),
+    }
+}
+
+/// Claude's decision for the claimed `offer`.
+fn decision_kind(kind: Kind, event: &Value, card: &Value, offer: &Value) -> Result<Value> {
+    match kind {
+        Kind::Question => decision(event, card, offer),
+        Kind::Approval => claude_approval::channel::decision(offer),
+    }
+}
+
 /// The main agent's `PermissionRequest` for AskUserQuestion.
 fn asks(event: &Value) -> bool {
     string(event, "hook_event_name") == "PermissionRequest"
@@ -336,7 +371,13 @@ fn decision(event: &Value, card: &Value, offer: &Value) -> Result<Value> {
 }
 
 /// Why a waiting process must stop, given the current record of its session.
-fn should_close(current: Option<&Value>, bound: &Value, card: &Value) -> Option<&'static str> {
+/// An approval stays bound to its exact request: a later identical one is not it.
+fn should_close(
+    kind: Kind,
+    current: Option<&Value>,
+    bound: &Value,
+    card: &Value,
+) -> Option<&'static str> {
     let Some(current) = current else {
         return Some("session ended");
     };
@@ -346,9 +387,17 @@ fn should_close(current: Option<&Value>, bound: &Value, card: &Value) -> Option<
     if string(current, "conversation_id") != string(bound, "conversation_id") {
         return Some("conversation changed");
     }
-    let pending = &current["pending_questions"][string(card, "tool_call_id")];
-    if pending["question_hash"] != card["question_hash"] {
-        return Some("question resolved");
+    match kind {
+        Kind::Question => {
+            let pending = &current["pending_questions"][string(card, "tool_call_id")];
+            if pending["question_hash"] != card["question_hash"] {
+                return Some("question resolved");
+            }
+        }
+        Kind::Approval if !claude_approval::channel::pending(current, card) => {
+            return Some("approval resolved");
+        }
+        Kind::Approval => {}
     }
     if !process_alive(current) {
         return Some("agent exited");
@@ -435,8 +484,9 @@ extern "C" fn terminate(_: libc::c_int) {
 }
 
 /// `hgs __state answer-channel`: Claude's `PermissionRequest` hook for
-/// AskUserQuestion. It waits beside the native panel for an answer offered
-/// through `hgs answer` and prints Claude's allow with those answers. Anything
+/// AskUserQuestion and main-agent tool approvals. It waits beside the native
+/// panel for an answer offered through `hgs answer` and prints Claude's
+/// decision: allow with those answers, or the one-time approval. Anything
 /// else (another session, no exact card, an answer in Terminal, a timeout)
 /// ends it without output, and the panel stays. So does any error: nothing is
 /// printed before emitted.json. An offer this worker had not claimed lets
@@ -453,9 +503,9 @@ fn wait() -> Result<()> {
         return Ok(());
     };
     let event = stdin_json()?;
-    if !asks(&event) {
+    let Some(kind) = kind(&event) else {
         return Ok(());
-    }
+    };
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t);
@@ -463,7 +513,7 @@ fn wait() -> Result<()> {
     let until = Instant::now() + BIND;
     let (record, card) = loop {
         if let Some(record) = read_run(&name, &token)? {
-            if let Some(card) = bind(&record, &event) {
+            if let Some(card) = bind_kind(kind, &record, &event) {
                 break (record, card);
             }
         }
@@ -498,7 +548,7 @@ fn wait() -> Result<()> {
             return Ok(());
         }
         let current = read_run(&name, &token)?;
-        if let Some(reason) = should_close(current.as_ref(), &record, &card) {
+        if let Some(reason) = should_close(kind, current.as_ref(), &record, &card) {
             close(&dir, reason);
             return Ok(());
         }
@@ -511,11 +561,16 @@ fn wait() -> Result<()> {
         }
         if let Some(offer) = claim(&dir)? {
             // The question must still be the bound one when its answer goes out.
+            // Claude tells the hook nothing of a Terminal approval: only the
+            // screen still showing the request proves it waits.
             let current = read_run(&name, &token)?;
-            let unchanged = should_close(current.as_ref(), &record, &card).is_none()
-                && current.as_ref().and_then(|record| bind(record, &event)).as_ref() == Some(&card)
+            let unchanged = should_close(kind, current.as_ref(), &record, &card).is_none()
+                && current.as_ref().is_some_and(|current| match kind {
+                    Kind::Question => bind(current, &event).as_ref() == Some(&card),
+                    Kind::Approval => claude_approval::channel::shown_now(current),
+                })
                 && !transcript.answered(current.as_ref().unwrap_or(&record), &tool);
-            let output = decision(&event, &card, &offer);
+            let output = decision_kind(kind, &event, &card, &offer);
             if !unchanged || output.is_err() || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
                 close(&dir, if unchanged { "invalid answer" } else { "question changed before delivery" });
                 return Ok(());
@@ -742,23 +797,23 @@ mod tests {
     fn channel_exits_when_card_or_run_changes() {
         let bound = live_record();
         let card = hook_card("toolu_1");
-        assert_eq!(should_close(Some(&bound), &bound, &card), None);
-        assert_eq!(should_close(None, &bound, &card), Some("session ended"));
+        assert_eq!(should_close(Kind::Question, Some(&bound), &bound, &card), None);
+        assert_eq!(should_close(Kind::Question, None, &bound, &card), Some("session ended"));
         let mut run = bound.clone();
         run["run_id"] = json!("run-2");
-        assert_eq!(should_close(Some(&run), &bound, &card), Some("run changed"));
+        assert_eq!(should_close(Kind::Question, Some(&run), &bound, &card), Some("run changed"));
         let mut conversation = bound.clone();
         conversation["conversation_id"] = json!("other");
-        assert_eq!(should_close(Some(&conversation), &bound, &card), Some("conversation changed"));
+        assert_eq!(should_close(Kind::Question, Some(&conversation), &bound, &card), Some("conversation changed"));
         let mut resolved = bound.clone();
         resolved["pending_questions"] = json!({});
-        assert_eq!(should_close(Some(&resolved), &bound, &card), Some("question resolved"));
+        assert_eq!(should_close(Kind::Question, Some(&resolved), &bound, &card), Some("question resolved"));
         let mut replaced = bound.clone();
         replaced["pending_questions"]["toolu_1"]["question_hash"] = json!("hash-2");
-        assert_eq!(should_close(Some(&replaced), &bound, &card), Some("question resolved"));
+        assert_eq!(should_close(Kind::Question, Some(&replaced), &bound, &card), Some("question resolved"));
         let mut exited = bound.clone();
         exited["process_start"] = json!("not this process");
-        assert_eq!(should_close(Some(&exited), &bound, &card), Some("agent exited"));
+        assert_eq!(should_close(Kind::Question, Some(&exited), &bound, &card), Some("agent exited"));
     }
 
     #[test]

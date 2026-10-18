@@ -52,7 +52,8 @@ const CLAUDE_MODEL_SWITCH: Version = (2, 1, 296);
 /// unregistered: its allow would also skip Claude's cache-miss confirmation
 /// for the user.
 /// The oldest Claude Code whose `PermissionRequest` hook answers AskUserQuestion
-/// with `updatedInput.answers` beside its open panel (verified 2026-10-17).
+/// with `updatedInput.answers` beside its open panel, and a tool approval with
+/// a one-time allow or a deny (verified 2026-10-17).
 const CLAUDE_ANSWER_CHANNEL: Version = (2, 1, 296);
 /// The arguments with which the answer channel runs hgs.
 const CHANNEL_ARGS: [&str; 2] = ["__state", "answer-channel"];
@@ -210,11 +211,11 @@ impl Entry {
         Some(Self::shell(format!("{program} answer-channel")))
     }
 
-    /// The matcher group of the answer channel: AskUserQuestion only, with a
-    /// timeout long enough for a person.
+    /// The matcher group of the answer channel: every tool, so that it can
+    /// answer AskUserQuestion and tool approvals, with a timeout long enough
+    /// for a person.
     fn channel_group(&self) -> Value {
         let mut group = self.group();
-        group["matcher"] = json!("AskUserQuestion");
         group["hooks"][0]["timeout"] = json!(CHANNEL_TIMEOUT);
         group
     }
@@ -439,6 +440,31 @@ fn merge_json(
         .filter_map(|group| group.get("hooks").and_then(Value::as_array))
         .flatten()
         .any(owns_channel);
+    // The group hgs wrote for AskUserQuestion alone also answers approvals
+    // once it matches every tool: the same entry, changed in place. A group
+    // that holds anything else keeps its matcher.
+    let narrowed = |group: &Value| {
+        group.get("matcher").and_then(Value::as_str) == Some("AskUserQuestion")
+            && group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|hooks| !hooks.is_empty() && hooks.iter().all(owns_channel))
+    };
+    if agent == "claude"
+        && !windows
+        && hooks
+            .get("PermissionRequest")
+            .and_then(Value::as_array)
+            .is_some_and(|groups| groups.iter().any(narrowed))
+        && version().is_some_and(|version| version >= CLAUDE_ANSWER_CHANNEL)
+    {
+        for group in hooks["PermissionRequest"].as_array_mut().into_iter().flatten() {
+            if narrowed(group) {
+                group.as_object_mut().ok_or("hook group must be an object")?.remove("matcher");
+                changed = true;
+            }
+        }
+    }
     // Windows keeps the terminal path until its native qualification.
     if agent == "claude"
         && !windows
@@ -1852,7 +1878,7 @@ mod tests {
         let merged = merged.unwrap();
         assert_eq!(
             channel_groups(&merged),
-            [json!({"matcher": "AskUserQuestion", "hooks": [{"type": "command",
+            [json!({"hooks": [{"type": "command",
                 "command": "'/opt/hgs dir/hgs' __state answer-channel", "timeout": 86400}]})]
         );
         // The journaling entry keeps its own group and short timeout.
@@ -1889,6 +1915,49 @@ mod tests {
         let pruned = pruned.unwrap();
         assert!(channel_groups(&pruned).is_empty());
         assert_eq!(serde_json::from_str::<Value>(&pruned).unwrap(), serde_json::from_str::<Value>(&older).unwrap());
+    }
+
+    #[test]
+    fn question_only_channel_widens_in_place_for_approvals() {
+        let unix = Entry::shell(UNIX.into());
+        let current = json_merge("", "claude", false, unix.clone()).unwrap();
+        let (current, _) = versioned_merge(&current, "claude", false, unix.clone(), Some(CLAUDE_ANSWER_CHANNEL));
+        let current = current.unwrap();
+        // The group an earlier hgs wrote for AskUserQuestion alone.
+        let mut document: Value = serde_json::from_str(&current).unwrap();
+        for group in document["hooks"]["PermissionRequest"].as_array_mut().unwrap() {
+            if group["hooks"].as_array().unwrap().iter().any(owns_channel) {
+                group["matcher"] = json!("AskUserQuestion");
+            }
+        }
+        let earlier = serde_json::to_string_pretty(&document).unwrap() + "\n";
+        assert_eq!(channel_groups(&earlier)[0]["matcher"], "AskUserQuestion");
+        let (widened, asked) = versioned_merge(&earlier, "claude", false, unix.clone(), Some(CLAUDE_ANSWER_CHANNEL));
+        assert_eq!(asked, 1);
+        let widened = widened.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&widened).unwrap(), serde_json::from_str::<Value>(&current).unwrap());
+        assert_eq!(channel_groups(&widened).len(), 1, "never two channel groups");
+        assert_eq!(versioned_merge(&widened, "claude", false, unix.clone(), None), (None, 0));
+        // A version that cannot be read or is older keeps the group as it is.
+        for version in [None, Some((2, 1, 295))] {
+            assert_eq!(versioned_merge(&earlier, "claude", false, unix.clone(), version).0, None, "{version:?}");
+        }
+        // An older version loses either shape.
+        for registered in [&earlier, &widened] {
+            let (pruned, _) = versioned_prune(registered, "claude", false, Some((2, 1, 295)));
+            assert!(channel_groups(&pruned.unwrap()).is_empty());
+        }
+        // A group that also holds the user's hooks keeps its matcher.
+        let mut shared: Value = serde_json::from_str(&earlier).unwrap();
+        for group in shared["hooks"]["PermissionRequest"].as_array_mut().unwrap() {
+            if group["matcher"] == "AskUserQuestion" {
+                group["hooks"].as_array_mut().unwrap().push(json!({"type": "command", "command": "notify-send asked"}));
+            }
+        }
+        let shared = serde_json::to_string_pretty(&shared).unwrap() + "\n";
+        assert_eq!(versioned_merge(&shared, "claude", false, unix.clone(), Some(CLAUDE_ANSWER_CHANNEL)).0, None);
+        // Windows keeps the terminal path.
+        assert_eq!(versioned_merge(&earlier, "claude", true, unix, Some(CLAUDE_ANSWER_CHANNEL)).0, None);
     }
 
     #[test]

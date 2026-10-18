@@ -1,0 +1,215 @@
+//! Claude's PermissionRequest answer channel for main-agent tool approvals.
+//! Claude names no tool use in that request, so hgs records each active
+//! main-agent PreToolUse and binds a request only to the one active tool use
+//! with the same tool and input. The waiting hook hands Claude one decision for
+//! exactly that tool use: allow it once, deny it and end the turn as Terminal's
+//! No does, or deny it with the person's message. A Terminal answer sends the
+//! hook no signal, so only the screen proves that the panel still waits.
+//! Children stay on the screen path: Claude 2.1.296 runs them in the
+//! background and draws their requests outside the main screen.
+use super::*;
+
+const USES:&str="claude_tool_uses";
+const OVERFLOW:&str="claude_tool_use_overflow";
+const LIMIT:usize=64;
+/// Claude's message for a denial that ends the turn, as Terminal's No does.
+const DENIED:&str="The user denied this tool use.";
+pub(super) const LOCKED:&str="A decision was already handed to Claude's permission hook and is not confirmed yet. Check Terminal before answering again.";
+
+fn digest(input:&Value)->String {format!("{:x}",Sha256::digest(input.to_string().as_bytes()))}
+
+/// Record the main agent's tool uses from PreToolUse until they end. A turn
+/// boundary or a new conversation forgets them all; more than LIMIT at once
+/// makes every binding ambiguous until then.
+pub(super) fn observe(record:&mut Value,event:&Value) {
+    if record["agent"]!="claude"||!string(event,"agent_id").is_empty() {return;}
+    let id=string(event,"tool_use_id");
+    let mut uses=record[USES].as_object().cloned().unwrap_or_default();
+    match string(event,"hook_event_name") {
+        "PreToolUse" if !id.is_empty()&&!question_tool(string(event,"tool_name")) => {
+            if uses.len()>=LIMIT&&!uses.contains_key(id) {record[OVERFLOW]=json!(true);}
+            else {uses.insert(id.into(),json!({"tool_name":event["tool_name"],"input":digest(&event["tool_input"]),"at":now()}));}
+        }
+        "PostToolUse"|"PostToolUseFailure" => {uses.remove(id);}
+        "Stop"|"StopFailure"|"Interrupt"|"UserPromptSubmit"|"SessionStart"|"SessionEnd" => {
+            uses.clear();record.as_object_mut().unwrap().remove(OVERFLOW);
+        }
+        _ => {}
+    }
+    if uses.is_empty() {record.as_object_mut().unwrap().remove(USES);} else {record[USES]=json!(uses);}
+}
+
+/// Forget the tool use a denial settled: Claude reports no end for it.
+pub(super) fn forget(record:&mut Value,tool_use:&str) {
+    if let Some(uses)=record[USES].as_object_mut() {uses.remove(tool_use);}
+    if record[USES].as_object().is_some_and(|uses|uses.is_empty()) {record.as_object_mut().unwrap().remove(USES);}
+}
+
+/// The one active tool use, begun before the request, that the pending
+/// main-agent request was made for. None when it is missing or ambiguous.
+fn bound_use(record:&Value)->Option<String> {
+    let request=&record["pending_approval"];
+    let at=record["pending_approval_at"].as_f64()?;
+    if record[OVERFLOW]==true {return None;}
+    let input=digest(&request["tool_input"]);
+    let mut found=record[USES].as_object()?.iter().filter(|(_,used)|used["tool_name"]==request["tool_name"]
+        &&used["input"]==input.as_str()&&used["at"].as_f64().is_some_and(|started|started<=at)).map(|(id,_)|id);
+    let id=found.next()?.clone();
+    found.next().is_none().then_some(id)
+}
+
+/// The channel identity of the pending main-agent request: its agent process,
+/// conversation, tool use and exact input.
+pub(super) fn identity(record:&Value)->Option<Value> {identity_for(record,&bound_use(record)?)}
+fn identity_for(record:&Value,tool_use:&str)->Option<Value> {
+    let request=request(record)?;
+    let tool=string(request,"tool_name");
+    if record["agent"]!="claude"||string(record,"run_id").is_empty()||string(record,"conversation_id").is_empty()
+        ||!string(request,"agent_id").is_empty()||TERMINAL_ONLY_TOOLS.contains(&tool)
+        ||record[USES][tool_use]["input"]!=digest(&request["tool_input"]).as_str() {return None;}
+    let key=format!("{:x}",Sha256::digest(json!([record["run_id"],record["conversation_id"],record["pane"],record["pid"],
+        record["process_start"],tool_use,tool,request["tool_input"],record["pending_approval_at"]]).to_string()));
+    Some(json!({"question_id":format!("claude-approval:{key}"),"question_hash":key,"tool_call_id":tool_use}))
+}
+
+/// Claude's PermissionRequest for a main-agent tool approval that hgs can answer.
+pub(in crate::state) fn requested(event:&Value)->bool {
+    let tool=string(event,"tool_name");
+    string(event,"hook_event_name")=="PermissionRequest"&&string(event,"agent_id").is_empty()
+        &&!tool.is_empty()&&!question_tool(tool)&&!TERMINAL_ONLY_TOOLS.contains(&tool)
+}
+
+/// The identity a waiting hook serves for Claude's PermissionRequest `event`:
+/// only from this conversation, for the request hgs recorded, with one active
+/// tool use of the same tool and input.
+pub(in crate::state) fn bind(record:&Value,event:&Value)->Option<Value> {
+    let conversation=string(record,"conversation_id");
+    let request=&record["pending_approval"];
+    if !requested(event)||conversation.is_empty()||string(event,"session_id")!=conversation
+        ||request["tool_name"]!=event["tool_name"]||request["tool_input"]!=event["tool_input"] {return None;}
+    identity(record)
+}
+
+/// Whether `current` still records the exact request that `card` was bound to.
+/// Another request with the same input may begin later; it is not this one.
+pub(in crate::state) fn pending(current:&Value,card:&Value)->bool {
+    identity_for(current,string(card,"tool_call_id")).as_ref()==Some(card)
+}
+
+/// Whether the screen still shows Claude waiting for this request: a chooser,
+/// and a complete panel only when it is this request. A clipped panel shows no
+/// other request, and the decision goes to the bound tool use alone.
+pub(super) fn shown(record:&Value,screen:&str)->bool {
+    visible(screen)&&request(record).is_some_and(|request|parse(screen).is_none_or(|panel|matches(request,&panel)))
+}
+
+/// The same proof, read from the terminal now.
+pub(in crate::state) fn shown_now(record:&Value)->bool {
+    kimi_tui_choice::identity(record).and_then(|live|kimi_tui_choice::capture(&live)).is_ok_and(|screen|shown(record,&screen))
+}
+
+/// Claude's PermissionRequest decision for an offered approval. Allow carries
+/// no updatedPermissions, so it grants this one tool use only.
+pub(in crate::state) fn decision(offer:&Value)->Result<Value> {
+    let decision=match (string(offer,"decision"),string(offer,"message")) {
+        ("allow","") => json!({"behavior":"allow"}),
+        ("deny","") => json!({"behavior":"deny","message":DENIED,"interrupt":true}),
+        ("feedback",message) if !message.trim().is_empty()&&!message.chars().any(char::is_control) =>
+            json!({"behavior":"deny","message":message}),
+        _ => return Err("the offered approval is invalid".into()),
+    };
+    Ok(json!({"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":decision}}))
+}
+
+#[cfg(test)] mod tests {
+    use super::*;
+    const COMMAND:&str="printf hi > out.txt";
+    fn event(kind:&str,extra:Value)->Value {
+        let mut event=json!({"hook_event_name":kind,"tool_name":"Bash","tool_input":{"command":COMMAND},"session_id":"conversation"});
+        for (key,value) in extra.as_object().unwrap() {event[key]=value.clone();}
+        event
+    }
+    fn waiting()->Value {
+        let mut r=json!({"agent":"claude","phase":"working","run_id":"run","conversation_id":"conversation","pane":"%1","pid":1,"process_start":"start"});
+        observe(&mut r,&event("PreToolUse",json!({"tool_use_id":"toolu_one"})));
+        let request=event("PermissionRequest",json!({}));
+        questions::observe(&mut r,&request);r["phase"]=json!("approval");
+        r
+    }
+
+    #[test] fn binds_only_the_one_active_tool_use_of_this_conversation() {
+        let r=waiting();
+        let card=bind(&r,&event("PermissionRequest",json!({}))).unwrap();
+        assert_eq!(card["tool_call_id"],"toolu_one");
+        assert_eq!(card,identity(&r).unwrap());assert!(pending(&r,&card));
+        // Another conversation, a child, a question or plan, another input.
+        for other in [event("PermissionRequest",json!({"session_id":"other"})),event("PermissionRequest",json!({"session_id":""})),
+            event("PermissionRequest",json!({"agent_id":"child"})),event("PermissionRequest",json!({"tool_name":"AskUserQuestion"})),
+            event("PermissionRequest",json!({"tool_name":"ExitPlanMode"})),event("PermissionRequest",json!({"tool_input":{"command":"rm"}})),
+            event("PreToolUse",json!({}))] {
+            assert!(bind(&r,&other).is_none(),"{other}");
+        }
+        let mut unsaved=r.clone();unsaved["conversation_id"]=json!("");
+        assert!(bind(&unsaved,&event("PermissionRequest",json!({"session_id":""}))).is_none());
+    }
+
+    #[test] fn missing_stale_ambiguous_or_overflowing_tool_uses_never_bind() {
+        let r=waiting();let request=event("PermissionRequest",json!({}));
+        let mut missing=r.clone();observe(&mut missing,&event("PostToolUse",json!({"tool_use_id":"toolu_one"})));
+        assert!(bind(&missing,&request).is_none());
+        let mut ended=r.clone();observe(&mut ended,&json!({"hook_event_name":"Stop"}));
+        assert!(bind(&ended,&request).is_none());
+        // A tool use that began after the request is not the one it asks for.
+        let mut late=r.clone();late[USES]["toolu_one"]["at"]=json!(late["pending_approval_at"].as_f64().unwrap()+1.);
+        assert!(bind(&late,&request).is_none());
+        // Two active uses with the same input are ambiguous.
+        let mut twice=r.clone();observe(&mut twice,&event("PreToolUse",json!({"tool_use_id":"toolu_two"})));
+        twice[USES]["toolu_two"]["at"]=twice[USES]["toolu_one"]["at"].clone();
+        assert!(bind(&twice,&request).is_none());
+        // A child's use of the same input is not recorded for the main agent.
+        let mut child=r.clone();observe(&mut child,&event("PreToolUse",json!({"tool_use_id":"toolu_child","agent_id":"child"})));
+        assert!(bind(&child,&request).is_some());
+        let mut full=json!({"agent":"claude"});
+        for index in 0..LIMIT {observe(&mut full,&event("PreToolUse",json!({"tool_use_id":format!("toolu_{index}"),"tool_input":{"command":index.to_string()}})));}
+        assert!(full.get(OVERFLOW).is_none());
+        observe(&mut full,&event("PreToolUse",json!({"tool_use_id":"toolu_extra"})));
+        assert_eq!(full[OVERFLOW],true);assert!(full[USES].get("toolu_extra").is_none());
+        let mut overflow=r.clone();overflow[OVERFLOW]=json!(true);
+        assert!(bind(&overflow,&request).is_none());
+        observe(&mut overflow,&json!({"hook_event_name":"UserPromptSubmit"}));
+        assert!(overflow.get(OVERFLOW).is_none()&&overflow.get(USES).is_none());
+    }
+
+    #[test] fn a_bound_request_stays_pending_only_with_its_exact_identity() {
+        let r=waiting();let card=identity(&r).unwrap();
+        // A later identical tool use does not close the bound request.
+        let mut duplicate=r.clone();observe(&mut duplicate,&event("PreToolUse",json!({"tool_use_id":"toolu_two"})));
+        assert_eq!(identity(&duplicate),Some(card.clone()));
+        assert!(pending(&duplicate,&card));
+        let mut finished=r.clone();observe(&mut finished,&event("PostToolUse",json!({"tool_use_id":"toolu_one"})));
+        assert!(!pending(&finished,&card));
+        let mut replaced=r.clone();questions::observe(&mut replaced,&event("PermissionRequest",json!({"tool_input":{"command":"rm"}})));
+        assert!(!pending(&replaced,&card));
+        let mut again=r.clone();again["pending_approval_at"]=json!(again["pending_approval_at"].as_f64().unwrap()+1.);
+        assert!(!pending(&again,&card),"a new request for the same tool use is another identity");
+        for (key,value) in [("run_id",json!("other")),("conversation_id",json!("other")),("pid",json!(2)),("process_start",json!("other"))] {
+            let mut changed=r.clone();changed[key]=value;assert!(!pending(&changed,&card),"{key}");
+        }
+        let mut forgotten=r.clone();forget(&mut forgotten,"toolu_one");
+        assert!(!pending(&forgotten,&card));assert!(forgotten.get(USES).is_none());
+    }
+
+    #[test] fn decisions_grant_once_deny_or_pass_feedback() {
+        let decided=|offer:Value|decision(&offer).map(|output|output["hookSpecificOutput"]["decision"].clone());
+        assert_eq!(decided(json!({"decision":"allow"})).unwrap(),json!({"behavior":"allow"}));
+        assert_eq!(decided(json!({"decision":"deny"})).unwrap(),json!({"behavior":"deny","message":DENIED,"interrupt":true}));
+        assert_eq!(decided(json!({"decision":"feedback","message":"Use printf other"})).unwrap(),
+            json!({"behavior":"deny","message":"Use printf other"}));
+        assert_eq!(decision(&json!({"decision":"allow"})).unwrap()["hookSpecificOutput"]["hookEventName"],"PermissionRequest");
+        for invalid in [json!({}),json!({"decision":"allow","message":"x"}),json!({"decision":"deny","message":"x"}),
+            json!({"decision":"feedback"}),json!({"decision":"feedback","message":"  "}),json!({"decision":"feedback","message":"a\nb"}),
+            json!({"decision":"always"})] {
+            assert!(decision(&invalid).is_err(),"{invalid}");
+        }
+    }
+}
