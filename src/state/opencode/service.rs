@@ -659,6 +659,30 @@ pub(super) fn start_decision(
     StartDecision::Start
 }
 
+/// Everything `ensure_started` decides before it may run `opencode service
+/// start`: a connected service is used, any unavailability other than "not
+/// running" or "disabled" is refused, and otherwise the registration is read
+/// again for the start decision. `Ok(None)` means start.
+fn may_start(
+    connected: std::result::Result<Service, Unavailable>,
+    read: impl FnOnce() -> RegistrationRead,
+    alive: impl FnOnce(u32) -> bool,
+    disabled: impl FnOnce() -> bool,
+) -> Result<Option<Service>> {
+    match connected {
+        Ok(service) => return Ok(Some(service)),
+        Err(Unavailable::NotRunning | Unavailable::Disabled) => {}
+        Err(other) => return Err(other.reason(&crate::platform::hostname())),
+    }
+    let read = read();
+    let alive = matches!(&read, RegistrationRead::Present(r) if alive(r.pid));
+    match start_decision(&read, alive, disabled()) {
+        StartDecision::AlreadyRunning => Err("OpenCode is starting; try again shortly".into()),
+        StartDecision::Refuse(why) => Err(why),
+        StartDecision::Start => Ok(None),
+    }
+}
+
 /// Variables the shared service must not inherit from `hgs`, the connector
 /// or an SSH login: `HGS_*`, `SSH_*`, `OPENCODE_SERVER_*`, `ZERUS_MOBILE_*`,
 /// and the inline configuration and permission overrides
@@ -695,20 +719,13 @@ fn reap(mut child: std::process::Child) {
 pub(super) fn ensure_started() -> Result<Service> {
     let lock_path = root().join("opencode/service-start.lock");
     let _guard = lock(Some(&lock_path))?;
-    match connect() {
-        Ok(service) => return Ok(service),
-        Err(Unavailable::NotRunning | Unavailable::Disabled) => {}
-        Err(other) => return Err(other.reason(&crate::platform::hostname())),
-    }
-    let read = read_registration();
-    let alive =
-        matches!(&read, RegistrationRead::Present(r) if crate::platform::process_alive(r.pid));
-    match start_decision(&read, alive, service_disabled()) {
-        StartDecision::AlreadyRunning => {
-            return Err("OpenCode is starting; try again shortly".into())
-        }
-        StartDecision::Refuse(why) => return Err(why),
-        StartDecision::Start => {}
+    if let Some(service) = may_start(
+        connect(),
+        read_registration,
+        crate::platform::process_alive,
+        service_disabled,
+    )? {
+        return Ok(service);
     }
     let mut command = Command::new("opencode");
     #[cfg(target_os = "linux")]
@@ -1118,6 +1135,72 @@ mod tests {
                 ));
             }
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Works as root and on every platform: a directory in place of the
+    /// registration cannot be read (EISDIR, or access denied on Windows).
+    #[test]
+    fn a_directory_at_the_registration_path_never_starts_the_service() {
+        let dir = temp_dir("registration-directory");
+        let path = dir.join("service.json");
+        fs::create_dir_all(&path).unwrap();
+        let read = read_registration_at(&path);
+        assert!(
+            matches!(&read, RegistrationRead::Unreadable(why) if why == UNREADABLE_REGISTRATION)
+        );
+        assert!(
+            matches!(start_decision(&read, false, false), StartDecision::Refuse(why) if why == UNREADABLE_REGISTRATION)
+        );
+        assert!(matches!(
+            connect_from(read),
+            Err(Unavailable::Unreachable(why)) if why == UNREADABLE_REGISTRATION
+        ));
+        // ensure_started's gate refuses whether the registration became
+        // unreadable before its connect or before its second read.
+        let reread = || read_registration_at(&path);
+        let refused = |gate: Result<Option<Service>>| {
+            assert!(matches!(gate, Err(why) if why == UNREADABLE_REGISTRATION));
+        };
+        refused(may_start(
+            connect_from(reread()),
+            reread,
+            |_| panic!("no pid"),
+            || false,
+        ));
+        refused(may_start(
+            Err(Unavailable::NotRunning),
+            reread,
+            |_| panic!("no pid"),
+            || false,
+        ));
+        refused(may_start(
+            Err(Unavailable::Disabled),
+            reread,
+            |_| panic!("no pid"),
+            || false,
+        ));
+        // Controls: only a missing registration or a dead PID may start.
+        fs::remove_dir(&path).unwrap();
+        assert!(matches!(
+            may_start(
+                Err(Unavailable::NotRunning),
+                reread,
+                |_| panic!("no pid"),
+                || false
+            ),
+            Ok(None)
+        ));
+        fs::write(
+            &path,
+            include_bytes!("../../../tests/fixtures/opencode2/registration.json"),
+        )
+        .unwrap();
+        assert!(matches!(
+            may_start(Err(Unavailable::NotRunning), reread, |_| false, || false),
+            Ok(None)
+        ));
+        assert!(may_start(Err(Unavailable::NotRunning), reread, |_| true, || false).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 

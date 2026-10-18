@@ -1598,6 +1598,26 @@ fn action(
     message_id: Option<&str>,
     scope: Option<&session_action::Scope>,
 ) -> Result<()> {
+    action_in(
+        &Ledger::current(),
+        running_service,
+        record,
+        action,
+        new_name,
+        message_id,
+        scope,
+    )
+}
+/// Core of `action`, against any native service and private state.
+fn action_in<N: Native>(
+    ledger: &Ledger,
+    connect: impl FnOnce() -> Result<N>,
+    record: &mut Value,
+    action: &str,
+    new_name: Option<&str>,
+    message_id: Option<&str>,
+    scope: Option<&session_action::Scope>,
+) -> Result<()> {
     if ["pause", "resume"].contains(&action) {
         return Err(NO_PROCESS.into());
     }
@@ -1617,7 +1637,7 @@ fn action(
     let old = string(record, "name").to_owned();
     if action == "remove_queued" {
         let id = queued_id(&json!({"message_id": message_id}))?;
-        remove_queued_with(&running_service()?, &Ledger::current(), record, &id, || {
+        remove_queued_with(&connect()?, ledger, record, &id, || {
             if let Some(scope) = scope {
                 scope.changing();
             }
@@ -1649,7 +1669,7 @@ fn action(
         if let Some(scope) = scope {
             scope.changing();
         }
-        change_title(&running_service()?, record, b[2])?;
+        change_title(&connect()?, record, b[2])?;
         record["name"] = json!(new);
     } else if let Some(scope) = scope {
         scope.changing();
@@ -2499,38 +2519,75 @@ mod tests {
     fn stale_removal_targets_are_refused_without_a_delete() {
         let dir = tempfile::tempdir().unwrap();
         let item = |session: &str| json!({"id": "msg_Q", "sessionID": session, "type": "user", "delivery": "queue", "payload": {"text": "hello"}});
+        // Each refusal is clean: no DELETE and no removal record.
+        let refused_untouched = |fake: &Fake| {
+            assert_eq!(t_remove(fake, dir.path(), "msg_Q").unwrap_err(), NOT_QUEUED);
+            assert_eq!(fake.w().deletes, 0);
+            let ledger = Ledger(dir.path().into());
+            assert_eq!(ledger.removal(&session_record(), "msg_Q").unwrap(), None);
+            assert!(!ledger.removals_path().exists());
+        };
         // Not queued.
-        let fake = Fake::new();
-        assert_eq!(
-            t_remove(&fake, dir.path(), "msg_Q").unwrap_err(),
-            NOT_QUEUED
-        );
-        // Already delivered: present in history.
+        refused_untouched(&Fake::new());
+        // Already delivered: present in history. Without the history check
+        // before the DELETE this would record an intent and DELETE.
         let fake = Fake::new();
         fake.w().inbox.push(item("ses_A"));
         fake.w()
             .messages
             .push(json!({"id": "msg_Q", "type": "user", "text": "hello"}));
-        assert_eq!(
-            t_remove(&fake, dir.path(), "msg_Q").unwrap_err(),
-            NOT_QUEUED
-        );
+        refused_untouched(&fake);
         // Listed for another session.
         let fake = Fake::new();
         fake.w().inbox.push(item("ses_B"));
-        assert_eq!(
-            t_remove(&fake, dir.path(), "msg_Q").unwrap_err(),
-            NOT_QUEUED
-        );
+        refused_untouched(&fake);
         // The session is running.
         let fake = Fake::new();
         fake.w().inbox.push(item("ses_A"));
         fake.w().active = true;
-        assert_eq!(
-            t_remove(&fake, dir.path(), "msg_Q").unwrap_err(),
-            NOT_QUEUED
-        );
-        assert_eq!(fake.w().deletes, 0);
+        refused_untouched(&fake);
+    }
+    /// A scoped Remove for another run or session is refused before any
+    /// native call or removal record.
+    #[test]
+    fn a_removal_for_another_run_or_session_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let fake = Fake::new();
+        fake.w().inbox.push(json!({"id": "msg_Q", "sessionID": "ses_A", "type": "user", "delivery": "queue", "payload": {"text": "hello"}}));
+        // No binding exists under this name, so nothing past the identity
+        // check could succeed either.
+        let name = format!("opencode/p/{}", uuid::Uuid::new_v4());
+        for (run, conversation) in [("r2", "ses_A"), ("r1", "ses_B")] {
+            let scope = session_action::Scope::expecting(&name, run, conversation);
+            let mut record =
+                json!({"name": name, "run_id": "r1", "conversation_id": "ses_A", "cwd": "/x"});
+            let connected = std::cell::Cell::new(false);
+            let error = action_in(
+                &ledger,
+                || {
+                    connected.set(true);
+                    Ok(&fake)
+                },
+                &mut record,
+                "remove_queued",
+                None,
+                Some("msg_Q"),
+                Some(&scope),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "Session identity changed; no replacement session was selected"
+            );
+            assert!(!connected.get());
+            assert!(!scope.was_changing());
+            let w = fake.w();
+            assert_eq!((w.calls, w.deletes, w.inbox.len()), (0, 0, 1));
+            drop(w);
+            assert_eq!(ledger.removal(&session_record(), "msg_Q").unwrap(), None);
+            assert!(!ledger.removals_path().exists());
+        }
     }
     #[test]
     fn a_lost_or_failed_delete_never_allows_a_repost() {
@@ -3240,10 +3297,16 @@ mod tests {
                 json!({"message": "down"}),
             ),
         ]);
-        assert!(
-            remove_queued_with(&unread, &ledger, &bound(), "msg_B", || panic!("no change"))
-                .is_err()
+        let fresh = Ledger(dir.path().join("unread"));
+        assert_eq!(
+            remove_queued_with(&unread, &fresh, &bound(), "msg_A", || panic!("no change"))
+                .unwrap_err(),
+            "OpenCode could not confirm this message is still queued"
         );
+        // It reached the history read, and nothing was recorded or deleted.
+        assert!(unread.script.borrow().is_empty());
+        assert_eq!(fresh.removal(&bound(), "msg_A").unwrap(), None);
+        assert!(!fresh.removals_path().exists());
         // A 204 whose message is still listed is not a confirmed removal.
         let listed = seen(vec![
             ("GET /api/session/ses_A/inbox", 200, inbox.clone()),

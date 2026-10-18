@@ -223,7 +223,9 @@ New session and launch validation use the selected project folder.
 - Pending inbox items appear in Activity as queued. After Stop they stay
   visible as not delivered, with Remove (`DELETE /inbox/{id}`) behind a
   confirmation. Remove requires the item in this session's inbox, the session
-  not running and the ID absent from history. Before the DELETE, Zerus records
+  not running, the ID absent from history and no Zerus request index naming
+  another session for that ID; a scoped Remove for another run or session is
+  refused before any native call. Before the DELETE, Zerus records
   a removal intent for the session and message ID in private state (the
   newest 5000 records): it forbids any repost but proves nothing. Because the
   DELETE answers 204 even for an item that already left the inbox, Zerus then
@@ -409,15 +411,20 @@ unavailable with reasons.
   names, dead `pid`), version comparison, OpenAPI requirement checks, ID
   formats, the catalog allowlist against fixtures carrying keys and headers,
   form mapping and answer validation, permission rulesets, inbox
-  reconciliation, bounds.
+  reconciliation without a repost, queue removal (stale targets, intent before
+  the DELETE, confirmation, lost or failed DELETE, removal records bounded and
+  failing closed), unreadable registrations (including a directory in its
+  place) never starting the service, bounds.
 - Native qualification (`tests/test_opencode_native.py`) against the actual
   minimum OpenCode with private `XDG_*` directories, a private service port
   and an offline catalog, its own service registration and a keyless local
   model fixture. Phase 1: launch with own IDs, lost launch and message
   responses (including a queued message), Stop with a pending queue item,
-  history pages, model and variant, question-tool forms and permissions,
-  OpenCode 1 binding adoption and refusal, service not running, start only
-  with a dead registration, incompatible version and missing operation.
+  a queued message removed while its receipt is pending and never delivered
+  by a same-request retry (`test_10`), history pages, model and variant,
+  question-tool forms and permissions, OpenCode 1 binding adoption and
+  refusal, service not running, start only with a dead registration,
+  incompatible version and missing operation.
   Phase 2: children and `Background`, compaction, fork reconciliation,
   attachments, Bypass with a configured deny.
 - Qt tests for effort, forms and allowed actions; Android and iOS tests from
