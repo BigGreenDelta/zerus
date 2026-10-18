@@ -320,9 +320,11 @@ delivery. The channel is only another transport.
   - Broader options, and the keys after an unclaimed offer, use only a proven
     panel.
 - A visible safety warning is added, as its rows below the last fence, only
-  when it belongs to this request: the panel proves it, or the visible command
-  rows of a clipped panel are part of this command. A warning that cannot be
-  attributed means no hook card.
+  when it belongs to this request: the panel proves it, or, while the bound
+  call is the only active Bash call, the visible command rows of a clipped
+  panel end this command. Any diagnostic gutter below a visible chooser's last
+  fence that cannot be attributed and shown this way means no hook card,
+  whatever its text.
 - When the screen path answers a panel of another queued request, its
   pre-existing bookkeeping settles the recorded request. That request then
   waits in Terminal. This path is unchanged.

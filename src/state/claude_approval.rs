@@ -309,17 +309,26 @@ fn proves(request:&Value,panel:&Panel)->bool {
         &&compact(&panel.body.join("\n")).contains(&compact(string(input,"description")))
 }
 
+/// Any native diagnostic in a gutter between a visible chooser's last fence
+/// and its question, whatever its text says.
+fn diagnostic(screen:&str)->bool {
+    let rows:Vec<_>=screen.lines().map(str::trim).collect();
+    chooser(&rows).is_some_and(|(question,_,_)|rows[..question].iter().rposition(|r|rule(r,'╌')||rule(r,'─'))
+        .is_some_and(|fence|rows[fence+1..question].iter().any(|r|r.starts_with("│ ")&&!gutter(r).is_empty())))
+}
+
 /// The visible native safety panel, and whether it belongs to this Bash
-/// request: a panel that `proves` it, or a clipped one whose visible command
-/// rows are part of this request's command. Another request's warning is never
-/// shown as this one's.
-fn safety_warning(request:&Value,screen:&str,proven:bool)->Option<(Panel,bool)> {
+/// request: a panel that `proves` it, or, while the bound call is the only
+/// active Bash call (`alone`), a clipped one whose visible command rows end
+/// this request's command. Another request's warning is never shown as this
+/// one's.
+fn safety_warning(request:&Value,screen:&str,proven:bool,alone:bool)->Option<(Panel,bool)> {
     let panel=safety_panel(screen)?;
     if request["tool_name"]!="Bash" {return Some((panel,false));}
     if proven {return Some((panel,true));}
-    let own=panel.body.iter().position(|row|rule(row,'╌')).is_some_and(|fence|{
+    let own=alone&&panel.body.iter().position(|row|rule(row,'╌')).is_some_and(|fence|{
         let shown=compact(&panel.body[..fence].iter().map(|row|row.strip_prefix('│').unwrap_or(row)).collect::<String>());
-        !shown.is_empty()&&compact(string(&request["tool_input"],"command")).contains(&shown)
+        !shown.is_empty()&&compact(string(&request["tool_input"],"command")).ends_with(&shown)
     });
     Some((panel,own))
 }
@@ -342,12 +351,16 @@ fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value
     let screen=screen?;
     let request=request(record)?;
     if !eligible(record)||!channel::shown(record,screen) {return None;}
+    let alone=channel::alone(record,string(identity,"tool_call_id"));
     let complete=parse(screen);
-    if complete.as_ref().is_some_and(|panel|!proves(request,panel)||!channel::alone(record,string(identity,"tool_call_id"))) {return None;}
+    if complete.as_ref().is_some_and(|panel|!proves(request,panel)||!alone) {return None;}
     let native=complete;
-    let warning=match safety_warning(request,screen,native.is_some()) {
+    // A diagnostic this card cannot show as the request's own leaves it to the
+    // screen, whatever the diagnostic says.
+    let warning=match safety_warning(request,screen,native.is_some(),alone) {
         Some((panel,true)) => Some(panel),
         Some((_,false)) => return None,
+        None if diagnostic(screen) => return None,
         None => None,
     };
     let tool=string(request,"tool_name");
@@ -1133,6 +1146,32 @@ pub(super) fn reconcile(record:Value)->Value {
         assert_eq!(full["panel_verified"],true);
         assert_eq!(string(&full["questions"][0],"body").matches("T=$(pwd)").count(),1);
         assert!(string(&full["questions"][0],"body").contains("Dangerous rm operation"));
+    }
+
+    #[test] fn any_diagnostic_the_card_cannot_attribute_leaves_it_to_the_screen() {
+        let command="T=$(pwd); test \"$T\" = /workspace/example && rm -f $T/*.jsonl $T/*.port";
+        let own=hooked("Bash",json!({"command":command}));
+        let identity=channel::identity(&own).unwrap();
+        let clipped=&SAFETY[SAFETY.find(" │ T=$(pwd)").unwrap()..];
+        assert!(channel_card(&own,Some(clipped),&identity).is_some());
+        // Another diagnostic than the dangerous-rm one, clipped: no hook card.
+        let flag=clipped.replace("│ Dangerous rm operation on possibly-empty variable path:","│ Dangerous flag combination detected:");
+        assert!(diagnostic(&flag)&&safety_panel(&flag).is_none());
+        assert!(channel_card(&own,Some(&flag),&identity).is_none());
+        // A proven panel whose diagnostic comes with other choices: no hook card.
+        let choices=SAFETY.replace("   2. No","   2. Yes, and always allow\n   3. No");
+        assert!(diagnostic(&choices)&&safety_panel(&choices).is_none());
+        assert!(proves(&own["pending_approval"],&parse(&choices).unwrap()));
+        assert!(channel_card(&own,Some(&choices),&identity).is_none());
+        // An ordinary panel shows no diagnostic.
+        assert!(!diagnostic(BASH)&&!diagnostic(OUTSIDE));
+        // A clipped warning is this command's only while no other Bash call is
+        // active, and only when the visible rows end this command.
+        let mut two=own.clone();
+        channel::observe(&mut two,&json!({"hook_event_name":"PreToolUse","tool_use_id":"toolu_other","tool_name":"Bash","tool_input":{"command":"ls"}}));
+        assert!(channel_card(&two,Some(clipped),&identity).is_none());
+        let longer=hooked("Bash",json!({"command":format!("{command} && printf more")}));
+        assert!(channel_card(&longer,Some(clipped),&channel::identity(&longer).unwrap()).is_none(),"the visible rows do not end this command");
     }
 
     #[test] fn waiting_hook_card_keeps_broader_options_behind_the_screen() {

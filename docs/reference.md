@@ -1153,9 +1153,9 @@ card answers through it, so a clipped panel no longer needs a larger Terminal.
 - Any other complete panel is answered on the screen as above, acting on what
   it shows. A clipped panel gives **Yes** and **No**. An unreadable terminal
   gives no hook card.
-- A visible safety warning must belong to this request's command, through a
-  proven panel or the visible command rows of a clipped one. Otherwise there is
-  no hook card.
+- A visible safety warning of any kind must belong to this request's command,
+  through a proven panel or the visible end of the command in a clipped one.
+  Otherwise there is no hook card.
 - **Yes** allows this one tool call without changing any permission setting.
   **No** ends Claude's turn as in Terminal. **Tell Claude what to do instead**
   denies the call with your message, and Claude continues without it.
