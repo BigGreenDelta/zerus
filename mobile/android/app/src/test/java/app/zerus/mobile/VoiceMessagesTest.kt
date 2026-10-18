@@ -98,7 +98,7 @@ class VoiceMessagesTest {
             assertNotEquals(RecordingDelivery.Sent, RecordingDelivery.of(state))
         }
         assertEquals(RecordingDelivery.Uncertain, RecordingDelivery.of("read"))
-        assertEquals("Sent to agent", RecordingDelivery.Sent.description)
+        assertEquals("Accepted by native app", RecordingDelivery.Sent.description)
     }
     private val target = Target("owner", "example", "run", "conversation", "workspace")
     private val id = UUID.randomUUID().toString()

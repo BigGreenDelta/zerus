@@ -264,10 +264,13 @@ object NativeParser {
                     else providerId.isNotBlank() && native.string("message_id") == providerId &&
                         (binding.string("provider_source").isBlank() || native.string("source") == binding.string("provider_source")) &&
                         (!binding.has("provider_source_offset") || native.opt("source_offset")?.toString() == binding.opt("provider_source_offset")?.toString())
-            }.mapNotNull { (native, stream) -> parse(native, stream)?.id }.distinct()
-            if (bound.size == 1) rows.removeAll { it.id == bound.single() && it.role == "You" && it.voice == null }
+            }.mapNotNull { (native, stream) -> parse(native, stream) }.distinctBy { it.id }
+            // Admission of the voice job does not consume the native inbox. Keep its
+            // live status row, including after Stop, outside voice suppression aliases.
+            val accepted = bound.singleOrNull()?.takeIf { it.delivery !in MessageDeliveryPresentation.inboxStates }
+            if (accepted != null) rows.removeAll { it.id == accepted.id && it.role == "You" && it.voice == null }
             val old = rows.indexOfFirst { it.voice?.id == voice.id }
-            val next = metadata.copy(originalIds = (metadata.originalIds + bound).distinct().take(8))
+            val next = metadata.copy(originalIds = (metadata.originalIds + listOfNotNull(accepted?.id)).distinct().take(8))
             if (old < 0) rows += next else if (rows[old].voice!!.revision < voice.revision) rows[old] = next
         }
         return if (raw.string("history_epoch").isNotBlank()) rows.toList() else rows.sortedBy { it.at }

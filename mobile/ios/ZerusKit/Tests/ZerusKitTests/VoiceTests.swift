@@ -42,7 +42,7 @@ final class VoiceMessagesTests: XCTestCase {
             XCTAssertNotEqual(.sent, RecordingDelivery.of(state), state)
         }
         XCTAssertEqual(.uncertain, RecordingDelivery.of("read"))
-        XCTAssertEqual("Sent to agent", RecordingDelivery.sent.description)
+        XCTAssertEqual("Accepted by native app", RecordingDelivery.sent.description)
     }
 
     func testAudioIsLosslesslyWrappedAndTamperingRejected() throws {

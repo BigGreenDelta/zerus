@@ -314,6 +314,21 @@ is pending, with exact conversation/archive authorization. Processing revisions
 update the same history card. Text equality alone cannot identify a voice
 message or associate it with a native user prompt.
 
+`submitted` confirms that the native application admitted the recognized text;
+it does not prove delivery to the model, reading or completion. The recording's
+status says **Accepted by native app**. If OpenCode still reports the exact
+bound message as `queued` or `not_delivered`, clients retain that native text
+row alongside the playable recording and explain where to find its queue
+status. This deliberately permits temporary duplicate text rather than merging
+inspection-only queue state into durable voice history. After Stop the row
+shows **Not delivered**; desktop retains its existing **Remove** action only
+with the reported permission and explicit confirmation for that exact message,
+run and conversation. Phones offer no queue removal. Removal or accepted native
+history returns to the ordinary recording display; stored media, receipts,
+drafts and replay authority are unchanged. Neither queue status authorizes
+resending the recording. Wrong-message/source/target matches and ambiguous
+bindings never authorize suppressing a native queue row.
+
 The first implementation sends from live primary conversations with verified
 native identity. Archived conversations retain playback; child-agent recording
 is disabled until it has a separately scoped delivery contract.

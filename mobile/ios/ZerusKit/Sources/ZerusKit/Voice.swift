@@ -235,7 +235,7 @@ public struct VoiceState: Codable, Hashable, Sendable {
     }
 }
 
-/// Native submission is confirmed delivery to the agent, never evidence of reading or completion.
+/// Native submission confirms admission; the native inbox can still be waiting for the model.
 public enum RecordingDelivery: String, Sendable {
     case uploading, processing, sent, failed, cancelled, uncertain
 
@@ -243,7 +243,7 @@ public enum RecordingDelivery: String, Sendable {
         switch self {
         case .uploading: "Sending recording"
         case .processing: "Processing recording"
-        case .sent: "Sent to agent"
+        case .sent: "Accepted by native app"
         case .failed: "Recording failed"
         case .cancelled: "Delivery cancelled"
         case .uncertain: "Delivery unconfirmed"

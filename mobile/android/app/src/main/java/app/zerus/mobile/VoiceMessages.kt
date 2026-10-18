@@ -123,7 +123,7 @@ object VoiceProtocol {
         "transcribing" -> "Transcribing…"
         "ready", "waiting_agent" -> "Waiting for the agent…"
         "delivering" -> "Delivering to the agent…"
-        "submitted" -> "Sent"
+        "submitted" -> "Accepted by native app"
         "failed" -> "Voice message failed"
         "cancelled" -> "Cancelled"
         else -> "Delivery unconfirmed"

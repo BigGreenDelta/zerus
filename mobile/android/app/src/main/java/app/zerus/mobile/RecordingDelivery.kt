@@ -1,14 +1,14 @@
 package app.zerus.mobile
 
-/** Native submission is confirmed delivery to the agent, never evidence of reading or completion. */
+/** Native submission confirms admission; the native inbox can still be waiting for the model. */
 internal enum class RecordingDelivery(val description: String) {
-    Uploading("Sending recording"), Processing("Processing recording"), Sent("Sent to agent"),
+    Uploading("Sending recording"), Processing("Processing recording"), Sent("Accepted by native app"),
     Failed("Recording failed"), Cancelled("Not sent"), Uncertain("Delivery unconfirmed");
 
     val explanation get() = when (this) {
         Uploading -> "Your recording is being uploaded. Its recognized text is not confirmed as sent to the agent yet."
         Processing -> "Your recording is being processed. Its recognized text is not confirmed as sent to the agent yet."
-        Sent -> "The recognized text was sent to the agent. The original recording stays in this conversation."
+        Sent -> "The native app accepted the recognized text. Queue status, when present, is shown alongside this recording. This does not confirm model delivery, reading or completion."
         Failed -> "The recording could not be sent. Your recording and any recognized text are kept for review."
         Cancelled -> "Delivery was cancelled. This recording was not sent to the agent."
         Uncertain -> "Delivery has not been confirmed. Check this recording's status before trying to send again."

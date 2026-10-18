@@ -756,7 +756,9 @@ struct ActivityRenderResult {
     for (const auto &value : sourceEvents) {
         if (!value.isObject()) continue;
         const auto event = value.toObject(); const auto key = eventKey(event);
-        if(event.value("source")!="hgs_voice") {
+        // Voice admission does not consume the native inbox. Keep its live
+        // queue status and existing confirmed Remove alongside the recording.
+        if(event.value("source")!="hgs_voice" && event.value("delivery_state")!="queued" && event.value("delivery_state")!="not_delivered") {
             bool bound=false;
             for(const auto &binding:voiceBindings) {
                 const auto seq=binding.value("journal_seq").toInteger();
@@ -900,7 +902,7 @@ struct ActivityRenderResult {
                 if(!audio.value("request_id").toString().isEmpty())m_voiceLinks.insert(key,video.isEmpty()?audio:video);
                 const auto state=voice.value("state").toString();
                 const QHash<QString,QString> labels{{"uploading",tr("Sending recording…")},{"queued",tr("Waiting for recognition")},{"transcribing",tr("Recognizing…")},{"ready",tr("Ready to deliver")},
-                    {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Sent to agent")},{"failed",tr("Voice message failed")},
+                    {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Accepted by native app")},{"failed",tr("Voice message failed")},
                     {"cancelled",tr("Cancelled")},{"uncertain",tr("Delivery not confirmed")}};
                 const int playerWidth=qBound(140,int(qMin(width,widthWithScrollBar)/m_scale)-72,420);
                 const QUrl playerUrl("hgs-voice-player:"+key);
@@ -929,6 +931,8 @@ struct ActivityRenderResult {
                 const auto mediaTime=video.isEmpty()?QString():VoicePlayerImage::time(video.value("duration_ms").toInteger());
                 body+=QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin:0;'><tr><td valign='middle' style='font-size:11px;color:%3;'>%1%2</td><td align='right' valign='middle' style='font-size:11px;color:%3;'>%4 &nbsp;<img src='%5' width='18' height='18' style='vertical-align:middle;' alt='%6' title='%6'></td></tr></table>")
                     .arg(transcriptAction,escaped(mediaTime),muted,escaped(timeText(event)),statusIcon.toString(),statusLabel);
+                if(state=="submitted")body+=QString("<p style='font-size:11px;color:%1;'>%2</p>")
+                    .arg(muted,escaped(tr("Queue status, when present, is shown alongside this recording.")));
                 if(!transcript.isEmpty() && m_expanded.value("voice-text-"+key))body+=userMessage(transcript);
                 if(!voice.value("error").toString().isEmpty())body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(voice.value("error").toString()));
                 if(!m_voiceError.isEmpty() && m_voiceError.startsWith(key+"\n"))body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(m_voiceError.mid(key.size()+1)));

@@ -313,7 +313,7 @@ public enum VoiceProtocol {
         case "transcribing": "Transcribing…"
         case "ready", "waiting_agent": "Waiting for the agent…"
         case "delivering": "Delivering to the agent…"
-        case "submitted": "Sent"
+        case "submitted": "Accepted by native app"
         case "failed": "Voice message failed"
         case "cancelled": "Cancelled"
         default: "Delivery unconfirmed"
@@ -464,7 +464,7 @@ public enum NativeEvents {
         for item in raw.objects("voice_messages") {
             guard let metadata = parse(item, "voice"), let voice = metadata.voice, metadata.requestId == voice.id else { continue }
             // A persisted native binding is authoritative; equal text alone never removes a row.
-            var bound: [String] = []
+            var bound: [Event] = []
             if let binding = item.object("voice")?.object("native_binding") {
                 let natives = journal.map { ($0, "journal") } + providers.map { ($0, "provider") }
                 for (native, stream) in natives {
@@ -480,12 +480,15 @@ public enum NativeEvents {
                             (providerSource.isEmpty || native.string("source") == providerSource) &&
                             (!binding.has("provider_source_offset") || native["source_offset"]?.compact == binding["provider_source_offset"]?.compact)
                     }
-                    if matched, let id = parse(native, stream)?.id, !bound.contains(id) { bound.append(id) }
+                    if matched, let row = parse(native, stream), !bound.contains(where: { $0.id == row.id }) { bound.append(row) }
                 }
             }
-            if bound.count == 1 { rows.removeAll { $0.id == bound[0] && $0.role == "You" && $0.voice == nil } }
+            // Admission of the voice job does not consume the native inbox. Keep its
+            // live status row, including after Stop, outside voice suppression aliases.
+            let accepted = bound.count == 1 && bound[0].deliveryState == nil ? bound[0] : nil
+            if let accepted { rows.removeAll { $0.id == accepted.id && $0.role == "You" && $0.voice == nil } }
             var next = metadata
-            next.originalIds = Array(unique(metadata.originalIds + bound).prefix(8))
+            next.originalIds = Array(unique(metadata.originalIds + (accepted.map { [$0.id] } ?? [])).prefix(8))
             if let old = rows.firstIndex(where: { $0.voice?.id == voice.id }) {
                 if rows[old].voice!.revision < voice.revision { rows[old] = next }
             } else {

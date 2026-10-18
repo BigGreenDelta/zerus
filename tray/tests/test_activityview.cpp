@@ -265,6 +265,8 @@ private slots:
     void contextCounterNamesTheReportedWindowSource();
     void failedMessageActionsFollowCardIdentity();
     void openCodeQueuedMessagesShowDeliveryAndRemove();
+    void openCodeVoiceQueueRemainsVisible_data();
+    void openCodeVoiceQueueRemainsVisible();
     void searchResultIsolatedFromLiveUpdatesAndReturnsToLatest();
     void searchResultClearsOnConversationChange();
     void searchToolExcerptIsExpandedAndClearlyMarked();
@@ -1428,7 +1430,7 @@ void TestActivityView::voiceMessageRetainsAudioAndExpandableTranscript()
     voice["state"]="submitted";voice["transcript"]="Recognized voice fixture";row["voice"]=voice;row["detail"]="Recognized voice fixture";
     auto local=row;local["id"]="voice-local";local["submitted_at"]=1791018002.0;local["status"]="sent";
     view.setTimeline({{"voice_messages",QJsonArray{row}}},{row,journalEvent(3,"UserPromptSubmit","Recognized voice fixture")},{local});
-    text=view.browser()->toPlainText();QCOMPARE(text.count("You (voice)"),1);QVERIFY(!text.contains("Show transcript"));QVERIFY(imageLabel("Show transcript"));QVERIFY(imageLabel("Sent to agent"));
+    text=view.browser()->toPlainText();QCOMPARE(text.count("You (voice)"),1);QVERIFY(!text.contains("Show transcript"));QVERIFY(imageLabel("Show transcript"));QVERIFY(imageLabel("Accepted by native app"));
     // Similar native text without an exact correlation remains a separate message.
     QCOMPARE(text.count("Recognized voice fixture"),1);
     QString toggle;for(const auto &url:links(view.browser()))if(url.startsWith("hgs-activity:voice-text-"))toggle=url;
@@ -1593,7 +1595,7 @@ void TestActivityView::recordingMetadataAppearance()
         const auto format=it.fragment().charFormat();if(!format.isImageFormat())continue;
         const QUrl resource(format.toImageFormat().name());
         if(resource.scheme()=="hgs-voice-status"){
-            status=true;QCOMPARE(format.property(QTextFormat::ImageAltText).toString(),state=="submitted"?"Sent to agent":state=="transcribing"?"Recognizing…":"Delivery not confirmed");
+            status=true;QCOMPARE(format.property(QTextFormat::ImageAltText).toString(),state=="submitted"?"Accepted by native app":state=="transcribing"?"Recognizing…":"Delivery not confirmed");
             QVERIFY(!view.browser()->document()->resource(QTextDocument::ImageResource,resource).value<QImage>().isNull());
         }
         if(resource.scheme()=="hgs-voice-transcript"){transcript=true;QCOMPARE(format.property(QTextFormat::ImageAltText).toString(),"Show transcript");}
@@ -2315,6 +2317,60 @@ void TestActivityView::failedMessageActionsFollowCardIdentity()
     activate(view.browser(),commands[0]);QCOMPARE(actions.size(),2); // Old Retry is no longer registered.
     view.setActivity({{"native_ui_available",true}},events);QVERIFY(view.browser()->toPlainText().contains("Check native UI"));
     view.setSessionKey("other");activate(view.browser(),commands[1]);QCOMPARE(actions.size(),2);
+}
+
+void TestActivityView::openCodeVoiceQueueRemainsVisible_data()
+{
+    QTest::addColumn<bool>("video");
+    QTest::newRow("audio") << false;
+    QTest::newRow("video") << true;
+}
+
+void TestActivityView::openCodeVoiceQueueRemainsVisible()
+{
+    QFETCH(bool,video);
+    SettledActivityView view;view.setSessionKey("opencode/voice/local");
+    auto row=waveformMessage();auto voice=row["voice"].toObject();
+    voice["native_binding"]=QJsonObject{{"provider_source","opencode_native"},{"provider_message_id","msg_Voice01"}};
+    if(video)voice["video"]=QJsonObject{{"request_id",voice["id"]},{"index",1},{"mime","video/mp4"},{"duration_ms",10000},{"width",480},{"height",480}};
+    row["voice"]=voice;
+    const auto original=row;
+    QJsonObject native{{"type","UserPromptSubmit"},{"source","opencode_native"},{"message_id","msg_Voice01"},
+        {"at",1791018003.0},{"detail",voice["transcript"]},{"delivery_state","queued"}};
+    QJsonObject details{{"voice_messages",QJsonArray{row}},{"allowed_actions",QJsonArray{"remove_queued"}}};
+    QSignalSpy actions(&view,&ActivityView::messageActionRequested);
+    const auto removeLinks=[&]{QStringList result;for(const auto &url:links(view.browser()))if(url.startsWith("hgs-message:"))result.append(url);return result;};
+    const auto admitted=[&]{
+        for(auto block=view.browser()->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it)
+            if(it.fragment().charFormat().property(QTextFormat::ImageAltText).toString()=="Accepted by native app")return true;
+        return false;
+    };
+    view.setActivity(details,{native});
+    QVERIFY(view.plainText().contains("Queued"));QVERIFY(removeLinks().isEmpty());
+    QVERIFY(admitted());QVERIFY(view.plainText().contains("Queue status, when present, is shown alongside this recording."));
+    QCOMPARE(view.plainText().count(video?"You (video)":"You (voice)"),1);
+    native["delivery_state"]="not_delivered";view.setActivity(details,{native});
+    QVERIFY(view.plainText().contains("Not delivered"));QCOMPARE(removeLinks().size(),1);
+    const auto remove=removeLinks().first();activate(view.browser(),remove);
+    QCOMPARE(actions.size(),1);QCOMPARE(actions[0][0].toString(),QString("msg_Voice01"));QCOMPARE(actions[0][1].toString(),QString("remove_queued"));
+    details["queued_removal"]="msg_Voice01";view.setActivity(details,{native});
+    QVERIFY(view.plainText().contains("Removing…"));QVERIFY(removeLinks().isEmpty());
+    activate(view.browser(),remove);QCOMPARE(actions.size(),1);
+    details.remove("queued_removal");details["allowed_actions"]=QJsonArray{};view.setActivity(details,{native});
+    QVERIFY(view.plainText().contains("Not delivered"));QVERIFY(removeLinks().isEmpty());
+    // Removing the transient inbox entry leaves media; consuming it deduplicates accepted history.
+    view.setActivity(details,{});QVERIFY(!view.plainText().contains("Not delivered"));QVERIFY(admitted());
+    native.remove("delivery_state");view.setActivity(details,{native});
+    QVERIFY(!view.plainText().contains(voice["transcript"].toString()));QVERIFY(admitted());
+    // Same text, wrong message or source cannot hide an accepted native row.
+    native["message_id"]="msg_Other01";view.setActivity(details,{native});QVERIFY(view.plainText().contains(voice["transcript"].toString()));
+    native["message_id"]="msg_Voice01";native["source"]="other_native";view.setActivity(details,{native});QVERIFY(view.plainText().contains(voice["transcript"].toString()));
+    // Even duplicate bindings never hide either live inbox row.
+    native["source"]="opencode_native";native["delivery_state"]="queued";
+    auto duplicate=native;duplicate["activity_key"]="other-copy";duplicate["at"]=1791018004.0;
+    view.setActivity(details,{native,duplicate});QCOMPARE(view.plainText().count("Queued"),2);
+    QCOMPARE(row,original);QCOMPARE(voice["state"].toString(),QString("submitted"));
+    view.setSessionKey("opencode/other/local");activate(view.browser(),remove);QCOMPARE(actions.size(),1);
 }
 
 void TestActivityView::openCodeQueuedMessagesShowDeliveryAndRemove()
