@@ -523,8 +523,8 @@ pub fn request(v: &Value) -> Result<()> {
                     return Err(Error::BAD);
                 }
                 if let Some(e) = p.get("effort") {
-                    // The fixed names, or for an OpenCode session a bounded
-                    // safe variant id: the connector decides per model.
+                    // The fixed names, or for an OpenCode session a native
+                    // effort id: the connector decides per model.
                     let opencode = v["session"]
                         .as_str()
                         .is_some_and(|s| s.starts_with("opencode/"));
@@ -534,7 +534,7 @@ pub fn request(v: &Value) -> Result<()> {
                     ]
                     .iter()
                     .any(|x| e == x)
-                        && !(opencode && e.as_str().is_some_and(variant_id))
+                        && !(opencode && e.as_str().is_some_and(opencode_effort_id))
                     {
                         return Err(Error::BAD);
                     }
@@ -594,11 +594,15 @@ fn agent(v: &Value) -> Result<()> {
     }
     Ok(())
 }
-/// An OpenCode effort variant: 1-40 ASCII letters, digits, `-`, `_` or `.`.
-fn variant_id(s: &str) -> bool {
+/// An OpenCode effort (model variant) id, exactly as the native catalog
+/// projects it: non-empty, at most 40 UTF-8 bytes, and no whitespace, control
+/// character or `/`. Shared with the connector; the model's `effort_options`
+/// decide membership. `tests/fixtures/opencode-effort-ids.json` fixes the shape.
+pub fn opencode_effort_id(s: &str) -> bool {
     (1..=40).contains(&s.len())
-        && s.bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+        && !s
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '/')
 }
 
 fn tag(v: &Value, launch: bool) -> Result<()> {
@@ -750,7 +754,7 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
                 // the value against that model's offered variants.
                 if p["agent"] != "opencode"
                     || p.get("model").is_none()
-                    || !effort.as_str().is_some_and(variant_id)
+                    || !effort.as_str().is_some_and(opencode_effort_id)
                 {
                     return Err(Error::BAD);
                 }

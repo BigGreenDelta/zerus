@@ -570,7 +570,9 @@ OpenCode rows add `catalog_state` (`ready`, `loading`, `not_running`,
 `disabled`, `incompatible` or `unreachable`), a bounded `catalog_reason` and,
 when it is not installed, `install_reason`. Each OpenCode `model_options` entry
 may add `provider_label`, `free`, and up to eight `effort_options` with
-`effort_labels` in the same order. All fields are additive and appear only when
+`effort_labels` in the same order. An effort id keeps the native catalog's rule
+(non-empty, at most 40 UTF-8 bytes, no whitespace, control character or `/`); a
+malformed id drops only that entry. All fields are additive and appear only when
 the computer reports them; the whole projection stays within 128 KiB (over the bound, `effort_labels` and
 then `effort_options` are dropped before the projection is refused).
 An unavailable catalog can indicate an older native CLI; it is not an empty
@@ -942,11 +944,14 @@ with `effort is not offered for this model` before anything starts. For any othe
 agent the field is refused as an unknown field, as before. A `settings` change for
 an `opencode/` session is checked the same way against the target model's
 `effort_options` in the session's own inspection instead of the fixed list.
-The relay admits a name outside the fixed effort list only as a safe variant id
-(1-40 ASCII letters, digits, `-`, `_` or `.`): in `launch` for agent `opencode`
-with a model, and in `settings` only for an `opencode/` session. It advertises
-`opencode_launch_effort` too; phones offer such names only when both the relay
-and the computer advertise it.
+The relay and the connector admit a name outside the fixed effort list only as a
+native OpenCode effort id (non-empty, at most 40 UTF-8 bytes, no whitespace,
+control character or `/`, as `hgs` projects it): in `launch` for agent
+`opencode` with a model, and in `settings` only for an `opencode/` session.
+`tests/fixtures/opencode-effort-ids.json` is the shared shape contract every
+layer tests against; membership in the model's `effort_options` stays
+authoritative. The relay advertises `opencode_launch_effort` too; phones offer
+such names only when both the relay and the computer advertise it.
 The connector also accepts a `remove_queued` session action carrying an exact
 `msg_` `message_id`, run and conversation identity and journals it like other
 session actions, and an in-flight one recovers as uncertain after a restart.

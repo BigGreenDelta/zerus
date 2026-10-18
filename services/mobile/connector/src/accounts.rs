@@ -8,6 +8,7 @@ use crate::pyvalue::{
 };
 use serde_json::{json, Map, Value};
 use zerus_relay::json;
+use zerus_relay::protocol::opencode_effort_id;
 
 pub const REFRESH_SECONDS: f64 = 300.0;
 pub const CATALOG_SECONDS: f64 = 30.0;
@@ -159,7 +160,7 @@ fn fit_rows(rows: &mut [Value], document: impl Fn(&[Value]) -> Value) -> bool {
     false
 }
 
-/// Variants one model offers: at most 8 bounded identifiers and, in the same
+/// Variants one model offers: at most 8 native effort ids and, in the same
 /// order, their labels. Anything malformed drops the entry, never the model.
 fn effort_options(row: &Map<String, Value>) -> Option<(Value, Value)> {
     let efforts = row.get("effort_options")?.as_array()?;
@@ -167,13 +168,7 @@ fn effort_options(row: &Map<String, Value>) -> Option<(Value, Value)> {
     let mut ids: Vec<Value> = Vec::new();
     let mut shown: Vec<Value> = Vec::new();
     for (index, effort) in efforts.iter().enumerate() {
-        let Some(id) = effort.as_str().filter(|id| {
-            !id.is_empty()
-                && id.len() <= 64
-                && id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
-        }) else {
+        let Some(id) = effort.as_str().filter(|id| opencode_effort_id(id)) else {
             continue;
         };
         if ids.iter().any(|known| known == id) {
