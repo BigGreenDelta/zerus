@@ -719,6 +719,11 @@ notification is withdrawn; it survives rename and resume. Hosts with an older
 as read** clears the current reminder without answering the agent; **Mark needs
 attention** creates a local review reminder.
 Opening the conversation does not clear an explicit review reminder.
+**Mark all as read** (right-click the Sessions icon in the rail, the icon beside
+Saved drafts, or the project and machine action menus) marks current replies on
+every machine as read, including hidden sessions. Sessions marked as needing
+attention keep their reply unread; pending approvals, questions and errors stay
+highlighted.
 
 Ctrl/Command-click selects multiple sessions while preserving the open conversation
 and draft. Batch actions include read/review later, pause, resume, archive, project
