@@ -64,9 +64,14 @@ fresh consent once; no permissions are reset automatically. Source builds link
 Homebrew Qt and are signed locally without the hardened runtime or notarization;
 use the published app for distribution. See [macOS signing](macos-distribution.md#local-source-builds).
 
-On Arch Linux, desktop dependencies include `cmake`, `qt6-base`, `qt6-multimedia`, `qt6-svg`,
+On Arch Linux, desktop dependencies include `cmake`, `qt6-base`, `qt6-tools`, `qt6-multimedia`, `qt6-svg`,
 `kstatusnotifieritem`, `kwindowsystem`, `kidletime` and C++ build tools; add
 `qt6-webengine` for the embedded Native UI.
+
+The desktop starts in English on every operating system. Settings > Appearance >
+Interface language offers an optional Russian preview; restart only Zerus to
+apply it. Agent sessions keep running, and untranslated text stays in English.
+See [translation coverage and maintenance](../tray/translations/README.md).
 
 Add `~/.local/bin` to `PATH`. The CLI installs to `~/.local/bin/hgs`; SSH calls
 use that exact path. The desktop installs to `~/.local/bin/hgs-tray` on Linux or

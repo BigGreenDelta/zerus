@@ -1,5 +1,11 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
+add_executable(test_ui_language test_ui_language.cpp "${ZERUS_TRANSLATIONS_QRC}")
+add_dependencies(test_ui_language zerus-translations)
+target_include_directories(test_ui_language PRIVATE ../src)
+target_link_libraries(test_ui_language PRIVATE Qt6::Test Qt6::Widgets)
+# Registered below, after the common native-test launcher is defined.
+
 # support/FakeCli.h starts fixture scripts as fake executables on every platform.
 set(ZERUS_TEST_SUPPORT "${CMAKE_CURRENT_SOURCE_DIR}/support")
 if(WIN32)
@@ -439,6 +445,11 @@ if(TARGET hgs-tray-native-ui)
     zerus_add_test(nativeuiplugin test_nativeuiplugin)
     set_tests_properties(nativeuiplugin PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu;QT_QUICK_BACKEND=software")
 endif()
+
+zerus_add_test(ui-language test_ui_language)
+set_tests_properties(ui-language PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_test(NAME translation-catalog COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+    -s "${PROJECT_SOURCE_DIR}/translations" -p "test_*.py")
 
 add_executable(test_activityview test_activityview.cpp)
 target_include_directories(test_activityview PRIVATE ../src)
