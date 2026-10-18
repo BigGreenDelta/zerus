@@ -68,9 +68,14 @@ elseif(APPLE)
     target_link_libraries(hgs-external-file PRIVATE "-framework CoreFoundation" "-framework CoreServices")
 endif()
 
-add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h)
+add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h
+    src/WindowsUpdateTrust.cpp src/WindowsUpdateTrust.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
+if(WIN32)
+    # WindowsUpdateTrust: CNG for the update manifest, WinVerifyTrust for installers.
+    target_link_libraries(hgs-updates PRIVATE bcrypt wintrust crypt32)
+endif()
 
 # The recorder alone serves the macOS microphone permission suite.
 add_library(hgs-speech-recorder STATIC src/speech/SpeechRecorder.cpp)
