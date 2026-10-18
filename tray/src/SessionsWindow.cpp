@@ -892,6 +892,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit refreshRequested();rebuild();inspect();
     });
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
+        if(!m_selectionForgetRequest||id!=m_selectionForgetRequest)return;
+        // A failed or unconfirmed receipt counts as failed and is never retried.
+        m_selectionForgetRequest=0;finishSelectionAction(m_selectionCommand,ok,error);
+    });
+    connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
         if(!m_removeQueuedRequest||id!=m_removeQueuedRequest)return;
         m_removeQueuedRequest=0;m_removeQueuedMessage.clear();
         if(m_selectedKey==m_removeQueuedKey){showNotice(ok?tr("Queued message removed."):error,!ok);renderDetails();inspect();}

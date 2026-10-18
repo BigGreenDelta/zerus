@@ -25,6 +25,13 @@ bool sameInstance(const SessionInfo &a, const SessionInfo &b)
     return a.name == b.name && a.archiveId == b.archiveId && a.created == b.created
         && a.runId == b.runId && a.conversationId == b.conversationId && a.state == b.state;
 }
+// As for a single session, Forget of an OpenCode 2 session removes only its
+// Zerus binding, even while it runs. In a selection it is scoped to the row's
+// own run and conversation, so a row without both is left as it is.
+bool forgetsBinding(const SessionInfo &s)
+{
+    return s.state != "archived" && NativeSessionCapabilities::forgetsBindingOnly(s);
+}
 }
 
 QList<SessionsWindow::Entry> SessionsWindow::selectionEntries() const
@@ -84,7 +91,8 @@ bool SessionsWindow::selectionActionApplies(const Entry &entry, SelectionAction 
     case SelectionAction::Resume: return s.resumable && s.state != "running"
         && (s.state != "archived" || (!s.archiveId.isEmpty() && !archiveNameOccupied(entry)));
     case SelectionAction::Archive: return s.state == "paused" || s.state == "stopped";
-    case SelectionAction::Forget: return s.state != "running" && (s.state != "archived" || !s.archiveId.isEmpty());
+    case SelectionAction::Forget: return forgetsBinding(s) ? !s.runId.isEmpty() && !s.conversationId.isEmpty()
+        : s.state != "running" && (s.state != "archived" || !s.archiveId.isEmpty());
     case SelectionAction::Terminate: return s.state == "running";
     default: return false;
     }
@@ -222,9 +230,14 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
         QStringList names; for (const auto &entry : targets) names << entry.machine + " / " + entry.session.name;
         QString text = clearArchive ? (m_archiveBrowser->paged()?tr("Remove %1 loaded archived sessions in the current date and machine scope? Unloaded entries are kept."):tr("Remove %1 archived sessions from HGS on the selected machines?")).arg(targets.size())
             : tr("%1 %2 selected sessions?").arg(selectionActionText(action)).arg(targets.size());
-        text += action == SelectionAction::Terminate
-            ? tr("\n\nRunning processes will stop. Tracked Codex, Claude and Kimi conversations are kept in Archive; native conversation history is kept.")
-            : tr("\n\nOnly these saved or archived entries are removed. Live sessions and native conversation history are kept.");
+        const auto bindings = action == SelectionAction::Forget
+            ? std::count_if(targets.cbegin(), targets.cend(), [](const Entry &entry) { return forgetsBinding(entry.session); }) : 0;
+        if (action == SelectionAction::Terminate)
+            text += tr("\n\nRunning processes will stop. Tracked Codex, Claude and Kimi conversations are kept in Archive; native conversation history is kept.");
+        else if (bindings < targets.size())
+            text += bindings ? tr("\n\nThese saved or archived entries are removed. Other live sessions and native conversation history are kept.")
+                : tr("\n\nOnly these saved or archived entries are removed. Live sessions and native conversation history are kept.");
+        if (bindings) text += tr("\n\nOpenCode sessions: only Zerus forgets them; their conversations stay in OpenCode.");
         if (entries.size() != targets.size()) text += tr("\n\n%1 unavailable or inapplicable sessions will be left as they are.").arg(entries.size() - targets.size());
         QMessageBox dialog(QMessageBox::Question, clearArchive ? tr("Clear archive") : selectionActionText(action), text, QMessageBox::Cancel, this);
         dialog.setObjectName("confirmSelectionAction"); dialog.setTextFormat(Qt::PlainText); dialog.setDetailedText(names.join('\n'));
@@ -278,6 +291,10 @@ void SessionsWindow::runNextSelectionAction()
         case SelectionAction::Archive:
             m_selectionCommand = "archive " + s.name; m_client.archiveSession(entry.host, s.name); return;
         case SelectionAction::Forget:
+            if (forgetsBinding(s)) {
+                m_selectionCommand = "forget " + s.name;
+                m_selectionForgetRequest = m_client.requestForgetBinding(entry.host, s.name, s.runId, s.conversationId); return;
+            }
             m_selectionCommand = (s.state == "archived" ? "forget archive " : "kill ") + s.name;
             if (s.state == "archived") m_client.forgetArchive(entry.host, s.name, s.archiveId); else m_client.killSession(entry.host, s.name); return;
         case SelectionAction::Terminate: {
@@ -297,7 +314,8 @@ void SessionsWindow::runNextSelectionAction()
 bool SessionsWindow::finishSelectionAction(const QString &operation, bool ok, const QString &detail)
 {
     if (!m_selectionRunning) return false;
-    if (operation != m_selectionCommand) return true;
+    // A binding forget finishes only with the result of its own request.
+    if (operation != m_selectionCommand || m_selectionForgetRequest) return true;
     if (ok) ++m_selectionDone;
     else { ++m_selectionFailed; m_selectionErrors << operation + ": " + detail; }
     m_selectionCommand.clear();
