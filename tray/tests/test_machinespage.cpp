@@ -48,6 +48,7 @@ private slots:
     void countsReadInSingularAndPlural();
     void windowsConsoleEnablesLocalSessions();
     void enablingIsOfferedOnlyToAWindowsConsole();
+    void windowsComputerPageHasNoSshConnection();
     void localSessionHostStates_data();
     void localSessionHostStates();
     void preview();
@@ -591,6 +592,37 @@ void TestMachinesPage::enablingIsOfferedOnlyToAWindowsConsole()
     page.setFleet(windowsComputer(true, {}, "linux")); widget<QListWidget>(page, "machineProfiles")->setCurrentRow(0);
     QVERIFY(!enable->isVisible()); QVERIFY(!host->isVisible());
     QVERIFY(widget<QPushButton>(page, "machineSessions")->isVisible()); QVERIFY(widget<QPushButton>(page, "machineAccounts")->isVisible());
+}
+
+void TestMachinesPage::windowsComputerPageHasNoSshConnection()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    auto *list = widget<QListWidget>(page, "machineProfiles");
+    const QList<const char *> connection{"saveMachine", "checkMachine", "sshMachine", "installMachine", "resetMachine", "removeMachine"};
+    // A Windows computer with local sessions is never reached over SSH: its own page
+    // keeps sessions, accounts, the session host and its color, without SSH fields.
+    page.setFleet(windowsComputer(true, sessionHost("stopped"))); list->setCurrentRow(0);
+    QTRY_VERIFY(widget<QLabel>(page, "localSessionHost")->isVisible());
+    QVERIFY(!widget<QLineEdit>(page, "machineAlias")->isVisible());
+    QVERIFY(!widget<QLineEdit>(page, "machineHostname")->isVisible());
+    QVERIFY(!widget<QCheckBox>(page, "machineEnabled")->isVisible());
+    for (const char *name : connection) QVERIFY2(!widget<QPushButton>(page, name)->isVisible(), name);
+    QVERIFY(widget<QPushButton>(page, "machineSessions")->isVisible());
+    QVERIFY(widget<QPushButton>(page, "machineAccounts")->isVisible());
+    QVERIFY(widget<QPushButton>(page, "machineColor")->isVisible());
+    // A remote machine keeps every action.
+    list->setCurrentRow(1);
+    QTRY_VERIFY(widget<QLineEdit>(page, "machineHostname")->isVisible());
+    for (const char *name : {"saveMachine", "checkMachine", "sshMachine", "installMachine", "removeMachine"})
+        QVERIFY2(widget<QPushButton>(page, name)->isVisible(), name);
+    // This computer on Linux and macOS is unchanged.
+    for (const QString platform : {"linux", "macos"}) {
+        page.setFleet(windowsComputer(true, {}, platform)); list->setCurrentRow(0);
+        QTRY_VERIFY(widget<QLineEdit>(page, "machineHostname")->isVisible());
+        QVERIFY(widget<QLineEdit>(page, "machineAlias")->isVisible());
+        for (const char *name : connection) QVERIFY2(widget<QPushButton>(page, name)->isVisible(), name);
+        list->setCurrentRow(1); QTRY_VERIFY(widget<QPushButton>(page, "machineSessions")->isVisible());
+    }
 }
 
 void TestMachinesPage::localSessionHostStates_data()

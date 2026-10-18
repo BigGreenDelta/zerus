@@ -231,6 +231,7 @@ private slots:
     void activitySurfaceRemainsOpaque();
     void settingsSlidersResetToDefaults();
     void projectSwarmFollowsWorkspaceTheme();
+    void followSystemAppearanceFollowsARuntimePaletteChange();
     void alwaysOnTopSettingKeepsWindowAbove();
     void railPinTogglesAlwaysOnTop();
     void windowLayerControlsKeepFocusAndLayout_data();
@@ -1264,6 +1265,23 @@ void TestSessionsWindow::projectSwarmFollowsWorkspaceTheme()
         QTimer timeout;timeout.setSingleShot(true);connect(&timeout,&QTimer::timeout,&window,[]{if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()))dialog->reject();});timeout.start(5000);
         showSwarmDialog(&client,&controller,fleet,&window,[]{});QVERIFY(checked);
     }
+}
+
+void TestSessionsWindow::followSystemAppearanceFollowsARuntimePaletteChange()
+{
+    // A system light/dark switch changes the application palette while Zerus runs.
+    const auto restore=qScopeGuard([]{QApplication::setPalette(QPalette());QSettings().remove("workspace/theme");});
+    QPalette light;light.setColor(QPalette::Window,QColor("#f0f0f0"));light.setColor(QPalette::WindowText,Qt::black);
+    QPalette dark;dark.setColor(QPalette::Window,QColor("#202020"));dark.setColor(QPalette::WindowText,Qt::white);
+    QApplication::setPalette(light);QSettings().setValue("workspace/theme","system");
+    SessionsWindow window(program());window.setFleet(fleet());window.show();
+    auto *list=window.findChild<QWidget*>("sessionList");QVERIFY(list);
+    QVERIFY(!list->property("hgsDark").toBool());
+    QApplication::setPalette(dark);QTRY_VERIFY(list->property("hgsDark").toBool());
+    QApplication::setPalette(light);QTRY_VERIFY(!list->property("hgsDark").toBool());
+    // An explicit theme ignores the system appearance.
+    QSettings().setValue("workspace/theme","light");QApplication::setPalette(dark);
+    QTest::qWait(50);QVERIFY(!list->property("hgsDark").toBool());
 }
 
 void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
@@ -8836,6 +8854,8 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     const auto bounds = [&] { return QRect(list->mapTo(&window, QPoint()), list->size()); };
     const auto originalBounds = bounds();
     auto *statusBar = window.findChild<QFrame *>("workspaceStatus"); QVERIFY(statusBar); QCOMPARE(statusBar->height(), 28);
+    // Only a Zerus that its login item started at background priority offers the fix.
+    auto *loginItem = statusBar->findChild<QPushButton *>("fixLoginItem"); QVERIFY(loginItem); QVERIFY(loginItem->isHidden());
     window.showNotificationNotice(QString(2000, 'x') + "\nRefreshing…"); QCoreApplication::processEvents();
     QCOMPARE(bounds(), originalBounds);
     // A native failure must stay visible after the previous success notice expires.
@@ -9734,7 +9754,7 @@ print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer
     SessionsWindow window(FakeCli::program(script));window.resize(1100,900);window.setFleet(state);window.show();
     window.findChild<QPushButton *>("workspaceSettings")->click();auto &page=*static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"));page.openRecovery();
     auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
-    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("Synchronized across 1 machines"),20000);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("Synchronized with 1 machine."),20000);
     auto *save=window.findChild<QPushButton *>("recoverySave");QTRY_VERIFY(save->isEnabled());
     window.findChild<QCheckBox *>("recoveryEnabled")->setChecked(true);save->click();
     QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(script+".saved"),20000);
@@ -9788,7 +9808,7 @@ print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer
     // Recovery includes this computer as well as the remote machine.
     static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"))->openRecovery();
     auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
-    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("Synchronized across 2 machines"),20000);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("Synchronized across 2 machines."),20000);
     local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     window.setFleet(state);QVERIFY(!sections->item(5)->isHidden());
     local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());

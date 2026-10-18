@@ -38,6 +38,13 @@ public:
         (void)clicked;
         showMessage(title, body, icon, msecs);
     }
+    // As showClickableMessage() with a picture instead of a standard icon, such as
+    // the program's own icon. Icons that cannot show a picture use Information.
+    virtual void showClickableIconMessage(const QString &title, const QString &body, const QIcon &icon,
+                                          int msecs, std::function<void()> clicked) {
+        (void)icon;
+        showClickableMessage(title, body, QSystemTrayIcon::Information, msecs, std::move(clicked));
+    }
     // Показать иконку. Звать после setIcon(): у QSystemTrayIcon пустая иконка видна как
     // дырка в панели. У SniTrayIcon это no-op -- StatusNotifierItem регистрируется у
     // панели уже в конструкторе.
