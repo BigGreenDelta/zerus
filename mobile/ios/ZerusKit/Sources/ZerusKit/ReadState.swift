@@ -140,6 +140,20 @@ public struct ConversationReadState: Codable, Hashable, Sendable {
     }
 }
 
+/// A later canonical page can identify rows already read from the bounded native inspection.
+public enum ConversationReadHead {
+    /// Only exact native-provided aliases of canonical rows in this page's epoch carry a read position forward;
+    /// equal text never does, and a later unseen reply stays unread.
+    public static func observe(_ state: ConversationReadState, _ page: HistoryPage) -> ConversationReadState {
+        let canonical = page.events.filter { $0.historyEpoch == page.epoch && !$0.historyId.isEmpty && !$0.historyCursor.isEmpty }
+        let aliases = HistoryAliases.exact(canonical, known: Set(state.record(page.target)?.seen ?? []))
+        let next = state.head(page.target, epoch: page.epoch, latest: page.latestIncoming, total: page.totalIncoming, complete: page.complete)
+            .supersede(page.target, aliases)
+        let seen = Set(next.record(page.target)?.seen ?? [])
+        return next.visible(page.target, canonical.filter { seen.contains($0.id) })
+    }
+}
+
 public enum ConversationReadPolicies {
     public static func key(_ target: Target) -> String {
         JSON([target.connectionId, target.computerId, target.session, target.conversation, target.archiveId, target.agentId, target.parentConversation]).compact
