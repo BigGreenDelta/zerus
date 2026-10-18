@@ -1,5 +1,11 @@
 import Foundation
 
+/// The choices and texts a question card opens with.
+public struct QuestionOpening: Hashable, Sendable {
+    public let options: [String: Set<String>]
+    public let texts: [String: String]
+}
+
 public struct QuestionQueue: Sendable {
     public let selected: Question?
     public let optional: [Question]
@@ -76,6 +82,26 @@ extension QuestionPolicies {
             !(options[prompt.id] ?? []).isEmpty || prompt.other && !(texts[prompt.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                 !prompt.inputKind.isEmpty && !prompt.required
         }
+    }
+
+    /// The answers a card opens with. A saved draft of this exact question (or its native submission) wins for every item
+    /// it records, including an intentionally empty text; otherwise form defaults seed the choices and an OpenCode text
+    /// item's `default_text`. Seeded answers are only shown: nothing is saved, confirmed or sent until the person acts.
+    public static func opening(_ prompts: [Prompt], draftAnswers: String, native: NativeQuestionDelivery?) -> QuestionOpening {
+        var saved: [String: NativeQuestionAnswer] = [:]
+        if let native {
+            for answer in native.answers { saved[answer.questionId] = answer }
+        } else if let rows = (try? JSON.parse(draftAnswers))?.array {
+            for row in rows.compactMap(\.object) {
+                let id = row.string("question_id")
+                saved[id] = NativeQuestionAnswer(questionId: id, optionIds: row.strings("selected_option_ids"), text: row.string("text"), skip: row.bool("skip"))
+            }
+        }
+        let choices = native == nil ? defaults(prompts) : [:]
+        let options = prompts.map { prompt in (prompt.id, saved[prompt.id].map { Set($0.optionIds) } ?? choices[prompt.id] ?? []) }
+        let texts = prompts.map { prompt in (prompt.id, saved[prompt.id]?.text ?? (native == nil ? prompt.defaultText : "")) }
+        return QuestionOpening(options: Dictionary(options, uniquingKeysWith: { first, _ in first }),
+                               texts: Dictionary(texts, uniquingKeysWith: { first, _ in first }))
     }
 
     /// Preselected form answers (`default_option_ids`) among the offered options; one for a single-answer item.

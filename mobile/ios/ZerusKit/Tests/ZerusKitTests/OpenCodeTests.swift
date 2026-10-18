@@ -302,6 +302,122 @@ final class OpenCodeTests: XCTestCase {
         XCTAssertNil(QuestionPolicies.queue(NativeEvents.questions(["pending_questions": [.object(answerable)]]), target, chosen: "").selected)
     }
 
+    func testEffortIdFixtureIsSharedByteForByte() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../../../tests/fixtures/opencode-effort-ids.json").standardized
+        XCTAssertEqual(try Data(contentsOf: SharedFixture.url("opencode-effort-ids.json")), try Data(contentsOf: root))
+    }
+
+    /// Every layer shares the native catalog's shape rule (opencode-effort-ids.json); the model's effort_options decide membership.
+    func testEffortIdsFollowTheSharedNativeRule() throws {
+        let fixture = try SharedFixture.json("opencode-effort-ids.json")
+        let accept = fixture.strings("accept"), reject = fixture.strings("reject")
+        XCTAssertEqual(accept.count, 10)
+        XCTAssertEqual(reject.count, 13)
+        XCTAssertTrue(accept.contains("think:deep"))
+        func launch(_ effort: String) throws -> JSONObject {
+            try SessionActionPolicies.arguments("launch", ["agent": "opencode", "directory": "/example/project", "tag": "work", "account_id": "native-opencode",
+                                                           "model": "fixture/local", "effort": .string(effort)])
+        }
+        func settings(_ effort: String) throws -> JSONObject {
+            try SessionActionPolicies.arguments("settings", ["model": "fixture/local", "effort": .string(effort)], effortVariants: true)
+        }
+        for id in accept {
+            XCTAssertTrue(EffortOption.valid(id), id)
+            XCTAssertEqual(EffortOption.options([id], labels: []).map(\.value), [id], id)
+            XCTAssertNoThrow(try launch(id), id)
+            XCTAssertNoThrow(try settings(id), id)
+        }
+        for id in reject {
+            XCTAssertFalse(EffortOption.valid(id), id.debugDescription)
+            XCTAssertEqual(EffortOption.options([id], labels: []), [], id.debugDescription)
+            XCTAssertThrowsError(try launch(id), id.debugDescription)
+            // In a model change "" is not a variant but the request for the model's default.
+            if id.isEmpty { XCTAssertNoThrow(try settings(id)); continue }
+            XCTAssertThrowsError(try settings(id), id.debugDescription) { XCTAssertEqual(($0 as? ZerusError)?.message, "Invalid effort.") }
+        }
+        // Accepted ids reach the launch form and the sheet only when the model offers them, still at most 16.
+        let offered = accept + ["v12", "v13", "v14", "v15", "v16", "v17", "v18"]
+        var raw = catalog
+        raw["accounts"] = [["id": "native-opencode", "provider": "opencode", "label": "OpenCode", "model_options": [
+            ["id": "fixture/local", "value": "fixture/local", "label": "Local", "effort_options": JSON(reject + offered)]]]]
+        let sanitized = LaunchPresentation.sanitizeCatalog(raw)
+        let launchable = LaunchPresentation.efforts(sanitized, provider: "opencode", accountId: "native-opencode", model: "fixture/local", supported: true)
+        XCTAssertEqual(launchable.map(\.value), Array(offered.prefix(16)), "malformed ids never take one of the 16 places")
+        let sheet = SessionDetailsPresentation.settings(["agent": "opencode", "model_options": [["id": "m/x", "effort_options": JSON(accept)]]])
+        XCTAssertEqual(sheet.effortOptions("m/x", effortFeature: true).map(\.value), [""] + accept)
+        XCTAssertEqual(try launch("think:deep")["effort"], "think:deep")
+    }
+
+    /// A well-formed variant the model no longer offers is refused here, at launch and in a model change.
+    func testWithdrawnEffortIsRefusedLocally() throws {
+        let before: JSONObject = ["agent": "opencode", "settings_model": "fixture/local", "settings_change_supported": true,
+                                  "model_options": [["id": "fixture/local", "effort_options": ["low", "think:deep"]]]]
+        let after = before.putting("model_options", [["id": "fixture/local", "effort_options": ["low"]]])
+        let args: JSONObject = ["model": "fixture/local", "effort": "think:deep"]
+        XCTAssertNoThrow(try SessionActionPolicies.arguments("settings", args, effortVariants: true))
+        XCTAssertEqual(SessionActionPolicies.inspectReason(target, "settings", args, before), "")
+        XCTAssertEqual(SessionActionPolicies.inspectReason(target, "settings", args, after), "The selected effort is unavailable for this model.")
+        XCTAssertEqual(SessionDetailsPresentation.settings(after).keptEffort("think:deep", model: "fixture/local", effortFeature: true), "")
+        func catalog(_ efforts: [String]) -> JSONObject {
+            LaunchPresentation.sanitizeCatalog(["agents": ["opencode"], "accounts": [["id": "native-opencode", "provider": "opencode", "label": "OpenCode",
+                                                                                     "model_options": [["id": "fixture/local", "effort_options": JSON(efforts)]]]]])
+        }
+        func launch(_ raw: JSONObject) throws -> JSONObject {
+            try LaunchPresentation.arguments(raw, agent: "opencode", directory: "/example/project", tag: "work", accountId: "native-opencode", projectId: "",
+                                             worktrees: nil, model: "fixture/local", effort: "think:deep", effortSupported: true)
+        }
+        XCTAssertNoThrow(try launch(catalog(["low", "think:deep"])))
+        XCTAssertThrowsError(try launch(catalog(["low"]))) { XCTAssertEqual(($0 as? ZerusError)?.message, "The native effort changed. Review the current choices.") }
+    }
+
+    func testOpenCodeTextDefaultSeedsOnlyAQuestionWithoutASavedDraft() throws {
+        func card(_ item: JSONObject, source: String = "opencode_native", hash: String = "h1") throws -> Question {
+            try XCTUnwrap(NativeEvents.questions(["pending_questions": [["question_id": "frm_1", "question_hash": .string(hash), "can_answer": true,
+                                                                         "source": .string(source), "questions": [.object(item)]]]]).first)
+        }
+        let item: JSONObject = ["id": "k", "header": "Name", "prompt": "Name", "options": [], "allow_other": true, "required": true,
+                                "input_kind": "text", "default_text": "Ada"]
+        let question = try card(item)
+        XCTAssertEqual(question.prompts[0].defaultText, "Ada")
+        // Prefilled and complete, but only shown: nothing is saved or sent until the person acts.
+        let opened = QuestionPolicies.opening(question.prompts, draftAnswers: "", native: nil)
+        XCTAssertEqual(opened.texts, ["k": "Ada"])
+        XCTAssertTrue(QuestionPolicies.complete(question.prompts, options: opened.options, texts: opened.texts))
+        // A saved draft of this exact question wins, including an intentionally empty text.
+        let empty = QuestionPolicies.answers(question.prompts, options: [:], texts: ["k": ""]).compact
+        let reopened = QuestionPolicies.opening(question.prompts, draftAnswers: empty, native: nil)
+        XCTAssertEqual(reopened.texts, ["k": ""])
+        XCTAssertFalse(QuestionPolicies.complete(question.prompts, options: reopened.options, texts: reopened.texts))
+        let edited = QuestionPolicies.answers(question.prompts, options: [:], texts: ["k": "Grace"]).compact
+        XCTAssertEqual(QuestionPolicies.opening(question.prompts, draftAnswers: edited, native: nil).texts, ["k": "Grace"])
+        // A changed question has no saved draft of its own (drafts are keyed by question ID and hash) and gets the default again.
+        let saved = Draft(target: target, text: "", questionId: question.id, questionHash: question.hash, answers: empty)
+        let changed = try card(item, hash: "h2")
+        let changedDraft = [saved].first { $0.target == target && $0.questionId == changed.id && $0.questionHash == changed.hash }
+        XCTAssertNil(changedDraft)
+        XCTAssertEqual(QuestionPolicies.opening(changed.prompts, draftAnswers: changedDraft?.answers ?? "", native: nil).texts, ["k": "Ada"])
+        // A submitted native answer is shown as submitted, never seeded.
+        let native = NativeQuestionDelivery(requestId: "r", questionId: question.id, questionHash: question.hash, run: "run", conversation: "ses_A",
+                                            status: "submitted", answers: [])
+        XCTAssertEqual(QuestionPolicies.opening(question.prompts, draftAnswers: "", native: native).texts, ["k": ""])
+        // A legacy card without default_text is unchanged.
+        var legacy = item
+        legacy["default_text"] = nil
+        XCTAssertEqual(QuestionPolicies.opening(try card(legacy).prompts, draftAnswers: "", native: nil).texts, ["k": ""])
+        // Only explicit native OpenCode text items carry it.
+        XCTAssertEqual(try card(item, source: "codex_tui").prompts[0].defaultText, "")
+        let choice: JSONObject = ["id": "c", "header": "Color", "prompt": "Color", "options": [["id": "Green", "label": "Green"]], "allow_other": true,
+                                  "input_kind": "choice", "default_text": "Ada"]
+        let chooser = try card(choice)
+        XCTAssertEqual(chooser.prompts[0].defaultText, "")
+        XCTAssertEqual(QuestionPolicies.opening(chooser.prompts, draftAnswers: "", native: nil).texts, ["c": ""])
+        // Sanitized like other text: control characters are ignored and the value is clipped to the reported bound.
+        XCTAssertEqual(try card(item.putting("default_text", "Ada\nLovelace")).prompts[0].defaultText, "")
+        XCTAssertEqual(try card(item.putting("default_text", 7)).prompts[0].defaultText, "")
+        XCTAssertEqual(try card(item.putting("max_length", 2)).prompts[0].defaultText, "Ad")
+        XCTAssertEqual(try card(item.putting("default_text", .string(String(repeating: "é", count: 3000)))).prompts[0].defaultText.utf8.count, 4096)
+    }
+
     func testFormItemLimitsApplyOnlyWhenReported() {
         let base = Prompt(id: "k", text: "Pick", choices: ["a", "b", "c"].map { Choice(id: $0, label: $0.uppercased(), description: "") },
                           multi: true, required: true, other: false, header: "", body: "", otherLabel: "", otherDescription: "")
