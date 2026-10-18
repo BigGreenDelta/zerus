@@ -420,4 +420,89 @@ sys.exit(0 if signed_in else 1)
             self.run_hgs('account','add',id,'--provider','codex',ok=False)
         self.assertFalse((self.config/'accounts').exists())
 
+
+class OpenCodeUserInstall(unittest.TestCase):
+    """OpenCode's official user install, ~/.opencode/bin, is found after every other
+    PATH folder. The caller's PATH holds only a private folder: /usr/bin can hold a
+    real OpenCode (an Arch package does), and a managed GUI runs hgs with a minimal
+    PATH. hgs puts ~/.local/bin, /opt/homebrew/bin and /usr/local/bin first, so an
+    OpenCode in either system folder would mask these cases."""
+    def setUp(self):
+        for folder in ('/opt/homebrew/bin', '/usr/local/bin'):
+            if os.access(os.path.join(folder, 'opencode'), os.X_OK):
+                self.skipTest('An OpenCode in ' + folder + ' precedes every folder these cases control')
+        temp = tempfile.TemporaryDirectory(prefix='zerus-opencode-install-')
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.home = self.root / 'home'
+        self.config = self.home / '.config/hgs'
+        self.config.mkdir(parents=True)
+        # The other agents and tools hgs may probe, never the real ones.
+        local = self.home / '.local/bin'
+        local.mkdir(parents=True)
+        for executable in ('codex', 'claude', 'kimi', 'dsh', 'ssh', 'security', 'tmux'):
+            (local / executable).write_text('#!/bin/sh\nexit ' + ('1' if executable == 'tmux' else '99') + '\n')
+            (local / executable).chmod(0o755)
+        self.caller = self.root / 'caller-bin'
+        self.caller.mkdir()
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(('HGS_', 'OPENCODE_', 'XDG_'))
+                    and key not in ('CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'KIMI_CODE_HOME', 'TMUX', 'TMUX_PANE')}
+        self.env.update(HOME=str(self.home), PATH=str(self.caller), HGS_CONFIG_DIR=str(self.config),
+                        HGS_STATE_DIR=str(self.root / 'state'), HGS_SELF='test', HGS_PEERS='', HGS_TAB='0')
+        self.user_install = self.home / '.opencode/bin'
+
+    def fake_opencode(self, folder, version):
+        """An `opencode` that logs every argument list it receives and answers only
+        `--version`; any other command fails. Returns its log."""
+        folder.mkdir(parents=True, exist_ok=True)
+        log = folder / 'calls.log'
+        (folder / 'opencode').write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "' + str(log) + '"\n'
+            '[ "$#" -eq 1 ] && [ "$1" = --version ] && echo "opencode v' + version + '" && exit 0\nexit 9\n')
+        (folder / 'opencode').chmod(0o755)
+        return log
+
+    def accounts(self):
+        run = subprocess.run([HGS, 'account', 'ls'], env=self.env, cwd=self.root, capture_output=True, text=True,
+                             timeout=30)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return json.loads(run.stdout)
+
+    def opencode_row(self):
+        rows = [row for row in self.accounts()['profiles'] if row['id'] == 'native-opencode']
+        self.assertEqual(len(rows), 1, 'no native OpenCode row')
+        return rows[0]
+
+    def assert_nothing_started(self):
+        self.assertFalse((self.home / '.local/state/opencode').exists(), 'a service registration appeared')
+        from test_opencode_native import owned_processes
+        self.assertEqual(owned_processes(str(self.root)), [])
+
+    def test_the_official_user_install_is_found_and_only_asked_its_version(self):
+        calls = self.fake_opencode(self.user_install, '2.0.32')
+        row = self.opencode_row()
+        self.assertTrue(row['installed'], row.get('install_reason'))
+        self.assertNotIn('install_reason', row)
+        self.assertEqual((row['catalog_state'], row['model_options']), ('not_running', []))
+        self.assertIn('OpenCode is not running', row['catalog_reason'])
+        # Listing asked only for the version: no service, API, provider or model command.
+        self.assertEqual(calls.read_text().splitlines(), ['--version'])
+        self.assert_nothing_started()
+
+    def test_without_any_opencode_there_is_no_native_row(self):
+        listed = self.accounts()
+        self.assertNotIn('native-opencode', [row['id'] for row in listed['profiles'] + listed['removed_profiles']])
+        self.assert_nothing_started()
+
+    def test_an_opencode_earlier_on_path_wins_over_the_user_install(self):
+        user = self.fake_opencode(self.user_install, '2.0.32')
+        earlier = self.fake_opencode(self.caller, '1.18.35')
+        row = self.opencode_row()
+        self.assertFalse(row['installed'])
+        self.assertEqual(row['install_reason'], 'OpenCode 1.18.35 is not supported; install OpenCode 2.0.32 or newer 2.x')
+        self.assertEqual(earlier.read_text().splitlines(), ['--version'])
+        self.assertFalse(user.exists(), 'the user install was run')
+        self.assert_nothing_started()
+
 if __name__=='__main__': unittest.main()

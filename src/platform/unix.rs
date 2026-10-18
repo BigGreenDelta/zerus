@@ -33,10 +33,7 @@ pub fn prepare_environment() {
     let home = env::var("HOME").unwrap_or_default();
     env::set_var(
         "PATH",
-        format!(
-            "{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:{}:{home}/.npm-global/bin:{home}/.kimi-code/bin",
-            env::var("PATH").unwrap_or_default()
-        ),
+        prepared_path(&home, &env::var("PATH").unwrap_or_default()),
     );
     let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
         .into_iter()
@@ -50,6 +47,16 @@ pub fn prepare_environment() {
         env::set_var("LC_CTYPE", locale);
         env::remove_var("LC_ALL");
     }
+}
+/// The PATH agents and their tools are found on: user and package-manager
+/// folders first, then the caller's PATH, then user-level installer folders
+/// last (npm's global prefix, Kimi Code's and OpenCode's official installers),
+/// so a program found earlier keeps winning. A managed GUI may run hgs with
+/// only the system folders, where OpenCode's own install is not listed.
+fn prepared_path(home: &str, path: &str) -> String {
+    format!(
+        "{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:{path}:{home}/.npm-global/bin:{home}/.kimi-code/bin:{home}/.opencode/bin"
+    )
 }
 /// Whether this computer runs agent sessions: Unix always does.
 pub fn local_sessions() -> bool {
@@ -1379,6 +1386,28 @@ pub(crate) fn write_script(path: &Path, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_path_keeps_the_caller_order_and_appends_user_installers() {
+        assert_eq!(
+            prepared_path("/home/user", "/usr/bin:/bin"),
+            "/home/user/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\
+             /home/user/.npm-global/bin:/home/user/.kimi-code/bin:/home/user/.opencode/bin"
+        );
+        // OpenCode's official user install comes last: any `opencode` the caller's
+        // PATH or the prepended folders hold is found first.
+        let path = prepared_path("/home/user", "/usr/bin");
+        let folders: Vec<&str> = path.split(':').collect();
+        assert_eq!(folders.last(), Some(&"/home/user/.opencode/bin"));
+        assert_eq!(
+            folders.iter().filter(|f| f.ends_with("/.opencode/bin")).count(),
+            1
+        );
+        assert!(
+            folders.iter().position(|f| *f == "/usr/bin")
+                < folders.iter().position(|f| f.ends_with("/.opencode/bin"))
+        );
+    }
 
     fn ps_start(pid: u32) -> Option<String> {
         let output = Command::new("ps")

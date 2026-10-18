@@ -838,6 +838,84 @@ class OpenCodeNative(unittest.TestCase):
         self.assertEqual(self.inbox(conversation), [])
         self.assertEqual(self.hgs(['inspect', name])['phase'], 'idle')
 
+    def test_11_a_message_left_queued_by_stop_runs_first_with_the_next_message(self):
+        # OpenCode keeps a message that Stop left in its queue without running it. The
+        # next message starts a run that delivers the leftover message first and then
+        # the new one, each with its own reply, ending in one idle. Zerus neither
+        # reposts nor refuses the leftover message.
+        b = self.create()
+        name, conversation = b['name'], b['conversation_id']
+        first = self.hgs(['send', name, '--json'], self.payload(b, text='HOLD_NATIVE first turn'))
+        self.assertTrue(self.model.holding.wait(30), 'the model never received the held turn')
+        working = self.wait(name, lambda v: v['phase'] == 'working' and v['interrupt_supported'])
+        left_text, next_text = 'Left in the queue by Stop', 'Sent after Stop'
+        left = self.payload(b, text=left_text)
+        queued = self.hgs(['send', name, '--json'], left)
+        self.assertEqual(queued['status'], 'submitted')
+        self.assertTrue(queued.get('queued'))
+        left_id = queued['native_message_id']
+        stop = {'request_id': str(uuid.uuid4()), 'expected_run_id': b['run_id'], 'expected_conversation_id': conversation,
+                'expected_turn_started': working['turn_started']}
+        self.hgs(['interrupt', name, '--json'], stop)
+        self.model.release.set()
+        stopped = self.wait(name, lambda v: v['phase'] == 'idle'
+                            and any(e.get('delivery_state') == 'not_delivered' for e in v['events']))
+        self.assertEqual([(e['detail'], e['delivery_state']) for e in stopped['events'] if e.get('message_id') == left_id],
+                         [(left_text, 'not_delivered')])
+        self.assertIn('remove_queued', stopped['allowed_actions'])
+        # Left alone, OpenCode keeps the message queued and never runs it.
+        until = time.monotonic() + 3
+        while time.monotonic() < until:
+            self.assertEqual([item['id'] for item in self.inbox(conversation)], [left_id])
+            self.assertNotIn(left_id, [i for i, _ in self.user_messages(conversation)])
+            time.sleep(.5)
+        self.assertEqual([r for r in self.model.requests if left_text in r['last_user']], [])
+        receipt = self.receipt_path(left).read_bytes()
+        requests_before = len(self.model.requests)
+        # The next message, sent while the session is idle, starts a run.
+        new = self.payload(b, text=next_text)
+        sent = self.hgs(['send', name, '--json'], new)
+        self.assertEqual(sent['status'], 'submitted')
+        self.assertNotIn('queued', sent)
+        next_id = sent['native_message_id']
+
+        def history():
+            status, page = self.api('GET', f'/api/session/{conversation}/message?limit=100')
+            self.assertEqual(status, 200, page)
+            return list(reversed(page['data']))
+        until = time.monotonic() + 10
+        messages = history()
+        while not (next_id in [m['id'] for m in messages] and messages[-1]['type'] == 'idle'):
+            if time.monotonic() > until:
+                self.fail('OpenCode did not settle after the next message: ' + json.dumps(messages)[-3000:])
+            time.sleep(.25)
+            messages = history()
+        # The leftover message ran first, as its own step with its own reply, then the
+        # new one; one run, one idle.
+        after = messages[next(i for i, m in enumerate(messages) if m['id'] == left_id):]
+        self.assertEqual([(m['type'], m['id'] if m['type'] == 'user' else m.get('outcome')) for m in after],
+                         [('user', left_id), ('assistant', None), ('user', next_id), ('assistant', None),
+                          ('idle', 'succeeded')])
+        self.assertEqual([c.get('text') for m in after if m['type'] == 'assistant' for c in m['content']],
+                         ['Native OpenCode reply'] * 2)
+        self.assertEqual(list(reversed(self.user_messages(conversation))),
+                         [(first['native_message_id'], 'HOLD_NATIVE first turn'), (left_id, left_text), (next_id, next_text)])
+        self.assertEqual(self.inbox(conversation), [])
+        self.assertEqual([r['last_user'] for r in self.model.requests[requests_before:] if r['tools']], [left_text, next_text])
+        # Zerus shows both as ordinary delivered prompts, in that order, with nothing to remove.
+        view = self.wait(name, lambda v: v['phase'] == 'idle' and not any(e.get('delivery_state') for e in v['events']))
+        prompts = [(e['message_id'], e['detail']) for e in view['events'] if e['type'] == 'UserPromptSubmit']
+        self.assertEqual(prompts[-2:], [(left_id, left_text), (next_id, next_text)])
+        self.assertNotIn('remove_queued', view['allowed_actions'])
+        # Zerus never reposted the leftover message and never marked it refused: its
+        # receipt is untouched and the same request still answers with its admission.
+        self.assertEqual(self.receipt_path(left).read_bytes(), receipt)
+        again = self.hgs(['send', name, '--json'], left)
+        self.assertEqual((again['status'], again['native_message_id'], again.get('queued')), ('submitted', left_id, True))
+        self.assertNotIn('reason', again)
+        self.assertEqual(self.receipt_path(left).read_bytes(), receipt)
+        self.assertEqual([i for i, _ in self.user_messages(conversation)].count(left_id), 1)
+        self.assertEqual([r for r in self.model.requests if r['last_user'] == left_text and r['tools']][1:], [])
 
 if __name__ == '__main__':
     unittest.main()

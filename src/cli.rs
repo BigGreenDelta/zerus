@@ -99,6 +99,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account rename ID --label NAME | inspect ID [--refresh]
        hgs [@host] account default [ID]   show or select the default account for new sessions
        hgs [@host] account set-key native-dsh --json   save API key from private JSON stdin
+       hgs [@host] account start native-opencode   start the shared OpenCode service if none runs; inspection never starts it
        hgs [@host] account install codex|claude|kimi|dsh   install an agent in this terminal
        hgs [@host] account inspect --session SESSION [--refresh]
        hgs account copy ID --from MACHINE --to MACHINE --as NEW_ID [--label NAME]
@@ -129,6 +130,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
   -n tag   separate session <cmd>/<project>/<tag>
   --account ID   use a named native agent profile for this session
   --model PROVIDER/MODEL   OpenCode native model for a new session
+  --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (empty or omitted: its default)
   --new    always create a separate session; generate a name unless -n is given
   -d       start detached (do not attach)      --fresh  explicitly replace a saved conversation
   --rc     claude --remote-control (phone)     --bare   ignore a project run_<cmd>.sh launcher
@@ -2381,6 +2383,20 @@ mod tests {
                     ""
                 )
         );
+    }
+
+    #[test]
+    fn usage_lists_opencode_effort_and_the_explicit_service_start() {
+        let usage = usage_text(true);
+        // `--effort` is an OpenCode launch option that `opencode` refuses
+        // without `--model`; an empty value keeps the model's default.
+        assert!(usage.contains(
+            "\n  --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (empty or omitted: its default)\n"
+        ), "{usage}");
+        // The only explicit start of the shared service; inspection never starts it.
+        assert!(usage.contains(
+            "\n       hgs [@host] account start native-opencode   start the shared OpenCode service if none runs; inspection never starts it\n"
+        ), "{usage}");
     }
 
     #[test]
