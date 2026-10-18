@@ -397,6 +397,7 @@ private slots:
     void launchNameFollowsRenameRules();
     void openCodeModelLaunchUsesNativeAccountAndActivity();
     void openCodeCapabilitiesPreserveDraftWithoutTerminal();
+    void openCodeRemovesUndeliveredMessageOnlyAfterConfirmation();
     void machineBatchCountsExcludeNativeOpenCodeSessions();
     void nativeLaunchStaysInWorkspace_data();
     void nativeLaunchStaysInWorkspace();
@@ -8283,6 +8284,66 @@ void TestSessionsWindow::openCodeCapabilitiesPreserveDraftWithoutTerminal()
     QVERIFY(!composer->findChild<QPushButton *>("attachMessageFile")->isEnabled());
     QVERIFY(!window.findChild<QAction *>("clearSessionAction")->isEnabled());QVERIFY(!window.findChild<QAction *>("forgetSessionAction")->isEnabled());
     QCOMPARE(composer->editor()->toPlainText(),QString("Keep my local model draft"));QVERIFY(!composer->editor()->isReadOnly());
+}
+
+void TestSessionsWindow::openCodeRemovesUndeliveredMessageOnlyAfterConfirmation()
+{
+    const QString name="opencode/project/local",run="open-run",conversation="ses_conversation";
+    const QJsonObject undelivered{{"type","UserPromptSubmit"},{"detail","Check the release notes"},{"tool",""},{"at",1791018005.0},{"source","opencode_native"},
+        {"agent_id",""},{"message_id","msg_Queued01"},{"reply_id",QJsonValue::Null},{"delivery_state","not_delivered"}};
+    const QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","running"},{"run_id",run},{"conversation_id",conversation},
+        {"phase","idle"},{"activity","idle"},{"process_state","running"},{"runtime_state","live"},{"terminal_supported",false},
+        {"allowed_actions",QJsonArray{"rename","forget","remove_queued"}},{"events",QJsonArray{undelivered}},{"replace_events",true},{"cursor",0}};
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer="elif c=='session-action':\n"
+        " import pathlib;p=json.load(sys.stdin);staged=pathlib.Path(__file__+'.remove.tmp')\n"
+        " staged.write_text(json.dumps({'args':sys.argv[1:],'payload':p}));staged.replace(__file__+'.remove')\n"
+        " print(json.dumps({'request_id':p['request_id'],'name':a[1],'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],'status':'completed'}))\n"
+        "elif c=='inspect':print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact)))+")\n";
+    const auto fixture=m_dir->filePath("opencode-remove-queued"),removal=fixture+".remove";
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="opencode";session.runId=run;session.conversationId=conversation;
+    session.tracked=true;session.activity="idle";session.phase="idle";session.processState="running";session.runtimeState="live";session.state="running";
+    session.terminalSupported=false;session.actionsReported=true;session.allowedActions={"rename","forget","remove_queued"};
+    box.sessions={session};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);
+    auto *activity=window.findChild<ActivityView *>("mainActivity");QVERIFY(activity);
+    QTRY_VERIFY(activity->plainText().contains("Not delivered"));QTRY_VERIFY(!activity->renderPending());
+    QString remove;
+    for(auto block=activity->browser()->document()->begin();block.isValid();block=block.next())
+        for(auto it=block.begin();!it.atEnd();++it)if(it.fragment().charFormat().anchorHref().startsWith("hgs-message:"))remove=it.fragment().charFormat().anchorHref();
+    QVERIFY(!remove.isEmpty());
+    const auto click=[&]{QMetaObject::invokeMethod(activity->browser(),"anchorClicked",Qt::DirectConnection,Q_ARG(QUrl,QUrl(remove)));};
+    QSignalSpy finished(client,&HgsClient::sessionActionFinished);
+    bool asked=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=window.findChild<QMessageBox *>("removeQueuedConfirm");QVERIFY(dialog);asked=true;
+        QCOMPARE(dialog->windowTitle(),QString("Remove queued message"));
+        QCOMPARE(dialog->text(),QString("Remove this queued message? It has not been delivered to OpenCode."));
+        QCOMPARE(dialog->defaultButton(),dialog->button(QMessageBox::Cancel));QCOMPARE(dialog->escapeButton(),dialog->button(QMessageBox::Cancel));
+        bool destructive=false;for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole)destructive=button->text()=="Remove";
+        QVERIFY(destructive);dialog->button(QMessageBox::Cancel)->click();
+    });
+    click();QVERIFY(asked);QTest::qWait(200);QVERIFY(!QFileInfo::exists(removal));QCOMPARE(finished.size(),0);
+    // A message that is not shown as not delivered asks nothing.
+    bool prompted=false;
+    QTimer::singleShot(0,&window,[&]{if(auto *dialog=window.findChild<QMessageBox *>("removeQueuedConfirm")){prompted=true;dialog->reject();}});
+    activity->messageActionRequested("msg_Unknown01","remove_queued");QTest::qWait(50);QVERIFY(!prompted);
+    asked=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=window.findChild<QMessageBox *>("removeQueuedConfirm");QVERIFY(dialog);asked=true;
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();return;}
+        QFAIL("Missing Remove");
+    });
+    click();QVERIFY(asked);QTRY_VERIFY(QFileInfo::exists(removal));
+    QFile sent(removal);QVERIFY(sent.open(QIODevice::ReadOnly));const auto call=QJsonDocument::fromJson(sent.readAll()).object();
+    QCOMPARE(call["args"].toArray(),QJsonArray({"session-action",name,"--json"}));
+    const auto payload=call["payload"].toObject();
+    QCOMPARE(payload["action"].toString(),QString("remove_queued"));QCOMPARE(payload["message_id"].toString(),QString("msg_Queued01"));
+    QCOMPARE(payload["expected_run_id"].toString(),run);QCOMPARE(payload["expected_conversation_id"].toString(),conversation);
+    QTRY_COMPARE(finished.size(),1);QVERIFY2(finished[0][1].toBool(),qPrintable(finished[0][3].toString()));
 }
 
 void TestSessionsWindow::nativeLaunchStaysInWorkspace_data()

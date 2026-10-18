@@ -447,7 +447,8 @@ quint64 HgsClient::requestAccounts(const QString &host, const QStringList &argum
     QStringList args;
     if (!host.isEmpty()) args << QLatin1Char('@') + host;
     args << QStringLiteral("account"); args.append(arguments);
-    runHgs(m_hgs, args, arguments.value(0) == "set-key" ? 90000 : arguments.value(0) == "copy" ? 60000 : 25000, this,
+    // Start waits up to 20 seconds for OpenCode's registration on that computer.
+    runHgs(m_hgs, args, arguments.value(0) == "set-key" ? 90000 : arguments.value(0) == "copy" || arguments.value(0) == "start" ? 60000 : 25000, this,
         [this, request, host](const QByteArray &bytes) {
             QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
             if (error.error != QJsonParseError::NoError || !data.isObject()) emit accountsFailed(request, host, tr("Invalid account catalog response"));
@@ -825,12 +826,14 @@ void HgsClient::launchNativeSession(const QString &host, const QString &target, 
     launchDetachedSession(host,"dsh",target,name,account,launchId);
 }
 
-void HgsClient::launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model)
+void HgsClient::launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model, const QString &effort)
 {
     QStringList args{agent, target, "--new", "-n", name, "--launch-id", launchId};
     if (agent != "dsh" && agent != "opencode") args << "-d";
     if (!account.isEmpty()) args << "--account" << account;
     if (agent == "opencode" && !model.isEmpty()) args << "--model" << model;
+    // hgs requires --model with --effort: effort is that model's variant.
+    if (agent == "opencode" && !model.isEmpty() && !effort.isEmpty()) args << "--effort" << effort;
     if (!host.isEmpty()) args.prepend('@' + host);
     runHgs(m_hgs, args, 90000, this,
         [this,launchId](const QByteArray &) { emit nativeSessionLaunched(launchId,true,{}); },
@@ -1709,11 +1712,28 @@ quint64 HgsClient::requestInterrupt(const QString &host, const QString &name, co
     return runSessionAction(host,name,"interrupt",{{"expected_run_id",run},{"expected_conversation_id",conversation},{"expected_turn_started",turnStarted}});
 }
 
+quint64 HgsClient::requestRemoveQueued(const QString &host, const QString &name, const QString &run,
+                                       const QString &conversation, const QString &messageId)
+{
+    // The exact native ID as hgs checks it: msg_ and at most 128 ASCII letters, digits, _ and -.
+    static const QRegularExpression nativeId(QRegularExpression::anchoredPattern(QStringLiteral("msg_[A-Za-z0-9_-]{1,124}")));
+    if (!nativeId.match(messageId).hasMatch()) {
+        const auto id = ++m_sessionActionRequest;
+        QTimer::singleShot(0, this, [this,id] { emit sessionActionFinished(id,false,{},tr("Choose the exact queued OpenCode message.")); });
+        return id;
+    }
+    return runSessionAction(host,name,"remove_queued",{{"expected_run_id",run},{"expected_conversation_id",conversation},{"message_id",messageId}});
+}
+
 quint64 HgsClient::runSessionAction(const QString &host, const QString &name, const QString &operation, QJsonObject data)
 {
     const auto request = ++m_sessionActionRequest;
     const auto requestId = QUuid::createUuid().toString(QUuid::WithoutBraces); data["request_id"] = requestId;
-    QStringList args{operation,name}; if (operation == "attachment") args << "--stage";
+    // Scoped native actions go through the receipt-keeping `session-action`
+    // command, which names the action in its request.
+    const bool scoped = operation == "remove_queued";
+    if (scoped) data["action"] = operation;
+    QStringList args{scoped ? QStringLiteral("session-action") : operation,name}; if (operation == "attachment") args << "--stage";
     args << "--json"; if (!host.isEmpty()) args.prepend('@' + host);
     auto *process = new QProcess(this); configureProcess(process,m_hgs,args);
     auto *timer = new QTimer(process); timer->setSingleShot(true);
@@ -1730,18 +1750,26 @@ quint64 HgsClient::runSessionAction(const QString &host, const QString &name, co
     connect(process,&QProcess::errorOccurred,process,[process,timer,fail](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) { timer->stop(); fail(process->errorString()); process->deleteLater(); }
     });
-    connect(process,&QProcess::finished,process,[this,process,timer,fail,reported,request,data,operation,name,host](int code,QProcess::ExitStatus status) {
+    connect(process,&QProcess::finished,process,[this,process,timer,fail,reported,request,data,operation,name,host,scoped](int code,QProcess::ExitStatus status) {
         timer->stop();
         if (!*reported) {
             const auto error = QString::fromUtf8(process->readAllStandardError()).trimmed().left(2000);
             if (code || status != QProcess::NormalExit) fail(error.isEmpty() ? tr("Could not complete the request. Check Terminal.") : error);
             else {
                 const auto result = QJsonDocument::fromJson(process->readAllStandardOutput()).object();
-                if (result.value("request_id") != data.value("request_id") || result.value("name") != name
-                    || result.value("run_id") != data.value("expected_run_id") || result.value("conversation_id") != data.value("expected_conversation_id")
+                const auto state = result.value("status").toString();
+                const bool identity = result.value("request_id") == data.value("request_id") && result.value("name") == name
+                    && result.value("run_id") == data.value("expected_run_id") && result.value("conversation_id") == data.value("expected_conversation_id");
+                if (scoped && identity && (state == "failed" || state == "uncertain")) {
+                    // A durable receipt that is not a success is never retried here.
+                    const auto reason = result.value("error").toString().trimmed().left(2000);
+                    fail(state == "failed" ? (reason.isEmpty() ? tr("The queued message was not removed.") : reason)
+                        : reason.isEmpty() ? tr("Removal was not confirmed. Refresh Activity before trying again.")
+                        : tr("Removal was not confirmed (%1). Refresh Activity before trying again.").arg(reason));
+                } else if (!identity
                     || (data.contains("expected_created") && result.value("created").toInteger(-1) != data.value("expected_created").toInteger())
-                    || !(result.value("status") == (operation == "attachment" ? "staged" : "submitted")
-                        || (operation == "clear-context" && result.value("status") == "confirmed")))
+                    || !(state == (scoped ? "completed" : operation == "attachment" ? "staged" : "submitted")
+                        || (operation == "clear-context" && state == "confirmed")))
                     fail(tr("Invalid acknowledgement. Check Terminal before retrying."));
                 else { *reported = true; emit sessionActionFinished(request,true,result,{}); if (operation != "attachment") emit sessionWriteDone(host); }
             }

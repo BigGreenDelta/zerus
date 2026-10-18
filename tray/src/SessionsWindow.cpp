@@ -858,6 +858,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(cacheUsage,&QPushButton::clicked,this,[this]{m_cacheStatus->closePopover();setInspectorVisible(true);m_inspector->setCurrentIndex(1);});
     // Close first: the confirmation dialog must not open over a popup.
     connect(m_cacheClear,&QPushButton::clicked,this,[this]{m_cacheStatus->closePopover();clearContext();});
+    connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
+        if(!m_removeQueuedRequest||id!=m_removeQueuedRequest)return;
+        m_removeQueuedRequest=0;
+        if(m_selectedKey==m_removeQueuedKey){showNotice(ok?tr("Queued message removed."):error,!ok);inspect();}
+        else if(!ok)showNotice(error,true);
+        emit refreshRequested();
+    });
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &receipt,const QString &error) {
         if(id!=m_clearRequest)return;
         m_clearRequest=0;
@@ -2315,7 +2322,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     if(!path.isEmpty())dialog.selectPath(path, false);
     if(!account.isNull())dialog.selectAccount(account);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
-        [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model) {
+        [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort) {
             const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_pendingLaunches.insert(id, QJsonObject{{"host", host}, {"cmd", cmd}, {"tag", name}, {"group", group},
                 {"target", target}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
@@ -2331,7 +2338,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
             });
             if (!openTerminal || cmd=="dsh" || cmd=="opencode") {
                 showNotice(tr("Starting session…"));
-                m_client.launchDetachedSession(host,cmd,target,name,account,id,model);
+                m_client.launchDetachedSession(host,cmd,target,name,account,id,model,effort);
             } else emit newSessionRequested(host, cmd, target, name, account, id);
         });
     connect(&dialog, &NewSessionDialog::manageProjectsRequested, this, &SessionsWindow::showProjects);
@@ -3750,8 +3757,43 @@ QString SessionsWindow::messageBlockReason(const Entry &entry) const
     return {};
 }
 
+bool SessionsWindow::queuedMessageRemovable(const QString &messageId) const
+{
+    const auto *entry=selected();
+    if(!entry||!entry->online||!m_inspectError.isEmpty()||m_removeQueuedRequest||entry->session.cmd!="opencode"
+        ||m_details.value("run_id").toString().isEmpty()||!NativeSessionCapabilities::action(entry->session,"remove_queued",m_details))return false;
+    return std::any_of(m_events.cbegin(),m_events.cend(),[&messageId](const QJsonValue &value){
+        const auto event=value.toObject();
+        return event.value("message_id").toString()==messageId&&event.value("delivery_state")=="not_delivered";
+    });
+}
+
+// Removing an OpenCode inbox message is destructive: it is confirmed, and sent
+// only while the same conversation still reports that message as not delivered.
+void SessionsWindow::removeQueuedMessage(const QString &messageId)
+{
+    if(messageId.isEmpty()||!queuedMessageRemovable(messageId)||findChild<QMessageBox *>("removeQueuedConfirm"))return;
+    const auto *entry=selected();
+    const auto key=m_selectedKey,host=entry->host,name=entry->session.name;
+    const auto run=m_details.value("run_id").toString(),conversation=m_details.value("conversation_id").toString();
+    QMessageBox dialog(QMessageBox::Warning,tr("Remove queued message"),tr("Remove this queued message? It has not been delivered to OpenCode."),QMessageBox::NoButton,this);
+    dialog.setObjectName("removeQueuedConfirm");dialog.setTextFormat(Qt::PlainText);
+    auto *confirm=dialog.addButton(tr("Remove"),QMessageBox::DestructiveRole);
+    auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);
+    dialog.exec();
+    if(dialog.clickedButton()!=confirm)return;
+    entry=selected();
+    if(!entry||m_selectedKey!=key||entry->host!=host||entry->session.name!=name||m_details.value("run_id")!=run
+        ||m_details.value("conversation_id")!=conversation||!queuedMessageRemovable(messageId)){
+        showNotice(tr("The queued message changed. Check Activity before removing it."),true);return;
+    }
+    m_removeQueuedKey=key;
+    m_removeQueuedRequest=m_client.requestRemoveQueued(host,name,run,conversation,messageId);
+}
+
 void SessionsWindow::messageAction(const QString &id,const QString &action)
 {
+    if(action=="remove_queued"){removeQueuedMessage(id);return;}
     const auto *entry=selected();if(!entry)return;
     auto &messages=m_localMessages[m_selectedKey];
     for(int i=0;i<messages.size();++i) {

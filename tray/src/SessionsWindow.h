@@ -258,6 +258,11 @@ private:
     QString m_interruptName, m_interruptMachine;
     quint64 m_queueSendRequest = 0;
     QString m_queueSendKey;
+    // One confirmed OpenCode inbox removal at a time.
+    quint64 m_removeQueuedRequest = 0;
+    QString m_removeQueuedKey;
+    void removeQueuedMessage(const QString &messageId);
+    bool queuedMessageRemovable(const QString &messageId) const;
     void runSessionMenuAction(const Entry &original, SessionMenuAction action);
     bool selectSessionEntry(const Entry &original);
     QString selectedDirectory() const;

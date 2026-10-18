@@ -938,7 +938,12 @@ struct ActivityRenderResult {
             const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
                 event.value("type") == "QuestionAnswered" || !replies.isEmpty() ? tr("You (answer)") : tr("You")) : tr("Agent");
             auto stamp=timeText(event);
-            if (role == "user" && event["type"] != "LocalMessage") {
+            // OpenCode reports its inbox: a waiting message is queued, and after
+            // Stop it stays there, not delivered, until it is sent or removed.
+            const auto delivery=role=="user"?event.value("delivery_state").toString():QString();
+            const bool inbox=delivery=="queued"||delivery=="not_delivered";
+            if (inbox) stamp += "  " + (delivery == "queued" ? tr("Queued") : tr("Not delivered"));
+            else if (role == "user" && event["type"] != "LocalMessage") {
                 bool accepted = event["type"] != "UserPromptQueued";
                 if (!accepted) for (int j=i+1;j<events.size();++j) {
                     const auto next = events[j];
@@ -963,6 +968,14 @@ struct ActivityRenderResult {
                 };
                 body+=QString("<table cellspacing='6' cellpadding='4'><tr>%1%2</tr></table>")
                     .arg(event.value("uncertain").toBool()?button("inspect",details.value("native_ui_available").toBool()?tr("Check native UI"):tr("Check Terminal")):button("retry",tr("Retry")),button("delete",tr("Delete")));
+            }
+            // Remove is offered only while the session reports it; the owner confirms first.
+            const auto queuedId=event.value("message_id").toString();
+            if(delivery=="not_delivered" && !queuedId.isEmpty() && details.value("allowed_actions").toArray().contains(QStringLiteral("remove_queued"))) {
+                const auto key=QString::fromLatin1(QCryptographicHash::hash((m_sessionKey+':'+queuedId+":remove_queued").toUtf8(),QCryptographicHash::Sha256).toHex());
+                m_messageActions.insert(key,{queuedId,QStringLiteral("remove_queued")});
+                body+=QString("<table cellspacing='6' cellpadding='4'><tr><td bgcolor='%1' style='border:1px solid %2;'><a href='hgs-message:%3' style='color:%4;'>&nbsp;%5&nbsp;</a></td></tr></table>")
+                    .arg(codeSurface,border,key,accent,escaped(tr("Remove")));
             }
             // A search excerpt is not the whole reply.
             const bool copyable = role == "assistant" && !(searching && m_searchResult.value("content_truncated").toBool());

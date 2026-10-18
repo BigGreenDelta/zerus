@@ -2,6 +2,8 @@
 #include <memory>
 #include <QComboBox>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -58,7 +60,7 @@ private slots:
     }
     void init() {
         QSettings().clear();
-        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes"})flag(name,false);
+        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started"})flag(name,false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -77,7 +79,23 @@ def status(i,provider):
  if (root/'other-scope').exists() and i=='claude-copy':result['identity']['organization']='Other team'
  if (root/'machine-accounts').exists():result['identity']['email']=('mac' if host=='mac' else 'pc')+'@example.invalid'
  return result
-if a[:2]==['account','ls']:
+# OpenCode's model catalog: its variants are each model's effort options.
+def catalog():
+ stopped=(root/'opencode-stopped').exists()
+ many=['level-%d'%n for n in range(20)]
+ models=[{'id':'fixture/local','value':'fixture/local','label':'Local fixture','provider':'fixture','provider_label':'fixture','free':True,
+          'effort_options':['low','medium','high'],'effort_labels':['low','medium','high']},
+         {'id':'fixture/plain','value':'fixture/plain','label':'Plain fixture','provider':'fixture','provider_label':'fixture','free':True,'effort_options':[],'effort_labels':[]},
+         {'id':'fixture/other','value':'fixture/other','label':'Other fixture','provider':'fixture','provider_label':'fixture','free':False,
+          'effort_options':['high','max','','bad value','x'*80,'max'],'effort_labels':['High','Maximum','','','','']},
+         {'id':'fixture/many','value':'fixture/many','label':'Many fixture','provider':'fixture','provider_label':'fixture','free':False,'effort_options':many,'effort_labels':many}]
+ return {'model_options':models,'settings_model':'fixture/local','catalog_state':'not_running' if stopped else 'ready',
+         'catalog_reason':'OpenCode is not running on '+(host or 'pc') if stopped else '','catalog_at':1791018000}
+if a[:2]==['account','start']:
+ with open(root/'service-started','a') as calls:calls.write(json.dumps([host]+a)+'\n')
+ (root/'opencode-stopped').unlink(missing_ok=True)
+ print(json.dumps(catalog()))
+elif a[:2]==['account','ls']:
  if (root/'fail').exists():sys.exit(1)
  if host=='mac' and (root/'slow-catalog-mac').exists():
   (root/'catalog-started').touch()
@@ -94,6 +112,7 @@ if a[:2]==['account','ls']:
             for i in (['mac-claude'] if host=='mac' else ['pc-claude','pc-copy'])]
  if (root/'opencode').exists():
   profiles.append({'id':'native-opencode','provider':'opencode','label':'Native configuration','home':'/profiles/native-opencode','installed':True,'is_default':True})
+  if (root/'opencode-models').exists():profiles[-1].update(catalog())
  if (root/'empty-catalog').exists():profiles=[]
  for profile in profiles:
   if not (root/'uncached').exists():profile['account_status']=status(profile['id'],profile['provider'])
@@ -314,6 +333,62 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
             }
             QCOMPARE(shown,available);
         }
+    }
+    // Effort is the selected OpenCode model's variants: offered only for a model
+    // that has them, and dropped when the next model does not offer it.
+    void openCodeEffortFollowsSelectedModel() {
+        flag("opencode");flag("opencode-models");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *models=dialog.findChild<QComboBox *>("launchModel"),*effort=dialog.findChild<QComboBox *>("launchEffort");
+        QVERIFY(models);QVERIFY(effort);QTRY_VERIFY(models->findData("fixture/local")>=0);
+        QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("native-opencode"));
+        QVERIFY(models->isVisible());QCOMPARE(models->currentData().toString(),QString());QVERIFY(!effort->isVisible());
+        const auto offered=[&]{QStringList result;for(int i=0;i<effort->count();++i)result<<effort->itemText(i);return result;};
+        models->setCurrentIndex(models->findData("fixture/local"));QVERIFY(effort->isVisible());
+        QCOMPARE(offered(),QStringList({"Default","low","medium","high"}));QCOMPARE(effort->currentData().toString(),QString());
+        QCOMPARE(effort->itemData(0).toString(),QString());
+        effort->setCurrentIndex(effort->findData("high"));
+        // Only valid, distinct variants, at most 16, keep their labels.
+        models->setCurrentIndex(models->findData("fixture/other"));QVERIFY(effort->isVisible());
+        QCOMPARE(offered(),QStringList({"Default","High","Maximum"}));QCOMPARE(effort->currentData().toString(),QString("high"));
+        effort->setCurrentIndex(effort->findData("max"));
+        models->setCurrentIndex(models->findData("fixture/local"));QCOMPARE(effort->currentData().toString(),QString());
+        models->setCurrentIndex(models->findData("fixture/many"));QCOMPARE(effort->count(),17);QCOMPARE(effort->itemData(16).toString(),QString("level-15"));
+        effort->setCurrentIndex(effort->findData("level-3"));
+        // A model without variants hides effort and clears the value.
+        models->setCurrentIndex(models->findData("fixture/plain"));QVERIFY(!effort->isVisible());QCOMPARE(effort->currentData().toString(),QString());
+        models->setCurrentIndex(models->findData("fixture/many"));QCOMPARE(effort->currentData().toString(),QString());
+        // Other agents have no effort here.
+        choices(dialog)->setCurrentRow(row(dialog,"work"));QVERIFY(!effort->isVisible());QVERIFY(!models->isVisible());
+        choices(dialog)->setCurrentRow(row(dialog,"native-opencode"));QTRY_VERIFY(models->findData("fixture/local")>=0);
+        models->setCurrentIndex(models->findData("fixture/local"));effort->setCurrentIndex(effort->findData("high"));
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][1].toString(),QString("opencode"));QCOMPARE(launched[0][4].toString(),QString("native-opencode"));
+        QCOMPARE(launched[0][8].toString(),QString("fixture/local"));QCOMPARE(launched[0][9].toString(),QString("high"));
+    }
+    // A stopped service keeps the last known models and offers the explicit start.
+    void openCodeStartsStoppedServiceExplicitly() {
+        flag("opencode");flag("opencode-models");flag("opencode-stopped");
+        NewSessionDialog dialog(program(),fleet(),"mac","opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *models=dialog.findChild<QComboBox *>("launchModel");auto *service=dialog.findChild<QPushButton *>("launchStartOpenCode");
+        auto *reason=dialog.findChild<QLabel *>("launchCatalogStatus");QVERIFY(models);QVERIFY(service);QVERIFY(reason);
+        QTRY_VERIFY(service->isVisible());QCOMPARE(service->text(),QString("Start OpenCode on mac"));QVERIFY(service->isEnabled());
+        QVERIFY(reason->isVisible());QCOMPARE(reason->text(),QString("OpenCode is not running on mac"));
+        QVERIFY(models->findData("fixture/local")>=0);QVERIFY(!QFile::exists(m_fixture.filePath("service-started")));
+        // Every row fits with the service notice, the model and its effort shown.
+        models->setCurrentIndex(models->findData("fixture/local"));QVERIFY(dialog.findChild<QComboBox *>("launchEffort")->isVisible());
+        auto *primary=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(primary->geometry().bottom()<dialog.height());
+        QVERIFY(service->mapTo(&dialog,QPoint(service->width(),0)).x()<=dialog.width());
+        const auto preview=qEnvironmentVariable("ZERUS_OPENCODE_LAUNCH_PREVIEW");if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview));
+        service->click();QTRY_VERIFY(QFile::exists(m_fixture.filePath("service-started")));
+        QFile calls(m_fixture.filePath("service-started"));QVERIFY(calls.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(calls.readAll().trimmed()).array(),QJsonArray({"mac","account","start","native-opencode","--json"}));
+        // Success refreshes this computer's catalog.
+        QTRY_VERIFY(!service->isVisible());QTRY_VERIFY(!reason->isVisible());QVERIFY(models->findData("fixture/local")>=0);
+        // Other agents never offer it.
+        flag("opencode-stopped");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
+        QTRY_VERIFY(service->isVisible());choices(dialog)->setCurrentRow(row(dialog,"work"));QVERIFY(!service->isVisible());QVERIFY(!reason->isVisible());
     }
     void emptyComputerCatalogOffersOnlyShell() {
         flag("empty-catalog");NewSessionDialog dialog(program(),fleet());dialog.show();

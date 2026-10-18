@@ -172,7 +172,8 @@ public:
 
     // Асинхронно: `hgs ls --json --local`. Один exec, единицы миллисекунд.
     void requestLocal();
-    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {});
+    // OpenCode effort is a variant of the chosen model: it is passed only with a model.
+    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {}, const QString &effort = {});
     void launchNativeSession(const QString &host, const QString &target, const QString &name, const QString &account, const QString &launchId);
     // Асинхронно: `hgs @<peer> ls --json`. Пир, который спит, — это ok:false, а не ошибка.
     // peerReady() carries a box whose host is this alias (see BoxState::host).
@@ -244,6 +245,11 @@ public:
     quint64 requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation, bool dismissPrompt = false);
     quint64 requestInterrupt(const QString &host, const QString &name, const QString &run,
                              const QString &conversation, double turnStarted);
+    // `hgs [@host] session-action <name> --json` with action remove_queued: removes
+    // one OpenCode inbox message that was not delivered. Only a completed receipt
+    // succeeds; failed and uncertain receipts report their error.
+    quint64 requestRemoveQueued(const QString &host, const QString &name, const QString &run,
+                                const QString &conversation, const QString &messageId);
     quint64 requestAnswerQuestion(const QString &host, const QString &name,
                                   const QJsonObject &question, const QJsonArray &answers, const QString &durableRequestId = {});
     // `hgs [@host] read <session> --json`: the host applies each field only while

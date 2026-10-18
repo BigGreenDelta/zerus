@@ -264,6 +264,7 @@ private slots:
     void contextCounterKeepsPhysicalRightAlignment();
     void contextCounterNamesTheReportedWindowSource();
     void failedMessageActionsFollowCardIdentity();
+    void openCodeQueuedMessagesShowDeliveryAndRemove();
     void searchResultIsolatedFromLiveUpdatesAndReturnsToLatest();
     void searchResultClearsOnConversationChange();
     void searchToolExcerptIsExpandedAndClearlyMarked();
@@ -2310,6 +2311,37 @@ void TestActivityView::failedMessageActionsFollowCardIdentity()
     activate(view.browser(),commands[0]);QCOMPARE(actions.size(),2); // Old Retry is no longer registered.
     view.setActivity({{"native_ui_available",true}},events);QVERIFY(view.browser()->toPlainText().contains("Check native UI"));
     view.setSessionKey("other");activate(view.browser(),commands[1]);QCOMPARE(actions.size(),2);
+}
+
+void TestActivityView::openCodeQueuedMessagesShowDeliveryAndRemove()
+{
+    SettledActivityView view;view.resize(600,400);view.show();view.setSessionKey("opencode-local");
+    QSignalSpy actions(&view,&ActivityView::messageActionRequested);
+    const auto queued=[](const QString &state){
+        return QJsonObject{{"type","UserPromptSubmit"},{"detail","Check the release notes"},{"tool",""},{"at",1791018005.0},{"source","opencode_native"},
+            {"agent_id",""},{"message_id","msg_Queued01"},{"reply_id",QJsonValue::Null},{"delivery_state",state}};
+    };
+    QJsonArray events{QJsonObject{{"type","UserPromptSubmit"},{"detail","First request"},{"tool",""},{"at",1791018000.0},{"source","opencode_native"},
+        {"agent_id",""},{"message_id","msg_Delivered1"},{"reply_id",QJsonValue::Null}},queued("queued")};
+    const QJsonObject idle{{"allowed_actions",QJsonArray{"rename","forget"}}};
+    const auto removeLinks=[&]{QStringList result;for(const auto &url:links(view.browser()))if(url.startsWith("hgs-message:"))result.append(url);return result;};
+    view.setActivity(idle,events);auto text=view.browser()->toPlainText();
+    QVERIFY(text.contains("Check the release notes"));QVERIFY(text.contains("Sent"));
+    QVERIFY(text.contains("Queued"));QVERIFY(!text.contains("Not delivered"));QVERIFY(!text.contains("Remove"));QVERIFY(removeLinks().isEmpty());
+    // After Stop the item stays visible as not delivered; Remove needs the
+    // session's reported action.
+    events[1]=queued("not_delivered");view.setActivity(idle,events);text=view.browser()->toPlainText();
+    QVERIFY(text.contains("Not delivered"));QVERIFY(!text.contains("Queued"));QVERIFY(!text.contains("Remove"));QVERIFY(removeLinks().isEmpty());
+    view.setActivity({{"allowed_actions",QJsonArray{"rename","forget","remove_queued"}}},events);text=view.browser()->toPlainText();
+    QVERIFY(text.contains("Not delivered"));QVERIFY(text.contains("Remove"));
+    const auto commands=removeLinks();QCOMPARE(commands.size(),1);
+    activate(view.browser(),commands[0]);QCOMPARE(actions.size(),1);
+    QCOMPARE(actions[0][0].toString(),QString("msg_Queued01"));QCOMPARE(actions[0][1].toString(),QString("remove_queued"));
+    const auto preview=qEnvironmentVariable("HGS_QUEUED_MESSAGE_PREVIEW");if(!preview.isEmpty()){QTest::qWait(30);QVERIFY(view.grab().save(preview));}
+    // A queued item, even with the action reported for another item, has no Remove.
+    events[1]=queued("queued");view.setActivity({{"allowed_actions",QJsonArray{"remove_queued"}}},events);
+    QVERIFY(!view.browser()->toPlainText().contains("Remove"));QVERIFY(removeLinks().isEmpty());
+    activate(view.browser(),commands[0]);QCOMPARE(actions.size(),1); // The old Remove is no longer registered.
 }
 
 void TestActivityView::localDeliveryCards()

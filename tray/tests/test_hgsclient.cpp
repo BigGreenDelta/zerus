@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QSettings>
 #include <QThread>
+#include <QUuid>
 #include <atomic>
 #include <memory>
 #ifndef Q_OS_WIN
@@ -84,6 +85,7 @@ private slots:
     void terminationPinsRun();
     void nativeLaunchReportsProcessResult();
     void nativeApiSessionsRetainExactCapabilities();
+    void openCodeQueuedRemovalUsesScopedSessionAction();
     void attachmentsUseCapturedIdentityAndValidateResponses();
     void downloadsRequireExactSavedFileReceipts();
     void cachedDownloadsPreserveRequestIdentityAndCleanFailures();
@@ -545,6 +547,12 @@ void TestHgsClient::nativeApiSessionsRetainExactCapabilities()
     QVERIFY(!NativeSessionCapabilities::action(session,"resume"));
     const auto rows=qvariant_cast<BoxState>(ready[0][0]).sessions;QCOMPARE(rows.size(),2);
     auto legacy=rows.last();QVERIFY(legacy.terminalReported);QVERIFY(legacy.terminalSupported);QVERIFY(NativeSessionCapabilities::terminal(legacy));
+    // OpenCode 2 has no process to pause: without reported actions only the
+    // binding operations remain, and queued removal needs reported evidence.
+    QVERIFY(!legacy.actionsReported);
+    for(const auto *operation:{"rename","forget"})QVERIFY2(NativeSessionCapabilities::action(legacy,operation),operation);
+    for(const auto *operation:{"pause","resume","archive","restore","terminate","fork","remove_queued"})QVERIFY2(!NativeSessionCapabilities::action(legacy,operation),operation);
+    QVERIFY(NativeSessionCapabilities::action(legacy,"remove_queued",{{"allowed_actions",QJsonArray{"forget","remove_queued"}}}));
     legacy.terminalReported=false;QVERIFY(!NativeSessionCapabilities::terminal(legacy));
     QVERIFY(NativeSessionCapabilities::terminal(legacy,{{"terminal_supported",true}}));
     legacy.cmd="dsh";QVERIFY(!NativeSessionCapabilities::terminal(legacy,{{"terminal_supported",true}}));
@@ -553,6 +561,58 @@ void TestHgsClient::nativeApiSessionsRetainExactCapabilities()
     QTRY_COMPARE(launched.size(),1);QVERIFY(launched[0][1].toBool());
     QFile args(program+".args");QVERIFY(args.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),QJsonArray({"@remote","opencode","/fixture/folder","--new","-n","local","--launch-id","launch-local","--account","native-opencode","--model",model}));
+    args.close();
+    // Effort is the chosen model's variant, so it travels only with that model.
+    client.launchDetachedSession("remote","opencode","/fixture/folder","deep","native-opencode","launch-deep",model,"high");
+    QTRY_COMPARE(launched.size(),2);QVERIFY(launched[1][1].toBool());QVERIFY(args.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),QJsonArray({"@remote","opencode","/fixture/folder","--new","-n","deep","--launch-id","launch-deep","--account","native-opencode","--model",model,"--effort","high"}));
+    args.close();
+    client.launchDetachedSession({},"opencode","/fixture/folder","plain","native-opencode","launch-plain",{},"high");
+    QTRY_COMPARE(launched.size(),3);QVERIFY(args.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),QJsonArray({"opencode","/fixture/folder","--new","-n","plain","--launch-id","launch-plain","--account","native-opencode"}));
+}
+
+void TestHgsClient::openCodeQueuedRemovalUsesScopedSessionAction()
+{
+    QTemporaryDir directory;const auto program=directory.filePath("hgs");
+    QVERIFY(FakeCli::install(program,"#!/usr/bin/env python3\nimport json,os,sys\n"
+        "p=json.load(sys.stdin);a=sys.argv[1:]\n"
+        "open(__file__+'.call','w').write(json.dumps({'args':a,'payload':p}))\n"
+        "status=open(__file__+'.status').read().strip() if os.path.exists(__file__+'.status') else 'completed'\n"
+        "r={'request_id':p['request_id'],'name':a[-2],'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],'status':status}\n"
+        "if status!='completed' and status!='submitted':r['error']='This message is no longer queued'\n"
+        "print(json.dumps(r))\n"));
+    HgsClient client(FakeCli::program(program));QSignalSpy finished(&client,&HgsClient::sessionActionFinished);
+    const auto call=[&]{QFile file(program+".call");return file.open(QIODevice::ReadOnly)?QJsonDocument::fromJson(file.readAll()).object():QJsonObject();};
+    const auto status=[&](const QByteArray &value){QVERIFY(FakeCli::replace(program+".status",value));};
+    const QString name="opencode/project/local";
+    auto request=client.requestRemoveQueued("mac",name,"run-one","ses_conversation","msg_Queued01");
+    QTRY_COMPARE(finished.size(),1);QCOMPARE(finished[0][0].toULongLong(),request);QVERIFY2(finished[0][1].toBool(),qPrintable(finished[0][3].toString()));
+    auto sent=call();QCOMPARE(sent["args"].toArray(),QJsonArray({"@mac","session-action",name,"--json"}));
+    auto payload=sent["payload"].toObject();
+    QCOMPARE(payload.keys(),QStringList({"action","expected_conversation_id","expected_run_id","message_id","request_id"}));
+    QCOMPARE(payload["action"].toString(),QString("remove_queued"));QCOMPARE(payload["message_id"].toString(),QString("msg_Queued01"));
+    QCOMPARE(payload["expected_run_id"].toString(),QString("run-one"));QCOMPARE(payload["expected_conversation_id"].toString(),QString("ses_conversation"));
+    QVERIFY(!QUuid::fromString(payload["request_id"].toString()).isNull());
+    // A durable failed or uncertain receipt is not a removal.
+    for(const auto *outcome:{"failed","uncertain"}) {
+        status(outcome);finished.clear();request=client.requestRemoveQueued({},name,"run-one","ses_conversation","msg_Queued01");
+        QTRY_COMPARE(finished.size(),1);QCOMPARE(finished[0][0].toULongLong(),request);QVERIFY2(!finished[0][1].toBool(),outcome);
+        QVERIFY2(finished[0][3].toString().contains("This message is no longer queued"),qPrintable(finished[0][3].toString()));
+        QCOMPARE(call()["args"].toArray(),QJsonArray({"session-action",name,"--json"}));
+    }
+    // Only an exact native message ID is sent.
+    QVERIFY(QFile::remove(program+".call"));finished.clear();
+    for(const auto *id:{"","queued-1","msg_has space","msg_\n"}) {
+        request=client.requestRemoveQueued({},name,"run-one","ses_conversation",id);
+        QTRY_COMPARE(finished.size(),1);QCOMPARE(finished[0][0].toULongLong(),request);QVERIFY(!finished[0][1].toBool());finished.clear();
+    }
+    QTest::qWait(100);QVERIFY(!QFile::exists(program+".call"));
+    // Other actions keep their own command and payload.
+    status("submitted");request=client.requestInterrupt({},name,"run-one","ses_conversation",12.5);
+    QTRY_COMPARE(finished.size(),1);QVERIFY(finished[0][1].toBool());
+    sent=call();QCOMPARE(sent["args"].toArray(),QJsonArray({"interrupt",name,"--json"}));
+    QVERIFY(!sent["payload"].toObject().contains("action"));QVERIFY(!sent["payload"].toObject().contains("message_id"));
 }
 
 void TestHgsClient::settingsUseStdinAndPinnedIdentityReceipt()

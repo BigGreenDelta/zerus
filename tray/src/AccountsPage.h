@@ -60,7 +60,7 @@ private:
     bool m_hasSnapshot = false;
     IdentityBadge *m_providerBadge;
     QLabel *m_summary, *m_title, *m_detail, *m_identity, *m_permissionState;
-    QPushButton *m_add, *m_login, *m_copy, *m_remove, *m_rename, *m_install, *m_permissions, *m_default;
+    QPushButton *m_add, *m_login, *m_copy, *m_remove, *m_rename, *m_install, *m_permissions, *m_default, *m_startOpenCode;
     AccountUsage::RefreshButton *m_refresh;
     QLayout *m_machineTags;
     QWidget *m_machineCard;
