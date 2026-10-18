@@ -75,12 +75,15 @@ struct QuestionCard: View {
         let editing = isEditing(draft, native)
         // A card that cannot be answered here is read-only, so no draft is written that could never be sent.
         let inputs = editing && question.canAnswer
-        let page = min(max(display.page(question), 0), max(question.prompts.count - 1, 0))
+        // Only the final step sends; Next moves on once this part's answer is valid.
+        let step = QuestionSteps.current(question.prompts, page: display.page(question), options: options, texts: texts)
+        let page = step.page
         let prompts = question.prompts.indices.contains(page) ? [question.prompts[page]] : []
         let otherPrompts = prompts.filter { $0.other && !question.approval }
         let error = QuestionPolicies.answerError(question.prompts, options: options, texts: texts)
         let complete = QuestionPolicies.complete(question.prompts, options: options, texts: texts)
         let sendEnabled = question.canAnswer && editing && complete && available && !submitting
+        let actionEnabled = step.nextPage != nil ? editing && !submitting && step.canAdvance : sendEnabled
         // A card that cannot be answered here shows its reason and no Submit.
         let showsSubmit = QuestionPolicies.showsSubmit(question)
         let approvalSupported = QuestionPolicies.approvalSupported(question)
@@ -130,9 +133,9 @@ struct QuestionCard: View {
                     }))
                     .textFieldStyle(.roundedBorder)
                     .disabled(!inputs)
-                    .submitLabel(.send)
-                    .onSubmit { submit(editing: editing) }
-                    if index == otherPrompts.count - 1 && showsSubmit { sendButton(enabled: sendEnabled, multiple: question.prompts.count > 1, editing: editing) }
+                    .submitLabel(step.nextPage != nil ? .next : .send)
+                    .onSubmit { primaryAction(step, editing: editing) }
+                    if index == otherPrompts.count - 1 && showsSubmit { actionButton(step, enabled: actionEnabled, editing: editing) }
                 }
                 if !QuestionPolicies.textHint(prompt).isEmpty {
                     Text(QuestionPolicies.textHint(prompt)).font(.footnote).foregroundStyle(Theme.muted)
@@ -174,7 +177,7 @@ struct QuestionCard: View {
                     if question.prompts.count > 1 {
                         Button { display = display.withPage(question, page - 1) } label: { Image(systemName: "chevron.left") }
                             .disabled(page == 0).accessibilityLabel("Previous part")
-                        Text("\(page + 1)/\(question.prompts.count)").font(.caption.weight(.semibold))
+                        Text("Question \(page + 1)/\(question.prompts.count)").font(.caption.weight(.semibold))
                         Button { display = display.withPage(question, page + 1) } label: { Image(systemName: "chevron.right") }
                             .disabled(page + 1 >= question.prompts.count).accessibilityLabel("Next part")
                     }
@@ -182,7 +185,7 @@ struct QuestionCard: View {
                     if question.canSkip {
                         Button("Skip") { skip() }.disabled(!(editing && available))
                     }
-                    if otherPrompts.isEmpty && showsSubmit { sendButton(enabled: sendEnabled, multiple: question.prompts.count > 1, editing: editing) }
+                    if otherPrompts.isEmpty && showsSubmit { actionButton(step, enabled: actionEnabled, editing: editing) }
                 }
             }
             if !available {
@@ -299,15 +302,32 @@ struct QuestionCard: View {
         }
     }
 
-    private func sendButton(enabled: Bool, multiple: Bool, editing: Bool) -> some View {
-        Button { submit(editing: editing) } label: {
-            Image(systemName: "arrow.up").font(.body.weight(.semibold)).frame(width: 36, height: 36)
+    /// Next, Review answers, Send all or Send, as on Android: one action per step.
+    private func actionButton(_ step: QuestionStep, enabled: Bool, editing: Bool) -> some View {
+        let label = step.reviewing ? "Review answers" : step.nextPage != nil ? "Next" : step.count > 1 ? "Send all" : "Send"
+        let description = step.reviewing ? "Review unanswered questions" : step.nextPage != nil ? "Next question" : step.count > 1 ? "Send all" : "Send answer"
+        return Button { primaryAction(step, editing: editing) } label: {
+            HStack(spacing: 6) {
+                Text(label)
+                Image(systemName: step.nextPage != nil ? "chevron.right" : "arrow.up")
+            }
+            .font(.footnote.weight(.semibold))
+            .padding(.horizontal, 12)
+            .frame(minHeight: 44)
         }
         .buttonStyle(.plain)
         .foregroundStyle(enabled ? Theme.background : Theme.muted)
-        .background(enabled ? Theme.mint : Color(hex: 0x2B3B3B), in: Circle())
+        .background(enabled ? Theme.mint : Color(hex: 0x2B3B3B), in: Capsule())
         .disabled(!enabled)
-        .accessibilityLabel(multiple ? "Send all" : "Send answer")
+        .accessibilityLabel(description)
+    }
+
+    /// Moves to the step's next page after saving the answer, or sends from the final step through the unchanged send.
+    private func primaryAction(_ step: QuestionStep, editing: Bool) {
+        guard let next = step.nextPage else { return submit(editing: editing) }
+        guard editing && !submitting && step.canAdvance else { return }
+        persist()
+        display = display.withPage(question, next)
     }
 
     private func otherLabel(_ prompt: Prompt) -> String {
