@@ -206,7 +206,7 @@ fn validate(request: &Request, name: &str) -> Result<()> {
     if request
         .message_id
         .as_deref()
-        .is_some_and(|id| !opencode::native_id(id, "msg_"))
+        .is_some_and(|id| !opencode::queued_message_id(id))
     {
         return Err("Invalid queued message identity".into());
     }
@@ -409,6 +409,11 @@ mod tests {
         validate(&r, "opencode/p/t").unwrap();
         r.message_id = Some("../x".into());
         assert!(validate(&r, "opencode/p/t").is_err());
+        // `msg_` alone names no message; the relay and the connector refuse it too.
+        r.message_id = Some("msg_".into());
+        assert!(validate(&r, "opencode/p/t").is_err());
+        r.message_id = Some("msg_a-b_c".into());
+        validate(&r, "opencode/p/t").unwrap();
         r.action = "forget".into();
         r.message_id = Some("msg_A".into());
         assert!(validate(&r, "opencode/p/t").is_err());

@@ -240,8 +240,36 @@ fn request_hashes_match_python_through_the_batch_codec() {
         missing.is_empty(),
         "listed rows without a vector: {missing:?}"
     );
-    // 56 requests of request_hash.jsonl and 57 of request_envelopes.jsonl.
-    assert_eq!(hashed, 115); // Includes archive_list and scoped hook health envelopes.
+    // 56 requests of request_hash.jsonl and 60 of request_envelopes.jsonl.
+    assert_eq!(hashed, 116); // Archive, scoped hook health and analytics envelopes.
+}
+
+/// `services/mobile/tests/rust-only-operations.json`: each operation only
+/// the Rust connector executes, and whether it is a read.
+fn rust_only() -> Vec<(String, bool)> {
+    let table = json::parse(
+        &std::fs::read(vectors().join("../tests/rust-only-operations.json")).unwrap(),
+        64,
+        1_000_000,
+    )
+    .unwrap();
+    let rows: Vec<(String, bool)> = table["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            assert!(
+                row["class"] == "read" || row["class"] == "mutation",
+                "{row}"
+            );
+            (
+                row["operation"].as_str().unwrap().to_owned(),
+                row["class"] == "read",
+            )
+        })
+        .collect();
+    assert!(!rows.is_empty());
+    rows
 }
 
 fn sorted(items: &[&str]) -> Vec<String> {
@@ -283,8 +311,33 @@ fn operation_tables_match_the_python_connector() {
         items.sort();
         items
     };
-    assert_eq!(sorted(protocol::OPERATIONS), set(&["OPERATIONS"]));
-    assert_eq!(sorted(protocol::READS), set(&["READ_OPERATIONS"]));
+    // Operations only the Rust connector executes: the Python connector,
+    // whose tables these vectors freeze, never lists them. Each is a read or
+    // a mutation here as its row says.
+    let rust_only = rust_only();
+    let python: Vec<&str> = protocol::OPERATIONS
+        .iter()
+        .copied()
+        .filter(|operation| !rust_only.iter().any(|(name, _)| name == operation))
+        .collect();
+    assert_eq!(python.len() + rust_only.len(), protocol::OPERATIONS.len());
+    assert_eq!(sorted(&python), set(&["OPERATIONS"]));
+    for (operation, read) in &rust_only {
+        assert_eq!(protocol::READS.contains(&operation.as_str()), *read);
+        for name in ["OPERATIONS", "READ_OPERATIONS", "MUTATIONS"] {
+            assert!(!set(&[name]).contains(operation), "{name} {operation}");
+        }
+    }
+    let python_reads: Vec<&str> = protocol::READS
+        .iter()
+        .copied()
+        .filter(|operation| !rust_only.iter().any(|(name, _)| name == operation))
+        .collect();
+    assert_eq!(
+        python_reads.len() + rust_only.iter().filter(|(_, read)| *read).count(),
+        protocol::READS.len()
+    );
+    assert_eq!(sorted(&python_reads), set(&["READ_OPERATIONS"]));
     assert_eq!(sorted(protocol::LAUNCH), set(&["LAUNCH_OPERATIONS"]));
     assert_eq!(sorted(protocol::COMPUTER), set(&["COMPUTER_OPERATIONS"]));
     assert_eq!(
@@ -305,7 +358,13 @@ fn operation_tables_match_the_python_connector() {
         .iter()
         .copied()
         .filter(|feature| {
-            !["opencode_launch_effort", "presence_alerts", "voice_video"].contains(feature)
+            ![
+                "opencode_launch_effort",
+                "presence_alerts",
+                "voice_video",
+                "clear_context_dismiss",
+            ]
+            .contains(feature)
         })
         .collect();
     assert_eq!(sorted(&features), set(&["FEATURES"]));

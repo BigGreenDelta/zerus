@@ -252,7 +252,8 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (244, 2));
+    // The common Python vectors include both hook health and analytics reads.
+    assert_eq!((checked, refused), (254, 2));
 }
 
 /// Python's `capable(node)`: every flag, the vectors' sessions and archive.
@@ -747,6 +748,41 @@ fn ported_operations_name_what_this_build_implements() {
     assert_eq!(listed, implemented);
 }
 
+/// The connector-only table equals the shared one the relay tests and the
+/// black-box suites read, and a gate named after a frozen marker is that
+/// marker.
+#[test]
+fn connector_only_operations_match_the_shared_table() {
+    let raw = std::fs::read(vectors().join("../tests/rust-only-operations.json")).unwrap();
+    let shared: Value = serde_json::from_slice(&raw).unwrap();
+    let rows: Vec<Value> = capabilities::CONNECTOR_ONLY
+        .iter()
+        .map(|row| {
+            let class = match row.class {
+                capabilities::Class::Read => "read",
+                capabilities::Class::Mutation => "mutation",
+            };
+            json!({"operation": row.operation, "marker": row.gate.name(), "class": class})
+        })
+        .collect();
+    assert_eq!(json!(rows), shared["operations"]);
+    let operations = document("operations.json");
+    let markers = operations["capabilities"]["markers"].as_array().unwrap();
+    for row in capabilities::CONNECTOR_ONLY {
+        let frozen = markers
+            .iter()
+            .find(|marker| marker["name"] == row.gate.name());
+        match frozen {
+            Some(marker) => assert_eq!(marker["help_line"], row.gate.help_line(), "{row:?}"),
+            None => assert_eq!(
+                shared["markers"][row.gate.name()],
+                row.gate.help_line(),
+                "{row:?}"
+            ),
+        }
+    }
+}
+
 #[test]
 fn capability_markers_match_the_python_connector() {
     let operations = document("operations.json");
@@ -774,10 +810,28 @@ fn capability_markers_match_the_python_connector() {
         let advertised = flags.advertised(one_hop);
         assert_eq!(advertised["reasons"], wanted["reasons"], "{name}");
         for operation in advertised["operations"].as_array().unwrap() {
-            assert!(capabilities::implemented(operation.as_str().unwrap()));
+            let operation = operation.as_str().unwrap();
+            assert!(capabilities::implemented(operation));
             assert!(
-                wanted["operations"].as_array().unwrap().contains(operation),
-                "{name}"
+                wanted["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|wanted| wanted == operation)
+                    || capabilities::connector_only(operation),
+                "{name} {operation}"
+            );
+        }
+        // A connector-only operation comes exactly with its own native gate.
+        for row in capabilities::CONNECTOR_ONLY {
+            assert_eq!(
+                advertised["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|advertised| advertised == row.operation),
+                row.gate.open(flags),
+                "{name} {row:?}"
             );
         }
     }

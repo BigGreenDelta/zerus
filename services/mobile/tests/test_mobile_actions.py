@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import uuid
 
 from zerus_mobile.connector import Connector
-from zerus_mobile.context import LIFECYCLE_OPERATIONS
+from zerus_mobile.context import LIFECYCLE_OPERATIONS, OPERATIONS
 from relay_oracle import validate_request
 
 
@@ -98,6 +98,17 @@ class LifecycleTransportTests(unittest.IsolatedAsyncioTestCase):
         self.connector.snapshot_seen_at -= 60
         with patch.object(self.connector, "native", AsyncMock()) as native:
             self.assertEqual((await self.connector.execute(self.request("restore", archive_id=archive)))["state"], "failed")
+            native.assert_not_awaited()
+
+    async def test_queue_removal_is_never_advertised_or_accepted(self):
+        # `remove_queued` (OpenCode) belongs to the Rust connector; this one
+        # neither lists it nor runs it, whatever the native CLI offers.
+        # Every advertised operation is one of OPERATIONS (Connector.snapshot).
+        self.assertNotIn("remove_queued", OPERATIONS | LIFECYCLE_OPERATIONS)
+        request = self.request("remove_queued", message_id="msg_Queued01")
+        with patch.object(self.connector, "native", AsyncMock()) as native:
+            response = await self.connector.execute(request)
+            self.assertEqual((response["state"], response["error"]), ("failed", "unsupported operation"))
             native.assert_not_awaited()
 
     async def test_bounded_help_probe_does_not_infer_support_from_arbitrary_text(self):

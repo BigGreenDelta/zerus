@@ -39,7 +39,7 @@ HERE = Path(__file__).resolve().parent
 if __name__ == "__main__":
     sys.path[:0] = [str(HERE.parent), str(HERE.parent / "tests")]
 
-from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet, file_reads, archives,  # noqa: E402
+from zerus_mobile import (analytics, accounts, attachment_reads, attachments, connector, context, fleet, file_reads, archives,  # noqa: E402
                           history, launch, managed_relay, projects, speech, speech_config, terminal,
                           voice, worktrees)
 from zerus_mobile.connector import Connector, ConnectorError, Journal  # noqa: E402
@@ -191,6 +191,7 @@ def connector_log(handler: logging.Handler):
 # Operation tables and the help-marker capability map.
 
 HELP_LINES = (
+    ("analytics", analytics.HELP_MARKER),
     ("lifecycle", "hgs session-action <session> --json"),
     ("terminal", "hgs terminal <session> --json"),
     ("recovery", "hgs recovery action --scoped-json"),
@@ -210,6 +211,7 @@ HELP_LINES = (
     ("speech_config", speech_config.HELP_MARKER),
     ("peer_inventory", "hgs swarm mobile-peers --json"),
     ("peer_command", "hgs swarm mobile-peer --json"),
+    ("clear_context_dismiss", context.CLEAR_CONTEXT_DISMISS_HELP),
 )
 
 
@@ -1121,6 +1123,7 @@ def valid_payloads() -> dict:
     upsert_profile = {"id": "example", "name": "Example transcription", "adapter": "openai_http", "model": "fixture",
                       "language": "ru", "base_url": "https://speech.example.invalid/v1", "allow_insecure_http": False}
     return {
+        "analytics_read": {"schema": 1, "from": "2026-01-01", "through": "2026-03-31"},
         "inspect": {}, "send": identity(text="Hello from the phone"),
         "answer": identity(question_id="q", expected_question_hash="h", answers=[["Yes"]]),
         "interrupt": identity(expected_turn_started=True), "send_now": identity(queue_id="c" * 64),
@@ -1156,7 +1159,7 @@ def valid_payloads() -> dict:
     }
 
 
-SESSIONLESS = {"archive_list"} | context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
+SESSIONLESS = {"analytics_read", "archive_list"} | context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
 
 
 def substitute(value, request_id):
@@ -1296,6 +1299,12 @@ def validation_cases() -> list[dict]:
     # context commands
     case("compact_context/extra-field", "compact_context", identity(path="/example"))
     case("clear_context/run-empty", "clear_context", identity(expected_run_id=""))
+    dismiss_source = "test_bb_dismiss_prompt.DismissPromptTests"
+    for label, value in (("true", True), ("false", False), ("null", None),
+                         ("integer-zero", 0), ("integer-one", 1), ("string", "true"), ("array", [])):
+        case("clear_context/dismiss-" + label, "clear_context", identity(dismiss_prompt=value), source=dismiss_source)
+    for value in (True, False):
+        case("compact_context/dismiss-" + str(value).lower(), "compact_context", identity(dismiss_prompt=value), source=dismiss_source)
     # lifecycle
     actions = "test_mobile_actions.LifecycleTransportTests.test_old_cli_and_invalid_payload_never_invoke_mutator"
     case("pause/action-field", "pause", identity(action="terminate"), source=actions)

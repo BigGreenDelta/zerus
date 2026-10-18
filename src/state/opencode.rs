@@ -1607,10 +1607,16 @@ fn interrupt_with(native: &dyn Native, record: &Value) -> Result<()> {
     ))
 }
 const NOT_QUEUED: &str = "This message is no longer queued";
+/// The message a `remove_queued` request may name: `msg_` and 1-124 ASCII
+/// letters, digits, `_` or `-`, the shape the relay and the mobile connector
+/// check too (`tests/fixtures/opencode-queued-message-ids.json`).
+pub(super) fn queued_message_id(id: &str) -> bool {
+    id.len() > "msg_".len() && native_id(id, "msg_")
+}
 /// The exact native message ID of a `remove_queued` request.
 fn queued_id(request: &Value) -> Result<String> {
     let id = string(request, "message_id");
-    if !native_id(id, "msg_") {
+    if !queued_message_id(id) {
         return Err("Choose the exact queued OpenCode message".into());
     }
     Ok(id.to_owned())
@@ -3591,6 +3597,19 @@ mod tests {
         assert!(queued_id(&json!({"message_id": "msg_gVmstesSuU81H2vTHdmxp65tNI"})).is_ok());
         assert!(queued_id(&json!({"message_id": "../x"})).is_err());
         assert!(queued_id(&json!({})).is_err());
+        // The shape the relay and the mobile connector check too.
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/opencode-queued-message-ids.json"
+        ))
+        .unwrap();
+        for (kind, valid) in [("accept", true), ("reject", false)] {
+            let ids = fixture[kind].as_array().unwrap();
+            assert!(!ids.is_empty(), "{kind}");
+            for id in ids {
+                assert_eq!(queued_id(&json!({"message_id": id})).is_ok(), valid, "{id}");
+                assert_eq!(queued_message_id(id.as_str().unwrap()), valid, "{id}");
+            }
+        }
     }
     #[test]
     fn interrupt_succeeds_when_acknowledged_or_already_stopped() {

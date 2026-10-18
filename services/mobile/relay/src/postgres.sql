@@ -91,3 +91,7 @@ CREATE INDEX IF NOT EXISTS archive_history ON requests(updated,id) WHERE operati
 
 -- Content-free hook diagnostics expire independently of native mutations.
 CREATE INDEX IF NOT EXISTS hook_health_history ON requests(updated,id) WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain');
+
+CREATE INDEX IF NOT EXISTS analytics_reads_history ON requests(updated,id) WHERE operation='analytics_read' AND state IN ('completed','failed','uncertain');
+
+CREATE INDEX IF NOT EXISTS git_status_history_v1 ON requests(updated,id) WHERE operation='git_status' AND state IN ('completed','failed','uncertain');

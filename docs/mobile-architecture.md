@@ -945,6 +945,17 @@ as `desktop_presence`.
 Both relay capabilities and the computer snapshot's
 `mobile_capabilities` must advertise an extension before the phone uses it.
 
+The `clear_context_dismiss` extension permits the optional strict Boolean
+`dismiss_prompt` only on `clear_context`. Presence, even `false`, requires the
+distinct relay and computer feature after exact durable duplicate lookup.
+The connector offers it only for the exact trimmed HELP line
+`Mobile clear-context ABI: dismiss-prompt-v1`. For `true`, it verifies a fresh
+exact session/run/conversation and unarchived state, then requires the actual
+Boolean native `clear_context_dismiss: true`; phase/source hints grant no
+authority. It forwards the original payload. Omitted ordinary clear and compact
+validation, mutation identities and no-replay behavior remain unchanged. The
+native addition is a HELP marker only; this contract adds no native clear logic.
+
 The Rust connector adds the feature `opencode_launch_effort` (never advertised by
 the legacy Python connector). A phone sends the optional `effort` string in a
 `launch` payload only for OpenCode, with a `model` whose current account
@@ -962,12 +973,30 @@ control character or `/`, as `hgs` projects it): in `launch` for agent
 layer tests against; membership in the model's `effort_options` stays
 authoritative. The relay advertises `opencode_launch_effort` too; phones offer
 such names only when both the relay and the computer advertise it.
-The connector also accepts a `remove_queued` session action carrying an exact
-`msg_` `message_id`, run and conversation identity and journals it like other
-session actions, and an in-flight one recovers as uncertain after a restart.
-It is currently unreachable from phones and relay clients: the relay operation
-set does not list it, so the relay rejects it and the connector does not
-advertise it. Phones do not offer it in phase 1.
+`remove_queued` removes one OpenCode message that was never delivered. It is a
+session mutation with a durable request identity, like `forget`: the payload
+holds exactly `request_id`, the exact `expected_run_id`, a nonempty
+`expected_conversation_id` and one `message_id`, `msg_` followed by 1–124 ASCII
+letters, digits, `_` or `-` (at most 128 characters). The relay, the Rust
+connector, the desktop and `hgs session-action` check the same shape, which
+`tests/fixtures/opencode-queued-message-ids.json` fixes; any other field is
+refused. The Rust connector advertises it exactly when its native hgs offers the
+scoped session-action ABI, as for the other session actions, journals it like
+them, and an in-flight one recovers as uncertain after a restart. That marker
+predates queue removal: an older hgs, for example on a one-hop peer, prints it
+too and then refuses the request, which leaves an uncertain receipt and removes
+nothing. The advertisement therefore does not prove that this hgs can remove a
+message; only `remove_queued` in the session's `allowed_actions` does, and an
+older hgs never lists it there. The legacy Python connector never advertises or
+accepts it, so the relay refuses it for a computer still running that connector.
+hgs removes the message only while it is still queued and the session is not
+running; it never resends it. A phone may offer Remove only when both the relay
+and the computer advertise `remove_queued`, the row's `delivery_state` is
+`not_delivered` and the session's `allowed_actions` contains `remove_queued`,
+always after an explicit confirmation for that exact run, conversation and
+message. It shows the message removed only after a completed receipt; a failed
+or uncertain receipt keeps the row with its reason and is never retried
+automatically.
 
 Legacy live `inspect` accepts an empty payload; an archive supplies its canonical
 `archive_id`. The `inspect_after` and `inspect_agent` features add a journal

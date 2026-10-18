@@ -229,6 +229,7 @@ target_link_libraries(test_automaticapprovals PRIVATE Qt6::Test hgs-tray-ui)
 zerus_add_test(automaticapprovals test_automaticapprovals)
 target_include_directories(test_hgsclient PRIVATE ../src)
 target_link_libraries(test_hgsclient PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+target_compile_definitions(test_hgsclient PRIVATE ZERUS_OPENCODE_QUEUED_MESSAGE_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-queued-message-ids.json")
 zerus_add_test(hgsclient test_hgsclient)
 
 add_executable(test_readmarksync test_readmarksync.cpp)
