@@ -412,8 +412,21 @@ QString MessageComposer::suggestion() const { return isWaitingToSend(m_key) ? QS
 void MessageComposer::updatePlaceholder()
 {
     const QString text = suggestion();
-    m_editor->setPlaceholderText(text.isEmpty() ? tr("Message this agent…") : text);
+    m_editor->setPlaceholderText(!text.isEmpty() ? text : !m_placeholder.isEmpty() ? m_placeholder : tr("Message this agent…"));
 }
+
+void MessageComposer::setTaskMode(bool taskMode)
+{
+    m_taskMode = taskMode;
+    m_toolbar->setVisible(!taskMode);
+    m_editor->setAccessibleName(taskMode ? tr("Task prompt") : tr("Message to selected agent"));
+    setAttachmentAvailability(!taskMode, taskMode ? tr("A task is text only.") : QString());
+    updateControls();
+}
+
+void MessageComposer::setSendLabel(const QString &label) { m_sendLabel = label; updateControls(); }
+
+void MessageComposer::setPlaceholder(const QString &placeholder) { m_placeholder = placeholder; updatePlaceholder(); }
 
 bool MessageComposer::requestInterrupt()
 {
@@ -870,8 +883,11 @@ void MessageComposer::updateControls()
     m_attach->setToolTip(m_attachmentsAvailable?tr("Attach files, paste an image, or drop files onto this session"):m_attachmentsReason);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
-    m_send->setText(draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send"));
-    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : tr("Send: Enter; new line: Shift+Enter"));
+    m_attach->setVisible(!m_taskMode);
+    m_send->setText(draft.sending ? (m_taskMode ? tr("Adding…") : tr("Sending…")) : waiting ? tr("Waiting to send…")
+        : m_taskMode ? m_sendLabel : tr("Send"));
+    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_taskMode ? tr("Add the task: Enter; new line: Shift+Enter")
+        : tr("Send: Enter; new line: Shift+Enter"));
     m_retry->setVisible(draft.uncertain && !operationLocked);
     m_refreshStatus->setVisible(!m_sessionStatus.isEmpty() && m_sessionStatusError);
     m_refreshStatus->setEnabled(!operationLocked);
@@ -897,7 +913,7 @@ void MessageComposer::updateControls()
     const bool showSettings = !m_narrow || status.isEmpty();
     const auto focus = QApplication::focusWidget();
     const bool returnFocus = !showSettings && (m_settings->hasFocus() || (focus && m_settingsPopup->isAncestorOf(focus)));
-    m_settings->setVisible(showSettings);
+    m_settings->setVisible(showSettings && !m_taskMode);
     if (!showSettings) m_settingsPopup->hide();
     // Do not transfer an unfinished settings interaction to the Stop action.
     if (returnFocus) m_editor->setFocus(Qt::OtherFocusReason);
@@ -946,6 +962,7 @@ void MessageComposer::showSavedDrafts()
                 if (owner.kind == ComposerDraftOwner::Kind::Subagent) title << tr("subagent");
                 else if (owner.kind == ComposerDraftOwner::Kind::Question) title << tr("question answer");
                 else if (owner.kind == ComposerDraftOwner::Kind::Voice) title << tr("voice message");
+                else if (owner.kind == ComposerDraftOwner::Kind::Task) title << tr("task prompt");
                 if (!owner.archive.isEmpty()) title << tr("archived");
             }
             if (summary.modified.isValid()) detail << QLocale().toString(summary.modified, QLocale::ShortFormat);
@@ -967,6 +984,7 @@ void MessageComposer::showSavedDrafts()
             if(owner.kind==ComposerDraftOwner::Kind::Subagent){context<<tr("Subagent");item->setData(SessionRoles::Title,item->data(SessionRoles::Title).toString()+" / "+owner.subagent);}
             else if(owner.kind==ComposerDraftOwner::Kind::Question)context<<tr("Question answer");
             else if(owner.kind==ComposerDraftOwner::Kind::Voice)context<<tr("Voice message");
+            else if(owner.kind==ComposerDraftOwner::Kind::Task)context<<tr("Task prompt");
             if(!owner.archive.isEmpty())context<<tr("Archived");
             if(summary.attachments&&!summary.preview.isEmpty())context<<tr("%n attachment(s)",nullptr,summary.attachments);
             if(!context.isEmpty()){const auto meta=item->data(SessionRoles::Meta).toString();if(!meta.isEmpty())context.prepend(meta);item->setData(SessionRoles::Meta,context.join(" / "));}

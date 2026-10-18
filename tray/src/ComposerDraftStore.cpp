@@ -246,9 +246,11 @@ QHash<QString, ComposerDraftSummary> ComposerDraftStore::indexDirect() const
 ComposerDraftOwner ComposerDraftStore::owner(const QString &key)
 {
     static const QString Voice = QStringLiteral("voice-message-draft\n"), Question = QStringLiteral("question\n");
-    if (key.startsWith(Voice)) {
-        auto result = owner(key.mid(Voice.size()));
-        if (result.kind == ComposerDraftOwner::Kind::Message) { result.kind = ComposerDraftOwner::Kind::Voice; return result; }
+    static const QString Task = QStringLiteral("task-draft\n");
+    for (const auto &[prefix, kind] : {std::pair{Voice, ComposerDraftOwner::Kind::Voice}, std::pair{Task, ComposerDraftOwner::Kind::Task}}) {
+        if (!key.startsWith(prefix)) continue;
+        auto result = owner(key.mid(prefix.size()));
+        if (result.kind == ComposerDraftOwner::Kind::Message) { result.kind = kind; return result; }
     }
     if (key.startsWith(Question)) {
         // A question identity is a compact JSON array, so it holds no line break.

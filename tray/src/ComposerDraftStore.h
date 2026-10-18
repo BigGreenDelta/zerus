@@ -25,10 +25,10 @@ struct ComposerDraftSummary {
     int attachments = 0;
 };
 
-// The conversation a stored draft belongs to. Message, subagent, question-answer
-// and voice drafts share one store and name their session differently.
+// The conversation a stored draft belongs to. Message, subagent, question-answer,
+// voice and task-prompt drafts share one store and name their session differently.
 struct ComposerDraftOwner {
-    enum class Kind { Unknown, Message, Subagent, Question, Voice };
+    enum class Kind { Unknown, Message, Subagent, Question, Voice, Task };
     Kind kind = Kind::Unknown;
     // The host alias, empty for this computer; a subagent key holds the machine
     // name instead. Archive is set for an archived session.
