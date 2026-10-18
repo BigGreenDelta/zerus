@@ -521,9 +521,14 @@ or failed reads cannot reopen it. Draft review and discard cannot bypass that
 submitted lock. Successful interrupts retain their separate cleanup behavior.
 Approval review accrues only in the visible, focused foreground disclosure.
 
-Ordinary agent messages and non-approval question disclosures render Markdown
-with the desktop's CommonMark and GFM feature set: headings, emphasis, lists,
+Ordinary agent messages and question disclosures from known agent-authored sources
+render Markdown with the desktop's CommonMark and GFM feature set: headings, emphasis, lists,
 quotes, links, tables, strikethrough, static task markers and code blocks.
+Approval and trust disclosures, terminal-read panels and unknown question sources
+stay literal, including prompt bodies, Other descriptions and option descriptions,
+so paths and terminal output keep their exact reported characters. The authored
+source allowlist matches desktop: `hook`, `codex_async`, `kimi_wire`,
+`kimi_plan_review`, `dsh_native`, `opencode_native` and `claude_native_question`.
 Android uses CommonMark Java 0.30.0 with native Compose presentation, not a WebView.
 Only explicitly tapped absolute HTTP(S) links open a browser. In an agent
 conversation, file links open the source computer's file dialog described below.
