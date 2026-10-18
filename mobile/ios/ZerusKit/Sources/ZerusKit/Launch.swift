@@ -66,10 +66,9 @@ public struct EffortOption: Hashable, Sendable {
         }
     }
 
-    /// Native variant IDs: one bounded token without spaces, path separators or control characters.
+    /// Native variant IDs the relay admits (`variant_id`): 1–40 ASCII letters, digits, `-`, `_` or `.`.
     public static func valid(_ value: String) -> Bool {
-        !value.isEmpty && value.utf8.count <= 40 && !value.unicodeScalars.contains { $0 == "/" || PairingInvite.isISOControl($0) } &&
-            value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+        (1...40).contains(value.utf8.count) && value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_.".contains($0)) }
     }
 
     /// `effort_labels` names `effort_options` by position; a missing or unusable label keeps the familiar name.

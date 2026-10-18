@@ -285,21 +285,10 @@ struct QuestionCard: View {
         loadedIdentity = identity
         gate = QuestionSubmitGate()
         submitting = false
-        var saved: [String: NativeQuestionAnswer] = [:]
-        if let native {
-            for answer in native.answers { saved[answer.questionId] = answer }
-        } else if let rows = (try? JSON.parse(draft.answers))?.array {
-            for row in rows.compactMap(\.object) {
-                let id = row.string("question_id")
-                saved[id] = NativeQuestionAnswer(questionId: id, optionIds: row.strings("selected_option_ids"), text: row.string("text"), skip: row.bool("skip"))
-            }
-        }
-        // A form's preselected answers apply until this draft records its own choice.
-        let defaults = native == nil ? QuestionPolicies.defaults(question.prompts) : [:]
-        options = Dictionary(uniqueKeysWithValues: question.prompts.map { prompt in
-            (prompt.id, saved[prompt.id].map { Set($0.optionIds) } ?? defaults[prompt.id] ?? [])
-        })
-        texts = Dictionary(uniqueKeysWithValues: question.prompts.map { ($0.id, saved[$0.id]?.text ?? "") })
+        // This question's saved draft wins; form defaults and default_text only seed an unsaved one and are never sent by themselves.
+        let opening = QuestionPolicies.opening(question.prompts, draftAnswers: draft.answers, native: native)
+        options = opening.options
+        texts = opening.texts
     }
 
     private func answers() -> JSON { QuestionPolicies.answers(question.prompts, options: options, texts: texts) }

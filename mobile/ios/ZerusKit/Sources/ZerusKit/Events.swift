@@ -113,6 +113,8 @@ public struct Prompt: Codable, Hashable, Sendable {
     public var minItems: Int?
     public var maxItems: Int?
     public var defaultOptionIds: [String] = []
+    /// The prefilled answer of a native OpenCode text item (`default_text`), bounded like a typed answer; "" otherwise.
+    public var defaultText = ""
 }
 
 public struct NativeQuestionAnswer: Codable, Hashable, Sendable {
@@ -534,6 +536,24 @@ public enum NativeEvents {
         return Int(value)
     }
 
+    /// Only an explicit native OpenCode text item seeds its text: one line, clipped to `max_length` characters and the
+    /// 4096-byte answer bound. Anything else has no default text.
+    static func defaultText(_ item: JSONObject, source: String) -> String {
+        guard source == "opencode_native", item.string("input_kind") == "text", case .string(let text)? = item["default_text"],
+              !text.unicodeScalars.contains(where: PairingInvite.isISOControl) else { return "" }
+        let characters = limit(item, "max_length") ?? Int.max
+        var clipped = String.UnicodeScalarView()
+        var count = 0, bytes = 0
+        for scalar in text.unicodeScalars {
+            let size = String(scalar).utf8.count
+            if count == characters || bytes + size > 4096 { break }
+            clipped.append(scalar)
+            count += 1
+            bytes += size
+        }
+        return String(clipped)
+    }
+
     public static func questions(_ raw: JSONObject) -> [Question] {
         raw.objects("pending_questions").map { card in
             let delivery = card.object("answer_delivery").map { delivery in
@@ -557,7 +577,7 @@ public enum NativeEvents {
                                        inputKind: ["choice", "text"].contains(prompt.string("input_kind")) ? prompt.string("input_kind") : "",
                                        minLength: limit(prompt, "min_length"), maxLength: limit(prompt, "max_length"),
                                        minItems: limit(prompt, "min_items"), maxItems: limit(prompt, "max_items"),
-                                       defaultOptionIds: prompt.strings("default_option_ids"))
+                                       defaultOptionIds: prompt.strings("default_option_ids"), defaultText: defaultText(prompt, source: card.string("source")))
                             },
                             canAnswer: card.bool("can_answer"), canSkip: card.bool("can_skip"), optional: card.bool("optional"),
                             delivery: delivery?.status ?? "", createdAt: created, source: card.string("source"), approval: card.bool("approval"),

@@ -302,6 +302,84 @@ final class OpenCodeTests: XCTestCase {
         XCTAssertNil(QuestionPolicies.queue(NativeEvents.questions(["pending_questions": [.object(answerable)]]), target, chosen: "").selected)
     }
 
+    func testEffortVariantIdsFollowTheRelayRule() throws {
+        let long = String(repeating: "a", count: 41), longest = String(repeating: "a", count: 40)
+        let values = ["thinking-8k_v1.2", "think:deep", long, longest, "dé", "a+b"]
+        XCTAssertEqual(EffortOption.options(values, labels: values).map(\.value), ["thinking-8k_v1.2", longest])
+        XCTAssertEqual(EffortOption.options(values, labels: values).first?.label, "thinking-8k_v1.2", "labels stay aligned with their variants")
+        var raw = catalog
+        raw["accounts"] = [["id": "native-opencode", "provider": "opencode", "label": "OpenCode", "model_options": [
+            ["id": "fixture/local", "value": "fixture/local", "label": "Local", "effort_options": ["thinking-8k_v1.2", "think:deep", .string(long)]]]]]
+        let sanitized = LaunchPresentation.sanitizeCatalog(raw)
+        XCTAssertEqual(LaunchPresentation.efforts(sanitized, provider: "opencode", accountId: "native-opencode", model: "fixture/local", supported: true)
+            .map(\.value), ["thinking-8k_v1.2"])
+        func launch(_ effort: String) throws -> JSONObject {
+            try SessionActionPolicies.arguments("launch", ["agent": "opencode", "directory": "/example/project", "tag": "work", "account_id": "native-opencode",
+                                                           "model": "fixture/local", "effort": .string(effort)])
+        }
+        XCTAssertNoThrow(try launch("thinking-8k_v1.2"))
+        XCTAssertThrowsError(try launch("think:deep"))
+        XCTAssertThrowsError(try launch(long))
+        func settings(_ effort: String) throws -> JSONObject {
+            try SessionActionPolicies.arguments("settings", ["model": "fixture/local", "effort": .string(effort)], effortVariants: true)
+        }
+        XCTAssertNoThrow(try settings("thinking-8k_v1.2"))
+        for refused in ["think:deep", long] {
+            XCTAssertThrowsError(try settings(refused)) { XCTAssertEqual(($0 as? ZerusError)?.message, "Invalid effort.") }
+        }
+        // The sheet never offers what the relay would refuse.
+        let sheet = SessionDetailsPresentation.settings(["agent": "opencode", "model_options": [["id": "m/x", "effort_options": ["thinking-8k_v1.2", "think:deep"]]]])
+        XCTAssertEqual(sheet.effortOptions("m/x", effortFeature: true).map(\.value), ["", "thinking-8k_v1.2"])
+    }
+
+    func testOpenCodeTextDefaultSeedsOnlyAQuestionWithoutASavedDraft() throws {
+        func card(_ item: JSONObject, source: String = "opencode_native", hash: String = "h1") throws -> Question {
+            try XCTUnwrap(NativeEvents.questions(["pending_questions": [["question_id": "frm_1", "question_hash": .string(hash), "can_answer": true,
+                                                                         "source": .string(source), "questions": [.object(item)]]]]).first)
+        }
+        let item: JSONObject = ["id": "k", "header": "Name", "prompt": "Name", "options": [], "allow_other": true, "required": true,
+                                "input_kind": "text", "default_text": "Ada"]
+        let question = try card(item)
+        XCTAssertEqual(question.prompts[0].defaultText, "Ada")
+        // Prefilled and complete, but only shown: nothing is saved or sent until the person acts.
+        let opened = QuestionPolicies.opening(question.prompts, draftAnswers: "", native: nil)
+        XCTAssertEqual(opened.texts, ["k": "Ada"])
+        XCTAssertTrue(QuestionPolicies.complete(question.prompts, options: opened.options, texts: opened.texts))
+        // A saved draft of this exact question wins, including an intentionally empty text.
+        let empty = QuestionPolicies.answers(question.prompts, options: [:], texts: ["k": ""]).compact
+        let reopened = QuestionPolicies.opening(question.prompts, draftAnswers: empty, native: nil)
+        XCTAssertEqual(reopened.texts, ["k": ""])
+        XCTAssertFalse(QuestionPolicies.complete(question.prompts, options: reopened.options, texts: reopened.texts))
+        let edited = QuestionPolicies.answers(question.prompts, options: [:], texts: ["k": "Grace"]).compact
+        XCTAssertEqual(QuestionPolicies.opening(question.prompts, draftAnswers: edited, native: nil).texts, ["k": "Grace"])
+        // A changed question has no saved draft of its own (drafts are keyed by question ID and hash) and gets the default again.
+        let saved = Draft(target: target, text: "", questionId: question.id, questionHash: question.hash, answers: empty)
+        let changed = try card(item, hash: "h2")
+        let changedDraft = [saved].first { $0.target == target && $0.questionId == changed.id && $0.questionHash == changed.hash }
+        XCTAssertNil(changedDraft)
+        XCTAssertEqual(QuestionPolicies.opening(changed.prompts, draftAnswers: changedDraft?.answers ?? "", native: nil).texts, ["k": "Ada"])
+        // A submitted native answer is shown as submitted, never seeded.
+        let native = NativeQuestionDelivery(requestId: "r", questionId: question.id, questionHash: question.hash, run: "run", conversation: "ses_A",
+                                            status: "submitted", answers: [])
+        XCTAssertEqual(QuestionPolicies.opening(question.prompts, draftAnswers: "", native: native).texts, ["k": ""])
+        // A legacy card without default_text is unchanged.
+        var legacy = item
+        legacy["default_text"] = nil
+        XCTAssertEqual(QuestionPolicies.opening(try card(legacy).prompts, draftAnswers: "", native: nil).texts, ["k": ""])
+        // Only explicit native OpenCode text items carry it.
+        XCTAssertEqual(try card(item, source: "codex_tui").prompts[0].defaultText, "")
+        let choice: JSONObject = ["id": "c", "header": "Color", "prompt": "Color", "options": [["id": "Green", "label": "Green"]], "allow_other": true,
+                                  "input_kind": "choice", "default_text": "Ada"]
+        let chooser = try card(choice)
+        XCTAssertEqual(chooser.prompts[0].defaultText, "")
+        XCTAssertEqual(QuestionPolicies.opening(chooser.prompts, draftAnswers: "", native: nil).texts, ["c": ""])
+        // Sanitized like other text: control characters are ignored and the value is clipped to the reported bound.
+        XCTAssertEqual(try card(item.putting("default_text", "Ada\nLovelace")).prompts[0].defaultText, "")
+        XCTAssertEqual(try card(item.putting("default_text", 7)).prompts[0].defaultText, "")
+        XCTAssertEqual(try card(item.putting("max_length", 2)).prompts[0].defaultText, "Ad")
+        XCTAssertEqual(try card(item.putting("default_text", .string(String(repeating: "é", count: 3000)))).prompts[0].defaultText.utf8.count, 4096)
+    }
+
     func testFormItemLimitsApplyOnlyWhenReported() {
         let base = Prompt(id: "k", text: "Pick", choices: ["a", "b", "c"].map { Choice(id: $0, label: $0.uppercased(), description: "") },
                           multi: true, required: true, other: false, header: "", body: "", otherLabel: "", otherDescription: "")
