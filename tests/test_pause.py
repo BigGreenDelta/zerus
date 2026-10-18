@@ -9,6 +9,7 @@ from pathlib import Path
 import pty
 import re
 import select
+import selectors
 import shutil
 import shlex
 import signal
@@ -27,6 +28,25 @@ STOP_REPORT_SECONDS = 20
 STOP_REPORT_CHARS = 16000
 STOP_REPORT_PANES, STOP_REPORT_PROCESSES, STOP_REPORT_AGENTS = 8, 12, 4
 STOP_REPORT_NATIVE, STOP_REPORT_THREADS = 6, 8
+STOP_REPORT_COMMAND_BYTES, STOP_REPORT_TABLE_BYTES = 256 * 1024, 1024 * 1024
+
+
+def fake_agent_interpreters(bin, path):
+    """The executables a fake agent's `#!/usr/bin/env python3` can run: the
+    first python3 on the agent's PATH, which hgs starts with HOME/.local/bin,
+    /opt/homebrew/bin and /usr/local/bin (prepare_environment), and the app
+    stub that a macOS framework build executes in its place."""
+    for directory in [str(bin), "/opt/homebrew/bin", "/usr/local/bin", *path.split(os.pathsep)]:
+        candidate = os.path.join(directory, "python3")
+        if directory and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            real = os.path.realpath(candidate)
+            found = {real}
+            if "/Python.framework/Versions/" in real and "/bin/" in real:
+                stub = real.rsplit("/bin/", 1)[0] + "/Resources/Python.app/Contents/MacOS/Python"
+                if os.path.isfile(stub):
+                    found.add(os.path.realpath(stub))
+            return found
+    return set()
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "hgs")).resolve()
 # Set only when verifying the archived Bash/Python implementation before migration.
 LEGACY_STATE = os.environ.get("HGS_TEST_LEGACY_STATE")
@@ -239,12 +259,40 @@ class Harness(unittest.TestCase):
         lines = ["", "Stop diagnostics:"]
         state = {"panes": [], "rows": [], "owned": [], "signalled": False}
 
-        def run(argv, limit, **options):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+        def run(argv, limit, maximum=STOP_REPORT_COMMAND_BYTES, **options):
+            # At most `maximum` bytes are read before the command's limit or the
+            # report deadline; then the command is stopped and reaped.
+            ends = min(deadline, time.monotonic() + limit)
+            if ends <= time.monotonic():
                 raise TimeoutError("report deadline reached")
-            return subprocess.run(argv, capture_output=True, text=True, errors="replace",
-                                  timeout=min(limit, remaining), **options)
+            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, **options)
+            captured, ended = bytearray(), False
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    while len(captured) < maximum:
+                        remaining = ends - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(argv, limit)
+                        if selector.select(remaining):
+                            chunk = os.read(process.stdout.fileno(), min(65536, maximum - len(captured)))
+                            if not chunk:
+                                ended = True
+                                break
+                            captured += chunk
+                if ended:
+                    process.wait(timeout=max(0.01, ends - time.monotonic()))
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        lines.append(f"unavailable: cleanup: {argv[0]} {process.pid} did not stop")
+                process.stdout.close()
+            text = captured.decode(errors="replace")
+            return text if ended else text + "\n[output truncated]"
 
         def step(name, action):
             try:
@@ -258,7 +306,7 @@ class Harness(unittest.TestCase):
 
         def panes():
             output = run([str(self.bin / "tmux"), "list-panes", "-a", "-F",
-                          "#{session_name} #{pane_id} #{pane_pid} #{pane_dead}"], 3, env=self.env).stdout
+                          "#{session_name} #{pane_id} #{pane_pid} #{pane_dead}"], 3, env=self.env)
             found = [line.split() for line in output.splitlines() if len(line.split()) == 4]
             state["panes"] = found[:STOP_REPORT_PANES]
             lines.append("panes: " + "; ".join(" ".join(pane) for pane in state["panes"])
@@ -271,8 +319,8 @@ class Harness(unittest.TestCase):
                     "name", "pid", "supervisor", "activity", "pausing", "session_end", "exited_at", "completion_reason")})[:600])
 
         def processes():
-            output = run(["ps", "-axo", "pid=,ppid=,lstart=,stat=,etime=,command="], 5,
-                         env=dict(self.env, LC_ALL="C", TZ="UTC")).stdout
+            output = run(["ps", "-axo", "pid=,ppid=,lstart=,stat=,etime=,command="], 5, STOP_REPORT_TABLE_BYTES,
+                         env=dict(self.env, LC_ALL="C", TZ="UTC"))
             rows = {}
             for line in output.splitlines():
                 fields = line.split(None, 9)
@@ -295,24 +343,48 @@ class Harness(unittest.TestCase):
             if len(listed) > STOP_REPORT_PROCESSES:
                 lines.append(f"process: +{len(listed) - STOP_REPORT_PROCESSES} more not listed")
 
-        def fake_agent(row):
-            interpreter, _, rest = row["command"].partition(" ")
+        def verified(row):
+            """Whether the PID and each ancestor up to its pane still name the
+            snapshot's processes (parent, start, command) and the pane is live."""
+            panes, chain = {pane[2] for pane in state["panes"]}, [row["pid"]]
+            while chain[-1] not in panes:
+                parent = state["rows"].get(chain[-1], {}).get("ppid")
+                if parent not in state["rows"] or len(chain) > 8:
+                    return False
+                chain.append(parent)
+            for pid in chain:
+                current = run(["ps", "-p", pid, "-o", "ppid=,lstart=,command="], 3,
+                              env=dict(self.env, LC_ALL="C", TZ="UTC")).split(None, 6)
+                snapshot = state["rows"][pid]
+                if len(current) != 7 or current[0] != snapshot["ppid"] or " ".join(current[1:6]) != snapshot["start"] \
+                        or current[6].strip() != snapshot["command"]:
+                    return False
+            live = run([str(self.bin / "tmux"), "list-panes", "-a", "-F", "#{pane_pid} #{pane_dead}"], 3, env=self.env)
+            return f"{chain[-1]} 0" in live.splitlines()
+
+        def fake_script(row):
+            _, _, rest = row["command"].partition(" ")
             scripts = [str(self.bin / name) for name in ("claude", "codex", "kimi")]
-            return ("python" in os.path.basename(interpreter).lower()
-                    and any(rest == script or rest.startswith(script + " ") for script in scripts))
+            return any(rest == script or rest.startswith(script + " ") for script in scripts)
+
+        def fixture_interpreter(row):
+            # The executable the process runs, from the system, not its argv.
+            if sys.platform.startswith("linux"):
+                executable = os.path.realpath(f"/proc/{row['pid']}/exe")
+            else:
+                executable = os.path.realpath(run(["ps", "-p", row["pid"], "-o", "comm="], 3).strip())
+            return executable in fake_agent_interpreters(self.bin, self.env.get("PATH", ""))
 
         def signal_agents():
-            agents = [row for row in state["owned"] if row["pid"] in state.get("descendants", ()) and fake_agent(row)]
+            agents = [row for row in state["owned"] if row["pid"] in state.get("descendants", ()) and fake_script(row)]
             for row in agents[:STOP_REPORT_AGENTS]:
-                # The PID must still name the same process: same parent, start and command.
-                current = run(["ps", "-p", row["pid"], "-o", "ppid=,lstart=,command="], 3,
-                              env=dict(self.env, LC_ALL="C", TZ="UTC")).stdout.split(None, 6)
-                if len(current) != 7 or current[0] != row["ppid"] or " ".join(current[1:6]) != row["start"] \
-                        or current[6].strip() != row["command"]:
-                    lines.append(f"python {row['pid']}: not signalled, its process identity changed")
-                    continue
-                os.kill(int(row["pid"]), signal.SIGUSR1)
-                state["signalled"] = True
+                if not verified(row):
+                    lines.append(f"python {row['pid']}: not signalled, its process identity or pane changed")
+                elif not fixture_interpreter(row):
+                    lines.append(f"python {row['pid']}: not signalled, it does not run the fixture's Python")
+                else:
+                    os.kill(int(row["pid"]), signal.SIGUSR1)
+                    state["signalled"] = True
 
         def python_stacks():
             if not state["signalled"]:
@@ -320,7 +392,7 @@ class Harness(unittest.TestCase):
             time.sleep(max(0, min(0.3, deadline - time.monotonic())))
             for pane in state["panes"]:
                 screen = run([str(self.bin / "tmux"), "capture-pane", "-p", "-J", "-S", "-200", "-t", pane[1]], 3,
-                             env=self.env).stdout[-65536:].splitlines()
+                             65536, env=self.env).splitlines()
                 starts = [i for i, text in enumerate(screen) if re.match(r"(Current thread|Thread) 0x", text)]
                 if starts:
                     lines.append(f"python in {pane[1]}: " + " | ".join(text.strip() for text in screen[starts[0]:] if text.strip())[:1500])
@@ -328,12 +400,14 @@ class Harness(unittest.TestCase):
                     lines.append(f"python in {pane[1]}: no stack on its terminal")
 
         def native(row):
+            if not verified(row):
+                lines.append(f"native {row['pid']}: omitted, its process identity or pane changed")
+                return
             if sys.platform != "darwin":
                 lines.append(f"wchan {row['pid']}: " + bounded(f"/proc/{row['pid']}/wchan", 256).strip())
                 return
-            output = self.root / f"stop-sample-{row['pid']}.txt"
-            run(["sample", row["pid"], "1", "-mayDie", "-file", str(output)], 5)
-            graph = bounded(output, 256 * 1024).split("Call graph:", 1)[-1].split("Total number in stack", 1)[0].splitlines()
+            sampled = run(["sample", row["pid"], "1", "-mayDie", "-file", "/dev/stdout"], 5)
+            graph = sampled.split("Call graph:", 1)[-1].split("Total number in stack", 1)[0].splitlines()
             threads = [i for i, text in enumerate(graph) if text.startswith("    ") and text[4:5] != " " and "Thread_" in text]
             for start, end in list(zip(threads, threads[1:] + [len(graph)]))[:STOP_REPORT_THREADS]:
                 frames = [text.strip() for text in graph[start + 1:end] if text.strip()]
@@ -347,7 +421,8 @@ class Harness(unittest.TestCase):
             step("processes", processes)
             step("signals", signal_agents)
             step("python stacks", python_stacks)
-            for row in state["owned"][:STOP_REPORT_NATIVE]:
+            # Only the private panes' own processes: a listed path match is never sampled.
+            for row in [row for row in state["owned"] if row["pid"] in state.get("descendants", ())][:STOP_REPORT_NATIVE]:
                 step(f"native stack {row['pid']}", lambda row=row: native(row))
         except Exception as error:  # Even a broken report keeps the original failure.
             lines.append(f"unavailable: report: {type(error).__name__}")
@@ -3237,12 +3312,15 @@ class Migration(Harness):
 
 
 
+
 class StopReportControls(unittest.TestCase):
-    """The stop report with mocked commands and signals: it stays within its
-    deadline and size, signals only exact fake agents of its own panes whose
-    identity still matches, and never replaces the failure it explains."""
+    """The stop report against mocked commands, each a small real child that
+    prints what the command would: the report stays within its deadline and
+    sizes, signals only exact fake agents of its own panes, stacks only their
+    verified processes, reaps every command and never replaces the failure."""
     hgs = Harness.hgs
     stop_report = Harness.stop_report
+    real_popen = subprocess.Popen
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="hgs-stop-report-")
@@ -3251,57 +3329,103 @@ class StopReportControls(unittest.TestCase):
         self.bin = self.root / ".local/bin"
         self.bin.mkdir(parents=True)
         (self.root / "state").mkdir()
-        self.env = {}
+        self.env = {"PATH": os.environ.get("PATH", "")}
+        self.interpreters = fake_agent_interpreters(self.bin, self.env["PATH"])
+        if not self.interpreters:
+            self.skipTest("no python3 on PATH")
         self.started = "Sun Oct 18 00:00:00 2026"
         python = "/usr/bin/python3"
         # pid: (ppid, command). 999 has a fake agent's exact command line but
-        # belongs to no private pane; 502 and 503 merely mention the root or
-        # run Python inside the pane.
+        # no private pane; 502 and 503 only mention the bin or run Python;
+        # 504 names a fake script but runs another program.
         self.table = {"500": ("1", "/fixture/hgs --run 0 claude"),
                       "501": ("500", f"{python} {self.bin / 'claude'} --settings {{}}"),
                       "502": ("500", f"/bin/sh -c {self.bin / 'claude'}-helper"),
                       "503": ("500", f"{python} -c pass"),
+                      "504": ("500", f"/synthetic/notpython {self.bin / 'claude'}"),
                       "999": ("1", f"{python} {self.bin / 'claude'}")}
-        self.identity, self.threads, self.kills = {}, 2, []
-        kill = mock.patch.object(os, "kill", side_effect=lambda pid, number: self.kills.append((pid, number)))
+        self.executables = {"501": sorted(self.interpreters)[0], "504": "/synthetic/notpython"}
+        self.identity, self.flood, self.pane_gone, self.kills, self.commands, self.children = {}, False, False, [], [], []
+        real_kill = os.kill
+        # Signals reach only the report's own command children; any other is recorded, not sent.
+        def kill_child_or_record(pid, number):
+            if any(child.pid == pid for child in self.children):
+                real_kill(pid, number)
+            else:
+                self.kills.append((pid, number))
+        kill = mock.patch.object(os, "kill", side_effect=kill_child_or_record)
         kill.start()
         self.addCleanup(kill.stop)
 
-    def commands(self, argv, **options):
-        argv = [str(part) for part in argv]
-        output = ""
+    def output(self, argv):
         if argv[0] == str(self.bin / "tmux") and argv[1] == "list-panes":
-            output = "claude/p/one %0 500 0\n"
-        elif argv[:2] == ["ps", "-axo"]:
-            output = "".join(f"{pid:>6} {ppid:>6} {self.started} S 00:10 {command}\n" for pid, (ppid, command) in self.table.items())
-        elif argv[:2] == ["ps", "-p"]:
+            if argv[4] == "#{pane_pid} #{pane_dead}":
+                return "" if self.pane_gone else "500 0\n"
+            return "claude/p/one %0 500 0\n"
+        if argv[:2] == ["ps", "-axo"]:
+            return "".join(f"{pid:>6} {ppid:>6} {self.started} S 00:10 {command}\n" for pid, (ppid, command) in self.table.items())
+        if argv[:2] == ["ps", "-p"] and argv[4] == "comm=":
+            return self.executables.get(argv[2], "/fixture/other") + "\n"
+        if argv[:2] == ["ps", "-p"]:
             ppid, command = self.table[argv[2]]
-            output = f"{ppid} {self.identity.get(argv[2], self.started)} {command}\n"
-        elif argv[0] == str(self.bin / "tmux") and argv[1] == "capture-pane":
-            output = 'Current thread 0x1 (most recent call first):\n  File "claude", line 73 in <module>\n'
-        elif argv[0] == "sample":
-            threads = "".join(f"    9 Thread_{index}   DispatchQueue_1: fixture\n"
-                              + "".join(f"      9 frame_{frame}  (in fixture) + 8\n" for frame in range(40))
-                              for index in range(self.threads))
-            Path(argv[argv.index("-file") + 1]).write_text("Call graph:\n" + threads + "Total number in stack\n")
-        return subprocess.CompletedProcess(argv, 0, output, "")
+            return f"{ppid} {self.identity.get(argv[2], self.started)} {command}\n"
+        if argv[0] == str(self.bin / "tmux") and argv[1] == "capture-pane":
+            return 'Current thread 0x1 (most recent call first):\n  File "claude", line 73 in <module>\n'
+        if argv[0] == "sample":
+            return "Call graph:\n    9 Thread_1   DispatchQueue_1: fixture\n      9 frame  (in fixture) + 8\nTotal number in stack\n"
+        return ""
 
-    def report(self):
-        with mock.patch.object(subprocess, "run", side_effect=self.commands), \
-                mock.patch.object(sys, "platform", "darwin"), mock.patch.object(time, "sleep"):
+    def spawn(self, argv, **options):
+        argv = [str(part) for part in argv]
+        self.commands.append(argv)
+        if argv[0] == str(HGS):
+            code = ["import sys; sys.stderr.write(sys.argv[1]); sys.exit(1)",
+                    "hgs: claude/p/one: agent did not exit after SIGTERM (no forced kill was sent)\n"]
+        elif self.hang:
+            code = ["import time; time.sleep(60)"]
+        elif argv[0] == "sample" and self.flood:
+            block = "".join(f"    9 Thread_{index}   DispatchQueue_1: fixture\n" + "      9 frame  (in fixture) + 8\n" * 40
+                            for index in range(50))
+            code = ["import sys\nwhile True: sys.stdout.write(sys.argv[1])", "Call graph:\n" + block]
+        else:
+            code = ["import sys; sys.stdout.write(sys.argv[1])", self.output(argv)]
+        child = self.real_popen([sys.executable, "-c", *code], **options)
+        self.children.append(child)
+        return child
+
+    def report(self, hang=False, platform="darwin"):
+        self.hang, self.proc = hang, []
+        real_open, real_realpath = open, os.path.realpath
+        # /proc is recorded, never read: the mocked PIDs belong to no real pane.
+        def proc_open(path, *args, **options):
+            if str(path).startswith("/proc/"):
+                self.proc.append(str(path))
+                raise FileNotFoundError(path)
+            return real_open(path, *args, **options)
+        def proc_realpath(path, *args, **options):
+            if str(path).startswith("/proc/"):
+                self.proc.append(str(path))
+                return str(path)
+            return real_realpath(path, *args, **options)
+        with mock.patch.object(subprocess, "Popen", side_effect=self.spawn), mock.patch.object(sys, "platform", platform), \
+                mock.patch("builtins.open", side_effect=proc_open), mock.patch.object(os.path, "realpath", side_effect=proc_realpath), \
+                mock.patch.object(time, "sleep"):
             return self.stop_report()
 
+    def sampled(self):
+        return {argv[1] for argv in self.commands if argv[0] == "sample"}
+
+    def tearDown(self):
+        # Every command the report started was stopped and reaped.
+        self.assertEqual([child.pid for child in self.children if child.poll() is None], [])
+
     def test_hung_commands_keep_the_original_failure_within_the_deadline(self):
-        def hung(argv, timeout=None, **options):
-            if argv[0] == str(HGS):
-                return subprocess.CompletedProcess(argv, 1, "", "hgs: claude/p/one: agent did not exit after SIGTERM (no forced kill was sent)\n")
-            time.sleep(timeout)
-            raise subprocess.TimeoutExpired(argv, timeout)
+        self.hang = True
         started = time.monotonic()
-        with mock.patch.dict(globals(), STOP_REPORT_SECONDS=1.0), mock.patch.object(subprocess, "run", side_effect=hung), \
+        with mock.patch.dict(globals(), STOP_REPORT_SECONDS=1.0), mock.patch.object(subprocess, "Popen", side_effect=self.spawn), \
                 self.assertRaises(AssertionError) as caught:
             self.hgs("pause", "claude/p/one")
-        self.assertLess(time.monotonic() - started, 3)
+        self.assertLess(time.monotonic() - started, 4)
         message = str(caught.exception)
         self.assertIn("agent did not exit after SIGTERM", message)
         self.assertIn("unavailable: panes: TimeoutExpired", message)
@@ -3311,24 +3435,48 @@ class StopReportControls(unittest.TestCase):
     def test_only_exact_fake_agents_of_the_private_panes_are_signalled(self):
         report = self.report()
         self.assertEqual(self.kills, [(501, signal.SIGUSR1)])
+        self.assertIn("python 504: not signalled, it does not run the fixture's Python", report)
         self.assertIn('python in %0: Current thread 0x1 (most recent call first): | File "claude", line 73 in <module>', report)
         for pid in self.table:
             self.assertRegex(report, rf"(?m)^process: {pid} ")
+        # A listed path match is informational only: it is never sampled.
+        self.assertEqual(self.sampled(), {"500", "501", "502", "503", "504"})
 
-    def test_a_reused_pid_is_not_signalled(self):
+    def test_a_reused_pid_is_neither_signalled_nor_sampled(self):
         self.identity["501"] = "Sun Oct 18 00:00:09 2026"
         report = self.report()
         self.assertEqual(self.kills, [])
-        self.assertIn("python 501: not signalled, its process identity changed", report)
+        self.assertIn("python 501: not signalled, its process identity or pane changed", report)
+        self.assertIn("native 501: omitted, its process identity or pane changed", report)
+        self.assertTrue({"501", "999"}.isdisjoint(self.sampled()))
 
-    def test_flooded_native_output_and_many_processes_stay_bounded(self):
-        self.threads = 2000
+    def test_proc_is_read_only_for_verified_pane_processes(self):
+        self.identity["501"] = "Sun Oct 18 00:00:09 2026"
+        report = self.report(platform="linux")
+        self.assertTrue({path.split("/")[2] for path in self.proc}.isdisjoint({"501", "999"}))
+        self.assertIn("/proc/500/wchan", self.proc)
+        self.assertIn("python 504: not signalled, it does not run the fixture's Python", report)
+        self.assertEqual(self.kills, [])
+
+    def test_a_closed_pane_stops_signals_and_stacks(self):
+        self.pane_gone = True
+        report = self.report()
+        self.assertEqual(self.kills, [])
+        self.assertEqual(self.sampled(), set())
+        self.assertIn("native 500: omitted, its process identity or pane changed", report)
+
+    def test_flooded_output_is_bounded_where_it_is_captured(self):
+        self.flood = True
         self.table.update({str(pid): ("500", f"/fixture/child {pid}") for pid in range(600, 650)})
         report = self.report()
         self.assertLessEqual(len(report), STOP_REPORT_CHARS + 60)
-        self.assertIn("process: +43 more not listed", report)
+        self.assertIn("process: +44 more not listed", report)
         self.assertIn("threads omitted", report)
         self.assertIn("python in %0: Current thread 0x1", report)
+        floods = [child for argv, child in zip(self.commands, self.children) if argv[0] == "sample"]
+        self.assertTrue(floods)
+        # Each endless writer was stopped at the byte ceiling, not drained.
+        self.assertTrue(all(child.wait(timeout=5) == -signal.SIGKILL for child in floods))
         self.assertEqual(self.kills, [(501, signal.SIGUSR1)])
 
 
