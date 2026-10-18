@@ -49,7 +49,7 @@ object RollingConversationHistory {
         }
         val replaced = mutableSetOf<String>()
         reconciled.filter { it.source == "hgs_delivery" && it.role == "You" && it.requestId.isNotBlank() && it.submittedText.isNotBlank() }.forEach { receipt ->
-            val candidates = reconciled.filter { it.id !in replaced && it.role == "You" && it.requestId.isBlank() &&
+            val candidates = reconciled.filter { it.id !in replaced && it.role == "You" && AttachmentReceiptMatch.replaceable(receipt, it) &&
                 it.nativeType in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted") &&
                 AttachmentReceiptMatch.matches(receipt, it) }
             val candidate = candidates.singleOrNull()
@@ -84,6 +84,10 @@ object RollingConversationHistory {
 /** Match the exact transport expansion, never strip attachment-looking user text. */
 internal object AttachmentReceiptMatch {
     private val instruction = Regex("""(?:Inspect the attached image at|Read the attached file at) ("(?:[^"\\]|\\.)+")""")
+    /** A receipt stands only for a row that is no receipt itself; an OpenCode prompt that
+     * names its sending request must name the receipt's. */
+    fun replaceable(receipt: Event, native: Event) = native.receiptRequestId.isBlank() &&
+        (native.requestId.isBlank() || native.requestId == receipt.requestId)
     fun matches(receipt: Event, native: Event): Boolean {
         val submitted = receipt.submittedText.trim()
         if (submitted.isBlank() || native.text.trim() != submitted) return false
