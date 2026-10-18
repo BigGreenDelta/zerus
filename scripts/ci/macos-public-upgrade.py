@@ -126,8 +126,14 @@ def safe_archive(path):
     seen, links, total = set(), {}, 0
     with zipfile.ZipFile(path) as archive:
         for member in archive.infolist():
-            name = member.filename.rstrip("/")
-            require(name not in seen and (name == "Zerus.app" or name.startswith("Zerus.app/"))
+            original = member.filename.rstrip("/")
+            # Qualification bundles use ASCII paths. Refuse Unicode rather than
+            # assume Python folding exactly models every APFS/HFS+ normalization
+            # rule; canonical ASCII keys account for normal case-insensitive Macs.
+            require(original.isascii() and member.orig_filename == member.filename and "\0" not in original,
+                    "Non-ASCII or truncated ZIP member path requires separate review.")
+            name = original.casefold()
+            require(name not in seen and (original == "Zerus.app" or original.startswith("Zerus.app/"))
                     and not any(part in ("", ".", "..") for part in name.split("/")) and "\\" not in name,
                     "Unexpected ZIP member path.")
             seen.add(name)
@@ -138,12 +144,12 @@ def safe_archive(path):
             if stat.S_ISLNK(mode):
                 require(member.file_size <= 4096, "Oversized ZIP symlink.")
                 target = archive.read(member).decode("utf-8")
-                require(target and not target.startswith("/") and "\\" not in target and "\0" not in target,
+                require(target and target.isascii() and not target.startswith("/") and "\\" not in target and "\0" not in target,
                         "Escaping ZIP symlink.")
-                links[name] = target
+                links[name] = target.casefold()
     # ditto must never write a member through an earlier (or later) stored
     # symlink. Qt frameworks store their real Versions/A tree separately.
-    require("Zerus.app" not in links, "Bundle root cannot be a symlink.")
+    require("zerus.app" not in links, "Bundle root cannot be a symlink.")
     for name in seen:
         parent = posixpath.dirname(name)
         while parent:
@@ -164,14 +170,14 @@ def safe_archive(path):
                 resolved.pop()
                 continue
             resolved.append(component)
-            require(resolved[0] == "Zerus.app", "ZIP link escapes the bundle root.")
+            require(resolved[0] == "zerus.app", "ZIP link escapes the bundle root.")
             prefix = "/".join(resolved)
             if prefix in links:
                 require(prefix not in followed, "Cyclic ZIP symlink graph.")
                 followed.add(prefix)
                 resolved.pop()
                 pending = links[prefix].split("/") + pending
-        require(resolved and resolved[0] == "Zerus.app", "ZIP link escapes the bundle root.")
+        require(resolved and resolved[0] == "zerus.app", "ZIP link escapes the bundle root.")
 
 
 def account_identity():

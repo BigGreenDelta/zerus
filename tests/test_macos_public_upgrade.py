@@ -148,6 +148,26 @@ class PublicCaskBoundaries(unittest.TestCase):
                 else:
                     upgrade.safe_archive(path)
 
+    def test_archive_rejects_case_and_normalization_alias_pivots(self):
+        cases = [
+            [("Zerus.app/A", "."), ("Zerus.app/B", "a/.."),
+             ("Zerus.app/C", "b/.."), ("Zerus.app/c/probe", None)],
+            [("Zerus.app/\u00c5", "."), ("Zerus.app/A\u030a/probe", None)],
+            [("Zerus.app/Case", None), ("Zerus.app/case", None)],
+            [("Zerus.app/UnicodeTarget", "\u00c5")],
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "aliases.zip"
+            for entries in cases:
+                with zipfile.ZipFile(path, "w") as archive:
+                    for name, target in entries:
+                        member = zipfile.ZipInfo(name)
+                        if target is not None:
+                            member.external_attr = (stat.S_IFLNK | 0o777) << 16
+                        archive.writestr(member, "Never extract this fixture." if target is None else target)
+                with self.subTest(paths=[name for name, _ in entries]), self.assertRaises(ValueError):
+                    upgrade.safe_archive(path)
+
     def test_owner_accounts_and_nonhosted_macs_are_refused(self):
         env = dict(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="macOS", RUNNER_TEMP="/tmp/fixture")
         with patch.object(upgrade.platform, "system", return_value="Darwin"), \
