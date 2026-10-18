@@ -74,8 +74,9 @@ final class SessionCardsTests: XCTestCase {
         XCTAssertEqual(SessionCardPresentation.childStatus(object(#"{"state":"working","display_state":null}"#)), "Working")
         XCTAssertTrue(SessionCardPresentation.childAction(object(#"{"state":"working","display_state":"approval"}"#)))
         XCTAssertFalse(SessionCardPresentation.childAction(object(#"{"state":"error"}"#)))
-        for state in ["finished", "idle", "ready"] { XCTAssertTrue(SessionCardPresentation.inactiveChild(["state": .string(state)])) }
-        for state in ["working", "error", "paused", "input", "unknown", ""] { XCTAssertFalse(SessionCardPresentation.inactiveChild(["state": .string(state)]), state) }
+        for state in ["finished", "idle", "ready", "error"] { XCTAssertTrue(SessionCardPresentation.inactiveChild(["state": .string(state)])) }
+        XCTAssertTrue(SessionCardPresentation.inactiveChild(object(#"{"state":"finished","display_state":"error"}"#)))
+        for state in ["working", "paused", "input", "unknown", ""] { XCTAssertFalse(SessionCardPresentation.inactiveChild(["state": .string(state)]), state) }
         XCTAssertFalse(SessionCardPresentation.inactiveChild(object(#"{"state":"finished","display_state":"unknown"}"#)))
         let group = object(#"{"group":true,"active_count":0}"#)
         XCTAssertTrue(SessionCardPresentation.inactiveChild(group, countsComplete: true))
@@ -86,15 +87,19 @@ final class SessionCardsTests: XCTestCase {
 
     func testRowsHideCompletedTurnsKeepDraftsAndUseStableIdOrder() {
         let item = live(#""subagent_source":"hooks","subagent_counts_complete":true,"subagent_active_count":2,"subagent_total_count":5,"subagents":{"c-ready":{"name":"Ready child","state":"finished","detail":"Done"},"a-input":{"name":"Reviewer","state":"working","display_state":"input","detail":"  Approve\n the   plan  ","provider":"codex"},"b-working":{"label":"Explorer","name":"ignored","state":"working","task":"Search the code"},"d-paused":{"state":"paused","detail":null,"task":"Resume later"},"e-error":{"name":"Builder","state":"error"}}"#)
+        // Finished and failed turns are both complete.
         let rows = SessionCardPresentation.children(item, true)
-        XCTAssertEqual(rows.map(\.id), ["a-input", "b-working", "d-paused", "e-error"])
+        XCTAssertEqual(rows.map(\.id), ["a-input", "b-working", "d-paused"])
         XCTAssertEqual(rows[0], SessionCardChild(id: "a-input", name: "Reviewer", status: "Needs input", detail: "Approve the plan", provider: "codex", kind: .attention, group: false))
         XCTAssertEqual(rows[1], SessionCardChild(id: "b-working", name: "Explorer", status: "Working", detail: "Search the code", provider: "claude", kind: .working, group: false))
         XCTAssertEqual(rows[2], SessionCardChild(id: "d-paused", name: "d-paused", status: "Paused", detail: "Resume later", provider: "claude", kind: .paused, group: false))
-        XCTAssertEqual(rows[3].kind, .neutral)
         XCTAssertEqual(rows[0].description, "Subagent Reviewer, Needs input")
-        XCTAssertEqual(SessionCardPresentation.children(item, true, includeCompleted: true).map(\.id), ["a-input", "b-working", "c-ready", "d-paused", "e-error"])
-        XCTAssertEqual(SessionCardPresentation.children(item, true, drafted: ["c-ready"]).map(\.id), ["a-input", "b-working", "c-ready", "d-paused", "e-error"])
+        let all = SessionCardPresentation.children(item, true, includeCompleted: true)
+        XCTAssertEqual(all.map(\.id), ["a-input", "b-working", "c-ready", "d-paused", "e-error"])
+        XCTAssertEqual(all[4].kind, .neutral)
+        XCTAssertEqual(all[4].status, "Error")
+        XCTAssertEqual(SessionCardPresentation.children(item, true, drafted: ["c-ready"]).map(\.id), ["a-input", "b-working", "c-ready", "d-paused"])
+        XCTAssertEqual(SessionCardPresentation.children(item, true, drafted: ["e-error"]).map(\.id), ["a-input", "b-working", "d-paused", "e-error"])
     }
 
     func testRowsOfUnavailableOrArchivedParentAreRecorded() {

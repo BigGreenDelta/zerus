@@ -36,6 +36,35 @@ final class VoiceMessagesTests: XCTestCase {
         XCTAssertTrue(restored.videoMode)
     }
 
+    func testSentAudioAndVideoStayInHistoryButNeverReappearAsDraftsAfterReload() throws {
+        let video = VideoDraft(file: Attachment(id: UUID().uuidString.lowercased(), name: "video.mp4", mime: "video/mp4", bytes: 200,
+                                                sha256: String(repeating: "b", count: 64)), durationMs: 200, width: 480, height: 480)
+        for movie in [nil, video] {
+            var sent = entry(message("submitted", revision: 5))
+            sent.video = movie
+            let before = VoiceState(outgoing: [sent])
+            let restored = try roundTrip(before)
+            XCTAssertEqual(before, restored)
+            XCTAssertFalse(restored.outgoing[0].needsDraftReview)
+            let history = try XCTUnwrap(VoiceHistory.merge(target, native: [], outgoing: restored.outgoing).first?.voice)
+            XCTAssertEqual("submitted", history.state)
+            XCTAssertEqual("Привет.", history.transcript)
+            XCTAssertFalse(restored.outgoing[0].needsStatus)
+        }
+    }
+
+    func testDraftProjectionPreservesUnsentUncertainCancelledFailedAndUnknownMedia() throws {
+        for state in VoiceProtocol.states.subtracting(["submitted"]) {
+            XCTAssertTrue(try roundTrip(VoiceState(outgoing: [entry(message(state))])).outgoing[0].needsDraftReview, "Must keep \(state)")
+        }
+        for state in ["uploading", "uncertain", "failed", "read", "finished", "submitted", ""] {
+            // Upload state alone is never an authoritative submission receipt.
+            var pending = entry()
+            pending.uploadState = state
+            XCTAssertTrue(pending.needsDraftReview, state)
+        }
+    }
+
     func testOnlyNativeSubmissionGetsASentIconAndUnknownStatesStayUnconfirmed() {
         XCTAssertEqual(.sent, RecordingDelivery.of("submitted"))
         for state in ["uploading", "queued", "transcribing", "ready", "waiting_agent", "delivering", "failed", "cancelled", "uncertain", "read", "finished", ""] {

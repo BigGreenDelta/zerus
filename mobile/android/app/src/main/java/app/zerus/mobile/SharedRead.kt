@@ -43,6 +43,18 @@ object SharedReadPolicies {
             .put("reply_id",reply ?: JSONObject.NULL).put("attention_signature",attention ?: JSONObject.NULL)
     }
     /**
+     * Whether a `mark_read` receipt shows the computer applied every field this phone sent. A
+     * completed request can apply nothing: the value is no longer current, or the computer's
+     * question index is not ready. That needs a newer snapshot, so the same mark waits.
+     */
+    fun applied(receipt:JSONObject,payload:JSONObject):Boolean {
+        val result=receipt.optJSONObject("result")?.takeIf { receipt.string("state")=="completed" && it.opt("ok")==true } ?: return false
+        val applied=result.optJSONObject("applied") ?: return false
+        return listOf("reply_id","attention_signature").all { payload.isNull(it) || applied.opt(it)==true }
+    }
+    /** Delay before the same unapplied mark may be sent again: two minutes, doubling up to 16. */
+    fun retryDelayMs(unapplied:Int):Long=120_000L shl unapplied.coerceIn(0,3)
+    /**
      * Read all shares its marks one request at a time. Each request is prepared only when its turn
      * comes, so a target that no longer qualifies (or was shared meanwhile) is skipped.
      */

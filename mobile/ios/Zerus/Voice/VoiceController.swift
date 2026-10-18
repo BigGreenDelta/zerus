@@ -78,6 +78,15 @@ final class VoiceController {
     @ObservationIgnored private var profileGeneration = 0
     @ObservationIgnored private var requestedProfileTarget: Target?
     @ObservationIgnored private var statsTask: Task<Void, Never>?
+
+    // Global defaults read the chosen computer's profiles directly, without a conversation.
+    private(set) var defaultLoading = false
+    private(set) var defaultNotice = ""
+    private var defaultReceived: [SpeechProfile] = []
+    private var defaultConfirmed: (host: SpeechConfigHost, connection: Connection)?
+    @ObservationIgnored private var defaultRequested: (host: SpeechConfigHost?, connection: Connection?)?
+    @ObservationIgnored private var defaultGeneration = 0
+    @ObservationIgnored private var defaultTask: Task<Void, Never>?
     @ObservationIgnored private var statusTasks: [String: Task<Void, Never>] = [:]
 
     init(app: AppModel) { self.app = app }
@@ -124,7 +133,8 @@ final class VoiceController {
     private func choose(_ next: SpeechSelection, _ target: Target, previewId: String?) -> Bool {
         guard ready, !recording, !savingRecording, !loading, profileTarget == target else { return false }
         if let previewId {
-            guard var captured = draft, captured.audio.id == previewId, captured.target == target else { return false }
+            // A refused recording resubmits to its pinned provider only.
+            guard var captured = draft, captured.audio.id == previewId, captured.target == target, captured.rejection == nil else { return false }
             captured.machineId = next.host?.computerId ?? ""
             captured.profileId = next.profileId
             captured.profileRevision = next.profileRevision
@@ -175,6 +185,100 @@ final class VoiceController {
             } catch { notice = "Could not save the default voice provider." }
         }
         return true
+    }
+
+    // MARK: Global defaults
+
+    var defaultHost: SpeechConfigHost? { DefaultVoiceRoutes.resolve(selection.host, machines: app.machines, connections: app.connections) }
+
+    func defaultHosts(_ query: String = "") -> [SpeechConfigHost] { DefaultVoiceRoutes.hosts(app.machines, connections: app.connections, query: query) }
+
+    /// Profiles confirmed for the current default computer through its current workspace; anything else shows none.
+    var defaultProfiles: [SpeechProfile] {
+        guard let host = defaultHost, let confirmed = defaultConfirmed, confirmed.host == host, defaultReason(host).isEmpty,
+              defaultConnection(host) == confirmed.connection else { return [] }
+        return defaultReceived
+    }
+
+    func defaultReason(_ host: SpeechConfigHost) -> String {
+        if app.demo || !app.storageReady { return "Connect a computer to load its voice profiles." }
+        if !app.connections.contains(where: { $0.id == host.key.connectionId }) { return "The voice workspace is disconnected." }
+        if DefaultVoiceRoutes.resolve(MachineKey(connectionId: host.key.connectionId, computerId: host.machineId), machines: app.machines,
+                                      connections: app.connections) != host {
+            return "The voice computer is unavailable or its identity changed. Refresh Machines and try again."
+        }
+        if !(app.relayOperations[host.key.connectionId] ?? []).contains("speech_profiles") { return "Update this gateway to load voice profiles." }
+        if !(app.machineOperations[host.key] ?? []).contains("speech_profiles") { return "Update Zerus on this computer to load voice profiles." }
+        return ""
+    }
+
+    private func defaultConnection(_ host: SpeechConfigHost) -> Connection? {
+        let matches = app.connections.filter { $0.id == host.key.connectionId }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    func refreshDefaultProfiles() {
+        guard ready else { return }
+        let captured = defaultHost
+        let route = captured.flatMap(defaultConnection)
+        if defaultLoading, let requested = defaultRequested, requested.host == captured, requested.connection == route, let captured, defaultReason(captured).isEmpty {
+            return
+        }
+        defaultGeneration += 1
+        let version = defaultGeneration
+        defaultTask?.cancel()
+        defaultRequested = (captured, route)
+        defaultConfirmed = nil
+        defaultLoading = false
+        defaultReceived = []
+        guard let captured else {
+            defaultNotice = selection.host != nil ? "The saved voice computer is unavailable. Choose an online computer."
+                : defaultHosts().isEmpty ? "No verified online voice computers are available. Refresh Machines and try again."
+                : "Choose a voice computer to load its profiles."
+            return
+        }
+        defaultNotice = defaultReason(captured)
+        guard defaultNotice.isEmpty, let connection = route else { return }
+        defaultLoading = true
+        let client = app.client
+        defaultTask = Task { [weak self] in
+            do {
+                let result = try await client.speech(connection, host: captured.key, operation: "speech_profiles", payload: [:],
+                                                     fallback: "Could not load voice profiles. Refresh to try again.")
+                let received = try SpeechProtocol.profiles(result)
+                guard let self, version == defaultGeneration else { return }
+                defaultLoading = false
+                guard defaultHost == captured, defaultConnection(captured) == connection, defaultReason(captured).isEmpty else { return }
+                defaultReceived = received
+                defaultConfirmed = (captured, connection)
+                defaultNotice = !result.bool("available", default: true) ? (result.string("reason").nonEmpty ?? "The speech service is unavailable on this computer.")
+                    : received.isEmpty ? "No voice profiles are configured on this computer. Manage speech providers to add one." : ""
+            } catch {
+                guard let self, version == defaultGeneration else { return }
+                defaultLoading = false
+                if error is CancellationError || defaultHost != captured { return }
+                defaultNotice = error is URLError ? "Could not connect to this computer. Refresh voice profiles to try again."
+                    : AppModel.message(error, fallback: "Could not load voice profiles. Refresh to try again.")
+            }
+        }
+    }
+
+    @discardableResult
+    func chooseDefaultHost(_ captured: SpeechConfigHost) -> Bool {
+        guard defaultReason(captured).isEmpty else { return false }
+        let same = defaultHost == captured
+        guard chooseDefault(SpeechSelection(host: MachineKey(connectionId: captured.key.connectionId, computerId: captured.machineId),
+                                            profileId: same ? selection.profileId : "", profileRevision: same ? selection.profileRevision : nil)) else { return false }
+        refreshDefaultProfiles()
+        return true
+    }
+
+    @discardableResult
+    func chooseDefaultProfile(_ profile: SpeechProfile) -> Bool {
+        guard let captured = defaultHost, !defaultLoading, defaultConfirmed?.host == captured, defaultReason(captured).isEmpty,
+              defaultProfiles.contains(profile) else { return false }
+        return chooseDefault(SpeechSelection(host: MachineKey(connectionId: captured.key.connectionId, computerId: captured.machineId),
+                                             profileId: profile.id, profileRevision: profile.profileRevision))
     }
 
     func refreshProfiles(_ target: Target?) {
@@ -506,9 +610,13 @@ final class VoiceController {
             return
         }
         guard let connection = app.connections.first(where: { $0.id == captured.target.connectionId }), let attachments = app.attachmentStore else { return }
-        let id = UUID().uuidString.lowercased()
+        // An explicit resubmission of a refused recording keeps its native message UUID under a fresh operation ID.
+        let id = captured.resubmissionId ?? UUID().uuidString.lowercased()
+        let operationId = captured.rejection == nil ? id : UUID().uuidString.lowercased()
         let pending = VoiceOutgoing(id: id, target: captured.target, machineId: captured.machineId, profileId: captured.profileId, audio: captured.audio,
-                                    durationMs: captured.durationMs, createdAt: captured.createdAt, profileRevision: captured.profileRevision, video: captured.video)
+                                    durationMs: captured.durationMs, createdAt: captured.createdAt, profileRevision: captured.profileRevision, video: captured.video,
+                                    rejection: captured.rejection, attemptedRejectionGeneration: VoiceRejection.generation(captured.rejection),
+                                    operationId: operationId)
         savingRecording = true
         activeRequests.insert(id)
         let client = app.client
@@ -522,8 +630,13 @@ final class VoiceController {
                 app.conversation.voiceSent(captured.target, id)
                 try validateSend(captured, allowColdCache: allowColdCache)
                 let payload = try await Task.detached(priority: .userInitiated) { () throws -> JSONObject in
-                    var payload = VoiceProtocol.payload(captured.target, requestId: id)
+                    var payload = VoiceProtocol.payload(captured.target, requestId: operationId)
                     payload["speech"] = .object(VoiceProtocol.provider(captured))
+                    if let proof = captured.rejection {
+                        guard let rejection = try JSON.parse(Data(proof.utf8)).object else { throw ZerusError.invalid("The saved refusal is invalid.") }
+                        payload["message_id"] = .string(id)
+                        payload["rejection"] = .object(rejection)
+                    }
                     let pcm = try VoiceProtocol.pcm(attachments.decrypt(captured.audio))
                     payload["audio"] = ["format": "pcm_s16le", "sample_rate": 16_000, "channels": 1, "data_base64": .string(pcm.base64EncodedString())]
                     if let video = captured.video { payload["video"] = .object(try VideoProtocol.wire(video, attachments.decrypt(video.file))) }
@@ -531,9 +644,12 @@ final class VoiceController {
                 }.value
                 try validateSend(captured, allowColdCache: allowColdCache)
                 attempted = true
-                try await accept(pending, client.voice(connection, target: captured.target, operation: "voice_submit", payload: payload, id: id))
+                try await accept(pending, client.voice(connection, target: captured.target, operation: "voice_submit", payload: payload, id: operationId),
+                                 operationId: operationId)
             } catch {
                 update(id) { entry in
+                    // An accepted message or a newer attempt is never overwritten by this attempt's failure.
+                    guard entry.message == nil, entry.operation == operationId else { return }
                     entry.uploadState = attempted ? "uncertain" : "failed"
                     entry.error = attempted ? "Sending was not confirmed. Check this message's status; it has not been resent."
                         : AppModel.message(error, fallback: "The recording was not sent.")
@@ -546,7 +662,16 @@ final class VoiceController {
         }
     }
 
-    private func accept(_ previous: VoiceOutgoing, _ raw: JSONObject) async throws {
+    /// Applies the response of operation `operationId`. A definitive refusal is accepted only with an exact proof;
+    /// responses for an older attempt change nothing.
+    private func accept(_ previous: VoiceOutgoing, _ raw: JSONObject, operationId: String) async throws {
+        guard let current = outgoing.first(where: { $0.id == previous.id }), current.operation == previous.operation else { return }
+        if raw["rejection"] != nil && raw["message"] == nil {
+            let refused = try VoiceRejection.accept(raw, current, operationId: operationId)
+            update(previous.id) { entry in if entry.message == nil { entry = refused } }
+            try await persist()
+            return
+        }
         let next = try VoiceProtocol.response(raw, target: previous.effectiveTarget, id: previous.id)
         if let audio = previous.audio, next.audio.bytes != audio.bytes || next.durationMs != previous.durationMs {
             throw ZerusError.mismatch("The computer returned different audio metadata.")
@@ -569,7 +694,7 @@ final class VoiceController {
         }
         let id = UUID().uuidString.lowercased()
         let payload = VoiceProtocol.payload(target, requestId: id).putting("message_id", .string(entry.id))
-        try await accept(entry, app.client.voice(connection, target: target, operation: "voice_status", payload: payload, id: id))
+        try await accept(entry, app.client.voice(connection, target: target, operation: "voice_status", payload: payload, id: id), operationId: id)
     }
 
     func checkStatus(_ entry: VoiceOutgoing) { poll(entry.id, force: true) }
@@ -634,7 +759,7 @@ final class VoiceController {
                 }
                 let id = UUID().uuidString.lowercased()
                 let payload = VoiceProtocol.payload(target, requestId: id).putting("message_id", .string(entry.id))
-                try await accept(entry, app.client.voice(connection, target: target, operation: "voice_cancel", payload: payload, id: id))
+                try await accept(entry, app.client.voice(connection, target: target, operation: "voice_cancel", payload: payload, id: id), operationId: id)
             } catch {
                 update(entry.id) { $0.error = AppModel.message(error, fallback: "Cancellation was not confirmed. Check status.") }
                 try? await persist()
@@ -654,12 +779,14 @@ final class VoiceController {
         }
     }
 
-    /// Only a locally proven pre-transport failure may become a new editable recording.
+    /// A locally proven pre-transport failure becomes a new editable recording; a native refusal keeps its immutable
+    /// identity, provider and proof for one explicit resubmission.
     func restoreUnsent(_ entry: VoiceOutgoing) {
         guard let current = outgoing.first(where: { $0.id == entry.id }), current == entry, current.canRestoreUnsent, let audio = current.audio,
               !activeRequests.contains(current.id), draft == nil, !recording, !savingRecording else { return }
         let restored = VoiceDraft(target: current.target, machineId: current.machineId, profileId: current.profileId, audio: audio, durationMs: current.durationMs,
-                                  createdAt: current.createdAt, profileRevision: current.profileRevision, video: current.video)
+                                  createdAt: current.createdAt, profileRevision: current.profileRevision, video: current.video,
+                                  resubmissionId: current.rejection == nil ? nil : current.id, rejection: current.rejection)
         savingRecording = true
         Task {
             do {

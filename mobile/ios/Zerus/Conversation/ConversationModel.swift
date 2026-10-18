@@ -132,6 +132,7 @@ final class ConversationModel {
     // MARK: Delivery
 
     var receiptFlights: Set<String> = []
+    @ObservationIgnored var outgoingReceiptProbe = OutgoingReceiptProbe()
     var answerFlights: [String: String] = [:]
     var preparingTargets: Set<String> = []
     var attachmentPreparing = false
@@ -212,6 +213,10 @@ final class ConversationModel {
     @ObservationIgnored var historySnapshotHints: [String: String] = [:]
     @ObservationIgnored let historyHeadScheduler = HistoryHeadScheduler()
     @ObservationIgnored var sharedReadsSent: Set<String> = []
+    /// Marks completed without being applied wait in one bounded table, released by one owned timer.
+    @ObservationIgnored var sharedReadRetries = SharedReadRetries()
+    @ObservationIgnored var sharedReadRetryTimer: Task<Void, Never>?
+    @ObservationIgnored let sharedReadClock = ContinuousClock.now
     @ObservationIgnored var readAllShares: Task<Void, Never>?
     @ObservationIgnored var readWriter: OrderedStatePersistence<ConversationReadState>?
     @ObservationIgnored var emptyDrafts: [String: Draft] = [:]
@@ -619,6 +624,12 @@ final class ConversationModel {
                     return copy
                 }
             }
+            // One status-only receipt read per navigation for the newest unconfirmed message; it never resends.
+            if let message = messages.last(where: { $0.status == "uncertain" && !merged.recordedRequestIds.contains($0.requestId) }),
+               self.outgoingReceiptProbe.claim(target, navigation: self.navigationId, message: message,
+                                               busy: self.deliveryFlights.contains(message.requestId) || self.receiptFlights.contains("outgoing:\(message.requestId)")) {
+                Task { await self.checkOutgoing(message, automatic: true) }
+            }
             // Last: opening a child replaces this parent presentation.
             self.openPendingAgent()
         }
@@ -728,6 +739,8 @@ final class ConversationModel {
     // MARK: Workspace removal
 
     func forget(connection: String) async {
+        sharedReadRetries.forget(connection: connection)
+        scheduleSharedReadRetries()
         for (_, flight) in inspections where flight.target.connectionId == connection { flight.task.cancel() }
         inspections = inspections.filter { $0.value.target.connectionId != connection }
         frames.removeAll { $0.target.connectionId == connection }

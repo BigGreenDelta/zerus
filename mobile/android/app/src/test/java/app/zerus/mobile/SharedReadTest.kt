@@ -87,6 +87,20 @@ class SharedReadTest {
         assertEquals(listOf("a","b","c"),prepared)
         assertEquals(listOf("a","c"),sent)
     }
+    @Test fun onlyAppliedMarksCountAsSharedAndUnappliedOnesWaitBeforeAnotherTry() {
+        val payload=SharedReadPolicies.payload(row(),true,0)!!
+        fun receipt(reply:Boolean,attention:Boolean,state:String="completed")=JSONObject().put("request_id","r").put("state",state)
+            .put("result",JSONObject().put("ok",true).put("applied",JSONObject().put("reply_id",reply).put("attention_signature",attention)).put("read",JSONObject.NULL))
+        assertTrue(SharedReadPolicies.applied(receipt(true,true),payload))
+        // Completed without applying: the request is no longer current, or the computer's question index is not ready.
+        assertFalse(SharedReadPolicies.applied(receipt(true,false),payload))
+        assertFalse(SharedReadPolicies.applied(receipt(false,false),payload))
+        assertFalse(SharedReadPolicies.applied(receipt(true,true,"failed"),payload))
+        assertFalse(SharedReadPolicies.applied(JSONObject().put("state","completed").put("result",JSONObject().put("ok",false).put("error","not_found")),payload))
+        // A field this phone did not send need not be applied.
+        assertTrue(SharedReadPolicies.applied(receipt(true,false),SharedReadPolicies.payload(row(),true,0,acknowledge=false)!!))
+        assertEquals(listOf(120_000L,240_000L,480_000L,960_000L,960_000L),(0..4).map(SharedReadPolicies::retryDelayMs))
+    }
     @Test fun childArchivedOrChangedRowsAreNeverMarked() {
         assertNull(SharedReadPolicies.payload(row(t=target.copy(agentId="child",parentConversation="conversation")),true,0))
         assertNull(SharedReadPolicies.payload(row(t=target.copy(archiveId="55555555-5555-4555-8555-555555555555")),true,0))

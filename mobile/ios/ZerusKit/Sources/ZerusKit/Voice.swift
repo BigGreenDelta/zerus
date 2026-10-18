@@ -106,9 +106,13 @@ public struct VoiceDraft: Codable, Hashable, Sendable {
     public var createdAt: Double
     public var profileRevision: Int64?
     public var video: VideoDraft?
+    /// A recording the computer refused before acceptance keeps its native message UUID and the refusal proof that
+    /// allows exactly one explicit resubmission of the same media to the same provider. Absent in older saved state.
+    public var resubmissionId: String?
+    public var rejection: String?
 
     public init(target: Target, machineId: String, profileId: String, audio: Attachment, durationMs: Int, createdAt: Double,
-                profileRevision: Int64? = nil, video: VideoDraft? = nil) {
+                profileRevision: Int64? = nil, video: VideoDraft? = nil, resubmissionId: String? = nil, rejection: String? = nil) {
         self.target = target
         self.machineId = machineId
         self.profileId = profileId
@@ -117,6 +121,8 @@ public struct VoiceDraft: Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.profileRevision = profileRevision
         self.video = video
+        self.resubmissionId = resubmissionId
+        self.rejection = rejection
     }
 
     public var selection: SpeechSelection {
@@ -139,9 +145,15 @@ public struct VoiceOutgoing: Codable, Hashable, Sendable {
     public var error: String
     public var profileRevision: Int64?
     public var video: VideoDraft?
+    /// The current refusal proof, the refusal generation a retry consumed, and that retry's operation request ID.
+    /// Absent in older saved state; the operation then is the message's own first submission.
+    public var rejection: String?
+    public var attemptedRejectionGeneration: Int64?
+    public var operationId: String?
 
     public init(id: String, target: Target, machineId: String, profileId: String, audio: Attachment?, durationMs: Int, createdAt: Double,
-                message: VoiceMessage? = nil, uploadState: String = "uploading", error: String = "", profileRevision: Int64? = nil, video: VideoDraft? = nil) {
+                message: VoiceMessage? = nil, uploadState: String = "uploading", error: String = "", profileRevision: Int64? = nil, video: VideoDraft? = nil,
+                rejection: String? = nil, attemptedRejectionGeneration: Int64? = nil, operationId: String? = nil) {
         self.id = id
         self.target = target
         self.machineId = machineId
@@ -154,10 +166,19 @@ public struct VoiceOutgoing: Codable, Hashable, Sendable {
         self.error = error
         self.profileRevision = profileRevision
         self.video = video
+        self.rejection = rejection
+        self.attemptedRejectionGeneration = attemptedRejectionGeneration
+        self.operationId = operationId
     }
+
+    /// The request ID of the latest upload attempt: the message UUID first, a fresh one for a resubmission.
+    public var operation: String { operationId ?? id }
 
     public var state: String { message?.state ?? uploadState }
     public var terminal: Bool { ["submitted", "failed", "cancelled", "uncertain"].contains(state) }
+    /// Confirmed submitted recordings stay in conversation history as a local cache, not as unsent drafts.
+    /// An upload state alone is never an authoritative submission receipt.
+    public var needsDraftReview: Bool { message?.state != "submitted" }
     public var needsStatus: Bool { (message == nil && uploadState == "uncertain") || !terminal }
     public var canRestoreUnsent: Bool { message == nil && uploadState == "failed" && audio != nil }
 
@@ -245,16 +266,21 @@ public enum RecordingDelivery: String, Sendable {
         case .processing: "Processing recording"
         case .sent: "Accepted by native app"
         case .failed: "Recording failed"
-        case .cancelled: "Delivery cancelled"
+        case .cancelled: "Not sent"
         case .uncertain: "Delivery unconfirmed"
         }
     }
 
+    /// The plain-language status shown when the status is tapped.
     public var explanation: String {
-        if self == .sent {
-            return "The native app accepted the recognized text. Queue status, when present, is shown alongside this recording. This does not confirm model delivery, reading or completion."
+        switch self {
+        case .uploading: "Your recording is being uploaded. Its recognized text is not confirmed as sent to the agent yet."
+        case .processing: "Your recording is being processed. Its recognized text is not confirmed as sent to the agent yet."
+        case .sent: "The native app accepted the recognized text. Queue status, when present, is shown alongside this recording. This does not confirm model delivery, reading or completion."
+        case .failed: "The recording could not be sent. Your recording and any recognized text are kept for review."
+        case .cancelled: "Delivery was cancelled. This recording was not sent to the agent."
+        case .uncertain: "Delivery has not been confirmed. Check this recording's status before trying to send again."
         }
-        return description
     }
 
     public static func of(_ state: String) -> RecordingDelivery {
@@ -357,6 +383,36 @@ extension VoiceProtocol {
         let pcm = Data(wav.dropFirst(44))
         guard let canonical = try? self.wav(pcm), canonical == wav else { throw ZerusError.invalid("The saved recording is invalid.") }
         return pcm
+    }
+}
+
+/// Global voice defaults come from computer-scoped reads; they never authorize a conversation or alter a saved recording.
+public enum DefaultVoiceRoutes {
+    static func eligible(_ machine: Machine, _ connections: [Connection]) -> Bool {
+        machine.online && !machine.lastKnown && AttachmentPolicy.validId(machine.machineId) && connections.contains { $0.id == machine.connectionId }
+    }
+
+    /// The saved default's computer, by stable machine UUID or older relay ID, only while it is verified and unambiguous.
+    public static func resolve(_ saved: MachineKey?, machines: [Machine], connections: [Connection]) -> SpeechConfigHost? {
+        guard let saved else { return nil }
+        let matches = machines.filter {
+            eligible($0, connections) && $0.connectionId == saved.connectionId && ($0.machineId == saved.computerId || $0.id == saved.computerId)
+        }
+        guard matches.count == 1 else { return nil }
+        return SpeechConfigHost(key: matches[0].key, machineId: matches[0].machineId, name: matches[0].name)
+    }
+
+    /// Verified online computers matching `query`, at most 100, one per physical machine in each workspace.
+    public static func hosts(_ machines: [Machine], connections: [Connection], query: String = "") -> [SpeechConfigHost] {
+        let needle = query.trimmingCharacters(in: .whitespaces)
+        var seen = Set<MachineKey>()
+        var result: [SpeechConfigHost] = []
+        for machine in machines where eligible(machine, connections) && (needle.isEmpty || machine.name.localizedCaseInsensitiveContains(needle)) {
+            guard seen.insert(MachineKey(connectionId: machine.connectionId, computerId: machine.machineId)).inserted else { continue }
+            result.append(SpeechConfigHost(key: machine.key, machineId: machine.machineId, name: machine.name))
+            if result.count == 100 { break }
+        }
+        return result
     }
 }
 
