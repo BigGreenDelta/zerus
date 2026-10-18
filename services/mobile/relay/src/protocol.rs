@@ -119,6 +119,7 @@ pub const OPERATIONS: &[&str] = &[
 pub const FEATURES: &[&str] = &[
     "inspect_after",
     "inspect_agent",
+    "opencode_launch_effort",
     "presence_alerts",
     "send_agent",
     "voice_video",
@@ -522,12 +523,16 @@ pub fn request(v: &Value) -> Result<()> {
                     return Err(Error::BAD);
                 }
                 if let Some(e) = p.get("effort") {
+                    // The fixed names, or a bounded safe variant id: the
+                    // connector decides per model for OpenCode sessions and
+                    // keeps the fixed list for every other agent.
                     if ![
                         "", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max",
                         "ultra", "on",
                     ]
                     .iter()
                     .any(|x| e == x)
+                        && !e.as_str().is_some_and(variant_id)
                     {
                         return Err(Error::BAD);
                     }
@@ -587,6 +592,13 @@ fn agent(v: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// An OpenCode effort variant: 1-40 ASCII letters, digits, `-`, `_` or `.`.
+fn variant_id(s: &str) -> bool {
+    (1..=40).contains(&s.len())
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+}
+
 fn tag(v: &Value, launch: bool) -> Result<()> {
     let s = text(v, 120, false)?;
     if s.len() > 120 || s.trim() != s || s.contains(['/', '.', ':']) || (launch && s.contains('\\'))
@@ -687,6 +699,7 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
                 &[
                     "account_id",
                     "model",
+                    "effort",
                     "swarm_id",
                     "project_id",
                     "project_folder_id",
@@ -726,6 +739,16 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
                     || !provider.bytes().enumerate().all(|(i, c)| {
                         c.is_ascii_alphanumeric() || c == b'_' || (i > 0 && b".-".contains(&c))
                     })
+                {
+                    return Err(Error::BAD);
+                }
+            }
+            if let Some(effort) = p.get("effort") {
+                // Additive: only OpenCode with a model; the connector checks
+                // the value against that model's offered variants.
+                if p["agent"] != "opencode"
+                    || p.get("model").is_none()
+                    || !effort.as_str().is_some_and(variant_id)
                 {
                     return Err(Error::BAD);
                 }
