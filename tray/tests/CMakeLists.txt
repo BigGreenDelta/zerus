@@ -255,6 +255,13 @@ target_link_libraries(test_taskdialogs PRIVATE Qt6::Test Qt6::Widgets hgs-tray-u
 zerus_add_test(taskdialogs test_taskdialogs)
 set_tests_properties(taskdialogs PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# Dragging tasks out of the Tasks tab (TaskDrag.h).
+add_executable(test_taskdrag test_taskdrag.cpp)
+target_include_directories(test_taskdrag PRIVATE ../src)
+target_link_libraries(test_taskdrag PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(taskdrag test_taskdrag)
+set_tests_properties(taskdrag PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_processview test_processview.cpp)
 target_include_directories(test_processview PRIVATE ../src)
 target_link_libraries(test_processview PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)

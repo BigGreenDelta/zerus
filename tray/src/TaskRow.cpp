@@ -1,8 +1,10 @@
 #include "TaskRow.h"
+#include "TaskDrag.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
 #include <QApplication>
 #include <QDateTime>
+#include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
@@ -206,6 +208,22 @@ void TaskRow::mousePressEvent(QMouseEvent *event) {
     QWidget::mousePressEvent(event);
     m_pressed = event->button() == Qt::LeftButton && !m_actions->geometry().translated(m_actions->parentWidget()->mapTo(this, QPoint()))
                                                          .contains(event->position().toPoint());
+    m_pressAt = event->position().toPoint();
+}
+
+// A To do or Backlog row pressed outside its actions is dragged once the pointer
+// moves past the drag distance; the release after a drag opens nothing.
+void TaskRow::mouseMoveEvent(QMouseEvent *event) {
+    QWidget::mouseMoveEvent(event);
+    if (!m_pressed || !(event->buttons() & Qt::LeftButton) || !TaskDrag::draggable(m_task)) return;
+    if ((event->position().toPoint() - m_pressAt).manhattanLength() < QApplication::startDragDistance()) return;
+    m_pressed = false; emit dragStarted(m_pressAt);
+}
+
+void TaskRow::setDragging(bool dragging) {
+    setProperty("dragging", dragging);
+    if (!dragging) { setGraphicsEffect(nullptr); return; }
+    auto *fade = new QGraphicsOpacityEffect(this); fade->setOpacity(0.4); setGraphicsEffect(fade);
 }
 
 void TaskRow::mouseReleaseEvent(QMouseEvent *event) {

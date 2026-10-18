@@ -32,9 +32,13 @@ public:
     void setTask(const TaskItem &task, const TaskRowState &state, const TaskColors &colors, qint64 now);
     const TaskItem &task() const { return m_task; }
     static QString actionKey(TaskAction action);
+    // While its drag runs the row stays in its place, faded.
+    void setDragging(bool dragging);
 signals:
     void actionRequested(TaskAction action);
     void opened();
+    // A To do or Backlog row was pressed and moved: the owner drags it from hotSpot.
+    void dragStarted(const QPoint &hotSpot);
 protected:
     void paintEvent(QPaintEvent *event) override;
     void enterEvent(QEnterEvent *event) override;
@@ -44,6 +48,7 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 private:
@@ -57,5 +62,6 @@ private:
     QLabel *m_glyph, *m_meta, *m_text, *m_summary;
     QWidget *m_actions;
     QHash<int, QToolButton *> m_buttons;
+    QPoint m_pressAt;
     bool m_hovered = false, m_pressed = false;
 };
