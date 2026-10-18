@@ -68,7 +68,10 @@ OpenCode 2.0.32 (`/openapi.json`, 119 paths):
   (`uri`, `name`; at most 20 MiB each), `delivery` (`steer` or `queue`;
   `steer` when omitted) and `resume`. A queued prompt is listed in `/inbox`
   and `GET /message/{id}` returns 404 until OpenCode runs it; queued items
-  stay pending after `/interrupt`. `/message` pages by cursor.
+  stay pending after `/interrupt`, unrun. The next prompt starts a run that
+  delivers them first, in order, each as its own step with its own reply,
+  and then the new prompt; the run ends in one idle (native `test_11`,
+  2026-10-18). `/message` pages by cursor.
 - `/interrupt`; `/model` (`Model.Ref`: `providerID`, `id`, optional
   `variant`); `/compact` (client ID); `/fork` (only `before`; no client ID;
   400 for an empty session); `/form`, `/form/{id}/reply`
@@ -421,7 +424,9 @@ unavailable with reasons.
   model fixture. Phase 1: launch with own IDs, lost launch and message
   responses (including a queued message), Stop with a pending queue item,
   a queued message removed while its receipt is pending and never delivered
-  by a same-request retry (`test_10`), history pages, model and variant,
+  by a same-request retry (`test_10`), a message left queued by Stop and
+  delivered first by the next message without a repost (`test_11`),
+  history pages, model and variant,
   question-tool forms and permissions, OpenCode 1 binding adoption and
   refusal, service not running, start only with a dead registration,
   incompatible version and missing operation.
