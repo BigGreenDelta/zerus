@@ -925,6 +925,10 @@ pub fn process_alive(pid: u32) -> bool {
 pub fn file_identity(path: &Path) -> Option<FileIdentity> {
     FileIdentity::of(&fs::File::open(path).ok()?).ok()
 }
+/// Not read on Windows: callers compare the file at the path they started from.
+pub fn image_identity() -> Option<FileIdentity> {
+    None
+}
 impl FileIdentity {
     /// The identity and metadata of an open file.
     pub fn with_metadata(file: &fs::File) -> io::Result<(Self, fs::Metadata)> {
