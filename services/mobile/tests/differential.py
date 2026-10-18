@@ -15,9 +15,9 @@ not traced. Every allowlist entry cites one of the deliberate divergences a-k
 
 What a connector's clock drives (polls, single heartbeats, periodic native
 reads) is reported but not compared; a shape summarizing each run's heartbeats
-is. That shape applies the explicit Rust-only OpenCode launch-effort capability
-contract; all other keys and arrays still match exactly. Native work and journal
-rows also match in number.
+is. That shape applies the explicit Rust-only OpenCode capability contracts
+(launch effort and queue removal); all other keys and arrays still match
+exactly. Native work and journal rows also match in number.
 """
 from __future__ import annotations
 
@@ -41,6 +41,11 @@ DIVERGENCES = set("abcdefghijk")
 KINDS = ("native", "relay", "journal")
 # The harness adds these for a Python connector run from this source tree.
 HARNESS_ENVIRONMENT = {"PYTHONPATH", "PYTHONDONTWRITEBYTECODE"}
+# Operations only the Rust connector executes, each with the marker that gates
+# it, and the operations each frozen Python marker gates (vectors).
+RUST_ONLY = json.loads((TESTS / "rust-only-operations.json").read_text())["operations"]
+FROZEN_MARKERS = {marker["name"]: marker["operations"] for marker in
+                  json.loads((TESTS.parent / "vectors" / "operations.json").read_text())["capabilities"]["markers"]}
 # Native commands a connector repeats on its own schedule rather than once per
 # request: heartbeat snapshots, capability probes and fleet discovery.
 PERIODIC = (
@@ -316,8 +321,14 @@ def capability_projection(entries: collections.Counter, side: str) -> tuple[coll
 
     Only accepted local/peer heartbeat SHAPEs are projected. Python must never
     offer OpenCode effort; Rust must offer it exactly when it offers launch.
-    All other keys, operations, features and counts remain exact comparisons.
-    Raw trace files are never changed.
+    Python must never offer an operation of `rust-only-operations.json` (such
+    as `remove_queued`). Rust must offer one gated by a frozen marker exactly
+    when it offers every operation that marker gates in Python (the session
+    actions for `remove_queued`). A Python shape cannot show a marker the
+    vectors do not know, so an operation gated by one is left out of the Rust
+    shape; the black-box suites check its advertisement. All other keys,
+    operations, features and counts remain exact comparisons. Raw trace files
+    are never changed.
     """
     projected, invalid, seen = collections.Counter(), [], set()
     feature = "opencode_launch_effort"
@@ -347,6 +358,19 @@ def capability_projection(entries: collections.Counter, side: str) -> tuple[coll
                     shape["features"] = sorted([*shape["features"], feature])
             elif offered != ("launch" in shape["operations"]):
                 raise ValueError("Rust OpenCode launch effort must match its launch operation")
+            operations = set(shape["operations"])
+            for row in RUST_ONLY:
+                operation, gated = row["operation"], FROZEN_MARKERS.get(row["marker"])
+                marked = gated is not None and set(gated) <= operations
+                if side == "python":
+                    if operation in operations:
+                        raise ValueError(f"Python must not advertise {operation}")
+                    if marked:
+                        shape["operations"] = sorted([*shape["operations"], operation])
+                elif gated is None:
+                    shape["operations"] = [item for item in shape["operations"] if item != operation]
+                elif (operation in operations) != marked:
+                    raise ValueError(f"Rust {operation} must match its {row['marker']} marker")
             projected["SHAPE " + kind + " " + canonical(shape)] += count
         except (ValueError, TypeError) as error:
             invalid.append({"kind": "relay", "side": side,

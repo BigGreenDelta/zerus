@@ -4,7 +4,8 @@
 //!
 //! An operation is advertised only when the native CLI offers it, as in
 //! Python, and this connector implements it; a later slice adds to
-//! [`IMPLEMENTED`]. Python resets every flag before probing, so a failed
+//! [`IMPLEMENTED`]. [`CONNECTOR_ONLY`] operations follow their own native
+//! gates and are never Python's. Python resets every flag before probing, so a failed
 //! probe disables everything for 300 s; here a probe that fails keeps the
 //! previous flags (divergence a).
 use serde_json::{json, Map, Value};
@@ -15,17 +16,20 @@ use zerus_relay::protocol::OPERATIONS;
 pub const REPROBE_SECONDS: f64 = 300.0;
 /// `hgs --help` budget (seconds).
 pub const PROBE_TIMEOUT: f64 = 3.0;
+pub const CLEAR_CONTEXT_DISMISS_HELP_MARKER: &str = "Mobile clear-context ABI: dismiss-prompt-v1";
 
 /// Operations this connector executes, with the session mutations of
 /// [`crate::mutations::OPERATIONS`] and the creations of
 /// [`crate::launch::OPERATIONS`]. Every other known operation is refused
 /// as unsupported and never advertised.
 pub const IMPLEMENTED: &[&str] = &[
+    "analytics_read",
     "archive_list",
     "attachment_read",
     "catalog",
     "dirs",
     "file_read",
+    "git_status",
     "history",
     "hooks_status",
     "inspect",
@@ -59,6 +63,7 @@ pub fn implemented(operation: &str) -> bool {
 /// Python's `FEATURES | {"accounts_snapshot"}` and the conditional features,
 /// each with the operation it needs.
 const FEATURE_OPERATIONS: &[(&str, &str)] = &[
+    ("clear_context_dismiss", "clear_context"),
     ("voice_video", "voice_submit"),
     ("accounts_snapshot", "inspect"),
     ("inspect_after", "inspect"),
@@ -68,6 +73,86 @@ const FEATURE_OPERATIONS: &[(&str, &str)] = &[
     ("launch_project", "launch"),
     ("gateway_one_hop", "send"),
 ];
+
+/// Whether an operation only reads native state or may change it. The relay
+/// classifies it the same way (`READS`), and a mutation keeps its journal
+/// identity and recovers as uncertain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    Read,
+    Mutation,
+}
+
+/// The native help marker that gates a [`CONNECTOR_ONLY`] operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// `session-action <session> --json`, the scoped session actions.
+    Lifecycle,
+    /// The bounded, computer-scoped Git checkout projection.
+    GitStatus,
+}
+
+impl Gate {
+    /// Whether the native CLI offers it.
+    pub fn open(self, flags: &Flags) -> bool {
+        match self {
+            Gate::Lifecycle => flags.lifecycle,
+            Gate::GitStatus => flags.git_status,
+        }
+    }
+
+    /// Its marker name in `services/mobile/tests/rust-only-operations.json`,
+    /// which is also the frozen marker's name in `operations.json`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Gate::Lifecycle => "lifecycle",
+            Gate::GitStatus => "git_status",
+        }
+    }
+
+    /// A help line that offers it.
+    pub fn help_line(self) -> &'static str {
+        match self {
+            Gate::Lifecycle => "hgs session-action <session> --json",
+            Gate::GitStatus => crate::git_status::HELP_MARKER,
+        }
+    }
+}
+
+/// An operation of the relay's set that only this connector executes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectorOnly {
+    pub operation: &'static str,
+    pub gate: Gate,
+    pub class: Class,
+}
+
+/// The operations of the relay's set that only this connector executes, each
+/// advertised exactly when its native marker is offered. The Python connector
+/// never lists or advertises them, so they are outside
+/// [`Flags::python_operations`]. The tests of the relay, of this connector and
+/// of the black-box suites read the same table from
+/// `services/mobile/tests/rust-only-operations.json`.
+pub const CONNECTOR_ONLY: &[ConnectorOnly] = &[
+    ConnectorOnly {
+        // The session-action marker predates queue removal: an older hgs prints it
+        // and refuses the request. Only `remove_queued` in the session's
+        // `allowed_actions` shows that hgs can remove the message.
+        operation: "remove_queued",
+        gate: Gate::Lifecycle,
+        class: Class::Mutation,
+    },
+    ConnectorOnly {
+        operation: "git_status",
+        gate: Gate::GitStatus,
+        class: Class::Read,
+    },
+];
+
+/// Whether only this connector executes the operation.
+pub fn connector_only(operation: &str) -> bool {
+    CONNECTOR_ONLY.iter().any(|row| row.operation == operation)
+}
 
 pub const LIFECYCLE: &[&str] = &[
     "archive",
@@ -114,6 +199,7 @@ pub const SPEECH_CONFIG: &[&str] = &[
 /// What the native CLI offers, from its help text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
+    pub analytics: bool,
     pub archive: bool,
     pub lifecycle: bool,
     pub terminal: bool,
@@ -128,6 +214,8 @@ pub struct Flags {
     pub preference: bool,
     pub attachment_read: bool,
     pub file_read: bool,
+    pub git_status: bool,
+    pub clear_context_dismiss: bool,
     pub speech: bool,
     pub voice: bool,
     pub voice_video: bool,
@@ -141,6 +229,7 @@ impl Flags {
     pub fn from_help(help: &str) -> Flags {
         let has = |marker: &str| help.contains(marker);
         Flags {
+            analytics: has("hgs [@host] analytics --json"),
             archive: has("archives --json"),
             lifecycle: help
                 .lines()
@@ -157,6 +246,12 @@ impl Flags {
             preference: has("swarm preference set mobile_delivery"),
             attachment_read: has("attachment <session> --request ID --index N"),
             file_read: has("file-read <session> --json"),
+            git_status: help
+                .lines()
+                .any(|line| line.trim() == crate::git_status::HELP_MARKER),
+            clear_context_dismiss: help
+                .lines()
+                .any(|line| line.trim() == CLEAR_CONTEXT_DISMISS_HELP_MARKER),
             speech: has("speech --json"),
             voice: has("voice <session> --json"),
             voice_video: has("voice-video-v1"),
@@ -168,6 +263,14 @@ impl Flags {
     /// Python's advertised operations, before this build's own filter.
     /// `fleet` is whether a fleet exists (always in the connector).
     pub fn python_operations(&self, fleet: bool) -> BTreeSet<&'static str> {
+        let mut operations = self.offered(fleet);
+        operations.retain(|operation| !connector_only(operation));
+        operations
+    }
+
+    /// The relay's operations the native CLI offers, by Python's formula,
+    /// and [`CONNECTOR_ONLY`] under their own gates.
+    fn offered(&self, fleet: bool) -> BTreeSet<&'static str> {
         let mut removed: BTreeSet<&str> = BTreeSet::new();
         let mut remove = |gate: bool, operations: &[&'static str]| {
             if !gate {
@@ -175,6 +278,7 @@ impl Flags {
             }
         };
         remove(self.worktree, WORKTREES);
+        remove(self.analytics, &["analytics_read"]);
         remove(self.archive, &["archive_list"]);
         remove(self.directory_create, &["directory_create"]);
         remove(self.lifecycle, LIFECYCLE);
@@ -195,6 +299,9 @@ impl Flags {
         remove(self.speech, SPEECH);
         remove(self.voice, VOICE);
         remove(self.speech_config, SPEECH_CONFIG);
+        for row in CONNECTOR_ONLY {
+            remove(row.gate.open(self), &[row.operation]);
+        }
         OPERATIONS
             .iter()
             .copied()
@@ -223,6 +330,9 @@ impl Flags {
         if self.project_launch {
             features.insert("launch_project");
         }
+        if self.clear_context_dismiss {
+            features.insert("clear_context_dismiss");
+        }
         features
     }
 
@@ -231,12 +341,12 @@ impl Flags {
         self.advertised_for(true, one_hop)
     }
 
-    /// `mobile_capabilities` as this build advertises it: Python's sets
-    /// limited to implemented operations and the features they carry. A
-    /// peer context has no fleet.
+    /// `mobile_capabilities` as this build advertises it: Python's sets and
+    /// [`CONNECTOR_ONLY`], limited to implemented operations, and the
+    /// features they carry. A peer context has no fleet.
     pub fn advertised_for(&self, fleet: bool, one_hop: bool) -> Value {
         let operations: Vec<&str> = self
-            .python_operations(fleet)
+            .offered(fleet)
             .into_iter()
             .filter(|operation| implemented(operation))
             .collect();
@@ -314,6 +424,7 @@ mod tests {
                 "pause",
                 "process_output",
                 "process_stop",
+                "remove_queued",
                 "rename",
                 "restore",
                 "resume",
@@ -356,5 +467,68 @@ mod tests {
             ])
         );
         assert_eq!(none["reasons"].as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn connector_only_operations_follow_their_gate_and_are_never_pythons() {
+        let advertises = |flags: Flags, fleet: bool, operation: &str| {
+            flags.advertised_for(fleet, false)["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|advertised| advertised == operation)
+        };
+        for row in CONNECTOR_ONLY {
+            assert!(implemented(row.operation) && OPERATIONS.contains(&row.operation));
+            let open = Flags::from_help(&format!("{}\n", row.gate.help_line()));
+            assert!(row.gate.open(&open) && !row.gate.open(&Flags::default()));
+            for fleet in [false, true] {
+                assert!(advertises(open, fleet, row.operation), "{row:?}");
+                assert!(!advertises(Flags::default(), fleet, row.operation));
+                assert!(!open.python_operations(fleet).contains(row.operation));
+            }
+        }
+    }
+
+    #[test]
+    fn remove_queued_follows_the_session_action_abi_and_is_never_pythons() {
+        let advertises = |flags: Flags| {
+            flags.advertised(false)["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|operation| operation == "remove_queued")
+        };
+        let lifecycle = Flags::from_help("hgs session-action <session> --json\n");
+        assert!(lifecycle.lifecycle && advertises(lifecycle));
+        assert!(lifecycle.advertised_for(false, false)["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "remove_queued"));
+        // Every other marker without the session-action ABI never offers it.
+        let others = Flags::from_help(
+            "terminal <session> --json\nhistory <session> --json\n--launch-id\nread <session> --json\nrecovery action --scoped-json\n",
+        );
+        assert!(!others.lifecycle && !advertises(others));
+        assert!(!advertises(Flags::default()));
+        // Python's tables never list it, with or without the ABI.
+        for flags in [lifecycle, others, Flags::default()] {
+            for fleet in [false, true] {
+                assert!(!flags.python_operations(fleet).contains("remove_queued"));
+            }
+        }
+        assert_eq!(
+            CONNECTOR_ONLY
+                .iter()
+                .filter(|row| row.operation == "remove_queued")
+                .copied()
+                .collect::<Vec<_>>(),
+            [ConnectorOnly {
+                operation: "remove_queued",
+                gate: Gate::Lifecycle,
+                class: Class::Mutation
+            }]
+        );
     }
 }

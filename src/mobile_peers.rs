@@ -261,6 +261,12 @@ fn validate(request: &LocalRequest) -> Result<()> {
         Ok(())
     };
     match op {
+        "analytics" => {
+            ensure!(rest == ["--json"], "analytics requires its fixed JSON ABI");
+            let payload = request.payload.as_ref().context("analytics payload is required")?;
+            ensure!(payload["action"] == "summary", "mobile analytics only permits summary reads");
+            crate::analytics::validate_request(payload).map_err(anyhow::Error::msg)?;
+        }
         "voice" => {
             ensure!(rest.len() == 2 && session(&rest[0]) && rest[1] == "--json", "voice requires a session and its fixed JSON ABI");
             crate::state::voice::validate_request(request.payload.as_ref().context("voice payload is required")?)
@@ -345,6 +351,20 @@ fn validate(request: &LocalRequest) -> Result<()> {
                 ensure!(rest.len() == 1 && session(&rest[0]), "invalid directory request");
             }
             no_payload()?;
+        }
+        "git-status" => {
+            no_payload()?;
+            let values = options(rest, &["--json"], &["--path"])?;
+            ensure!(
+                values.len() == 2 && values.contains_key("--json"),
+                "Git status requires its exact path and JSON options"
+            );
+            ensure!(
+                values.get("--path").is_some_and(|path| {
+                    text(path, 4096, false) && std::path::Path::new(path).is_absolute()
+                }),
+                "Git status path must be absolute"
+            );
         }
         "worktrees" => {
             no_payload()?;
@@ -1093,12 +1113,15 @@ fn execute(config: &Config, args: &[String]) -> Result<i32> {
                 direct(config, &request.via),
                 "mobile route is not an enabled direct peer"
             );
+            let max_output = if local.argv.first().is_some_and(|op| op == "analytics") {
+                1024 * 1024
+            } else { MAX_BYTES };
             let output = transport(
                 &request.via,
                 Helper::Local,
                 Some(local),
                 deadline,
-                MAX_BYTES,
+                max_output,
             )?;
             std::io::stdout().write_all(&output.stdout)?;
             std::io::stderr().write_all(&output.stderr)?;
@@ -1128,6 +1151,25 @@ mod tests {
 
     fn scope() -> Value {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
+    }
+
+    #[test]
+    fn analytics_peer_reads_cannot_enable_purge_or_extend_the_range() {
+        let argv = ["analytics", "--json"];
+        let payload = json!({"schema":1,"action":"summary","from":"2026-01-01","through":"2026-03-31"});
+        assert!(validate(&request(&argv, Some(payload.clone()))).is_ok());
+        for (key, value) in [("action", json!("purge")), ("action", json!("configure")),
+            ("enabled", json!(true)), ("through", json!("2026-04-01")),
+            ("schema", json!(true)), ("path", json!("/fixture/private"))] {
+            let mut bad = payload.clone();
+            bad[key] = value;
+            assert!(validate(&request(&argv, Some(bad))).is_err());
+        }
+        for argv in [vec!["analytics"], vec!["analytics", "--json", "@next"],
+            vec!["analytics", "--json", "--purge"]] {
+            assert!(validate(&request(&argv, Some(payload.clone()))).is_err());
+        }
+        assert!(validate(&request(&["analytics", "--json"], None)).is_err());
     }
 
     #[test]
@@ -1313,6 +1355,80 @@ mod tests {
             vec!["swarm", "preference", "set", "theme", "away", "--json"],
             vec!["swarm", "preference", "set", "mobile_delivery", "away"],
             vec!["swarm", "preference", "get", "--json"],
+        ] {
+            assert!(validate(&request(&argv, None)).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn git_status_admits_only_an_absolute_bounded_native_path() {
+        let prefix = if cfg!(windows) {
+            "C:\\fixture\\"
+        } else {
+            "/fixture/"
+        };
+        let path = format!("{prefix}checkout ' проект");
+        for argv in [
+            vec!["git-status", "--path", path.as_str(), "--json"],
+            vec!["git-status", "--json", "--path", path.as_str()],
+        ] {
+            assert!(validate(&request(&argv, None)).is_ok(), "{argv:?}");
+        }
+        let mut longest = format!("{prefix}{}", "é".repeat((4096 - prefix.len()) / 2));
+        if longest.len() < 4096 {
+            longest.push('a');
+        }
+        assert_eq!(longest.len(), 4096);
+        assert!(validate(&request(
+            &["git-status", "--path", &longest, "--json"],
+            None
+        ))
+        .is_ok());
+        longest.push('é');
+        assert!(longest.chars().count() < 4096);
+        assert!(validate(&request(
+            &["git-status", "--path", &longest, "--json"],
+            None
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn git_status_refuses_payloads_relative_paths_and_extra_options() {
+        let path = if cfg!(windows) {
+            "C:\\fixture\\checkout"
+        } else {
+            "/fixture/checkout"
+        };
+        let read = ["git-status", "--path", path, "--json"];
+        for payload in [scope(), json!({}), Value::Null] {
+            assert!(validate(&request(&read, Some(payload))).is_err());
+        }
+        for invalid in [
+            "",
+            "relative",
+            "~/checkout",
+            "@peer",
+            "-option",
+            "/fixture/bad\npath",
+            "/fixture/bad\tpath",
+            "/fixture/bad\u{85}path",
+        ] {
+            assert!(
+                validate(&request(&["git-status", "--path", invalid, "--json"], None)).is_err(),
+                "{invalid:?}"
+            );
+        }
+        for argv in [
+            vec!["git-status"],
+            vec!["git-status", "--json"],
+            vec!["git-status", "--path", path],
+            vec!["git-status", "--path"],
+            vec!["git-status", "--path", path, "--json", "--json"],
+            vec!["git-status", "--path", path, "--json", "--path", path],
+            vec!["git-status", "--path", path, "--json", "--refresh"],
+            vec!["git-status", "--path", path, "--json", "--git-dir", path],
+            vec!["git-status", "--path", path, "--json", "extra"],
         ] {
             assert!(validate(&request(&argv, None)).is_err(), "{argv:?}");
         }
