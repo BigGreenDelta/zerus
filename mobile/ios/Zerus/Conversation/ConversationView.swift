@@ -58,7 +58,7 @@ struct ConversationView: View {
                                                              detailProgress: model.detailProgress, historyLoading: model.olderLoading,
                                                              historyProgress: historyProgress, demo: app.demo, resolved: raw != nil,
                                                              opening: openedTarget != target.key)
-        // The opening refresh uses the progress bar, so no status row moves cached messages.
+        // Refresh progress uses the progress bar, so no status row moves cached messages.
         let openingProgress = openedTarget != target.key && loadStatus?.initial == false && loadStatus?.spinner == true
         let loading = loadStatus?.initial == true
         let offered = Set(questions.filter { QuestionPolicies.shown($0) && QuestionPolicies.submitted($0, target) == nil }.map(\.id)).count
@@ -75,7 +75,7 @@ struct ConversationView: View {
                 .accessibilityHidden(loadStatus?.initial != false || loadStatus?.spinner != true)
                 .accessibilityLabel(loadStatus?.text ?? "")
             SessionHeaderTools(session: session, details: $details, search: $searching, terminal: $terminal)
-            statusStrip(loadStatus: openingProgress ? nil : loadStatus, unread: unread, offered: offered, questions: questions, target: target)
+            statusStrip(unread: unread, offered: offered, questions: questions, target: target)
             if !notice.isEmpty {
                 HStack {
                     Text(notice).font(.footnote).foregroundStyle(Theme.amber)
@@ -314,14 +314,12 @@ struct ConversationView: View {
     }
 
     @ViewBuilder
-    private func statusStrip(loadStatus: ConversationLoadPresentation.Status?, unread: UnreadBadge?, offered: Int, questions: [Question], target: Target) -> some View {
-        let strip = loadStatus.flatMap { $0.initial ? nil : $0 }
-        if strip != nil || unread != nil || offered > 0 {
+    private func statusStrip(unread: UnreadBadge?, offered: Int, questions: [Question], target: Target) -> some View {
+        if unread != nil || offered > 0 {
             HStack(spacing: 8) {
-                if strip?.spinner == true { ProgressView().controlSize(.mini) }
-                Text(strip?.text ?? unread.map { "\($0.text) unread" } ?? "")
+                Text(unread.map { "\($0.text) unread" } ?? "")
                     .font(.caption)
-                    .foregroundStyle(strip == nil && unread != nil ? Theme.mint : Theme.muted)
+                    .foregroundStyle(Theme.mint)
                 Spacer()
                 if offered > 0 {
                     Button("Questions (\(offered))") {
