@@ -211,6 +211,7 @@ HELP_LINES = (
     ("speech_config", speech_config.HELP_MARKER),
     ("peer_inventory", "hgs swarm mobile-peers --json"),
     ("peer_command", "hgs swarm mobile-peer --json"),
+    ("clear_context_dismiss", context.CLEAR_CONTEXT_DISMISS_HELP),
 )
 
 
@@ -1298,6 +1299,12 @@ def validation_cases() -> list[dict]:
     # context commands
     case("compact_context/extra-field", "compact_context", identity(path="/example"))
     case("clear_context/run-empty", "clear_context", identity(expected_run_id=""))
+    dismiss_source = "test_bb_dismiss_prompt.DismissPromptTests"
+    for label, value in (("true", True), ("false", False), ("null", None),
+                         ("integer-zero", 0), ("integer-one", 1), ("string", "true"), ("array", [])):
+        case("clear_context/dismiss-" + label, "clear_context", identity(dismiss_prompt=value), source=dismiss_source)
+    for value in (True, False):
+        case("compact_context/dismiss-" + str(value).lower(), "compact_context", identity(dismiss_prompt=value), source=dismiss_source)
     # lifecycle
     actions = "test_mobile_actions.LifecycleTransportTests.test_old_cli_and_invalid_payload_never_invoke_mutator"
     case("pause/action-field", "pause", identity(action="terminate"), source=actions)

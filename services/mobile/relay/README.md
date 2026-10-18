@@ -528,3 +528,15 @@ with a retention ceiling of one hour. Existing `READ_SQL`, `read_history_v3`,
 other index definitions and mutation retention predicates remain unchanged.
 Deploy the additive index through the normal root-coordinated rollout; source
 qualification does not switch any existing gateway to the Rust connector.
+
+### Explicit prompt dismissal with context clear
+
+`clear_context` accepts the optional strict Boolean `dismiss_prompt` when both
+the relay and selected computer advertise `clear_context_dismiss`. Any presence,
+including `false`, requires that feature after exact duplicate receipt lookup.
+Omitting the field retains the ordinary request body/hash and validation;
+`compact_context` rejects it. The connector separately verifies the native HELP
+marker `Mobile clear-context ABI: dismiss-prompt-v1`. A `true` request requires
+fresh exact native identity, an unarchived session and actual Boolean
+`clear_context_dismiss: true`; the relay does not infer prompt eligibility.
+An uncertain receipt retains its original identity and never permits replay.

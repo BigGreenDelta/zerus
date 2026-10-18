@@ -124,6 +124,7 @@ pub const OPERATIONS: &[&str] = &[
     "worktrees",
 ];
 pub const FEATURES: &[&str] = &[
+    "clear_context_dismiss",
     "inspect_after",
     "inspect_agent",
     "opencode_launch_effort",
@@ -522,6 +523,7 @@ pub fn request(v: &Value) -> Result<()> {
     } else {
         let extras: &[&str] = match op {
             "send" => &["text", "attachments", "expected_compaction_id", "agent_id"],
+            "clear_context" => &["dismiss_prompt"],
             "voice_submit" => &["speech", "audio", "video", "message_id", "rejection"],
             "voice_status" | "voice_cancel" => &["message_id"],
             "answer" => &["question_id", "expected_question_hash", "answers"],
@@ -624,6 +626,11 @@ pub fn request(v: &Value) -> Result<()> {
             }
             "voice_status" | "voice_cancel" => {
                 uuid(&p["message_id"], true)?;
+            }
+            "clear_context" => {
+                if p.get("dismiss_prompt").is_some_and(|v| !v.is_boolean()) {
+                    return Err(Error::BAD);
+                }
             }
             "send" => send(p)?,
             "answer" => {

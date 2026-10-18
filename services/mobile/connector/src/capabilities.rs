@@ -16,6 +16,7 @@ use zerus_relay::protocol::OPERATIONS;
 pub const REPROBE_SECONDS: f64 = 300.0;
 /// `hgs --help` budget (seconds).
 pub const PROBE_TIMEOUT: f64 = 3.0;
+pub const CLEAR_CONTEXT_DISMISS_HELP_MARKER: &str = "Mobile clear-context ABI: dismiss-prompt-v1";
 
 /// Operations this connector executes, with the session mutations of
 /// [`crate::mutations::OPERATIONS`] and the creations of
@@ -62,6 +63,7 @@ pub fn implemented(operation: &str) -> bool {
 /// Python's `FEATURES | {"accounts_snapshot"}` and the conditional features,
 /// each with the operation it needs.
 const FEATURE_OPERATIONS: &[(&str, &str)] = &[
+    ("clear_context_dismiss", "clear_context"),
     ("voice_video", "voice_submit"),
     ("accounts_snapshot", "inspect"),
     ("inspect_after", "inspect"),
@@ -213,6 +215,7 @@ pub struct Flags {
     pub attachment_read: bool,
     pub file_read: bool,
     pub git_status: bool,
+    pub clear_context_dismiss: bool,
     pub speech: bool,
     pub voice: bool,
     pub voice_video: bool,
@@ -246,6 +249,9 @@ impl Flags {
             git_status: help
                 .lines()
                 .any(|line| line.trim() == crate::git_status::HELP_MARKER),
+            clear_context_dismiss: help
+                .lines()
+                .any(|line| line.trim() == CLEAR_CONTEXT_DISMISS_HELP_MARKER),
             speech: has("speech --json"),
             voice: has("voice <session> --json"),
             voice_video: has("voice-video-v1"),
@@ -323,6 +329,9 @@ impl Flags {
         }
         if self.project_launch {
             features.insert("launch_project");
+        }
+        if self.clear_context_dismiss {
+            features.insert("clear_context_dismiss");
         }
         features
     }

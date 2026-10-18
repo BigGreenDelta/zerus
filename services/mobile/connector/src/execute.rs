@@ -255,7 +255,11 @@ impl<N: Native + 'static> Connector<N> {
                     self.archive_preflight(&validated.session, payload).await?;
                 }
             }
-            self.gate(&validated.operation, self.flags.get())?;
+            self.gate(
+                &validated.operation,
+                validated.payload.as_ref(),
+                self.flags.get(),
+            )?;
             let result = if crate::mutations::handles(&validated.operation) {
                 self.mutate(&validated, request_id, &mutation_started)
                     .await?
@@ -436,7 +440,15 @@ impl<N: Native + 'static> Connector<N> {
     }
 
     /// The capability checks of `_execute_claimed`, in Python's order.
-    fn gate(&self, operation: &str, flags: Flags) -> Result<(), Failure> {
+    fn gate(&self, operation: &str, payload: Option<&Value>, flags: Flags) -> Result<(), Failure> {
+        if operation == "clear_context"
+            && payload.is_some_and(|payload| payload.get("dismiss_prompt").is_some())
+            && !flags.clear_context_dismiss
+        {
+            return Err(Failure::text(
+                "native clear-context dismiss ABI is unavailable",
+            ));
+        }
         if operation == crate::git_status::OPERATION && !flags.git_status {
             return Err(Failure::text(crate::git_status::UNAVAILABLE));
         }

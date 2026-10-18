@@ -15,6 +15,7 @@ import uuid
 
 from .attachments import MAX_QUEUE_BYTES
 from . import speech, speech_config, voice
+from .context import CLEAR_CONTEXT_DISMISS_FEATURE
 from .context import CAPABILITY_OPERATIONS, ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, inspect_features, supports
 from .projects import is_archived
 from .routes import Registry, RouteError, drive_sync, SCHEMA as ROUTE_SCHEMA, MAX_PEER_SNAPSHOT_BYTES
@@ -285,6 +286,8 @@ class Store:
                     return 404, {"error": "speech configuration operation not found"}
             if body["operation"] in CAPABILITY_OPERATIONS and not supports(snapshot, body["operation"]):
                 return 409, {"error": "computer does not advertise this operation; update its connector"}
+            if body["operation"] == "clear_context" and "dismiss_prompt" in body["payload"] and not supports(snapshot, CLEAR_CONTEXT_DISMISS_FEATURE, "features"):
+                return 409, {"error": "computer does not advertise dismiss-and-clear; update its connector"}
             if body["operation"] == "inspect" and any(not supports(snapshot, feature, "features") for feature in inspect_features(body["payload"])):
                 return 409, {"error": "computer does not advertise this inspection feature; update its connector"}
             if body["operation"] == "send" and "agent_id" in body["payload"] and not supports(snapshot, "send_agent", "features"):

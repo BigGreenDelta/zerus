@@ -16,6 +16,7 @@ import uuid
 
 from zerus_mobile import analytics, archives, hook_health, file_reads, speech, speech_config, voice
 from zerus_mobile.attachments import validate_read, validate_send
+from zerus_mobile.context import validate_clear_context
 from zerus_mobile.context import (COMPUTER_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS,
                                   validate_context, validate_core, validate_inspect, validate_lifecycle,
                                   validate_mark_read, validate_mobile_delivery)
@@ -136,7 +137,7 @@ def validate_request(value):
         validate_lifecycle(op, payload, request_id)
         return
     if op in CONTEXT_COMMANDS:
-        validate_context(payload, request_id)
+        (validate_clear_context if op == "clear_context" else validate_context)(payload, request_id)
         return
     if op in {"send_now", "settings", "process_output", "process_stop"}:
         validate_core(op, payload, request_id)

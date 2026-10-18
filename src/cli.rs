@@ -114,6 +114,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--delete-branch] [--json]
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
        Mobile Git status ABI: git-status-v1
+       Mobile clear-context ABI: dismiss-prompt-v1
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
        hgs [@host] kill <session> [--archive <id>]

@@ -50,6 +50,17 @@ journal class within the shared read quota. Delivered terminal rows expire
 after one hour; existing persisted SQL predicates and mutation tombstones stay
 unchanged. The Python connector does not list or advertise this operation.
 
+The optional `clear_context` field `dismiss_prompt` is a strict Boolean. Either
+value requires the distinct `clear_context_dismiss` feature, offered only for an
+exact trimmed native HELP line `Mobile clear-context ABI: dismiss-prompt-v1`.
+For `true`, a fresh inspect must match the exact session/run/conversation,
+remain unarchived and report the actual Boolean `clear_context_dismiss: true`.
+Phase or question-source hints do not grant eligibility. The original payload
+reaches native unchanged; omitted ordinary clear and `compact_context` keep their
+existing validation. Durable duplicate/replay handling precedes the new gate,
+so capability loss never authorizes another mutation identity. Both connectors
+support this additive field; it does not change native clear behavior.
+
 With a CLI that pages archives (`archives --json` in its help), heartbeats
 list live sessions only (`ls --json --local --no-archives`) plus a bounded
 preview of recent archives, read again when the listing's archive revision

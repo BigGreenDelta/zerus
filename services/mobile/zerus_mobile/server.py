@@ -21,6 +21,7 @@ from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUE
 from . import analytics, archives, speech, speech_config, voice
 from .recovery import validate_recovery
 from .history import validate_history
+from .context import CLEAR_CONTEXT_DISMISS_FEATURE, validate_clear_context
 from .context import COMPUTER_OPERATIONS, validate_mobile_delivery, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
 from .launch import OPERATIONS as LAUNCH_OPERATIONS, validate as validate_launch
 from .routes import RouteError, MAX_PEERS
@@ -256,7 +257,7 @@ async def pair(request):
 async def capabilities(request):
     await auth(request, "devices")
     providers = ["fcm"] if request.app[PUSH_WORKER].fcm is not None else []
-    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES | {voice.video.FEATURE})})
+    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES | {voice.video.FEATURE, CLEAR_CONTEXT_DISMISS_FEATURE})})
 
 
 def small_response(request):
@@ -344,7 +345,7 @@ def validate_request(value):
         validate_lifecycle(op, payload, request_id)
         return
     if op in CONTEXT_COMMANDS:
-        validate_context(payload, request_id)
+        (validate_clear_context if op == "clear_context" else validate_context)(payload, request_id)
         return
     if op in {"send_now", "settings", "process_output", "process_stop"}:
         validate_core(op, payload, request_id)

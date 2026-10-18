@@ -7,6 +7,8 @@ from .speech_config import OPERATIONS as SPEECH_CONFIG_OPERATIONS, READS as SPEE
 from .voice import OPERATIONS as VOICE_OPERATIONS, READS as VOICE_READS
 
 CONTEXT_COMMANDS = {"compact_context": "compact-context", "clear_context": "clear-context"}
+CLEAR_CONTEXT_DISMISS_FEATURE = "clear_context_dismiss"
+CLEAR_CONTEXT_DISMISS_HELP = "Mobile clear-context ABI: dismiss-prompt-v1"
 LIFECYCLE_OPERATIONS = frozenset({"pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget"})
 TERMINAL_OPERATIONS = frozenset({"terminal_snapshot", "terminal_input"})
 LAUNCH_OPERATIONS = frozenset({"catalog", "dirs", "directory_create", "launch", "worktrees", "worktree_create"})
@@ -43,6 +45,16 @@ def validate_context(payload, request_id):
         value = payload[field]
         if not isinstance(value, str) or not value or len(value) > maximum or any(ord(c) < 32 or ord(c) == 127 for c in value):
             raise ValueError("context control requires nonempty bounded native identity")
+
+
+def validate_clear_context(payload, request_id):
+    """Keep ordinary context validation unchanged; only clear accepts this opt-in."""
+    ordinary = payload
+    if isinstance(payload, dict) and "dismiss_prompt" in payload:
+        if type(payload["dismiss_prompt"]) is not bool:
+            raise ValueError("dismiss_prompt must be a boolean")
+        ordinary = {key: value for key, value in payload.items() if key != "dismiss_prompt"}
+    validate_context(ordinary, request_id)
 
 
 def bounded(value, maximum, empty=False):

@@ -358,7 +358,13 @@ fn operation_tables_match_the_python_connector() {
         .iter()
         .copied()
         .filter(|feature| {
-            !["opencode_launch_effort", "presence_alerts", "voice_video"].contains(feature)
+            ![
+                "opencode_launch_effort",
+                "presence_alerts",
+                "voice_video",
+                "clear_context_dismiss",
+            ]
+            .contains(feature)
         })
         .collect();
     assert_eq!(sorted(&features), set(&["FEATURES"]));

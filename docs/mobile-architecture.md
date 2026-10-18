@@ -936,6 +936,17 @@ as `desktop_presence`.
 Both relay capabilities and the computer snapshot's
 `mobile_capabilities` must advertise an extension before the phone uses it.
 
+The `clear_context_dismiss` extension permits the optional strict Boolean
+`dismiss_prompt` only on `clear_context`. Presence, even `false`, requires the
+distinct relay and computer feature after exact durable duplicate lookup.
+The connector offers it only for the exact trimmed HELP line
+`Mobile clear-context ABI: dismiss-prompt-v1`. For `true`, it verifies a fresh
+exact session/run/conversation and unarchived state, then requires the actual
+Boolean native `clear_context_dismiss: true`; phase/source hints grant no
+authority. It forwards the original payload. Omitted ordinary clear and compact
+validation, mutation identities and no-replay behavior remain unchanged. The
+native addition is a HELP marker only; this contract adds no native clear logic.
+
 The Rust connector adds the feature `opencode_launch_effort` (never advertised by
 the legacy Python connector). A phone sends the optional `effort` string in a
 `launch` payload only for OpenCode, with a `model` whose current account

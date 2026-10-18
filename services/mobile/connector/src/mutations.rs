@@ -183,7 +183,8 @@ pub fn validate_delivery(payload: Option<&Value>) -> Result<(), String> {
 pub fn validate(operation: &str, payload: &Value, request_id: &str) -> Result<(), String> {
     match operation {
         "recovery_action" => validate_recovery(payload, request_id),
-        "compact_context" | "clear_context" => validate_context(payload, request_id),
+        "compact_context" => validate_context(payload, request_id),
+        "clear_context" => validate_clear_context(payload, request_id),
         "send_now" | "settings" | "process_stop" => validate_core(operation, payload, request_id),
         "send" => validate_send(payload),
         "remove_queued" => validate_remove_queued(payload, request_id),
@@ -295,6 +296,23 @@ pub fn validate_recovery(payload: &Value, request_id: &str) -> Result<(), String
         return Err(text("invalid recovery job action"));
     }
     Ok(())
+}
+
+/// Only the optional clear field is new; the ordinary identity validator stays unchanged.
+pub fn validate_clear_context(payload: &Value, request_id: &str) -> Result<(), String> {
+    if let Some(value) = payload.get("dismiss_prompt") {
+        if !value.is_boolean() {
+            return Err(text("dismiss_prompt must be a boolean"));
+        }
+        let mut ordinary = payload.clone();
+        ordinary
+            .as_object_mut()
+            .expect("field exists")
+            .remove("dismiss_prompt");
+        validate_context(&ordinary, request_id)
+    } else {
+        validate_context(payload, request_id)
+    }
 }
 
 /// `context.validate_context(payload, request_id)`.
@@ -721,6 +739,11 @@ impl<N: Native + 'static> Connector<N> {
             return Err(Failure::text(CONTEXT_IDENTITY));
         }
         match operation {
+            "clear_context" if is_true(payload.get("dismiss_prompt")) => {
+                if !is_true(detail.get("clear_context_dismiss")) {
+                    return Err(Failure::text("native context operation is unavailable"));
+                }
+            }
             "compact_context" | "clear_context" => {
                 if !is_true(detail.get(&format!("{operation}_supported"))) {
                     return Err(Failure::text("native context operation is unavailable"));
