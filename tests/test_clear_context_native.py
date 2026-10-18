@@ -49,6 +49,54 @@ class NativeClearContext(unittest.TestCase):
         self.assertFalse(fresh.get('cache_hint'))
         self.assertEqual(fresh['phase'], 'idle')
 
+@unittest.skipUnless(native.CLAUDE, 'Set HGS_CLAUDE_TEST_BIN for the isolated native clear test')
+class NativeInterruptedClear(unittest.TestCase):
+    """Claude reports no hook when Stop ends a turn; its empty prompt still takes /clear."""
+    import test_claude_approval_native as approval
+    import test_questions as questions
+    tool_name = 'Bash'
+    tool_input = {'command': 'sleep 30; printf done > slept.txt', 'description': 'Wait for the fixture'}
+    setUp = native.NativeClaudeQuestions.setUp
+    tmux = NativeClearContext.tmux
+    script = native.NativeClaudeQuestions.script
+    write_record = native.NativeClaudeQuestions.write_record
+    wait_for = native.NativeClaudeQuestions.wait_for
+    screen = native.NativeClaudeQuestions.screen
+    hook = native.NativeClaudeQuestions.hook
+    inspect = native.NativeClaudeQuestions.inspect
+    answer = questions.Questions.answer
+    payload = questions.Questions.payload
+    options = approval.NativeClaudeApprovals.options
+    choose = approval.NativeClaudeApprovals.choose
+    interrupt = approval.NativeClaudeInterrupt.test_escape_interrupt_is_recorded_without_a_hook
+    del approval, questions
+
+    def test_stopped_turn_clears_from_the_empty_native_prompt(self):
+        self.interrupt()
+        # Claude 2.1.296 can offer auto mode after a stopped approved tool. Its
+        # dialog keeps the clear unavailable until it is answered.
+        time.sleep(.5)
+        if 'Make auto mode your default permission mode?' in self.screen():
+            self.assertFalse(self.inspect()['clear_context_supported'])
+            self.tmux('send-keys', '-t', self.pane, 'Down'); time.sleep(.15)
+            self.tmux('send-keys', '-t', self.pane, 'Enter')
+            self.wait_for(lambda: 'Make auto mode' not in self.screen())
+        info = self.inspect()
+        self.assertTrue(info['clear_context_supported'], info['clear_context_reason'] + '\n' + self.screen())
+        self.assertFalse(info['compact_context_supported'])
+        request = dict(request_id=str(uuid.uuid4()), expected_run_id=self.run_id,
+                       expected_conversation_id=self.conversation_id)
+        result = subprocess.run([str(test_input.HGS), 'clear-context', self.name, '--json'],
+            input=json.dumps(request), env=self.env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
+        self.assertEqual(json.loads(result.stdout)['status'], 'confirmed')
+        current = json.loads(self.record_path.read_text())
+        self.assertNotEqual(current['conversation_id'], self.conversation_id)
+        self.assertEqual((current['run_id'], current['pid']), (self.run_id, self.record['pid']))
+        self.assertEqual((current['activity'], current['phase']), ('idle', 'idle'))
+        self.assertNotIn('What should Claude do instead?', self.screen())
+        self.assertFalse((self.root/'work/slept.txt').exists())
+
 @unittest.skipUnless(os.environ.get('HGS_CODEX_TEST_BIN'), 'Set HGS_CODEX_TEST_BIN for the isolated native Codex clear test')
 class NativeCodexClear(unittest.TestCase):
     script = test_input.InputTransport.script

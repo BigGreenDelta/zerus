@@ -289,6 +289,20 @@ pub(super) fn resumed(record: &Value, live: bool) -> bool {
 pub(super) fn resumed_verified(record: &Value, live: bool, verified: bool) -> bool {
     live && unblocked(record) && resume_input::idle_checked(record, verified)
 }
+/// Claude sends no hook when Esc stops a turn, so the session stays
+/// Interrupted until its next message while its prompt already takes /clear,
+/// whose SessionStart reports Ready. The clear needs no remaining work and the
+/// empty prompt verified as for that message (`input::checked_interrupted`).
+/// Compaction keeps requiring `available`.
+pub(super) fn interrupted(record: &Value, live: bool) -> bool {
+    live && unblocked(record) && !string(record,"conversation_id").is_empty()
+        && string(record,"expected_id").is_empty() && stopped(record)
+}
+/// The turn state `interrupted` needs. Dispatch rechecks it before Enter, as
+/// `telemetry::settled` for Ready, once its own clear request is recorded.
+pub(super) fn stopped(record: &Value) -> bool {
+    record["agent"] == "claude" && record["phase"] == "interrupted" && !telemetry::work_remains(record)
+}
 /// Codex reports a clear of a resumed conversation only with the SessionStart
 /// it defers to the next turn, under the new conversation's ID. That clear
 /// confirms the resume when it was requested or observed for the expected
@@ -373,11 +387,13 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let current=read(name)?;
     // A resume before its deferred SessionStart is verified as for its first message.
     let resuming=resume_input::clearable(&current);
-    let dismiss=request.dismiss_prompt && !resuming && !available(&current,true);
+    let stopped=!resuming && interrupted(&current,true);
+    let dismiss=request.dismiss_prompt && !resuming && !stopped && !available(&current,true);
     let mut record=if dismiss {checked_chooser(name,&request)?} else {
         let record=if resuming {input::checked_resumed(name,&request.expected_run_id,&request.expected_conversation_id)?}
+            else if stopped {input::checked_interrupted(name,&request.expected_run_id,&request.expected_conversation_id)?}
             else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
-        if !(available(&record,true) || resuming && resumed(&record,true)) {
+        if !(available(&record,true) || resuming && resumed(&record,true) || stopped && interrupted(&record,true)) {
             return Err("Wait for the agent to become idle before clearing context".into());
         }
         input::checked_terminal(&record,true)?;
@@ -419,6 +435,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         std::thread::sleep(COMMAND_SETTLE);
         let current=if dismiss {kimi_tui_choice::identity(&record)?}
             else if resuming {resume_input::owned(&record)?;kimi_tui_choice::identity(&record)?}
+            else if stopped {input::checked_interrupted(name,&request.expected_run_id,&request.expected_conversation_id)?}
             else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
         kimi_tui_choice::identity(&record)?;
         input::checked_terminal(&current,false)?;
@@ -559,6 +576,27 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             children["subagents"]["worker"]["state"]=json!(state);
             check(&children,true,None);
         }
+    }
+    #[test] fn a_claude_turn_stopped_with_escape_may_clear_once_nothing_works() {
+        // Claude sends no hook after Esc; the prompt check happens at dispatch.
+        let turn=json!({"agent":"claude","run_id":"run","conversation_id":"conversation","activity":"unknown",
+            "phase":"interrupted","main_done":false,"active_tools":{},"subagents":{}});
+        assert!(interrupted(&turn,true));
+        assert!(!interrupted(&turn,false));
+        // Compaction keeps waiting for Ready.
+        assert_eq!(unavailable(&turn,true).as_deref(),Some("Wait until the agent reports Ready"));
+        let changed=|key:&str,value:Value|{let mut record=turn.clone();record[key]=value;record};
+        for (key,value) in [("agent",json!("codex")),("agent",json!("kimi")),("phase",json!("error")),("phase",json!("working")),
+            ("conversation_id",json!("")),("expected_id",json!("conversation")),("error",json!("failed")),
+            ("active_tools",json!({"a":{"name":"Bash","started":1.0}})),
+            ("subagents",json!({"worker":{"name":"Explore","state":"working"}})),
+            ("compact_context_request",json!({"status":"submitted"}))] {
+            assert!(!interrupted(&changed(key,value.clone()),true),"{key}={value}");
+        }
+        // Dispatch's own recorded request does not end the stopped turn.
+        let requested=changed("clear_context_request",json!({"request_id":"r","conversation_id":"conversation"}));
+        assert!(!interrupted(&requested,true));
+        assert!(stopped(&requested));
     }
     #[test] fn context_actions_agree_with_dispatch_on_the_ready_state_the_listing_reports() {
         // Inspect offers clear and compaction exactly when dispatch accepts

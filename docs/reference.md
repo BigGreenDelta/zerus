@@ -1370,7 +1370,11 @@ confirmation: Zerus presses Esc once, as in Terminal, so an approval is denied a
 a question stays unanswered. It runs `/clear` only after the chooser closed and the
 empty native prompt is verified, and never repeats an uncertain attempt. Startup
 choices such as resume, permission mode and folder trust are answered in Activity
-instead. DeepSeek context reset is unavailable until
+instead. Claude reports no hook when **Stop** ends its turn, so the session stays
+**Interrupted** until its next message. **Clear session** is available there once
+no tool or subagent still works and the empty native prompt is verified, as for
+that message; a native draft keeps it unavailable and is named as the reason.
+Compaction still waits for Ready. DeepSeek context reset is unavailable until
 its native Session Controller provides the supported operation. A confirmed clear
 adds an amber **Session cleared** boundary to Activity and keeps the earlier local
 timeline above it: the agent no longer sees that history, but you can still read
