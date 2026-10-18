@@ -28,6 +28,24 @@ public struct ZerusError: Error, LocalizedError, Equatable, Sendable {
     public static func mismatch(_ message: String) -> ZerusError { ZerusError(.mismatch, message) }
 }
 
+/// Bounds a read that may poll; the slower branch is cancelled. Nothing is retried or resent.
+public enum Deadline {
+    public static let expired = ZerusError(.unavailable, "The check did not finish in time.")
+
+    public static func within<T: Sendable>(_ limit: Duration, _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(for: limit)
+                throw expired
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw expired }
+            return first
+        }
+    }
+}
+
 /// HTTPS client for protocol version 1. It never follows redirects, stores no
 /// cookies or cached responses and never retries a request by itself.
 public struct RelayClient: Sendable {
@@ -159,6 +177,15 @@ public struct RelayClient: Sendable {
     static let mismatchedReceipt = ZerusError.mismatch("Gateway returned a mismatched receipt. Delivery remains unconfirmed.")
 
     /// Reads the original receipt; it never creates a replacement request.
+    /// The status-only check of an unconfirmed request: its original receipt, polled until it settles, within `limit`.
+    /// It never submits anything; on expiry the read or poll in progress is cancelled.
+    public func boundedReceipt(_ connection: Connection, id: String, limit: Duration = .seconds(45),
+                               pollDelay: Duration = .milliseconds(800)) async throws -> JSONObject {
+        try await Deadline.within(limit) {
+            try await self.waitForReceipt(connection, initial: try await self.receipt(connection, id: id), pollDelay: pollDelay)
+        }
+    }
+
     public func receipt(_ connection: Connection, id: String) async throws -> JSONObject {
         guard let escaped = id.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-_"))) else {
             throw ZerusError.invalid("Invalid request identity.")

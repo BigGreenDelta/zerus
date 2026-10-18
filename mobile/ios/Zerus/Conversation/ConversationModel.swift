@@ -132,6 +132,7 @@ final class ConversationModel {
     // MARK: Delivery
 
     var receiptFlights: Set<String> = []
+    @ObservationIgnored var outgoingReceiptProbe = OutgoingReceiptProbe()
     var answerFlights: [String: String] = [:]
     var preparingTargets: Set<String> = []
     var attachmentPreparing = false
@@ -618,6 +619,12 @@ final class ConversationModel {
                     }
                     return copy
                 }
+            }
+            // One status-only receipt read per navigation for the newest unconfirmed message; it never resends.
+            if let message = messages.last(where: { $0.status == "uncertain" && !merged.recordedRequestIds.contains($0.requestId) }),
+               self.outgoingReceiptProbe.claim(target, navigation: self.navigationId, message: message,
+                                               busy: self.deliveryFlights.contains(message.requestId) || self.receiptFlights.contains("outgoing:\(message.requestId)")) {
+                Task { await self.checkOutgoing(message, automatic: true) }
             }
             // Last: opening a child replaces this parent presentation.
             self.openPendingAgent()

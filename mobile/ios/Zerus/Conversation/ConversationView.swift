@@ -161,7 +161,7 @@ struct ConversationView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.bar)
             } else {
-                Composer(session: session, online: online, onReview: { review = $0 })
+                Composer(session: session, online: online, onReview: { review = $0 }, onReviewOutgoing: { reviewOutgoing = $0 })
                     .id(ComposerIdentity.lane(target))
             }
         }
