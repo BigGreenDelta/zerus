@@ -24,6 +24,7 @@
 #include <QUrl>
 #include "ProcessSettings.h"
 #include "QuestionNotificationSettings.h"
+#include "UiLanguage.h"
 
 class SettingsPage : public QWidget {
 public:
@@ -39,6 +40,13 @@ public:
         pages=new QStackedWidget;pages->setMinimumWidth(0);body->addWidget(pages,1);outer->addLayout(body,1);
         auto makePage=[&](const QString &heading){auto *content=new QWidget;content->setMaximumWidth(850);auto *layout=new QVBoxLayout(content);layout->setContentsMargins(0,0,12,0);layout->setSpacing(18);auto *h=new QLabel(heading);h->setObjectName("heading");layout->addWidget(h);addPage(content);return layout;};
         auto *appearance=makePage(tr("Appearance"));auto *theme=new QComboBox;theme->setObjectName("workspaceTheme");theme->addItem(tr("Follow system appearance"),"system");theme->addItem(tr("Dark"),"dark");theme->addItem(tr("Light"),"light");theme->setCurrentIndex(qMax(0,theme->findData(QSettings().value("workspace/theme","system"))));appearance->addWidget(new QLabel(tr("Theme")));appearance->addWidget(theme);
+        appearance->addWidget(new QLabel(tr("Interface language")));
+        appearance->addWidget(zerusLanguageChoice());
+        auto *languageHint=new QLabel(tr("Restart Zerus to apply the interface language. Agent sessions keep running."));
+        languageHint->setWordWrap(true);appearance->addWidget(languageHint);
+        auto *translationHint=new QLabel(tr("Russian is a preview. Untranslated text stays in English."));
+        translationHint->setWordWrap(true);appearance->addWidget(translationHint);
+        if(zerusUiLanguage()=="ru")nav->setFixedWidth(qMax(180,nav->sizeHintForColumn(0)+32));
         auto *usageIndicator=new QComboBox;usageIndicator->setObjectName("workspaceUsageIndicator");
         usageIndicator->addItem(tr("Usage and elapsed time bars"),"rails");usageIndicator->addItem(tr("Pace marker"),"marker");usageIndicator->addItem(tr("Pace marker and reset countdown"),"marker-countdown");
         usageIndicator->setCurrentIndex(qMax(0,usageIndicator->findData(QSettings().value("workspace/usageIndicator","rails"))));

@@ -395,8 +395,15 @@ void TerminalScreen::paintEvent(QPaintEvent *event) {
                Padding + m_cursor.row * m_cellHeight, m_cellWidth,
                m_cellHeight);
     painter.setPen(Foreground);
-    if (!hasFocus())
-      painter.drawRect(rect.adjusted(0, 0, -1, -1));
+    if (!hasFocus()) {
+      // A stroked outline is centred on the cell edge: above a device pixel
+      // ratio of 1 its top half lands in the row above, which updateCursor()
+      // never invalidates. Fill the four edges inside the cell instead.
+      painter.fillRect(QRect(rect.topLeft(), QSize(rect.width(), 1)), Foreground);
+      painter.fillRect(QRect(rect.left(), rect.bottom(), rect.width(), 1), Foreground);
+      painter.fillRect(QRect(rect.topLeft(), QSize(1, rect.height())), Foreground);
+      painter.fillRect(QRect(rect.right(), rect.top(), 1, rect.height()), Foreground);
+    }
     else if (m_cursorShape == VTERM_PROP_CURSORSHAPE_BAR_LEFT)
       painter.fillRect(QRect(rect.topLeft(), QSize(2, rect.height())),
                        Foreground);

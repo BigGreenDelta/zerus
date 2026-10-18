@@ -29,7 +29,23 @@ pub(super) fn clock(record: &Value) -> Option<Clock> {
                 .checked_add(time.tv_nsec as u64 / 1_000_000)?,
         })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
+        // Boot-relative interrupt ticks exclude sleep/hibernation. Resolution is
+        // the system timer's, not 100 ns precision; never adjust the timer here.
+        // The reducer still requires exact native boundaries and generation, and
+        // rejects wall/monotonic drift above its existing five-second tolerance.
+        let mut ticks = 0u64;
+        if unsafe { QueryUnbiasedInterruptTime(&mut ticks) } == 0 {
+            return None;
+        }
+        Some(Clock {
+            generation: Identity::new(&[run, process]),
+            monotonic_ms: ticks.checked_div(10_000)?,
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (run, process);
         None

@@ -646,6 +646,54 @@ private slots:
         QVERIFY2(open.contains(1),shown.constData());for(int fd:creating.ends)QVERIFY2(!open.contains(fd),shown.constData());
 #endif
     }
+    void oldLoginItemIsRecognizedByItsPriorityLimit(){
+        const QString label="com.hgdev.hgs-tray";
+        // Measured under launchd: no ProcessType (or Standard) stops every thread at 20,
+        // Background and Adaptive at 4; Interactive, like an app started by Finder, at 63.
+        QVERIFY(UpdateController::launchedDeprioritized(20,label));
+        QVERIFY(UpdateController::launchedDeprioritized(4,label));
+        QVERIFY(!UpdateController::launchedDeprioritized(63,label));
+        QVERIFY(!UpdateController::launchedDeprioritized(31,label));
+        QVERIFY(!UpdateController::launchedDeprioritized(-1,label));
+        // Only Zerus's own login item: LaunchServices names apps "application.<id>.<n>.<n>".
+        QVERIFY(!UpdateController::launchedDeprioritized(20,"application.com.hgdev.hgs-tray.1234.5678"));
+        QVERIFY(!UpdateController::launchedDeprioritized(20,{}));
+#ifdef Q_OS_MACOS
+        QVERIFY(UpdateController::threadMaxPriority()>0);
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        const auto restore=qScopeGuard([]{UpdateController::setLaunchForTests(-1);});
+        const QString executable=dir.path()+"/Zerus.app/Contents/MacOS/hgs-tray";
+        UpdateController::setLaunchForTests(20,label);
+        UpdateController clamped(nullptr,executable);QVERIFY(clamped.loginItemDeprioritized());
+        UpdateController::setLaunchForTests(63,label);
+        UpdateController interactive(nullptr,executable);QVERIFY(!interactive.loginItemDeprioritized());
+#else
+        QCOMPARE(UpdateController::threadMaxPriority(),-1);
+#endif
+    }
+    void loginItemUpdateOnlyRunsTheBundledSetup(){
+#ifndef Q_OS_UNIX
+        QSKIP("zerus-setup is part of the macOS bundle");
+#else
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        const QString contents=dir.path()+"/Zerus.app/Contents",setup=contents+"/Resources/bin/zerus-setup";
+        QVERIFY(QDir().mkpath(contents+"/MacOS"));QVERIFY(QDir().mkpath(contents+"/Resources/bin"));
+        UpdateController controller(nullptr,contents+"/MacOS/hgs-tray");
+        // A source installation has no zerus-setup: say what to run instead.
+        QVERIFY(controller.loginItemSetup().isEmpty());
+        QString result=QStringLiteral("pending");controller.updateLoginItem([&](const QString &error){result=error;});
+        QVERIFY2(result.contains("tray/install.sh"),qPrintable(result));
+        tool(setup,"#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/arguments\"\n");
+        QCOMPARE(controller.loginItemSetup(),setup);
+        result=QStringLiteral("pending");controller.updateLoginItem([&](const QString &error){result=error;});
+        QTRY_COMPARE(result,QString());
+        QFile arguments(contents+"/Resources/bin/arguments");QVERIFY(arguments.open(QIODevice::ReadOnly));QCOMPARE(arguments.readAll(),QByteArray("--autostart\n"));
+        // A refusal reaches the person in zerus-setup's own words, from its stderr.
+        QVERIFY(QFile::remove(setup));tool(setup,"#!/bin/sh\necho 'zerus-setup: the login item belongs to another installation' >&2\nexit 2\n");
+        result=QStringLiteral("pending");controller.updateLoginItem([&](const QString &error){result=error;});
+        QTRY_VERIFY(result!="pending");QVERIFY2(result.contains("belongs to another installation"),qPrintable(result));
+#endif
+    }
     void canonicalOwnershipAsync(){
 #ifdef Q_OS_LINUX
         QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();auto oldPath=qgetenv("PATH");qputenv("PATH",dir.path().toUtf8()+":"+oldPath);qputenv("ZERUS_TEST_LOG",(dir.path()+"/args.json").toUtf8());

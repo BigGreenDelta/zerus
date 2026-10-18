@@ -855,3 +855,224 @@ fn typed_failure_invalidates_only_its_observed_owner_work_interval() {
         );
     }
 }
+
+#[test]
+fn native_clock_requires_generation_and_supported_platform_time() {
+    let record = json!({"run_id":"synthetic-run","process_start":"synthetic-generation"});
+    let first = adapters::clock(&record);
+    #[cfg(any(unix, windows))]
+    {
+        let first = first.expect("supported native clock must be available");
+        let second = adapters::clock(&record).unwrap();
+        assert_eq!(first.generation.0, second.generation.0);
+        assert!(second.monotonic_ms >= first.monotonic_ms);
+        let changed = adapters::clock(
+            &json!({"run_id":"another-run","process_start":"synthetic-generation"}),
+        )
+        .unwrap();
+        assert_ne!(first.generation.0, changed.generation.0);
+        let changed = adapters::clock(
+            &json!({"run_id":"synthetic-run","process_start":"another-generation"}),
+        )
+        .unwrap();
+        assert_ne!(first.generation.0, changed.generation.0);
+    }
+    #[cfg(not(any(unix, windows)))]
+    assert!(first.is_none());
+    for missing in [
+        json!({}),
+        json!({"run_id":"synthetic-run"}),
+        json!({"process_start":"synthetic-generation"}),
+    ] {
+        assert!(adapters::clock(&missing).is_none());
+    }
+}
+
+#[test]
+fn wait_counts_and_durations_require_matching_clock_evidence() {
+    for case in 0..5 {
+        let (_dir, mut db) = enabled();
+        let mut ask = event("ask", Kind::WaitStarted(Interval::Input), AT);
+        let mut answer = event("answer", Kind::WaitResolved(Interval::Input), AT + 1000);
+        match case {
+            1 => {
+                ask.clock = None;
+                answer.clock = None;
+            }
+            2 => {
+                answer.clock.as_mut().unwrap().generation = Identity::new(&["restarted"]);
+            }
+            // Model suspend: native elapsed excludes sleep; UTC has moved ahead.
+            3 => {
+                answer.observed_ms += 6000;
+            }
+            // Merely having a clock never supplies a matching native request.
+            4 => {
+                answer.correlation = Some(Identity::new(&["foreign-request"]));
+            }
+            _ => (),
+        }
+        db.record(&ask, AT).unwrap();
+        db.record(&answer, AT + 7000).unwrap();
+        db.record(&answer, AT + 7000).unwrap();
+        let value = summary(&db);
+        assert_eq!(total(&value, "input_requested"), 1, "case {case}");
+        assert_eq!(
+            total(&value, "input_resolved"),
+            u64::from(!matches!(case, 1 | 4)),
+            "case {case}"
+        );
+        assert_eq!(
+            total(&value, "input_wait_ms"),
+            if case == 0 { 1000 } else { 0 },
+            "case {case}"
+        );
+        assert_eq!(value["unresolved_waits"]["observed"], u64::from(case == 4));
+    }
+}
+
+#[test]
+fn native_batch_commits_events_and_cursor_together_or_rolls_back() {
+    for case in 0..3 {
+        let (dir, mut db) = enabled();
+        let reader = Store::open(dir.path(), false, false).unwrap().unwrap();
+        let source = Identity::new(&["source"]);
+        let fingerprint = Identity::new(&["file"]);
+        let mut batch = db.native_batch(&source, AT).unwrap().unwrap();
+        assert!(batch
+            .record(&event("batch-event", Kind::TurnCompleted, AT), AT)
+            .unwrap());
+        assert_eq!(total(&summary(&reader), "turn_completed"), 0);
+        assert!(reader.cursor(&source).unwrap().is_none());
+        match case {
+            0 => {
+                batch.save_cursor(&source, &fingerprint, 123, AT).unwrap();
+                batch.commit().unwrap();
+            }
+            1 => {
+                drop(batch);
+            }
+            2 => {
+                assert!(batch
+                    .save_cursor(&source, &fingerprint, u64::MAX, AT)
+                    .is_err());
+                assert!(batch.commit().is_err());
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            total(&summary(&reader), "turn_completed"),
+            u64::from(case == 0)
+        );
+        assert_eq!(
+            reader.cursor(&source).unwrap().map(|(_, offset)| offset),
+            if case == 0 { Some(123) } else { None }
+        );
+    }
+}
+
+#[test]
+fn native_batch_rejected_event_rolls_back_its_partial_counters_and_continues() {
+    let (_dir, mut db) = enabled();
+    let source = Identity::new(&["source"]);
+    let mut batch = db.native_batch(&source, AT).unwrap().unwrap();
+    let first = event("first", Kind::TurnCompleted, AT);
+    assert!(batch.record(&first, AT).unwrap());
+    let mut conflict = first.clone();
+    conflict.observed_ms += 1;
+    assert!(batch.record(&conflict, AT + 1).is_err());
+    let mut invalid = event("invalid-clock", Kind::TurnStarted, AT);
+    invalid.clock.as_mut().unwrap().monotonic_ms = MAX_VALUE + 1;
+    assert!(batch.record(&invalid, AT).is_err());
+    batch.note_gap(Gap::Observation, AT).unwrap();
+    assert!(batch
+        .record(&event("last", Kind::TurnCompleted, AT), AT)
+        .unwrap());
+    batch
+        .save_cursor(&source, &Identity::new(&["file"]), 99, AT)
+        .unwrap();
+    batch.commit().unwrap();
+    let value = summary(&db);
+    assert_eq!(total(&value, "turn_completed"), 2);
+    assert_eq!(total(&value, "turn_started"), 0);
+    assert_eq!(db.cursor(&source).unwrap().unwrap().1, 99);
+    // Failed event identity was rolled back along with its counters.
+    invalid.clock.as_mut().unwrap().monotonic_ms = 100;
+    assert!(db.record(&invalid, AT).unwrap());
+    assert_eq!(total(&summary(&db), "turn_started"), 1);
+}
+
+#[test]
+fn native_batch_busy_and_cursor_quota_fail_before_accepting_events() {
+    let (dir, mut db) = enabled();
+    let mut raw = rusqlite::Connection::open(dir.path().join("analytics.sqlite3")).unwrap();
+    let source = Identity::new(&["source"]);
+    let lock = raw
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(db.native_batch(&source, AT).is_err());
+    lock.rollback().unwrap();
+    raw.execute("UPDATE metadata SET cursor_rows=10000 WHERE id=1", [])
+        .unwrap();
+    assert!(db.native_batch(&source, AT).is_err());
+    assert!(db.cursor(&source).unwrap().is_none());
+    assert!(summary(&db)["coverage"]["gaps"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("quota_exhausted")));
+    raw.execute("UPDATE metadata SET cursor_rows=0 WHERE id=1", [])
+        .unwrap();
+    assert!(db.native_batch(&source, AT).unwrap().is_some());
+}
+
+#[test]
+fn unknown_record_error_keeps_the_batch_poisoned_after_successful_cleanup() {
+    let (dir, mut db) = enabled();
+    let seed = event("seed", Kind::TurnCompleted, AT);
+    db.record(&seed, AT).unwrap();
+    let raw = rusqlite::Connection::open(dir.path().join("analytics.sqlite3")).unwrap();
+    let payload: String = raw
+        .query_row(
+            "SELECT payload FROM daily WHERE provider='codex'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    raw.execute(
+        "UPDATE daily SET payload='invalid-json' WHERE provider='codex'",
+        [],
+    )
+    .unwrap();
+    let source = Identity::new(&["source"]);
+    let mut first = event("first-valid", Kind::TurnCompleted, AT);
+    first.provider = Provider::Claude;
+    let second = event("second-valid", Kind::TurnCompleted, AT);
+    let mut batch = db.native_batch(&source, AT).unwrap().unwrap();
+    assert!(batch.record(&first, AT).unwrap());
+    // Decoding corrupt stored JSON is neither a SQLite error nor rejected native
+    // metadata. Successful savepoint cleanup must not make it safe to continue.
+    assert!(batch.record(&second, AT).is_err());
+    assert!(
+        batch.commit().is_err(),
+        "unclassified errors must poison the batch"
+    );
+    assert_eq!(
+        raw.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(db.cursor(&source).unwrap().is_none());
+    raw.execute(
+        "UPDATE daily SET payload=? WHERE provider='codex'",
+        [payload],
+    )
+    .unwrap();
+    let mut batch = db.native_batch(&source, AT).unwrap().unwrap();
+    assert!(batch.record(&first, AT).unwrap());
+    assert!(batch.record(&second, AT).unwrap());
+    batch
+        .save_cursor(&source, &Identity::new(&["file"]), 123, AT)
+        .unwrap();
+    batch.commit().unwrap();
+    assert_eq!(total(&summary(&db), "turn_completed"), 3);
+}

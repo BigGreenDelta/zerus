@@ -314,7 +314,9 @@ int FleetState::attentionSessions(qint64 nowMs) const
 QString FleetState::tooltip(qint64 nowMs) const
 {
     QStringList lines;
-    lines << QStringLiteral("%1 need attention, %2 sessions total").arg(attentionSessions(nowMs)).arg(totalSessions());
+    const int attention = attentionSessions(nowMs), total = totalSessions();
+    lines << (attention == 1 ? QStringLiteral("1 needs attention") : QStringLiteral("%1 need attention").arg(attention))
+                 + (total == 1 ? QStringLiteral(", 1 session total") : QStringLiteral(", %1 sessions total").arg(total));
     // A control-only computer has no sessions of its own to count.
     if (m_local.localSessions)
         lines << QStringLiteral("%1 here").arg(m_haveLocal ? visibleSessionCount(m_local) : 0);

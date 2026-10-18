@@ -231,6 +231,7 @@ private slots:
     void activitySurfaceRemainsOpaque();
     void settingsSlidersResetToDefaults();
     void projectSwarmFollowsWorkspaceTheme();
+    void followSystemAppearanceFollowsARuntimePaletteChange();
     void alwaysOnTopSettingKeepsWindowAbove();
     void railPinTogglesAlwaysOnTop();
     void windowLayerControlsKeepFocusAndLayout_data();
@@ -1309,6 +1310,23 @@ void TestSessionsWindow::projectSwarmFollowsWorkspaceTheme()
         QTimer timeout;timeout.setSingleShot(true);connect(&timeout,&QTimer::timeout,&window,[]{if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()))dialog->reject();});timeout.start(5000);
         showSwarmDialog(&client,&controller,fleet,&window,[]{});QVERIFY(checked);
     }
+}
+
+void TestSessionsWindow::followSystemAppearanceFollowsARuntimePaletteChange()
+{
+    // A system light/dark switch changes the application palette while Zerus runs.
+    const auto restore=qScopeGuard([]{QApplication::setPalette(QPalette());QSettings().remove("workspace/theme");});
+    QPalette light;light.setColor(QPalette::Window,QColor("#f0f0f0"));light.setColor(QPalette::WindowText,Qt::black);
+    QPalette dark;dark.setColor(QPalette::Window,QColor("#202020"));dark.setColor(QPalette::WindowText,Qt::white);
+    QApplication::setPalette(light);QSettings().setValue("workspace/theme","system");
+    SessionsWindow window(program());window.setFleet(fleet());window.show();
+    auto *list=window.findChild<QWidget*>("sessionList");QVERIFY(list);
+    QVERIFY(!list->property("hgsDark").toBool());
+    QApplication::setPalette(dark);QTRY_VERIFY(list->property("hgsDark").toBool());
+    QApplication::setPalette(light);QTRY_VERIFY(!list->property("hgsDark").toBool());
+    // An explicit theme ignores the system appearance.
+    QSettings().setValue("workspace/theme","light");QApplication::setPalette(dark);
+    QTest::qWait(50);QVERIFY(!list->property("hgsDark").toBool());
 }
 
 void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
@@ -9067,7 +9085,10 @@ void TestSessionsWindow::openCodeStoppedServiceOffersExplicitStart()
         {"activity_detail","OpenCode is not running on fixture"},{"cursor",0}};
     QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
     const QByteArray answer="elif c=='account' and a[1:2]==['start']:\n"
-        " open(__file__+'.started','a').write(json.dumps(sys.argv[1:])+'\\n')\n"
+        " import time\n"
+        " with open(__file__+'.started','a') as started:\n"
+        "  time.sleep(0.2)\n"
+        "  started.write(json.dumps(sys.argv[1:])+'\\n')\n"
         " print(json.dumps({'model_options':[],'settings_model':'','catalog_state':'ready','catalog_reason':'','catalog_at':1791018000}))\n"
         "elif c=='inspect' and a[1:2]==["+FakeCli::pythonString(name)+"]:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact)))+")\n";
     const auto fixture=m_dir->filePath("opencode-stopped-service"),started=fixture+".started";
@@ -9089,11 +9110,12 @@ void TestSessionsWindow::openCodeStoppedServiceOffersExplicitStart()
     auto offline=box;offline.ok=false;state.setLocal(offline,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
     QTRY_VERIFY(!start->isEnabled());start->click();QTest::qWait(100);QVERIFY(!QFileInfo::exists(started));
     state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QTRY_VERIFY(start->isEnabled());
-    start->click();QTRY_VERIFY(QFileInfo::exists(started));
+    const auto noticed=[&](const QString &text){for(auto *label:window.findChildren<QLabel *>())if(label->isVisible()&&label->text().contains(text))return true;return false;};
+    start->click();
+    // File creation precedes the fixture's write; completion proves it is closed.
+    QTRY_VERIFY(noticed("OpenCode started on arch."));
     QFile calls(started);QVERIFY(calls.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(calls.readAll().trimmed()).array(),QJsonArray({"account","start","native-opencode","--json"}));
-    const auto noticed=[&](const QString &text){for(auto *label:window.findChildren<QLabel *>())if(label->isVisible()&&label->text().contains(text))return true;return false;};
-    QTRY_VERIFY(noticed("OpenCode started on arch."));
     // Other OpenCode states never show it.
     auto running=details;running["state"]="running";running.remove("inspection_unavailable");running.remove("inspection_reason");
     client->inspectionReady({},name,running);QTRY_VERIFY(!banner->isVisible());
@@ -9136,6 +9158,8 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     const auto bounds = [&] { return QRect(list->mapTo(&window, QPoint()), list->size()); };
     const auto originalBounds = bounds();
     auto *statusBar = window.findChild<QFrame *>("workspaceStatus"); QVERIFY(statusBar); QCOMPARE(statusBar->height(), 28);
+    // Only a Zerus that its login item started at background priority offers the fix.
+    auto *loginItem = statusBar->findChild<QPushButton *>("fixLoginItem"); QVERIFY(loginItem); QVERIFY(loginItem->isHidden());
     window.showNotificationNotice(QString(2000, 'x') + "\nRefreshing…"); QCoreApplication::processEvents();
     QCOMPARE(bounds(), originalBounds);
     // A native failure must stay visible after the previous success notice expires.
@@ -10034,7 +10058,7 @@ print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer
     SessionsWindow window(FakeCli::program(script));window.resize(1100,900);window.setFleet(state);window.show();
     window.findChild<QPushButton *>("workspaceSettings")->click();auto &page=*static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"));page.openRecovery();
     auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
-    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("Synchronized across 1 machines"),20000);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("Synchronized with 1 machine."),20000);
     auto *save=window.findChild<QPushButton *>("recoverySave");QTRY_VERIFY(save->isEnabled());
     window.findChild<QCheckBox *>("recoveryEnabled")->setChecked(true);save->click();
     QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(script+".saved"),20000);
@@ -10088,7 +10112,7 @@ print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer
     // Recovery includes this computer as well as the remote machine.
     static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"))->openRecovery();
     auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
-    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("Synchronized across 2 machines"),20000);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("Synchronized across 2 machines."),20000);
     local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     window.setFleet(state);QVERIFY(!sections->item(5)->isHidden());
     local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());

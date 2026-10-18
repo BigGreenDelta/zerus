@@ -327,7 +327,7 @@ void TestAttention::countsOnlyActionableFreshSessions()
     QCOMPARE(fleet.attentionSessions(1000), 2);
     QCOMPARE(fleet.attentionSessions(1000 + FleetState::kPeerStaleMs), 1);
     box.ok = false; fleet.setPeer(box, 1500); QCOMPARE(fleet.attentionSessions(1500), 1);
-    QVERIFY(fleet.tooltip(1500).startsWith("1 need attention"));
+    QVERIFY(fleet.tooltip(1500).startsWith("1 needs attention"));
     box.host = "arch"; fleet.setLocal(box, 1500); QCOMPARE(fleet.attentionSessions(1500), 0);
 }
 
