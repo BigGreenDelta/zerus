@@ -660,6 +660,10 @@ The Android history cache is private and encrypted, with atomic files outside
 Android backup. It retains at most twenty conversations and twenty MiB for seven
 days, with a one-MiB limit per inspection. Disconnecting a workspace purges its
 history. Cache failures fall back to a network read and do not damage drafts.
+After a workspace is durably disconnected, Android clears only read errors owned
+by that exact connection. Catalog failures from an older connection set cannot
+restore its banner after disconnecting or pairing again. Errors from other
+workspaces and unowned mutation or storage failures remain visible.
 Native message IDs and journal sequence numbers identify rows. Legacy messages
 without either use scoped fingerprints; array positions are not message IDs.
 History parsing and reconciliation run away from the typing path.

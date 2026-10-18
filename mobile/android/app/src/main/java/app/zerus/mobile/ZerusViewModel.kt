@@ -1869,6 +1869,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             catch (e: RelayException) { if (e.status != 401) throw e }
             val next = connections.filterNot { it.id == connection.id }
             withContext(Dispatchers.IO) { store.saveConnections(next) }; connections = next
+            if (catalogErrorOwner == connection.id || detailReadErrorOwner?.first?.connectionId == connection.id) error = ""
             accountsWriter?.edit { rows -> rows.filterNot { it.key.connectionId==connection.id } }; accountsWriter?.flushAsync()
             inspections.values.filter { it.first.connectionId == connection.id }.forEach { it.second.cancel() }
             inspections.entries.removeAll { it.value.first.connectionId == connection.id }
@@ -1936,7 +1937,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     successfulConnections += connection.id
                     if (catalogGate.owns(operation.id) && connections == originalConnections && catalogErrorOwner == connection.id) error = ""
                 } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { if (catalogGate.owns(operation.id) && selected == null) {
+                catch (e: Exception) { if (catalogGate.owns(operation.id) && connections == originalConnections && selected == null) {
                     error = "${connection.displayName}: ${ReadFailure.message(e, "sessions")}"; catalogErrorOwner = connection.id
                 } }
             }
