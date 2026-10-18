@@ -110,6 +110,23 @@ QPointF chipPadding(const QTextCharFormat &format)
     return format.boolProperty(ChipHeading) ? QPointF(0.2 * em, 0) : QPointF(0.4 * em, 0.2 * em);
 }
 
+// Whether the block's text can be underlined, overlined or struck out, by its
+// own formats or by the document's font. A line draws these after its glyphs,
+// with the painter's own antialiasing.
+bool decorated(const QTextBlock &block, const QFont &documentFont)
+{
+    const auto marked = [&](const QTextCharFormat &format) {
+        const QFont font = format.font().resolve(documentFont);
+        return font.underline() || font.overline() || font.strikeOut()
+            || format.underlineStyle() != QTextCharFormat::NoUnderline || format.fontUnderline();
+    };
+    if (documentFont.underline() || documentFont.overline() || documentFont.strikeOut() || marked(block.charFormat()))
+        return true;
+    for (auto it = block.begin(); !it.atEnd(); ++it)
+        if (marked(it.fragment().charFormat())) return true;
+    return false;
+}
+
 // Content and layout indexes are independent: resizing keeps the code runs but
 // rebuilds their block bounds. Paint only the blocks intersecting the viewport.
 class Chips final : public QObject {
@@ -120,6 +137,7 @@ public:
         QTextBlock block;
         QRectF bounds, padded;
         qsizetype begin = 0, end = 0;
+        bool decorated = false;
     };
     explicit Chips(QTextDocument *document) : QObject(document), m_document(document)
     {
@@ -156,7 +174,8 @@ public:
             do { padding = qMax(padding, qreal(code[i++].format.font().pixelSize())); }
             while (i < code.size() && block.contains(code[i].start));
             const QRectF bounds = layout->blockBoundingRect(block);
-            m_blocks.append({block, bounds, bounds.adjusted(-padding, -padding, padding, padding), begin, i});
+            m_blocks.append({block, bounds, bounds.adjusted(-padding, -padding, padding, padding), begin, i,
+                             decorated(block, m_document->defaultFont())});
         }
         std::sort(m_blocks.begin(), m_blocks.end(), [](const auto &a, const auto &b) { return a.padded.top() < b.padded.top(); });
         // Blocks in table columns need not be ordered vertically, or have equal
@@ -334,10 +353,11 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
     if (!chips) return;
     auto *layout = document->documentLayout();
     struct Piece { QPainterPath shape; QColor fill; QTextBlock block; };
-    QList<Piece> pieces; QList<QTextBlock> blocks;
+    QList<Piece> pieces; QList<QTextBlock> blocks, decoratedBlocks;
     const auto &runs = chips->runs();
     for (const auto *entry : chips->visible(exposed)) {
         const auto block = entry->block; const auto bounds = entry->bounds;
+        if (entry->decorated) decoratedBlocks.append(block);
         const QTextLayout *text = block.layout(); const QString content = block.text();
         for (qsizetype r = entry->begin; r < entry->end; ++r) {
             const auto &run = runs[r];
@@ -460,6 +480,14 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
     painter->save(); painter->setRenderHint(QPainter::Antialiasing);
     for (const auto &piece : std::as_const(pieces)) painter->fillPath(piece.shape, piece.fill);
     painter->restore();
+    // Under a scaling device transform (HiDPI), QPainter turns antialiasing on
+    // and off again around every text item it draws, and each change makes the
+    // raster engine rasterize the whole clip path anew. The text is drawn under
+    // the antialiased clip either way; set it once, before the clip. Selected
+    // and found text keep the toggling: their highlights fill without it. So do
+    // decorated blocks, whose lines draw their decorations after the glyphs, and
+    // blocks whose layouts carry extra formats, which may add decorations.
+    const bool scaled = painter->deviceTransform().type() >= QTransform::TxScale;
     for (const auto &batch : std::as_const(batches)) {
         const auto each = batch.block;
         QList<QTextLayout::FormatRange> ranges;
@@ -468,6 +496,8 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
             if (start < each.length() && end > 0 && end > start) ranges.append({start, end - start, selection.format});
         }
         painter->save();
+        if (scaled && ranges.isEmpty() && !decoratedBlocks.contains(each) && each.layout()->formats().isEmpty())
+            painter->setRenderHint(QPainter::Antialiasing);
         if (batch.sliced) painter->setClipRect(batch.clip, Qt::IntersectClip);
         painter->setClipPath(batch.area, Qt::IntersectClip);
         painter->setPen(palette.color(QPalette::Text));

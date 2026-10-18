@@ -8,6 +8,7 @@
 #include <QImage>
 #include <QPainter>
 #include <QPalette>
+#include <QSet>
 #include <QTest>
 #include <QTextBlock>
 #include <QTextCursor>
@@ -123,6 +124,8 @@ private slots:
     void codeLinesKeepTheParagraphPitch();
     void wrappedCodeKeepsRoundedEnds();
     void selectedCodeKeepsTheSelectionLook();
+    void denseShortCodeCostsAtHiDpiLikeOtherText();
+    void decoratedCodeKeepsItsLinesAtHiDpi();
 };
 
 void TestMarkdownObjects::resourcesAreDrawnAtScaleAndPixelRatio()
@@ -479,6 +482,88 @@ void TestMarkdownObjects::selectedCodeKeepsTheSelectionLook()
     };
     QVERIFY(close(middleOf(5), over(theme.chip, Qt::white)));
     QVERIFY(close(middleOf(10), QColor("#00ff00")));
+}
+
+void TestMarkdownObjects::denseShortCodeCostsAtHiDpiLikeOtherText()
+{
+    // Many short chips in one paragraph, as in lists of names or tags. Under a
+    // scaling transform QPainter turns antialiasing on and off around each text
+    // item; when every change rasterized the rounded clip again, a 2x frame of
+    // this paragraph cost about 60 times a 1x frame (180 ms on a Mac).
+    const auto theme = MarkdownTheme::github(true, QColor("#1d252e"), 1.25);
+    QString prose = QString::fromUtf8("Метки: убраны устаревшие (");
+    for (int i = 0; i < 40; ++i) prose += QString("`tag-%1`, ").arg(i);
+    prose += QString::fromUtf8("остальные остались на месте.");
+    QTextDocument doc; doc.setHtml(ContentScale::html(MarkdownHtml::render(prose, theme, {}), 1.25));
+    MarkdownObjects::convertChips(&doc, theme); doc.setTextWidth(850);
+    MarkdownObjects::prepareChips(&doc);
+    const QSizeF size = doc.documentLayout()->documentSize();
+    QPalette palette; palette.setColor(QPalette::Base, theme.canvas);
+    QAbstractTextDocumentLayout::PaintContext context; context.palette = palette; context.clip = QRectF(QPointF(), size);
+    const auto cost = [&](qreal ratio) {
+        QImage image(qCeil(size.width() * ratio), qCeil(size.height() * ratio), QImage::Format_ARGB32_Premultiplied);
+        image.setDevicePixelRatio(ratio);
+        qint64 best = std::numeric_limits<qint64>::max();
+        for (int run = 0; run < 3; ++run) {
+            const auto start = threadCpuMs();
+            for (int frame = 0; frame < 20; ++frame) {
+                image.fill(theme.canvas); QPainter painter(&image);
+                doc.documentLayout()->draw(&painter, context);
+                MarkdownObjects::paintChips(&painter, &doc, context.clip, palette, {});
+            }
+            best = std::min(best, threadCpuMs() - start);
+        }
+        return best;
+    };
+    // Measured together, so the host's speed cancels: four times the pixels
+    // cost about twice the time, compared with sixty times before.
+    const qint64 standard = cost(1), hiDpi = cost(2);
+    QVERIFY2(hiDpi < 8 * qMax<qint64>(standard, 5),
+             qPrintable(QString("%1 ms at 2x, %2 ms at 1x for 20 frames").arg(hiDpi).arg(standard)));
+}
+
+void TestMarkdownObjects::decoratedCodeKeepsItsLinesAtHiDpi()
+{
+    // Lines draw underlines and overlines after their glyphs, with the
+    // painter's own antialiasing: in chips as on the text around them, none.
+    const auto theme = MarkdownTheme::github(true, QColor("#1d252e"), 1.25);
+    QPalette palette; palette.setColor(QPalette::Base, theme.canvas);
+    QAbstractTextDocumentLayout::PaintContext context; context.palette = palette;
+    const auto paint = [&](QTextDocument &doc, qreal ratio) {
+        const QSizeF size = doc.documentLayout()->documentSize();
+        QImage image(qCeil(size.width() * ratio), qCeil(size.height() * ratio), QImage::Format_ARGB32_Premultiplied);
+        image.setDevicePixelRatio(ratio); image.fill(theme.canvas);
+        QPainter painter(&image); doc.documentLayout()->draw(&painter, context);
+        MarkdownObjects::paintChips(&painter, &doc, QRectF(QPointF(), size), palette, {});
+        return image;
+    };
+    const auto decorate = [](QTextDocument &doc, bool underline) {
+        auto code = doc.find("a     b"); QTextCharFormat format;
+        if (underline) format.setFontUnderline(true); else format.setFontOverline(true);
+        code.mergeCharFormat(format);
+    };
+    for (const int variant : {0, 1, 2}) {   // underline, overline, underline added after a paint
+        QTextDocument doc; doc.setHtml(ContentScale::html(MarkdownHtml::render("Spaced `a     b` code.", theme, {}), 1.25));
+        MarkdownObjects::convertChips(&doc, theme); doc.setTextWidth(850);
+        if (variant == 2) paint(doc, 2);   // indexes the chips before the change
+        decorate(doc, variant != 1);
+        const QTextBlock block = doc.begin();
+        const int from = block.text().indexOf("a     b") + 1, to = from + 5;
+        QTextCursor code(&doc); code.setPosition(block.position() + from + 1);
+        const QFont font = code.charFormat().font(); const QFontMetricsF metrics(font);
+        const qreal padding = 0.2 * font.pixelSize();
+        const QTextLine line = block.layout()->lineForTextPosition(from);
+        const QPointF origin = doc.documentLayout()->blockBoundingRect(block).topLeft();
+        const qreal x = origin.x() + (line.cursorToX(from) + line.cursorToX(to)) / 2, baseline = origin.y() + line.y() + line.ascent();
+        for (const qreal ratio : {1.5, 2.0}) {
+            const QImage image = paint(doc, ratio);
+            // Between the letters and inside the chip's fill: only the chip and its line.
+            QSet<QRgb> colors;
+            for (int y = qCeil((baseline - metrics.ascent() - padding) * ratio) + 2; y < qFloor((baseline + metrics.descent() + padding) * ratio) - 2; ++y)
+                colors.insert(image.pixel(qFloor(x * ratio), y));
+            QVERIFY2(colors.size() == 2, qPrintable(QString("%1 colours in case %2 at %3x").arg(colors.size()).arg(variant).arg(ratio)));
+        }
+    }
 }
 
 QTEST_MAIN(TestMarkdownObjects)
