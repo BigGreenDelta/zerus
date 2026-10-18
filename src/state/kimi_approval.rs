@@ -52,8 +52,9 @@ pub(super) fn recover(record: &Value, events: &[Value]) -> Vec<Value> {
 }
 
 /// Unresolved interaction requests by ID, the first record of each, and
-/// whether one cannot be told apart: a request without an ID, or another
-/// request with the ID of one still unresolved.
+/// whether one cannot be told apart: a request or closure without a
+/// non-empty string ID, another request with the ID of one still unresolved,
+/// or an interaction record of a kind Kimi 2.1.1 and 2.2.0 do not write.
 struct Open {
     pending: BTreeMap<String, Value>,
     ambiguous: bool,
@@ -65,17 +66,18 @@ fn open(events: &[Value]) -> Open {
         ambiguous: false,
     };
     for event in events {
-        let id = string(event, "id");
-        match string(event, "type") {
-            "interaction.request" if id.is_empty() || open.pending.contains_key(id) => {
-                open.ambiguous = true;
-            }
-            "interaction.request" => {
+        let id = event["id"].as_str().filter(|id| !id.is_empty());
+        match (string(event, "type"), id) {
+            ("interaction.request", Some(id)) if !open.pending.contains_key(id) => {
                 open.pending.insert(id.to_owned(), event.clone());
             }
-            "interaction.resolved" | "interaction.cancelled" | "interaction.dismissed" => {
+            (
+                "interaction.resolved" | "interaction.cancelled" | "interaction.dismissed",
+                Some(id),
+            ) => {
                 open.pending.remove(id);
             }
+            (kind, _) if kind.starts_with("interaction.") => open.ambiguous = true,
             _ => {}
         }
     }
@@ -403,9 +405,17 @@ fn card(record: &Value, event: &Value) -> Option<Value> {
     Some(card)
 }
 
+/// Each record's decoded type. Every record Kimi 2.1.1 and 2.2.0 write names
+/// one; a JSON escape spells the same type.
+#[derive(serde::Deserialize)]
+struct Header {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
 /// Every interaction record of a whole wire. Err when the wire is longer than
 /// `max`, ends in a record Kimi is still writing, or holds any line that is
-/// not JSON: then a request may be missing.
+/// not a JSON record with one string type: then a request may be missing.
 fn history(path: &Path, max: u64) -> Result<Vec<Value>> {
     let unreadable = |_| UNVERIFIED.to_owned();
     let mut bytes = Vec::new();
@@ -422,13 +432,9 @@ fn history(path: &Path, max: u64) -> Result<Vec<Value>> {
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
     {
-        if !line.windows(12).any(|part| part == b"interaction.") {
-            serde_json::from_slice::<serde::de::IgnoredAny>(line).map_err(|_| UNVERIFIED)?;
-            continue;
-        }
-        let record: Value = serde_json::from_slice(line).map_err(|_| UNVERIFIED)?;
-        if string(&record, "type").starts_with("interaction.") {
-            events.push(record);
+        let header: Header = serde_json::from_slice(line).map_err(|_| UNVERIFIED)?;
+        if header.kind.starts_with("interaction.") {
+            events.push(serde_json::from_slice(line).map_err(|_| UNVERIFIED)?);
         }
     }
     Ok(events)
@@ -1474,6 +1480,91 @@ mod tests {
             fs::write(&wire, wire_text).unwrap();
             assert_eq!(bound(&r, &card).unwrap_err(), UNVERIFIED, "{case}");
         }
+    }
+
+    #[test]
+    fn every_record_is_read_by_its_decoded_type_and_identity() {
+        let mut old = request("approval_old", "tool_old", COMMAND);
+        old["time"] = json!(1000);
+        let new = request("approval_new", "tool_bash", COMMAND);
+        let h = home(&[], &[]);
+        let wire = h
+            .path()
+            .join("sessions/workspace/session_test/agents/main/wire.jsonl");
+        let r = record(h.path());
+        let card = only(&r, std::slice::from_ref(&new));
+        let old_line = old.to_string();
+        assert!(old_line.contains(r#""type":"interaction.request""#));
+        let choosing = screen(&BODY, CHOOSING, HINT_ROW);
+        let pick = json!([{"question_id":"approval","selected_option_ids":["1"],"text":""}]);
+        let feedback =
+            json!([{"question_id":"approval","selected_option_ids":[],"text":"use a dry run"}]);
+        let refused = |text: String, refusal: &str| {
+            fs::write(&wire, text).unwrap();
+            assert!(bound(&r, &card).unwrap_err().contains(refusal), "{refusal}");
+            for answer in [&pick, &feedback] {
+                let mut io = Fixture {
+                    screens: vec![choosing.clone(), String::new()],
+                    keys: vec![],
+                    pastes: vec![],
+                    response: Some(json!({"decision":"approved"})),
+                };
+                let mut check = || bound(&r, &card).map(|_| ());
+                assert!(drive(&mut io, &mut check, &new["request"], &card, answer).is_err());
+                assert!(io.keys.is_empty() && io.pastes.is_empty());
+            }
+        };
+        // JSON escapes spell the same old request: it still waits.
+        for spelled in [
+            old_line.replace(
+                r#""type":"interaction.request""#,
+                r#""type":"interaction.request""#,
+            ),
+            old_line.replace(
+                r#""type":"interaction.request""#,
+                r#""type":"interaction.request""#,
+            ),
+            old_line.replace(r#""id":"approval_old""#, r#""id":"approval_old""#),
+        ] {
+            assert_ne!(spelled, old_line);
+            refused(format!("{spelled}\n{new}\n"), "Another Kimi request");
+        }
+        // An interaction record Zerus cannot identify might close or be any request.
+        for unknown in [
+            r#"{"type":"interaction.resolved","agentId":"main"}"#,
+            r#"{"type":"interaction.resolved","agentId":"main","id":5}"#,
+            r#"{"type":"interaction.resolved","agentId":"main","id":""}"#,
+            r#"{"type":"interaction.cancelled","agentId":"main","id":null}"#,
+            r#"{"type":"interaction.reopened","agentId":"main","id":"approval_old"}"#,
+            r#"{"type":"interaction.request","agentId":"main","id":7}"#,
+        ] {
+            refused(format!("{old_line}\n{unknown}\n{new}\n"), UNVERIFIED);
+        }
+        // Every record names one string type.
+        for malformed in [
+            r#"{"time":1}"#,
+            r#"{"type":5,"time":1}"#,
+            r#"{"type":"turn.ended","type":"interaction.request","id":"x"}"#,
+            "[]",
+        ] {
+            refused(format!("{malformed}\n{new}\n"), UNVERIFIED);
+        }
+        // A closure decoded from escapes closes exactly that request.
+        let closed = format!(
+            "{old_line}\n{}\n{new}\n",
+            r#"{"type":"interaction.resolved","agentId":"main","id":"approval_old","response":{"decision":"approved"},"time":1100}"#
+        );
+        fs::write(&wire, closed).unwrap();
+        assert_eq!(bound(&r, &card).unwrap()["id"], "approval_new");
+        // Other records stay what they are, whatever text they hold.
+        let unrelated = [
+            json!({"type":"context.append_message","time":1200,"text":"mentions interaction.request and \"id\""}),
+            json!({"type":"turn.ended","turnId":1,"time":1300}),
+            json!({"type":"metadata","time":1400}),
+        ];
+        let lines: String = unrelated.iter().map(|row| format!("{row}\n")).collect();
+        fs::write(&wire, format!("{lines}{new}\n")).unwrap();
+        assert_eq!(bound(&r, &card).unwrap()["id"], "approval_new");
     }
 
     /// Records `line` on `wire` after the transport's `after`-th write, as

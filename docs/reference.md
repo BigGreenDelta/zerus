@@ -1264,8 +1264,10 @@ working directory, description and danger warning row by row, wrapped as Kimi
 wraps it, and the complete history of every agent of the conversation may hold
 no other unresolved Kimi request, however old: nothing proves that Kimi no
 longer shows one. A history longer than 8 MiB (4 MiB for another agent), a
-record Kimi is still writing, an unreadable line or a repeated request ID keeps
-the approval read-only. Every key and pasted feedback line first finds the same
+record Kimi is still writing, a line that is not a JSON record with one string
+type, an interaction record without its ID or of a kind Kimi does not write,
+or a repeated request ID keeps the approval read-only. Types and IDs are
+compared as decoded JSON. Every key and pasted feedback line first finds the same
 unresolved request, with its active tool call, in the same run, process and
 pane. The
 choices are Kimi's: **Approve once**, **Approve for this session**, **Reject** and
