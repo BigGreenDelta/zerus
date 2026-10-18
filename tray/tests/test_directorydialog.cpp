@@ -19,6 +19,7 @@
 #include <QUuid>
 #include "DirectoryDialog.h"
 #include "FakeCli.h"
+#include "MachinePlatform.h"
 
 class TestDirectoryDialog : public QObject {
     Q_OBJECT
@@ -375,6 +376,18 @@ sys.exit(1)
         // Do not read or overwrite a person's Cocoa/X11/Wayland clipboard.
         if (QGuiApplication::platformName() != "offscreen") QSKIP("Private clipboard interaction uses the offscreen platform only");
         QFETCH(QString, host);
+        const auto style = host.isEmpty() ? MachinePlatform::build() : MachinePlatform::Style::Posix;
+        const QString parent = style == MachinePlatform::Style::Windows
+            ? QStringLiteral("C:/fixture/projects") : QStringLiteral("/fixture/projects");
+        QVERIFY(MachinePlatform::absolute(parent, style));
+        if (style == MachinePlatform::Style::Windows) {
+            // The local fake must prove a native absolute parent, just as the
+            // real CLI does. Remote peers keep their POSIX fixture unchanged.
+            QFile script(m_fixture.filePath("hgs")); QVERIFY(script.open(QIODevice::ReadOnly));
+            auto contents = script.readAll(); script.close();
+            contents.replace("/fixture/projects", parent.toUtf8());
+            QVERIFY(FakeCli::install(m_fixture.filePath("hgs"), contents));
+        }
         QWidget workspace; workspace.setStyleSheet(workspaceStyle(true, 1.0));
         DirectoryDialog browser(program(), host, "~", &workspace); browser.show(); browser.activateWindow(); QApplication::setActiveWindow(&browser);
         auto *open = browser.findChild<QPushButton *>("newFolder"); QTRY_VERIFY(open->isEnabled()); open->click();
@@ -383,10 +396,10 @@ sys.exit(1)
         QApplication::clipboard()->setText(leaf); QTest::keySequence(name, QKeySequence(QKeySequence::Paste));
         QCOMPARE(name->text(), leaf); QVERIFY(editorInk(name) > name->fontMetrics().height() * 3);
         QTest::keyClick(name, Qt::Key_Return);
-        QTRY_COMPARE(browser.directory(), "/fixture/projects/" + leaf); QCOMPARE(mutations(), 1); QVERIFY(browser.isVisible());
+        QTRY_COMPARE(browser.directory(), parent + '/' + leaf); QCOMPARE(mutations(), 1); QVERIFY(browser.isVisible());
         for (const auto &call : calls()) if (call.toObject()["args"].toArray().contains("--create")) {
             QCOMPARE(call.toObject()["host"].toString(), host);
-            QCOMPARE(call.toObject()["args"].toArray().at(2).toString(), "/fixture/projects/" + leaf);
+            QCOMPARE(call.toObject()["args"].toArray().at(2).toString(), parent + '/' + leaf);
         }
         QApplication::clipboard()->clear();
     }
