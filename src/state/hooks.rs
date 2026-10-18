@@ -1341,8 +1341,13 @@ mod tests {
     }
     #[test]
     fn tracking_repair_does_not_enable_or_widen_answer_channels() {
-        let empty=merge_json_mode("{}",Path::new("/config"),"claude",false,&mut ||Ok(Entry::shell("hgs __state hook".into())),&mut ||Some((2,1,296)),false).unwrap().unwrap();
-        assert!(!health_document(&empty,"claude",Some((2,1,296))).unwrap()["answer_channel_registered"].as_bool().unwrap());
+        for (windows, entry) in [
+            (false, Entry::shell("hgs __state hook".into())),
+            (true, forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap()),
+        ] {
+            let empty=merge_json_mode("{}",Path::new("/config"),"claude",windows,&mut ||Ok(entry.clone()),&mut ||Some((2,1,296)),false).unwrap().unwrap();
+            assert!(!health_document(&empty,"claude",Some((2,1,296))).unwrap()["answer_channel_registered"].as_bool().unwrap());
+        }
         let original=json!({"hooks":{"PermissionRequest":[{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"hgs __state answer-channel"}]}]}});
         let merged=merge_json_mode(&original.to_string(),Path::new("/config"),"claude",false,&mut ||Ok(Entry::shell("hgs __state hook".into())),&mut ||Some((2,1,296)),false).unwrap().unwrap();
         let value:Value=serde_json::from_str(&merged).unwrap();assert_eq!(value["hooks"]["PermissionRequest"][0],original["hooks"]["PermissionRequest"][0]);
