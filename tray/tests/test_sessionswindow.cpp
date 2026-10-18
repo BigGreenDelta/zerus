@@ -3560,6 +3560,8 @@ void TestSessionsWindow::inspectionBehindSettingsReceiptKeepsTheChange()
     // An inspection that read the session before a settings change and answers
     // after its scheduled receipt must not drop the queued change: the idle
     // listing still starts its automatic apply (zerus-ssoi, slow Windows runners).
+    // The held inspection answers only once the window has the receipt; a fixed
+    // delay let a late process exit deliver it first on macOS (zerus-6qdm).
     constexpr int Timeout = 20000;
     QTemporaryDir directory; QVERIFY(directory.isValid());
     const QString program = directory.filePath("hgs"), snapshot = directory.filePath("snapshot.json");
@@ -3583,13 +3585,13 @@ if args[0]=='inspect':
  if args[1]!='codex/hgs/dashboard':
   print(json.dumps({'tracked':True,'run_id':'run-other','conversation_id':'conversation-other','activity':'idle','phase':'idle','cursor':0,'events':[]}));sys.exit()
  text=(root/'snapshot.json').read_text()
- if (root/'hold').exists() and not (root/'settled').exists():
-  # Read before the change; answer only after its receipt.
+ if (root/'hold').exists() and not (root/'held').exists():
+  # Read before the change; answer only once the test has its receipt.
   (root/'held').write_text('1')
   for _ in range(1000):
-   if (root/'settled').exists():break
+   if (root/'release').exists():break
    time.sleep(.01)
-  time.sleep(.3)
+  data=json.loads(text);data['fixture_reply']='held';text=json.dumps(data)
  print(text)
 elif args[0]=='settings':
  p=json.load(sys.stdin)
@@ -3606,8 +3608,7 @@ elif args[0]=='settings':
   data['model']=p['model'];data['effort']=p['effort']
   for field in ['pending_model','pending_effort','pending_settings_id']:data.pop(field,None)
   publish(data);receipt['status']='applied'
- print(json.dumps(receipt));sys.stdout.flush()
- if previous==0:(root/'settled').write_text('1')
+ print(json.dumps(receipt))
 )PY"));
     auto current = fleet(); auto box = current.local(); box.sessions[0].runId = "run-original";
     current.setLocal(box, QDateTime::currentMSecsSinceEpoch());
@@ -3624,10 +3625,21 @@ elif args[0]=='settings':
     auto *apply = composer->findChild<QPushButton *>("applySessionSettings"); QVERIFY(apply->isEnabled()); apply->click();
     QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 1, Timeout);
     QCOMPARE(changes[0][2].toJsonObject().value("status").toString(), QString("scheduled"));
-    // The held reply, from before the change, arrives after the receipt.
+    // The receipt met the held inspection in flight; only now may it answer.
+    QVERIFY(client->inspectionInFlight({}, "codex/hgs/dashboard"));
+    const auto heldReply = [&](qsizetype from) {
+        for (auto index = from; index < inspections.size(); ++index)
+            if (inspections[index][2].toJsonObject().value("fixture_reply") == "held") return index;
+        return qsizetype(-1);
+    };
     const auto seen = inspections.size();
-    QTRY_VERIFY_WITH_TIMEOUT(inspections.size() > seen, Timeout);
-    QVERIFY(!inspections.last()[2].toJsonObject().contains("pending_settings_id"));
+    QCOMPARE(heldReply(0), qsizetype(-1));
+    QFile release(directory.filePath("release")); QVERIFY(release.open(QIODevice::WriteOnly)); release.close();
+    // The held reply, from before the change, arrives after the receipt.
+    QTRY_VERIFY_WITH_TIMEOUT(heldReply(seen) >= 0, Timeout);
+    const auto held = inspections[heldReply(seen)];
+    QCOMPARE(held[1].toString(), QString("codex/hgs/dashboard"));
+    QVERIFY(!held[2].toJsonObject().contains("pending_settings_id"));
     box.sessions[0].activity = "idle"; box.sessions[0].phase = "idle"; box.sessions[0].processState = "running";
     current.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(current);
     QTRY_COMPARE_WITH_TIMEOUT(changes.size(), 2, Timeout);

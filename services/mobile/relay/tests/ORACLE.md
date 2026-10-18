@@ -228,21 +228,35 @@ already require the Rust relay and never serve Python.
 
 ## Differences found
 
-None of these needed a Rust change in this slice. They are listed so the
-owner can decide whether any is a contract question:
+None of these keeps the Python behaviour. The owner decided each contract
+question on 2026-10-18; the Rust relay's rule is the contract:
 
-- A workspace over its retained-payload budget gets 429 from both relays, but
-  Python's error text names the retained payload and Rust's is the generic
-  "relay capacity is busy". Phones act on the status only.
-- Python's `RateLimits` also bounded authenticated requests globally and per
-  IP address. Rust bounds them per credential (2,400 a minute) and by its
-  admission lanes; the Terminal budget fits both.
-- A body holding a lone UTF-16 surrogate escape, such as `"\ud800"`, is
-  refused with 400 by Rust, whose strings must be valid Unicode
-  (`codec::bodies_parse_as_python_json_loads_does`). Python's `json.loads`
-  keeps it, so Python accepts it wherever it does not check the text, for
-  example in a heartbeat snapshot or in the answers of an `answer`, and
-  refuses it in checked text such as a send's.
+- **DEL (U+007F)** is a control character in every identity the relay checks:
+  `session`, `computer_id` and the `expected_run_id`/`expected_conversation_id`
+  of a send, answer or interrupt are refused with 400, as for the C0 controls.
+  Python's `text()` refused only C0 controls. The Rust connector's identity
+  checks already counted DEL as a control; an answer's `question_id` and
+  `expected_question_hash` stay unchecked by both relays, since native `hgs`
+  verifies them (zerus-3rqx.6, `vectors.rs` `ORACLE_DIFFERENCES`).
+- **A workspace over its own limits** gets 429 from both relays with the text
+  that names the limit, which Android shows: "workspace queue is full",
+  "workspace retained request limit reached" and "workspace retained payload
+  budget is full". Only the relay's own capacity (its shared payload shards,
+  lanes and rates) answers "relay capacity is busy" (zerus-3rqx.8,
+  `operation_contracts::retained_bodies_reach_the_budget_while_exact_retries_and_controls_fit`,
+  `contracts::retained_request_counts_name_their_own_limit`).
+- **Rate limits:** Python's `RateLimits` also bounded authenticated requests
+  globally and per IP address. The relay bounds them per credential (2,400 a
+  minute) and by its admission lanes, and the Terminal budget fits both. Global
+  and per-address limits belong to the reverse proxy, which a shared public
+  relay needs before it opens (zerus-3rqx.9, `docs/mobile-deployment.md`).
+- **Lone surrogates:** a body holding a lone UTF-16 surrogate escape, such as
+  `"\ud800"`, is refused with 400, since the relay's strings must be valid
+  Unicode (`codec::bodies_parse_as_python_json_loads_does`). Python's
+  `json.loads` kept it wherever it did not check the text, for example in a
+  heartbeat snapshot or in the answers of an `answer`. No released client sends
+  one: `hgs` and serde_json never write one, the Python connector forwards
+  `hgs` JSON, and Android's UTF-8 encoding replaces one with `?` (zerus-3rqx.10).
 - Rust appends presence `alert` events beside ordinary events and queues wakes
   only for them; Python wakes phones on every ordinary event. The contracts
   that compare event lists skip `alert` rows. This is the reviewed presence

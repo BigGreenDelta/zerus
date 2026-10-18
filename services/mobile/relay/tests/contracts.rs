@@ -809,10 +809,8 @@ async fn budgets_reserve_results_and_release_on_expiry() {
     .await;
     let b = f.command("send");
     f.submit(&b).await.unwrap();
-    assert_eq!(
-        f.submit(&f.command("send")).await.unwrap_err().0.as_u16(),
-        429
-    );
+    let full = f.submit(&f.command("send")).await.unwrap_err();
+    assert_eq!((full.0.as_u16(), full.1), (429, "workspace queue is full"));
     f.store
         .db
         .exec(
@@ -830,6 +828,27 @@ async fn budgets_reserve_results_and_release_on_expiry() {
     );
     f.submit(&f.command("send")).await.unwrap();
     f.check_accounting().await;
+    f.close().await;
+}
+#[tokio::test]
+async fn retained_request_counts_name_their_own_limit() {
+    let f = Fixture::new().await;
+    // A workspace at its retained read limit still takes mutations, and the
+    // phone is told which limit it reached rather than that the relay is busy.
+    f.store
+        .db
+        .exec(
+            "UPDATE workspace_usage SET reads=5000 WHERE workspace_id=?",
+            args![&f.phone.workspace],
+        )
+        .await
+        .unwrap();
+    let limit = f.submit(&f.command("inspect")).await.unwrap_err();
+    assert_eq!(
+        (limit.0.as_u16(), limit.1),
+        (429, "workspace retained request limit reached")
+    );
+    f.submit(&f.command("send")).await.unwrap();
     f.close().await;
 }
 #[tokio::test]

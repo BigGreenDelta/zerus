@@ -60,10 +60,10 @@ class SessionFiltersTest {
         assertFalse(SessionFilters.active(finished,true))
     }
     private val machines = listOf(Machine("a", "same", "Computer A", true), Machine("b", "same", "Computer B", false))
-    private fun session(raw: String = "{}", connection: String = "a", pending: Int = 0, archive: String = "", name: String = "codex/project/task"): Session {
+    private fun session(raw: String = "{}", connection: String = "a", pending: Int? = null, archive: String = "", name: String = "codex/project/task"): Session {
         val data=JSONObject(raw)
         return Session(Target("same", name, data.string("run_id").ifBlank {"run"}, data.string("conversation_id").ifBlank {"conversation"}, connection, archive),
-            "Long title", "codex", "MISLEADING UI STATUS", "Project", "Preview", pending, data)
+            "Long title", "codex", "MISLEADING UI STATUS", "Project", "Preview", pending ?: QuestionPolicies.blockingRequests(data), data)
     }
     @Test fun filtersFollowSharedDesktopContract() {
         val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/session-filter-contract.json")).bufferedReader().use { it.readText() })
@@ -168,7 +168,7 @@ class SessionFiltersTest {
     @Test fun activeCountsUnionOnceAndPreservesExplicitAttentionOffline() {
         val working = session("""{"activity":"busy","phase":"tool"}""", name = "codex/project/working")
         val attention = session("""{"activity":"idle","phase":"input"}""", name = "codex/project/input")
-        val overlap = session("""{"activity":"busy"}""", pending = 1, name = "codex/project/optional-question")
+        val overlap = session("""{"activity":"busy"}""", pending = 1, name = "codex/project/pending-request")
         val child = session("""{"activity":"idle","subagents":{"child":{"display_state":"input"}}}""", name = "codex/project/child")
         val reminder = session("""{"state":"paused","review_later":true}""", connection = "b", name = "codex/project/reminder")
         val archived = session("""{"activity":"busy","phase":"input","review_later":true}""", archive = "archive-one")
@@ -193,9 +193,42 @@ class SessionFiltersTest {
         }
         assertFalse(SessionFilters.needsAction(session("""{"state":"paused","recovery":{"state":"blocked"}}""")))
     }
-    @Test fun optionalQuestionsAndExplicitChildRequestsCountButRoutineFailuresDoNot() {
-        assertTrue(SessionFilters.needsAttention(session("""{"activity":"busy"}""", pending = 1), true))
-        assertFalse(SessionFilters.needsAttention(session("""{"activity":"busy"}""", pending = 1), false))
+    @Test fun optionalOnlySessionsAreNotAttentionButRequiredAndExplicitChildRequestsAreAndRoutineFailuresAreNot() {
+        val optional = JSONObject("""{"question_id":"codex-async:c:0","question_hash":"h0","optional":true}""")
+        // Older connectors omit `optional`; every codex-async card is optional.
+        val olderOptional = JSONObject("""{"question_id":"codex-async:c:1","question_hash":"h1"}""")
+        val required = JSONObject("""{"question_id":"request","question_hash":"h2"}""")
+        val summary = JSONObject("""{"count":2,"ids":["codex-async:c:0","codex-async:c:1"],"latest_at":1760000000}""")
+        for (base in listOf("""{"activity":"busy","phase":"tool"}""", """{"activity":"idle","phase":"idle"}""")) {
+            val listed = JSONObject(base).put("mobile_attention", JSONArray(listOf(optional, olderOptional))).put("optional_questions", summary)
+            val olderComputer = JSONObject(base).put("mobile_attention", JSONArray(listOf(olderOptional)))
+            for (raw in listOf(listed, olderComputer)) {
+                // The agent keeps working without them, as on the desktop: no status, filter or counter.
+                val item = session(raw.toString())
+                assertEquals(0, item.pendingCount)
+                assertFalse(SessionFilters.needsAttention(item, true))
+                assertEquals(SessionFilters.working(item, true), SessionFilters.active(item, true))
+                assertEquals(0, SessionFilters.counts(listOf(item), machines).getValue(SessionFilter.Attention))
+                assertNotEquals(DesktopBadgeKind.Attention, DesktopSessionPalette.badge(item, true).kind)
+                // A required request, approval, error or explicit child request beside them still needs attention.
+                val withRequired = session(JSONObject(raw.toString()).apply { getJSONArray("mobile_attention").put(required) }.toString())
+                assertEquals(1, withRequired.pendingCount)
+                assertTrue(SessionFilters.needsAttention(withRequired, true))
+                assertEquals(1, SessionFilters.counts(listOf(withRequired), machines).getValue(SessionFilter.Attention))
+                listOf("input", "approval", "error").forEach { phase ->
+                    assertTrue(SessionFilters.needsAttention(session(JSONObject(raw.toString()).put("phase", phase).toString()), true))
+                }
+                assertTrue(SessionFilters.needsAttention(session(JSONObject(raw.toString())
+                    .put("subagents", JSONObject().put("child", JSONObject().put("display_state", "input"))).toString()), true))
+                // Offline rows keep only device reminders, as before.
+                assertFalse(SessionFilters.needsAttention(withRequired, false))
+                assertFalse(SessionFilters.needsAttention(item, false))
+                assertTrue(SessionFilters.needsAttention(session(JSONObject(raw.toString()).put("mobile_review_later", true).toString()), false))
+            }
+        }
+        // Without connector items, the older pending count stays a blocking request.
+        assertTrue(SessionFilters.needsAttention(session("""{"activity":"busy","pending_question_count":1}"""), true))
+        assertFalse(SessionFilters.needsAttention(session("""{"activity":"busy","pending_question_count":1}"""), false))
         listOf("input", "approval", "attention").forEach { child ->
             assertTrue(SessionFilters.needsAttention(session(JSONObject().put("activity", "busy").put("subagents", JSONObject().put("child", JSONObject().put("display_state", child))).toString()), true))
         }
