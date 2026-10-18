@@ -1,11 +1,22 @@
 #include "AttentionNotifier.h"
 #include "TrayIcon.h"
 
+#include <QIcon>
 #include <QPointer>
 #include <QSet>
 #include <QSystemTrayIcon>
 
 namespace {
+// The program's own colored icon (resources.qrc, the artwork of hgs-tray.exe's
+// icon): a standard Information icon shows as a generic "i" in a Windows toast.
+QIcon programIcon()
+{
+    QIcon icon;
+    for (const int size : {16, 24, 32, 48, 64, 128, 256})
+        icon.addFile(QStringLiteral(":/hgs/icons/hgs-zerus-%1.png").arg(size), QSize(size, size));
+    return icon;
+}
+
 // Windows: an attention notice is a message of the tray icon (a toast on Windows
 // 10/11). Delivered messages cannot be retracted, so withdraw() only stops a later
 // click from opening a session that no longer needs attention.
@@ -21,7 +32,7 @@ public:
         }
         m_pending.insert(token);
         const QPointer<WindowsAttentionNotifier> self(this);
-        m_tray.showClickableMessage(title, body, QSystemTrayIcon::Information, 15000, [self, token]() {
+        m_tray.showClickableIconMessage(title, body, programIcon(), 15000, [self, token]() {
             if (self && self->m_pending.contains(token))
                 emit self->activated(token, QString());
         });

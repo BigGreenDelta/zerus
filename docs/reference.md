@@ -2745,8 +2745,9 @@ session and Accounts offer this computer without DeepSeek and OpenCode, the shel
 entry is **Run PowerShell**, voice messages to its sessions are disabled with the
 reason as the tooltip, and it is listed at most once every 5 seconds. In both modes,
 Settings → Mobile connection is hidden and no desktop presence is recorded.
-Attention notices are tray notifications with a taskbar badge. A start without
-options opens the workspace, because Windows 11 first hides a new notification
+Attention notices are tray notifications with the Zerus icon and a taskbar
+badge. A start without options opens the workspace, because Windows 11 first
+hides a new notification
 icon in the overflow; `--background` starts in the notification area only, as a
 Startup-folder shortcut should. Starting `hgs-tray.exe` again opens the running
 app's workspace, unless with `--background`. After a main-thread watchdog abort,

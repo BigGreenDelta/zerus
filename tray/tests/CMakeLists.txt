@@ -606,7 +606,7 @@ set_tests_properties(phonepairing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscr
 # Windows pieces with portable logic: the Windows Terminal command, the console
 # host, terminal templates, tray-icon notifications and the swarm worker the
 # Windows tray supervises.
-add_executable(test_windowsdesktop test_windowsdesktop.cpp)
+add_executable(test_windowsdesktop test_windowsdesktop.cpp ../resources.qrc)
 target_include_directories(test_windowsdesktop PRIVATE ../src)
 target_link_libraries(test_windowsdesktop PRIVATE Qt6::Test Qt6::Widgets hgs-tray-windows)
 if(WIN32)
