@@ -324,7 +324,12 @@ When the computer advertises `mark_read`, reaching the newest reply (a fresh
 complete head read through on this phone), Mark read and Read all also send the
 exact run, conversation, reply and attention signature to the session's
 computer, which shares them with every desktop and phone. A reply or request read
-elsewhere is shown as read here. Review later stays on this phone.
+elsewhere can be adopted here for the exact verified selected reply. Automatic
+adoption for a nonselected conversation is deferred: fleet hints do not prove
+which canonical incoming prefix belongs to that shared reply. Its unread indicator
+may stay stale until a verified selection or explicit Mark read / Read all.
+Review later stays on this phone. This interim guard does not add native prefix
+proof or change explicit reading and Read all.
 Bounded background metadata probes can prepare canonical heads for live sessions
 with reported reply evidence, without opening their conversations or fetching
 full history. Previously unvisited sessions with unknown evidence are not
