@@ -6,7 +6,10 @@ mod catalog;
 mod forms;
 mod history;
 mod service;
-pub(crate) use catalog::{catalog, install_state, start_from_accounts};
+pub(crate) use catalog::catalog;
+// Accounts reads the install state and starts the service only on Unix.
+#[cfg(unix)]
+pub(crate) use catalog::{install_state, start_from_accounts};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
