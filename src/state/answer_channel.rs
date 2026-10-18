@@ -813,9 +813,14 @@ mod tests {
         write(&dir, WAITING, &json!(Waiting::new(&record(), &card(), std::process::id(), 60.))).unwrap();
         (temp, std::thread::spawn(move || act(&dir)))
     }
+    // Fsync on hosted runners can take most of a second: a stand-in claims
+    // well within `claim_wait`, and a handover meant to arrive gets 5 s.
     fn delivered(dir: &Path, screen: &std::cell::Cell<u32>) -> Result<&'static str> {
-        deliver(dir, &json!({"request_id":"one","answers":{}}), Duration::from_millis(300),
-            Duration::from_millis(300), || { screen.set(screen.get() + 1); Ok(()) })
+        delivered_within(dir, screen, Duration::from_millis(300))
+    }
+    fn delivered_within(dir: &Path, screen: &std::cell::Cell<u32>, handover: Duration) -> Result<&'static str> {
+        deliver(dir, &json!({"request_id":"one","answers":{}}), Duration::from_secs(3),
+            handover, || { screen.set(screen.get() + 1); Ok(()) })
     }
 
     #[test]
@@ -825,7 +830,7 @@ mod tests {
             write(dir, EMITTED, &json!({"request_id":"one"})).unwrap();
         });
         let screen = std::cell::Cell::new(0);
-        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_hook");
+        assert_eq!(delivered_within(temp.path(), &screen, Duration::from_secs(5)).unwrap(), "claude_hook");
         assert_eq!(screen.get(), 0);
         waiting.join().unwrap();
     }
@@ -877,7 +882,7 @@ mod tests {
             write(dir, EMITTED, &json!({"request_id":"one"})).unwrap();
         });
         let screen = std::cell::Cell::new(0);
-        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_hook");
+        assert_eq!(delivered_within(temp.path(), &screen, Duration::from_secs(5)).unwrap(), "claude_hook");
         assert_eq!(screen.get(), 0);
         waiting.join().unwrap();
     }
@@ -958,7 +963,7 @@ mod tests {
             close(dir, "terminated");
         });
         let screen = std::cell::Cell::new(0);
-        assert_eq!(delivered(temp.path(), &screen).unwrap(), "claude_hook");
+        assert_eq!(delivered_within(temp.path(), &screen, Duration::from_secs(5)).unwrap(), "claude_hook");
         assert_eq!(screen.get(), 0);
         waiting.join().unwrap();
     }
