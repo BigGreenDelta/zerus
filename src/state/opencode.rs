@@ -112,9 +112,19 @@ fn legacy_verdict(record: &Value, migration: &Value, session: Option<&Value>) ->
     }
 }
 type Reply = std::result::Result<Response, String>;
+/// Server text as an OpenCode reason presents it: `journal::clipped`'s
+/// escape-sequence removal, tabs and line breaks and its 300-character cap,
+/// and in addition without DEL or C1 controls, which `clipped` keeps. The
+/// controls are dropped before the cap, so they never count toward it.
+pub(super) fn server_reason(text: &str) -> String {
+    let clean: String = journal::clipped(&json!(text), usize::MAX)
+        .chars()
+        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
+        .collect();
+    journal::clipped(&json!(clean), 300)
+}
 /// OpenCode's refusal as a session row or error carries it: the server's own
-/// message clipped to 300 characters, without escape sequences or control
-/// characters other than tabs and line breaks.
+/// message as `server_reason` presents it.
 fn refusal_text(response: &Response) -> String {
     let reason = response.body["message"]
         .as_str()
@@ -123,7 +133,7 @@ fn refusal_text(response: &Response) -> String {
     format!(
         "OpenCode HTTP {}: {}",
         response.status,
-        journal::clipped(&json!(reason), 300)
+        server_reason(reason)
     )
 }
 fn successful(response: &Response) -> bool {
@@ -2042,6 +2052,24 @@ mod tests {
             refusal_text(&silent),
             "OpenCode HTTP 502: Native operation refused"
         );
+        // DEL and C1 controls go too, and do not count toward the bound.
+        let c1 = Response {
+            status: 409,
+            body: json!({"message": "a\u{7f}b\u{85}c\u{9b}31md\te\nf"}),
+        };
+        assert_eq!(refusal_text(&c1), "OpenCode HTTP 409: abc31md\te\nf");
+        let padded = Response {
+            status: 500,
+            body: json!({ "message": format!("{}{}", "\u{85}\u{7f}\u{9b}".repeat(100), "x".repeat(400)) }),
+        };
+        let text = refusal_text(&padded);
+        assert_eq!(text, format!("OpenCode HTTP 500: {}…", "x".repeat(300)));
+        let native = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/x".into(),
+            500,
+            padded.body.clone(),
+        )]));
+        assert_eq!(get(&native, "/api/x").unwrap_err(), text);
     }
     #[test]
     fn a_queued_message_is_found_in_the_inbox_after_a_lost_response() {

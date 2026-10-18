@@ -150,7 +150,7 @@ fn cached_at(path: &Path, home: &Path) -> Option<Value> {
 }
 
 /// The catalog answer. Its reason can carry server text to phones, so it is
-/// clipped and sanitized as session rows clip OpenCode's messages.
+/// presented as session rows present OpenCode's messages (`server_reason`).
 fn answer(
     options: Value,
     selected: &str,
@@ -160,7 +160,7 @@ fn answer(
     at: Value,
 ) -> Value {
     json!({"model_options": options, "settings_model": selected, "model_catalog_source": source,
-        "catalog_state": state, "catalog_reason": journal::clipped(&json!(reason), 300), "catalog_at": at})
+        "catalog_state": state, "catalog_reason": super::server_reason(reason), "catalog_at": at})
 }
 
 fn unavailable(why: &Unavailable, home_location: bool) -> Value {
@@ -534,6 +534,27 @@ mod tests {
         assert!(reason.starts_with("OpenCode HTTP 500: zzz") && reason.ends_with('…'));
         assert!(!reason.chars().any(char::is_control));
         assert_eq!(row["catalog_state"], "unreachable");
+        // DEL and C1 controls go too, and do not count toward the bound.
+        let c1 = format!("OpenCode HTTP 500: \u{7f}\u{85}\u{9b}{}", "q".repeat(400));
+        let row = answer(
+            json!([]),
+            "",
+            "unavailable",
+            "unreachable",
+            &c1,
+            Value::Null,
+        );
+        let reason = row["catalog_reason"].as_str().unwrap();
+        assert_eq!(reason, format!("OpenCode HTTP 500: {}…", "q".repeat(281)));
+        let short = answer(
+            json!([]),
+            "",
+            "unavailable",
+            "unreachable",
+            "a\u{7f}\tb\u{85}\nc\u{9b}",
+            Value::Null,
+        );
+        assert_eq!(short["catalog_reason"], "a\tb\nc");
         // Zerus's own reasons stay byte for byte.
         for (state, reason) in [
             ("ready", String::new()),
