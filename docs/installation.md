@@ -216,13 +216,21 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.hgdev.hgs-tray.pli
 `brew upgrade --cask zerus` (or the installed nightly/dev cask) replaces the application but never
 quits it, unloads its LaunchAgents or stops tmux and native agents. When the
 installed bundle is another build than the running GUI, Zerus shows **Restart to
-finish update**; drafts are kept. Background workers keep the previous binary until
-you restart them:
+finish update**; drafts are kept. Background workers finish their current round
+and exit when an upgrade replaces their executable, and launchd starts the new
+version. A worker that `launchctl print "gui/$(id -u)/com.hgdev.hgs-swarm"` shows
+without a `pid` and with `last exit code = 78: EX_CONFIG` cannot be started: the
+system log reports `Unable to get updated LWCR`, a launch constraint from its Login
+Items record that names an earlier build, which launchd's retries do not renew. Running
+`zerus-setup --workers` (or `install.sh` for a source installation) again loads such
+a worker again, as does:
 
 ```sh
-launchctl kickstart -k "gui/$(id -u)/com.hgdev.hgs-recovery"
-launchctl kickstart -k "gui/$(id -u)/com.hgdev.hgs-swarm"
+launchctl bootout "gui/$(id -u)/com.hgdev.hgs-swarm"
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.hgdev.hgs-swarm.plist
 ```
+
+Use `com.hgdev.hgs-recovery` the same way.
 
 To uninstall, remove the per-user integration first:
 
