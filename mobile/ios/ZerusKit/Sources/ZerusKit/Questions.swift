@@ -490,7 +490,9 @@ public struct QuestionDisplayState: Hashable, Sendable {
 }
 
 /// Three continuous foreground, visible seconds of one card; background time never approves an action. Another card
-/// shown in the same place (another target, ID or hash) starts its own review.
+/// shown in the same place (another target, ID or hash) starts its own review. Only `observe`, called when the card's
+/// eligibility or identity changes, starts a review; clock ticks in between only let it run, so leaving (background,
+/// out of view) always means a full new review after returning.
 public struct ApprovalReview: Hashable, Sendable {
     public var startedAt: Double?
     /// The reviewed card, `key(_:_:)`; "" where only one card is reviewed.
@@ -507,6 +509,14 @@ public struct ApprovalReview: Hashable, Sendable {
     public func observe(eligible: Bool, now: Double, card: String = "") -> ApprovalReview {
         if !eligible || (startedAt.map { now < $0 } ?? false) { return ApprovalReview(card: card) }
         return startedAt == nil || card != self.card ? ApprovalReview(startedAt: now, card: card) : self
+    }
+
+    /// A clock tick while the card stays eligible: it lets this card's started review run on and never starts or
+    /// re-arms one. A late tick from a clock stopped because the card left therefore cannot complete a review that
+    /// leaving reset; a tick for another card leaves this review alone, and a clock that went back resets it.
+    public func tick(now: Double, card: String) -> ApprovalReview {
+        guard card == self.card, let startedAt, now < startedAt else { return self }
+        return ApprovalReview(card: card)
     }
 
     /// A card this review did not observe has its full review ahead, even before the next observation.
