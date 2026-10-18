@@ -166,7 +166,7 @@ object NativeParser {
             Session(Target(machine.getString("id"), raw.string("name"), raw.string("run_id"), raw.string("conversation_id"), connection.id, archive),
                 raw.string("title", "label", "name"), raw.string("agent", "cmd"),
                 if (raw.string("phase") in listOf("input", "approval", "error")) raw.string("phase") else raw.string("activity", "phase", "state"),
-                raw.string("project", "cwd"), SessionPreview.render(raw.string("last_message", "prompt")), raw.optJSONArray("mobile_attention")?.length() ?: raw.optInt("pending_question_count"), raw)
+                raw.string("project", "cwd"), SessionPreview.render(raw.string("last_message", "prompt")), QuestionPolicies.blockingRequests(raw), raw)
         }
     }
     fun events(raw: JSONObject): List<Event> {

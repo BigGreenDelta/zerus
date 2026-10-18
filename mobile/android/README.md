@@ -192,9 +192,13 @@ they are edited, cleared or sent; archived sessions remain exclusive to Archive.
 Drafts stay on their device; desktop and Android share the filter rules and IDs.
 Work requires a reachable computer and a current running agent;
 input, approval, non-recovering errors, and blocked recovery require attention.
-Optional native questions and explicit child requests also count as attention.
-Routine child failures and legacy hook-profile observations do not. Saved
-sessions are paused or stopped; Archive contains immutable archived histories.
+Explicit child requests and blocking native requests also count as attention;
+routine child failures and legacy hook-profile observations do not. As on the
+desktop, optional Codex questions, which the agent keeps working without, are
+not attention: a session whose only pending items are optional questions stays
+out of Needs attention and its counters, while a required question, approval,
+error or child request beside them still counts. Saved sessions are paused or
+stopped; Archive contains immutable archived histories.
 
 The computer filter supports several machines across workspaces. Counts and
 cards use the same computer, project, and search scope. Results form collapsible
@@ -236,7 +240,7 @@ lists persist with the other Sessions state. A running session with pending
 optional Codex questions, which the agent keeps working without, shows an
 amber question-mark chip with their count (`99+` above 99) right after its
 status badge, as on the desktop; its spoken description says how many are
-waiting. It shares the amber of attention but changes no status or count.
+waiting. It shares the amber of attention but changes no status, filter or count.
 The listing's `optional_questions` count wins. Without it (an older computer, or
 while hgs cannot read its question index), the chip counts the connector's
 optional attention items once per question. It is hidden for saved, archived,
@@ -679,8 +683,8 @@ card is withdrawn. A blocking request or error in the same session takes
 precedence and its card does not change for new optional questions. When the
 switch is off, a finished turn can still notify. Optional cards never join the
 summary of sessions that need attention, and a new need may replace one when the
-shade is full. Optional-only sessions still count under Needs attention on
-Android, unlike the desktop; aligning them is an open owner decision.
+shade is full. As on the desktop, optional-only sessions are not in Needs
+attention or its counters.
 
 There is one updated card per workspace, computer and live session slot. The
 normal shade shows the authenticated session title and the computer's private
