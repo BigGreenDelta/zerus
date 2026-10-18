@@ -424,8 +424,14 @@ pub fn validate_voice(operation: &str, payload: &Value, request_id: &str) -> PyR
         "voice_status" | "voice_cancel" => vec!["message_id"],
         _ => vec![],
     };
-    if operation=="voice_submit" && payload.get("video").is_some() {extra.push("video");}
-    if operation=="voice_submit" && (payload.get("message_id").is_some() || payload.get("rejection").is_some()) {extra.extend(["message_id","rejection"]);}
+    if operation == "voice_submit" && payload.get("video").is_some() {
+        extra.push("video");
+    }
+    if operation == "voice_submit"
+        && (payload.get("message_id").is_some() || payload.get("rejection").is_some())
+    {
+        extra.extend(["message_id", "rejection"]);
+    }
     let common = ["request_id", "expected_run_id", "expected_conversation_id"];
     let Some(object) = payload.as_object().filter(|payload| {
         crate::capabilities::VOICE.contains(&operation)
@@ -470,10 +476,16 @@ pub fn validate_voice(operation: &str, payload: &Value, request_id: &str) -> PyR
             let encoded = object["audio"]["data_base64"].as_str().unwrap_or_default();
             let pcm_bytes =
                 encoded.len() / 4 * 3 - (encoded.len() - encoded.trim_end_matches('=').len());
-            zerus_relay::validate_voice_video(video, zerus_relay::voice_rejection::message_id(payload).as_str().unwrap_or_default(), pcm_bytes)
-                .map_err(|message| error(&message))?;
+            zerus_relay::validate_voice_video(
+                video,
+                zerus_relay::voice_rejection::message_id(payload)
+                    .as_str()
+                    .unwrap_or_default(),
+                pcm_bytes,
+            )
+            .map_err(|message| error(&message))?;
         }
-        zerus_relay::voice_rejection::validate_retry(payload).map_err(|message|error(&message))?;
+        zerus_relay::voice_rejection::validate_retry(payload).map_err(|message| error(&message))?;
         return Ok(());
     }
     if extra.contains(&"message_id") {
@@ -533,8 +545,8 @@ pub fn speech_result_valid(operation: &str, result: &Value, payload: &Value) -> 
 /// `voice.result_valid(operation, result, payload)`, with the same TypeError
 /// for an unhashable message state.
 pub fn voice_result_valid(operation: &str, result: &Value, payload: &Value) -> PyResult<bool> {
-    if operation!="voice_profiles" && result.get("rejection").is_some() {
-        return Ok(zerus_relay::voice_rejection::result_valid(result,payload));
+    if operation != "voice_profiles" && result.get("rejection").is_some() {
+        return Ok(zerus_relay::voice_rejection::result_valid(result, payload));
     }
     let Some(result) = result.as_object().filter(|result| schema_one(result)) else {
         return Ok(false);
@@ -549,7 +561,9 @@ pub fn voice_result_valid(operation: &str, result: &Value, payload: &Value) -> P
         return Ok(false);
     };
     let expected = if operation == "voice_submit" {
-        payload.get("message_id").or_else(||payload.get("request_id"))
+        payload
+            .get("message_id")
+            .or_else(|| payload.get("request_id"))
     } else {
         payload.get("message_id")
     };

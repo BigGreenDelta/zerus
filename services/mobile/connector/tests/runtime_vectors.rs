@@ -1041,35 +1041,87 @@ async fn voice_refusal_and_explicit_retry_keep_separate_operation_and_native_rec
         "intent":zerus_relay::voice_rejection::intent(&upload["payload"]).unwrap(),"payload_sha256":"a".repeat(64),"generation":1,
         "retry_token":"33333333-3333-4333-8333-333333333333","code":"route_unavailable","detail":"The recording was not accepted."});
     let refused = json!({"schema":1,"rejection":proof});
-    let argv = vec!["voice".into(),"codex/example/session".into(),"--json".into()];
-    connector.native.answer(argv.clone(),refused.clone());
-    assert_eq!(connector.execute(upload.clone()).await.unwrap(),Outcome::Finished(json!({"state":"completed","result":refused,"error":null})));
-    assert_eq!(connector.execute(upload.clone()).await.unwrap(),Outcome::Replayed);
+    let argv = vec![
+        "voice".into(),
+        "codex/example/session".into(),
+        "--json".into(),
+    ];
+    connector.native.answer(argv.clone(), refused.clone());
+    assert_eq!(
+        connector.execute(upload.clone()).await.unwrap(),
+        Outcome::Finished(json!({"state":"completed","result":refused,"error":null}))
+    );
+    assert_eq!(
+        connector.execute(upload.clone()).await.unwrap(),
+        Outcome::Replayed
+    );
     let mut retry = upload.clone();
     let operation = "22222222-2222-4222-8222-222222222222";
-    retry["request_id"]=json!(operation);retry["payload"]["request_id"]=json!(operation);
-    retry["payload"]["message_id"]=json!(id);retry["payload"]["rejection"]=proof.clone();
+    retry["request_id"] = json!(operation);
+    retry["payload"]["request_id"] = json!(operation);
+    retry["payload"]["message_id"] = json!(id);
+    retry["payload"]["rejection"] = proof.clone();
     zerus_relay::protocol::request(&retry).unwrap();
-    let accepted=json!({"schema":1,"message":{"id":id,"run_id":"run","conversation_id":"conversation","state":"queued","revision":1}});
+    let accepted = json!({"schema":1,"message":{"id":id,"run_id":"run","conversation_id":"conversation","state":"queued","revision":1}});
     connector.native.answers.borrow_mut().clear();
-    connector.native.answer(argv,accepted.clone());
-    assert_eq!(connector.execute(retry.clone()).await.unwrap(),Outcome::Finished(json!({"state":"completed","result":accepted,"error":null})));
-    assert_eq!(connector.execute(retry.clone()).await.unwrap(),Outcome::Replayed);
-    assert_eq!(connector.native.calls.borrow().len(),2);
-    assert_eq!(connector.native.calls.borrow()[1]["payload"]["message_id"],id);
-    assert_eq!(connector.native.calls.borrow()[1]["payload"]["request_id"],operation);
-    for field in ["expected_run_id","expected_conversation_id","message_id"] {
-        let mut wrong=retry.clone();wrong["payload"][field]=json!("44444444-4444-4444-8444-444444444444");
+    connector.native.answer(argv, accepted.clone());
+    assert_eq!(
+        connector.execute(retry.clone()).await.unwrap(),
+        Outcome::Finished(json!({"state":"completed","result":accepted,"error":null}))
+    );
+    assert_eq!(
+        connector.execute(retry.clone()).await.unwrap(),
+        Outcome::Replayed
+    );
+    assert_eq!(connector.native.calls.borrow().len(), 2);
+    assert_eq!(
+        connector.native.calls.borrow()[1]["payload"]["message_id"],
+        id
+    );
+    assert_eq!(
+        connector.native.calls.borrow()[1]["payload"]["request_id"],
+        operation
+    );
+    for field in ["expected_run_id", "expected_conversation_id", "message_id"] {
+        let mut wrong = retry.clone();
+        wrong["payload"][field] = json!("44444444-4444-4444-8444-444444444444");
         assert!(zerus_relay::protocol::request(&wrong).is_err());
-        assert!(zerus_mobile_connector::speech::validate_voice("voice_submit",&wrong["payload"],operation).is_err());
+        assert!(zerus_mobile_connector::speech::validate_voice(
+            "voice_submit",
+            &wrong["payload"],
+            operation
+        )
+        .is_err());
     }
-    let mut wrong=retry.clone();wrong["payload"]["speech"]["profile_revision"]=json!(8);
+    let mut wrong = retry.clone();
+    wrong["payload"]["speech"]["profile_revision"] = json!(8);
     assert!(zerus_relay::protocol::request(&wrong).is_err());
-    wrong=retry.clone();wrong["payload"]["audio"]["data_base64"]=json!(STANDARD.encode(vec![1u8;3200]));
+    wrong = retry.clone();
+    wrong["payload"]["audio"]["data_base64"] = json!(STANDARD.encode(vec![1u8; 3200]));
     assert!(zerus_relay::protocol::request(&wrong).is_err());
-    for field in ["request_id","message_id","run_id","conversation_id","payload_sha256","generation","retry_token","state"] {
-        let mut wrong=refused.clone();wrong["rejection"][field]=json!("wrong");
-        assert!(!zerus_mobile_connector::speech::voice_result_valid("voice_submit",&wrong,&upload["payload"]).unwrap());
+    for field in [
+        "request_id",
+        "message_id",
+        "run_id",
+        "conversation_id",
+        "payload_sha256",
+        "generation",
+        "retry_token",
+        "state",
+    ] {
+        let mut wrong = refused.clone();
+        wrong["rejection"][field] = json!("wrong");
+        assert!(!zerus_mobile_connector::speech::voice_result_valid(
+            "voice_submit",
+            &wrong,
+            &upload["payload"]
+        )
+        .unwrap());
     }
-    assert!(!zerus_mobile_connector::speech::voice_result_valid("voice_submit",&json!({"schema":1,"error":"not found"}),&upload["payload"]).unwrap());
+    assert!(!zerus_mobile_connector::speech::voice_result_valid(
+        "voice_submit",
+        &json!({"schema":1,"error":"not found"}),
+        &upload["payload"]
+    )
+    .unwrap());
 }

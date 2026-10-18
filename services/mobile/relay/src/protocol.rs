@@ -497,12 +497,18 @@ pub fn request(v: &Value) -> Result<()> {
                     let pcm = STANDARD
                         .decode(p["audio"]["data_base64"].as_str().ok_or(Error::BAD)?)
                         .map_err(|_| Error::BAD)?;
-                    let media =
-                        crate::voice_video::parse(video, crate::voice_rejection::message_id(p).as_str().ok_or(Error::BAD)?, pcm.len()).map_err(|_| Error::BAD)?;
+                    let media = crate::voice_video::parse(
+                        video,
+                        crate::voice_rejection::message_id(p)
+                            .as_str()
+                            .ok_or(Error::BAD)?,
+                        pcm.len(),
+                    )
+                    .map_err(|_| Error::BAD)?;
                     // Drop decoded media before the canonical request buffer is allocated.
                     let _ = (media.bytes.len(), media.metadata);
                 }
-                crate::voice_rejection::validate_retry(p).map_err(|_|Error::BAD)?;
+                crate::voice_rejection::validate_retry(p).map_err(|_| Error::BAD)?;
             }
             "voice_status" | "voice_cancel" => {
                 uuid(&p["message_id"], true)?;

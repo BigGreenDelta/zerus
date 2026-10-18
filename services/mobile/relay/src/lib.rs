@@ -18,8 +18,8 @@ pub mod registry;
 mod speech_config;
 #[cfg(feature = "server")]
 pub mod store;
-mod voice_video;
 pub mod voice_rejection;
+mod voice_video;
 
 /// Validate additive video media without starting a codec. Shared with the outbound connector.
 pub fn validate_voice_video(
