@@ -114,13 +114,23 @@ pub(super) fn offer(dir: &Path, offer: &Value) -> Result<()> {
 /// Move the offered answer to `stage` if it is still offered. A rename alone
 /// is not exclusive on Windows, where std renames through an open handle: two
 /// renames that both opened answer.json would both succeed. Both sides
-/// therefore take the channel's handover lock first.
+/// therefore take the channel's handover lock first. A scanner or reader
+/// without delete sharing can hold answer.json for a moment there, and the
+/// refused rename moved nothing, so it is tried again for a bounded time.
 fn take(dir: &Path, stage: &str) -> Result<bool> {
     let _handover = lock(Some(&dir.join("handover.lock")))?;
-    match fs::rename(dir.join(ANSWER), dir.join(stage)) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.to_string()),
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match fs::rename(dir.join(ANSWER), dir.join(stage)) {
+            Ok(()) => return Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error)
+                if crate::platform::transient_replace_error(&error) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
     }
 }
 
@@ -898,6 +908,40 @@ mod tests {
         prune(&root, Duration::from_secs(30 * 86400), 64);
         assert!(!root.join("old").exists());
         assert!(root.join("new").exists());
+    }
+
+    /// A scanner or reader that opens answer.json without delete sharing makes
+    /// Windows refuse its rename for a moment: the claim or the retraction
+    /// waits it out, and still only one of them wins.
+    #[cfg(windows)]
+    #[test]
+    fn a_briefly_held_offer_is_still_taken_once() {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_SHARE_READ only, as some readers and scanners open files.
+        let hold = |dir: &Path| fs::OpenOptions::new().read(true).share_mode(1).open(dir.join(ANSWER)).unwrap();
+        for (stage, other) in [(CLAIMED, RETRACTED), (RETRACTED, CLAIMED)] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path();
+            offer(dir, &json!({"request_id": "r", "answers": {}})).unwrap();
+            let reader = hold(dir);
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                drop(reader);
+            });
+            assert!(take(dir, stage).unwrap(), "{stage}");
+            release.join().unwrap();
+            assert!(dir.join(stage).exists() && !dir.join(ANSWER).exists(), "{stage}");
+            assert!(!take(dir, other).unwrap(), "{other} after {stage}");
+        }
+        // A holder that never lets go leaves the offer in place, as an error.
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        offer(dir, &json!({"request_id": "r", "answers": {}})).unwrap();
+        let _reader = hold(dir);
+        let started = Instant::now();
+        assert!(take(dir, CLAIMED).is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(dir.join(ANSWER).exists() && !dir.join(CLAIMED).exists());
     }
 
     /// A stand-in waiting process: waiting.json for this test process, then `act`.

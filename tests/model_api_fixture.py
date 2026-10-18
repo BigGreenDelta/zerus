@@ -13,6 +13,8 @@ one of these phrases (not a request that quotes it, such as a title request):
 - QUESTIONS: Claude's AskUserQuestion with QUESTION_ITEMS, Codex's request_user_input_async
   with CODEX_QUESTIONS when it offers that tool.
 - WRITE: Claude's Write tool, creating APPROVED_FILE in --project with APPROVED_TEXT.
+- BASH: Claude's Bash tool with BASH_INPUT, which creates BASH_FILE in its folder; LONG_BASH
+  the same command after LONG_LINES no-op lines, a panel taller than 80x24.
 
 After the tool's result the turn ends with DONE. Side requests (titles, token counts) get
 the plain reply.
@@ -34,6 +36,11 @@ REPLY = "Fixture reply."
 DONE = "Fixture complete."
 APPROVED_FILE = "approved.txt"
 APPROVED_TEXT = "approved through hgs\n"
+BASH = "Use the Bash tool now."
+LONG_BASH = "Use the long Bash tool now."
+BASH_FILE = "bash-approved.txt"
+BASH_INPUT = {"command": f"printf approved > {BASH_FILE}", "description": "Create the fixture file after approval"}
+LONG_LINES = 90
 # The questions of tests/test_claude_questions_native.py, which the Windows screen fixtures
 # tests/fixtures/claude-question-*-windows.txt were recorded with.
 QUESTION_ITEMS = [
@@ -119,6 +126,10 @@ def plan(body, project):
         return ("tool", "request_user_input_async", {"questions": CODEX_QUESTIONS})
     if prompt == WRITE and "Write" in offered and project:
         return ("tool", "Write", {"file_path": os.path.join(project, APPROVED_FILE), "content": APPROVED_TEXT})
+    if prompt == BASH and "Bash" in offered:
+        return ("tool", "Bash", BASH_INPUT)
+    if prompt == LONG_BASH and "Bash" in offered:
+        return ("tool", "Bash", dict(BASH_INPUT, command=":\n" * LONG_LINES + BASH_INPUT["command"]))
     return ("text", REPLY)
 
 

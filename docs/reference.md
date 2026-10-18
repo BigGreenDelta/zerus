@@ -1106,8 +1106,8 @@ Polling and inspection never edit native drafts. The exact form payload and
 matching native acknowledgement determine delivery; uncertain attempts are
 never replayed automatically.
 
-With Claude Code 2.1.296 or later on Linux and macOS, hgs also registers its
-own `PermissionRequest` hook for AskUserQuestion and tool approvals,
+With Claude Code 2.1.296 or later on Linux, macOS and Windows, hgs also
+registers its own `PermissionRequest` hook for AskUserQuestion and tool approvals,
 `hgs __state answer-channel`, beside its usual hooks. The entry an earlier hgs
 registered for AskUserQuestion alone is widened in place.
 - It waits next to Claude's question panel and is bound to the one exact
@@ -1123,8 +1123,10 @@ registered for AskUserQuestion alone is widened in place.
   further answers are refused until the question is resolved in Terminal.
 - An answer, decline or cancellation in Terminal ends the hook, and so do a run
   change and its one-day deadline.
-- Sessions started before the hook was registered, Windows and other agents keep
-  Terminal delivery. Tool approvals through this hook are described below.
+- Sessions started before the hook was registered and other agents keep
+  Terminal delivery. On Windows the hook runs only in Claude Code's exec form;
+  settings that still use the shell form, written for an older Claude Code,
+  keep Terminal delivery. Tool approvals through this hook are described below.
 
 A disabled **Submit** always shows why, including while a saved answer is still
 loading.

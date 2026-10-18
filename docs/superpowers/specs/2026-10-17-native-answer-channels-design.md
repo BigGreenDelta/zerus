@@ -337,6 +337,22 @@ delivery. The channel is only another transport.
   `PermissionRequest` for the same tool use. No screen proof can show that a
   child's request still waits.
 
+### Windows (`zerus-sser`)
+
+- Windows registers the same group, in Claude Code's exec form only
+  (`command` names the stable CLI, `args` `__state answer-channel`): Claude
+  starts hgs itself, so the hook process is the channel worker and its
+  recorded pid and start time identify it. Settings that keep the shell form
+  of an older Claude Code get no channel, since Git Bash would run between
+  Claude and hgs. hgs never wrote the AskUserQuestion-only group there.
+- No SIGTERM reaches the worker. A Terminal answer, decline or cancellation
+  ends it through the record, the transcript or Claude ending the hook
+  process; its own deadline stays below the hook timeout.
+- A rename is not exclusive on Windows, so claim and retract take
+  `handover.lock`. While holding it, a rename refused because a scanner or a
+  reader without delete sharing holds `answer.json` is tried again for up to
+  one second; a refused rename moved nothing. The outcome rules are unchanged.
+
 ## A, unviewed-terminal growth
 
 Implemented first for approvals in `zerus-6uhz` (agent-approval session) and

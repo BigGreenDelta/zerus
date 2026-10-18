@@ -454,7 +454,8 @@ fn merge_json_mode(
         .any(owns_channel);
     // The group hgs wrote for AskUserQuestion alone also answers approvals
     // once it matches every tool: the same entry, changed in place. A group
-    // that holds anything else keeps its matcher.
+    // that holds anything else keeps its matcher. hgs never wrote that group
+    // on Windows.
     let narrowed = |group: &Value| {
         group.get("matcher").and_then(Value::as_str) == Some("AskUserQuestion")
             && group
@@ -477,9 +478,7 @@ fn merge_json_mode(
             }
         }
     }
-    // Windows keeps the terminal path until its native qualification.
     if channels && agent == "claude"
-        && !windows
         && !channel_installed
         && version().is_some_and(|version| version >= CLAUDE_ANSWER_CHANNEL)
     {
@@ -487,7 +486,10 @@ fn merge_json_mode(
             Some(entry) => entry.clone(),
             None => fresh()?,
         };
-        if let Some(channel) = base.channel() {
+        // On Windows only Claude's exec form runs the channel: Claude starts
+        // hgs itself, so the hook process is the waiting channel. The shell
+        // form puts Git Bash in between and keeps the terminal path.
+        if let Some(channel) = base.channel().filter(|channel| !windows || channel.args.is_some()) {
             hooks
                 .entry("PermissionRequest")
                 .or_insert_with(|| json!([]))
@@ -2034,11 +2036,8 @@ mod tests {
         assert!(hook_entries(&merged, "PermissionRequest")
             .contains(&json!({"type": "command", "command": UNIX, "timeout": 5})));
         assert_eq!(versioned_merge(&merged, "claude", false, unix.clone(), None), (None, 0));
-        // Windows keeps the terminal path until the channel is qualified there.
-        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
-        let (settings, _) = versioned_merge("", "claude", true, exec.clone(), Some(CLAUDE_ANSWER_CHANNEL));
-        assert!(channel_groups(&settings.unwrap()).is_empty());
         // Claude's exec form derives the channel's arguments.
+        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
         let channel = exec.channel().unwrap().channel_group();
         assert_eq!(channel["hooks"][0]["command"], json!(exec.command));
         assert_eq!(channel["hooks"][0]["args"], json!(["__state", "answer-channel"]));
@@ -2047,6 +2046,39 @@ mod tests {
         let legacy = Entry::shell("python3 /opt/hgs_state.py hook".into());
         let (legacy, _) = versioned_merge("", "claude", false, legacy, Some(CLAUDE_ANSWER_CHANNEL));
         assert!(channel_groups(&legacy.unwrap()).is_empty());
+    }
+
+    #[test]
+    fn windows_runs_the_answer_channel_in_claude_exec_form_only() {
+        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
+        let channel = json!({"hooks": [{"type": "command", "command": exec.command,
+            "args": ["__state", "answer-channel"], "timeout": 86400}]});
+        // A new configuration, and one that an earlier hgs wrote without it.
+        let earlier = json_merge("", "claude", true, exec.clone()).unwrap();
+        assert!(channel_groups(&earlier).is_empty());
+        for original in ["", earlier.as_str()] {
+            let (merged, asked) =
+                versioned_merge(original, "claude", true, exec.clone(), Some(CLAUDE_ANSWER_CHANNEL));
+            assert_eq!(asked, 1);
+            let merged = merged.unwrap();
+            assert_eq!(channel_groups(&merged), std::slice::from_ref(&channel));
+            // The journaling entry keeps its own group and short timeout.
+            assert!(hook_entries(&merged, "PermissionRequest").contains(&json!({"type": "command",
+                "command": exec.command, "args": ["__state", "hook"], "timeout": 5})));
+            assert_eq!(versioned_merge(&merged, "claude", true, exec.clone(), None), (None, 0));
+            // An older version loses it before it starts.
+            let (pruned, _) = versioned_prune(&merged, "claude", true, Some((2, 1, 295)));
+            assert!(channel_groups(&pruned.unwrap()).is_empty());
+        }
+        for version in [None, Some((2, 1, 295))] {
+            assert_eq!(versioned_merge(&earlier, "claude", true, exec.clone(), version).0, None, "{version:?}");
+        }
+        // Claude Code runs the shell form under Git Bash, between Claude and
+        // hgs: no channel there.
+        let shell = forms::claude_entry(STABLE, (2, 1, 200), true).unwrap();
+        let kept = json_merge("", "claude", true, shell.clone()).unwrap();
+        let (merged, _) = versioned_merge(&kept, "claude", true, shell, Some(CLAUDE_ANSWER_CHANNEL));
+        assert!(channel_groups(&merged.unwrap()).is_empty());
     }
 
     #[test]

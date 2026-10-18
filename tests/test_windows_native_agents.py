@@ -38,6 +38,10 @@ which hgs never writes. Each case covers one area for one agent:
   request_user_input_async) and `hgs answer` answers from Activity.
 - approval: Claude's Write permission prompt, and Codex's review of the hooks hgs
   installed, answered with `hgs answer`.
+- answer channel (Claude): the PermissionRequest hook hgs registers in exec form takes
+  the question's answers and Bash approvals (once, feedback, No), a Bash panel too tall
+  for the host's 80x24 too; Terminal answers and a killed hook end it, and the verified
+  screen takes over only from a hook that took nothing.
 - clear: `hgs clear-context` starts a new conversation in the same agent process. For
   Codex, hgs must first not take the header above a message for its reset panel
   (zerus-g9dd, which a project folder short enough to show whole exposes).
@@ -632,11 +636,14 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         return rows
 
     def check_hook_form(self):
-        """Claude Code from 2.1.296 gets the exec form naming the stable CLI (spec D12)."""
+        """Claude Code from 2.1.296 gets the exec form naming the stable CLI (spec D12), and the
+        answer channel beside its PermissionRequest hook in the same form."""
         settings = json.loads((self.agent_home / "settings.json").read_text(encoding="utf-8"))
         stable = os.path.realpath(self.bin / "hgs.exe").replace(os.sep, "/")
-        self.assertEqual(settings["hooks"]["Stop"], [{"hooks": [{"type": "command", "command": stable,
-                                                                 "args": ["__state", "hook"], "timeout": 5}]}])
+        hook = {"hooks": [{"type": "command", "command": stable, "args": ["__state", "hook"], "timeout": 5}]}
+        self.assertEqual(settings["hooks"]["Stop"], [hook])
+        self.assertEqual(settings["hooks"]["PermissionRequest"], [hook, {"hooks": [{
+            "type": "command", "command": stable, "args": ["__state", "answer-channel"], "timeout": 86400}]}])
 
     def accepted(self, name, text, conversation_id=None):
         conversation_id = conversation_id or self.row(name).get("conversation_id")
@@ -664,13 +671,16 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
     def test_hgs_answers_ask_user_question(self):
         name = self.launch("question")
         self.deliver_prompt(name, api.QUESTIONS)
-        card = self.card(name, "hook")
+        card = self.channel_card(name, "hook")
         self.assertEqual([item["question"] for item in card["questions"]],
                          [item["question"] for item in api.QUESTION_ITEMS])
         answers = [dict(question_id="q_0", selected_option_ids=["opt_0_1"], text=""),
                    dict(question_id="q_1", selected_option_ids=["opt_1_0", "opt_1_2"], text=""),
                    dict(question_id="q_2", selected_option_ids=[], text="Привет from Zerus")]
         payload, receipt = self.answer(name, card, answers)
+        # The answer channel took it, so no key reached Claude's panel.
+        self.assertEqual(receipt["transport"], "claude_hook", receipt)
+        self.assertEqual(len(self.channels("emitted.json")), 1)
         # The same request is acknowledged again without a second delivery.
         self.assertEqual(self.json("answer", name, "--json", input=json.dumps(payload)), receipt)
         expected = {"Which release should we prepare?": "Preview", "Which checks should we run?": "Unit, UI",
@@ -711,6 +721,92 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         settings = json.loads((self.agent_home / "settings.json").read_text(encoding="utf-8"))
         self.assertEqual(settings["permissions"], {"defaultMode": "default"})
 
+    def test_the_answer_channel_answers_bash_approvals(self):
+        name = self.launch("channel")
+        self.check_hook_form()
+        approved = self.project / api.BASH_FILE
+        # Yes: the command runs once and the permission mode stays as it was.
+        card = self.hook_card(name, api.BASH)
+        self.assertTrue(card["panel_verified"], card)
+        self.assertEqual(card["questions"][0]["options"][0], dict(id="1", label="Yes", scope="once"))
+        payload, receipt = self.answer(name, card, self.choose(card, "Yes"))
+        self.assertEqual(receipt["transport"], "claude_hook", receipt)
+        self.until("the approved file", approved.is_file)
+        self.until("the end of the turn", lambda: self.turn_ended(name, receipt["submitted_at"]))
+        self.assertEqual(self.json("answer", name, "--json", input=json.dumps(payload)), receipt)
+        self.assertEqual(json.loads((self.agent_home / "settings.json").read_text(encoding="utf-8"))["permissions"],
+                         {"defaultMode": "default"})
+        approved.unlink()
+        # Feedback: Claude gets the text instead of running the command and goes on.
+        card = self.hook_card(name, api.BASH)
+        text = "Use printf other instead"
+        _, receipt = self.answer(name, card, [dict(question_id="approval", selected_option_ids=[], text=text)])
+        self.assertEqual(receipt["transport"], "claude_hook", receipt)
+        self.until("the feedback at the model", lambda: any(text in json.dumps(result, ensure_ascii=False)
+                                                            for result in self.model_results()))
+        self.until("the end of the turn", lambda: self.turn_ended(name, receipt["submitted_at"]))
+        # No: Claude stops the turn as its own No does.
+        card = self.hook_card(name, api.BASH)
+        _, receipt = self.answer(name, card, self.choose(card, "No"))
+        self.assertEqual(receipt["transport"], "claude_hook", receipt)
+        self.until("Claude's interruption", lambda: "What should Claude do instead?" in self.capture(name))
+        state = self.until("the interrupted turn", lambda: (lambda state: state if state.get("phase") == "interrupted"
+                                                            and not state.get("pending_questions") else None)(
+            self.inspect(name)))
+        self.assertFalse(approved.exists(), state)
+        self.assertEqual(len(self.channels("emitted.json")), 3)
+
+    def test_a_bash_panel_taller_than_80x24_is_answered_through_the_hook(self):
+        # The host's size for a session no client views (host::SIZE): the panel loses its top.
+        name = self.launch("clipped")
+        card = self.hook_card(name, api.LONG_BASH)
+        question = card["questions"][0]
+        self.assertFalse(card["panel_verified"], card)
+        self.assertEqual([(option["label"], option["scope"]) for option in question["options"]],
+                         [("Yes", "once"), ("No", "once")])
+        self.assertIn(api.BASH_INPUT["command"], question["body"])
+        _, receipt = self.answer(name, card, self.choose(card, "Yes"))
+        self.assertEqual(receipt["transport"], "claude_hook", receipt)
+        self.until("the approved file", (self.project / api.BASH_FILE).is_file)
+        self.until("the end of the turn", lambda: self.turn_ended(name, receipt["submitted_at"]))
+
+    def test_terminal_answers_end_the_hook(self):
+        name = self.launch("terminal")
+        approved = self.project / api.BASH_FILE
+        # Claude tells the hook nothing of a Terminal Yes: the run's end closes it.
+        for key, check in (("Enter", approved.is_file),
+                           ("Escape", lambda: "What should Claude do instead?" in self.capture(name))):
+            card = self.hook_card(name, api.BASH)
+            worker = self.worker()
+            self.keys(name, {"named": key})
+            self.until(f"Terminal's {key}", check)
+            self.until(f"the hook to end after {key}", lambda: not self.alive(*worker))
+            self.until("no pending card", lambda: not self.inspect(name).get("pending_questions"))
+            self.refused(name, card, self.choose(card, "No"))
+            self.assertEqual(self.channels("answer.json") + self.channels("claimed.json")
+                             + self.channels("emitted.json"), [])
+            if key == "Enter":
+                self.until("the end of the turn", lambda: self.turn_ended(name, 0))
+        self.assertFalse(self.channels("retracted.json"))
+
+    def test_a_killed_hook_leaves_the_approval_to_the_verified_screen(self):
+        name = self.launch("killed")
+        self.hook_card(name, api.BASH)
+        handle = host.open_host(*self.worker())
+        self.assertTrue(handle)
+        try:
+            host.KERNEL32.TerminateProcess(handle, 1)
+            host.KERNEL32.WaitForSingleObject(handle, WAIT * 1000)
+        finally:
+            host.KERNEL32.CloseHandle(handle)
+        card = self.until("the screen card", lambda: next((card for card in self.inspect(name)["pending_questions"]
+                                                           if card.get("answer_transport") == "claude_tui"
+                                                           and card.get("can_answer")), None))
+        _, receipt = self.answer(name, card, self.choose(card, "Yes"))
+        self.assertEqual(receipt["transport"], "claude_tui", receipt)
+        self.until("the approved file", (self.project / api.BASH_FILE).is_file)
+        self.assertEqual(self.channels("answer.json") + self.channels("claimed.json"), [])
+
     def test_clear_context_starts_a_new_conversation_in_the_same_agent(self):
         name = self.launch("clear")
         self.deliver(name, MESSAGES[0])
@@ -733,6 +829,50 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         receipt = self.send(name, self.message(row, text))
         self.assertEqual(receipt["status"], "submitted", receipt)
         return receipt
+
+    # The answer channel.
+
+    def channels(self, stage):
+        """The answer channel files named `stage` in the case's state."""
+        return sorted((self.state / "native_answers").glob(f"*/*/{stage}"))
+
+    def channel_card(self, name, source):
+        """The pending card of `source` once the answer channel waits for it."""
+        return self.until(f"a {source} card of the answer channel", lambda: next(
+            (card for card in self.inspect(name).get("pending_questions", [])
+             if card.get("source") == source and card.get("answer_transport") == "claude_hook"
+             and card.get("can_answer")), None))
+
+    def hook_card(self, name, prompt):
+        """Send `prompt`, whose Bash call waits for approval; its card once the answer channel waits."""
+        self.deliver_prompt(name, prompt)
+        return self.channel_card(name, "claude_tool_approval")
+
+    def worker(self):
+        """The (PID, start) of the answer channel that waits now."""
+        def waiting():
+            for path in self.channels("waiting.json"):
+                stages = {entry.name for entry in path.parent.iterdir()}
+                if "closed.json" not in stages:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                    if self.alive(record["pid"], record["process_start"]):
+                        return record["pid"], record["process_start"]
+            return None
+        return self.until("the waiting answer channel", waiting)
+
+    def choose(self, card, label):
+        ids = [option["id"] for option in card["questions"][0]["options"] if option["label"] == label]
+        self.assertEqual(len(ids), 1, card["questions"][0]["options"])
+        return [dict(question_id="approval", selected_option_ids=ids, text="")]
+
+    def refused(self, name, card, answers):
+        """`hgs answer` for a card that is no longer pending fails and sends nothing."""
+        row = self.row(name)
+        payload = dict(request_id=str(uuid.uuid4()), expected_run_id=row["run_id"],
+                       expected_conversation_id=row.get("conversation_id") or "", question_id=card["question_id"],
+                       expected_question_hash=card["question_hash"], answers=answers)
+        result = self.hgs("answer", name, "--json", input=json.dumps(payload), rc=None)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
 
 
 @unittest.skipUnless(CODEX and HGS_SET, "set HGS_TEST_BIN and HGS_CODEX_TEST_BIN to run real Codex")
