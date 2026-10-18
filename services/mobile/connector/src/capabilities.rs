@@ -21,6 +21,7 @@ pub const PROBE_TIMEOUT: f64 = 3.0;
 /// [`crate::launch::OPERATIONS`]. Every other known operation is refused
 /// as unsupported and never advertised.
 pub const IMPLEMENTED: &[&str] = &[
+    "analytics_read",
     "archive_list",
     "attachment_read",
     "catalog",
@@ -114,6 +115,7 @@ pub const SPEECH_CONFIG: &[&str] = &[
 /// What the native CLI offers, from its help text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
+    pub analytics: bool,
     pub archive: bool,
     pub lifecycle: bool,
     pub terminal: bool,
@@ -141,6 +143,7 @@ impl Flags {
     pub fn from_help(help: &str) -> Flags {
         let has = |marker: &str| help.contains(marker);
         Flags {
+            analytics: has("hgs [@host] analytics --json"),
             archive: has("archives --json"),
             lifecycle: help
                 .lines()
@@ -175,6 +178,7 @@ impl Flags {
             }
         };
         remove(self.worktree, WORKTREES);
+        remove(self.analytics, &["analytics_read"]);
         remove(self.archive, &["archive_list"]);
         remove(self.directory_create, &["directory_create"]);
         remove(self.lifecycle, LIFECYCLE);

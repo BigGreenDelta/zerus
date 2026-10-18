@@ -1,6 +1,7 @@
 """Fixed context-control transport; native hgs remains the final authority."""
 import uuid
 import re
+from .analytics import OPERATIONS as ANALYTICS_READS
 from .speech import OPERATIONS as SPEECH_OPERATIONS, READS as SPEECH_READS
 from .speech_config import OPERATIONS as SPEECH_CONFIG_OPERATIONS, READS as SPEECH_CONFIG_READS
 from .voice import OPERATIONS as VOICE_OPERATIONS, READS as VOICE_READS
@@ -13,9 +14,9 @@ COMPUTER_OPERATIONS = frozenset({"set_mobile_delivery"})
 MOBILE_DELIVERY = ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
 ATTACHMENT_OPERATIONS = frozenset({"attachment_read"})
 FILE_OPERATIONS = frozenset({"file_read"})
-OPERATIONS = SPEECH_CONFIG_OPERATIONS | VOICE_OPERATIONS | SPEECH_OPERATIONS | LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | FILE_OPERATIONS | frozenset({"archive_list","hooks_status","inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
+OPERATIONS = ANALYTICS_READS | SPEECH_CONFIG_OPERATIONS | VOICE_OPERATIONS | SPEECH_OPERATIONS | LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | FILE_OPERATIONS | frozenset({"archive_list","hooks_status","inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
 FEATURES = frozenset({"inspect_after", "inspect_agent", "send_agent"})
-READ_OPERATIONS = SPEECH_CONFIG_READS | VOICE_READS | SPEECH_READS | frozenset({"archive_list", "hooks_status", "inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read", "file_read"})
+READ_OPERATIONS = ANALYTICS_READS | SPEECH_CONFIG_READS | VOICE_READS | SPEECH_READS | frozenset({"archive_list", "hooks_status", "inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read", "file_read"})
 # Predicate of the persisted read_history_v3 index and the one-hour read class.
 # attachment_read is a read with its own short class, so this text stays fixed.
 READ_SQL = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')"

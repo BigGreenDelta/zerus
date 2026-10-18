@@ -28,7 +28,7 @@ import aiohttp
 from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
-from . import speech, speech_config, voice
+from . import analytics, speech, speech_config, voice
 from . import attachment_reads, file_reads, archives, hook_health
 from .recovery import validate_recovery
 from .history import validate_history
@@ -178,6 +178,7 @@ class Journal:
                 self.db.execute("UPDATE requests SET state=?,response=?,updated_at=? WHERE request_id=?",
                                 (state, json.dumps(response), now, request_id))
         self.db.execute("CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS analytics_delivered_reads ON requests(delivered_at) WHERE operation='analytics_read' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running'")
@@ -192,6 +193,7 @@ class Journal:
         with self.db:
             self.db.execute("DELETE FROM requests WHERE operation='hooks_status' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute("DELETE FROM requests WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
+            self.db.execute("DELETE FROM requests WHERE operation='analytics_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {speech_config.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {speech.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {voice.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
@@ -320,6 +322,7 @@ class Connector:
         self.archive_preview_next = 0.0
         self.archive_preview_meta = {"schema":1,"available":False,"loaded":0,"total":None,"partial":False}
         self.file_read_supported = False
+        self.analytics_supported = False
         self.speech_supported = False
         self.speech_config_supported = False
         self.voice_supported = False
@@ -521,7 +524,7 @@ class Connector:
             snapshot["mobile_projects"]={**groups,"projects":[{k:v for k,v in p.items() if k!="archives"} for p in groups.get("projects",[]) if isinstance(p,dict)]}
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
+        operations = (OPERATIONS - (set() if self.analytics_supported else analytics.OPERATIONS) - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({voice.video.FEATURE} if self.voice_supported and self.video_supported else set()) | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -547,6 +550,7 @@ class Connector:
         self.preference_supported = False
         self.attachment_read_supported = False
         self.file_read_supported = False
+        self.analytics_supported = False
         self.speech_supported = False
         self.speech_config_supported = False
         self.voice_supported = False
@@ -570,6 +574,7 @@ class Connector:
             self.attachment_read_supported = isinstance(help_text, str) and attachment_reads.HELP_MARKER in help_text
             self.archive_supported = isinstance(help_text,str) and archives.HELP_MARKER in help_text
             self.file_read_supported = isinstance(help_text, str) and file_reads.HELP_MARKER in help_text
+            self.analytics_supported = isinstance(help_text, str) and analytics.HELP_MARKER in help_text
             self.speech_supported = isinstance(help_text, str) and speech.HELP_MARKER in help_text
             self.voice_supported = isinstance(help_text, str) and voice.HELP_MARKER in help_text
             self.video_supported = isinstance(help_text, str) and voice.video.HELP_MARKER in help_text
@@ -665,6 +670,11 @@ class Connector:
         operation, session = request.get("operation"), request.get("session")
         if not isinstance(operation, str) or operation not in OPERATIONS:
             raise ConnectorError("unsupported operation")
+        if operation in analytics.OPERATIONS:
+            if session != "": raise ConnectorError("analytics reads use no session target")
+            try: analytics.validate(request.get("payload"))
+            except ValueError as error: raise ConnectorError(str(error)) from None
+            return operation, session, request["payload"]
         if operation == "archive_list":
             if session != "": raise ConnectorError("archive browsing uses no session target")
             try: archives.validate(request.get("payload"))
@@ -972,6 +982,8 @@ class Connector:
                         raise ConnectorError("native Terminal binding or input support changed")
                     if deadline <= time.time():
                         raise ConnectorError("terminal input expired before native delivery")
+            if operation in analytics.OPERATIONS and not self.analytics_supported:
+                raise ConnectorError("native analytics read ABI is unavailable")
             if operation in voice.OPERATIONS and not self.voice_supported:
                 raise ConnectorError("native voice message ABI is unavailable")
             if operation == "voice_submit" and "video" in payload and not self.video_supported:
@@ -1252,6 +1264,13 @@ class Connector:
                 result = await self.native(["voice", session, "--json"], {"action": voice.ACTIONS[operation], **payload}, timeout=30)
                 if not voice.result_valid(operation, result, payload):
                     raise ConnectorError("native voice acknowledgement did not match")
+            elif operation in analytics.OPERATIONS:
+                result = await self.native(["analytics", "--json"], {**payload, "action": "summary"},
+                                           timeout=10, max_output_bytes=analytics.MAX_OUTPUT_BYTES)
+                route = request.get("gateway_route")
+                machine = route.get("machine_id") if isinstance(route, dict) else getattr(getattr(self, "fleet", None), "local_id", None)
+                if not analytics.result_valid(result, payload, machine):
+                    raise ConnectorError("native analytics summary did not match")
             elif operation in speech_config.OPERATIONS:
                 try:
                     result = await self.native(["speech", "--json"], {"action": speech_config.ACTIONS[operation], **payload}, timeout=35, failure_json=True)

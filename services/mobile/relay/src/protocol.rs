@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub const MIB: usize = 1024 * 1024;
 pub const REQUEST_MAX: usize = 29 * MIB;
 pub const READS: &[&str] = &[
+    "analytics_read",
     "archive_list",
     "speech_config",
     "speech_config_status",
@@ -69,6 +70,7 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "analytics_read",
     "archive_list",
     "speech_config",
     "speech_profile_upsert",
@@ -136,6 +138,87 @@ pub const ATTACHMENT_FILE_MAX: u64 = 10 * MIB as u64;
 pub const ATTACHMENT_RESULT_TTL: f64 = 60.0;
 pub const ATTACHMENT_READ_GRACE: f64 = 5.0;
 const ID: &[&str] = &["request_id", "expected_run_id", "expected_conversation_id"];
+
+/// A canonical Gregorian UTC calendar date, as a bounded ordinal. No locale,
+/// timestamps or caller-supplied offsets enter aggregate bucket selection.
+fn analytics_day(value: &Value) -> Result<u32> {
+    let bytes = value.as_str().ok_or(Error::BAD)?.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(i, b)| i != 4 && i != 7 && !b.is_ascii_digit())
+    {
+        return Err(Error::BAD);
+    }
+    let number = |part: &[u8]| part.iter().fold(0u32, |n, b| n * 10 + u32::from(b - b'0'));
+    let (year, month, day) = (
+        number(&bytes[..4]),
+        number(&bytes[5..7]),
+        number(&bytes[8..]),
+    );
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if year == 0 || !(1..=12).contains(&month) || day == 0 || day > months[(month - 1) as usize] {
+        return Err(Error::BAD);
+    }
+    let previous = year - 1;
+    Ok(365 * previous + previous / 4 - previous / 100
+        + previous / 400
+        + months[..(month - 1) as usize].iter().sum::<u32>()
+        + day)
+}
+
+/// Mobile analytics are strictly read-only and span at most 90 inclusive days.
+pub fn analytics_read(payload: &Value) -> Result<()> {
+    fields(payload, &["schema", "from", "through"], &[])?;
+    if payload["schema"].as_u64() != Some(1) {
+        return Err(Error::BAD);
+    }
+    let from = analytics_day(&payload["from"])?;
+    let through = analytics_day(&payload["through"])?;
+    if through < from || through - from >= 90 {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
+/// Check the native summary envelope without rewriting its aggregate buckets.
+pub fn analytics_summary(value: &Value, payload: &Value, machine: Option<&str>) -> Result<()> {
+    uuid(&value["machine_id"], true)?;
+    uuid(&value["source_epoch"], false)?;
+    if value["schema"].as_u64() != Some(1)
+        || value["source"] != "agent"
+        || machine.is_some_and(|expected| value["machine_id"] != expected)
+        || value["range"] != json!({"from": payload["from"], "through": payload["through"]})
+        || value["revision"].as_u64().is_none()
+        || !value["generated_at"]
+            .as_f64()
+            .is_some_and(|at| at.is_finite() && at >= 0.0)
+        || !value["collection"].is_object()
+        || !value["coverage"].is_object()
+        || !value["buckets"].is_array()
+    {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
 pub fn fields(v: &Value, required: &[&str], optional: &[&str]) -> Result<()> {
     let o = v.as_object().ok_or(Error::BAD)?;
     if required.iter().any(|k| !o.contains_key(*k))
@@ -304,12 +387,18 @@ pub fn request(v: &Value) -> Result<()> {
     text(
         &v["session"],
         1024,
-        op == "archive_list"
+        op == "analytics_read"
+            || op == "archive_list"
             || LAUNCH.contains(&op)
             || COMPUTER.contains(&op)
             || SPEECH.contains(&op),
     )?;
-    if op == "archive_list" {
+    if op == "analytics_read" {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        analytics_read(p)?;
+    } else if op == "archive_list" {
         if v["session"] != "" {
             return Err(Error::BAD);
         }

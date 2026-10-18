@@ -39,7 +39,7 @@ HERE = Path(__file__).resolve().parent
 if __name__ == "__main__":
     sys.path[:0] = [str(HERE.parent), str(HERE.parent / "tests")]
 
-from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet, file_reads, archives,  # noqa: E402
+from zerus_mobile import (analytics, accounts, attachment_reads, attachments, connector, context, fleet, file_reads, archives,  # noqa: E402
                           history, launch, managed_relay, projects, speech, speech_config, terminal,
                           voice, worktrees)
 from zerus_mobile.connector import Connector, ConnectorError, Journal  # noqa: E402
@@ -191,6 +191,7 @@ def connector_log(handler: logging.Handler):
 # Operation tables and the help-marker capability map.
 
 HELP_LINES = (
+    ("analytics", analytics.HELP_MARKER),
     ("lifecycle", "hgs session-action <session> --json"),
     ("terminal", "hgs terminal <session> --json"),
     ("recovery", "hgs recovery action --scoped-json"),
@@ -1121,6 +1122,7 @@ def valid_payloads() -> dict:
     upsert_profile = {"id": "example", "name": "Example transcription", "adapter": "openai_http", "model": "fixture",
                       "language": "ru", "base_url": "https://speech.example.invalid/v1", "allow_insecure_http": False}
     return {
+        "analytics_read": {"schema": 1, "from": "2026-01-01", "through": "2026-03-31"},
         "inspect": {}, "send": identity(text="Hello from the phone"),
         "answer": identity(question_id="q", expected_question_hash="h", answers=[["Yes"]]),
         "interrupt": identity(expected_turn_started=True), "send_now": identity(queue_id="c" * 64),
@@ -1156,7 +1158,7 @@ def valid_payloads() -> dict:
     }
 
 
-SESSIONLESS = {"archive_list"} | context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
+SESSIONLESS = {"analytics_read", "archive_list"} | context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
 
 
 def substitute(value, request_id):

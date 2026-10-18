@@ -261,6 +261,12 @@ fn validate(request: &LocalRequest) -> Result<()> {
         Ok(())
     };
     match op {
+        "analytics" => {
+            ensure!(rest == ["--json"], "analytics requires its fixed JSON ABI");
+            let payload = request.payload.as_ref().context("analytics payload is required")?;
+            ensure!(payload["action"] == "summary", "mobile analytics only permits summary reads");
+            crate::analytics::validate_request(payload).map_err(anyhow::Error::msg)?;
+        }
         "voice" => {
             ensure!(rest.len() == 2 && session(&rest[0]) && rest[1] == "--json", "voice requires a session and its fixed JSON ABI");
             crate::state::voice::validate_request(request.payload.as_ref().context("voice payload is required")?)
@@ -1093,12 +1099,15 @@ fn execute(config: &Config, args: &[String]) -> Result<i32> {
                 direct(config, &request.via),
                 "mobile route is not an enabled direct peer"
             );
+            let max_output = if local.argv.first().is_some_and(|op| op == "analytics") {
+                1024 * 1024
+            } else { MAX_BYTES };
             let output = transport(
                 &request.via,
                 Helper::Local,
                 Some(local),
                 deadline,
-                MAX_BYTES,
+                max_output,
             )?;
             std::io::stdout().write_all(&output.stdout)?;
             std::io::stderr().write_all(&output.stderr)?;
@@ -1128,6 +1137,25 @@ mod tests {
 
     fn scope() -> Value {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
+    }
+
+    #[test]
+    fn analytics_peer_reads_cannot_enable_purge_or_extend_the_range() {
+        let argv = ["analytics", "--json"];
+        let payload = json!({"schema":1,"action":"summary","from":"2026-01-01","through":"2026-03-31"});
+        assert!(validate(&request(&argv, Some(payload.clone()))).is_ok());
+        for (key, value) in [("action", json!("purge")), ("action", json!("configure")),
+            ("enabled", json!(true)), ("through", json!("2026-04-01")),
+            ("schema", json!(true)), ("path", json!("/fixture/private"))] {
+            let mut bad = payload.clone();
+            bad[key] = value;
+            assert!(validate(&request(&argv, Some(bad))).is_err());
+        }
+        for argv in [vec!["analytics"], vec!["analytics", "--json", "@next"],
+            vec!["analytics", "--json", "--purge"]] {
+            assert!(validate(&request(&argv, Some(payload.clone()))).is_err());
+        }
+        assert!(validate(&request(&["analytics", "--json"], None)).is_err());
     }
 
     #[test]

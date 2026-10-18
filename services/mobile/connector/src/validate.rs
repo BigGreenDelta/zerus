@@ -354,6 +354,14 @@ pub fn validate(
         session: session.into(),
         payload,
     };
+    if operation == "analytics_read" {
+        if request.get("session").and_then(Value::as_str) != Some("") {
+            return Err(error("analytics reads use no session target"));
+        }
+        zerus_relay::protocol::analytics_read(request.get("payload").unwrap_or(&Value::Null))
+            .map_err(|_| error("invalid analytics read fields or UTC range"))?;
+        return Ok(validated("", request.get("payload").cloned()));
+    }
     if operation == "archive_list" {
         if request.get("session").and_then(Value::as_str) != Some("") {
             return Err(error("archive browsing uses no session target"));

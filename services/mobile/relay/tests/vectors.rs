@@ -241,7 +241,7 @@ fn request_hashes_match_python_through_the_batch_codec() {
         "listed rows without a vector: {missing:?}"
     );
     // 56 requests of request_hash.jsonl and 57 of request_envelopes.jsonl.
-    assert_eq!(hashed, 115); // Includes archive_list and scoped hook health envelopes.
+    assert_eq!(hashed, 117); // Archive, scoped hook health and analytics envelopes.
 }
 
 fn sorted(items: &[&str]) -> Vec<String> {

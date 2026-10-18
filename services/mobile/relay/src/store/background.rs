@@ -270,6 +270,7 @@ impl Store {
             }
             let mut rows = vec![];
             for (predicate, threshold) in [
+                ("operation='analytics_read'".into(), at - 120.0),
                 ("operation='terminal_snapshot'".into(), at - 120.0),
                 (
                     format!("operation IN {}", crate::speech_config::READ_SQL),
@@ -318,6 +319,7 @@ impl Store {
                     && (f(&r, "updated")
                         < at - match s(&r, "operation") {
                             "hooks_status"
+                            | "analytics_read"
                             | "speech_config"
                             | "speech_config_status"
                             | "terminal_snapshot"

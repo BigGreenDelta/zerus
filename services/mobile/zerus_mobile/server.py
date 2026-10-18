@@ -18,7 +18,7 @@ import uuid
 from aiohttp import web
 
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_read, validate_send
-from . import archives, speech, speech_config, voice
+from . import analytics, archives, speech, speech_config, voice
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import COMPUTER_OPERATIONS, validate_mobile_delivery, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
@@ -281,10 +281,14 @@ def validate_request(value):
     if str(uuid.UUID(request_id)) != request_id:
         raise web.HTTPBadRequest()
     text(value["computer_id"], 36)
-    text(value["session"], 1024, empty=value["operation"] == "archive_list" or value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
+    text(value["session"], 1024, empty=value["operation"] in analytics.OPERATIONS or value["operation"] == "archive_list" or value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
     op, payload = value["operation"], value["payload"]
     if not isinstance(op, str) or op not in OPERATIONS or not isinstance(payload, dict):
         raise web.HTTPBadRequest()
+    if op in analytics.OPERATIONS:
+        if value["session"] != "": raise ValueError("analytics reads use no session target")
+        analytics.validate(payload)
+        return
     if op == "archive_list":
         if value["session"] != "": raise ValueError("archive browsing uses no session target")
         archives.validate(payload)

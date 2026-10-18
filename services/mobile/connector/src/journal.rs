@@ -2,7 +2,8 @@
 //! exactly as the Python `Journal` (`connector.py:104-249`) opens it: the same
 //! file checks and lock, DDL text, legacy upgrade, restart recovery, pragmas,
 //! retention and caps. While a rollback to Python is supported the schema is
-//! frozen: `user_version` 0, a rollback journal (never WAL), no other objects.
+//! table-compatible: `user_version` 0 and a rollback journal (never WAL).
+//! Additive read indexes are mirrored by the Python connector.
 //!
 //! Each Python `with self.db:` block is one explicit DEFERRED transaction
 //! here, and the clock is a parameter so tests can fix it.
@@ -42,8 +43,9 @@ pub const ADDED_COLUMNS: [(&str, &str); 5] = [
     ("delivered_at", "REAL"),
     ("response_expired", "INTEGER NOT NULL DEFAULT 0"),
 ];
-pub const INDEXES: [(&str, &str); 8] = [
+pub const INDEXES: [(&str, &str); 9] = [
     ("delivered_history", "CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)"),
+    ("analytics_delivered_reads", "CREATE INDEX IF NOT EXISTS analytics_delivered_reads ON requests(delivered_at) WHERE operation='analytics_read' AND delivered=1 AND state!='running'"),
     ("terminal_delivered_reads", "CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'"),
     ("archive_delivered_reads", "CREATE INDEX IF NOT EXISTS archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running'"),
     ("file_delivered_reads", "CREATE INDEX IF NOT EXISTS file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running'"),
@@ -54,7 +56,7 @@ pub const INDEXES: [(&str, &str); 8] = [
 ];
 
 // The Python connector's frozen predicates (operations.json `sql`).
-pub const READ_CLASS_SQL: &str = "('archive_list','attachment_read','catalog','dirs','file_read','history','hooks_status','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
+pub const READ_CLASS_SQL: &str = "('analytics_read','archive_list','attachment_read','catalog','dirs','file_read','history','hooks_status','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
 pub const READ_SQL: &str = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')";
 pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
@@ -246,6 +248,7 @@ impl Journal {
             [short],
         )?;
         for set in [
+            "('analytics_read')",
             SPEECH_CONFIG_READ_SQL,
             SPEECH_READ_SQL,
             VOICE_READ_SQL,

@@ -265,6 +265,22 @@ impl<N: Native + 'static> Connector<N> {
             } else {
                 self.run(&validated, request_id).await?
             };
+            if validated.operation == "analytics_read" {
+                let local = self
+                    .fleet
+                    .as_ref()
+                    .and_then(|fleet| fleet.local_id.borrow().clone());
+                let machine = request
+                    .get("gateway_route")
+                    .and_then(|route| route["machine_id"].as_str())
+                    .or(local.as_deref());
+                protocol::analytics_summary(
+                    &result,
+                    validated.payload.as_ref().expect("validated"),
+                    machine,
+                )
+                .map_err(|_| Failure::text("native analytics summary did not match"))?;
+            }
             Ok((receipt_of(&validated.operation, result), validated))
         }
         .await;
@@ -421,6 +437,9 @@ impl<N: Native + 'static> Connector<N> {
 
     /// The capability checks of `_execute_claimed`, in Python's order.
     fn gate(&self, operation: &str, flags: Flags) -> Result<(), Failure> {
+        if operation == "analytics_read" && !flags.analytics {
+            return Err(Failure::text("native analytics read ABI is unavailable"));
+        }
         if operation == "archive_list" && !flags.archive {
             return Err(Failure::text(crate::archives::UNAVAILABLE));
         }
@@ -456,6 +475,15 @@ impl<N: Native + 'static> Connector<N> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref();
         match validated.operation.as_str() {
+            "analytics_read" => {
+                let mut payload = payload.expect("validated").clone();
+                payload["action"] = json!("summary");
+                let mut call = Call::new(["analytics", "--json"])
+                    .payload(payload)
+                    .timeout(10.0);
+                call.max_output_bytes = Some(MAX_RESULT);
+                self.call(call).await
+            }
             "archive_list" => {
                 self.archive_page(payload.expect("validated"), request_id)
                     .await
