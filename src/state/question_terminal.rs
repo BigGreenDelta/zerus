@@ -1321,7 +1321,7 @@ mod tests {
     }
     #[test]
     fn clipped_dialog_differs_from_complete_one() {
-        // Kimi 2.2.0 at 80x24: the bottom of a tall dialog shows, its heading does not.
+        // Kimi 2.1.1 and 2.2.0 at 80x24: the bottom of a tall dialog shows, its heading does not.
         let clipped_dialog = include_str!("../../tests/fixtures/kimi-question-clipped-80x24.txt");
         assert!(clipped(clipped_dialog));
         assert!(!complete(clipped_dialog));

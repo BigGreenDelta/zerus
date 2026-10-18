@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Real Kimi TUI against a localhost-only API fixture, never a user's account.
-Run with HGS_KIMI_TEST_BIN=/absolute/path/to/a/pinned/kimi (otherwise skipped).
-Kimi installs updates over the executable it runs from, so the fixture runs a
-private copy with automatic updates off and never the user's installed Kimi.
+Run with HGS_KIMI_TEST_BIN=/absolute/path/to/a/pinned/kimi and its sha256 in
+HGS_KIMI_TEST_SHA256 (otherwise skipped). Kimi installs updates over the
+executable it runs from, so the fixture runs a private copy with automatic
+updates off and never the user's installed Kimi. HGS_KIMI_GUARD lists
+executables, such as that installed Kimi, that must not change during a run;
+HGS_KIMI_EVIDENCE_DIR keeps each run's screens, logs and metadata.
 """
 import hashlib,json,os,shlex,shutil,subprocess,tempfile,threading,time,unittest,uuid
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -11,6 +14,10 @@ import test_input as fixtures
 import test_questions as questions
 
 KIMI=os.environ.get('HGS_KIMI_TEST_BIN')
+KIMI_SHA256=os.environ.get('HGS_KIMI_TEST_SHA256','')
+GUARDED=[Path(path) for path in os.environ.get('HGS_KIMI_GUARD','').split(os.pathsep) if path]
+EVIDENCE=os.environ.get('HGS_KIMI_EVIDENCE_DIR')
+def sha256(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 LONG=('Любой провайдер из списка (Z.AI, OpenRouter, DeepSeek и другие): ввести, заменить '
       'или удалить ключ на выбранной машине. Дополнительные поля провайдер описывает сам.')
 # One question taller than the 24 rows of a pane no client has attached to.
@@ -41,8 +48,14 @@ class NativeKimiQuestions(unittest.TestCase):
   self.state=self.root/'state';self.state.mkdir();work=self.root/'work';work.mkdir()
   self.kimi_home=self.root/'.kimi-code';self.kimi_home.mkdir()
   # Kimi stages updates beside its executable and swaps them in at the next
-  # start: run a private copy, and keep both update switches off.
-  kimi=self.root/'kimi-bin/kimi';kimi.parent.mkdir();shutil.copy2(KIMI,kimi)
+  # start: run a private copy of exactly the pinned build, keep both update
+  # switches off, and prove afterwards that nothing outside changed.
+  self.assertRegex(KIMI_SHA256,'^[0-9a-f]{64}$','HGS_KIMI_TEST_SHA256 must pin the executable')
+  self.assertEqual(sha256(KIMI),KIMI_SHA256)
+  guarded={str(path):sha256(path) for path in GUARDED}
+  self.addCleanup(lambda:self.assertEqual({str(path):sha256(path) for path in GUARDED},guarded,'a guarded executable changed'))
+  self.kimi=kimi=self.root/'kimi-bin/kimi';kimi.parent.mkdir();shutil.copy2(KIMI,kimi)
+  self.assertEqual(sha256(kimi),KIMI_SHA256)
   (self.kimi_home/'tui.toml').write_text('[upgrade]\nauto_install = false\n')
   self.items=SHORT if '_short_' in self._testMethodName else TALL
   fixture=self;self.native_requests=[]
@@ -89,8 +102,14 @@ display_name = "Fixture"
             'PATH='+os.environ['PATH'],'TERM=xterm-256color','LANG=C.UTF-8','KIMI_CODE_HOME='+str(self.kimi_home),
             'KIMI_DISABLE_TELEMETRY=1','KIMI_CODE_NO_AUTO_UPDATE=1',str(kimi))
   self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
-  if 'Trust this folder?' in self.wait_for(lambda:(s:=self.screen()) if 'Trust this folder?' in s or '│ >' in s else None):
-   self.tmux('send-keys','-t',self.pane,'Enter')
+  self.addCleanup(self.retain)
+  pid=int(self.tmux('display-message','-p','-t',self.pane,'#{pane_pid}'))
+  # The pane runs the private copy, not any other Kimi.
+  if Path('/proc').is_dir():self.wait_for(lambda:os.readlink(f'/proc/{pid}/exe')==str(kimi),10)
+  def started():
+   screen=self.screen()
+   return screen if 'Trust this folder?' in screen or '│ >' in screen else None
+  if 'Trust this folder?' in self.wait_for(started):self.tmux('send-keys','-t',self.pane,'Enter')
   self.wait_for(lambda:'│ >' in self.screen())
   self.tmux('send-keys','-t',self.pane,'-l','Ask me with the question tool.');time.sleep(.3)
   self.tmux('send-keys','-t',self.pane,'Enter')
@@ -98,7 +117,6 @@ display_name = "Fixture"
    for wire in self.kimi_home.glob('sessions/*/*/agents/main/wire.jsonl'):
     if '"interaction.request"' in wire.read_text() and 'esc cancel' in self.screen():return wire
   wire=self.wait_for(asked);self.conversation_id=wire.parent.parent.parent.name
-  pid=int(self.tmux('display-message','-p','-t',self.pane,'#{pane_pid}'))
   start=subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
   self.tmux('set-option','-t','='+self.name+':','@hgs_run',self.run_id)
   self.record_path=self.state/(hashlib.sha256(self.name.encode()).hexdigest()+'.json')
@@ -106,6 +124,18 @@ display_name = "Fixture"
                    agent_home=str(self.kimi_home),pane=self.pane,pid=pid,process_start=start,activity='busy',phase='input',
                    active_tools={'call_fixture':{'name':'AskUserQuestion'}},subagents={},last_event_at=time.time(),created=time.time())
   self.write_record();self.wire=wire
+ def retain(self):
+  """Keep this run's screens, logs and metadata before its home is removed."""
+  if not EVIDENCE:return
+  out=Path(EVIDENCE)/self.id().rsplit('.',1)[-1];out.mkdir(parents=True,exist_ok=True)
+  (out/'screen.txt').write_text(self.screen())
+  (out/'screen-styled.txt').write_text(self.tmux('capture-pane','-p','-e','-t',self.pane,check=False))
+  for source in [self.kimi_home/'logs',*self.kimi_home.glob('sessions/*/*/agents/main')]:
+   if source.is_dir():shutil.copytree(source,out/source.relative_to(self.kimi_home),dirs_exist_ok=True)
+  if getattr(self,'record_path',None) and self.record_path.exists():shutil.copy2(self.record_path,out/'record.json')
+  (out/'metadata.json').write_text(json.dumps(dict(pinned=KIMI,pinned_sha256=KIMI_SHA256,copy=str(self.kimi),copy_sha256=sha256(self.kimi),
+   guarded={str(path):sha256(path) for path in GUARDED},height=self.tmux('display-message','-p','-t',self.pane,'#{window_height}',check=False).strip(),
+   requests=len(self.native_requests)),indent=1))
  def card(self):
   state=self.inspect()
   self.assertEqual(len(state['pending_questions']),1,state)
