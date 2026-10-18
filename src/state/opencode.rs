@@ -27,8 +27,9 @@ thread_local! {
     static BINDINGS_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 /// opencode/bindings.lock, released when dropped. A guard taken while this
-/// thread already holds the lock holds nothing more.
-pub(super) struct Bindings(Option<Guard>);
+/// thread already holds the lock holds nothing more. It stays on the thread
+/// that took it, whose flag it clears.
+pub(super) struct Bindings(Option<Guard>, std::marker::PhantomData<*const ()>);
 impl Drop for Bindings {
     fn drop(&mut self) {
         if self.0.take().is_some() {
@@ -40,16 +41,16 @@ fn bindings_lock() -> PathBuf {
     root().join("opencode/bindings.lock")
 }
 /// The bindings lock, waiting as long as another process holds it.
-fn lock_bindings() -> Result<Bindings> {
+pub(super) fn lock_bindings() -> Result<Bindings> {
     lock_bindings_at(&bindings_lock())
 }
 fn lock_bindings_at(path: &Path) -> Result<Bindings> {
     if BINDINGS_HELD.with(std::cell::Cell::get) {
-        return Ok(Bindings(None));
+        return Ok(Bindings(None, std::marker::PhantomData));
     }
     let guard = lock(Some(path))?;
     BINDINGS_HELD.with(|held| held.set(true));
-    Ok(Bindings(Some(guard)))
+    Ok(Bindings(Some(guard), std::marker::PhantomData))
 }
 /// The bindings lock within `wait`, or None while another process holds it.
 pub(super) fn try_bindings(wait: Duration) -> Option<Bindings> {
@@ -57,11 +58,11 @@ pub(super) fn try_bindings(wait: Duration) -> Option<Bindings> {
 }
 fn try_bindings_at(path: &Path, wait: Duration) -> Option<Bindings> {
     if BINDINGS_HELD.with(std::cell::Cell::get) {
-        return Some(Bindings(None));
+        return Some(Bindings(None, std::marker::PhantomData));
     }
     let guard = lock_until(path, Instant::now() + wait).ok()??;
     BINDINGS_HELD.with(|held| held.set(true));
-    Some(Bindings(Some(guard)))
+    Some(Bindings(Some(guard), std::marker::PhantomData))
 }
 pub(crate) fn exists(name: &str) -> bool {
     binding_path(name).is_file()

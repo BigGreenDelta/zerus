@@ -150,13 +150,27 @@ fn valid(message: &Value) -> bool {
 
 /// Reads the newest window of `/message` with the cache, within 20 seconds.
 pub(super) fn fetch(native: &dyn Native, record: &Value) -> Result<Page> {
-    let cache = cache_path(record);
-    fetch_with(native, record, &cache, |page| publish(record, &cache, page))
+    fetch_published(native, record, &cache_path(record), publish_lock, || {
+        super::binding(string(record, "name")).ok()
+    })
 }
 /// `fetch` with a cache path of the caller's own, saved without a binding.
 #[cfg(test)]
 pub(super) fn fetch_at(native: &dyn Native, record: &Value, cache: &Path) -> Result<Page> {
     fetch_with(native, record, cache, |page| save_at(cache, record, page))
+}
+/// `fetch` with its lock and current binding given: a changed read is saved
+/// only through `publish_with`.
+fn fetch_published<G>(
+    native: &dyn Native,
+    record: &Value,
+    cache: &Path,
+    lock: impl FnOnce() -> Option<G>,
+    current: impl FnOnce() -> Option<Value>,
+) -> Result<Page> {
+    fetch_with(native, record, cache, |page| {
+        publish_with(lock, current, record, cache, page)
+    })
 }
 fn fetch_with(
     native: &dyn Native,
@@ -179,33 +193,27 @@ const PUBLISH_WAIT: Duration = Duration::from_millis(200);
 /// Set once a read in this process found the lock busy: later reads (the
 /// rest of a listing) try once and never wait again.
 static PUBLISH_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The bindings lock for a read's save, within `PUBLISH_WAIT` until a read
+/// in this process found it busy.
+fn publish_lock() -> Option<super::Bindings> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let wait = if PUBLISH_BUSY.load(Relaxed) {
+        Duration::ZERO
+    } else {
+        PUBLISH_WAIT
+    };
+    let guard = super::try_bindings(wait);
+    if guard.is_none() {
+        PUBLISH_BUSY.store(true, Relaxed);
+    }
+    guard
+}
 /// Saves the cache only under the bindings lock, which Forget holds while it
 /// removes a binding and its cache, and only while this exact binding (run
 /// and conversation) is still the one under its name. A Forget, rename or
 /// re-creation that ran during the read wins: nothing is saved and this
 /// conversation's cache is removed. Without the lock the save is skipped;
 /// an action that already holds it saves at once.
-fn publish(record: &Value, cache: &Path, page: &Page) {
-    use std::sync::atomic::Ordering::Relaxed;
-    publish_with(
-        || {
-            let wait = if PUBLISH_BUSY.load(Relaxed) {
-                Duration::ZERO
-            } else {
-                PUBLISH_WAIT
-            };
-            let guard = super::try_bindings(wait);
-            if guard.is_none() {
-                PUBLISH_BUSY.store(true, Relaxed);
-            }
-            guard
-        },
-        || super::binding(string(record, "name")).ok(),
-        record,
-        cache,
-        page,
-    );
-}
 fn publish_with<G>(
     lock: impl FnOnce() -> Option<G>,
     current: impl FnOnce() -> Option<Value>,
@@ -1031,6 +1039,29 @@ mod tests {
         // Unchanged binding: saved.
         publish_with(|| Some(()), || Some(a.clone()), &a, &cache, &page);
         assert!(load_at(&cache, &a).is_some());
+    }
+
+    #[test]
+    fn a_changed_read_is_published_only_under_the_lock_for_its_exact_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let a = json!({"name": "opencode/p/t", "run_id": "run-a", "conversation_id": "ses_A"});
+        let b = json!({"name": "opencode/p/t", "run_id": "run-b", "conversation_id": "ses_B"});
+        // Lock busy: the read still answers, saves nothing and reads no binding.
+        let native = pages(vec![listed(&["msg_1"], None)]);
+        let page =
+            fetch_published(&native, &a, &cache, || None::<()>, || panic!("unlocked")).unwrap();
+        assert_eq!(ids(&page), ["msg_1"]);
+        assert!(!cache.exists());
+        // Under the lock for the exact binding: saved.
+        let native = pages(vec![listed(&["msg_1"], None)]);
+        fetch_published(&native, &a, &cache, || Some(()), || Some(a.clone())).unwrap();
+        assert!(load_at(&cache, &a).is_some());
+        // The name was re-created during a changed read: its cache is removed.
+        let native = pages(vec![listed(&["msg_1", "msg_2"], None)]);
+        let page = fetch_published(&native, &a, &cache, || Some(()), || Some(b.clone())).unwrap();
+        assert_eq!(ids(&page), ["msg_1", "msg_2"]);
+        assert!(!cache.exists());
     }
 
     #[test]
