@@ -53,12 +53,13 @@ object QuestionPolicies {
             .put("selected_option_ids", JSONArray(prompt.choices.filter { it.id in options[prompt.id].orEmpty() }.map { it.id }))
             .put("text", if (prompt.other) texts[prompt.id].orEmpty() else "") })
 
-    fun answerError(prompts: List<Prompt>, options: Map<String, Set<String>>, texts: Map<String, String>): String {
+    /** Pass [QuestionPolicies.literalText] of the card as [literalText]; without it, text starting with `/` or `!` is refused. */
+    fun answerError(prompts: List<Prompt>, options: Map<String, Set<String>>, texts: Map<String, String>, literalText: Boolean = false): String {
         for (prompt in prompts) {
             val text = texts[prompt.id].orEmpty()
             val selected = options[prompt.id].orEmpty()
             if (text.toByteArray(Charsets.UTF_8).size > 4096 || text.any(Char::isISOControl)) return "Answers must be one line and at most 4096 UTF-8 bytes."
-            if (text.trim().startsWith('/') || text.trim().startsWith('!')) return "Enter command-like answers on your computer."
+            if (!literalText && (text.trim().startsWith('/') || text.trim().startsWith('!'))) return "Enter command-like answers on your computer."
             if (selected.any { id -> prompt.choices.none { it.id == id } }) return "An answer option changed. Review this request again."
             if (text.isNotBlank() && !prompt.other) return "This request does not accept an Other answer."
             if (!prompt.multi && selected.size + (if (text.isNotBlank()) 1 else 0) > 1) return "Choose one answer for this question."
@@ -74,8 +75,8 @@ object QuestionPolicies {
         }
         return ""
     }
-    fun complete(prompts: List<Prompt>, options: Map<String, Set<String>>, texts: Map<String, String>): Boolean =
-        prompts.isNotEmpty() && answerError(prompts, options, texts).isBlank() && prompts.all {
+    fun complete(prompts: List<Prompt>, options: Map<String, Set<String>>, texts: Map<String, String>, literalText: Boolean = false): Boolean =
+        prompts.isNotEmpty() && answerError(prompts, options, texts, literalText).isBlank() && prompts.all {
             options[it.id].orEmpty().isNotEmpty() || it.other && texts[it.id].orEmpty().isNotBlank() || mayBeEmpty(it)
         }
     /**
@@ -127,4 +128,47 @@ object QuestionPolicies {
     fun approvalSupported(question: Question) = question.approval && question.prompts.size == 1 &&
         !question.prompts.single().multi && question.prompts.single().choices.any { it.id == "allow" } &&
         question.prompts.single().choices.any { it.id == "deny" }
+
+    /**
+     * An OpenCode form card: hgs sends its text through the form reply API, never to a terminal, so text
+     * starting with `/` or `!` is an ordinary answer there. Every other card, approvals included, refuses it.
+     */
+    fun literalText(question: Question) = question.source == "opencode_native" && !question.approval
+
+    private val openCodePermissionOptions = setOf("once", "always", "reject")
+    /**
+     * An OpenCode permission card the phone can answer: one single-choice `permission` item offering Allow once
+     * and Reject, possibly Always allow, and nothing else. Other approvals, including Claude choice cards, keep
+     * [approvalSupported].
+     */
+    fun openCodePermission(question: Question): Boolean {
+        val prompt = question.prompts.singleOrNull() ?: return false
+        val ids = prompt.choices.map { it.id }
+        return question.approval && question.source == "opencode_native" && question.canAnswer && prompt.id == "permission" &&
+            !prompt.multi && "once" in ids && "reject" in ids && ids.all { it in openCodePermissionOptions }
+    }
+    /** Always allow reaches beyond this request; it is offered only behind [AlwaysAllowConfirmation]. */
+    fun alwaysAllowOffered(question: Question) = openCodePermission(question) && question.prompts.single().choices.any { it.id == "always" }
+    /** The one answer row an approval button sends: [option] for the card's single item. */
+    fun approvalAnswer(question: Question, option: String): JSONArray = JSONArray().put(JSONObject()
+        .put("question_id", question.prompts.single().id).put("selected_option_ids", JSONArray().put(option)).put("text", ""))
+}
+
+/**
+ * The separate confirmation of OpenCode's Always allow for one exact card (ID and hash). It sends only while
+ * that card still offers Always allow and can be answered and edited; Confirm closes it either way.
+ */
+internal data class AlwaysAllowConfirmation(val questionId: String = "", val questionHash: String = "") {
+    val open: Boolean get() = questionId.isNotEmpty()
+    /** Opens from an enabled Always allow… button: [reviewed] is the same review that enables Allow once. */
+    fun request(question: Question, reviewed: Boolean) =
+        if (reviewed && QuestionPolicies.alwaysAllowOffered(question)) AlwaysAllowConfirmation(question.id, question.hash) else this
+    /** Whether the dialog may stay open for the current [question]; [editable]: its answer can still be edited and sent. */
+    fun showing(question: Question, editable: Boolean) = open && editable && question.id == questionId &&
+        question.hash == questionHash && QuestionPolicies.alwaysAllowOffered(question)
+    fun cancel() = AlwaysAllowConfirmation()
+    fun confirm(question: Question, editable: Boolean, send: (JSONArray) -> Unit): AlwaysAllowConfirmation {
+        if (showing(question, editable)) send(QuestionPolicies.approvalAnswer(question, "always"))
+        return cancel()
+    }
 }

@@ -105,6 +105,140 @@ class QuestionPoliciesTest {
         assertTrue(QuestionPolicies.answerError(listOf(p), emptyMap(), mapOf("q" to "a\nb")).isNotBlank())
         assertTrue(QuestionPolicies.complete(listOf(p), emptyMap(), mapOf("q" to "literal <tag>")))
     }
+    private fun card(source: String, items: JSONArray, approval: Boolean = false, canAnswer: Boolean = true, choices: Boolean = false) =
+        NativeParser.questions(JSONObject().put("pending_questions", JSONArray().put(JSONObject().put("question_id", "card-$source")
+            .put("question_hash", "hash-$source").put("source", source).put("approval", approval).put("approval_choices", choices)
+            .put("can_answer", canAnswer).put("questions", items)))).single()
+    private fun options(vararg ids: String) = JSONArray(ids.map { JSONObject().put("id", it).put("label", it) })
+    private val choiceItem get() = JSONObject().put("id", "c").put("question", "Pick").put("allow_other", true).put("options", options("a", "b"))
+    private val textItem get() = JSONObject().put("id", "t").put("question", "Path").put("allow_other", true).put("input_kind", "text")
+    private fun permission(id: String = "permission", choices: JSONArray = options("once", "always", "reject"), multi: Boolean = false) =
+        JSONObject().put("id", id).put("question", "shell").put("allow_other", false).put("multi_select", multi).put("options", choices)
+
+    @Test fun openCodeFormTextMayStartWithSlashOrBang() {
+        val form = card("opencode_native", JSONArray().put(textItem).put(choiceItem))
+        val literal = QuestionPolicies.literalText(form)
+        assertTrue(literal)
+        listOf("/tmp/report.txt", "!important", "  /x").forEach { text ->
+            // Both the text item and the Other answer of a choice item.
+            val texts = mapOf("t" to text, "c" to text)
+            assertEquals(text, "", QuestionPolicies.answerError(form.prompts, emptyMap(), texts, literal))
+            assertTrue(text, QuestionPolicies.complete(form.prompts, emptyMap(), texts, literal))
+            assertTrue(text, QuestionSteps.current(form.prompts, 0, emptyMap(), texts, literal).complete)
+        }
+        // Every other text rule still applies.
+        assertEquals("Answers must be one line and at most 4096 UTF-8 bytes.", QuestionPolicies.answerError(form.prompts, emptyMap(), mapOf("t" to "/a\nb"), literal))
+        assertEquals("This request does not accept an Other answer.",
+            QuestionPolicies.answerError(listOf(form.prompts.last().copy(other = false)), emptyMap(), mapOf("c" to "/x"), literal))
+    }
+
+    @Test fun commandLikeTextIsRefusedOutsideOpenCodeForms() {
+        val refused = "Enter command-like answers on your computer."
+        val others = listOf("codex_async", "claude_terminal_choice", "claude_tool_approval", "kimi_wire", "dsh_native", "startup_terminal_choice", "")
+            .map { card(it, JSONArray().put(choiceItem)) }
+        // An OpenCode approval card is not a form.
+        val openCodeApproval = card("opencode_native", JSONArray().put(choiceItem), approval = true)
+        (others + openCodeApproval).forEach { question ->
+            val literal = QuestionPolicies.literalText(question)
+            assertFalse(question.source, literal)
+            listOf("/command", "!rm -rf", "  /x").forEach { text ->
+                val texts = mapOf("c" to text)
+                assertEquals(question.source + text, refused, QuestionPolicies.answerError(question.prompts, emptyMap(), texts, literal))
+                assertFalse(question.source + text, QuestionPolicies.complete(question.prompts, emptyMap(), texts, literal))
+                assertFalse(question.source + text, QuestionSteps.current(question.prompts, 0, emptyMap(), texts, literal).complete)
+            }
+        }
+        // A prompt built without its card keeps the refusal.
+        assertEquals(refused, QuestionPolicies.answerError(listOf(prompt.copy(other = true)), emptyMap(), mapOf("q" to "/command")))
+    }
+
+    @Test fun openCodePermissionCardsQualifyOnlyInTheirExactShape() {
+        val full = card("opencode_native", JSONArray().put(permission()), approval = true, choices = true)
+        assertTrue(QuestionPolicies.openCodePermission(full))
+        assertTrue(QuestionPolicies.alwaysAllowOffered(full))
+        // Without Always allow the card still qualifies; only Reject and Allow once are offered.
+        val narrow = card("opencode_native", JSONArray().put(permission(choices = options("reject", "once"))), approval = true, choices = true)
+        assertTrue(QuestionPolicies.openCodePermission(narrow))
+        assertFalse(QuestionPolicies.alwaysAllowOffered(narrow))
+        val refused = mapOf(
+            "claude approval_choices" to card("claude_tool_approval", JSONArray().put(permission("approval", options("1", "2", "3"))), approval = true, choices = true),
+            "claude with OpenCode ids" to card("claude_tool_approval", JSONArray().put(permission()), approval = true, choices = true),
+            "allow/deny" to card("opencode_native", JSONArray().put(permission(choices = options("allow", "deny"))), approval = true),
+            "extra option" to card("opencode_native", JSONArray().put(permission(choices = options("once", "always", "reject", "later"))), approval = true, choices = true),
+            "no once" to card("opencode_native", JSONArray().put(permission(choices = options("always", "reject"))), approval = true, choices = true),
+            "no reject" to card("opencode_native", JSONArray().put(permission(choices = options("once", "always"))), approval = true, choices = true),
+            "multi" to card("opencode_native", JSONArray().put(permission(multi = true)), approval = true, choices = true),
+            "second prompt" to card("opencode_native", JSONArray().put(permission()).put(permission("other")), approval = true, choices = true),
+            "other item id" to card("opencode_native", JSONArray().put(permission("approval")), approval = true, choices = true),
+            "not an approval" to card("opencode_native", JSONArray().put(permission())),
+            "unanswerable" to card("opencode_native", JSONArray().put(permission()), approval = true, canAnswer = false, choices = true),
+            "no items" to card("opencode_native", JSONArray(), approval = true, choices = true))
+        refused.forEach { (name, question) ->
+            assertFalse(name, QuestionPolicies.openCodePermission(question))
+            assertFalse(name, QuestionPolicies.alwaysAllowOffered(question))
+        }
+        // Allow/deny cards behave as before, and Claude choice cards stay unanswerable here.
+        assertTrue(QuestionPolicies.approvalSupported(refused.getValue("allow/deny")))
+        assertFalse(QuestionPolicies.approvalSupported(refused.getValue("claude approval_choices")))
+        assertFalse(QuestionPolicies.approvalSupported(full))
+    }
+
+    @Test fun approvalButtonsSendOneRowForTheChosenOption() {
+        val allowDeny = question().copy(approval = true, prompts = listOf(prompt.copy(id = "approval", choices = listOf(Choice("allow", "Yes", ""), Choice("deny", "No", "")))))
+        val row = QuestionPolicies.approvalAnswer(allowDeny, "deny")
+        assertEquals(1, row.length())
+        assertEquals("approval", row.getJSONObject(0).getString("question_id"))
+        assertEquals(listOf("deny"), row.getJSONObject(0).getJSONArray("selected_option_ids").let { ids -> (0 until ids.length()).map(ids::getString) })
+        assertEquals("", row.getJSONObject(0).getString("text"))
+    }
+
+    @Test fun alwaysAllowNeedsItsOwnConfirmationOfTheSameCard() {
+        val question = card("opencode_native", JSONArray().put(permission()), approval = true, choices = true)
+        val sent = mutableListOf<JSONArray>()
+        // Only after the same review as Allow once.
+        assertFalse(AlwaysAllowConfirmation().request(question, reviewed = false).open)
+        val open = AlwaysAllowConfirmation().request(question, reviewed = true)
+        assertTrue(open.open); assertTrue(open.showing(question, editable = true))
+        // Cancel sends nothing, and a late Confirm after it sends nothing either.
+        val cancelled = open.cancel()
+        assertFalse(cancelled.open)
+        assertFalse(cancelled.confirm(question, editable = true) { sent += it }.open)
+        assertTrue(sent.isEmpty())
+        // Confirm sends always once and closes.
+        val closed = open.confirm(question, editable = true) { sent += it }
+        assertFalse(closed.open)
+        assertEquals(1, sent.size)
+        assertEquals(listOf("always"), sent.single().getJSONObject(0).getJSONArray("selected_option_ids").let { ids -> (0 until ids.length()).map(ids::getString) })
+        assertEquals("permission", sent.single().getJSONObject(0).getString("question_id"))
+        closed.confirm(question, editable = true) { sent += it }
+        assertEquals(1, sent.size)
+        // A card without Always allow cannot open it.
+        val narrow = card("opencode_native", JSONArray().put(permission(choices = options("once", "reject"))), approval = true, choices = true)
+        assertFalse(AlwaysAllowConfirmation().request(narrow, reviewed = true).open)
+    }
+
+    @Test fun alwaysAllowSendsNothingWhenTheCardChangedMeanwhile() {
+        val question = card("opencode_native", JSONArray().put(permission()), approval = true, choices = true)
+        val open = AlwaysAllowConfirmation().request(question, reviewed = true)
+        val changed = mapOf(
+            "new hash" to question.copy(hash = "replacement"),
+            "new id" to question.copy(id = "per_2"),
+            "stopped qualifying" to question.copy(prompts = listOf(question.prompts.single().copy(choices = question.prompts.single().choices + Choice("later", "Later", "")))),
+            "always withdrawn" to question.copy(prompts = listOf(question.prompts.single().copy(choices = question.prompts.single().choices.filter { it.id != "always" }))),
+            "unanswerable" to question.copy(canAnswer = false))
+        changed.forEach { (name, current) ->
+            val sent = mutableListOf<JSONArray>()
+            assertFalse(name, open.showing(current, editable = true))
+            assertFalse(name, open.confirm(current, editable = true) { sent += it }.open)
+            assertTrue(name, sent.isEmpty())
+        }
+        // No longer editable (sending, submitted, or the conversation is not verified).
+        val sent = mutableListOf<JSONArray>()
+        assertFalse(open.showing(question, editable = false))
+        assertFalse(open.confirm(question, editable = false) { sent += it }.open)
+        assertTrue(sent.isEmpty())
+    }
+
     @Test fun approvalRequiresExactNativeIds() {
         val approval = question().copy(approval = true)
         assertFalse(QuestionPolicies.approvalSupported(approval))
