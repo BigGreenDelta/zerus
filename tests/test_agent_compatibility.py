@@ -37,12 +37,15 @@ class AgentCompatibility(unittest.TestCase):
         return stream.getvalue()
 
     def package(self, payload, agent='codex', target='linux-x64'):
+        spec = compat.AGENTS[agent]
+        algorithm = 'sha256' if 'binary' in spec else 'sha512'
         return {'version': '1.2.3', 'target': target,
-                'url': compat.AGENTS[agent]['tarball'].format(version='1.2.3', target=target),
-                'integrity': 'sha512-' + base64.b64encode(hashlib.sha512(payload).digest()).decode()}
+                'url': (spec.get('tarball') or spec['binary']).format(version='1.2.3', target=target),
+                'integrity': algorithm + '-' + base64.b64encode(hashlib.new(algorithm, payload).digest()).decode()}
 
     def test_verified_archive_extracts_only_the_expected_executable(self):
-        for agent, target in [(agent, target) for agent, spec in compat.AGENTS.items() for target in spec['members']]:
+        for agent, target in [(agent, target) for agent, spec in compat.AGENTS.items() if 'tarball' in spec
+                              for target in spec['members']]:
             payload = self.archive(name=compat.AGENTS[agent]['members'][target])
             with self.subTest(agent=agent, target=target), tempfile.TemporaryDirectory() as temporary, patch.object(
                     compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload)):
@@ -51,6 +54,29 @@ class AgentCompatibility(unittest.TestCase):
                 self.assertEqual(native.read_bytes(), b'synthetic-native-executable')
                 self.assertEqual(native.stat().st_mode & 0o777, 0o755)
                 self.assertEqual(list(Path(temporary).iterdir()), [native])
+
+    def test_a_published_executable_is_kept_only_once_its_digest_matches(self):
+        payload = b'synthetic-native-executable'
+        for target in compat.AGENTS['kimi']['members']:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary, patch.object(
+                    compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload)) as fetch:
+                package = self.package(payload, 'kimi', target)
+                self.assertEqual(package['url'], 'https://code.kimi.com/kimi-code/binaries/1.2.3/kimi-code-' + target)
+                native = compat.install_native('kimi', package, Path(temporary))
+                fetch.assert_called_once_with(package['url'], timeout=60)
+                self.assertEqual(native, Path(temporary) / 'kimi')
+                self.assertEqual(native.read_bytes(), payload)
+                self.assertEqual(native.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(list(Path(temporary).iterdir()), [native])
+        # Other bytes, or a pin in another algorithm, leave nothing behind.
+        for package, message in [(self.package(payload + b'changed', 'kimi'), 'integrity mismatch'),
+                                 (dict(self.package(payload, 'kimi'), integrity=self.package(payload)['integrity']),
+                                  'SHA-256')]:
+            with self.subTest(message), tempfile.TemporaryDirectory() as temporary, patch.object(
+                    compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload)):
+                with self.assertRaisesRegex(ValueError, message):
+                    compat.install_native('kimi', package, Path(temporary))
+                self.assertEqual(list(Path(temporary).iterdir()), [])
 
     def test_windows_codex_helpers_are_never_extracted(self):
         # The sandbox setup program must never run; nothing but the CLI leaves the archive.
@@ -75,7 +101,11 @@ class AgentCompatibility(unittest.TestCase):
                  # A target must match its URL, and Codex has no reviewed macOS package.
                  ('claude', dict(darwin, target='linux-x64')), ('codex', dict(self.package(payload), target='darwin-arm64')),
                  # OpenCode's x86_64 Linux pin is the baseline package, and it has no Windows package.
-                 ('opencode', dict(opencode, target='linux-x64')), ('opencode', dict(opencode, target='win32-x64'))]
+                 ('opencode', dict(opencode, target='linux-x64')), ('opencode', dict(opencode, target='win32-x64')),
+                 # Kimi Code's executable comes only from its own download, and it has no Windows pin.
+                 ('kimi', self.package(payload, 'claude')), ('claude', self.package(payload, 'kimi')),
+                 ('kimi', dict(self.package(payload, 'kimi'), target='darwin-arm64')),
+                 ('kimi', dict(self.package(payload, 'kimi'), target='win32-x64'))]
         for agent, package in cases:
             with self.subTest(agent=agent, url=package['url'], target=package['target']), \
                     tempfile.TemporaryDirectory() as temporary, patch.object(
@@ -100,8 +130,8 @@ class AgentCompatibility(unittest.TestCase):
                                     if package['version'] in current),
                              sorted((version, target) for version in current for target in spec['members']))
             for package in pins:
-                self.assertEqual(package['url'], spec['tarball'].format(**package))
-                self.assertTrue(package['integrity'].startswith('sha512-'))
+                self.assertEqual(package['url'], (spec.get('tarball') or spec['binary']).format(**package))
+                self.assertTrue(package['integrity'].startswith('sha256-' if 'binary' in spec else 'sha512-'))
         # Codex 0.160.1 stays a Linux-only regression boundary for resident sessions.
         self.assertEqual([(package['version'], package['target']) for package in manifest['codex']
                           if package.get('retained')], [('0.160.1', 'linux-x64')])
@@ -109,6 +139,11 @@ class AgentCompatibility(unittest.TestCase):
         # OpenCode pins its reviewed minimum, which its canary never moves.
         self.assertEqual(sorted((package['version'], package['target']) for package in manifest['opencode']),
                          [('2.0.32', 'darwin-arm64'), ('2.0.32', 'linux-x64-baseline')])
+        # Kimi Code is discovered from its own release train, not the archived Python kimi-cli.
+        self.assertEqual(sorted((package['version'], package['target']) for package in manifest['kimi']),
+                         [('2.1.1', 'darwin-arm64'), ('2.1.1', 'linux-x64')])
+        kimi = next(row for row in manifest['upstream'] if row['name'] == 'Kimi Code')
+        self.assertEqual(kimi['url'], 'https://registry.npmjs.org/@moonshot-ai/kimi-code/latest')
         policies = {row['name']: row.get('policy') for row in manifest['upstream']}
         self.assertEqual(policies['OpenCode'], 'minimum')
         self.assertEqual({name for name, policy in policies.items() if policy}, {'OpenCode'})
@@ -121,7 +156,8 @@ class AgentCompatibility(unittest.TestCase):
         claude = [pin('2.0.0', target) for target in compat.AGENTS['claude']['members']]
         codex = [pin('1.0.0', 'linux-x64', **retained), pin('1.1.0', 'linux-x64'), pin('1.1.0', 'win32-x64')]
         opencode = [pin('2.0.0', target) for target in compat.AGENTS['opencode']['members']]
-        compat.check_manifest({'codex': codex, 'claude': claude, 'opencode': opencode})
+        kimi = [pin('2.0.0', target) for target in compat.AGENTS['kimi']['members']]
+        compat.check_manifest({'codex': codex, 'claude': claude, 'opencode': opencode, 'kimi': kimi})
         for label, pins, message in [
                 ('current version without Windows', codex[:2], 'needs a pin for every target'),
                 ('newest version retained', [pin('1.1.0', 'linux-x64', **retained)], 'only an older'),
@@ -132,7 +168,7 @@ class AgentCompatibility(unittest.TestCase):
                 ('unsupported target', [*codex, pin('1.1.0', 'darwin-arm64')], 'unsupported target'),
                 ('no version', [], 'no reviewed version')]:
             with self.subTest(label), self.assertRaisesRegex(ValueError, message):
-                compat.check_manifest({'codex': pins, 'claude': claude, 'opencode': opencode})
+                compat.check_manifest({'codex': pins, 'claude': claude, 'opencode': opencode, 'kimi': kimi})
 
     def test_changed_package_bytes_fail_before_extraction(self):
         payload = self.archive()
@@ -306,9 +342,11 @@ class AgentCompatibility(unittest.TestCase):
         for target, arguments, expected in [
                 # OpenCode runs its baseline x86_64 package on Linux.
                 ('linux-x64', [], [('codex', '0.160.1', 'linux-x64'), ('codex', '0.162.0', 'linux-x64'),
-                                   ('claude', '2.1.296', 'linux-x64'), ('opencode', '2.0.32', 'linux-x64-baseline')]),
+                                   ('claude', '2.1.296', 'linux-x64'), ('opencode', '2.0.32', 'linux-x64-baseline'),
+                                   ('kimi', '2.1.1', 'linux-x64')]),
                 ('linux-x64', ['--agent', 'opencode'], [('opencode', '2.0.32', 'linux-x64-baseline')]),
-                ('darwin-arm64', [], [('claude', '2.1.296', 'darwin-arm64'), ('opencode', '2.0.32', 'darwin-arm64')]),
+                ('darwin-arm64', [], [('claude', '2.1.296', 'darwin-arm64'), ('opencode', '2.0.32', 'darwin-arm64'),
+                                      ('kimi', '2.1.1', 'darwin-arm64')]),
                 ('darwin-arm64', ['--agent', 'codex'], SystemExit),
                 ('win32-x64', ['--agent', 'opencode'], SystemExit),
                 # The retained Codex 0.160.1 has no Windows pin.
@@ -361,16 +399,20 @@ class AgentCompatibility(unittest.TestCase):
                 with self.subTest(agent=agent, target=target):
                     self.assertIs(compat.target_spec(agent, target), spec)
 
-    def qualify_fixture(self, agent, target):
+    def qualify_fixture(self, agent, target, rewrites=False):
         """Run qualify() with stand-ins for the package, the executable and the suite
         interpreter; returns the report row, the suite runs, the results folder and the
-        profile each probe of the executable saw."""
+        profile each probe of the executable saw. A suite that `rewrites` changes the
+        executable as an agent's updater would."""
         runs, profiles = [], []
         self.probe_environments = []
 
         def run(argv, **options):
             self.assertIs(options['stdin'], compat.subprocess.DEVNULL)
             runs.append((argv[3:], options['env'], options['timeout']))
+            if rewrites:
+                with native.open('ab') as file:
+                    file.write(b'updated')
             options['stdout'].write(b'ZERUS_NATIVE_RESULT={"tests": 2, "skipped": 0}\n')
             options['stderr'].write('ok: \u041f\u0440\u0438\u0432\u0435\u0442\n'.encode())
             return SimpleNamespace(returncode=0)
@@ -390,8 +432,10 @@ class AgentCompatibility(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         work, results = Path(temporary.name) / 'work', Path(temporary.name) / 'results'
         (work / agent / '1.2.3').mkdir(parents=True)
+        native = work / agent / '1.2.3' / 'native'
+        native.write_bytes(b'synthetic-native-executable')
         package = {'version': '1.2.3', 'target': target, 'integrity': 'sha512-fixture'}
-        with patch.object(compat, 'install_native', return_value=work / agent / '1.2.3' / 'native'), \
+        with patch.object(compat, 'install_native', return_value=native), \
                 patch.object(compat, 'probe', side_effect=probe), \
                 patch.object(compat.subprocess, 'run', side_effect=run), \
                 patch.dict(compat.os.environ, {'HGS_TEST_CONPTY_DIR': 'C:\\fixture\\conpty',
@@ -455,6 +499,64 @@ class AgentCompatibility(unittest.TestCase):
             self.qualify_fixture(agent, 'linux-x64')
             self.assertTrue(all(env.get('XDG_STATE_HOME') == '/fixture-live-state' for env in self.probe_environments))
 
+    def test_an_executable_that_changes_during_its_contract_fails(self):
+        row, runs, directory, profiles = self.qualify_fixture('kimi', 'linux-x64')
+        self.assertEqual(row['status'], 'passed', row.get('error'))
+        self.assertEqual(row['image_sha256'], hashlib.sha256(b'synthetic-native-executable').hexdigest())
+        self.assertEqual(row['image_sha256_after'], row['image_sha256'])
+        [(suites, env, timeout)] = runs
+        self.assertEqual((suites, timeout), (['test_kimi_native'], compat.AGENTS['kimi']['timeout']))
+        self.assertEqual(env['KIMI_CODE_NO_AUTO_UPDATE'], '1')
+        self.assertEqual(Path(env['HGS_KIMI_TEST_BIN']).name, 'native')
+        # The suite passed, but its executable did not keep the verified bytes.
+        row, runs, directory, profiles = self.qualify_fixture('kimi', 'linux-x64', rewrites=True)
+        self.assertEqual(row['status'], 'failed')
+        self.assertEqual(row['error'], 'The native executable changed during default')
+        self.assertNotEqual(row['image_sha256_after'], row['image_sha256'])
+
+    def test_latest_kimi_canary_uses_the_official_release_manifest(self):
+        manifest = json.loads(compat.MANIFEST.read_text())
+        checksum = hashlib.sha256(b'synthetic-native-executable').hexdigest()
+        responses = {source['url']: {'version': '9.8.7'} if source['name'] == 'Kimi Code' else OSError('fixture')
+                     for source in manifest['upstream']}
+        release = compat.AGENTS['kimi']['manifest'].format(version='9.8.7')
+        responses[release] = {'version': '9.8.7', 'platforms': {
+            'linux-x64': {'filename': 'kimi-code-linux-x64', 'checksum': checksum}}}
+
+        def fetch(url):
+            if isinstance(responses[url], Exception):
+                raise responses[url]
+            return responses[url]
+
+        def qualify(agent, package, work, results, hgs):
+            return {'agent': agent, 'version': package['version'], 'target': package['target'], 'status': 'passed',
+                    'url': package['url'], 'integrity': package['integrity']}
+
+        def canary(platforms):
+            responses[release]['platforms'] = platforms
+            with tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(compat, 'fetch_json', side_effect=fetch), \
+                    patch.object(compat, 'qualify', side_effect=qualify), \
+                    patch.object(compat, 'host_target', return_value='linux-x64'), \
+                    patch.object(compat.sys, 'argv', ['agent-compatibility.py', '--latest', '--agent', 'kimi',
+                                                      '--results', temporary]):
+                compat.main()
+                return json.loads((Path(temporary) / 'report.json').read_text())
+
+        report = canary(responses[release]['platforms'])
+        self.assertEqual(report['canary_versions'], {'kimi': '9.8.7'})
+        self.assertEqual([(row['version'], row['target']) for row in report['contracts']],
+                         [('2.1.1', 'linux-x64'), ('9.8.7', 'linux-x64')])
+        self.assertEqual(report['contracts'][-1]['url'], 'https://code.kimi.com/kimi-code/binaries/9.8.7/kimi-code-linux-x64')
+        self.assertEqual(report['contracts'][-1]['integrity'],
+                         'sha256-' + base64.b64encode(bytes.fromhex(checksum)).decode())
+        # A manifest that names another file or no valid digest qualifies nothing new.
+        for platforms in ({'linux-x64': {'filename': 'kimi-code-linux-arm64', 'checksum': checksum}},
+                          {'linux-x64': {'filename': 'kimi-code-linux-x64', 'checksum': 'fixture'}}):
+            report = canary(platforms)
+            self.assertEqual([row['version'] for row in report['contracts']], ['2.1.1'])
+            self.assertTrue(any(error.startswith('Kimi Code canary discovery:') for error in report['errors']))
+
     def test_a_suite_that_times_out_keeps_its_log(self):
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / 'default.log'
@@ -500,7 +602,7 @@ class AgentCompatibility(unittest.TestCase):
                 'HGS_ACCOUNT': 'fixture-account', 'CODEX_HOME': '/fixture-live-home',
                 'CLAUDE_CONFIG_DIR': '/fixture-live-claude', 'CLAUDECODE': '1',
                 'OPENCODE_CONFIG': '/fixture-live-opencode.json', 'OPENCODE_SERVER_PASSWORD': 'fixture-password',
-                'OPENAI_API_KEY': 'fixture-key', 'ANTHROPIC_API_KEY': 'fixture-key',
+                'OPENAI_API_KEY': 'fixture-key', 'ANTHROPIC_API_KEY': 'fixture-key', 'KIMI_CODE_HOME': '/fixture-live-kimi',
                 'HGS_TEST_CONPTY_DIR': '/fixture-conpty', 'SYSTEMROOT': 'C:\\Windows', 'PATHEXT': '.COM;.EXE',
                 'TEMP': '/fixture-temp', 'USERPROFILE': '/fixture-live-profile'}):
             home = Path(temporary) / 'home'
@@ -510,8 +612,10 @@ class AgentCompatibility(unittest.TestCase):
             self.assertEqual(env['PYTHONPATH'], str(ROOT / 'tests'))
             self.assertEqual(env['PYTHONUTF8'], '1')
             self.assertEqual(env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'], '1')
+            # No agent updates itself; Kimi's updater would replace the executable under test.
+            self.assertEqual((env['DISABLE_AUTOUPDATER'], env['KIMI_CODE_NO_AUTO_UPDATE']), ('1', '1'))
             for key in ('HGS_SESSION', 'HGS_RUN_ID', 'HGS_ACCOUNT', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
-                        'CLAUDE_CONFIG_DIR', 'CLAUDECODE', 'OPENCODE_CONFIG', 'OPENCODE_SERVER_PASSWORD'):
+                        'CLAUDE_CONFIG_DIR', 'CLAUDECODE', 'OPENCODE_CONFIG', 'OPENCODE_SERVER_PASSWORD', 'KIMI_CODE_HOME'):
                 self.assertNotIn(key, env)
             # The suites' own inputs and what Windows programs need pass through. So
             # does the real profile: the Windows suites place their projects by it.

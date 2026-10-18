@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keyless released Codex, Claude Code and OpenCode contracts and read-only upstream capability reports."""
+"""Keyless released Codex, Claude Code, OpenCode and Kimi Code contracts and read-only upstream capability reports."""
 import argparse
 import base64
 import datetime
@@ -76,6 +76,21 @@ AGENTS = {
                  'incompatible or unresponsive services',
         timeout=600,
         suites=['test_opencode_native']),
+    # Kimi Code ships one native executable per target outside npm: its official
+    # installer downloads it from `binary` and checks the SHA-256 that the
+    # release's `manifest` names, which the pin keeps. Its updater replaces the
+    # executable it runs from, so the suite runs a copy of its own, and
+    # KIMI_CODE_NO_AUTO_UPDATE turns every update step off.
+    'kimi': dict(
+        name='Kimi Code', variable='HGS_KIMI_TEST_BIN', version_output='{}',
+        binary='https://code.kimi.com/kimi-code/binaries/{version}/kimi-code-{target}',
+        manifest='https://code.kimi.com/kimi-code/binaries/{version}/manifest.json',
+        members={'linux-x64': 'kimi', 'darwin-arm64': 'kimi'},
+        coverage='folder trust answered through hgs, a first message before its conversation, exact input with trailing '
+                 'backslashes, several lines and Cyrillic once per request, pause and resume of the conversation and '
+                 'an unchanged executable',
+        timeout=600,
+        suites=['test_kimi_native']),
 }
 # Suite inputs taken from the caller; every other HGS_ variable is dropped.
 FORWARDED = ('HGS_TEST_CONPTY_DIR',)
@@ -191,17 +206,38 @@ def discover_upstream(manifest):
     return rows
 
 
+def candidate(agent, version, target):
+    """The official package of an unreviewed release as its own index names it:
+    npm metadata, or the release manifest of an agent published as an executable."""
+    spec = AGENTS[agent]
+    version = version_text(version)
+    if 'binary' in spec:
+        data = fetch_json(spec['manifest'].format(version=version))
+        url = spec['binary'].format(version=version, target=target)
+        entry = data['platforms'][target]
+        if data['version'] != version or entry['filename'] != url.rsplit('/', 1)[1]:
+            raise ValueError('Latest native package version mismatch')
+        if not re.fullmatch(r'[0-9a-f]{64}', entry['checksum']):
+            raise ValueError('Invalid package integrity digest')
+        integrity = 'sha256-' + base64.b64encode(bytes.fromhex(entry['checksum'])).decode()
+        return {'version': version, 'target': target, 'url': url, 'integrity': integrity}
+    data = fetch_json(spec['metadata'].format(version=version, target=target))
+    if data['version'] != spec['published'].format(version=version, target=target):
+        raise ValueError('Latest native package version mismatch')
+    return {'version': version, 'target': target, 'url': data['dist']['tarball'], 'integrity': data['dist']['integrity']}
+
+
 DOWNLOAD_ATTEMPTS = 3
 
 
-def download(url, archive):
-    """Fetch a bounded package into archive and return its SHA-512 digest.
+def download(url, archive, algorithm='sha512'):
+    """Fetch a bounded package into archive and return its digest.
 
     A dropped connection or a server error is retried; the caller still
     verifies every byte against the pin, so a retry cannot change the package.
     """
     for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
-        digest = hashlib.sha512()
+        digest = hashlib.new(algorithm)
         size = 0
         try:
             with urllib.request.urlopen(url, timeout=60) as response, archive.open('wb') as output:
@@ -223,20 +259,33 @@ def download(url, archive):
 
 
 def install_native(agent, package, destination):
-    """Verify published bytes, then extract exactly one regular native executable."""
+    """Verify published bytes, then extract exactly one regular native executable,
+    or keep the executable itself for an agent published as one."""
     spec = AGENTS[agent]
     url = package['url']
-    if package['target'] not in spec['members'] or url != spec['tarball'].format(
+    if package['target'] not in spec['members'] or url != (spec.get('tarball') or spec['binary']).format(
             version=version_text(package['version']), target=package['target']):
         raise ValueError('Expected the official ' + spec['name'] + ' package distribution')
     name = spec['members'][package['target']]
     algorithm, encoded = package['integrity'].split('-', 1)
-    if algorithm != 'sha512':
-        raise ValueError('Expected a SHA-512 package pin')
+    pinned, size = ('sha256', 32) if 'binary' in spec else ('sha512', 64)
+    if algorithm != pinned:
+        raise ValueError('Expected a ' + pinned.upper().replace('SHA', 'SHA-') + ' package pin')
     expected = base64.b64decode(encoded, validate=True)
-    if len(expected) != 64:
+    if len(expected) != size:
         raise ValueError('Invalid package integrity digest')
     destination.mkdir(parents=True, exist_ok=True)
+    if 'binary' in spec:
+        download_path = destination / 'native.download'
+        try:
+            if download(url, download_path, pinned) != expected:
+                raise ValueError('Native package integrity mismatch')
+            native = destination / name
+            download_path.replace(native)
+            native.chmod(0o755)
+            return native
+        finally:
+            download_path.unlink(missing_ok=True)
     archive = destination / 'native.tgz'
     try:
         if download(url, archive) != expected:
@@ -254,6 +303,14 @@ def install_native(agent, package, destination):
         archive.unlink(missing_ok=True)
 
 
+def file_digest(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as file:
+        while chunk := file.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def fixture_environment(home):
     # Windows spells every inherited name in upper case, so the prefixes match there
     # too, and SYSTEMROOT, PATHEXT, TEMP and the like pass through unchanged.
@@ -263,9 +320,10 @@ def fixture_environment(home):
     home.mkdir(parents=True, exist_ok=True)
     (home / '.codex').mkdir(exist_ok=True)
     # UTF-8 mode: suites and their Python fakes log non-ASCII prompts, which a
-    # Windows code page cannot encode.
+    # Windows code page cannot encode. No agent updates itself: an update
+    # replaces the executable under test.
     env.update(HOME=str(home), CODEX_HOME=str(home / '.codex'),
-               CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1', DISABLE_AUTOUPDATER='1',
+               CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1', DISABLE_AUTOUPDATER='1', KIMI_CODE_NO_AUTO_UPDATE='1',
                PYTHONPATH=str(ROOT / 'tests'), PYTHONUTF8='1', TERM='xterm-256color')
     return env
 
@@ -364,8 +422,12 @@ def qualify(agent, package, work, results, hgs):
            'package_integrity': package['integrity'], 'status': 'failed'}
     directory = results / agent / version
     directory.mkdir(parents=True, exist_ok=True)
+    native = None
     try:
         native = install_native(agent, package, work / agent / version)
+        # The executable under test keeps its verified bytes: a changed image
+        # means an agent updated or rewrote itself during its contract.
+        row['image_sha256'] = file_digest(native)
         home = work / agent / version / 'home'
         env = fixture_environment(home)
         # The runner's own probes get a private Windows profile too. The suites keep
@@ -404,10 +466,15 @@ def qualify(agent, package, work, results, hgs):
                 row['cases'][case] = json.loads(marker)
             if status or marker is None:
                 raise ValueError('Native contract failed at ' + case)
+            if file_digest(native) != row['image_sha256']:
+                raise ValueError('The native executable changed during ' + case)
         row['status'] = 'passed'
     except Exception as error:
         row['error'] = str(error)
         print(spec['name'], version, 'failed:', error, flush=True)
+    finally:
+        if native is not None and native.exists():
+            row['image_sha256_after'] = file_digest(native)
     return row
 
 
@@ -446,7 +513,7 @@ def write_report(report, results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--latest', action='store_true',
-                        help='Discover agent releases and qualify latest Codex, Claude Code and OpenCode as canaries')
+                        help='Discover agent releases and qualify latest Codex, Claude Code, OpenCode and Kimi Code as canaries')
     parser.add_argument('--agent', choices=sorted(AGENTS), action='append',
                         help='Qualify only this agent (repeatable); default: every agent pinned for this host')
     parser.add_argument('--results', type=Path, default=ROOT / 'artifacts/test-results/agent-compatibility')
@@ -479,12 +546,7 @@ def main():
             try:
                 latest = next(row['version'] for row in report['upstream'] if row['name'] == spec['name'])
                 if latest not in {package['version'] for package in packages[agent]}:
-                    package_target = agent_target(agent, target)
-                    data = fetch_json(spec['metadata'].format(version=latest, target=package_target))
-                    if data['version'] != spec['published'].format(version=latest, target=package_target):
-                        raise ValueError('Latest native package version mismatch')
-                    packages[agent].append({'version': latest, 'target': package_target, 'url': data['dist']['tarball'],
-                                            'integrity': data['dist']['integrity']})
+                    packages[agent].append(candidate(agent, latest, agent_target(agent, target)))
                 report['canary_versions'][agent] = latest
             except Exception as error:
                 report['errors'].append(spec['name'] + ' canary discovery: ' + str(error))
