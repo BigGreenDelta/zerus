@@ -1261,9 +1261,13 @@ Other Kimi tool approvals also appear in Activity, with the complete request fro
 Kimi's wire. Kimi's hooks cannot approve, so Zerus answers only in Kimi's own
 panel, and only for a Bash command: the panel must draw that exact command,
 working directory, description and danger warning row by row, wrapped as Kimi
-wraps it, and no other Kimi request may be waiting in any of the conversation's
-agents. Every key and pasted feedback line first finds the same unresolved
-request, with its active tool call, in the same run, process and pane. The
+wraps it, and the complete history of every agent of the conversation may hold
+no other unresolved Kimi request, however old: nothing proves that Kimi no
+longer shows one. A history longer than 8 MiB (4 MiB for another agent), a
+record Kimi is still writing, an unreadable line or a repeated request ID keeps
+the approval read-only. Every key and pasted feedback line first finds the same
+unresolved request, with its active tool call, in the same run, process and
+pane. The
 choices are Kimi's: **Approve once**, **Approve for this session**, **Reject** and
 **Reject with feedback**. The session choice asks for confirmation: Kimi then
 stops asking about that exact command and also approves every other request

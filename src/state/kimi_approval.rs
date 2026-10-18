@@ -12,7 +12,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -32,8 +32,6 @@ const MAX_FEEDBACK_CHARS: usize = 2000;
 const MAX_MAIN_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_AGENTS: usize = 64;
 const MAX_AGENT_BYTES: u64 = 4 * 1024 * 1024;
-/// How much earlier than its PreToolUse hook Kimi may record a request.
-const SKEW_MS: f64 = 60_000.0;
 const UNVERIFIED: &str =
     "Zerus cannot confirm that this is the only Kimi request waiting. Answer it in Terminal.";
 const NARROW: &str =
@@ -47,33 +45,47 @@ pub(super) fn recover(record: &Value, events: &[Value]) -> Vec<Value> {
         return Vec::new();
     }
     open(events)
+        .pending
         .values()
         .filter_map(|event| card(record, event))
         .collect()
 }
 
-/// Unresolved interaction requests by ID, in any of `events`.
-fn open(events: &[Value]) -> BTreeMap<String, Value> {
-    let mut pending = BTreeMap::new();
+/// Unresolved interaction requests by ID, the first record of each, and
+/// whether one cannot be told apart: a request without an ID, or another
+/// request with the ID of one still unresolved.
+struct Open {
+    pending: BTreeMap<String, Value>,
+    ambiguous: bool,
+}
+
+fn open(events: &[Value]) -> Open {
+    let mut open = Open {
+        pending: BTreeMap::new(),
+        ambiguous: false,
+    };
     for event in events {
         let id = string(event, "id");
         match string(event, "type") {
-            "interaction.request" if !id.is_empty() => {
-                pending.insert(id.to_owned(), event.clone());
+            "interaction.request" if id.is_empty() || open.pending.contains_key(id) => {
+                open.ambiguous = true;
+            }
+            "interaction.request" => {
+                open.pending.insert(id.to_owned(), event.clone());
             }
             "interaction.resolved" | "interaction.cancelled" | "interaction.dismissed" => {
-                pending.remove(id);
+                open.pending.remove(id);
             }
             _ => {}
         }
     }
-    pending
+    open
 }
 
-fn active(record: &Value, call: &str, tool: Option<&str>) -> bool {
+fn active(record: &Value, call: &str, tool: &str) -> bool {
     record["active_tools"]
         .get(call)
-        .is_some_and(|active| tool.is_none_or(|tool| string(active, "name") == tool))
+        .is_some_and(|active| string(active, "name") == tool)
 }
 
 /// Kimi's approval panel title (headerFor).
@@ -327,7 +339,7 @@ fn card(record: &Value, event: &Value) -> Option<Value> {
         || tool == "ExitPlanMode"
         || ["plan_review", "goal_start"].contains(&kind)
         || !display.is_object()
-        || !active(record, call, Some(tool))
+        || !active(record, call, tool)
     {
         return None;
     }
@@ -391,56 +403,40 @@ fn card(record: &Value, event: &Value) -> Option<Value> {
     Some(card)
 }
 
-/// The interaction records in the last `max` bytes of a wire, whether older
-/// records were left out, and the time of the first record read.
-struct Window {
-    events: Vec<Value>,
-    truncated: bool,
-    first: f64,
-}
-
-fn window(path: &Path, max: u64, main: bool) -> Result<Window> {
+/// Every interaction record of a whole wire. Err when the wire is longer than
+/// `max`, ends in a record Kimi is still writing, or holds any line that is
+/// not JSON: then a request may be missing.
+fn history(path: &Path, max: u64) -> Result<Vec<Value>> {
     let unreadable = |_| UNVERIFIED.to_owned();
-    let mut file = File::open(path).map_err(unreadable)?;
-    let size = file.metadata().map_err(unreadable)?.len();
-    let offset = size.saturating_sub(max);
-    file.seek(SeekFrom::Start(offset)).map_err(unreadable)?;
     let mut bytes = Vec::new();
-    file.take(max).read_to_end(&mut bytes).map_err(unreadable)?;
-    let mut window = Window {
-        events: Vec::new(),
-        truncated: offset > 0,
-        first: f64::INFINITY,
-    };
-    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
-        if (offset > 0 && index == 0) || line.is_empty() {
+    File::open(path)
+        .map_err(unreadable)?
+        .take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    if bytes.len() as u64 > max || bytes.last().is_some_and(|last| *last != b'\n') {
+        return Err(UNVERIFIED.into());
+    }
+    let mut events = Vec::new();
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        if !line.windows(12).any(|part| part == b"interaction.") {
+            serde_json::from_slice::<serde::de::IgnoredAny>(line).map_err(|_| UNVERIFIED)?;
             continue;
         }
-        let interaction = line.windows(12).any(|part| part == b"interaction.");
-        if window.first.is_infinite() || interaction {
-            // A record cut off while Kimi writes it might be a request.
-            let Ok(record) = serde_json::from_slice::<Value>(line) else {
-                if interaction {
-                    return Err(UNVERIFIED.into());
-                }
-                continue;
-            };
-            if window.first.is_infinite() {
-                window.first = record["time"].as_f64().unwrap_or(f64::INFINITY);
-            }
-            if interaction
-                && string(&record, "type").starts_with("interaction.")
-                && (!main || string(&record, "agentId") == "main")
-            {
-                window.events.push(record);
-            }
+        let record: Value = serde_json::from_slice(line).map_err(|_| UNVERIFIED)?;
+        if string(&record, "type").starts_with("interaction.") {
+            events.push(record);
         }
     }
-    Ok(window)
+    Ok(events)
 }
 
 /// Every other agent of the conversation, such as a subagent, draws its
-/// approvals in the same panel. None of them may wait on a request.
+/// approvals in the same panel. None of them may wait on a request, and each
+/// one's whole history must be readable.
 fn others(main: &Path) -> Result<()> {
     let agents = main.parent().and_then(Path::parent).ok_or(UNVERIFIED)?;
     let root = crate::platform::canonical(agents).map_err(|_| UNVERIFIED)?;
@@ -455,63 +451,48 @@ fn others(main: &Path) -> Result<()> {
             return Err(UNVERIFIED.into());
         }
         let path = entry.path().join("wire.jsonl");
-        if fs::symlink_metadata(&path).is_err() {
-            continue;
+        match fs::symlink_metadata(&path) {
+            // Only a definite absence means this agent recorded nothing.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(UNVERIFIED.into()),
+            Ok(_) => {}
         }
         let resolved = crate::platform::canonical(&path).map_err(|_| UNVERIFIED)?;
-        let size = fs::metadata(&resolved).map_err(|_| UNVERIFIED)?.len();
-        if !resolved.starts_with(&root) || !resolved.is_file() || size > MAX_AGENT_BYTES {
+        if !resolved.starts_with(&root) || !resolved.is_file() {
             return Err(UNVERIFIED.into());
         }
-        if !open(&window(&resolved, MAX_AGENT_BYTES, false)?.events).is_empty() {
+        let open = open(&history(&resolved, MAX_AGENT_BYTES)?);
+        if open.ambiguous || !open.pending.is_empty() {
             return Err("Another Kimi agent is waiting for an answer. Answer in Terminal.".into());
         }
     }
     Ok(())
 }
 
-/// The exact unresolved wire request behind `card`, read again: the same
-/// request with its active tool, the same hash, and the only request any agent
-/// of this run may show. The caller checks the screen.
+/// The exact unresolved wire request behind `card`, read again from the
+/// whole history: the same request with its active tool and the same hash,
+/// and the only unresolved request of every agent of the conversation, however
+/// old. Nothing proves that Kimi no longer shows an older unresolved request.
+/// The caller checks the screen.
 fn bound(record: &Value, card: &Value) -> Result<Value> {
     let paths = questions::wire_paths(record)?;
     let [path] = paths.as_slice() else {
         return Err(UNVERIFIED.into());
     };
-    let main = window(path, MAX_MAIN_BYTES, true)?;
+    let open = open(&history(path, MAX_MAIN_BYTES)?);
+    if open.ambiguous {
+        return Err(UNVERIFIED.into());
+    }
     let id = string(card, "question_id");
-    let waiting = open(&main.events);
     let gone = "This approval is no longer pending; refresh Activity";
-    let event = waiting.get(id).ok_or(gone)?;
+    let event = open.pending.get(id).ok_or(gone)?;
     let fresh = self::card(record, event).ok_or(gone)?;
     if fresh["question_hash"] != card["question_hash"]
         || fresh["questions"][0]["allow_other"] != true
     {
         return Err("This approval changed; refresh Activity".into());
     }
-    // A request recorded since the run's oldest active tool started may be
-    // shown, whatever its tool; an older one belongs to an earlier process.
-    let floor = record["active_tools"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(_, tool)| {
-            tool["started"]
-                .as_f64()
-                .map_or(f64::NEG_INFINITY, |at| at * 1000.0 - SKEW_MS)
-        })
-        .fold(f64::INFINITY, f64::min);
-    if main.truncated && main.first > floor {
-        return Err(UNVERIFIED.into());
-    }
-    let shown = waiting
-        .values()
-        .filter(|other| {
-            active(record, string(other, "toolCallId"), None)
-                || other["time"].as_f64().is_none_or(|at| at >= floor)
-        })
-        .count();
-    if shown != 1 {
+    if open.pending.len() != 1 {
         return Err("Another Kimi request is waiting. Answer in Terminal.".into());
     }
     others(path)?;
@@ -1354,18 +1335,20 @@ mod tests {
         let h = home(&[b1.clone(), b2.clone(), resolved("approval_b2")], &[]);
         both["agent_home"] = json!(h.path());
         assert!(bound(&both, &cards[0]).is_ok());
-        // A request from an earlier process is ignored; a recent one without
-        // an active tool may be the one Kimi shows.
+        // Any other unresolved request blocks, however old and whatever its
+        // tool: nothing proves that Kimi no longer shows it.
         let mut stale = request("approval_old", "tool_old", "ls");
         stale["time"] = json!(1000);
         let mut recent = stale.clone();
         recent["time"] = json!(990_000);
-        for (other, ok) in [(stale, true), (recent, false)] {
+        for other in [stale, recent] {
             let h = home(&[other, a.clone()], &[]);
             let mut r = r.clone();
             r["agent_home"] = json!(h.path());
             let card = only(&r, std::slice::from_ref(&a));
-            assert_eq!(bound(&r, &card).is_ok(), ok);
+            assert!(bound(&r, &card)
+                .unwrap_err()
+                .contains("Another Kimi request"));
         }
         // Another agent's waiting request, unreadable or oversized history,
         // or too many agents: never bound.
@@ -1409,6 +1392,32 @@ mod tests {
         assert!(bound(&r, &card).is_err());
         fs::write(agents.join("child/wire.jsonl"), "").unwrap();
         assert!(bound(&r, &card).is_ok());
+        // Only a definite absence of a history counts as none.
+        fs::write(
+            agents.join("child/wire.jsonl"),
+            format!("{child}\n{child}\n"),
+        )
+        .unwrap();
+        assert!(bound(&r, &card).is_err());
+        fs::remove_file(agents.join("child/wire.jsonl")).unwrap();
+        assert!(bound(&r, &card).is_ok());
+        // A history that cannot be looked up is not an absent one. Windows
+        // reports a path through a file as absent, and root reads anything.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(agents.join("stray"), "").unwrap();
+            assert_eq!(bound(&r, &card).unwrap_err(), UNVERIFIED);
+            fs::remove_file(agents.join("stray")).unwrap();
+            if unsafe { libc::geteuid() } != 0 {
+                fs::set_permissions(agents.join("child"), fs::Permissions::from_mode(0o000))
+                    .unwrap();
+                let denied = bound(&r, &card);
+                fs::set_permissions(agents.join("child"), fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                assert_eq!(denied.unwrap_err(), UNVERIFIED);
+            }
+        }
         for index in 0..MAX_AGENTS {
             fs::create_dir_all(agents.join(format!("agent_{index}"))).unwrap();
         }
@@ -1437,25 +1446,174 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_history_must_reach_back_to_the_oldest_active_tool() {
+    fn a_history_that_may_miss_a_request_never_binds() {
         let a = request("approval_a", "tool_bash", COMMAND);
         let h = home(std::slice::from_ref(&a), &[]);
         let wire = h
             .path()
             .join("sessions/workspace/session_test/agents/main/wire.jsonl");
+        let r = record(h.path());
+        let card = only(&r, std::slice::from_ref(&a));
+        assert!(bound(&r, &card).is_ok());
         let filler = format!(
             "{}\n",
             json!({"type":"context.append_message","time":900_000,"text":"x".repeat(1000)})
         );
-        let mut text = filler.repeat((MAX_MAIN_BYTES as usize / filler.len()) + 2);
-        text.push_str(&format!("{a}\n"));
-        fs::write(&wire, &text).unwrap();
-        let r = record(h.path());
-        let card = only(&r, std::slice::from_ref(&a));
-        assert!(bound(&r, &card).is_ok());
-        let late = text.replace("\"time\":900000", "\"time\":999999");
-        fs::write(&wire, late).unwrap();
-        assert!(bound(&r, &card).unwrap_err().contains("only Kimi request"));
+        let long = filler.repeat((MAX_MAIN_BYTES as usize / filler.len()) + 2);
+        let mut nameless = request("", "tool_other", "ls");
+        nameless["request"]["id"] = json!("");
+        for (wire_text, case) in [
+            // Longer than the whole history Zerus reads, whatever its times.
+            (format!("{long}{a}\n"), "too long"),
+            // A record Kimi is still writing may be another request.
+            (format!("{a}\n{{\"type\":\"context.append"), "unfinished"),
+            (format!("{{\"type\":\"context.append\n{a}\n"), "not JSON"),
+            (format!("{a}\n{a}\n"), "repeated request ID"),
+            (format!("{nameless}\n{a}\n"), "request without an ID"),
+        ] {
+            fs::write(&wire, wire_text).unwrap();
+            assert_eq!(bound(&r, &card).unwrap_err(), UNVERIFIED, "{case}");
+        }
+    }
+
+    /// Records `line` on `wire` after the transport's `after`-th write, as
+    /// Kimi would record another request between two of Zerus's writes.
+    struct Recording {
+        inner: Fixture,
+        wire: std::path::PathBuf,
+        line: String,
+        after: usize,
+        writes: usize,
+    }
+    impl Recording {
+        fn wrote(&mut self) {
+            self.writes += 1;
+            if self.writes == self.after {
+                let mut text = fs::read_to_string(&self.wire).unwrap();
+                text.push_str(&self.line);
+                fs::write(&self.wire, text).unwrap();
+            }
+        }
+    }
+    impl Transport for Recording {
+        fn screen(&mut self) -> Result<String> {
+            self.inner.screen()
+        }
+        fn key(&mut self, key: &str) -> Result<()> {
+            self.inner.key(key)?;
+            self.wrote();
+            Ok(())
+        }
+        fn paste(&mut self, text: &str) -> Result<()> {
+            self.inner.paste(text)?;
+            self.wrote();
+            Ok(())
+        }
+        fn resolved(&mut self) -> Result<Option<Value>> {
+            self.inner.resolved()
+        }
+        fn pause(&mut self) {}
+    }
+
+    #[test]
+    fn an_older_unresolved_request_drawn_the_same_blocks_every_write() {
+        // The review's counterexample: an old request without an active tool
+        // and a new one with the same rows. Either may be the panel shown.
+        let mut old = request("approval_old", "tool_old", COMMAND);
+        old["time"] = json!(1000);
+        let new = request("approval_new", "tool_bash", COMMAND);
+        let choosing = screen(&BODY, CHOOSING, HINT_ROW);
+        assert_eq!(read(&choosing, &old["request"]).unwrap(), Shown::Choosing);
+        assert_eq!(read(&choosing, &new["request"]).unwrap(), Shown::Choosing);
+        let filler = format!(
+            "{}\n",
+            json!({"type":"context.append_message","time":900_000,"text":"x".repeat(1000)})
+        );
+        let hidden = filler.repeat((MAX_MAIN_BYTES as usize / filler.len()) + 2);
+        let feedback =
+            json!([{"question_id":"approval","selected_option_ids":[],"text":"use a dry run"}]);
+        let pick = json!([{"question_id":"approval","selected_option_ids":["1"],"text":""}]);
+        // The old request is in the history, or in a prefix too long to read.
+        for (wire_text, refusal) in [
+            (format!("{old}\n{new}\n"), "Another Kimi request"),
+            (format!("{old}\n{hidden}{new}\n"), UNVERIFIED),
+        ] {
+            let h = home(&[], &[]);
+            let wire = h
+                .path()
+                .join("sessions/workspace/session_test/agents/main/wire.jsonl");
+            fs::write(&wire, wire_text).unwrap();
+            let r = record(h.path());
+            let card = only(&r, &[old.clone(), new.clone()]);
+            assert_eq!(card["question_id"], "approval_new");
+            assert!(bound(&r, &card).unwrap_err().contains(refusal));
+            for answer in [&pick, &feedback] {
+                let mut io = Fixture {
+                    screens: vec![choosing.clone(), String::new()],
+                    keys: vec![],
+                    pastes: vec![],
+                    response: Some(json!({"decision":"approved"})),
+                };
+                let mut check = || bound(&r, &card).map(|_| ());
+                assert!(drive(&mut io, &mut check, &new["request"], &card, answer).is_err());
+                assert!(io.keys.is_empty() && io.pastes.is_empty());
+            }
+        }
+        // Another request recorded between two writes stops the next one:
+        // before the feedback paste, and before its Enter.
+        let typing = [
+            "    1. Approve once",
+            "    2. Approve for this session",
+            "    3. Reject",
+            "  ▶ 4. Reject with feedback",
+        ];
+        let typed = [
+            "    1. Approve once",
+            "    2. Approve for this session",
+            "    3. Reject",
+            "  ▶ 4. Reject with feedback  use a dry run",
+        ];
+        let mut later = request("approval_later", "tool_later", COMMAND);
+        later["time"] = json!(1_000_900);
+        for (after, keys, pastes) in [(1, vec!["4"], 0), (2, vec!["4"], 1)] {
+            let h = home(std::slice::from_ref(&new), &[]);
+            let wire = h
+                .path()
+                .join("sessions/workspace/session_test/agents/main/wire.jsonl");
+            let r = record(h.path());
+            let card = only(&r, std::slice::from_ref(&new));
+            assert!(bound(&r, &card).is_ok());
+            let mut io = Recording {
+                inner: Fixture {
+                    screens: vec![
+                        choosing.clone(),
+                        screen(&BODY, typing, TYPING_ROW),
+                        screen(&BODY, typed, TYPING_ROW),
+                        String::new(),
+                    ],
+                    keys: vec![],
+                    pastes: vec![],
+                    response: None,
+                },
+                wire,
+                line: format!("{later}\n"),
+                after,
+                writes: 0,
+            };
+            let mut check = || bound(&r, &card).map(|_| ());
+            assert!(
+                drive(&mut io, &mut check, &new["request"], &card, &feedback)
+                    .unwrap_err()
+                    .contains("Another Kimi request")
+            );
+            assert_eq!(
+                (io.inner.keys, io.inner.pastes.len()),
+                (
+                    keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+                    pastes
+                )
+            );
+        }
     }
 
     struct Fixture {
