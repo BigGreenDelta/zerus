@@ -221,10 +221,20 @@ public struct PermissionConfirmation: Hashable, Sendable {
         return saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? general : general + "\n\n" + saved
     }
 
-    /// The answer to send when the person confirms, or nil to send nothing. The dialog is shown only while this is non-nil.
-    public func answers(_ current: Question, editing: Bool, available: Bool) -> JSON? {
+    /// The card-level part of `confirm`: this exact card still offers Always allow and can be answered and edited here.
+    func answers(_ current: Question, editing: Bool, available: Bool) -> JSON? {
         guard current.id == questionId, current.hash == questionHash, Self.offered(current), editing, available else { return nil }
         return QuestionPolicies.approvalAnswers(current, PermissionAction.alwaysAllow.option)
+    }
+
+    /// The answer to send when the person confirms, or nil to send nothing; the dialog is shown only while this is non-nil.
+    /// It rechecks everything the Always allow… button needed: the same card, answerable and editable, in the foreground
+    /// and visible, with that card's own review complete. Background or a hidden card restarts the review, so a dialog
+    /// left open across them cannot confirm until a new review completes.
+    public func confirm(_ current: Question, target: Target, editing: Bool, available: Bool, foreground: Bool, visible: Bool,
+                        review: ApprovalReview, now: Double) -> JSON? {
+        guard foreground, visible, review.secondsRemaining(now: now, card: ApprovalReview.key(target, current)) == 0 else { return nil }
+        return answers(current, editing: editing, available: available)
     }
 }
 

@@ -91,8 +91,10 @@ struct QuestionCard: View {
         let remaining = review.secondsRemaining(now: now, card: reviewCard)
         let reviewed = eligible && remaining == 0
         let answerable = question.canAnswer && editing && available
-        // The Always allow dialog is shown only while confirming would send; one that cannot send is dropped.
-        let alwaysSendable = confirmation?.answers(question, editing: editing, available: available) != nil
+        // The Always allow dialog is shown only while confirming would send; one that cannot send (including in the
+        // background or out of view) is dropped.
+        let alwaysSendable = confirmation?.confirm(question, target: target, editing: editing, available: available, foreground: scenePhase == .active,
+                                                   visible: visible, review: review, now: now) != nil
         let staleConfirmation = confirmation != nil && !alwaysSendable
 
         VStack(alignment: .leading, spacing: 8) {
@@ -202,7 +204,8 @@ struct QuestionCard: View {
         } message: { pending in
             Text(verbatim: pending.message)
         }
-        // A confirmation that cannot send (its card changed or can no longer be answered or edited here) closes without sending.
+        // A confirmation that cannot send (its card changed, can no longer be answered or edited here, left the foreground or
+        // view, or needs a new review) closes without sending.
         .onChange(of: staleConfirmation) { _, stale in if stale { confirmation = nil } }
         .onAppear { load(identity: identity, draft: draft, native: native) }
         .onChange(of: identity) { load(identity: identity, draft: draft, native: native) }
@@ -350,11 +353,13 @@ struct QuestionCard: View {
         Task { await model.sendQuestion(target, question, answers: payload) }
     }
 
-    /// Sends Always allow only for the card that offered it, while it can still be answered and edited here.
+    /// Sends Always allow only for the card that offered it, while it is answerable, editable, in the foreground, visible
+    /// and still reviewed; all of it is checked again now.
     private func confirmAlways(_ pending: PermissionConfirmation) {
         confirmation = nil
         let editing = isEditing(model.draft(target, question), QuestionPolicies.submitted(question, target))
-        guard let payload = pending.answers(question, editing: editing, available: available)?.compact else { return }
+        guard let payload = pending.confirm(question, target: target, editing: editing, available: available, foreground: scenePhase == .active,
+                                            visible: visible, review: review, now: ProcessInfo.processInfo.systemUptime)?.compact else { return }
         Task { await model.sendQuestion(target, question, answers: payload) }
     }
 
