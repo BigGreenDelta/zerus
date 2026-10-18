@@ -187,7 +187,7 @@ class Installer(windows_host.HostCase):
         # Setup refuses before it changes anything (exit code 7: Preparing to Install
         # determined that Setup cannot proceed), and the installation stays as it was.
         self.assertEqual(code, 7, log[-4000:])
-        self.assertIn("contains a link or junction", log)
+        self.assertIn("is a link or junction on the path of the Zerus folder or inside it", log)
         self.assertIn("linked", log)
         self.assertTrue(os.path.isjunction(link))
         self.assertEqual(registered()["DisplayVersion"], self.manifest["version"])
@@ -199,6 +199,22 @@ class Installer(windows_host.HostCase):
         self.assertEqual(windows_installer.problems(self.app, self.expected), [])
         for path, data in sentinels.items():
             self.assertEqual(path.read_bytes(), data)
+
+    def test_setup_never_installs_through_a_linked_folder(self):
+        # A junction above the chosen folder: Setup writes nothing through it.
+        real = self.root / "real"
+        real.mkdir()
+        via = self.root / "via"
+        made = subprocess.run([os.environ.get("ComSpec", "cmd.exe"), "/d", "/c", "mklink", "/J", str(via), str(real)],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=LIMIT, creationflags=HIDDEN)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        self.addCleanup(lambda: via.exists() and os.rmdir(via))
+        self.app = via / "Zerus"
+        code, log = self.setup()
+        self.assertEqual(code, 7, log[-4000:])
+        self.assertIn("is a link or junction on the path of the Zerus folder", log)
+        self.assertEqual(list(real.iterdir()), [])
+        self.assertIsNone(registered())
 
 
 if __name__ == "__main__":

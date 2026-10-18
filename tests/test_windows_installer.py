@@ -207,7 +207,7 @@ class Script(unittest.TestCase):
     def test_only_a_folder_the_installer_owns_is_cleaned_up(self):
         owned = self.procedure("OwnedFolder")
         self.assertIn(f"{{app}}\\{windows_installer.INSTALLATION}", owned)
-        self.assertIn("not IsLink(ExpandConstant('{app}'))", owned)
+        self.assertIn("(LinkedPath(ExpandConstant('{app}')) = '')", owned)
         # The markers it looks for are those of the record stage() writes.
         record = json.dumps(windows_installer.installation_record({"version": "0.45.0", "source_commit": "c" * 40}), indent=2)
         markers = re.findall(r"Pos\('([^']+)', Contents\)", owned)
@@ -227,9 +227,14 @@ class Script(unittest.TestCase):
                             r"DeleteFile|RemoveDir|RemoveStale")
         # Setup refuses before it changes anything when the folder is or holds a link.
         prepare = self.procedure("PrepareToInstall")
-        self.assertIn("IsLink(ExpandConstant('{app}'))", prepare)
-        self.assertIn("FindLink(ExpandConstant('{app}'))", prepare)
-        self.assertRegex(prepare, r"Result := 'The Zerus folder contains a link or junction: '")
+        self.assertIn("Link := LinkedPath(ExpandConstant('{app}'));", prepare)
+        self.assertIn("Link := FindLink(ExpandConstant('{app}'));", prepare)
+        self.assertIn("is a link or junction on the path of the Zerus folder or inside it.", prepare)
+        # Every folder above {app} is checked, up to the root, and an absurd depth refuses.
+        linked = self.procedure("LinkedPath")
+        self.assertIn("IsLink(Current)", linked)
+        self.assertIn("ExtractFileDir(Current)", linked)
+        self.assertRegex(linked, r"refuse rather than guess\. }\s+Result := Path;\s+end;")
 
     def test_only_a_silent_self_update_relaunches_the_app(self):
         runs = re.findall(r"(?m)^Filename: (.*)$", self.text.split("[Run]", 1)[1].split("\n[", 1)[0])

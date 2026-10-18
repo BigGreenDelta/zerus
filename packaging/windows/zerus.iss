@@ -117,6 +117,31 @@ begin
   end;
 end;
 
+{ The first reparse point among Path and the folders above it, else ''. The
+  installer neither writes nor cleans up through a link anywhere on its path. }
+function LinkedPath(const Path: String): String;
+var
+  Current, Parent: String;
+  Depth: Integer;
+begin
+  Result := '';
+  Current := RemoveBackslashUnlessRoot(Path);
+  for Depth := 1 to 128 do
+  begin
+    if IsLink(Current) then
+    begin
+      Result := Current;
+      Exit;
+    end;
+    Parent := RemoveBackslashUnlessRoot(ExtractFileDir(Current));
+    if (Parent = '') or (CompareText(Parent, Current) = 0) then
+      Exit;
+    Current := Parent;
+  end;
+  { A path deeper than any real one: refuse rather than guess. }
+  Result := Path;
+end;
+
 { The first reparse point in Folder or below it, else ''. Never follows one. }
 function FindLink(const Folder: String): String;
 var
@@ -142,32 +167,33 @@ begin
   end;
 end;
 
-{ A link in the folder could lead writes and the stale-file sweep anywhere the
-  user can write: refuse before anything changes. Setup exits with code 7. }
+{ A link on the folder's path or inside it could lead installed files and the
+  stale-file sweep anywhere the user can write, such as configuration or state:
+  refuse before anything changes. Setup exits with code 7. Windows 11's
+  redirection guard is no substitute: Zerus supports Windows 10 1903. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Link: String;
 begin
   Result := '';
-  if IsLink(ExpandConstant('{app}')) then
-    Link := ExpandConstant('{app}')
-  else
+  Link := LinkedPath(ExpandConstant('{app}'));
+  if Link = '' then
     Link := FindLink(ExpandConstant('{app}'));
   if Link <> '' then
   begin
-    Result := 'The Zerus folder contains a link or junction: ' + Link +
-      '. Remove it, then run Setup again. Nothing was changed.';
+    Result := 'Setup stopped: ' + Link + ' is a link or junction on the path of the Zerus folder or inside it.' +
+      ' Remove it or choose another location, then run Setup again. Nothing was changed.';
     Log(Result);
   end;
 end;
 
 { The installer record scripts/windows_installer.py writes: only a folder an
-  earlier installer created, and that is no link itself, is cleaned up. }
+  earlier installer created, with no link on its path, is cleaned up. }
 function OwnedFolder(): Boolean;
 var
   Contents: AnsiString;
 begin
-  Result := not IsLink(ExpandConstant('{app}')) and
+  Result := (LinkedPath(ExpandConstant('{app}')) = '') and
     LoadStringFromFile(ExpandConstant('{app}\installation.json'), Contents) and
     (Pos('"kind": "installer"', Contents) > 0) and (Pos('"product": "Zerus"', Contents) > 0);
 end;
