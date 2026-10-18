@@ -380,6 +380,66 @@ final class OpenCodeTests: XCTestCase {
         }
     }
 
+    /// A canonical history page row of an OpenCode prompt.
+    private func paged(_ text: String, _ id: String, _ at: Double, request: JSON? = nil) throws -> Event {
+        var row = try XCTUnwrap(prompt(text, id, at, request: request).object)
+        row["history_id"] = "h1"
+        row["history_stream"] = "journal"
+        row["history_cursor"] = "c1"
+        return try XCTUnwrap(NativeEvents.events(["history_epoch": "epoch", "events": [.object(row)]]).first)
+    }
+
+    func testAnOlderPagedPromptTakesTheRequestItsOwnInspectionNames() throws {
+        // An older hgs indexed the prompt without its request; this window's inspection of the same message names it now.
+        let canonical = try paged("Waited in the queue", "msg_1", 1_012)
+        XCTAssertEqual(canonical.requestId, "")
+        let window = HistoryWindow(target: target, epoch: "epoch", events: [canonical], before: nil, after: "c1", hasBefore: false, hasAfter: false, atHead: true)
+        let named = NativeEvents.events(["events": [prompt("Waited in the queue", "msg_1", 1_012, request: .string(request))]])
+        var expected = canonical
+        expected.requestId = request
+        XCTAssertEqual(window.inspection(named, scope: target).events, [expected], "identity, cursor and read epoch stay exact")
+        XCTAssertEqual(HistoryInspection.retain(window, nil, named, [], scope: target).events, [expected])
+        // This phone's message, pending for more than 10 s, merges once.
+        let merged = ConversationMerge.merge(target: target, native: window.inspection(named, scope: target).events, outgoing: [sent()])
+        XCTAssertEqual(merged.events.map(\.id), ["outgoing:\(request)"])
+        XCTAssertEqual(merged.events.map(\.historyId), ["h1"])
+        XCTAssertEqual(merged.recordedRequestIds, [request])
+    }
+
+    func testAPagedPromptTakesNoRequestFromAnyOtherRow() throws {
+        let canonical = try paged("Waited in the queue", "msg_1", 1_012)
+        let window = HistoryWindow(target: target, epoch: "epoch", events: [canonical], before: nil, after: "c1", hasBefore: false, hasAfter: false, atHead: true)
+        let named = NativeEvents.events(["events": [prompt("Waited in the queue", "msg_1", 1_012, request: .string(request))]])
+        func separate(_ rows: [Event], _ label: String) {
+            XCTAssertEqual(rows.map(\.requestId), [""], label)
+            XCTAssertEqual(ConversationMerge.merge(target: target, native: rows, outgoing: [sent()]).events.count, 2, label)
+        }
+        // Another OpenCode message naming this request.
+        let other = window.inspection(NativeEvents.events(["events": [prompt("Waited in the queue", "msg_2", 1_012, request: .string(request))]]), scope: target)
+        XCTAssertEqual(other.events, [canonical])
+        separate(other.events, "message")
+        // The body changed, so hgs names no request on the inspection row; the phone guesses none.
+        let edited = window.inspection(NativeEvents.events(["events": [prompt("Edited in OpenCode", "msg_1", 1_012)]]), scope: target)
+        XCTAssertEqual(edited.events.map(\.text), ["Edited in OpenCode"])
+        separate(edited.events, "body")
+        // Another conversation's or run's inspection, or one of unknown scope.
+        for scope in [target.with(conversation: "ses_B"), target.with(run: "other"), nil] as [Target?] {
+            XCTAssertEqual(window.inspection(named, scope: scope).events, [canonical], scope?.key ?? "nil")
+            XCTAssertEqual(HistoryInspection.retain(window, nil, named, [], scope: scope).events, [canonical], scope?.key ?? "nil")
+        }
+        separate(window.inspection(named).events, "scope")
+        // A non-canonical request.
+        var odd = named[0]
+        odd.requestId = request.uppercased()
+        XCTAssertEqual(window.inspection([odd], scope: target).events, [canonical])
+        // A request the history row already names is never overwritten.
+        let recorded = try paged("Waited in the queue", "msg_1", 1_012, request: .string(otherRequest))
+        XCTAssertEqual(recorded.requestId, otherRequest)
+        let kept = HistoryWindow(target: target, epoch: "epoch", events: [recorded], before: nil, after: "c1", hasBefore: false, hasAfter: false, atHead: true)
+        XCTAssertEqual(kept.inspection(named, scope: target).events, [recorded])
+        XCTAssertEqual(ConversationMerge.merge(target: target, native: kept.inspection(named, scope: target).events, outgoing: [sent()]).events.count, 2)
+    }
+
     // MARK: Form contract
 
     /// The card the computer sends for one contract case: the asserted fields, with `item` as its question item.
