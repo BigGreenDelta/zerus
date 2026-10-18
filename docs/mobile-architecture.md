@@ -768,8 +768,9 @@ record pasted input as `<pasted_content id="…">…</pasted_content id="…">`,
 frames a prompt that is only pasted text with blank lines; `hgs` keeps only the
 inner text, so the native prompt still matches its delivery receipt and the
 message appears once. As in desktop Activity, history leaves out Claude's
-compaction summaries and its record of local slash commands and their output;
-a slash prompt Claude records as typed text remains.
+compaction summaries and its own complete record of a local slash command and
+of its output; a slash prompt Claude records as typed text remains, and so does
+text a person types or pastes, even when it quotes those tags.
 
 Limits match native input: eight files, ten MiB per file, twenty MiB total and
 64 KiB of message text. `/v1/requests` accepts a bounded 29 MiB JSON envelope;
