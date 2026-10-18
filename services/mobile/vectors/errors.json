@@ -107,6 +107,7 @@
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native directory parent catalog is invalid","module":"connector"},
   {"android":{"update_required":true},"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native exact launch-ID ABI is unavailable","module":"connector"},
   {"android":{"update_required":true},"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native explicit directory creation ABI is unavailable","module":"connector"},
+  {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native hook health acknowledgement did not match","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native inspection run/conversation identity did not match","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native launch could not be verified by exact launch UUID; check computers before creating another","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native lifecycle acknowledgement identity or status did not match","module":"connector"},

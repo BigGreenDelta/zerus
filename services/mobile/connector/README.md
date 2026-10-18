@@ -23,8 +23,17 @@ peer's heartbeat and runs routed requests in that peer's context through
 `hgs swarm mobile-peer`, rechecking the route at every call. Every black-box
 module runs against it (`tests/ported.json`, with the operations it implements
 under `rust_operations`); an unknown operation is refused with Python's
-`unsupported operation` receipt. Nothing packages or starts this binary yet;
-gateways keep running the Python connector.
+`unsupported operation` receipt. Arch packages and signed macOS bundles include
+this binary; source installs build it only when requested or when updating an
+existing Rust copy. Installation does not start or switch a gateway. Follow the
+explicit [per-computer cutover](../../../docs/mobile-deployment.md#move-a-computer-to-the-rust-connector)
+procedure; existing Python gateways remain supported until they move.
+
+With native `hooks-health-v1`, `hooks_status` reads content-free configuration and
+observed-callback metadata for an exact current session/run/conversation. Unknown
+native trust/effective settings remain unknown. No account-wide or repair call
+is transported; CLI hook repair remains explicit and native-only. The connector's
+`src/hooks.rs` is unrelated: it contains non-default black-box test seams.
 
 With a CLI that pages archives (`archives --json` in its help), heartbeats
 list live sessions only (`ls --json --local --no-archives`) plus a bounded

@@ -391,6 +391,7 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
             for card in &mut pending {
                 if string(card,"source")=="codex_async" {
                     card["can_skip"]=json!(card["answer_delivery"]["status"] != "submitted");
+                    codex_questions::fit(record,card);
                     match codex_questions::available(record,card) {
                         Ok(())=>{card["can_answer"]=json!(true);card["answer_transport"]=json!("codex_tui");card["answer_unavailable_reason"]=json!("");}
                         Err(error)=>card["answer_unavailable_reason"]=json!(error),

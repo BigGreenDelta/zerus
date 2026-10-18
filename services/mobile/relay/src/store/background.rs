@@ -287,6 +287,15 @@ impl Store {
             ] {
                 rows.extend(t.all(&format!("SELECT id,workspace_id FROM requests WHERE {predicate} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![threshold,batch]).await?);
             }
+            // SQLite must not choose the broad state index and sort mutation
+            // history for a sparse diagnostic read. PostgreSQL has the same
+            // partial date index and uses its normal planner.
+            let diagnostics = if self.db.postgres {
+                "requests"
+            } else {
+                "requests INDEXED BY hook_health_history"
+            };
+            rows.extend(t.all(&format!("SELECT id,workspace_id FROM {diagnostics} WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![at-120.0,batch]).await?);
             rows.extend(t.all("SELECT id,workspace_id FROM requests WHERE operation='archive_list' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?",args![at-3600.0,batch]).await?);
             // Attachment bytes are carried, never kept: a result leaves shortly
             // after the phone read it, or after a short TTL if it never does.
@@ -308,7 +317,8 @@ impl Store {
                 let remove = read
                     && (f(&r, "updated")
                         < at - match s(&r, "operation") {
-                            "speech_config"
+                            "hooks_status"
+                            | "speech_config"
                             | "speech_config_status"
                             | "terminal_snapshot"
                             | "speech_profiles"

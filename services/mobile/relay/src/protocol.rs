@@ -15,6 +15,7 @@ pub const READS: &[&str] = &[
     "speech_config_status",
     "inspect",
     "history",
+    "hooks_status",
     "process_output",
     "terminal_snapshot",
     "catalog",
@@ -90,6 +91,7 @@ pub const OPERATIONS: &[&str] = &[
     "forget",
     "fork",
     "history",
+    "hooks_status",
     "inspect",
     "interrupt",
     "launch",
@@ -459,6 +461,7 @@ pub fn request(v: &Value) -> Result<()> {
             p,
             id,
             ![
+                "hooks_status",
                 "compact_context",
                 "clear_context",
                 "history",

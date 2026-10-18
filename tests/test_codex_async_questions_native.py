@@ -5,7 +5,9 @@ Run with HGS_CODEX_TEST_BIN=/absolute/path/to/codex (otherwise skipped).
 import http.server
 import json
 import os
+import re
 import threading
+import time
 import unittest
 
 import test_clear_context_native as native
@@ -15,6 +17,11 @@ import test_codex_update
 PROMPT = 'Ask questions with the tool now.'
 CALL = 'call_native_question'
 QUESTIONS = [dict(title='Which option?', options=['One', 'Two']), dict(title='Any notes?')]
+# Taller than an unviewed 80x24 pane and than both CI geometries (95x47, 110x35).
+TALL = [dict(title=' '.join(['Before releasing, which channel should this build target, given that stable needs '
+                             'the full CI matrix, signed artifacts and the owner-triggered publication step?'] * 3),
+             options=[f'Channel {i}: publish after the complete matrix, package checks and signed asset '
+                      'verification succeed on this exact candidate' for i in range(1, 21)])]
 REPLY = ('<send_user_message_question_reply>', '</send_user_message_question_reply>')
 # Codex 0.160 prints "ctrl+] skip"; 0.162 abbreviates it as "^] skip".
 SKIP_KEYS = ('ctrl+] skip', '^] skip')
@@ -48,7 +55,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
         self.server.requests.append(dict(texts=texts, tools=tools, answering=answering))
         if not answering and texts and texts[-1] == PROMPT and 'request_user_input_async' in tools:
             item = dict(type='function_call', id='fc_question', call_id=CALL, name='request_user_input_async',
-                        arguments=json.dumps(dict(questions=QUESTIONS)), status='completed')
+                        arguments=json.dumps(dict(questions=self.server.questions)), status='completed')
         else:
             item = dict(type='message', id='msg_fixture', role='assistant', status='completed',
                         content=[dict(type='output_text', text='Fixture turn complete.', annotations=[])])
@@ -83,17 +90,19 @@ class NativeCodexAsyncQuestions(unittest.TestCase):
     wait_for = test_codex_update.NativeCodexUpdate.wait_for
     inspect = synthetic.CodexAsync.inspect
     native_features = 'send_message_to_user_async=true\n'
+    questions = QUESTIONS
 
     def setUp(self):
         self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Provider)
         self.server.requests, self.server.release = [], threading.Event()
+        self.server.questions = self.questions
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.addCleanup(self.server.release.set)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.provider_url = 'http://127.0.0.1:' + str(self.server.server_port) + '/v1'
         native.NativeCodexClear.setUp(self)
-        self.ids = ['codex-async:' + CALL + ':' + str(index) for index in range(len(QUESTIONS))]
+        self.ids = ['codex-async:' + CALL + ':' + str(index) for index in range(len(self.questions))]
         self.tmux('send-keys', '-t', self.pane, '-l', PROMPT)
         self.wait_for(lambda: PROMPT in self.screen())
         self.tmux('send-keys', '-t', self.pane, 'Enter')
@@ -218,6 +227,104 @@ class NativeCodexAsyncQuestions(unittest.TestCase):
         self.assertIn('draft in Terminal', result.stderr)
         self.assertIn('› 3. Terminal draft', self.panel())
         self.assertEqual(self.replies(), [])
+
+
+@unittest.skipUnless(os.environ.get('HGS_CODEX_TEST_BIN'), 'Set HGS_CODEX_TEST_BIN for the isolated native Codex question test')
+class NativeCodexTallQuestion(unittest.TestCase):
+    """A panel taller than its unviewed pane, opened in Terminal and left there."""
+    questions = TALL
+    script = NativeCodexAsyncQuestions.script
+    write_record = NativeCodexAsyncQuestions.write_record
+    tmux = NativeCodexAsyncQuestions.tmux
+    tearDown = NativeCodexAsyncQuestions.tearDown
+    fail = NativeCodexAsyncQuestions.fail
+    wait_for = NativeCodexAsyncQuestions.wait_for
+    inspect = NativeCodexAsyncQuestions.inspect
+    native_features = NativeCodexAsyncQuestions.native_features
+    setUp = NativeCodexAsyncQuestions.setUp
+    screen = NativeCodexAsyncQuestions.screen
+    cards = NativeCodexAsyncQuestions.cards
+    answer = NativeCodexAsyncQuestions.answer
+    replies = NativeCodexAsyncQuestions.replies
+    reply = NativeCodexAsyncQuestions.reply
+    deliver = NativeCodexAsyncQuestions.deliver
+    finish = NativeCodexAsyncQuestions.finish
+
+    def height(self):
+        return int(self.tmux('display-message', '-p', '-t', self.pane, '#{window_height}').strip())
+
+    def open_scrolled(self):
+        self.tmux('send-keys', '-t', self.pane, 'S-Left')
+        # Codex keeps the title and scrolls the answers, naming the visible row.
+        self.wait_for(lambda: re.search(r'enter submit .*option 1/21', self.screen()))
+        return self.panel()
+
+    def panel(self):
+        """The panel from its title through its key hints, without the animated status above it."""
+        rows = self.screen().splitlines()
+        start = next(i for i, row in enumerate(rows) if row.strip().startswith('Before releasing'))
+        end = next(i for i, row in enumerate(rows) if 'enter submit' in row)
+        return rows[start:end + 1]
+
+    def assert_nothing_sent(self, panel):
+        self.assertEqual(self.panel(), panel)
+        # Codex 0.160 sends a queued reply once the turn ends; 0.162 steers it at once.
+        self.server.release.set()
+        time.sleep(2)
+        self.assertFalse([text for request in self.server.requests for text in request['texts'] if text.startswith(REPLY[0])])
+
+    def test_scrolled_answers_grow_the_unviewed_pane_and_answer_from_activity(self):
+        before = self.height()
+        self.open_scrolled()
+        card = self.cards()[self.ids[0]]
+        self.assertTrue(card['can_answer'], card['answer_unavailable_reason'])
+        self.assertEqual(card['answer_transport'], 'codex_tui')
+        self.assertGreater(self.height(), before)
+        self.assertNotRegex(self.screen(), r'option \d+/\d+')
+        self.deliver(card, dict(question_id='q_0', selected_option_ids=['opt_1']))
+        self.finish([self.reply(card, TALL[0]['options'][1])])
+
+    def test_a_viewed_pane_keeps_its_size_and_the_scrolled_panel_stays_in_terminal(self):
+        # A real client on the agent's session, as Terminal attaches one.
+        columns, rows = map(str, self.geometry)
+        self.tmux('new-session', '-d', '-s', 'viewer', '-x', columns, '-y', rows,
+                  'env', '-u', 'TMUX', str(self.bin / 'tmux'), 'attach', '-t', '=' + self.name)
+        self.wait_for(lambda: self.tmux('display-message', '-p', '-t', '=' + self.name + ':', '#{session_attached}').strip() == '1')
+        viewed = self.height()
+        panel = self.open_scrolled()
+        # tmux fits a viewed window back to its client at once, so watch the
+        # whole listing for even a passing resize.
+        heights, listing = set(), threading.Event()
+        def watch():
+            while not listing.is_set():
+                heights.add(self.height())
+        watcher = threading.Thread(target=watch)
+        watcher.start()
+        try:
+            card = self.cards()[self.ids[0]]
+        finally:
+            listing.set()
+            watcher.join()
+        self.assertEqual(heights, {viewed})
+        self.assertFalse(card['can_answer'])
+        self.assertTrue(card['answer_unavailable_reason'])
+        result, _ = self.answer_raw(card)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.height(), viewed)
+        self.assert_nothing_sent(panel)
+
+    def test_an_answer_never_grows_the_pane(self):
+        # Taken while the panel is closed, so no listing has grown the pane.
+        card = self.cards()[self.ids[0]]
+        before = self.height()
+        panel = self.open_scrolled()
+        result, _ = self.answer_raw(card)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.height(), before)
+        self.assert_nothing_sent(panel)
+
+    def answer_raw(self, card):
+        return synthetic.CodexAsync.answer(self, card, dict(question_id='q_0', selected_option_ids=['opt_1']))
 
 
 if __name__ == '__main__':

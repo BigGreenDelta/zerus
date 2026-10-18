@@ -104,7 +104,7 @@ fn owns_channel(hook: &Value) -> bool {
     argv.len() >= 3 && argv[argv.len() - 2..] == CHANNEL_ARGS && names_hgs(&argv[argv.len() - 3])
 }
 
-fn resolved_target(path: &Path) -> Result<PathBuf> {
+pub(super) fn resolved_target(path: &Path) -> Result<PathBuf> {
     // Resolve even dangling symlinks, as pathlib.resolve() did, so replacing a
     // dotfile never replaces the user's symlink itself.
     let absolute = if path.is_absolute() {
@@ -368,6 +368,18 @@ fn merge_json(
     fresh: &mut dyn FnMut() -> Result<Entry>,
     version: &mut dyn FnMut() -> Option<Version>,
 ) -> Result<Option<String>> {
+    merge_json_mode(original,path,agent,windows,fresh,version,true)
+}
+
+fn merge_json_mode(
+    original: &str,
+    path: &Path,
+    agent: &str,
+    windows: bool,
+    fresh: &mut dyn FnMut() -> Result<Entry>,
+    version: &mut dyn FnMut() -> Option<Version>,
+    channels: bool,
+) -> Result<Option<String>> {
     let mut document: Value = if original.trim().is_empty() {
         json!({})
     } else {
@@ -450,7 +462,7 @@ fn merge_json(
                 .and_then(Value::as_array)
                 .is_some_and(|hooks| !hooks.is_empty() && hooks.iter().all(owns_channel))
     };
-    if agent == "claude"
+    if channels && agent == "claude"
         && !windows
         && hooks
             .get("PermissionRequest")
@@ -466,7 +478,7 @@ fn merge_json(
         }
     }
     // Windows keeps the terminal path until its native qualification.
-    if agent == "claude"
+    if channels && agent == "claude"
         && !windows
         && !channel_installed
         && version().is_some_and(|version| version >= CLAUDE_ANSWER_CHANNEL)
@@ -721,6 +733,101 @@ impl Installed<'_> {
         version::remember(&self.seen, &identity, version);
         Some(version)
     }
+}
+
+/// Read-only evidence: never runs a provider or refreshes the version cache.
+pub(super) fn health_version(path: &Path, program: &str) -> Option<(u64, u64, u64)> {
+    let identity = version::executable_identity(program)?;
+    let bytes = super::hook_health::read_bounded(&seen_version(path), 4096).ok()??;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    (value["executable"] == identity).then(|| version::version_in(value["version"].as_str()?))?
+}
+
+pub(super) fn health_events(agent: &str) -> Vec<&'static str> {
+    events(agent).into_iter().chain(versioned_events(agent).iter().map(|(event,_)| *event)).collect()
+}
+
+/// Content-free registration inventory. Native trust/policy is deliberately not inferred.
+pub(super) fn health_document(original: &str, agent: &str, known: Option<(u64, u64, u64)>) -> Result<Value> {
+    let mut present = std::collections::BTreeSet::new();
+    let mut channel = false;
+    let mut counts = std::collections::BTreeMap::<String,usize>::new();
+    let mut conditional = false;
+    if agent == "kimi" {
+        let document = original.parse::<toml_edit::DocumentMut>().map_err(|_| "Invalid hook configuration")?;
+        if let Some(item) = document.get("hooks") {
+            let tables = item.as_array_of_tables().ok_or("Invalid hook configuration")?;
+            for table in tables {
+                if table.get("command").and_then(toml_edit::Item::as_str).is_some_and(owns_hook) {
+                    if let Some(event) = table.get("event").and_then(toml_edit::Item::as_str) {
+                        if events(agent).contains(&event) { present.insert(event.to_owned()); *counts.entry(event.to_owned()).or_default() += 1; }
+                    }
+                }
+            }
+        }
+    } else {
+        let document: Value = if original.trim().is_empty() { json!({}) } else {
+            serde_json::from_str(original).map_err(|_| "Invalid hook configuration")?
+        };
+        let object = document.as_object().ok_or("Invalid hook configuration")?;
+        if let Some(hooks) = object.get("hooks") {
+            let hooks = hooks.as_object().ok_or("Invalid hook configuration")?;
+            // Only the bounded event names hgs itself knows may be returned.
+            let names = events(agent).into_iter().chain(versioned_events(agent).iter().map(|(event, _)| *event));
+            for event in names {
+                if let Some(groups) = hooks.get(event) {
+                    for group in groups.as_array().ok_or("Invalid hook configuration")? {
+                        for hook in group.get("hooks").and_then(Value::as_array).ok_or("Invalid hook configuration")? {
+                            let tracking = Entry::owned(hook, cfg!(windows)).is_some();
+                            let answer = owns_channel(hook);
+                            if (tracking || answer) && hook.get("type").and_then(Value::as_str) != Some("command") { return Err("Invalid hook configuration".into()); }
+                            if tracking { present.insert(event.to_owned()); *counts.entry(event.to_owned()).or_default() += 1; }
+                            if event == "PermissionRequest" && answer { channel = true; }
+                            if (tracking || answer) && group.get("matcher").is_some_and(|value| value.as_str().is_none_or(|s| !s.is_empty() && s != "*")) {
+                                conditional = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let expected: Vec<_> = events(agent).into_iter().chain(versioned_events(agent).iter()
+        .filter(|(_, minimum)| known.is_some_and(|version| version >= *minimum)).map(|(event, _)| *event)).collect();
+    let missing: Vec<_> = expected.iter().filter(|event| !present.contains(**event)).copied().collect();
+    let incompatible: Vec<_> = versioned_events(agent).iter().filter(|(event, minimum)| present.contains(*event) && known.is_some_and(|version| version < *minimum)).map(|(event,_)| *event).collect();
+    let duplicates: Vec<_> = counts.iter().filter(|(_,count)| **count > 1).map(|(event,_)| event).collect();
+    let channel_incompatible = channel && (cfg!(windows) || agent != "claude" || known.is_some_and(|v| v < CLAUDE_ANSWER_CHANNEL));
+    Ok(json!({"state":if missing.is_empty(){"configured"}else if present.is_empty(){"missing"}else{"partial"},
+        "expected_events":expected,"registered_events":present,"missing_events":missing,"duplicate_events":duplicates,"conditional_matchers":conditional,
+        "answer_channel_registered":channel,"compatibility":{"state":if !incompatible.is_empty() || channel_incompatible {"incompatible"}else if known.is_some(){"compatible"}else{"unknown"},
+        "basis":"Cached executable identity and known HGS versioned entries only",
+        "native_version":known.map(|(a,b,c)|format!("{a}.{b}.{c}")),"unsupported_registered_events":incompatible}}))
+}
+
+/// Explicit repair uses only a previously verified version. It never probes a provider.
+pub(super) fn repair_document(original: &str, path: &Path, agent: &str, known: (u64,u64,u64)) -> Result<Option<String>> {
+    let executable = runner_executable()?;
+    if agent == "kimi" {
+        let health=health_document(original,agent,Some(known))?;
+        if health["state"]=="configured" {return Ok(None);}
+        // Rewriting an existing Kimi block can discard custom fields/personal
+        // entries within it. Explicit repair refuses that lossy transformation.
+        if health["state"]=="partial" || original.contains(KIMI_BEGIN) || original.contains(KIMI_END) {
+            return Err("Partial Kimi hooks require a supervised launch or manual review; explicit repair preserved the existing block".into());
+        }
+        return merge_kimi(original, path, cfg!(windows), &mut || fresh_command(&executable));
+    }
+    // Existing owned entries (including trusted legacy commands) remain exact.
+    // Version-incompatible registrations are not removed by explicit repair.
+    let health = health_document(original, agent, Some(known))?;
+    if health["compatibility"]["state"] != "compatible" { return Err("Hook configuration is incompatible; use a qualified supervised launch".into()); }
+    merge_json_mode(original, path, agent, cfg!(windows), &mut || {
+        #[cfg(windows)]
+        { if agent=="claude" { windows::claude_entry(&executable, known, windows::git_bash().is_some()) } else { windows::codex_entry(&executable) } }
+        #[cfg(unix)]
+        { Ok(Entry::shell(fresh_command(&executable)?)) }
+    }, &mut || Some(known), false)
 }
 
 /// The command line a hook runs `executable __state hook` with.
@@ -1190,6 +1297,7 @@ pub(super) fn hook() -> Result<i32> {
         write(&mut record)?;
         return Ok(0);
     }
+    super::hook_health::observe(&mut record, &event);
     telemetry::observe(&mut record, &event);
     tasks::observe(&mut record, &event);
     processes::observe(&mut record, &event);
@@ -1214,6 +1322,47 @@ pub(super) fn hook() -> Result<i32> {
 mod tests {
     use super::windows::{self as forms, CLAUDE_EXEC_FORM};
     use super::*;
+
+    #[test]
+    fn health_registration_preserves_personal_and_legacy_hooks_and_never_grants_trust() {
+        let personal=json!({"type":"command","command":"personal-hook --secret example"});
+        let legacy=json!({"type":"command","command":"python3 /opt/old/hgs_state.py hook","timeout":5});
+        let original=json!({"apiKey":"never disclose", "hooks":{"Stop":[{"hooks":[personal.clone(),legacy.clone()]}]}}).to_string();
+        let health=health_document(&original,"claude",None).unwrap();
+        assert_eq!(health["state"],"partial");assert_eq!(health["compatibility"]["state"],"unknown");
+        assert!(!health.to_string().contains("secret"));assert!(!health.to_string().contains("apiKey"));
+        let merged=merge_json(&original,Path::new("/config"),"claude",false,&mut ||panic!("must retain legacy command"),&mut ||Some((2,1,296))).unwrap().unwrap();
+        let doc:Value=serde_json::from_str(&merged).unwrap();
+        assert_eq!(doc["hooks"]["Stop"][0]["hooks"],json!([personal,legacy]));
+        assert_eq!(health_document(&merged,"claude",Some((2,1,296))).unwrap()["state"],"configured");
+        assert!(merge_json(&merged,Path::new("/config"),"claude",false,&mut ||panic!(),&mut ||Some((2,1,296))).unwrap().is_none());
+    }
+    #[test]
+    fn tracking_repair_does_not_enable_or_widen_answer_channels() {
+        let empty=merge_json_mode("{}",Path::new("/config"),"claude",false,&mut ||Ok(Entry::shell("hgs __state hook".into())),&mut ||Some((2,1,296)),false).unwrap().unwrap();
+        assert!(!health_document(&empty,"claude",Some((2,1,296))).unwrap()["answer_channel_registered"].as_bool().unwrap());
+        let original=json!({"hooks":{"PermissionRequest":[{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"hgs __state answer-channel"}]}]}});
+        let merged=merge_json_mode(&original.to_string(),Path::new("/config"),"claude",false,&mut ||Ok(Entry::shell("hgs __state hook".into())),&mut ||Some((2,1,296)),false).unwrap().unwrap();
+        let value:Value=serde_json::from_str(&merged).unwrap();assert_eq!(value["hooks"]["PermissionRequest"][0],original["hooks"]["PermissionRequest"][0]);
+    }
+
+    #[test]
+    fn health_exposes_duplicates_and_partial_kimi_repair_preserves_every_entry() {
+        let text=json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"hgs __state hook"},{"type":"command","command":"hgs __state hook"}]}]}}).to_string();
+        assert_eq!(health_document(&text,"claude",None).unwrap()["duplicate_events"],json!(["Stop"]));
+        let kimi="# BEGIN hgs session tracking\n[[hooks]]\nevent = \"Stop\"\ncommand = \"hgs __state hook\"\ntimeout = 7\n[[hooks]]\nevent = \"Stop\"\ncommand = \"personal-hook\"\n# END hgs session tracking\n";
+        assert!(repair_document(kimi,Path::new("/config"),"kimi",(2,1,1)).is_err());
+    }
+
+    #[test]
+    fn health_reports_version_drift_and_rejects_malformed_owned_handlers() {
+        let future=json!({"hooks":{"PostModelSwitch":[{"hooks":[{"type":"command","command":"hgs __state hook"}]}]}}).to_string();
+        assert_eq!(health_document(&future,"claude",Some((2,1,200))).unwrap()["compatibility"]["state"],"incompatible");
+        assert_eq!(health_document(&future,"claude",None).unwrap()["compatibility"]["state"],"unknown");
+        for text in ["[]","{",r#"{"hooks":{"Stop":"invalid"}}"#,r#"{"hooks":{"Stop":[{"hooks":[{"type":"prompt","command":"hgs __state hook"}]}]}}"#] {
+            assert!(health_document(text,"claude",Some((2,1,296))).is_err(),"{text}");
+        }
+    }
 
     const UNIX: &str = "'/opt/hgs dir/hgs' __state hook";
     const STABLE: &str = r"C:\Profiles\Иван Петров\.local\bin\hgs.exe";

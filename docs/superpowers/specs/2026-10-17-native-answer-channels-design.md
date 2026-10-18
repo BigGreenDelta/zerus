@@ -79,7 +79,7 @@ specific reason.
 | `claude_tool_approval` | Claude | PermissionRequest hook (allow or deny), main agent (P3) | in `zerus-6uhz` |
 | Claude's own questions (`refusal_fallback_preference`) | Claude | PermissionRequest without PreToolUse, to verify | fallback |
 | `claude_folder_trust`, `claude_permission_mode`, `claude_resume`, `claude_usage_limit`, terminal safety, auto-mode chooser | Claude | none known | only path |
-| `codex_async` | Codex | to investigate (hooks, app-server) | fallback |
+| `codex_async` | Codex | none on 0.160.1–0.162.1 (see Other agents) | only path, with A |
 | `codex_folder_trust`, `codex_hooks_trust`, `codex_update`, `codex_goal_resume` | Codex | none known | only path |
 | `kimi_wire` questions | Kimi | to investigate (wire protocol) | fallback |
 | `kimi_folder_trust`, `kimi_cache_hint` | Kimi | none known | only path |
@@ -396,6 +396,18 @@ version, like the Claude spike:
   can carry answers.
 
 Until an adapter is qualified, these panels use screen delivery with A.
+
+Codex result (`zerus-zeb2`, 2026-10-18, pinned 0.160.1 and 0.162.0 plus
+0.162.1, isolated homes with `--no-daemon`): no channel. A synchronous
+`PermissionRequest` hook runs before Codex draws its approval panel, which
+shows only after the hook returns without a decision, so a waiting hook would
+hide the Terminal choice. With `async: true` the panel shows at once but the
+hook's decision is ignored. The decision carries only allow or deny with a
+message; `updatedInput`, `updatedPermissions` and `interrupt` fail closed, so
+hooks cannot answer questions either. hgs runs Codex without its app-server
+daemon, so no second client exists. `codex_async` questions keep screen
+delivery with A: an open panel taller than its pane scrolls its answers and
+names the visible row in its key hints, which marks it clipped.
 
 ## Testing and qualification
 

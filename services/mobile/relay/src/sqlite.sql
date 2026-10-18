@@ -68,3 +68,6 @@ CREATE INDEX IF NOT EXISTS speech_config_body_cleanup ON requests(updated,id) WH
 CREATE INDEX IF NOT EXISTS file_history ON requests(updated,id) WHERE operation='file_read' AND state IN ('completed','failed','uncertain');
 
 CREATE INDEX IF NOT EXISTS archive_history ON requests(updated,id) WHERE operation='archive_list' AND state IN ('completed','failed','uncertain');
+
+-- Content-free hook diagnostics expire independently of native mutations.
+CREATE INDEX IF NOT EXISTS hook_health_history ON requests(updated,id) WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain');
