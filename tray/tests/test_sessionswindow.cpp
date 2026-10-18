@@ -10121,8 +10121,9 @@ void TestSessionsWindow::fileCacheSettingsNavigation(){
     auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
     QCOMPARE(sections->item(6)->text(), QString("Files"));
     QCOMPARE(sections->item(sections->count()-1)->text(), QString("About"));
-    QCOMPARE(sections->item(sections->count()-2)->text(), QString("Keyboard"));
-    QCOMPARE(sections->item(sections->count()-3)->text(), QString("Voice input"));
+    QCOMPARE(sections->item(sections->count()-2)->text(), QString("Private analytics"));
+    QCOMPARE(sections->item(sections->count()-3)->text(), QString("Keyboard"));
+    QCOMPARE(sections->item(sections->count()-4)->text(), QString("Voice input"));
     sections->setCurrentRow(6);
     auto *files = window.findChild<DownloadCacheSettings *>("downloadCacheSettings"); QVERIFY(files); QVERIFY(files->isVisible());
     QCOMPARE(files->findChild<QComboBox *>("downloadCachePolicy")->currentText(), QString("Never clear"));
