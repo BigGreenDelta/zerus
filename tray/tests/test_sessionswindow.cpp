@@ -238,6 +238,7 @@ private slots:
     void windowLayerControlsKeepFocusAndLayout();
     void unreadRepliesNeedAnActiveVisibleResult();
     void markAllReadIgnoresFiltersAndKeepsCurrentDraft();
+    void markAllReadFromTheRailAndBesideDraftsSkipsReviewReminders();
     void sharedReadsQueueOnTheSessionHost();
     void unsentDraftBecomesARowStatus();
     void compactWorkspaceGeometry();
@@ -1828,7 +1829,8 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     QVERIFY(action->text().contains("(5)"));
     // Marks are shared through each session's host, not kept on this device.
     QCOMPARE(action->toolTip(), QString("Mark current replies across all machines as read, including hidden sessions. "
-                                        "Pending approvals, questions and errors stay highlighted."));
+                                        "Pending approvals, questions and errors stay highlighted. "
+                                        "Sessions you marked as needing attention keep their reply unread."));
     auto *context = window.findChild<QMenu *>("sessionProjectsMenu"); QVERIFY(context); QVERIFY(context->actions().contains(action));
     auto *batch = window.findChild<QPushButton *>("batchActions")->menu(); QMetaObject::invokeMethod(batch, "aboutToShow");
     QVERIFY(batch->actions().contains(action));
@@ -1858,6 +1860,58 @@ void TestSessionsWindow::markAllReadIgnoresFiltersAndKeepsCurrentDraft()
     action->trigger(); QCOMPARE(seen.size(), 2); QCOMPARE(seen[1][0].toJsonObject().size(), 1); QVERIFY(!action->isEnabled());
     QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("1 reply marked as read."));
     QSettings().remove("attention/readReplies");
+}
+
+void TestSessionsWindow::markAllReadFromTheRailAndBesideDraftsSkipsReviewReminders()
+{
+    const auto previousMarks = QSettings().value("attention/sessionMarks");
+    const auto restore = qScopeGuard([previousMarks] {
+        QSettings().setValue("attention/sessionMarks", previousMarks); QSettings().remove("attention/readReplies");
+    });
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    auto state = fleet(); auto box = state.local();
+    for (int i : {0, 1, 2}) { box.sessions[i].conversationId = QString("rail-%1").arg(i); box.sessions[i].replyId = "10:100"; }
+    box.sessions[2].state = "running"; box.sessions[2].activity = "idle"; box.sessions[2].phase = "input"; // A pending question.
+    state.setLocal(box, now);
+    auto remote = *state.peer("mac"); remote.sessions[0].conversationId = "rail-remote"; remote.sessions[0].replyId = "20:200";
+    state.setPeer(remote, now);
+    // The person kept one session here and the remote approval for later.
+    QVERIFY(state.setReviewLater({}, box.sessions[1], true)); QVERIFY(state.setReviewLater("mac", remote.sessions[0], true));
+    QSettings().setValue("attention/sessionMarks", QJsonDocument(state.attentionMarks()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(program()); window.setFleet(state); window.show(); window.showSession({}, box.sessions[0].name);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Keep this draft");
+    const auto selectedKey = composer->sessionKey();
+    auto *action = window.findChild<QAction *>("markAllSessionsRead"); QVERIFY(action); QVERIFY(action->isEnabled());
+    QCOMPARE(action->text(), QString("Mark all as read (2)"));
+    // Right-clicking the Sessions icon in the rail offers the same action.
+    auto *railMenu = window.findChild<QMenu *>("sessionsNavMenu"); QVERIFY(railMenu);
+    QCOMPARE(railMenu->actions().size(), 1); QCOMPARE(railMenu->actions().constFirst(), action);
+    auto *rail = qobject_cast<QPushButton *>(railMenu->parent()); QVERIFY(rail); QCOMPARE(rail->property("glyph").toString(), QString("sessions"));
+    QContextMenuEvent event(QContextMenuEvent::Mouse, QPoint(8, 8), rail->mapToGlobal(QPoint(8, 8))); QApplication::sendEvent(rail, &event);
+    QTRY_VERIFY(railMenu->isVisible()); railMenu->close();
+    // The icon beside Saved drafts runs it too, with the same count for assistive technology.
+    auto *button = window.findChild<QPushButton *>("markAllReadButton"), *drafts = window.findChild<QPushButton *>("savedDrafts");
+    QVERIFY(button); QVERIFY(drafts); QVERIFY(button->isVisible()); QVERIFY(button->isEnabled());
+    QHBoxLayout *summary = nullptr;
+    for (auto *row : drafts->parentWidget()->findChildren<QHBoxLayout *>()) if (row->indexOf(drafts) >= 0) summary = row;
+    QVERIFY(summary); QCOMPARE(summary->indexOf(button) + 1, summary->indexOf(drafts));
+    QCOMPARE(button->accessibleName(), action->text()); QCOMPARE(button->toolTip(), action->text() + "\n" + action->toolTip());
+    QSignalSpy seen(&window, &SessionsWindow::repliesMarkedRead);
+    connect(&window, &SessionsWindow::repliesMarkedRead, &window, [&](const QJsonObject &replies) {
+        QCOMPARE(state.markRepliesRead(replies), replies.size());
+        QSettings().setValue("attention/readReplies", QJsonDocument(state.readReplies()).toJson(QJsonDocument::Compact));
+        window.setFleet(state);
+    });
+    button->click(); QCOMPARE(seen.size(), 1); QCOMPARE(seen[0][0].toJsonObject().size(), 2);
+    QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("2 replies marked as read."));
+    // Reminded sessions keep their unread reply and their reminder; the question stays highlighted.
+    QVERIFY(state.local().sessions[1].unreadReply); QVERIFY(state.local().sessions[1].reviewLater);
+    QVERIFY(state.peer("mac")->sessions[0].unreadReply); QVERIFY(state.peer("mac")->sessions[0].reviewLater);
+    QVERIFY(!state.local().sessions[0].unreadReply);
+    QVERIFY(!state.local().sessions[2].unreadReply); QVERIFY(state.local().sessions[2].needsAttention());
+    QVERIFY(!action->isEnabled()); QVERIFY(!button->isEnabled()); QCOMPARE(action->text(), QString("Mark all as read"));
+    QCOMPARE(button->accessibleName(), QString("Mark all as read"));
+    QCOMPARE(composer->sessionKey(), selectedKey); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft"));
 }
 
 void TestSessionsWindow::sharedReadsQueueOnTheSessionHost()
@@ -7249,6 +7303,8 @@ void TestSessionsWindow::sessionListCollapsesIntoWorkingStrip()
     QCOMPARE(panel->width(), SessionStrip::width(true)); QCOMPARE(slot->width(), SessionStrip::width(true)); QVERIFY(detail->width() > detailWidth);
     QVERIFY(QSettings().value("workspace/sessionsCollapsed").toBool());
     QVERIFY(!window->findChild<QLineEdit *>("search")->isVisible()); QVERIFY(window->findChild<QPushButton *>("sessionStripSearch")->isVisible());
+    auto *readAll = window->findChild<QPushButton *>("markAllReadButton"); QVERIFY(readAll);
+    QVERIFY(!readAll->isVisible()); QVERIFY(!window->findChild<QPushButton *>("savedDrafts")->isVisible());
     // The strip keeps the active filter and the most urgent one, together as wide
     // as a tile, under a search button of the same width.
     const auto shownFilters = [&] {

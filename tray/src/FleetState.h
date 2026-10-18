@@ -32,6 +32,8 @@ public:
 
     void setReadReplies(const QJsonObject &read);
     QJsonObject readReplies() const { return m_readReplies; }
+    // Replies Mark all as read may mark: unread, except in sessions marked as needing
+    // attention. markRepliesRead checks both again when it applies a snapshot.
     QJsonObject unreadReplies() const;
     int markRepliesRead(const QJsonObject &replies);
     bool markReplyRead(const QString &host, const QString &name, const QString &conversation, const QString &reply);
