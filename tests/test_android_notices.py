@@ -2,10 +2,12 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,7 +181,7 @@ class AndroidNoticesTests(unittest.TestCase):
         (self.directory / "resolved.json").write_text("{")
         self.assert_refused("Read the resolved release classpath first")
 
-    def test_assets_change_together_or_not_at_all(self):
+    def test_staging_failure_preserves_existing_assets(self):
         self.assertEqual(self.run_script().returncode, 0)
         before = self.assets_now()
         self.components.remove(self.component("example.lib:core:1.1"))
@@ -195,6 +197,47 @@ class AndroidNoticesTests(unittest.TestCase):
         result = self.run_script()
         self.assertIn("updated libraries.tsv, library-notices.txt", result.stdout)
         self.assertEqual(sorted(self.assets_now()), sorted(before))
+
+    def test_failed_staged_write_removes_its_temporary_file(self):
+        replace = runpy.run_path(str(SCRIPT))["replace"]
+        (self.assets / "libraries.tsv").write_text("old")
+        before = self.assets_now()
+        fdopen = os.fdopen
+
+        class FailedWrite:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                self.stream.close()
+
+            def write(self, _):
+                raise OSError("injected staged write failure")
+
+        with mock.patch.object(os, "fdopen", side_effect=lambda *a, **k: FailedWrite(fdopen(*a, **k))):
+            with self.assertRaisesRegex(OSError, "staged write failure"):
+                replace(self.assets, {"libraries.tsv": "new"})
+        self.assertEqual(self.assets_now(), before)
+
+    def test_replacement_failure_is_reported_and_cleans_staging(self):
+        replace = runpy.run_path(str(SCRIPT))["replace"]
+        outputs = {"libraries.tsv": "new list", "google-notices.txt": "new notice"}
+        for name in outputs:
+            (self.assets / name).write_text("old")
+        rename = os.replace
+
+        def fail_second(source, destination):
+            if Path(destination).name == "google-notices.txt":
+                raise OSError("injected second replacement failure")
+            return rename(source, destination)
+
+        with mock.patch.object(os, "replace", side_effect=fail_second):
+            with self.assertRaisesRegex(OSError, "second replacement failure"):
+                replace(self.assets, outputs)
+        self.assertEqual(self.assets_now(), {"google-notices.txt": b"old", "libraries.tsv": b"new list"})
 
     def test_unreviewed_license_or_missing_text_stops_generation(self):
         mit = "<licenses><license><name>MIT License</name></license></licenses>"

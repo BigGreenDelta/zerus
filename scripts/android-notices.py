@@ -206,14 +206,18 @@ def generate(resolved, cache, offline, assets=ASSETS):
 
 
 def replace(assets, outputs):
-    """Write every changed asset or none: the old files stay until all new ones exist."""
+    """Stage every asset before replacing files atomically one at a time.
+
+    A replacement failure propagates; rerun generation and --check to reconcile
+    a partially replaced set. This is not a transaction across the asset files.
+    """
     staged = {}
     try:
         for name, content in outputs.items():
             descriptor, path = tempfile.mkstemp(prefix=f".{name}.", dir=assets)
+            staged[name] = Path(path)
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                 stream.write(content)
-            staged[name] = Path(path)
         for name, path in staged.items():
             os.replace(path, assets / name)
     finally:
