@@ -121,9 +121,10 @@ public enum ConversationMerge {
             .map(\.element)
         for message in mine {
             // Only a user row from durable native receipt metadata, or a native OpenCode prompt naming the request that
-            // sent it, is authoritative by request ID; a receipt comes first.
+            // sent it, is authoritative by request ID; a receipt comes first. Only a canonical request names a row.
             func named(_ source: String) -> Int? {
-                result.indices.first { index in
+                guard AttachmentPolicy.validId(message.requestId) else { return nil }
+                return result.indices.first { index in
                     !used.contains(index) && result[index].role == "You" && result[index].source == source && result[index].requestId == message.requestId
                 }
             }

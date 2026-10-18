@@ -50,7 +50,7 @@ struct MessageBubble: View {
                     Text("Message text shortened").font(.caption2).foregroundStyle(Theme.amber)
                 }
                 footer
-                if let outgoing, ["failed", "uncertain"].contains(outgoing.status) { recovery(outgoing) }
+                if let outgoing, outgoing.recoverable { recovery(outgoing) }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)

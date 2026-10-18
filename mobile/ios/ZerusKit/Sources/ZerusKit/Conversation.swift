@@ -500,6 +500,20 @@ public enum MessageChanges {
         return copy
     }
 
+    /// Messages a native row proved delivered (`ConversationMerge.Result.recordedRequestIds`) become recorded, which ends
+    /// their recovery; a reviewed message stays reviewed.
+    public static func recorded(_ state: MessageState, _ requestIds: Set<String>) -> MessageState {
+        var copy = state
+        copy.outgoing = state.outgoing.map { message in
+            guard requestIds.contains(message.requestId), message.status != "reviewed" else { return message }
+            var updated = message
+            updated.status = "recorded"
+            updated.error = ""
+            return updated
+        }
+        return copy
+    }
+
     public static func result(_ state: MessageState, _ requestId: String, _ update: (OutgoingMessage) -> OutgoingMessage) -> MessageState {
         var copy = state
         copy.outgoing = state.outgoing.map { $0.requestId == requestId && !["recorded", "reviewed"].contains($0.status) ? update($0) : $0 }
