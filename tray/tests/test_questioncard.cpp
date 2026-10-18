@@ -7,7 +7,9 @@
 #include <QDir>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QFile>
 #include <QFontInfo>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -120,6 +122,26 @@ bool setSendingReady(QuestionCard &card, const QString &key, const QString &id, 
     while (!finished && clock.elapsed() < 3000) QTest::qWait(1);
     return finished && okay;
 }
+// A case of the shared OpenCode form contract (tests/fixtures/opencode-form-contract.json).
+QJsonObject openCodeCase(const QString &name)
+{
+    QFile file(QStringLiteral(ZERUS_OPENCODE_FORM_CONTRACT));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    for (const auto &value : QJsonDocument::fromJson(file.readAll()).object().value("cases").toArray())
+        if (value.toObject().value("name") == name) return value.toObject();
+    return {};
+}
+// The case's card as hgs sends it: its card fields with its item as the only
+// question. hgs sends an item's prompt as both prompt and question, and a hash
+// of the native request, which the contract leaves out.
+QJsonObject openCodeCard(const QJsonObject &contractCase)
+{
+    auto card = contractCase.value("card").toObject();
+    auto item = card.take("item").toObject(); card.remove("question_count");
+    item["question"] = item.value("prompt");
+    card["questions"] = QJsonArray{item}; card["question_hash"] = contractCase.value("name");
+    return card;
+}
 }
 
 class TestQuestionCard : public QObject {
@@ -161,6 +183,7 @@ private slots:
     void openCodeFormDefaultsSeedOnlyWithoutSavedDraft();
     void openCodeSeededDefaultsStayUnsavedUntilEdited();
     void openCodeOtherAnswerCountsTowardItemBounds();
+    void openCodePermissionListsNativeChoicesAndConfirmsAlwaysAllow();
     void claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes();
     void unreadableApprovalPointsToTerminal();
     void kimiPlanReviewShowsPlanAndNamedRevise();
@@ -650,6 +673,67 @@ void TestQuestionCard::openCodeOtherAnswerCountsTowardItemBounds()
     option(card, "b")->click(); QVERIFY(!submit(card)->isEnabled());
     option(card, "a")->click(); QVERIFY(submit(card)->isEnabled());
     option(card, "b")->click(); text(card, "tags")->setText("Gamma"); QVERIFY(!submit(card)->isEnabled());
+}
+
+// The contract's permission cases. hgs accepts only OpenCode's own decisions
+// (once, always, reject) and refuses the synthesized allow/deny ids.
+void TestQuestionCard::openCodePermissionListsNativeChoicesAndConfirmsAlwaysAllow()
+{
+    QuestionCard card; card.resize(700, 450); card.show(); card.activateWindow(); QApplication::setActiveWindow(&card);
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    const auto status = [&card] { return card.findChild<QLabel *>("questionStatus")->text(); };
+    auto *approve = card.findChild<QPushButton *>("approveToolRequest"), *deny = card.findChild<QPushButton *>("denyToolRequest");
+    const auto refused = openCodeCase("permission-allow-refused");
+    QCOMPARE(refused.value("error").toString(), QString("Unknown answer option"));
+    QStringList chosen;
+    for (const QString name : {"permission-once", "permission", "permission-reject"}) {
+        const auto contractCase = openCodeCase(name); QVERIFY2(!contractCase.isEmpty(), qPrintable(name));
+        const auto permission = openCodeCard(contractCase); const auto expected = contractCase.value("answers").toArray();
+        QCOMPARE(permission.value("questions").toArray().size(), contractCase["card"]["question_count"].toInt());
+        const auto choice = expected.first()["selected_option_ids"][0].toString();
+        card.setReviewDelayForTests(3000); setQuestionReady(card, "opencode\nsession", permission); sent.clear();
+        // OpenCode's own choices, listed in its order, with nothing preselected.
+        QStringList ids;
+        for (const auto &value : permission["questions"][0]["options"].toArray()) {
+            const auto item = value.toObject(); auto *button = option(card, item.value("id").toString());
+            QVERIFY2(button, qPrintable(item.value("id").toString()));
+            QVERIFY2(button->isVisible(), qPrintable(item.value("id").toString() + " is not listed"));
+            QCOMPARE(button->accessibleName(), item.value("label").toString()); QVERIFY(!button->isChecked());
+            ids << item.value("id").toString();
+        }
+        QCOMPARE(ids, QStringList({"once", "always", "reject"}));
+        QVERIFY(!option(card, refused["answers"][0]["selected_option_ids"][0].toString()));
+        QVERIFY(approve->isHidden()); QVERIFY(deny->isHidden());
+        QCOMPARE(option(card, "reject")->accessibleDescription(), QString("Rejects every pending request in this session"));
+        QStringList descriptions;
+        for (auto *label : card.findChildren<QLabel *>("questionChoiceDescription")) if (label->isVisible()) descriptions << label->text();
+        QVERIFY2(descriptions.contains("Rejects every pending request in this session"), qPrintable(descriptions.join(" | ")));
+        QCOMPARE(option(card, "always")->accessibleDescription(), QString("Applies beyond this request. Asks for confirmation."));
+        QCOMPARE(card.findChild<QLabel *>("questionHeading")->text(), QString("Agent needs your approval"));
+        QCOMPARE(card.findChild<QLabel *>("questionPrompt")->text(), QString("shell\nprintf native-tool-output"));
+        QCOMPARE(status(), QString("Review the request, then choose one of the agent's options."));
+        QVERIFY(!submit(card)->isEnabled());
+        // Submit waits for the review countdown.
+        option(card, choice)->click(); QVERIFY(!submit(card)->isEnabled()); QVERIFY(submit(card)->text().startsWith("Submit answer ("));
+        submit(card)->click(); QCOMPARE(sent.size(), 0);
+        card.setReviewDelayForTests(200); QTRY_VERIFY(submit(card)->isEnabled());
+        // The hidden synthesized buttons send nothing.
+        approve->click(); deny->click(); QCOMPARE(sent.size(), 0);
+        if (choice == "always") {
+            // Always allow reaches past this request: it needs a second, explicit click.
+            submit(card)->click(); QCOMPARE(sent.size(), 0); QCOMPARE(submit(card)->text(), QString("Confirm"));
+            QCOMPARE(status(), QString("“Always allow” changes the agent's permissions beyond this request. Select Confirm to send it."));
+            const auto preview = qEnvironmentVariable("HGS_APPROVAL_PREVIEW");
+            if (!preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(card.grab().save(preview + "/opencode-permission.png")); }
+        } else QCOMPARE(submit(card)->text(), QString("Submit answer"));
+        submit(card)->click(); QCOMPARE(sent.size(), 1);
+        QCOMPARE(sent.first()[0].toString(), QString("opencode\nsession")); QCOMPARE(sent.first()[1].toString(), QString("per_1"));
+        QCOMPARE(sent.first()[2].toJsonArray(), expected);
+        chosen << sent.first()[2].toJsonArray().at(0)["selected_option_ids"][0].toString();
+    }
+    QCOMPARE(chosen, QStringList({"once", "always", "reject"}));
+    QCOMPARE(QJsonDocument(openCodeCase("permission-once").value("answers").toArray()).toJson(QJsonDocument::Compact),
+        QByteArray(R"([{"question_id":"permission","selected_option_ids":["once"],"text":""}])"));
 }
 
 void TestQuestionCard::unreadableApprovalPointsToTerminal()

@@ -123,7 +123,7 @@ The project directory remains on the agent computer.
 - **Questions.** Option, boolean and text fields are answered in Zerus; other
   forms show "Answer this form in OpenCode".
 - **Permissions.** Allow once, Always allow or Reject. Reject rejects every
-  pending request of that session.
+  pending request of that session. Always allow asks for a second confirmation.
 - **Model and effort** can be changed; **rename** changes the session title.
 - **Forget** removes only the Zerus binding; native history is kept.
 - **Voice** transcripts use the same guarded send path; a refused voice message

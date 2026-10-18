@@ -812,8 +812,8 @@ void QuestionCard::updateControls()
         if (!notice.isEmpty()) break;
     }
     if (notice.isEmpty() && confirming)
-        notice = tr("“%1” changes Claude's permissions beyond this request. Select Confirm to send it.").arg(broader);
-    if (notice.isEmpty() && choices) notice = tr("Review the request, then choose one of Claude's options.");
+        notice = tr("“%1” changes the agent's permissions beyond this request. Select Confirm to send it.").arg(broader);
+    if (notice.isEmpty() && choices) notice = tr("Review the request, then choose one of the agent's options.");
     if (notice.isEmpty() && planReview && !complete) notice = tr("Review the plan, then choose how the agent continues.");
     if (notice.isEmpty()) notice = approval?tr("Approval applies only to this command. Review it before continuing."):
         optional ? tr("The agent can continue. Answer when ready or skip this question.") :
