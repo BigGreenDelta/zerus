@@ -244,6 +244,49 @@ final class QuestionPoliciesTests: XCTestCase {
         }
     }
 
+    func testPermissionButtonsMapToTheirNativeOptions() throws {
+        let permission = try card(approval: true, items: [permissionItem])
+        XCTAssertEqual(PermissionAction.actions(permission), [.reject, .allowOnce, .alwaysAllow])
+        XCTAssertEqual(PermissionAction.actions(permission).map(\.option), ["reject", "once", "always"])
+        XCTAssertEqual(PermissionAction.actions(try card(approval: true, items: [permissionItem.putting("options", options(["once", "reject"]))])),
+                       [.reject, .allowOnce], "Always allow… only when offered")
+        XCTAssertEqual(PermissionAction.actions(try card(approval: true, items: [permissionItem.putting("options", options(["allow", "deny"]))])), [])
+        XCTAssertEqual(PermissionAction.actions(try card(approval: true, canAnswer: false, items: [permissionItem])), [])
+        XCTAssertEqual(PermissionAction.reject.label(remaining: 2), "Reject")
+        XCTAssertEqual(PermissionAction.allowOnce.label(remaining: 2), "Allow once (2)")
+        XCTAssertEqual(PermissionAction.allowOnce.label(remaining: 0), "Allow once")
+        XCTAssertEqual(PermissionAction.alwaysAllow.label(remaining: 2), "Always allow…")
+        // Reject is enabled like Deny; Allow once and Always allow… also wait for this card's review.
+        XCTAssertTrue(PermissionAction.reject.enabled(answerable: true, reviewed: false))
+        XCTAssertFalse(PermissionAction.reject.enabled(answerable: false, reviewed: true))
+        for action in [PermissionAction.allowOnce, .alwaysAllow] {
+            XCTAssertFalse(action.enabled(answerable: true, reviewed: false), "\(action)")
+            XCTAssertFalse(action.enabled(answerable: false, reviewed: true), "\(action)")
+            XCTAssertTrue(action.enabled(answerable: true, reviewed: true), "\(action)")
+        }
+        // Only Always allow asks for a confirmation, and only it is broader than this request.
+        XCTAssertEqual(PermissionAction.allCases.filter(\.confirmation), [.alwaysAllow])
+        XCTAssertEqual(PermissionConfirmation(permission)?.answers(permission, editing: true, available: true),
+                       QuestionPolicies.approvalAnswers(permission, PermissionAction.alwaysAllow.option))
+    }
+
+    func testAlwaysAllowConfirmationNamesThePatternsItSavesVerbatim() throws {
+        let general = "OpenCode will allow matching requests without asking again."
+        func described(_ text: String) throws -> Question {
+            try card(approval: true, items: [permissionItem.putting("options", [
+                ["id": "once", "label": "Allow once", "scope": "once"],
+                ["id": "always", "label": "Always allow", "description": .string(text), "scope": "broader"],
+                ["id": "reject", "label": "Reject", "description": "Rejects every pending request in this session", "scope": "once"]])])
+        }
+        let saved = "Allows without asking again: printf *"
+        XCTAssertEqual(try XCTUnwrap(PermissionConfirmation(try described(saved))).message, general + "\n\n" + saved)
+        let several = "Allows without asking again: git push *, git fetch *"
+        XCTAssertEqual(try XCTUnwrap(PermissionConfirmation(try described(several))).message, general + "\n\n" + several)
+        // A card from an older computer has no description: the general sentence alone.
+        XCTAssertEqual(try XCTUnwrap(PermissionConfirmation(try card(approval: true, items: [permissionItem]))).message, general)
+        XCTAssertEqual(try XCTUnwrap(PermissionConfirmation(try described("  "))).message, general)
+    }
+
     func testAlwaysAllowIsSentOnlyForTheExactCardThatStillOffersIt() throws {
         let permission = try card(approval: true, items: [permissionItem])
         let confirmation = try XCTUnwrap(PermissionConfirmation(permission))
@@ -681,6 +724,30 @@ final class QuestionPresentationTests: XCTestCase {
         XCTAssertEqual(64, bounded.offsets.count)
         XCTAssertEqual(99, bounded.page(question("99")))
         XCTAssertEqual(0, bounded.page(question("0")))
+    }
+
+    func testApprovalReviewRestartsWhenAnotherCardTakesItsPlace() {
+        let target = Target(computerId: "computer", session: "session", run: "run", conversation: "conversation", connectionId: "workspace")
+        let first = Question(id: "per_1", hash: "h1", prompts: [], canAnswer: true, canSkip: false, optional: false, delivery: "")
+        var second = first
+        second.id = "per_2"
+        var rehashed = first
+        rehashed.hash = "h2"
+        let a = ApprovalReview.key(target, first), b = ApprovalReview.key(target, second)
+        XCTAssertEqual(Set([a, b, ApprovalReview.key(target, rehashed), ApprovalReview.key(target.with(run: "other"), first)]).count, 4)
+        var review = ApprovalReview().observe(eligible: true, now: 1, card: a)
+        XCTAssertEqual(0, review.secondsRemaining(now: 4, card: a))
+        // Another card shown in the same place has not been reviewed, even before the next observation.
+        XCTAssertEqual(3, review.secondsRemaining(now: 4, card: b))
+        review = review.observe(eligible: true, now: 4, card: b)
+        XCTAssertEqual(3, review.secondsRemaining(now: 4, card: b))
+        XCTAssertEqual(1, review.secondsRemaining(now: 6, card: b))
+        XCTAssertEqual(0, review.secondsRemaining(now: 7, card: b))
+        review = review.observe(eligible: true, now: 7, card: b)
+        XCTAssertEqual(0, review.secondsRemaining(now: 7, card: b), "the same card keeps its review")
+        XCTAssertEqual(3, review.secondsRemaining(now: 7, card: a), "the earlier card is reviewed again")
+        XCTAssertEqual(3, review.observe(eligible: true, now: 8, card: a).secondsRemaining(now: 8, card: a))
+        XCTAssertEqual(3, review.observe(eligible: false, now: 8, card: b).secondsRemaining(now: 20, card: b))
     }
 
     func testApprovalReviewNeedsThreeContinuousVisibleSeconds() {

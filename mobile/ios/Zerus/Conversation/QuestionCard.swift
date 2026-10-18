@@ -72,7 +72,7 @@ struct QuestionCard: View {
         let draft = model.draft(target, question)
         let native = QuestionPolicies.submitted(question, target)
         let identity = "\(target.key)|\(QuestionPolicies.key(question))|\(native?.requestId ?? "")|\(draft.generation)"
-        let editing = draft.status == "editing" && native == nil && model.pendingQuestionSend == nil
+        let editing = isEditing(draft, native)
         // A card that cannot be answered here is read-only, so no draft is written that could never be sent.
         let inputs = editing && question.canAnswer
         let page = min(max(display.page(question), 0), max(question.prompts.count - 1, 0))
@@ -86,8 +86,14 @@ struct QuestionCard: View {
         let approvalSupported = QuestionPolicies.approvalSupported(question)
         let permission = QuestionPolicies.openCodePermission(question)
         let eligible = visible && scenePhase == .active && available && editing && question.canAnswer && (approvalSupported || permission)
-        let remaining = review.secondsRemaining(now: now)
-        let alwaysPermitted = confirmation?.answers(question, editing: editing, available: available) != nil
+        // The review belongs to this card: another card shown here starts its own three seconds.
+        let reviewCard = ApprovalReview.key(target, question)
+        let remaining = review.secondsRemaining(now: now, card: reviewCard)
+        let reviewed = eligible && remaining == 0
+        let answerable = question.canAnswer && editing && available
+        // The Always allow dialog is shown only while confirming would send; one that cannot send is dropped.
+        let alwaysSendable = confirmation?.answers(question, editing: editing, available: available) != nil
+        let staleConfirmation = confirmation != nil && !alwaysSendable
 
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -135,19 +141,20 @@ struct QuestionCard: View {
             let notice = model.questionSendNotice(target, question)
             if !notice.isEmpty { Text(notice).font(.footnote).foregroundStyle(Theme.amber) }
             if question.approval && permission {
+                let reject = PermissionAction.reject, once = PermissionAction.allowOnce, always = PermissionAction.alwaysAllow
                 HStack(spacing: 8) {
-                    Button("Reject") { approve("reject") }
+                    Button(reject.label(remaining: remaining)) { approve(reject.option) }
                         .buttonStyle(.bordered)
-                        .disabled(!(permission && question.canAnswer && editing && available))
-                    Button(remaining > 0 ? "Allow once (\(remaining))" : "Allow once") { approve("once") }
+                        .disabled(!reject.enabled(answerable: answerable, reviewed: reviewed))
+                    Button(once.label(remaining: remaining)) { approve(once.option) }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!(eligible && remaining == 0))
+                        .disabled(!once.enabled(answerable: answerable, reviewed: reviewed))
                 }
                 // Always allow reaches beyond this request, so it opens its own confirmation.
-                if let always = PermissionConfirmation(question) {
-                    Button("Always allow…") { confirmation = always }
+                if PermissionAction.actions(question).contains(always) {
+                    Button(always.label(remaining: remaining)) { confirmation = PermissionConfirmation(question) }
                         .buttonStyle(.bordered)
-                        .disabled(!(eligible && remaining == 0))
+                        .disabled(!always.enabled(answerable: answerable, reviewed: reviewed))
                 }
                 Text("Reject rejects every pending request in this session.").font(.footnote).foregroundStyle(Theme.muted)
             } else if question.approval {
@@ -157,7 +164,7 @@ struct QuestionCard: View {
                         .disabled(!(approvalSupported && question.canAnswer && editing && available))
                     Button(remaining > 0 ? "Approve once (\(remaining))" : "Approve once") { approve("allow") }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!(eligible && remaining == 0))
+                        .disabled(!reviewed)
                 }
                 Text("Approval applies only to this command. Review it before continuing.").font(.footnote).foregroundStyle(Theme.muted)
             } else if question.prompts.count > 1 || question.canSkip || otherPrompts.isEmpty {
@@ -188,27 +195,24 @@ struct QuestionCard: View {
         }
         .padding(12)
         .background(Color(hex: 0x2B2923), in: RoundedRectangle(cornerRadius: 14))
-        .confirmationDialog("Always allow?", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }),
-                            titleVisibility: .visible) {
-            Button("Always allow", role: .destructive) { confirmAlways() }
+        .confirmationDialog("Always allow?", isPresented: Binding(get: { alwaysSendable }, set: { if !$0 { confirmation = nil } }),
+                            titleVisibility: .visible, presenting: confirmation) { pending in
+            Button("Always allow", role: .destructive) { confirmAlways(pending) }
             Button("Cancel", role: .cancel) { confirmation = nil }
-        } message: {
-            Text("OpenCode will allow matching requests without asking again.")
+        } message: { pending in
+            Text(verbatim: pending.message)
         }
-        // The confirmation closes, sending nothing, once its card changes or can no longer be answered or edited here.
-        .onChange(of: alwaysPermitted) { _, permitted in if !permitted { confirmation = nil } }
+        // A confirmation that cannot send (its card changed or can no longer be answered or edited here) closes without sending.
+        .onChange(of: staleConfirmation) { _, stale in if stale { confirmation = nil } }
         .onAppear { load(identity: identity, draft: draft, native: native) }
         .onChange(of: identity) { load(identity: identity, draft: draft, native: native) }
-        .onChange(of: eligible, initial: true) {
-            now = ProcessInfo.processInfo.systemUptime
-            review = review.observe(eligible: eligible, now: now)
-        }
-        .task(id: eligible && question.approval) {
+        .onChange(of: eligible, initial: true) { observeReview(eligible: eligible, card: reviewCard) }
+        .onChange(of: reviewCard) { observeReview(eligible: eligible, card: reviewCard) }
+        .task(id: "\(eligible && question.approval)|\(reviewCard)") {
             guard eligible && question.approval else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(200))
-                now = ProcessInfo.processInfo.systemUptime
-                review = review.observe(eligible: true, now: now)
+                observeReview(eligible: true, card: reviewCard)
             }
         }
     }
@@ -347,13 +351,21 @@ struct QuestionCard: View {
     }
 
     /// Sends Always allow only for the card that offered it, while it can still be answered and edited here.
-    private func confirmAlways() {
-        guard let pending = confirmation else { return }
+    private func confirmAlways(_ pending: PermissionConfirmation) {
         confirmation = nil
-        let editing = model.draft(target, question).status == "editing" && QuestionPolicies.submitted(question, target) == nil &&
-            model.pendingQuestionSend == nil
+        let editing = isEditing(model.draft(target, question), QuestionPolicies.submitted(question, target))
         guard let payload = pending.answers(question, editing: editing, available: available)?.compact else { return }
         Task { await model.sendQuestion(target, question, answers: payload) }
+    }
+
+    /// The answer can still be edited and sent: no attempt, native submission or pending send confirmation holds it.
+    private func isEditing(_ draft: Draft, _ native: NativeQuestionDelivery?) -> Bool {
+        draft.status == "editing" && native == nil && model.pendingQuestionSend == nil
+    }
+
+    private func observeReview(eligible: Bool, card: String) {
+        now = ProcessInfo.processInfo.systemUptime
+        review = review.observe(eligible: eligible, now: now, card: card)
     }
 
     private func skip() {

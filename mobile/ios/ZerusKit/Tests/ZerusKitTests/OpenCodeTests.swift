@@ -361,10 +361,13 @@ final class OpenCodeTests: XCTestCase {
         let card = try question(try XCTUnwrap(cases["permission"]))
         XCTAssertTrue(QuestionPolicies.openCodePermission(card))
         XCTAssertFalse(QuestionPolicies.showsSubmit(card), "decisions use their own buttons")
-        for (option, name) in [("once", "permission-once"), ("always", "permission"), ("reject", "permission-reject")] {
+        // Each button sends the decision of its contract case.
+        XCTAssertEqual(PermissionAction.actions(card), [.reject, .allowOnce, .alwaysAllow])
+        let decisions: [(PermissionAction, String)] = [(.allowOnce, "permission-once"), (.alwaysAllow, "permission"), (.reject, "permission-reject")]
+        for (action, name) in decisions {
             let expected = JSON.array(try XCTUnwrap(cases[name]?.array("answers")))
-            XCTAssertEqual(QuestionPolicies.approvalAnswers(card, option), expected, name)
-            XCTAssertTrue(QuestionSendPolicies.available(card, target, try XCTUnwrap(QuestionPolicies.approvalAnswers(card, option)).compact), name)
+            XCTAssertEqual(QuestionPolicies.approvalAnswers(card, action.option), expected, name)
+            XCTAssertTrue(QuestionSendPolicies.available(card, target, try XCTUnwrap(QuestionPolicies.approvalAnswers(card, action.option)).compact), name)
         }
         // Always allow reaches beyond this request: it is sent only through its confirmation.
         let confirmation = try XCTUnwrap(PermissionConfirmation(card))
