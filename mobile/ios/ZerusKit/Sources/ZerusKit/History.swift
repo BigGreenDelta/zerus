@@ -69,7 +69,7 @@ public enum RollingConversationHistory {
         var replaced = Set<String>()
         for receipt in reconciled where receipt.source == "hgs_delivery" && receipt.role == "You" && !receipt.requestId.isEmpty && !receipt.submittedText.isEmpty {
             let candidates = reconciled.filter {
-                !replaced.contains($0.id) && $0.role == "You" && $0.requestId.isEmpty && NativeEvents.userTypes.contains($0.nativeType) &&
+                !replaced.contains($0.id) && $0.role == "You" && $0.receiptRequestId.isEmpty && NativeEvents.userTypes.contains($0.nativeType) &&
                     AttachmentReceiptMatch.matches(receipt, $0)
             }
             guard candidates.count == 1 else { continue }
@@ -120,10 +120,14 @@ public enum ConversationMerge {
             .enumerated().sorted { $0.element.createdAt != $1.element.createdAt ? $0.element.createdAt < $1.element.createdAt : $0.offset < $1.offset }
             .map(\.element)
         for message in mine {
-            // Only a user row from durable native receipt metadata is authoritative by request ID.
-            var match = result.indices.first { index in
-                !used.contains(index) && result[index].role == "You" && result[index].source == "hgs_delivery" && result[index].requestId == message.requestId
+            // Only a user row from durable native receipt metadata, or a native OpenCode prompt naming the request that
+            // sent it, is authoritative by request ID; a receipt comes first.
+            func named(_ source: String) -> Int? {
+                result.indices.first { index in
+                    !used.contains(index) && result[index].role == "You" && result[index].source == source && result[index].requestId == message.requestId
+                }
             }
+            var match = named("hgs_delivery") ?? named("opencode_native")
             if match == nil, ["submitted", "recorded"].contains(message.status), message.submittedAt > 0 {
                 let text = (message.submittedText.isEmpty ? message.text : message.submittedText).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty {

@@ -136,10 +136,11 @@ final class OpenCodeTests: XCTestCase {
 
     // MARK: Queued messages
 
-    private func prompt(_ text: String, _ id: String, _ at: Double, _ state: String? = nil) -> JSON {
+    private func prompt(_ text: String, _ id: String, _ at: Double, _ state: String? = nil, request: JSON? = nil) -> JSON {
         var row: JSONObject = ["type": "UserPromptSubmit", "detail": .string(text), "source": "opencode_native", "agent_id": "", "message_id": .string(id),
                                "at": .double(at)]
         if let state { row["delivery_state"] = .string(state) }
+        if let request { row["request_id"] = request }
         return .object(row)
     }
 
@@ -185,6 +186,135 @@ final class OpenCodeTests: XCTestCase {
         XCTAssertEqual(later.events.map(\.text), ["hello", "queued later"])
         XCTAssertEqual(later.events.map(\.deliveryState), [nil, "not_delivered"])
         XCTAssertEqual(later.inspection([native]).events.map(\.id), ["history:h1"])
+    }
+
+    // MARK: Request identity
+
+    /// This phone's outbox request; OpenCode prompts Zerus sent name theirs in `request_id`.
+    private let request = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a01"
+    private let otherRequest = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02"
+
+    /// This phone's message, submitted at 1000.
+    private func sent(_ text: String = "Waited in the queue") -> OutgoingMessage {
+        OutgoingMessage(requestId: request, target: target, text: text, attachments: [], createdAt: 999, status: "submitted", submittedAt: 1_000)
+    }
+
+    private func merge(_ rows: JSON...) -> ConversationMerge.Result {
+        ConversationMerge.merge(target: target, native: NativeEvents.events(["events": .array(rows)]), outgoing: [sent()])
+    }
+
+    /// The same rows as if no OpenCode prompt named a request.
+    private func unnamed(_ rows: [Event]) -> [Event] {
+        rows.map { row in
+            var copy = row
+            if copy.source == "opencode_native" { copy.requestId = "" }
+            return copy
+        }
+    }
+
+    func testAPromptNamingThisPhonesRequestIsItsSentMessage() {
+        // OpenCode dates a queued prompt by its delivery: here 12 s after this phone submitted it.
+        let rows = NativeEvents.events(["events": [prompt("Waited in the queue", "msg_1", 1_012, request: .string(request))]])
+        XCTAssertEqual(rows.map(\.requestId), [request])
+        XCTAssertEqual(rows.map(\.receiptRequestId), [""], "it stays a native row, not a receipt")
+        let result = ConversationMerge.merge(target: target, native: rows, outgoing: [sent()])
+        XCTAssertEqual(result.events.map(\.id), ["outgoing:\(request)"])
+        XCTAssertEqual(result.events.map(\.outgoingId), [request])
+        XCTAssertEqual(result.events.map(\.delivery), ["recorded"])
+        XCTAssertEqual(result.events.map(\.deliveryState), [nil])
+        XCTAssertEqual(result.events.map(\.at), [1_012])
+        XCTAssertEqual(result.recordedRequestIds, [request])
+    }
+
+    func testAQueuedPromptNamingThisPhonesRequestKeepsItsNativeState() {
+        for state in ["queued", "not_delivered"] {
+            let result = merge(prompt("hello", "msg_0", 990), prompt("Waited in the queue", "msg_1", 1_012, state, request: .string(request)))
+            XCTAssertEqual(result.events.map(\.text), ["hello", "Waited in the queue"], state)
+            XCTAssertEqual(result.events.map(\.id).last, "outgoing:\(request)", state)
+            XCTAssertEqual(result.events.map(\.deliveryState), [nil, state], state)
+            XCTAssertEqual(result.events.map { QueuedDelivery.label($0.deliveryState) }, ["", QueuedDelivery.label(state)], state)
+            XCTAssertEqual(result.recordedRequestIds, [request], state)
+        }
+    }
+
+    func testAPromptNamingAnotherRequestIsNeverThisPhonesMessage() {
+        // Not even with the same text inside the 10 s window that matches a prompt naming no request.
+        for at in [1_001.0, 1_012] {
+            let result = merge(prompt("Waited in the queue", "msg_1", at, request: .string(otherRequest)))
+            XCTAssertEqual(result.events.count, 2, "\(at)")
+            XCTAssertEqual(result.events.map(\.source), ["mobile_outbox", "opencode_native"], "\(at)")
+            XCTAssertEqual(result.events.map(\.outgoingId), [request, ""], "\(at)")
+            XCTAssertEqual(result.events[0].delivery, "submitted", "\(at)")
+            XCTAssertTrue(result.recordedRequestIds.isEmpty, "\(at)")
+        }
+    }
+
+    func testAPromptNamingNoRequestKeepsTheTextAndTimeMatch() {
+        // The known limit: a prompt naming no request that OpenCode dated 12 s after submission stays a separate row.
+        let late = merge(prompt("Waited in the queue", "msg_1", 1_012))
+        XCTAssertEqual(late.events.map(\.source), ["mobile_outbox", "opencode_native"])
+        XCTAssertTrue(late.recordedRequestIds.isEmpty)
+        let early = merge(prompt("Waited in the queue", "msg_1", 1_010))
+        XCTAssertEqual(early.events.map(\.id), ["outgoing:\(request)"])
+        XCTAssertEqual(early.recordedRequestIds, [request])
+    }
+
+    func testOnlyACanonicalLowercaseUuidNamesARequest() {
+        let invalid: [JSON] = [.string(request.uppercased()), .string("{\(request)}"), .string(request.replacingOccurrences(of: "-", with: "")),
+                               .string(" \(request)"), .string(request + "0"), .string("request-queued"), .string(""), .int(7), .bool(true), .null,
+                               .array([.string(request)]), .object(["id": .string(request)])]
+        for value in invalid {
+            XCTAssertEqual(NativeEvents.events(["events": [prompt("Waited in the queue", "msg_1", 1_012, request: value)]]).map(\.requestId), [""], value.compact)
+            // Ignored: the prompt is unmatched 12 s later and still matches by text and time.
+            XCTAssertEqual(merge(prompt("Waited in the queue", "msg_1", 1_012, request: value)).events.count, 2, value.compact)
+            XCTAssertEqual(merge(prompt("Waited in the queue", "msg_1", 1_001, request: value)).events.map(\.id), ["outgoing:\(request)"], value.compact)
+        }
+    }
+
+    func testOtherSourcesAndRowsIgnoreRequestId() {
+        let named: JSONObject = ["type": "UserPromptSubmit", "detail": "Waited in the queue", "agent_id": "", "message_id": "native-1", "at": 1_012,
+                                 "request_id": .string(request)]
+        for source in ["", "codex_transcript", "claude_transcript", "kimi_wire", "dsh_native", "opencode"] {
+            let row = source.isEmpty ? named : named.putting("source", .string(source))
+            XCTAssertEqual(NativeEvents.events(["events": [.object(row)]]).map(\.requestId), [""], source)
+            XCTAssertEqual(merge(.object(row)).events.count, 2, source)
+        }
+        // Receipts keep naming their request by message_id.
+        let receipt = named.putting("source", "hgs_delivery").putting("message_id", .string(otherRequest))
+        XCTAssertEqual(NativeEvents.events(["events": [.object(receipt)]]).map(\.requestId), [otherRequest])
+        XCTAssertEqual(NativeEvents.events(["events": [.object(receipt)]]).map(\.receiptRequestId), [otherRequest])
+        XCTAssertEqual(merge(.object(receipt)).events.count, 2)
+        // Only an OpenCode prompt names its request, never a reply or an answer.
+        for type in ["AgentMessage", "QuestionAnswered"] {
+            let row = named.putting("source", "opencode_native").putting("type", .string(type))
+            XCTAssertEqual(NativeEvents.events(["events": [.object(row)]]).map(\.requestId), [""], type)
+        }
+    }
+
+    func testAPromptNamingItsRequestStaysANativeRowForAttachmentReceipts() {
+        // The OpenCode adapter refuses attachments today. A receipt treats a prompt naming its request like one naming none.
+        let text = "Compare images"
+        let receipt: JSON = ["type": "UserPromptSubmit", "source": "hgs_delivery", "message_id": .string(request), "at": 1_000, "submitted_text": .string(text),
+                             "detail": .string(text), "attachments": [["name": "image.png", "mime": "image/png", "bytes": 120]]]
+        let receipts = NativeEvents.events(["attachment_messages": [receipt]])
+        for (at, count) in [(1_002.0, 1), (1_012, 2)] {
+            let named = prompt(text, "msg_1", at, request: .string(request)), plain = prompt(text, "msg_1", at)
+            let joint = NativeEvents.events(["events": [named], "attachment_messages": [receipt]])
+            XCTAssertEqual(joint.count, count, "\(at)")
+            XCTAssertEqual(unnamed(joint), NativeEvents.events(["events": [plain], "attachment_messages": [receipt]]), "\(at)")
+            let rolling = RollingConversationHistory.merge(target: target, previousTarget: target, previous: NativeEvents.events(["events": [named]]), incoming: receipts)
+            let expected = RollingConversationHistory.merge(target: target, previousTarget: target, previous: NativeEvents.events(["events": [plain]]), incoming: receipts)
+            XCTAssertEqual(rolling.events.count, count, "\(at)")
+            XCTAssertEqual(unnamed(rolling.events), expected.events, "\(at)")
+            XCTAssertEqual(rolling.supersededIds, expected.supersededIds, "\(at)")
+        }
+        // The receipt keeps precedence for this phone's message, whatever the row order.
+        let rows = NativeEvents.events(["events": [prompt(text, "msg_1", 1_012, request: .string(request))], "attachment_messages": [receipt]])
+        for order in [rows, Array(rows.reversed())] {
+            let result = ConversationMerge.merge(target: target, native: order, outgoing: [sent(text)])
+            XCTAssertEqual(result.events.count, 2)
+            XCTAssertEqual(result.events.filter { $0.outgoingId == request }.map(\.source), ["hgs_delivery"])
+        }
     }
 
     // MARK: Form contract
