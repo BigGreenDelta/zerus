@@ -159,23 +159,12 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn cursor(&self, key: &Identity) -> Result<Option<(Identity, u64)>> {
-        let row:Option<(Vec<u8>,u64)>=self.db.query_row(
-            "SELECT fingerprint,offset FROM cursors WHERE source=? AND (SELECT enabled FROM metadata WHERE id=1)=1",
-            [key.0.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        row.map(|(fingerprint, offset)| {
-            Ok((
-                Identity(
-                    fingerprint
-                        .try_into()
-                        .map_err(|_| anyhow::anyhow!("Invalid analytics cursor fingerprint"))?,
-                ),
-                offset,
-            ))
-        })
-        .transpose()
+        cursor(&self.db, key)
     }
 
+    #[cfg(test)]
     pub(crate) fn save_cursor(
         &mut self,
         key: &Identity,
@@ -183,17 +172,30 @@ impl Store {
         offset: u64,
         now: i64,
     ) -> Result<()> {
-        ensure!(
-            offset <= i64::MAX as u64,
-            "Analytics cursor offset exceeds storage bound"
-        );
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let saved = save_cursor(&tx, key, fingerprint, offset, now)?;
+        tx.commit()?;
+        ensure!(saved, "Analytics cursor quota reached");
+        Ok(())
+    }
+
+    /// One bounded native pass owns its accepted events and cursor atomically.
+    /// The writer never waits. Preflight cursor capacity before accepting events.
+    pub(crate) fn native_batch(
+        &mut self,
+        key: &Identity,
+        now: i64,
+    ) -> Result<Option<NativeBatch<'_>>> {
+        self.nonblocking_observer()?;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !tx.query_row("SELECT enabled FROM metadata WHERE id=1", [], |r| {
             r.get::<_, bool>(0)
         })? {
-            return Ok(());
+            return Ok(None);
         }
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM cursors WHERE source=?)",
@@ -208,10 +210,7 @@ impl Store {
             tx.commit()?;
             anyhow::bail!("Analytics cursor quota reached");
         }
-        tx.execute("INSERT INTO cursors VALUES(?,?,?,?) ON CONFLICT(source) DO UPDATE SET fingerprint=excluded.fingerprint,offset=excluded.offset,last_at=excluded.last_at",
-            params![key.0.as_slice(),fingerprint.0.as_slice(),offset,now])?;
-        tx.commit()?;
-        Ok(())
+        Ok(Some(NativeBatch { tx, usable: true }))
     }
 
     /// Called by the background recovery worker, including while collection is OFF.
@@ -304,150 +303,13 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (enabled, boundary): (bool, i64) = tx.query_row(
-            "SELECT enabled,boundary FROM metadata WHERE id=1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if !enabled {
-            return Ok(false);
-        }
-        // Dedup tombstones may expire only after events cease being admissible.
-        if event.observed_ms < now - EVENT_DAYS * DAY
-            || event.observed_ms < boundary
-            || event.observed_ms > now + 300_000
-        {
-            return Ok(false);
-        }
-        prune(&tx, now)?;
-        // Observation clocks can change when native events are replayed by another
-        // process. Only intrinsic source metadata establishes conflicting identity.
-        let fingerprint = Sha256::digest(format!(
-            "{:?}",
-            (
-                &event.scope,
-                event.provider,
-                event.producer,
-                &event.correlation,
-                event.observed_ms,
-                &event.kind
-            )
-        ));
-        let old: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT fingerprint FROM events WHERE id=?",
-                [event.id.0.as_slice()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(old) = old {
-            ensure!(
-                old == fingerprint.as_slice(),
-                "Conflicting analytics event identity"
-            );
-            return Ok(false);
-        }
-        let rows: i64 = tx.query_row("SELECT event_rows FROM metadata WHERE id=1", [], |r| {
-            r.get(0)
-        })?;
-        if rows >= MAX_EVENTS {
-            gap(&tx, Gap::Quota, now)?;
-            tx.commit()?;
-            return Ok(false);
-        }
-        tx.execute(
-            "INSERT INTO events(id,at,fingerprint) VALUES(?,?,?)",
-            params![
-                event.id.0.as_slice(),
-                event.observed_ms,
-                fingerprint.as_slice()
-            ],
-        )?;
-        let day = date(event.observed_ms)?;
-        if !matches!(event.kind, Kind::WaitResolved(_)) {
-            if let Some(counter) = event.kind.counter() {
-                add(&tx, &day, event, counter, 1, None)?;
+        match record(&tx, event, now)? {
+            RecordOutcome::Skip => Ok(false),
+            RecordOutcome::Commit(accepted) => {
+                tx.commit()?;
+                Ok(accepted)
             }
         }
-        match &event.kind {
-            Kind::TurnStarted => {
-                support(&tx, event, "turns")?;
-                start(&tx, event, Interval::Work)?;
-            }
-            Kind::TurnCompleted | Kind::TurnInterrupted => {
-                support(&tx, event, "turns")?;
-                finish(&tx, event, Interval::Work)?;
-            }
-            Kind::WaitStarted(kind) => {
-                // A turn spanning native approval/input is not all working time.
-                // Until native work-resumption proof is available, omit that
-                // work interval instead of counting the wait twice.
-                if tx.execute(
-                    "DELETE FROM intervals WHERE owner=? AND kind='work'",
-                    [event.scope.0.as_slice()],
-                )? > 0
-                {
-                    gap(&tx, Gap::Observation, event.observed_ms)?;
-                }
-                start(&tx, event, *kind)?;
-            }
-            Kind::WaitResolved(kind) => {
-                // Tool completion alone does not prove that permission was requested.
-                // A consumed wait cannot be resolved twice through different hook names.
-                let pending=match &event.correlation {
-                    Some(id)=>tx.query_row("SELECT EXISTS(SELECT 1 FROM intervals WHERE scope=? AND kind=? AND owner=?)",
-                        params![id.0.as_slice(),kind.key(),event.scope.0.as_slice()],|r|r.get::<_,bool>(0))?,
-                    None=>false,
-                };
-                if pending {
-                    if let Some(counter) = event.kind.counter() {
-                        add(&tx, &day, event, counter, 1, None)?;
-                    }
-                }
-                finish(&tx, event, *kind)?;
-            }
-            Kind::DeliverySubmitted | Kind::DeliveryFailed | Kind::DeliveryUncertain => {
-                support(&tx, event, "delivery")?
-            }
-            Kind::RecoveryAttempt | Kind::RecoverySucceeded | Kind::RecoveryExhausted => {
-                support(&tx, event, "recovery")?
-            }
-            Kind::Failure(_) => {
-                support(&tx, event, "failures")?;
-                // A later completion cannot establish continuous work through a
-                // failed/recovering interval. Never invalidate another owner/turn.
-                let removed = if let Some(turn) = &event.correlation {
-                    tx.execute(
-                        "DELETE FROM intervals WHERE owner=? AND kind='work' AND scope=? AND at<=?",
-                        params![
-                            event.scope.0.as_slice(),
-                            turn.0.as_slice(),
-                            event.observed_ms
-                        ],
-                    )?
-                } else {
-                    tx.execute(
-                        "DELETE FROM intervals WHERE owner=? AND kind='work' AND at<=?",
-                        params![event.scope.0.as_slice(), event.observed_ms],
-                    )?
-                };
-                if removed > 0 {
-                    gap(&tx, Gap::Observation, event.observed_ms)?;
-                }
-            }
-            Kind::Usage { epoch, counters } => usage(&tx, event, epoch, counters, true)?,
-            Kind::RequestUsage { counters } => usage(
-                &tx,
-                event,
-                &Identity::new(&["native-request-v1"]),
-                counters,
-                false,
-            )?,
-        }
-        tx.execute("UPDATE metadata SET revision=revision+1,first_at=min(coalesce(first_at,?),?),last_at=max(coalesce(last_at,?),?) WHERE id=1",
-            params![event.observed_ms,event.observed_ms,event.observed_ms,event.observed_ms])?;
-        tx.commit()?;
-        Ok(true)
     }
 
     pub fn summary(&self, machine: &str, from: &str, through: &str, now: i64) -> Result<Value> {
@@ -535,12 +397,274 @@ impl Store {
     }
 }
 
+/// Private to the analytics native ingestion path. Drop rolls back the whole pass.
+pub(crate) struct NativeBatch<'a> {
+    tx: Transaction<'a>,
+    usable: bool,
+}
+impl NativeBatch<'_> {
+    pub(crate) fn cursor(&self, key: &Identity) -> Result<Option<(Identity, u64)>> {
+        cursor(&self.tx, key)
+    }
+    pub(crate) fn record(&mut self, event: &Event, now: i64) -> Result<bool> {
+        ensure!(
+            self.usable,
+            "Analytics batch cannot continue after a storage failure"
+        );
+        // Only a successfully released/rolled-back savepoint allows the pass to
+        // commit. A cleanup failure must not retain a rejected event's counters.
+        self.usable = false;
+        let savepoint = self.tx.savepoint()?;
+        let result = record(&savepoint, event, now);
+        if matches!(&result, Ok(RecordOutcome::Commit(_))) {
+            savepoint.commit()?;
+        } else {
+            savepoint.finish()?;
+        }
+        self.usable = true;
+        result.map(|outcome| match outcome {
+            RecordOutcome::Skip => false,
+            RecordOutcome::Commit(accepted) => accepted,
+        })
+    }
+    pub(crate) fn note_gap(&self, code: Gap, now: i64) -> Result<()> {
+        gap(&self.tx, code, now)
+    }
+    pub(crate) fn save_cursor(
+        &mut self,
+        key: &Identity,
+        fingerprint: &Identity,
+        offset: u64,
+        now: i64,
+    ) -> Result<()> {
+        ensure!(
+            self.usable,
+            "Analytics batch cannot continue after a storage failure"
+        );
+        self.usable = false;
+        ensure!(
+            save_cursor(&self.tx, key, fingerprint, offset, now)?,
+            "Analytics cursor quota reached"
+        );
+        self.usable = true;
+        Ok(())
+    }
+    pub(crate) fn commit(self) -> Result<()> {
+        ensure!(
+            self.usable,
+            "Analytics batch cannot commit after a storage failure"
+        );
+        self.tx.commit()?;
+        Ok(())
+    }
+}
+
+fn cursor(db: &Connection, key: &Identity) -> Result<Option<(Identity, u64)>> {
+    let row:Option<(Vec<u8>,u64)>=db.query_row(
+            "SELECT fingerprint,offset FROM cursors WHERE source=? AND (SELECT enabled FROM metadata WHERE id=1)=1",
+            [key.0.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    row.map(|(fingerprint, offset)| {
+        Ok((
+            Identity(
+                fingerprint
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("Invalid analytics cursor fingerprint"))?,
+            ),
+            offset,
+        ))
+    })
+    .transpose()
+}
+fn save_cursor(
+    tx: &Connection,
+    key: &Identity,
+    fingerprint: &Identity,
+    offset: u64,
+    now: i64,
+) -> Result<bool> {
+    ensure!(
+        offset <= i64::MAX as u64,
+        "Analytics cursor offset exceeds storage bound"
+    );
+    if !tx.query_row("SELECT enabled FROM metadata WHERE id=1", [], |r| {
+        r.get::<_, bool>(0)
+    })? {
+        return Ok(true);
+    }
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cursors WHERE source=?)",
+        [key.0.as_slice()],
+        |r| r.get(0),
+    )?;
+    let count: i64 = tx.query_row("SELECT cursor_rows FROM metadata WHERE id=1", [], |r| {
+        r.get(0)
+    })?;
+    if !exists && count >= MAX_SCOPES {
+        gap(tx, Gap::Quota, now)?;
+        return Ok(false);
+    }
+    tx.execute("INSERT INTO cursors VALUES(?,?,?,?) ON CONFLICT(source) DO UPDATE SET fingerprint=excluded.fingerprint,offset=excluded.offset,last_at=excluded.last_at",
+            params![key.0.as_slice(),fingerprint.0.as_slice(),offset,now])?;
+    Ok(true)
+}
+enum RecordOutcome {
+    Skip,
+    Commit(bool),
+}
+fn record(tx: &Connection, event: &Event, now: i64) -> Result<RecordOutcome> {
+    let (enabled, boundary): (bool, i64) = tx.query_row(
+        "SELECT enabled,boundary FROM metadata WHERE id=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if !enabled {
+        return Ok(RecordOutcome::Skip);
+    }
+    // Dedup tombstones may expire only after events cease being admissible.
+    if event.observed_ms < now - EVENT_DAYS * DAY
+        || event.observed_ms < boundary
+        || event.observed_ms > now + 300_000
+    {
+        return Ok(RecordOutcome::Skip);
+    }
+    prune(tx, now)?;
+    // Observation clocks can change when native events are replayed by another
+    // process. Only intrinsic source metadata establishes conflicting identity.
+    let fingerprint = Sha256::digest(format!(
+        "{:?}",
+        (
+            &event.scope,
+            event.provider,
+            event.producer,
+            &event.correlation,
+            event.observed_ms,
+            &event.kind
+        )
+    ));
+    let old: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT fingerprint FROM events WHERE id=?",
+            [event.id.0.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(old) = old {
+        ensure!(
+            old == fingerprint.as_slice(),
+            "Conflicting analytics event identity"
+        );
+        return Ok(RecordOutcome::Skip);
+    }
+    let rows: i64 = tx.query_row("SELECT event_rows FROM metadata WHERE id=1", [], |r| {
+        r.get(0)
+    })?;
+    if rows >= MAX_EVENTS {
+        gap(tx, Gap::Quota, now)?;
+        return Ok(RecordOutcome::Commit(false));
+    }
+    tx.execute(
+        "INSERT INTO events(id,at,fingerprint) VALUES(?,?,?)",
+        params![
+            event.id.0.as_slice(),
+            event.observed_ms,
+            fingerprint.as_slice()
+        ],
+    )?;
+    let day = date(event.observed_ms)?;
+    if !matches!(event.kind, Kind::WaitResolved(_)) {
+        if let Some(counter) = event.kind.counter() {
+            add(tx, &day, event, counter, 1, None)?;
+        }
+    }
+    match &event.kind {
+        Kind::TurnStarted => {
+            support(tx, event, "turns")?;
+            start(tx, event, Interval::Work)?;
+        }
+        Kind::TurnCompleted | Kind::TurnInterrupted => {
+            support(tx, event, "turns")?;
+            finish(tx, event, Interval::Work)?;
+        }
+        Kind::WaitStarted(kind) => {
+            // A turn spanning native approval/input is not all working time.
+            // Until native work-resumption proof is available, omit that
+            // work interval instead of counting the wait twice.
+            if tx.execute(
+                "DELETE FROM intervals WHERE owner=? AND kind='work'",
+                [event.scope.0.as_slice()],
+            )? > 0
+            {
+                gap(tx, Gap::Observation, event.observed_ms)?;
+            }
+            start(tx, event, *kind)?;
+        }
+        Kind::WaitResolved(kind) => {
+            // Tool completion alone does not prove that permission was requested.
+            // A consumed wait cannot be resolved twice through different hook names.
+            let pending = match &event.correlation {
+                Some(id) => tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM intervals WHERE scope=? AND kind=? AND owner=?)",
+                    params![id.0.as_slice(), kind.key(), event.scope.0.as_slice()],
+                    |r| r.get::<_, bool>(0),
+                )?,
+                None => false,
+            };
+            if pending {
+                if let Some(counter) = event.kind.counter() {
+                    add(tx, &day, event, counter, 1, None)?;
+                }
+            }
+            finish(tx, event, *kind)?;
+        }
+        Kind::DeliverySubmitted | Kind::DeliveryFailed | Kind::DeliveryUncertain => {
+            support(tx, event, "delivery")?
+        }
+        Kind::RecoveryAttempt | Kind::RecoverySucceeded | Kind::RecoveryExhausted => {
+            support(tx, event, "recovery")?
+        }
+        Kind::Failure(_) => {
+            support(tx, event, "failures")?;
+            // A later completion cannot establish continuous work through a
+            // failed/recovering interval. Never invalidate another owner/turn.
+            let removed = if let Some(turn) = &event.correlation {
+                tx.execute(
+                    "DELETE FROM intervals WHERE owner=? AND kind='work' AND scope=? AND at<=?",
+                    params![
+                        event.scope.0.as_slice(),
+                        turn.0.as_slice(),
+                        event.observed_ms
+                    ],
+                )?
+            } else {
+                tx.execute(
+                    "DELETE FROM intervals WHERE owner=? AND kind='work' AND at<=?",
+                    params![event.scope.0.as_slice(), event.observed_ms],
+                )?
+            };
+            if removed > 0 {
+                gap(tx, Gap::Observation, event.observed_ms)?;
+            }
+        }
+        Kind::Usage { epoch, counters } => usage(tx, event, epoch, counters, true)?,
+        Kind::RequestUsage { counters } => usage(
+            tx,
+            event,
+            &Identity::new(&["native-request-v1"]),
+            counters,
+            false,
+        )?,
+    }
+    tx.execute("UPDATE metadata SET revision=revision+1,first_at=min(coalesce(first_at,?),?),last_at=max(coalesce(last_at,?),?) WHERE id=1",
+            params![event.observed_ms,event.observed_ms,event.observed_ms,event.observed_ms])?;
+    Ok(RecordOutcome::Commit(true))
+}
+
 pub fn empty(machine: &str, from: &str, through: &str, now: i64) -> Value {
     json!({"schema":1,"machine_id":machine,"source":"agent","source_epoch":NIL_EPOCH,"revision":0,"generated_at":now as f64/1000.0,
         "range":{"from":from,"through":through},"collection":{"enabled":false,"retention_days":90,"event_retention_days":EVENT_DAYS},
         "coverage":{"start":null,"end":null,"gaps":["collection_disabled"],"unsupported":MEASURES,"partial":true},"buckets":[]})
 }
-fn gap(tx: &Transaction<'_>, code: Gap, at: i64) -> Result<()> {
+fn gap(tx: &Connection, code: Gap, at: i64) -> Result<()> {
     if tx.execute(
         "INSERT OR IGNORE INTO gaps(code,at) VALUES(?,?)",
         params![code.name(), at],
@@ -550,14 +674,14 @@ fn gap(tx: &Transaction<'_>, code: Gap, at: i64) -> Result<()> {
     }
     Ok(())
 }
-fn support(tx: &Transaction<'_>, event: &Event, measure: &str) -> Result<()> {
+fn support(tx: &Connection, event: &Event, measure: &str) -> Result<()> {
     tx.execute(
         "INSERT OR IGNORE INTO supported VALUES(?,?)",
         params![event.provider.name(), measure],
     )?;
     Ok(())
 }
-fn prune(tx: &Transaction<'_>, now: i64) -> Result<()> {
+fn prune(tx: &Connection, now: i64) -> Result<()> {
     // Indexed, capped work per callback even after a long offline interval.
     let removed = tx.execute(
         "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE at<? ORDER BY at LIMIT 1000)",
@@ -585,7 +709,7 @@ fn prune(tx: &Transaction<'_>, now: i64) -> Result<()> {
     Ok(())
 }
 fn add(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     day: &str,
     event: &Event,
     key: &str,
@@ -632,7 +756,7 @@ fn add(
         params![day,event.provider.name(),event.producer.name(),value.to_string()])?;
     Ok(())
 }
-fn start(tx: &Transaction<'_>, event: &Event, kind: Interval) -> Result<()> {
+fn start(tx: &Connection, event: &Event, kind: Interval) -> Result<()> {
     let Some(correlation) = &event.correlation else {
         return gap(tx, Gap::Identity, event.observed_ms);
     };
@@ -658,7 +782,7 @@ fn start(tx: &Transaction<'_>, event: &Event, kind: Interval) -> Result<()> {
         params![correlation.0.as_slice(),kind.key(),clock.generation.0.as_slice(),clock.monotonic_ms,event.observed_ms,event.scope.0.as_slice()])?;
     Ok(())
 }
-fn finish(tx: &Transaction<'_>, event: &Event, kind: Interval) -> Result<()> {
+fn finish(tx: &Connection, event: &Event, kind: Interval) -> Result<()> {
     let Some(correlation) = &event.correlation else {
         return gap(tx, Gap::Identity, event.observed_ms);
     };
@@ -729,7 +853,7 @@ fn finish(tx: &Transaction<'_>, event: &Event, kind: Interval) -> Result<()> {
     Ok(())
 }
 fn usage(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     event: &Event,
     epoch: &Identity,
     counters: &Tokens,

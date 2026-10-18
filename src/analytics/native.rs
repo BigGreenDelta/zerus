@@ -1,6 +1,6 @@
 //! Incremental metadata extraction at native hook time, never on dashboard reads.
 //! Reads at most 68 KiB + one boundary byte / 64 records per invocation, with a
-//! 50 ms processing deadline and nonblocking database writes. OS file operations
+//! 50 ms processing deadline and nonblocking database writes. OS I/O operations
 //! can exceed that deadline. Native text is not
 //! an identity, classification signal, stored field or exported diagnostic.
 use super::{adapters, model::*, store::Store};
@@ -206,7 +206,17 @@ fn rows(record: &Value, row: &Value, hook: &str) -> Vec<Event> {
 }
 
 fn read(db: &mut Store, record: &Value, hook: &Value) -> Result<()> {
+    // Setup and metadata reads consume the same budget as event processing.
     let deadline = Instant::now() + Duration::from_millis(50);
+    read_with_budget(db, record, hook, || Instant::now() >= deadline)
+}
+
+fn read_with_budget(
+    db: &mut Store,
+    record: &Value,
+    hook: &Value,
+    mut exhausted: impl FnMut() -> bool,
+) -> Result<()> {
     db.nonblocking_observer()?;
     if !db.enabled()? {
         return Ok(());
@@ -249,6 +259,9 @@ fn read(db: &mut Store, record: &Value, hook: &Value) -> Result<()> {
     let fingerprint = Identity::new(&[&identity.device.to_string(), &identity.inode.to_string()]);
     let key = Identity::new(&[provider, conversation]);
     let now = Utc::now().timestamp_millis();
+    let Some(mut db) = db.native_batch(&key, now)? else {
+        return Ok(());
+    };
     let mut offset = match db.cursor(&key)? {
         Some((old, offset)) if old.0 == fingerprint.0 && offset <= meta.len() => offset,
         _ => {
@@ -257,7 +270,7 @@ fn read(db: &mut Store, record: &Value, hook: &Value) -> Result<()> {
         }
     };
     if offset == meta.len() {
-        return Ok(());
+        return db.commit();
     }
     // If a previous bounded pass stopped inside an oversized line, skip its
     // remainder. No unbounded allocation or repeated scan from its start.
@@ -271,8 +284,8 @@ fn read(db: &mut Store, record: &Value, hook: &Value) -> Result<()> {
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = Vec::new();
     (&mut file).take(BYTES).read_to_end(&mut bytes)?;
-    for (count, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
-        if count >= RECORDS || Instant::now() >= deadline {
+    'lines: for (count, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        if count >= RECORDS || exhausted() {
             db.note_gap(Gap::Observation, now)?;
             break;
         }
@@ -283,32 +296,36 @@ fn read(db: &mut Store, record: &Value, hook: &Value) -> Result<()> {
             }
             break;
         }
-        offset += line.len() as u64;
         if !boundary {
+            offset += line.len() as u64;
             boundary = true;
             db.note_gap(Gap::Observation, now)?;
             continue;
         }
         let Ok(row) = serde_json::from_slice::<Value>(line) else {
+            offset += line.len() as u64;
             db.note_gap(Gap::Observation, now)?;
             continue;
         };
         for mut e in rows(record, &row, text(hook, "hook_event_name").unwrap_or("")) {
             e.clock = live_clock(record, hook, &e, now);
-            if Instant::now() >= deadline {
+            if exhausted() {
                 db.note_gap(Gap::Observation, now)?;
-                break;
+                // Replay this line, including any already accepted event IDs.
+                break 'lines;
             }
             // A contradictory native metadata row must not pin all future reads.
             // Failed records are explicit coverage gaps; durable native state is
-            // untouched. A cursor commit failure is safe to replay via event IDs.
+            // untouched. Accepted events and the cursor commit together; a line
+            // interrupted by the budget replays safely via exact event IDs.
             if db.record(&e, now).is_err() {
                 db.note_gap(Gap::Observation, now)?;
             }
         }
+        offset += line.len() as u64;
     }
     db.save_cursor(&key, &fingerprint, offset, now)?;
-    Ok(())
+    db.commit()
 }
 
 pub(crate) fn collect(root: &Path, record: &Value, hook: &Value) {
@@ -528,6 +545,123 @@ mod tests {
         assert!(read(&mut db, &record, &json!({"hook_event_name":"Stop"})).is_ok());
         assert!(db.cursor(&Identity::new(&["codex", ID])).unwrap().is_none());
     }
+    #[test]
+    fn deadline_before_event_keeps_line_for_the_next_pass() {
+        let (_dir, mut db, record, at) = fixture();
+        drain(&mut db, &record);
+        let key = Identity::new(&["codex", ID]);
+        let before = db.cursor(&key).unwrap().unwrap().1;
+        let row = json!({"type":"event_msg","timestamp":DateTime::from_timestamp_millis(at).unwrap().to_rfc3339(),
+            "payload":{"type":"task_complete","turn_id":"budget-turn"}});
+        append(&record, &row);
+        let mut checks = 0;
+        read_with_budget(&mut db, &record, &json!({"hook_event_name":"Stop"}), || {
+            checks += 1;
+            checks >= 2
+        })
+        .unwrap();
+        assert_eq!(total(&db, "turn_completed"), 0);
+        assert_eq!(
+            db.cursor(&key).unwrap().unwrap().1,
+            before,
+            "deadline must not consume an unattempted event"
+        );
+        drain(&mut db, &record);
+        assert_eq!(total(&db, "turn_completed"), 1);
+    }
+
+    #[test]
+    fn deadline_between_events_replays_the_unfinished_line_exactly_once() {
+        let (_dir, mut db, mut record, at) = fixture();
+        record["agent"] = json!("claude");
+        let key = Identity::new(&["claude", ID]);
+        read(&mut db, &record, &json!({"hook_event_name":"Stop"})).unwrap();
+        let before = db.cursor(&key).unwrap().unwrap().1;
+        let row = json!({"type":"assistant","timestamp":DateTime::from_timestamp_millis(at).unwrap().to_rfc3339(),
+            "sessionId":ID,"uuid":"row-budget","message":{"id":"request-budget",
+            "usage":{"input_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":7},
+            "stop_reason":"end_turn"}});
+        append(&record, &row);
+        let mut checks = 0;
+        read_with_budget(&mut db, &record, &json!({"hook_event_name":"Stop"}), || {
+            checks += 1;
+            checks >= 3
+        })
+        .unwrap();
+        assert_eq!(total(&db, "input_tokens"), 3);
+        assert_eq!(total(&db, "turn_completed"), 0);
+        assert_eq!(
+            db.cursor(&key).unwrap().unwrap().1,
+            before,
+            "deadline must leave the partially attempted line replayable"
+        );
+        read_with_budget(&mut db, &record, &json!({"hook_event_name":"Stop"}), || {
+            false
+        })
+        .unwrap();
+        read_with_budget(&mut db, &record, &json!({"hook_event_name":"Stop"}), || {
+            false
+        })
+        .unwrap();
+        assert_eq!(total(&db, "input_tokens"), 3);
+        assert_eq!(total(&db, "turn_completed"), 1);
+    }
+
+    #[test]
+    fn expired_budget_and_record_limit_keep_exact_cursor_boundaries() {
+        let (_dir, mut db, record, at) = fixture();
+        drain(&mut db, &record);
+        let key = Identity::new(&["codex", ID]);
+        let before = db.cursor(&key).unwrap().unwrap().1;
+        for i in 0..100 {
+            append(&record, &usage(at + i, 10 + i as u64));
+        }
+        let hook = json!({"hook_event_name":"Stop"});
+        read_with_budget(&mut db, &record, &hook, || true).unwrap();
+        assert_eq!(db.cursor(&key).unwrap().unwrap().1, before);
+        assert_eq!(total(&db, "input_tokens"), 0);
+        read_with_budget(&mut db, &record, &hook, || false).unwrap();
+        let expected = before
+            + (0..64)
+                .map(|i| usage(at + i, 10 + i as u64).to_string().len() as u64 + 1)
+                .sum::<u64>();
+        assert_eq!(db.cursor(&key).unwrap().unwrap().1, expected);
+        assert_eq!(total(&db, "input_tokens"), 63);
+        drain(&mut db, &record);
+        assert_eq!(total(&db, "input_tokens"), 99);
+    }
+
+    #[test]
+    fn cursor_write_failure_rolls_back_accepted_events_and_allows_replay() {
+        let (dir, mut db, record, at) = fixture();
+        drain(&mut db, &record);
+        let key = Identity::new(&["codex", ID]);
+        let before = db.cursor(&key).unwrap().unwrap().1;
+        let raw =
+            rusqlite::Connection::open(dir.path().join("analytics/analytics.sqlite3")).unwrap();
+        raw.execute_batch("CREATE TRIGGER reject_cursor BEFORE UPDATE ON cursors BEGIN SELECT RAISE(ABORT,'synthetic cursor failure'); END;").unwrap();
+        append(
+            &record,
+            &json!({"type":"event_msg","timestamp":DateTime::from_timestamp_millis(at).unwrap().to_rfc3339(),
+            "payload":{"type":"task_complete","turn_id":"cursor-failure-turn"}}),
+        );
+        assert!(
+            read_with_budget(&mut db, &record, &json!({"hook_event_name":"Stop"}), || {
+                false
+            })
+            .is_err()
+        );
+        assert_eq!(db.cursor(&key).unwrap().unwrap().1, before);
+        assert_eq!(
+            total(&db, "turn_completed"),
+            0,
+            "event and cursor must commit atomically"
+        );
+        raw.execute_batch("DROP TRIGGER reject_cursor;").unwrap();
+        drain(&mut db, &record);
+        assert_eq!(total(&db, "turn_completed"), 1);
+    }
+
     #[test]
     fn stream_identity_and_byte_record_bounds_are_enforced_without_storing_text() {
         use std::io::Write;

@@ -930,3 +930,97 @@ fn wait_counts_and_durations_require_matching_clock_evidence() {
         assert_eq!(value["unresolved_waits"]["observed"], u64::from(case == 4));
     }
 }
+
+#[test]
+fn native_batch_commits_events_and_cursor_together_or_rolls_back() {
+    for case in 0..3 {
+        let (dir, mut db) = enabled();
+        let reader = Store::open(dir.path(), false, false).unwrap().unwrap();
+        let source = Identity::new(&["source"]);
+        let fingerprint = Identity::new(&["file"]);
+        let mut batch = db.native_batch(&source, AT).unwrap().unwrap();
+        assert!(batch
+            .record(&event("batch-event", Kind::TurnCompleted, AT), AT)
+            .unwrap());
+        assert_eq!(total(&summary(&reader), "turn_completed"), 0);
+        assert!(reader.cursor(&source).unwrap().is_none());
+        match case {
+            0 => {
+                batch.save_cursor(&source, &fingerprint, 123, AT).unwrap();
+                batch.commit().unwrap();
+            }
+            1 => {
+                drop(batch);
+            }
+            2 => {
+                assert!(batch
+                    .save_cursor(&source, &fingerprint, u64::MAX, AT)
+                    .is_err());
+                assert!(batch.commit().is_err());
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            total(&summary(&reader), "turn_completed"),
+            u64::from(case == 0)
+        );
+        assert_eq!(
+            reader.cursor(&source).unwrap().map(|(_, offset)| offset),
+            if case == 0 { Some(123) } else { None }
+        );
+    }
+}
+
+#[test]
+fn native_batch_rejected_event_rolls_back_its_partial_counters_and_continues() {
+    let (_dir, mut db) = enabled();
+    let source = Identity::new(&["source"]);
+    let mut batch = db.native_batch(&source, AT).unwrap().unwrap();
+    let first = event("first", Kind::TurnCompleted, AT);
+    assert!(batch.record(&first, AT).unwrap());
+    let mut conflict = first.clone();
+    conflict.observed_ms += 1;
+    assert!(batch.record(&conflict, AT + 1).is_err());
+    let mut invalid = event("invalid-clock", Kind::TurnStarted, AT);
+    invalid.clock.as_mut().unwrap().monotonic_ms = MAX_VALUE + 1;
+    assert!(batch.record(&invalid, AT).is_err());
+    batch.note_gap(Gap::Observation, AT).unwrap();
+    assert!(batch
+        .record(&event("last", Kind::TurnCompleted, AT), AT)
+        .unwrap());
+    batch
+        .save_cursor(&source, &Identity::new(&["file"]), 99, AT)
+        .unwrap();
+    batch.commit().unwrap();
+    let value = summary(&db);
+    assert_eq!(total(&value, "turn_completed"), 2);
+    assert_eq!(total(&value, "turn_started"), 0);
+    assert_eq!(db.cursor(&source).unwrap().unwrap().1, 99);
+    // Failed event identity was rolled back along with its counters.
+    invalid.clock.as_mut().unwrap().monotonic_ms = 100;
+    assert!(db.record(&invalid, AT).unwrap());
+    assert_eq!(total(&summary(&db), "turn_started"), 1);
+}
+
+#[test]
+fn native_batch_busy_and_cursor_quota_fail_before_accepting_events() {
+    let (dir, mut db) = enabled();
+    let mut raw = rusqlite::Connection::open(dir.path().join("analytics.sqlite3")).unwrap();
+    let source = Identity::new(&["source"]);
+    let lock = raw
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(db.native_batch(&source, AT).is_err());
+    lock.rollback().unwrap();
+    raw.execute("UPDATE metadata SET cursor_rows=10000 WHERE id=1", [])
+        .unwrap();
+    assert!(db.native_batch(&source, AT).is_err());
+    assert!(db.cursor(&source).unwrap().is_none());
+    assert!(summary(&db)["coverage"]["gaps"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("quota_exhausted")));
+    raw.execute("UPDATE metadata SET cursor_rows=0 WHERE id=1", [])
+        .unwrap();
+    assert!(db.native_batch(&source, AT).unwrap().is_some());
+}
