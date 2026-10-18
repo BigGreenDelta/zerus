@@ -670,6 +670,7 @@ fn observe(
     record: &Value,
     active: &Value,
     history: impl FnOnce() -> Result<history::Page>,
+    requests: bool,
 ) -> Result<Observed> {
     let session = exact_session(record, get(native, &session_path(record, ""))?)?;
     let forms = pending_requests(native, record, "/form")?;
@@ -681,7 +682,12 @@ fn observe(
         return Err("Invalid OpenCode inbox".into());
     }
     let page = history()?;
-    let requests = sent_requests(&Ledger::current(), record, &page.messages, &inbox);
+    // Only a full inspection shows events; listings and actions drop them.
+    let requests = if requests {
+        sent_requests(&Ledger::current(), record, &page.messages, &inbox)
+    } else {
+        Default::default()
+    };
     Ok(Observed {
         session,
         active: active.get(string(record, "conversation_id")).is_some(),
@@ -734,7 +740,13 @@ fn parent_view(
     active: &Value,
     detail: Detail,
 ) -> Result<Value> {
-    let observed = observe(service, record, active, || history::fetch(service, record))?;
+    let observed = observe(
+        service,
+        record,
+        active,
+        || history::fetch(service, record),
+        detail == Detail::Full,
+    )?;
     let mut result = normalize(record, Some(&observed));
     if detail != Detail::Listing {
         result["attachment_messages"] = attachments::messages(record, "");
@@ -761,7 +773,8 @@ fn parent_view(
 /// `/api/session/active` and one migration check per instance.
 struct Inspector {
     service: std::result::Result<service::Service, service::Unavailable>,
-    computer: String,
+    /// Named only when a reason needs it.
+    computer: Option<String>,
     active: Option<Result<Value>>,
     migration: Option<Reply>,
     verdicts: Option<Vec<String>>,
@@ -772,7 +785,7 @@ impl Inspector {
     fn connect() -> Self {
         Inspector {
             service: service::connect(),
-            computer: service::computer(),
+            computer: None,
             active: None,
             migration: None,
             verdicts: None,
@@ -788,7 +801,10 @@ impl Inspector {
     }
     fn view(&mut self, record: &Value, detail: Detail) -> Value {
         let service = match &self.service {
-            Err(why) => return unavailable(record, why.reason(&self.computer)),
+            Err(why) => {
+                let computer = self.computer.get_or_insert_with(service::computer);
+                return unavailable(record, why.reason(computer));
+            }
             Ok(service) => service,
         };
         let key = verdict_key(record, &service.reg);
@@ -1058,7 +1074,15 @@ impl Ledger {
     }
     /// The request ID and session that sent a native message, if indexed.
     fn indexed(&self, message_id: &str) -> Option<Value> {
-        let bytes = fs::read(self.index(message_id)).ok()?;
+        let mut bytes = Vec::new();
+        fs::File::open(self.index(message_id))
+            .ok()?
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > 4096 {
+            return None;
+        }
         let value: Value = serde_json::from_slice(&bytes).ok()?;
         uuid::Uuid::parse_str(string(&value, "request_id")).ok()?;
         Some(value)
@@ -2975,11 +2999,14 @@ mod tests {
         let b = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02";
         index("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "ses_A");
         index("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "ses_A");
-        // Another session's message and an index that names no request.
-        index("msg_14bb2d63e001NhfRTKy4frROM8", a, "ses_B");
-        index("msg_14bb2d652001wyzMESFNncEtnf", "not-a-uuid", "ses_A");
+        // User messages whose index names another session or no request.
+        index("msg_otherSession00000000000000", a, "ses_B");
+        index("msg_notARequest000000000000000", "not-a-uuid", "ses_A");
         let observed = observed("messages", true, opencode2("inbox_busy"));
-        let found = sent_requests(&ledger, &status_record("ses_A"), &observed.page.messages, &observed.inbox);
+        let mut messages = observed.page.messages.clone();
+        messages.push(json!({"id": "msg_otherSession00000000000000", "type": "user"}));
+        messages.push(json!({"id": "msg_notARequest000000000000000", "type": "user"}));
+        let found = sent_requests(&ledger, &status_record("ses_A"), &messages, &observed.inbox);
         let expected: std::collections::HashMap<String, String> = [
             ("msg_6kezDqwZEklnh8eFGVy3UbP6iX".to_owned(), a.to_owned()),
             ("msg_gVmstesSuU81H2vTHdmxp65tNI".to_owned(), b.to_owned()),
@@ -3274,9 +3301,13 @@ mod tests {
         ]));
         let active = opencode2("active_busy")["data"].clone();
         let cache = dir.path().join("history.json");
-        let seen = observe(&native, &record, &active, || {
-            history::fetch_at(&native, &record, &cache)
-        })
+        let seen = observe(
+            &native,
+            &record,
+            &active,
+            || history::fetch_at(&native, &record, &cache),
+            false,
+        )
         .unwrap();
         assert!(native.0.borrow().is_empty());
         assert!(seen.active);
@@ -3306,9 +3337,13 @@ mod tests {
                 opencode2("messages"),
             ),
         ]));
-        let seen = observe(&native, &record, &json!({}), || {
-            history::fetch_at(&native, &record, &cache)
-        })
+        let seen = observe(
+            &native,
+            &record,
+            &json!({}),
+            || history::fetch_at(&native, &record, &cache),
+            false,
+        )
         .unwrap();
         assert!(native.0.borrow().is_empty());
         assert!(!seen.active);
@@ -3323,7 +3358,7 @@ mod tests {
             json!({"data":{"id":"ses_A","location":{"directory":"/elsewhere"}}}),
         )]));
         let none = || -> Result<history::Page> { panic!("no history read") };
-        assert!(observe(&moved, &record, &json!({}), none).is_err());
+        assert!(observe(&moved, &record, &json!({}), none, false).is_err());
         let invalid = Scripted(std::cell::RefCell::new(vec![
             (
                 "GET /api/session/ses_A".into(),
@@ -3336,7 +3371,7 @@ mod tests {
                 json!({"data": {}}),
             ),
         ]));
-        assert!(observe(&invalid, &record, &json!({}), none).is_err());
+        assert!(observe(&invalid, &record, &json!({}), none, false).is_err());
         let refused = Scripted(std::cell::RefCell::new(vec![(
             "GET /api/session/active".into(),
             500,

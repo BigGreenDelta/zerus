@@ -968,10 +968,12 @@ fresh control state. Inspect returns native `hgs inspect` JSON; bounded public
 history may be omitted as whole rows with explicit truncation metadata, while
 question disclosures and other control metadata remain intact.
 OpenCode events keep `delivery_state` (`queued` or `not_delivered`, with
-`message_id`) and `streaming`. A prompt Zerus sent carries the `request_id` of
-its send, while queued and after delivery: OpenCode dates a queued message by
-its delivery, so clients match their own message by this identity rather than
-by text and time. Its question cards keep `input_kind`,
+`message_id`) and `streaming`. A recent prompt Zerus sent (among the newest
+100 user messages, queued ones first) carries the `request_id` of its send,
+while queued and after delivery: OpenCode dates a queued message by its
+delivery, so clients match their own message by this identity before falling
+back to text and time. Older prompts and rows from earlier versions have none.
+Its question cards keep `input_kind`,
 `min_length`, `max_length`, `min_items`, `max_items`, `default_option_ids`,
 `default_text` (prefilled for OpenCode text items unless a saved draft exists),
 `can_answer`, `answerable` and `unavailable_reason` unchanged.

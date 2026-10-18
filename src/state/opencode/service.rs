@@ -684,7 +684,8 @@ fn may_start(
     match connected {
         Ok(service) => return Ok(Some(service)),
         Err(Unavailable::NotRunning | Unavailable::Disabled) => {}
-        Err(other) => return Err(other.reason(&computer())),
+        // Only not running and disabled name the computer.
+        Err(other) => return Err(other.reason("")),
     }
     let read = read();
     let alive = matches!(&read, RegistrationRead::Present(r) if alive(r.pid));

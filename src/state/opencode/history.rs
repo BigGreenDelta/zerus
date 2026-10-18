@@ -76,6 +76,12 @@ fn save_at(path: &Path, record: &Value, page: &Page) {
         }
     }
 }
+/// Best effort: an unchanged cache in use counts as recent for pruning.
+fn touch(path: &Path) {
+    if let Ok(file) = std::fs::File::options().append(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
 /// Forgetting a session drops its cache; a later binding reads it again.
 pub(super) fn forget(record: &Value) {
     let _ = std::fs::remove_file(cache_path(record));
@@ -95,7 +101,7 @@ fn cache_name(name: &str) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
 }
-/// Best effort: removes the least recently saved caches beyond the bounds,
+/// Best effort: removes the least recently used caches beyond the bounds,
 /// never `keep`, and temporary files of interrupted saves.
 fn prune(dir: &Path, keep: &Path, files: usize, bytes: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -114,7 +120,10 @@ fn prune(dir: &Path, keep: &Path, files: usize, bytes: u64) {
             continue;
         }
         if name.starts_with(".hgs-") {
-            if now.duration_since(modified).is_ok_and(|age| age > STALE_TEMP) {
+            if now
+                .duration_since(modified)
+                .is_ok_and(|age| age > STALE_TEMP)
+            {
                 let _ = std::fs::remove_file(entry.path());
             }
         } else if cache_name(&name) && entry.path() != keep {
@@ -141,7 +150,17 @@ fn valid(message: &Value) -> bool {
 
 /// Reads the newest window of `/message` with the cache, within 20 seconds.
 pub(super) fn fetch(native: &dyn Native, record: &Value) -> Result<Page> {
-    fetch_at(native, record, &cache_path(record))
+    let cache = cache_path(record);
+    let page = fetch_at(native, record, &cache);
+    // A Forget that ran meanwhile removed the binding first: drop the cache
+    // this read may have saved after Forget removed it.
+    drop_unbound(&cache, &super::binding_path(string(record, "name")));
+    page
+}
+fn drop_unbound(cache: &Path, binding: &Path) {
+    if !binding.is_file() {
+        let _ = std::fs::remove_file(cache);
+    }
 }
 pub(super) fn fetch_at(native: &dyn Native, record: &Value, cache: &Path) -> Result<Page> {
     let cached = load_at(cache, record);
@@ -149,6 +168,8 @@ pub(super) fn fetch_at(native: &dyn Native, record: &Value, cache: &Path) -> Res
     let (page, changed) = scan(native, record, cached.as_ref(), Bounds::default(), deadline)?;
     if changed {
         save_at(cache, record, &page);
+    } else if cached.is_some() {
+        touch(cache);
     }
     Ok(page)
 }
@@ -855,7 +876,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let keep = dir.path().join(format!("{}.json", "a".repeat(64)));
         std::fs::write(&keep, b"x").unwrap();
-        for name in [".hgs-old", ".hgs-fresh", "notes.json", &format!("{}.json", "A".repeat(64))] {
+        // Upper case is not a cache name; "C" aliases no other file on
+        // case-insensitive file systems.
+        for name in [
+            ".hgs-old",
+            ".hgs-fresh",
+            "notes.json",
+            &format!("{}.json", "C".repeat(64)),
+        ] {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
         std::fs::create_dir(dir.path().join(format!("{}.json", "b".repeat(64)))).unwrap();
@@ -863,7 +891,7 @@ mod tests {
         prune(dir.path(), &keep, 1, 1);
         let mut expected = vec![
             ".hgs-fresh".to_owned(),
-            format!("{}.json", "A".repeat(64)),
+            format!("{}.json", "C".repeat(64)),
             format!("{}.json", "a".repeat(64)),
             format!("{}.json", "b".repeat(64)),
             "notes.json".to_owned(),
@@ -889,7 +917,43 @@ mod tests {
         assert_eq!(names(dir.path()).len(), CACHE_FILES);
         assert!(path.exists());
         // The oldest older cache went first.
-        assert!(!dir.path().join(format!("{:064x}.json", CACHE_FILES - 1)).exists());
+        assert!(!dir
+            .path()
+            .join(format!("{:064x}.json", CACHE_FILES - 1))
+            .exists());
+    }
+
+    #[test]
+    fn a_cache_without_its_binding_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cache, binding) = (
+            dir.path().join("cache.json"),
+            dir.path().join("binding.json"),
+        );
+        std::fs::write(&cache, b"{}").unwrap();
+        std::fs::write(&binding, b"{}").unwrap();
+        drop_unbound(&cache, &binding);
+        assert!(cache.exists());
+        std::fs::remove_file(&binding).unwrap();
+        drop_unbound(&cache, &binding);
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn using_a_cache_makes_it_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        std::fs::write(&path, b"{}").unwrap();
+        aged(&path, 1000);
+        touch(&path);
+        let age = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        assert!(age < Duration::from_secs(100), "{age:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
     }
 
     #[test]

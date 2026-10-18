@@ -35,8 +35,9 @@ it. Without a registered live service, Zerus shows "OpenCode is not running on
 <computer>" and offers Start OpenCode; a registered service that does not answer
 shows "OpenCode is not responding" and is never restarted. When OpenCode's
 background service is disabled, Zerus shows "The OpenCode background service is
-disabled on <computer>" and starts nothing. `<computer>` is the computer's first
-`HGS_SELF` name (by default its host name), the name the desktop uses for it.
+disabled on <computer>" and starts nothing. `<computer>` is the name `hgs ls` reports as
+its host: the first `HGS_SELF` name (by default the host name), which `hgs
+machine` setup sets to the desktop's name for that computer.
 You can also start it yourself with `opencode service start`.
 
 Connect providers in a terminal on that computer with `opencode auth login`.
@@ -127,7 +128,8 @@ The project directory remains on the agent computer.
   pending request of that session.
 - **Model and effort** can be changed; **rename** changes the session title.
 - **Forget** removes the Zerus binding and its local history cache; native
-  history is kept. The cache keeps at most 64 recent conversations and 256 MiB.
+  history is kept. The cache keeps at most 64 recently used conversations and
+  256 MiB.
 - **Voice** transcripts use the same guarded send path; a refused voice message
   shows as failed, and the original audio stays in Zerus history.
 
