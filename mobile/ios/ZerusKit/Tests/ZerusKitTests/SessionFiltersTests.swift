@@ -16,14 +16,14 @@ final class SessionFiltersTests: XCTestCase {
     private let machines = [Machine(connectionId: "a", id: "same", name: "Computer A", online: true),
                             Machine(connectionId: "b", id: "same", name: "Computer B", online: false)]
 
-    private func session(_ raw: String = "{}", connection: String = "a", pending: Int = 0, archive: String = "",
+    private func session(_ raw: String = "{}", connection: String = "a", pending: Int? = nil, archive: String = "",
                          name: String = "codex/project/task") -> Session {
         let data = object(raw)
         return Session(target: Target(computerId: "same", session: name, run: data.string("run_id").isEmpty ? "run" : data.string("run_id"),
                                       conversation: data.string("conversation_id").isEmpty ? "conversation" : data.string("conversation_id"),
                                       connectionId: connection, archiveId: archive),
                        title: "Long title", agent: "codex", status: "MISLEADING UI STATUS", project: "Project", preview: "Preview",
-                       pendingCount: pending, raw: data)
+                       pendingCount: pending ?? QuestionPolicies.blockingRequests(data), raw: data)
     }
 
     private func with(_ session: Session, _ changes: [String: JSON]) -> Session {
@@ -194,7 +194,7 @@ final class SessionFiltersTests: XCTestCase {
     func testActiveCountsUnionOnceAndPreservesExplicitAttentionOffline() {
         let working = session(#"{"activity":"busy","phase":"tool"}"#, name: "codex/project/working")
         let attention = session(#"{"activity":"idle","phase":"input"}"#, name: "codex/project/input")
-        let overlap = session(#"{"activity":"busy"}"#, pending: 1, name: "codex/project/optional-question")
+        let overlap = session(#"{"activity":"busy"}"#, pending: 1, name: "codex/project/pending-request")
         let child = session(#"{"activity":"idle","subagents":{"child":{"display_state":"input"}}}"#, name: "codex/project/child")
         let reminder = session(#"{"state":"paused","review_later":true}"#, connection: "b", name: "codex/project/reminder")
         let archived = session(#"{"activity":"busy","phase":"input","review_later":true}"#, archive: "archive-one")
@@ -224,6 +224,48 @@ final class SessionFiltersTests: XCTestCase {
         XCTAssertFalse(SessionFilters.needsAttention(session(#"{"activity":"busy","subagent_source":"hook_profiles","subagents":{"child":{"display_state":"input"}}}"#), true))
         XCTAssertTrue(SessionFilters.needsAttention(session(#"{"review_later":true}"#), false))
         XCTAssertFalse(SessionFilters.needsAttention(session(#"{"unread_reply":true,"phase":"approval"}"#), false))
+    }
+
+    func testOptionalOnlySessionsAreNotAttentionButRequiredAndExplicitChildRequestsAre() {
+        let optional: JSON = ["question_id": "codex-async:c:0", "question_hash": "h0", "optional": true]
+        // Older connectors omit `optional`; every codex-async card is optional.
+        let olderOptional: JSON = ["question_id": "codex-async:c:1", "question_hash": "h1"]
+        let required: JSON = ["question_id": "request", "question_hash": "h2"]
+        let summary: JSON = ["count": 2, "ids": ["codex-async:c:0", "codex-async:c:1"], "latest_at": 1760000000]
+        for base in [#"{"activity":"busy","phase":"tool"}"#, #"{"activity":"idle","phase":"idle"}"#] {
+            var listed = object(base)
+            listed["mobile_attention"] = [optional, olderOptional]
+            listed["optional_questions"] = summary
+            var olderComputer = object(base)
+            olderComputer["mobile_attention"] = [olderOptional]
+            for raw in [listed, olderComputer] {
+                // The agent keeps working without them, as on the desktop: no status, filter or counter.
+                let item = session(raw.compactJSON)
+                XCTAssertEqual(item.pendingCount, 0)
+                XCTAssertFalse(SessionFilters.needsAttention(item, true))
+                XCTAssertEqual(SessionFilters.active(item, true), SessionFilters.working(item, true))
+                XCTAssertEqual(SessionFilters.counts([item], machines)[.attention], 0)
+                XCTAssertNotEqual(DesktopSessionPalette.badge(item, true).kind, .attention)
+                // A required request, approval, error or explicit child request beside them still needs attention.
+                var requiredRaw = raw
+                requiredRaw["mobile_attention"] = .array((raw.array("mobile_attention") ?? []) + [required])
+                let withRequired = session(requiredRaw.compactJSON)
+                XCTAssertEqual(withRequired.pendingCount, 1)
+                XCTAssertTrue(SessionFilters.needsAttention(withRequired, true))
+                XCTAssertEqual(SessionFilters.counts([withRequired], machines)[.attention], 1)
+                for phase in ["input", "approval", "error"] {
+                    XCTAssertTrue(SessionFilters.needsAttention(with(item, ["phase": .string(phase)]), true))
+                }
+                XCTAssertTrue(SessionFilters.needsAttention(with(item, ["subagents": ["child": ["display_state": "input"]]]), true))
+                // Offline rows keep only device reminders, as before.
+                XCTAssertFalse(SessionFilters.needsAttention(withRequired, false))
+                XCTAssertFalse(SessionFilters.needsAttention(item, false))
+                XCTAssertTrue(SessionFilters.needsAttention(with(item, ["mobile_review_later": true]), false))
+            }
+        }
+        // Without connector items, the older pending count stays a blocking request.
+        XCTAssertTrue(SessionFilters.needsAttention(session(#"{"activity":"busy","pending_question_count":1}"#), true))
+        XCTAssertFalse(SessionFilters.needsAttention(session(#"{"activity":"busy","pending_question_count":1}"#), false))
     }
 
     func testArchivesAreExclusiveAndSavedMeansNonRunning() {

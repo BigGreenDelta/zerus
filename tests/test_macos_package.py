@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -78,6 +79,47 @@ Load command 20
 
 
 class BundleChecks(unittest.TestCase):
+    def test_packaging_promotes_only_its_private_copy_to_the_public_identity(self):
+        with tempfile.TemporaryDirectory(prefix="zerus-package-identity-") as temporary:
+            root = Path(temporary)
+            qt, licenses = root / "qt", root / "licenses"
+            qt.mkdir()
+            licenses.mkdir()
+            (qt / "zerus-qt.json").write_bytes((ROOT / "packaging/macos/qt.json").read_bytes())
+            (licenses / "inventory.json").write_text("{}")
+            version = (ROOT / "VERSION").read_text().strip()
+            for index, identity in enumerate(("com.hgdev.hgs-tray.local", "com.hgdev.hgs-tray", "example.foreign")):
+                with self.subTest(identity=identity):
+                    app, output = root / f"input-{index}.app", root / f"output-{index}"
+                    info = app / "Contents/Info.plist"
+                    info.parent.mkdir(parents=True)
+                    original = plistlib.dumps({"CFBundleIdentifier": identity, "CFBundleShortVersionString": version})
+                    info.write_bytes(original)
+                    deployed = []
+                    def execute(*args):
+                        if args[0] == "ditto":
+                            shutil.copytree(args[1], args[2])
+                        else:
+                            self.assertEqual(args[0], qt / "bin/macdeployqt")
+                            deployed.append(args[1])
+                            raise RuntimeError("metadata checkpoint")
+                    arguments = ["package-macos.py", "--qt", str(qt), "--app", str(app),
+                                 "--cli", str(root / "hgs"), "--connector", str(root / "connector"),
+                                 "--licenses", str(licenses), "--version", version, "--output", str(output)]
+                    with mock.patch.object(sys, "argv", arguments), mock.patch.object(package, "run", side_effect=execute):
+                        if identity == "example.foreign":
+                            with self.assertRaises(SystemExit) as error:
+                                package.main()
+                            self.assertEqual(error.exception.code, 2)
+                            self.assertEqual(deployed, [])
+                        else:
+                            with self.assertRaisesRegex(RuntimeError, "metadata checkpoint"):
+                                package.main()
+                            self.assertEqual(deployed, [output / "work/hgs-tray.app"])
+                            staged = plistlib.loads((deployed[0] / "Contents/Info.plist").read_bytes())
+                            self.assertEqual(staged["CFBundleIdentifier"], "com.hgdev.hgs-tray")
+                    self.assertEqual(info.read_bytes(), original, "packaging never changes the source bundle")
+
     def test_exhausted_ticket_validation_is_a_bundle_failure(self):
         responses = [subprocess.CompletedProcess([], 0, "", ""),
                      subprocess.CompletedProcess([], 0, "", "TeamIdentifier=ABCDE12345\nflags=0x10000(runtime)"),
@@ -247,7 +289,8 @@ assert subprocess.check_output(["tmux", "-V"], text=True).strip() == "tmux fixtu
         missing = dict(good)
         del missing["NSAppleEventsUsageDescription"]
         self.assertTrue(check.plist_findings(missing, "0.38.0"), "hardened runtime needs the Apple Events purpose")
-        for key, value in (("CFBundleIdentifier", "dev.zerus.app"), ("CFBundleShortVersionString", "0.37.0"),
+        for key, value in (("CFBundleIdentifier", "dev.zerus.app"), ("CFBundleIdentifier", "com.hgdev.hgs-tray.local"),
+                           ("CFBundleShortVersionString", "0.37.0"),
                            ("LSMinimumSystemVersion", "15.0"), ("CFBundleName", "hgs zerus")):
             self.assertTrue(check.plist_findings(dict(good, **{key: value}), "0.38.0"), key)
 

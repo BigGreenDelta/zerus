@@ -41,15 +41,22 @@ class MacosBundleName(unittest.TestCase):
         info = self.check_names(PACKAGING / "Info.plist", PACKAGING / "en.lproj/InfoPlist.strings")
         # The executable must not depend on the bundle folder name.
         self.assertEqual(info["CFBundleExecutable"], "${MACOSX_BUNDLE_EXECUTABLE_NAME}")
-        self.assertEqual(info["CFBundleIdentifier"], "com.hgdev.hgs-tray")
+        self.assertEqual(info["CFBundleIdentifier"], "${MACOSX_BUNDLE_GUI_IDENTIFIER}")
         self.assertEqual(info["LSMinimumSystemVersion"], "${CMAKE_OSX_DEPLOYMENT_TARGET}")
         self.assertIn("voice", info["NSMicrophoneUsageDescription"])
+
+    def test_raw_build_has_a_separate_privacy_identifier(self):
+        info = plistlib.loads((PACKAGING / "Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleIdentifier"], "${MACOSX_BUNDLE_GUI_IDENTIFIER}")
+        cmake = (ROOT / "tray/CMakeLists.txt").read_text()
+        self.assertRegex(cmake, r'MACOSX_BUNDLE_GUI_IDENTIFIER\s+"com\.hgdev\.hgs-tray\.local"')
 
     @unittest.skipUnless(os.environ.get("ZERUS_MACOS_BUNDLE"), "needs a built macOS bundle")
     def test_built_bundle_carries_the_localized_name(self):
         contents = Path(os.environ["ZERUS_MACOS_BUNDLE"]) / "Contents"
         info = self.check_names(contents / "Info.plist", contents / "Resources/en.lproj/InfoPlist.strings")
         self.assertEqual(info["CFBundleExecutable"], "hgs-tray")
+        self.assertEqual(info["CFBundleIdentifier"], "com.hgdev.hgs-tray.local")
         self.assertTrue((contents / "MacOS/hgs-tray").is_file())
 
     @unittest.skipUnless(os.environ.get("ZERUS_MACOS_BUNDLE"), "needs a built macOS bundle")

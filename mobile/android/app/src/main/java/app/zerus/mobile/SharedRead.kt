@@ -13,6 +13,16 @@ object SharedReadPolicies {
         ?.takeIf { row.target.conversation.isNotBlank() && it.string("conversation_id")==row.target.conversation }
     /** Exactly the current reply was read on some device. */
     fun replyRead(row:Session):Boolean=row.raw.string("reply_id").let { it.isNotBlank() && mark(row)?.string("reply_id")==it }
+    /** The open conversation may have a newer reply than its last fleet snapshot. */
+    fun canAdoptReply(row:Session,selectedTarget:Target?,selectedRaw:JSONObject?,selectedVerified:Boolean):Boolean {
+        if(!replyRead(row)) return false
+        if(selectedTarget==null || ConversationReadPolicies.key(selectedTarget)!=ConversationReadPolicies.key(row.target)) return true
+        val target=row.target
+        return selectedTarget==target && selectedVerified && selectedRaw!=null &&
+            row.raw.string("run_id")==target.run && row.raw.string("conversation_id")==target.conversation &&
+            selectedRaw.string("run_id")==target.run && selectedRaw.string("conversation_id")==target.conversation &&
+            selectedRaw.string("reply_id")==row.raw.string("reply_id")
+    }
     /** Exactly the current request was acknowledged on some device. */
     fun attentionAcknowledged(row:Session):Boolean=
         row.raw.string("attention_signature").let { it.isNotBlank() && mark(row)?.string("attention_signature")==it }

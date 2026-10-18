@@ -597,7 +597,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private fun adoptSharedReads() {
         val writer=readWriter ?: return
         if(demo || !readTrackingReady) return
-        val captured=sessions.filter { SharedReadPolicies.replyRead(it) && (unreadCount(it.target) ?: 0)>0 }
+        val captured=sessions.filter { SharedReadPolicies.canAdoptReply(it,selected?.target,activity,activityVerified) && (unreadCount(it.target) ?: 0)>0 }
             .mapNotNull { row -> readAllEvidence(row.target)?.takeIf { it.authoritative }?.let { ReadAllCapture(row.target,it) } }
         if(captured.isEmpty()) return
         readState=writer.edit { state -> ReadAllPolicies.apply(state,captured,captured).state }
