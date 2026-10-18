@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import time
 import unittest
 
 import test_clear_context_native as native
@@ -249,19 +250,81 @@ class NativeCodexTallQuestion(unittest.TestCase):
     deliver = NativeCodexAsyncQuestions.deliver
     finish = NativeCodexAsyncQuestions.finish
 
-    def test_scrolled_answers_grow_the_unviewed_pane_and_answer_from_activity(self):
-        height = lambda: int(self.tmux('display-message', '-p', '-t', self.pane, '#{window_height}').strip())
-        before = height()
+    def height(self):
+        return int(self.tmux('display-message', '-p', '-t', self.pane, '#{window_height}').strip())
+
+    def open_scrolled(self):
         self.tmux('send-keys', '-t', self.pane, 'S-Left')
         # Codex keeps the title and scrolls the answers, naming the visible row.
         self.wait_for(lambda: re.search(r'enter submit .*option 1/21', self.screen()))
+        return self.panel()
+
+    def panel(self):
+        """The panel from its title through its key hints, without the animated status above it."""
+        rows = self.screen().splitlines()
+        start = next(i for i, row in enumerate(rows) if row.strip().startswith('Before releasing'))
+        end = next(i for i, row in enumerate(rows) if 'enter submit' in row)
+        return rows[start:end + 1]
+
+    def assert_nothing_sent(self, panel):
+        self.assertEqual(self.panel(), panel)
+        # Codex 0.160 sends a queued reply once the turn ends; 0.162 steers it at once.
+        self.server.release.set()
+        time.sleep(2)
+        self.assertFalse([text for request in self.server.requests for text in request['texts'] if text.startswith(REPLY[0])])
+
+    def test_scrolled_answers_grow_the_unviewed_pane_and_answer_from_activity(self):
+        before = self.height()
+        self.open_scrolled()
         card = self.cards()[self.ids[0]]
         self.assertTrue(card['can_answer'], card['answer_unavailable_reason'])
         self.assertEqual(card['answer_transport'], 'codex_tui')
-        self.assertGreater(height(), before)
+        self.assertGreater(self.height(), before)
         self.assertNotRegex(self.screen(), r'option \d+/\d+')
         self.deliver(card, dict(question_id='q_0', selected_option_ids=['opt_1']))
         self.finish([self.reply(card, TALL[0]['options'][1])])
+
+    def test_a_viewed_pane_keeps_its_size_and_the_scrolled_panel_stays_in_terminal(self):
+        # A real client on the agent's session, as Terminal attaches one.
+        columns, rows = map(str, self.geometry)
+        self.tmux('new-session', '-d', '-s', 'viewer', '-x', columns, '-y', rows,
+                  'env', '-u', 'TMUX', str(self.bin / 'tmux'), 'attach', '-t', '=' + self.name)
+        self.wait_for(lambda: self.tmux('display-message', '-p', '-t', '=' + self.name + ':', '#{session_attached}').strip() == '1')
+        viewed = self.height()
+        panel = self.open_scrolled()
+        # tmux fits a viewed window back to its client at once, so watch the
+        # whole listing for even a passing resize.
+        heights, listing = set(), threading.Event()
+        def watch():
+            while not listing.is_set():
+                heights.add(self.height())
+        watcher = threading.Thread(target=watch)
+        watcher.start()
+        try:
+            card = self.cards()[self.ids[0]]
+        finally:
+            listing.set()
+            watcher.join()
+        self.assertEqual(heights, {viewed})
+        self.assertFalse(card['can_answer'])
+        self.assertTrue(card['answer_unavailable_reason'])
+        result, _ = self.answer_raw(card)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.height(), viewed)
+        self.assert_nothing_sent(panel)
+
+    def test_an_answer_never_grows_the_pane(self):
+        # Taken while the panel is closed, so no listing has grown the pane.
+        card = self.cards()[self.ids[0]]
+        before = self.height()
+        panel = self.open_scrolled()
+        result, _ = self.answer_raw(card)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.height(), before)
+        self.assert_nothing_sent(panel)
+
+    def answer_raw(self, card):
+        return synthetic.CodexAsync.answer(self, card, dict(question_id='q_0', selected_option_ids=['opt_1']))
 
 
 if __name__ == '__main__':
