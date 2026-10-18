@@ -176,7 +176,7 @@ QJsonObject FleetState::unreadReplies() const
     QJsonObject replies;
     const auto collect = [&](const QString &host, const BoxState &box) {
         for (const auto &s : box.sessions)
-            if (s.unreadReply) replies[replyKey(host, s)] = s.replyId;
+            if (s.unreadReply && !s.reviewLater) replies[replyKey(host, s)] = s.replyId;
     };
     collect({}, m_local);
     for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) collect(it.key(), it->box);
@@ -187,7 +187,9 @@ int FleetState::markRepliesRead(const QJsonObject &replies)
     int marked = 0;
     const auto mark = [&](const QString &host, BoxState &box) {
         for (const auto &s : box.sessions) {
-            if (!s.unreadReply) continue;
+            // A session marked as needing attention keeps its reply unread, even when
+            // the mark was added after the UI took its snapshot.
+            if (!s.unreadReply || s.reviewLater) continue;
             const auto key = replyKey(host, s);
             // A newer poll may have arrived since the UI took its snapshot.
             // Acknowledging old replies must never acknowledge the next answer.

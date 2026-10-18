@@ -15,6 +15,7 @@ private slots:
     void recoveryWaitsQuietlyAndNotifiesWhenExhausted();
     void repliesPersistByConversationAndNeverConfuseIdleWithUnread();
     void batchReadIncludesOfflineAndPreservesNewerRepliesAndActions();
+    void batchReadSkipsSessionsMarkedForLaterEvenAfterTheSnapshot();
     void unreadRepliesNotifyOnceAcrossResumeAndRead();
     void onlyExplicitChildRequestsNotify();
     void failedDeliveryRetriesAfterBackoff();
@@ -404,6 +405,56 @@ void TestAttention::batchReadIncludesOfflineAndPreservesNewerRepliesAndActions()
     FleetState secondDevice; secondDevice.setLocal(local, 3); QCOMPARE(secondDevice.unreadReplies().size(), 4);
     remote.sessions[0].replyId = "12:102"; restarted.setPeer(remote, 4);
     QCOMPARE(restarted.unreadReplies().size(), 1); QVERIFY(restarted.peer("mac")->sessions[0].unreadReply);
+}
+
+void TestAttention::batchReadSkipsSessionsMarkedForLaterEvenAfterTheSnapshot()
+{
+    // Automatic attention (approval, question, error) beside manual review reminders,
+    // on this computer and a peer, with shared and per-device read state.
+    SessionInfo ready; ready.name = "codex/project/ready"; ready.cmd = "codex"; ready.runId = "run"; ready.sharedRead = true;
+    ready.conversationId = "ready"; ready.replyId = "10:100"; ready.activity = "idle"; ready.phase = "idle";
+    auto approval = ready; approval.name = "codex/project/approval"; approval.conversationId = "approval"; approval.phase = "approval";
+    auto input = ready; input.name = "codex/project/question"; input.conversationId = "question"; input.phase = "input";
+    auto error = ready; error.name = "codex/project/error"; error.conversationId = "error"; error.phase = "error";
+    auto manual = ready; manual.name = "codex/project/manual"; manual.conversationId = "manual";
+    auto legacy = manual; legacy.name = "codex/project/legacy"; legacy.conversationId = "legacy"; legacy.sharedRead = false;
+    auto late = ready; late.name = "codex/project/late"; late.conversationId = "late";
+    BoxState local; local.host = "arch"; local.ok = true; local.sessions = {ready, approval, input, error, manual, legacy, late};
+    auto remoteManual = manual; remoteManual.conversationId = "remote-manual";
+    auto remoteReady = ready; remoteReady.conversationId = "remote-ready";
+    BoxState remote; remote.host = "mac"; remote.ok = true; remote.sessions = {remoteManual, remoteReady};
+    FleetState fleet; fleet.setLocal(local, 0); fleet.setPeer(remote, 0);
+    QVERIFY(fleet.setReviewLater({}, manual, true)); QVERIFY(fleet.setReviewLater({}, legacy, true));
+    QVERIFY(fleet.setReviewLater("mac", remoteManual, true));
+    // Mark all as read never offers a reply the person kept for later.
+    const auto requested = fleet.unreadReplies();
+    QCOMPARE(requested.size(), 6);
+    // A reminder set after the click's snapshot still protects that session,
+    // and an answer that arrives meanwhile stays unread.
+    QVERIFY(fleet.setReviewLater({}, late, true));
+    local.sessions[0].replyId = "11:101"; fleet.setLocal(local, 1);
+    QCOMPARE(fleet.markRepliesRead(requested), 4);
+    QVERIFY(fleet.local().sessions[0].unreadReply);
+    for (int i : {1, 2, 3}) {
+        QVERIFY(!fleet.local().sessions[i].unreadReply);
+        QVERIFY(fleet.local().sessions[i].needsAttention());
+    }
+    for (int i : {4, 5, 6}) {
+        const auto &s = fleet.local().sessions[i];
+        QVERIFY(s.unreadReply); QVERIFY(s.reviewLater); QVERIFY(s.needsAttention());
+    }
+    QVERIFY(fleet.peer("mac")->sessions[0].unreadReply); QVERIFY(fleet.peer("mac")->sessions[0].reviewLater);
+    QVERIFY(!fleet.peer("mac")->sessions[1].unreadReply);
+    // Nothing of the reminded sessions is shared with their hosts or kept on this device.
+    QStringList shared;
+    for (const auto &mark : fleet.takeNewReadMarks()) shared << mark.host + '/' + mark.conversationId;
+    shared.sort(); QCOMPARE(shared, QStringList({"/approval", "/error", "/question", "mac/remote-ready"}));
+    QCOMPARE(fleet.readReplies().size(), 4);
+    QCOMPARE(fleet.unreadReplies().size(), 1); // Only the newer answer is offered next.
+    // Mark as read on one reminded session stays explicit: it clears the reply and the reminder.
+    const auto chosen = fleet.local().sessions[4];
+    QVERIFY(fleet.markSessionRead({}, chosen));
+    QVERIFY(!fleet.local().sessions[4].unreadReply); QVERIFY(!fleet.local().sessions[4].reviewLater);
 }
 
 void TestAttention::acknowledgedAttentionWithdrawsItsNotification()
