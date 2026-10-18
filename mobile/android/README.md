@@ -86,8 +86,11 @@ through the OpenCode form reply, never to a terminal. Other cards, approvals
 included, still ask for such answers on the computer.
 An OpenCode permission card offers **Reject**, which rejects every pending
 request in that session, and **Allow once** after the approval review. When the
-request offers it, **Always allow…** asks for a separate confirmation and sends
-nothing if the request changed or can no longer be answered meanwhile. Other
+request offers it, **Always allow…** follows the same review and then asks for a
+separate confirmation, which shows what it saves when the computer describes it
+(for example `Allows without asking again: printf *`). The confirmation sends
+nothing and closes if the request changed, can no longer be answered, or the app
+left the foreground meanwhile; opening it again needs a fresh review. Other
 approvals without Allow and Deny remain answerable only on the computer.
 
 Conversation messages use 16 sp text and a 20 sp baseline; the editor uses 18 sp
