@@ -170,7 +170,7 @@ fn unavailable(why: &Unavailable, home_location: bool) -> Value {
         Unavailable::Incompatible(_) => "incompatible",
         Unavailable::Unreachable(_) => "unreachable",
     };
-    let reason = why.reason(&crate::platform::hostname());
+    let reason = why.reason(&super::service::computer());
     match cached().filter(|_| home_location) {
         Some(last) => answer(
             last["model_options"].clone(),

@@ -485,6 +485,9 @@ struct Observed {
     inbox: Value,
     forms: Value,
     permissions: Value,
+    /// The Zerus request that sent each of the newest user messages, from the
+    /// receipt index (message ID to request ID).
+    requests: std::collections::HashMap<String, String>,
 }
 /// The status of one binding; `None` when the service could not be read,
 /// which keeps native state unknown rather than stopped.
@@ -563,6 +566,15 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     let idle = available && pending.is_empty();
     let mut events = delivered.clone();
     events.extend(queued);
+    // A prompt Zerus sent names its request, so a client can match its own
+    // message even when OpenCode dates a queued prompt by its delivery.
+    if let Some(observed) = observed {
+        for row in events.iter_mut().filter(|e| e["type"] == "UserPromptSubmit") {
+            if let Some(request) = observed.requests.get(string(row, "message_id")) {
+                row["request_id"] = json!(request);
+            }
+        }
+    }
     let mut value = json!({"name":record["name"],"cmd":"opencode","agent":"opencode","backend":"opencode","project":parts.get(1),"tag":parts.get(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],"launch_id":record["launch_id"],"created":record["created"],"cwd":record["cwd"],"cwd_source":"native_session","tracked":true,"resumable":true,"attached":0,"clients":[],
         "state":state,"process_state":process_state,"runtime_state":runtime_state,"conversation_state":"active","phase":phase,"activity":activity,"activity_summary":summary,
         "activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
@@ -658,6 +670,7 @@ fn observe(
     record: &Value,
     active: &Value,
     history: impl FnOnce() -> Result<history::Page>,
+    requests: bool,
 ) -> Result<Observed> {
     let session = exact_session(record, get(native, &session_path(record, ""))?)?;
     let forms = pending_requests(native, record, "/form")?;
@@ -669,6 +682,12 @@ fn observe(
         return Err("Invalid OpenCode inbox".into());
     }
     let page = history()?;
+    // Only a full inspection shows events; listings and actions drop them.
+    let requests = if requests {
+        sent_requests(&Ledger::current(), record, &page.messages, &inbox)
+    } else {
+        Default::default()
+    };
     Ok(Observed {
         session,
         active: active.get(string(record, "conversation_id")).is_some(),
@@ -676,7 +695,32 @@ fn observe(
         inbox,
         forms,
         permissions,
+        requests,
     })
+}
+/// At most this many of the newest user messages are looked up.
+const SENT_LOOKUPS: usize = 100;
+/// The Zerus requests that sent the newest user messages of this session:
+/// queued ones first, then history newest first.
+fn sent_requests(
+    ledger: &Ledger,
+    record: &Value,
+    messages: &[Value],
+    inbox: &Value,
+) -> std::collections::HashMap<String, String> {
+    let queued = inbox["data"].as_array().into_iter().flatten();
+    queued
+        .chain(messages.iter().rev())
+        .filter(|m| m["type"] == "user")
+        .map(|m| string(m, "id"))
+        .filter(|id| native_id(id, "msg_"))
+        .take(SENT_LOOKUPS)
+        .filter_map(|id| {
+            let index = ledger.indexed(id)?;
+            (index["conversation_id"] == record["conversation_id"])
+                .then(|| (id.to_owned(), string(&index, "request_id").to_owned()))
+        })
+        .collect()
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Detail {
@@ -696,7 +740,13 @@ fn parent_view(
     active: &Value,
     detail: Detail,
 ) -> Result<Value> {
-    let observed = observe(service, record, active, || history::fetch(service, record))?;
+    let observed = observe(
+        service,
+        record,
+        active,
+        || history::fetch(service, record),
+        detail == Detail::Full,
+    )?;
     let mut result = normalize(record, Some(&observed));
     if detail != Detail::Listing {
         result["attachment_messages"] = attachments::messages(record, "");
@@ -723,7 +773,8 @@ fn parent_view(
 /// `/api/session/active` and one migration check per instance.
 struct Inspector {
     service: std::result::Result<service::Service, service::Unavailable>,
-    computer: String,
+    /// Named only when a reason needs it.
+    computer: Option<String>,
     active: Option<Result<Value>>,
     migration: Option<Reply>,
     verdicts: Option<Vec<String>>,
@@ -734,7 +785,7 @@ impl Inspector {
     fn connect() -> Self {
         Inspector {
             service: service::connect(),
-            computer: crate::platform::hostname(),
+            computer: None,
             active: None,
             migration: None,
             verdicts: None,
@@ -750,7 +801,10 @@ impl Inspector {
     }
     fn view(&mut self, record: &Value, detail: Detail) -> Value {
         let service = match &self.service {
-            Err(why) => return unavailable(record, why.reason(&self.computer)),
+            Err(why) => {
+                let computer = self.computer.get_or_insert_with(service::computer);
+                return unavailable(record, why.reason(computer));
+            }
             Ok(service) => service,
         };
         let key = verdict_key(record, &service.reg);
@@ -1020,7 +1074,15 @@ impl Ledger {
     }
     /// The request ID and session that sent a native message, if indexed.
     fn indexed(&self, message_id: &str) -> Option<Value> {
-        let bytes = fs::read(self.index(message_id)).ok()?;
+        let mut bytes = Vec::new();
+        fs::File::open(self.index(message_id))
+            .ok()?
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > 4096 {
+            return None;
+        }
         let value: Value = serde_json::from_slice(&bytes).ok()?;
         uuid::Uuid::parse_str(string(&value, "request_id")).ok()?;
         Some(value)
@@ -1115,7 +1177,7 @@ fn reconcile(
 }
 fn running_service() -> Result<service::Service> {
     // Sending is explicit, but phase 1 does not start the service for it.
-    service::connect().map_err(|why| why.reason(&crate::platform::hostname()))
+    service::connect().map_err(|why| why.reason(&service::computer()))
 }
 fn check_receipt_identity(record: &Value, receipt: &Value) -> Result<()> {
     if !native_id(string(receipt, "native_message_id"), "msg_")
@@ -1688,6 +1750,7 @@ fn action_in<N: Native>(
     }
     if action == "forget" {
         archive::remove_synced(&binding_path(&old))?;
+        history::forget(record);
         return Ok(());
     }
     save(record)?;
@@ -2817,6 +2880,7 @@ mod tests {
             inbox,
             forms: json!([]),
             permissions: json!([]),
+            requests: Default::default(),
         }
     }
     fn status_record(id: &str) -> Value {
@@ -2893,6 +2957,74 @@ mod tests {
         assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
         // Queued text is not the prompt the agent is working on.
         assert_eq!(value["prompt"], "hello");
+    }
+    #[test]
+    fn prompts_zerus_sent_name_their_request() {
+        let mut observed = observed("messages", true, opencode2("inbox_busy"));
+        observed.requests = [
+            ("msg_6kezDqwZEklnh8eFGVy3UbP6iX", "request-delivered"),
+            ("msg_gVmstesSuU81H2vTHdmxp65tNI", "request-queued"),
+            ("msg_14bb2d63e001NhfRTKy4frROM8", "request-not-a-prompt"),
+        ]
+        .map(|(id, request)| (id.to_owned(), request.to_owned()))
+        .into();
+        let value = normalize(&status_record("ses_A"), Some(&observed));
+        let named: Vec<(&str, &str, &str)> = value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (string(e, "type"), string(e, "message_id"), string(e, "request_id")))
+            .filter(|(_, _, request)| !request.is_empty())
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("UserPromptSubmit", "msg_6kezDqwZEklnh8eFGVy3UbP6iX", "request-delivered"),
+                ("UserPromptSubmit", "msg_gVmstesSuU81H2vTHdmxp65tNI", "request-queued"),
+            ]
+        );
+    }
+    #[test]
+    fn sent_requests_come_only_from_this_sessions_receipt_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let index = |id: &str, request: &str, conversation: &str| {
+            atomic(
+                &ledger.index(id),
+                &json!({"request_id": request, "conversation_id": conversation}).to_string(),
+            )
+            .unwrap()
+        };
+        let a = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a01";
+        let b = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02";
+        index("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "ses_A");
+        index("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "ses_A");
+        // User messages whose index names another session or no request.
+        index("msg_otherSession00000000000000", a, "ses_B");
+        index("msg_notARequest000000000000000", "not-a-uuid", "ses_A");
+        let observed = observed("messages", true, opencode2("inbox_busy"));
+        let mut messages = observed.page.messages.clone();
+        messages.push(json!({"id": "msg_otherSession00000000000000", "type": "user"}));
+        messages.push(json!({"id": "msg_notARequest000000000000000", "type": "user"}));
+        let found = sent_requests(&ledger, &status_record("ses_A"), &messages, &observed.inbox);
+        let expected: std::collections::HashMap<String, String> = [
+            ("msg_6kezDqwZEklnh8eFGVy3UbP6iX".to_owned(), a.to_owned()),
+            ("msg_gVmstesSuU81H2vTHdmxp65tNI".to_owned(), b.to_owned()),
+        ]
+        .into();
+        assert_eq!(found, expected);
+        // Only the newest user messages are looked up: the queued one first.
+        let many: Vec<Value> = (0..SENT_LOOKUPS + 5)
+            .map(|n| json!({"id": format!("msg_{n:026}"), "type": "user"}))
+            .collect();
+        for n in 0..SENT_LOOKUPS + 5 {
+            index(&format!("msg_{n:026}"), a, "ses_A");
+        }
+        let found = sent_requests(&ledger, &status_record("ses_A"), &many, &observed.inbox);
+        assert_eq!(found.len(), SENT_LOOKUPS);
+        assert!(found.contains_key("msg_gVmstesSuU81H2vTHdmxp65tNI"));
+        assert!(found.contains_key(&format!("msg_{:026}", SENT_LOOKUPS + 4)));
+        assert!(!found.contains_key(&format!("msg_{:026}", 5)));
     }
     #[test]
     fn after_stop_queued_messages_are_not_delivered_and_removable() {
@@ -3169,9 +3301,13 @@ mod tests {
         ]));
         let active = opencode2("active_busy")["data"].clone();
         let cache = dir.path().join("history.json");
-        let seen = observe(&native, &record, &active, || {
-            history::fetch_at(&native, &record, &cache)
-        })
+        let seen = observe(
+            &native,
+            &record,
+            &active,
+            || history::fetch_at(&native, &record, &cache),
+            false,
+        )
         .unwrap();
         assert!(native.0.borrow().is_empty());
         assert!(seen.active);
@@ -3201,9 +3337,13 @@ mod tests {
                 opencode2("messages"),
             ),
         ]));
-        let seen = observe(&native, &record, &json!({}), || {
-            history::fetch_at(&native, &record, &cache)
-        })
+        let seen = observe(
+            &native,
+            &record,
+            &json!({}),
+            || history::fetch_at(&native, &record, &cache),
+            false,
+        )
         .unwrap();
         assert!(native.0.borrow().is_empty());
         assert!(!seen.active);
@@ -3218,7 +3358,7 @@ mod tests {
             json!({"data":{"id":"ses_A","location":{"directory":"/elsewhere"}}}),
         )]));
         let none = || -> Result<history::Page> { panic!("no history read") };
-        assert!(observe(&moved, &record, &json!({}), none).is_err());
+        assert!(observe(&moved, &record, &json!({}), none, false).is_err());
         let invalid = Scripted(std::cell::RefCell::new(vec![
             (
                 "GET /api/session/ses_A".into(),
@@ -3231,7 +3371,7 @@ mod tests {
                 json!({"data": {}}),
             ),
         ]));
-        assert!(observe(&invalid, &record, &json!({}), none).is_err());
+        assert!(observe(&invalid, &record, &json!({}), none, false).is_err());
         let refused = Scripted(std::cell::RefCell::new(vec![(
             "GET /api/session/active".into(),
             500,
