@@ -103,18 +103,13 @@ import org.json.JSONObject
     val draft = model.draft(target, question)
     val native = QuestionPolicies.submitted(question, target)
     val saved = remember(draft.answers, native) {
-        if (native != null) native.answers.associate { it.questionId to it }
-        else runCatching { JSONArray(draft.answers).objects().associate { answer ->
-            answer.string("question_id") to NativeQuestionAnswer(answer.string("question_id"), answer.optJSONArray("selected_option_ids")?.let { ids ->
-                (0 until ids.length()).mapNotNull { ids.opt(it) as? String }
-            }.orEmpty(), answer.string("text"), answer.optBoolean("skip"))
-        } }.getOrDefault(emptyMap())
+        if (native != null) native.answers.associate { it.questionId to it } else QuestionPolicies.savedAnswers(draft.answers)
     }
     var options by remember(target.key, question.id, question.hash, native, draft.generation) {
         mutableStateOf(QuestionPolicies.initialOptions(question.prompts, saved))
     }
     var texts by remember(target.key, question.id, question.hash, native, draft.generation) {
-        mutableStateOf(question.prompts.associate { it.id to saved[it.id]?.text.orEmpty() })
+        mutableStateOf(QuestionPolicies.initialTexts(question.prompts, saved))
     }
     fun answers() = QuestionPolicies.answers(question.prompts, options, texts)
     fun persist() { model.edit(target, texts.values.filter { it.isNotBlank() }.joinToString("\n"), question, answers().toString()) }

@@ -305,7 +305,10 @@ object NativeParser {
             }, prompt.optBoolean("multi_select"), prompt.optBoolean("required", true), prompt.optBoolean("allow_other", false),
                 prompt.string("header"), prompt.string("body"), prompt.string("other_label"), prompt.string("other_description"),
                 prompt.string("input_kind"), bound("min_length", 1_000_000), bound("max_length", 1_000_000), bound("min_items", 1000), bound("max_items", 1000),
-                prompt.optJSONArray("default_option_ids")?.let { ids -> (0 until minOf(ids.length(), 64)).mapNotNull { ids.opt(it) as? String } }.orEmpty())
+                prompt.optJSONArray("default_option_ids")?.let { ids -> (0 until minOf(ids.length(), 64)).mapNotNull { ids.opt(it) as? String } }.orEmpty(),
+                // Only an explicit OpenCode text item seeds its field; it is never sent without the user's Send.
+                if (prompt.string("input_kind") == "text" && card.string("source") == "opencode_native" && prompt.optBoolean("allow_other", false))
+                    QuestionPolicies.defaultText(prompt.opt("default_text"), bound("max_length", 1_000_000)) else "")
         }, card.optBoolean("can_answer"), card.optBoolean("can_skip"), card.optBoolean("optional"),
             nativeDelivery?.status.orEmpty(), (card.opt("created_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it > 0 && it < 253402300800.0 } ?: 0.0,
             card.string("source"), card.optBoolean("approval"), card.optBoolean("trust_request"), card.string("answer_unavailable_reason", "unavailable_reason"),

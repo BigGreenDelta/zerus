@@ -112,6 +112,49 @@ class OpenCodeFormContractTest {
         assertFalse(QuestionPolicies.complete(listOf(legacy), emptyMap(), emptyMap()))
     }
 
+    /** The plain-string card as hgs emits it for a string field with a string default. */
+    private fun withDefault(default: Any, hash: String = "hash-default", source: String = "opencode_native", item: JSONObject = case("plain-string").getJSONObject("card").getJSONObject("item")): Question {
+        val card = JSONObject(case("plain-string").getJSONObject("card").toString()).put("question_hash", hash).put("source", source)
+        card.remove("item")
+        card.put("questions", JSONArray().put(JSONObject(item.toString()).put("default_text", default)))
+        return NativeParser.questions(JSONObject().put("pending_questions", JSONArray().put(card))).single()
+    }
+
+    @Test fun anOpenCodeTextDefaultIsPrefilledUnlessADraftExists() {
+        val target = Target("computer", "opencode/project/local", "run", "ses_A", "workspace")
+        val question = withDefault("Ada")
+        assertEquals("Ada", question.prompts.single().defaultText)
+        val prefilled = QuestionPolicies.initialTexts(question.prompts, emptyMap())
+        assertEquals(mapOf("k" to "Ada"), prefilled)
+        assertTrue(QuestionPolicies.complete(question.prompts, emptyMap(), prefilled))
+        // A saved draft for this exact question wins, even when its text is intentionally empty.
+        val draft = Draft(target, "", questionId = question.id, questionHash = question.hash,
+            answers = QuestionPolicies.answers(question.prompts, emptyMap(), mapOf("k" to "")).toString())
+        val saved = QuestionPolicies.savedAnswers(checkNotNull(QuestionPolicies.savedDraft(listOf(draft), target, question)).answers)
+        assertEquals(mapOf("k" to ""), QuestionPolicies.initialTexts(question.prompts, saved))
+        // A changed question (another hash or ID) has no saved draft and gets the default again.
+        listOf(withDefault("Ada", hash = "hash-changed"), question.copy(id = "frm_2")).forEach { changed ->
+            assertNull(QuestionPolicies.savedDraft(listOf(draft), target, changed))
+            assertEquals(mapOf("k" to "Ada"), QuestionPolicies.initialTexts(changed.prompts, emptyMap()))
+        }
+        // Bounded like typed text: clipped to max_length; control characters or non-strings are ignored.
+        assertEquals("Adela", withDefault("Adelaide").prompts.single().defaultText)
+        assertEquals("", withDefault("A\nB").prompts.single().defaultText)
+        assertEquals("", withDefault("A\u0007").prompts.single().defaultText)
+        assertEquals("", withDefault(42).prompts.single().defaultText)
+    }
+
+    @Test fun defaultTextNeedsAnOpenCodeTextItem() {
+        // Legacy cards without default_text are unchanged.
+        val legacy = question(case("plain-string"))
+        assertEquals("", legacy.prompts.single().defaultText)
+        assertEquals(mapOf("k" to ""), QuestionPolicies.initialTexts(legacy.prompts, emptyMap()))
+        // A choice item or a non-OpenCode card ignores it.
+        val choice = withDefault("Purple", item = case("question-single").getJSONObject("card").getJSONObject("item"))
+        assertEquals("", choice.prompts.single().defaultText)
+        assertEquals("", withDefault("Ada", source = "codex_async").prompts.single().defaultText)
+    }
+
     @Test fun booleanPreselectsTheNativeDefault() {
         val question = question(case("boolean"))
         val options = QuestionPolicies.initialOptions(question.prompts, emptyMap())

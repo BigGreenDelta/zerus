@@ -395,7 +395,7 @@ import org.json.JSONObject
     var selectedModel by remember(target) { mutableStateOf(snapshot.pendingModel.ifBlank { snapshot.model }) }
     var selectedEffort by remember(target) { mutableStateOf(if(snapshot.pendingId.isNotBlank()) snapshot.pendingEffort else snapshot.effort) }
     val choice = snapshot.models.find { it.id == selectedModel }
-    val nativeEfforts = model.nativeEffortsSupported(target)
+    val nativeEfforts = model.nativeEffortsSupported(target,model.activity)
     val efforts = SessionDetailsPresentation.effortChoices(snapshot,selectedModel,nativeEfforts)
     val applyingPending = snapshot.pendingId.isNotBlank() && selectedModel == snapshot.pendingModel && selectedEffort == snapshot.pendingEffort
     val reason = model.actionReason(target,"settings").ifBlank {

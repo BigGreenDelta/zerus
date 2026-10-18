@@ -49,7 +49,7 @@ data class Prompt(val id: String, val text: String, val choices: List<Choice>, v
     val required: Boolean, val other: Boolean, val header: String = "", val body: String = "",
     val otherLabel: String = "", val otherDescription: String = "", val inputKind: String = "",
     val minLength: Int? = null, val maxLength: Int? = null, val minItems: Int? = null, val maxItems: Int? = null,
-    val defaults: List<String> = emptyList())
+    val defaults: List<String> = emptyList(), val defaultText: String = "")
 data class Question(val id: String, val hash: String, val prompts: List<Prompt>, val canAnswer: Boolean,
     val canSkip: Boolean, val optional: Boolean, val delivery: String, val createdAt: Double = 0.0,
     val source: String = "", val approval: Boolean = false, val trustRequest: Boolean = false,
