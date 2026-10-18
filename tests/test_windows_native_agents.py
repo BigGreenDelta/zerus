@@ -702,7 +702,24 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         self.assertEqual([event["type"] for event in state["events"]].count("QuestionAnswered"), 1)
 
     def test_hgs_answers_a_question_taller_than_its_unviewed_pane(self):
+        # Pane growth is the behavior under test, so this session has no answer
+        # channel: its hooks stay in the shell form an earlier hgs wrote, which
+        # hgs repeats for every event and never pairs with a channel. Claude
+        # runs that form with Git Bash, found as Claude Code 2.1.296 finds it.
+        git = shutil.which("git", path=self.env.get("PATH") or self.env.get("Path"))
+        bashes = [Path(self.env.get("CLAUDE_CODE_GIT_BASH_PATH", "")), Path(r"C:\Program Files\Git\bin\bash.exe"),
+                  Path(r"C:\Program Files (x86)\Git\bin\bash.exe"), *([Path(git).parent.parent / "bin" / "bash.exe"] if git else [])]
+        self.assertTrue(any(bash.name and bash.is_file() for bash in bashes),
+                        "the shell-form hooks of this case need Git for Windows")
+        stable = os.path.realpath(self.bin / "hgs.exe").replace(os.sep, "/")
+        settings = json.loads((self.agent_home / "settings.json").read_text(encoding="utf-8"))
+        settings["hooks"] = {"PermissionRequest": [{"hooks": [
+            {"type": "command", "command": f'"{stable}" __state hook', "timeout": 5}]}]}
+        (self.agent_home / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
         name = self.launch("tall")
+        written = json.loads((self.agent_home / "settings.json").read_text(encoding="utf-8"))["hooks"]
+        self.assertEqual(written["PermissionRequest"], settings["hooks"]["PermissionRequest"])
+        self.assertNotIn("answer-channel", json.dumps(written))
         self.deliver_prompt(name, api.TALL_QUESTION)
         # No client views the pane, so the session host grows it from 80x24
         # until Claude redraws the whole panel; the screen is the only path here.
