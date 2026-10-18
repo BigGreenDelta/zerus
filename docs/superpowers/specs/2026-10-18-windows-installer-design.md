@@ -204,3 +204,37 @@ Applying an update:
 [Artifact Signing FAQ]: https://learn.microsoft.com/en-us/azure/artifact-signing/faq
 [quickstart]: https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart
 [signpath.org/terms]: https://signpath.org/terms
+
+## Status (2026-10-18)
+
+Implemented as isolated source:
+
+- `packaging/windows/zerus.iss` and `scripts/package-windows-installer.py`.
+- The Windows CI steps that build the installer and run
+  `tests/test_windows_installer_survival.py`.
+- `scripts/windows_signing.py`.
+
+The GUI tells installer builds apart:
+
+- When `installation.json` next to `hgs-tray.exe` holds the installer record,
+  the installation kind is `installer`.
+- Installer builds stay link-only, like portable builds.
+
+`tray/src/WindowsUpdateTrust` provides the self-update checks:
+
+- The trust anchors are the manifest key and the expected publisher. They are
+  constants in its source and stay empty, so `selfUpdateConfigured()` is false
+  in every build.
+- `verifyManifest` checks an ECDSA P-256 SHA-256 signature, given as r and s of
+  32 bytes each, through CNG. The Qt suite runs it against a test vector.
+- `authenticodePublisher` uses `WinVerifyTrust` and checks revocation for the
+  whole chain.
+
+Remaining, in order:
+
+1. The owner's signing decision and update key.
+2. Signing in publication, gated by `windows_signing.changes`.
+3. Publishing the installer as a release asset, together with the mirror's
+   asset family, and documenting it in `docs/installation.md#windows`.
+4. The signed Windows manifest endpoint.
+5. The background download and apply flow, which uses these checks.
