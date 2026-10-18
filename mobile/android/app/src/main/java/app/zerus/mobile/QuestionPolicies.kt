@@ -16,6 +16,9 @@ object QuestionPolicies {
             question.id.isNotBlank() && question.hash.isNotBlank() && target.run.isNotBlank()
     }
     fun key(question: Question) = question.id + ":" + question.hash
+    private val authoredSources=setOf("hook","codex_async","kimi_wire","kimi_plan_review","dsh_native","opencode_native","claude_native_question")
+    /** Terminal panels and approval/trust disclosures preserve the exact reported text. */
+    fun authoredMarkdown(question:Question)=!question.approval && !question.trustRequest && question.source in authoredSources
     /** A card needs items to be answered; an unanswerable one without items still shows its reason. */
     fun shown(question: Question) = question.id.isNotBlank() && (question.prompts.isNotEmpty() || !question.canAnswer)
 
