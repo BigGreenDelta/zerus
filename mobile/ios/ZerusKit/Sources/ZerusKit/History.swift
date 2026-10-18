@@ -323,8 +323,8 @@ public struct HistoryWindow: Hashable, Sendable {
                              hasAfter: nextHasAfter, atHead: !nextHasAfter)
     }
 
-    /// Inspection rows that update or extend a head window, ordered by journal arrival.
-    /// Queued and not-delivered rows are never history: the head shows the current inspection's after its canonical rows.
+    /// Inspection rows that update or extend a head window; canonical rows stay in journal arrival order. Queued and
+    /// not-delivered rows are never history: only the current inspection's are shown, appended after the canonical rows.
     public func inspection(_ incoming: [Event], previous previousInspection: [Event] = []) -> HistoryWindow {
         guard atHead else { return self }
         let pending = incoming.filter { $0.deliveryState != nil }

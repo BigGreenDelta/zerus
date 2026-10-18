@@ -72,6 +72,8 @@ struct QuestionCard: View {
         let native = QuestionPolicies.submitted(question, target)
         let identity = "\(target.key)|\(QuestionPolicies.key(question))|\(native?.requestId ?? "")|\(draft.generation)"
         let editing = draft.status == "editing" && native == nil && model.pendingQuestionSend == nil
+        // A card that cannot be answered here is read-only, so no draft is written that could never be sent.
+        let inputs = editing && question.canAnswer
         let page = min(max(display.page(question), 0), max(question.prompts.count - 1, 0))
         let prompts = question.prompts.indices.contains(page) ? [question.prompts[page]] : []
         let otherPrompts = prompts.filter { $0.other && !question.approval }
@@ -100,7 +102,7 @@ struct QuestionCard: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(prompts, id: \.id) { prompt in
-                        promptView(prompt, editing: editing)
+                        promptView(prompt, editing: inputs)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -116,7 +118,7 @@ struct QuestionCard: View {
                         persist()
                     }))
                     .textFieldStyle(.roundedBorder)
-                    .disabled(!editing)
+                    .disabled(!inputs)
                     .submitLabel(.send)
                     .onSubmit { submit(editing: editing) }
                     if index == otherPrompts.count - 1 && showsSubmit { sendButton(enabled: sendEnabled, multiple: question.prompts.count > 1, editing: editing) }

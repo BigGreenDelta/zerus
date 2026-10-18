@@ -19,9 +19,10 @@ extension QuestionPolicies {
 
     public static func key(_ question: Question) -> String { question.id + ":" + question.hash }
 
-    /// A card with items, or one that cannot be answered here and says why (hgs clears the items of an oversized form).
+    /// A card with items, or one that cannot be answered here (hgs clears the items of an oversized form); the card
+    /// shows its reason, or a fallback when none is reported.
     public static func shown(_ question: Question) -> Bool {
-        !question.id.isEmpty && (!question.prompts.isEmpty || !question.canAnswer && !question.unavailableReason.isEmpty)
+        !question.id.isEmpty && (!question.prompts.isEmpty || !question.canAnswer)
     }
 
     public static func queue(_ questions: [Question], _ target: Target, chosen: String) -> QuestionQueue {

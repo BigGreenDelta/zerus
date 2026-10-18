@@ -73,15 +73,13 @@ public struct EffortOption: Hashable, Sendable {
     }
 
     /// `effort_labels` names `effort_options` by position; a missing or unusable label keeps the familiar name.
-    /// Malformed or repeated variants are never offered.
+    /// At most the first 16 variants are offered, never malformed or repeated ones.
     public static func options(_ values: [String], labels: [String]) -> [EffortOption] {
+        let named = labels.count == values.count
         var seen = Set<String>()
-        return values.enumerated().compactMap { index, value in
+        return values.prefix(16).enumerated().compactMap { index, value in
             guard valid(value), seen.insert(value).inserted else { return nil }
-            let label = labels.count == values.count ? labels[index] : ""
-            let usable = !label.trimmingCharacters(in: .whitespaces).isEmpty && label.utf16.count <= 160 &&
-                !label.unicodeScalars.contains(where: PairingInvite.isISOControl)
-            return EffortOption(value: value, label: usable ? label : text(value))
+            return EffortOption(value: value, label: named && LaunchPresentation.usableLabel(labels[index]) ? labels[index] : text(value))
         }
     }
 }
@@ -208,6 +206,11 @@ public enum LaunchPresentation {
         }
     }
 
+    /// A native display name: non-blank, at most 160 UTF-16 units and free of control characters.
+    public static func usableLabel(_ text: String) -> Bool {
+        !text.trimmingCharacters(in: .whitespaces).isEmpty && text.utf16.count <= 160 && !text.unicodeScalars.contains(where: PairingInvite.isISOControl)
+    }
+
     public static func validModel(_ value: String) -> Bool {
         !value.trimmingCharacters(in: .whitespaces).isEmpty && value.utf16.count <= 120 && value.contains("/") &&
             !value.unicodeScalars.contains(where: PairingInvite.isISOControl)
@@ -223,9 +226,8 @@ public enum LaunchPresentation {
             let rawValue = option["value"] ?? option["id"]
             guard case .string(let value)? = rawValue, validModel(value), seen.insert(value).inserted else { return nil }
             var label = value
-            if case .string(let text)? = option["label"], !text.trimmingCharacters(in: .whitespaces).isEmpty, text.utf16.count <= 160,
-               !text.unicodeScalars.contains(where: PairingInvite.isISOControl) { label = text }
-            let efforts = EffortOption.options(Array(option.strings("effort_options").prefix(16)), labels: Array(option.strings("effort_labels").prefix(16)))
+            if case .string(let text)? = option["label"], usableLabel(text) { label = text }
+            let efforts = EffortOption.options(option.strings("effort_options"), labels: option.strings("effort_labels"))
             return LaunchModel(value: value, label: label, efforts: efforts)
         }
     }

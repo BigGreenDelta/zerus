@@ -90,15 +90,48 @@ final class OpenCodeTests: XCTestCase {
         // Other providers keep the relay's fixed levels even when the feature is advertised.
         let other = SessionDetailsPresentation.settings(["agent": "dsh", "model": "x/y", "model_options": [["id": "x/y", "effort_options": ["high", "default"]]]])
         XCTAssertEqual(other.effortOptions("x/y", effortFeature: true).map(\.value), ["", "high"])
-        // Any native variant token is a valid request; the fresh inspection decides whether it is offered.
-        XCTAssertNoThrow(try SessionActionPolicies.arguments("settings", ["model": "fixture/local", "effort": "thinking"]))
-        XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["model": "fixture/local", "effort": "deep thinking"]))
+        XCTAssertEqual(settings.effortLabel("thinking", model: "fixture/local"), "Deep thinking")
+        XCTAssertNil(codex.effortLabel("medium", model: "gpt"), "unlabeled efforts keep today's text")
+        // Switching model keeps the effort only when the new model offers it through this relay and computer.
+        XCTAssertEqual(settings.keptEffort("thinking", model: "fixture/local", effortFeature: true), "thinking")
+        XCTAssertEqual(settings.keptEffort("thinking", model: "fixture/local", effortFeature: false), "", "an older relay resets a native variant")
+        XCTAssertEqual(settings.keptEffort("low", model: "fixture/plain", effortFeature: true), "")
+        XCTAssertEqual(settings.keptEffort("low", model: "fixture/local", effortFeature: false), "low")
+        // Variant lists are bounded like the launch catalog.
+        let many = SessionDetailsPresentation.settings(["agent": "opencode", "model_options": [["id": "m/x", "effort_options": .array((0..<20).map { .string("v\($0)") })]]])
+        XCTAssertEqual(many.effortOptions("m/x", effortFeature: true).count, 17)
+        // The fresh inspection decides whether a variant is offered for the chosen model.
         XCTAssertEqual(SessionActionPolicies.inspectReason(target, "settings", ["model": "fixture/local", "effort": "thinking"], raw), "")
         XCTAssertEqual(SessionActionPolicies.inspectReason(target, "settings", ["model": "fixture/local", "effort": "high"], raw),
                        "The selected effort is unavailable for this model.")
         XCTAssertEqual(SessionActionPolicies.inspectReason(target, "settings", ["model": "fixture/plain", "effort": "low"], raw),
                        "The selected effort is unavailable for this model.")
         XCTAssertEqual(SessionActionPolicies.inspectReason(target, "settings", ["model": "fixture/plain", "effort": ""], raw), "")
+    }
+
+    func testSettingsEffortVariantsNeedOpenCodeAndBothFeatures() {
+        let feature: Set<String> = ["inspect_after", "opencode_launch_effort"]
+        let open = SessionActionPolicies.effortVariants(agent: "opencode", relay: feature, computer: feature)
+        XCTAssertTrue(open)
+        // OpenCode with an updated relay and connector: the native variant is a valid request; inspection decides whether it is offered.
+        XCTAssertNoThrow(try SessionActionPolicies.arguments("settings", ["model": "fixture/local", "effort": "thinking"], effortVariants: open))
+        XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["model": "fixture/local", "effort": "deep thinking"], effortVariants: open))
+        // OpenCode behind an older relay or connector: refused here with a clear reason.
+        let older: Set<String> = ["inspect_after"]
+        let hops: [(Set<String>?, Set<String>?)] = [(older, feature), (feature, older), (nil, feature)]
+        for (relay, computer) in hops {
+            let variants = SessionActionPolicies.effortVariants(agent: "opencode", relay: relay, computer: computer)
+            XCTAssertFalse(variants)
+            XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["model": "fixture/local", "effort": "thinking"], effortVariants: variants)) { error in
+                XCTAssertEqual((error as? ZerusError)?.message, SessionActionPolicies.effortUpdateRequired)
+            }
+        }
+        // Other agents keep the relay's fixed levels even when the feature is advertised.
+        let codex = SessionActionPolicies.effortVariants(agent: "codex", relay: feature, computer: feature)
+        XCTAssertFalse(codex)
+        XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["model": "gpt", "effort": "turbo"], effortVariants: codex))
+        XCTAssertNoThrow(try SessionActionPolicies.arguments("settings", ["model": "gpt", "effort": "high"], effortVariants: codex))
+        XCTAssertNoThrow(try SessionActionPolicies.arguments("settings", ["model": "fixture/local", "effort": "low"]))
     }
 
     // MARK: Queued messages
@@ -258,13 +291,15 @@ final class OpenCodeTests: XCTestCase {
         XCTAssertEqual(shown.unavailableReason, "Answer this form in OpenCode")
         XCTAssertFalse(QuestionPolicies.showsSubmit(shown))
         XCTAssertTrue(QuestionPolicies.shown(shown))
-        // A card without items that claims to be answerable, or gives no reason, is still not shown.
+        // Without a reason it still shows, with the card's fallback text; only an "answerable" card without items is hidden.
+        var silent = cleared.object!
+        silent["unavailable_reason"] = nil
+        let fallback = try XCTUnwrap(QuestionPolicies.queue(NativeEvents.questions(["pending_questions": [.object(silent)]]), target, chosen: "").selected)
+        XCTAssertEqual(fallback.unavailableReason, "")
+        XCTAssertFalse(QuestionPolicies.showsSubmit(fallback))
         var answerable = cleared.object!
         answerable["can_answer"] = true
         XCTAssertNil(QuestionPolicies.queue(NativeEvents.questions(["pending_questions": [.object(answerable)]]), target, chosen: "").selected)
-        var silent = cleared.object!
-        silent["unavailable_reason"] = nil
-        XCTAssertNil(QuestionPolicies.queue(NativeEvents.questions(["pending_questions": [.object(silent)]]), target, chosen: "").selected)
     }
 
     func testFormItemLimitsApplyOnlyWhenReported() {

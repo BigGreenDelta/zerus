@@ -109,7 +109,8 @@ struct NativeSettingsSheet: View {
                     Text("Settings apply to \(target.session).").font(.footnote).foregroundStyle(Theme.muted)
                     if !snapshot.pendingId.isEmpty {
                         let pending = snapshot.models.first { $0.id == snapshot.pendingModel }?.label ?? snapshot.pendingModel
-                        Text("Pending: \(pending) / \(ActionText.effort(snapshot.pendingEffort))").font(.footnote)
+                        let effort = snapshot.effortLabel(snapshot.pendingEffort, model: snapshot.pendingModel) ?? ActionText.effort(snapshot.pendingEffort)
+                        Text("Pending: \(pending) / \(effort)").font(.footnote)
                     }
                 }
                 if effortPage {
@@ -135,7 +136,7 @@ struct NativeSettingsSheet: View {
                         ForEach(snapshot.models, id: \.id) { option in
                             row(option.label, selected: selectedModel == option.id) {
                                 selectedModel = option.id
-                                if !option.efforts.contains(selectedEffort) { selectedEffort = "" }
+                                selectedEffort = snapshot.keptEffort(selectedEffort, model: option.id, effortFeature: effortFeature)
                             }
                         }
                     }

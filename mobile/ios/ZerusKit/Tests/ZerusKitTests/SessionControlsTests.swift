@@ -57,9 +57,7 @@ final class SessionActionTests: XCTestCase {
         XCTAssertThrowsError(try SessionActionPolicies.arguments("send_now", ["queue_id": "../other"]))
         XCTAssertThrowsError(try SessionActionPolicies.arguments("rename", ["new_name": "bad\nname"]))
         XCTAssertThrowsError(try SessionActionPolicies.arguments("fork", ["tag": "a/b"]))
-        // Native variants are open-ended (OpenCode); malformed tokens are still refused before the inspection check.
-        XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["effort": "turbo boost"]))
-        XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["effort": "a/b"]))
+        XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["effort": "turbo"]))
         XCTAssertNoThrow(try SessionActionPolicies.arguments("settings", ["model": "native-model", "effort": "high"]))
         XCTAssertThrowsError(try SessionActionPolicies.arguments("terminal_input", ["terminal_binding_id": "b", "key": "F13"]))
         XCTAssertNoThrow(try SessionActionPolicies.arguments("terminal_input", ["terminal_binding_id": "b", "text": "ls", "enter": true]))

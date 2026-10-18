@@ -94,6 +94,18 @@ public struct NativeSettings: Hashable, Sendable {
         let offered = EffortOption.options(choice?.efforts ?? efforts, labels: choice?.effortLabels ?? [])
         return [EffortOption(value: "", label: EffortOption.text(""))] + offered.filter { open || SessionActionPolicies.efforts.contains($0.value) }
     }
+
+    /// The selected effort after choosing `model`: kept only when that model offers it here, else the native default.
+    public func keptEffort(_ effort: String, model: String, effortFeature: Bool) -> String {
+        effortOptions(model, effortFeature: effortFeature).contains { $0.value == effort } ? effort : ""
+    }
+
+    /// The native name of `effort` for `model` (OpenCode `effort_labels`), or nil when it has none.
+    public func effortLabel(_ effort: String, model: String) -> String? {
+        guard !effort.isEmpty, let choice = models.first(where: { $0.id == model }), choice.effortLabels.count == choice.efforts.count,
+              let index = choice.efforts.firstIndex(of: effort), LaunchPresentation.usableLabel(choice.effortLabels[index]) else { return nil }
+        return choice.effortLabels[index]
+    }
 }
 
 public enum SessionDetailsPresentation {
