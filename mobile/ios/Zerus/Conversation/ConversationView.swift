@@ -23,6 +23,8 @@ struct ConversationView: View {
     @State private var notice = ""
     @State private var visible: [String] = []
     @State private var historyProgress = false
+    /// The conversation whose opening reads have settled; until then its first refresh shows at once.
+    @State private var openedTarget = ""
     @State private var stopRequest = false
     @State private var details = false
     @State private var terminal = false
@@ -54,7 +56,10 @@ struct ConversationView: View {
             : (model.historyTruncated ? "Showing recent activity. Older messages may be outside the available history." : "")
         let loadStatus = ConversationLoadPresentation.status(hasContent: !events.isEmpty || !questions.isEmpty, detailLoading: model.detailBusy,
                                                              detailProgress: model.detailProgress, historyLoading: model.olderLoading,
-                                                             historyProgress: historyProgress, demo: app.demo, resolved: raw != nil)
+                                                             historyProgress: historyProgress, demo: app.demo, resolved: raw != nil,
+                                                             opening: openedTarget != target.key)
+        // The opening refresh uses the progress bar, so no status row moves cached messages.
+        let openingProgress = openedTarget != target.key && loadStatus?.initial == false && loadStatus?.spinner == true
         let loading = loadStatus?.initial == true
         let offered = Set(questions.filter { QuestionPolicies.shown($0) && QuestionPolicies.submitted($0, target) == nil }.map(\.id)).count
         let keys = Self.keys(events: events, questions: questions, warning: warning, bounded: bounded, unreadBoundary: unreadBoundary, loading: loading)
@@ -66,9 +71,11 @@ struct ConversationView: View {
                 .progressViewStyle(.linear)
                 .tint(Theme.mint)
                 .frame(height: 3)
-                .opacity(!app.demo && (model.detailProgress || historyProgress) ? 1 : 0)
+                .opacity(!app.demo && (model.detailProgress || historyProgress || openingProgress) ? 1 : 0)
+                .accessibilityHidden(loadStatus?.initial != false || loadStatus?.spinner != true)
+                .accessibilityLabel(loadStatus?.text ?? "")
             SessionHeaderTools(session: session, details: $details, search: $searching, terminal: $terminal)
-            statusStrip(loadStatus: loadStatus, unread: unread, offered: offered, questions: questions, target: target)
+            statusStrip(loadStatus: openingProgress ? nil : loadStatus, unread: unread, offered: offered, questions: questions, target: target)
             if !notice.isEmpty {
                 HStack {
                     Text(notice).font(.footnote).foregroundStyle(Theme.amber)
@@ -193,6 +200,10 @@ struct ConversationView: View {
             #endif
         }
         .onChange(of: target.key) { display = display.forTarget(target.key) }
+        .task(id: OpeningKey(target: target.key, settled: model.activityVerified && model.readPositionReady && !model.detailBusy && !model.olderLoading)) {
+            // The inspection and canonical history can finish in either order; later polls keep the delayed gate.
+            if model.activityVerified && model.readPositionReady && !model.detailBusy && !model.olderLoading { openedTarget = target.key }
+        }
         .onChange(of: ContentSignature(revision: model.revision, own: model.ownSendId(target), verified: model.activityVerified,
                                        boundary: unreadBoundary, ready: readReady, newer: model.hasNewer, questions: questions.count)) {
             applyContent(target: target, keys: keys, events: events, questions: questions, unreadBoundary: unreadBoundary, readReady: readReady)
@@ -463,6 +474,11 @@ private struct ContentSignature: Equatable {
     let ready: Bool
     let newer: Bool
     let questions: Int
+}
+
+private struct OpeningKey: Equatable {
+    let target: String
+    let settled: Bool
 }
 
 private struct VisibilityKey: Equatable {
