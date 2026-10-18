@@ -298,15 +298,30 @@ delivery. The channel is only another transport.
   and the screen remains. A later identical call is never adopted.
 - Before and after the claim, the screen is matched against the record that
   was just checked.
+- The card always discloses the whole bound request (`request_body`): every
+  field of a Bash input, or the whole input of another tool. It never shows
+  another request's panel as the operation the hook grants.
 - The card's options:
-  - With a complete matching panel, it lists Claude's options verbatim, and
-    `panel_verified` is true.
-  - Otherwise it shows the whole request with Yes and No.
+  - Claude's options are listed verbatim, and `panel_verified` is true, only
+    when a complete panel proves the exact operation (`proves`). That means the
+    main agent's "Bash command" title, the full command and description, and no
+    other input field.
+  - The legacy file-name or host match is not proof. A Read of another file
+    with the same name can be queued in front, shown as "1 of 2" while the hook
+    waits for the second.
+  - Any other complete panel is left to the screen path, which acts on what it
+    shows.
+  - A clipped or unreadable panel gives one-time Yes and No.
   - Its free-text field, "Tell Claude what to do instead", maps to deny with
     the message.
-  - Broader options always go through the verified screen.
-- Automatic approvals accept `claude_hook` only with `panel_verified`. This is
-  the same one-time grant as on the screen path.
+  - Broader options, and the keys after an unclaimed offer, use only a proven
+    panel.
+- A visible safety warning is added only when it belongs to this request: the
+  panel proves it, or the visible command rows of a clipped panel are part of
+  this command.
+- Automatic approvals accept `claude_hook` only with `panel_verified`, so only
+  for a proven Bash panel. This is the same one-time grant as on the screen
+  path.
 - Children are not answered through the channel. In Claude 2.1.296 they run in
   the background, their requests appear only in the agents view, and switching
   that view terminates the waiting hook. Claude then repeats `PreToolUse` and

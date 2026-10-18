@@ -294,27 +294,63 @@ fn request_body(request:&Value)->Option<String> {
 
 const FEEDBACK:&str="Tell Claude what to do instead";
 
+/// Whether a complete native panel shows the whole operation that the hook
+/// grants. The legacy match accepts a file name or host, so it can be another
+/// request with the same name, queued in front of this one. Only a Bash panel
+/// can show it all: the main agent's own title, the full command, its
+/// description, and no other input field.
+fn proves(request:&Value,panel:&Panel)->bool {
+    let input=&request["tool_input"];
+    request["tool_name"]=="Bash"&&panel.title=="Bash command"
+        &&input.as_object().is_some_and(|fields|fields.keys().all(|key|key=="command"||key=="description"))
+        &&matches(request,panel)
+        &&compact(&panel.body.join("\n")).contains(&compact(string(input,"description")))
+}
+
+/// The warning of a visible native safety panel, when it belongs to this Bash
+/// request: a panel that `proves` it, or a clipped one whose visible command
+/// rows are part of this request's command. Another request's warning is never
+/// shown as this one's.
+fn attributed_warning(request:&Value,screen:&str,proven:bool)->Option<Panel> {
+    if request["tool_name"]!="Bash" {return None;}
+    let panel=safety_panel(screen)?;
+    if proven {return Some(panel);}
+    let fence=panel.body.iter().position(|row|rule(row,'╌'))?;
+    let shown=compact(&panel.body[..fence].join(""));
+    (!shown.is_empty()&&compact(string(&request["tool_input"],"command")).contains(&shown)).then_some(panel)
+}
+
 /// The card for the pending main-agent request while Claude's permission hook
 /// waits for it (`identity`). The hook gives the decision to the bound tool use
-/// itself, so the screen need only prove that Claude still waits. A complete
-/// panel of this request adds its native options; one reaching beyond this
-/// request goes through the verified screen. None when the screen proves
-/// nothing, or when a child's request may be the one shown (`channel::shown`).
+/// itself, so the card always shows that whole request. Only a panel that
+/// `proves` the same operation adds Claude's options; one reaching beyond this
+/// request goes through that verified panel. A complete panel that proves less
+/// is left to the screen path, which acts on what it shows. A clipped one gives
+/// a one-time Yes or No. None when the screen proves nothing, or when a
+/// child's request may be the one shown (`channel::shown`).
 fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value> {
     let screen=screen?;
     let request=request(record)?;
     if !eligible(record)||!channel::shown(record,screen) {return None;}
-    let native=parse(screen).filter(|panel|matches(request,panel));
+    let complete=parse(screen);
+    if complete.as_ref().is_some_and(|panel|!proves(request,panel)) {return None;}
+    let native=complete;
+    let warning=attributed_warning(request,screen,native.is_some());
     let tool=string(request,"tool_name");
-    let (question,body,options)=match &native {
-        Some(panel) => (panel.question.clone(),native_body(panel),native_options(panel)),
-        None => (format!("Claude asks to use {tool}"),with_warning(request_body(request)?,Some(screen)),
+    let mut body=request_body(request)?;
+    if let Some(warning)=&warning {
+        let text=warning.body.iter().map(|r|if rule(r,'╌'){""}else{r.as_str()}).collect::<Vec<_>>().join("\n");
+        body=format!("{body}\n\n{}",text.trim());
+    }
+    let (question,options)=match &native {
+        Some(panel) => (panel.question.clone(),native_options(panel)),
+        None => (format!("Claude asks to use {tool}"),
             vec![json!({"id":"1","label":"Yes","scope":"once"}),json!({"id":"2","label":"No","scope":"once"})]),
     };
-    // The visible warning is part of the review; its countdown is not.
+    // The shown warning is part of the review; its countdown is not.
     let hash=format!("{:x}",Sha256::digest(json!([identity["question_hash"],
         native.as_ref().map(|p|json!([p.title,identity_body(p),p.question,p.labels])),
-        native.is_none().then(||safety_panel(screen).map(|p|identity_body(&p))).flatten()]).to_string()));
+        warning.as_ref().map(identity_body)]).to_string()));
     let created=record["pending_approval_at"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
     Some(json!({"question_id":identity["question_id"],"question_hash":hash,"tool_call_id":identity["tool_call_id"],
         "agent_id":request["agent_id"],"child_request_id":"","run_id":record["run_id"],"conversation_id":record["conversation_id"],
@@ -995,11 +1031,89 @@ pub(super) fn reconcile(record:Value)->Value {
         assert_eq!(hash(clipped),hash(&clipped.replace("in 2:00,","in 1:59,")));
         assert_ne!(hash(clipped),hash(&clipped.replace("possibly-empty","possibly-wrong")));
     }
+    // Two Reads of the same file name in different folders: Claude shows the
+    // first ("1 of 2") while the hook waits for the second (Claude 2.1.296).
+    fn read_panel(path:&str)->String {
+        format!("────────────────────────────────────────\n Read file                                   1 of 2\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Read({path})\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, allow reading from {} during this session\n   3. No\n\n Esc to cancel · Tab to amend\n",
+            Path::new(path).parent().unwrap().display())
+    }
+    #[test] fn a_hook_never_grants_one_request_under_another_requests_panel() {
+        let (a,b)=("/work/outsideA/notes.txt","/work/outsideB/notes.txt");
+        let r=hooked("Read",json!({"file_path":b}));
+        let identity=channel::identity(&r).unwrap();
+        let shown_a=read_panel(a);
+        // The legacy match accepts A's panel for B by file name.
+        assert!(matches(&r["pending_approval"],&parse(&shown_a).unwrap()));
+        assert!(channel_card(&r,Some(&shown_a),&identity).is_none(),"no hook card under A's panel");
+        // The screen path answers the panel it shows, with its own keys.
+        let screen=card(&r,&shown_a);
+        assert_eq!(screen["answer_transport"],"claude_tui");
+        assert!(string(&screen["questions"][0],"body").contains(a));
+        // Even B's own complete Read panel proves only what Read shows; the hook
+        // card appears only for a panel the screen cannot answer, with B in full.
+        assert!(channel_card(&r,Some(&read_panel(b)),&identity).is_none());
+        let clipped=read_panel(a).split_once(" Read file").unwrap().1.split_once("\n").unwrap().1.split_once("\n").unwrap().1.to_owned();
+        assert!(parse(&clipped).is_none());
+        let q=channel_card(&r,Some(&clipped),&identity).unwrap();
+        let body=string(&q["questions"][0],"body");
+        assert!(body.contains(b)&&!body.contains(a),"{body}");
+        assert_eq!((q["panel_verified"].clone(),q["tool_call_id"].clone()),(json!(false),json!("toolu_one")));
+        assert_eq!(options(&q),[("Yes".into(),"once".into()),("No".into(),"once".into())],"no broader option of another request");
+        assert!(channel_snapshot(&r,&clipped).is_none(),"no keys fallback without a proven panel");
+    }
+    #[test] fn only_the_whole_bash_operation_proves_a_panel() {
+        let base=json!({"command":"printf hi > out.txt","description":"Write \"hi\" into out.txt without a trailing newline"});
+        let r=hooked("Bash",base.clone());
+        assert!(proves(&r["pending_approval"],&parse(BASH).unwrap()));
+        // The same command with another field the panel does not show.
+        for (key,value) in [("dangerouslyDisableSandbox",json!(true)),("run_in_background",json!(true)),("timeout",json!(600000))] {
+            let mut input=base.clone();input[key]=value.clone();
+            let r=hooked("Bash",input);
+            assert!(!proves(&r["pending_approval"],&parse(BASH).unwrap()),"{key}");
+            let identity=channel::identity(&r).unwrap();
+            assert!(channel_card(&r,Some(BASH),&identity).is_none(),"{key}: left to the screen path");
+            let clipped=BASH.split_once(" Bash command\n").unwrap().1;
+            let q=channel_card(&r,Some(clipped),&identity).unwrap();
+            assert!(string(&q["questions"][0],"body").contains(&format!("\"{key}\": {value}")),"{key}: disclosed");
+            assert_eq!(q["panel_verified"],false);
+        }
+        // Another description, or a child's panel with the same command.
+        let mut other=base.clone();other["description"]=json!("Something else");
+        assert!(!proves(&hooked("Bash",other)["pending_approval"],&parse(BASH).unwrap()));
+        let child_panel=BASH.replace(" Bash command\n"," Bash command · from the \"fixture-checks\" workflow\n");
+        assert!(!proves(&r["pending_approval"],&parse(&child_panel).unwrap()));
+    }
+    #[test] fn a_fetch_of_the_same_host_is_not_the_same_operation() {
+        let r=hooked("WebFetch",json!({"url":"https://example.com/private/report","prompt":"title?"}));
+        let identity=channel::identity(&r).unwrap();
+        assert!(matches(&r["pending_approval"],&parse(FETCH).unwrap()),"the legacy match checks the host only");
+        assert!(channel_card(&r,Some(FETCH),&identity).is_none());
+        let clipped=FETCH.split_once(" Fetch\n").unwrap().1;
+        let q=channel_card(&r,Some(clipped),&identity).unwrap();
+        assert!(string(&q["questions"][0],"body").contains("https://example.com/private/report"));
+        assert_eq!((q["panel_verified"].clone(),options(&q).len()),(json!(false),2));
+    }
+    #[test] fn a_warning_is_shown_only_for_the_command_it_belongs_to() {
+        let command="T=$(pwd); test \"$T\" = /workspace/example && rm -f $T/*.jsonl $T/*.port";
+        let clipped=&SAFETY[SAFETY.find(" │ T=$(pwd)").unwrap()..];
+        let own=hooked("Bash",json!({"command":command}));
+        let q=channel_card(&own,Some(clipped),&channel::identity(&own).unwrap()).unwrap();
+        assert!(string(&q["questions"][0],"body").contains("Dangerous rm operation"));
+        let other=hooked("Bash",json!({"command":"rm -f build/*.o"}));
+        let q=channel_card(&other,Some(clipped),&channel::identity(&other).unwrap()).unwrap();
+        let body=string(&q["questions"][0],"body");
+        assert!(body.starts_with("Bash\n\nrm -f build/*.o")&&!body.contains("Dangerous rm operation"),"{body}");
+        let only_warning=&clipped[clipped.find("╌").unwrap()..];
+        assert!(attributed_warning(&own["pending_approval"],only_warning,false).is_none(),"no visible command, no attribution");
+    }
+
     #[test] fn waiting_hook_card_keeps_broader_options_behind_the_screen() {
         let r=hooked("Bash",json!({"command":"printf hi > out.txt","description":"Write \"hi\" into out.txt without a trailing newline"}));
         let q=channel_card(&r,Some(BASH),&channel::identity(&r).unwrap()).unwrap();
         assert_eq!(options(&q),options(&card(&r,BASH)));
-        assert_eq!(q["questions"][0]["body"],card(&r,BASH)["questions"][0]["body"]);
+        assert_eq!(q["panel_verified"],true);
+        assert_eq!(q["questions"][0]["body"],"Bash\n\nprintf hi > out.txt\n\nWrite \"hi\" into out.txt without a trailing newline",
+            "the hook's request itself, in full");
         // Every field of a non-Bash request is shown when its panel is not.
         let write=hooked("Write",json!({"file_path":"/work/project/new.txt","content":"secret\nline"}));
         let body=request_body(&write["pending_approval"]).unwrap();

@@ -167,6 +167,12 @@ class NativeClaudeApprovalChannel(unittest.TestCase):
                         + ('T=$(pwd); test "$T" = ' + shlex.quote(str(work)) + ' && rm -f $T/*.jsonl $T/*.port && ' if safety else '')
                         + ('sleep 6; ' if '_terminal_' in name else '') + 'printf approved > approved.txt')
         self.tool_input = dict(command=self.command, description='Create a fixture file after approval')
+        # Two Reads of one file name in different folders, outside the project.
+        self.reads = '_two_reads_' in name
+        self.target_A, self.target_B = self.root / 'outsideA/notes.txt', self.root / 'outsideB/notes.txt'
+        if self.reads:
+            for path, text in [(self.target_A, 'SYNTHETIC_A_ONLY'), (self.target_B, 'SYNTHETIC_B_ONLY')]:
+                path.parent.mkdir(); path.write_text(text)
         (self.root / '.claude.json').write_text(json.dumps(dict(
             hasCompletedOnboarding=True, bypassPermissionsModeAccepted=True, theme='dark', hasSeenAutoDefaultNudge=True,
             customApiKeyResponses=dict(approved=['fixture-key'], rejected=[]),
@@ -181,7 +187,8 @@ class NativeClaudeApprovalChannel(unittest.TestCase):
         # The channel group hgs registers: every tool, a timeout for a person.
         hooks['PermissionRequest'].append(dict(hooks=[dict(type='command', command=program + 'answer-channel', timeout=86400)]))
         mode = 'bypassPermissions' if safety else 'default'
-        self.settings = json.dumps(dict(permissions=dict(defaultMode=mode), hooks=hooks))
+        permissions = dict(defaultMode=mode, **(dict(ask=['Read']) if self.reads else {}))
+        self.settings = json.dumps(dict(permissions=permissions, hooks=hooks))
         (self.root / '.claude/settings.json').write_text(self.settings)
         fixture = self; self.requests = []
         class Server(BaseHTTPRequestHandler):
@@ -189,11 +196,13 @@ class NativeClaudeApprovalChannel(unittest.TestCase):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or '{}')
                 fixture.requests.append(body)
-                asks = any(t.get('name') == 'Bash' for t in body.get('tools', []))
+                asks = any(t.get('name') == ('Read' if fixture.reads else 'Bash') for t in body.get('tools', []))
                 answered = any(isinstance(m.get('content'), list) and any(b.get('type') == 'tool_result' for b in m['content'])
                                for m in body.get('messages', []))
-                blocks = ([dict(type='tool_use', id='toolu_native_channel', name='Bash', input=fixture.tool_input)]
-                          if asks and not answered else [dict(type='text', text='Fixture complete.')])
+                calls = ([dict(type='tool_use', id='toolu_read_' + key, name='Read', input=dict(file_path=str(path)))
+                          for key, path in [('A', fixture.target_A), ('B', fixture.target_B)]] if fixture.reads
+                         else [dict(type='tool_use', id='toolu_native_channel', name='Bash', input=fixture.tool_input)])
+                blocks = calls if asks and not answered else [dict(type='text', text='Fixture complete.')]
                 tool = blocks[0]['type'] == 'tool_use'
                 message = dict(id='msg_fixture', type='message', role='assistant', model=body.get('model', 'claude-sonnet-4-6'), content=blocks,
                                stop_reason='tool_use' if tool else 'end_turn', stop_sequence=None, usage=dict(input_tokens=100, output_tokens=30))
@@ -441,6 +450,34 @@ class NativeClaudeApprovalChannel(unittest.TestCase):
 
     def test_terminal_of_another_run_never_takes_an_offered_decision(self):
         self.refused_offer(lambda: self.tmux('set-option', '-t', '=' + self.name + ':', '@hgs_run', str(uuid.uuid4())))
+
+    def results(self):
+        # Claude records each tool result in its transcript once the tool ran.
+        return [part['tool_use_id'] for row in native.records(self.transcript) if row.get('type') == 'user'
+                for part in (row.get('message', {}).get('content') or []) if isinstance(part, dict) and part.get('type') == 'tool_result']
+
+    def test_two_reads_of_one_name_never_grant_the_request_not_shown(self):
+        # Claude shows the first Read ("1 of 2") while hgs records the latest
+        # request, which may be the other one.
+        cards = self.wait_for(lambda: [c for c in self.inspect()['pending_questions'] if c['can_answer']])
+        bound = json.loads(self.record_path.read_text())['pending_approval']['tool_input']['file_path']
+        other = str(self.target_A) if bound == str(self.target_B) else str(self.target_B)
+        for card in cards:
+            body = card['questions'][0]['body']
+            if card['answer_transport'] == 'claude_hook':
+                self.assertIn(bound, body); self.assertNotIn(other, body)
+                self.assertFalse(card['panel_verified'], 'no Read panel proves the whole request')
+        card = cards[0]
+        body = card['questions'][0]['body']
+        displayed = [key for key, path in [('A', self.target_A), ('B', self.target_B)] if str(path) in body]
+        self.assertEqual(len(displayed), 1, body)
+        # The screen path may report its queued panel as uncertain; either way
+        # the decision must act on the request the card showed.
+        result = subprocess.run([str(transport.HGS), 'answer', self.name, '--json'], input=json.dumps(self.payload(card, 'Yes')),
+                                text=True, capture_output=True, env=self.env, timeout=60)
+        self.assertTrue(result.returncode == 0 or 'delivery uncertain' in result.stderr, result.stderr)
+        first = self.wait_for(lambda: self.results())[0]
+        self.assertEqual(first, 'toolu_read_' + displayed[0], 'the decision acts on the request the card shows')
 
     def test_claimed_decision_is_never_sent_again_through_any_transport(self):
         card = self.channel_card()
