@@ -450,6 +450,13 @@ private:
     ActivityView *m_activityView = nullptr;
     class ProcessView *m_processes = nullptr;
     QWidget *m_nativeSignIn = nullptr;
+    // A stopped OpenCode service: started only by this explicit action.
+    QWidget *m_openCodeService = nullptr;
+    QLabel *m_openCodeServiceText = nullptr;
+    QPushButton *m_openCodeServiceStart = nullptr;
+    quint64 m_openCodeStartRequest = 0;
+    QString m_openCodeStartMachine;
+    void startOpenCodeService();
     ActivityView *m_subagentView = nullptr;
     QStackedWidget *m_activityStack = nullptr;
     QLabel *m_subagentTitle = nullptr, *m_subagentHint = nullptr;

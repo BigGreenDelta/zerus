@@ -60,7 +60,7 @@ private slots:
     }
     void init() {
         QSettings().clear();
-        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started"})flag(name,false);
+        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids"})flag(name,false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -89,6 +89,7 @@ def catalog():
          {'id':'fixture/other','value':'fixture/other','label':'Other fixture','provider':'fixture','provider_label':'fixture','free':False,
           'effort_options':['high','max','','bad value','x'*80,'max'],'effort_labels':['High','Maximum','','','','']},
          {'id':'fixture/many','value':'fixture/many','label':'Many fixture','provider':'fixture','provider_label':'fixture','free':False,'effort_options':many,'effort_labels':many}]
+ if (root/'opencode-ids').exists():models.append(json.loads((root/'opencode-ids').read_text()))
  return {'model_options':models,'settings_model':'fixture/local','catalog_state':'not_running' if stopped else 'ready',
          'catalog_reason':'OpenCode is not running on '+(host or 'pc') if stopped else '','catalog_at':1791018000}
 if a[:2]==['account','start']:
@@ -389,6 +390,28 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         // Other agents never offer it.
         flag("opencode-stopped");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
         QTRY_VERIFY(service->isVisible());choices(dialog)->setCurrentRow(row(dialog,"work"));QVERIFY(!service->isVisible());QVERIFY(!reason->isVisible());
+    }
+    // The shared variant shape rule (tests/fixtures/opencode-effort-ids.json).
+    void openCodeEffortIdsFollowSharedRule() {
+        QFile file(QStringLiteral(ZERUS_OPENCODE_EFFORT_IDS));QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto fixture=QJsonDocument::fromJson(file.readAll()).object();
+        const auto accept=fixture.value("accept").toArray(),reject=fixture.value("reject").toArray();QVERIFY(accept.size()>=10);QVERIFY(reject.size()>=13);
+        QJsonArray ids;for(const auto &id:reject)ids.append(id);for(const auto &id:accept)ids.append(id);
+        QFile model(m_fixture.filePath("opencode-ids"));QVERIFY(model.open(QIODevice::WriteOnly));
+        model.write(QJsonDocument(QJsonObject{{"id","fixture/ids"},{"value","fixture/ids"},{"label","Ids fixture"},{"provider","fixture"},
+            {"effort_options",ids},{"effort_labels",ids}}).toJson(QJsonDocument::Compact));model.close();
+        flag("opencode");flag("opencode-models");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *models=dialog.findChild<QComboBox *>("launchModel"),*effort=dialog.findChild<QComboBox *>("launchEffort");
+        QTRY_VERIFY(models->findData("fixture/ids")>=0);models->setCurrentIndex(models->findData("fixture/ids"));
+        QStringList offered;for(int i=0;i<effort->count();++i)offered<<effort->itemData(i).toString();
+        QStringList expected{QString()};for(const auto &id:accept)expected<<id.toString();
+        QCOMPARE(offered,expected);
+        for(const auto &id:reject)QVERIFY2(id.toString().isEmpty()||effort->findData(id.toString())<0,qPrintable(id.toString()));
+        // An accepted id with a colon and a multibyte one launch as given.
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        effort->setCurrentIndex(effort->findData("think:deep"));QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        start->click();QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][9].toString(),QString("think:deep"));
     }
     // As in Accounts, an offline computer cannot be asked to start its service.
     void openCodeStartNeedsOnlineComputer() {

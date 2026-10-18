@@ -3,8 +3,8 @@
 [Reference](reference.md) | [Local models](local-models.md)
 
 OpenCode owns its tools, permissions and conversations. Zerus connects to
-OpenCode 2's native HTTP API and presents that conversation in desktop Activity
-and on Android. The model provider is configured on the computer running
+OpenCode 2's native HTTP API and presents that conversation in desktop Activity,
+on Android and on iOS. The model provider is configured on the computer running
 OpenCode; the client and mobile relay do not run inference or receive provider
 credentials.
 
@@ -33,8 +33,10 @@ read, and only for a launch or the explicit **Start
 OpenCode** action (`hgs account start native-opencode`). Inspection never starts
 it. Without a registered live service, Zerus shows "OpenCode is not running on
 <computer>" and offers Start OpenCode; a registered service that does not answer
-shows "OpenCode is not responding" and is never restarted. You can also start it
-yourself with `opencode service start`.
+shows "OpenCode is not responding" and is never restarted. When OpenCode's
+background service is disabled, Zerus shows "The OpenCode background service is
+disabled on <computer>" and starts nothing. You can also start it yourself with
+`opencode service start`.
 
 Connect providers in a terminal on that computer with `opencode auth login`.
 `hgs account login native-opencode` does not run it; it prints that instruction.
@@ -112,7 +114,9 @@ The project directory remains on the agent computer.
 ## Controls and limits
 
 - **Send.** Messages sent while OpenCode is working queue. After Stop, queued
-  messages show "Not delivered" and can be removed, with confirmation.
+  messages show "Not delivered": they stay in OpenCode's queue, and OpenCode
+  may still deliver them when the session runs again unless you remove them
+  (with confirmation).
 - **Stop** interrupts the current turn.
 - **Questions.** Option, boolean and text fields are answered in Zerus; other
   forms show "Answer this form in OpenCode".

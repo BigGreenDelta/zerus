@@ -1872,8 +1872,13 @@ quint64 HgsClient::requestEffort(const QString &host, const QString &name, const
     timer->start(host.isEmpty() ? 20000 : 35000); process->start(); return request;
 }
 
-quint64 HgsClient::requestSettings(const QString &host, const QString &name, const QString &model, const QString &effort, const QString &run, const QString &conversation, const QString &expectedPendingId)
+quint64 HgsClient::requestSettings(const QString &host, const QString &name, const QString &model, const QString &effort, const QString &run, const QString &conversation, const QString &expectedPendingId, bool withoutTerminal)
 {
+    const auto check = [withoutTerminal](const QString &terminal, const QString &session) { return withoutTerminal ? session : terminal; };
+    const auto transferFailed = check(tr("Settings transfer failed. Check Terminal before retrying."), tr("Settings transfer failed. Check the session before retrying."));
+    const auto timedOut = check(tr("Settings change timed out. Check Terminal before retrying."), tr("Settings change timed out. Check the session before retrying."));
+    const auto unconfirmed = check(tr("Could not confirm session settings. Check Terminal before retrying."), tr("Could not confirm session settings. Check the session before retrying."));
+    const auto invalid = check(tr("Invalid settings acknowledgement. Check Terminal before retrying."), tr("Invalid settings acknowledgement. Check the session before retrying."));
     const auto request = ++m_settingsRequest;
     const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QJsonObject data{{"request_id", requestId}, {"expected_run_id", run}, {"expected_conversation_id", conversation}};
@@ -1888,28 +1893,28 @@ quint64 HgsClient::requestSettings(const QString &host, const QString &name, con
     const auto fail = [this, request, reported](const QString &error) {
         if (*reported) return; *reported = true; emit settingsFinished(request, false, {}, error);
     };
-    connect(process, &QProcess::started, process, [process, payload, fail] {
-        if (process->write(payload) != payload.size()) { fail(tr("Settings transfer failed. Check Terminal before retrying.")); process->kill(); }
+    connect(process, &QProcess::started, process, [process, payload, fail, transferFailed] {
+        if (process->write(payload) != payload.size()) { fail(transferFailed); process->kill(); }
         process->closeWriteChannel();
     });
-    connect(timer, &QTimer::timeout, process, [process, fail] {
-        fail(tr("Settings change timed out. Check Terminal before retrying.")); process->kill();
+    connect(timer, &QTimer::timeout, process, [process, fail, timedOut] {
+        fail(timedOut); process->kill();
     });
     connect(process, &QProcess::errorOccurred, process, [process, timer, fail](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) { timer->stop(); fail(process->errorString()); process->deleteLater(); }
     });
-    connect(process, &QProcess::finished, process, [this, process, timer, fail, reported, request, requestId, name, run, conversation, model, effort, host](int code, QProcess::ExitStatus status) {
+    connect(process, &QProcess::finished, process, [this, process, timer, fail, reported, request, requestId, name, run, conversation, model, effort, host, unconfirmed, invalid](int code, QProcess::ExitStatus status) {
         timer->stop();
         if (!*reported) {
             if (code || status != QProcess::NormalExit) {
                 const QString error = QString::fromUtf8(process->readAllStandardError()).trimmed().left(2000);
-                fail(error.isEmpty() ? tr("Could not confirm session settings. Check Terminal before retrying.") : error);
+                fail(error.isEmpty() ? unconfirmed : error);
             } else {
                 QJsonParseError error; const auto doc = QJsonDocument::fromJson(process->readAllStandardOutput(), &error); const auto receipt = doc.object();
                 if (error.error != QJsonParseError::NoError || (receipt.value("status") != "applied" && receipt.value("status") != "scheduled") || receipt.value("request_id") != requestId
                     || receipt.value("name") != name || receipt.value("run_id") != run || receipt.value("conversation_id") != conversation
                     || (!model.isEmpty() && receipt.value("model") != model) || (!effort.isEmpty() && receipt.value("effort") != effort))
-                    fail(tr("Invalid settings acknowledgement. Check Terminal before retrying."));
+                    fail(invalid);
                 else { *reported = true; emit settingsFinished(request, true, receipt, {}); emit sessionWriteDone(host); }
             }
         }

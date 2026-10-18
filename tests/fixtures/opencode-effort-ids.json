@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "description": "OpenCode effort (variant) ids every layer must treat alike: hgs catalog projection (src/state/opencode/catalog.rs safe_id with the 40-byte bound), Rust connector, relay, desktop, Android and iOS. An id is valid when it is non-empty, at most 40 UTF-8 bytes, and contains no whitespace, no control character and no '/'. Membership in the model's effort_options stays authoritative; this list only fixes the shape rule.",
+  "accept": [
+    "high",
+    "thinking-8k_v1.2",
+    "think:deep",
+    "x.y",
+    "v1+2",
+    "a,b",
+    "caf\u00e9",
+    "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "low\u2014deep"
+  ],
+  "reject": [
+    "",
+    "a b",
+    "a\tb",
+    "a\nb",
+    "a/b",
+    "/",
+    "a\u007fb",
+    "a\u0085b",
+    "a\u00a0b",
+    "a\u2003b",
+    "a\u0000b",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9a"
+  ]
+}

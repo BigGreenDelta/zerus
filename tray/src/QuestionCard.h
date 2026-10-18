@@ -75,6 +75,7 @@ private:
     struct Form {
         QString id;
         bool multi = false, allowOther = false, required = true;
+        int minItems = 0, maxItems = 0;   // OpenCode multiselect bounds; 0 is unbounded
         QHash<QString, QAbstractButton *> options;
         QAbstractButton *other = nullptr;
         QLineEdit *text = nullptr;

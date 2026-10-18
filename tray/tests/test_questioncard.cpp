@@ -154,6 +154,8 @@ private slots:
     void nativeCountdownPreservesScrollChoiceAndReview();
     void terminalOnlyChoicesDoNotPretendToAcceptAnswers();
     void unanswerableOpenCodeFormPointsToOpenCode();
+    void oversizedOpenCodeFormShowsReasonWithoutSubmit();
+    void openCodeFormDefaultsSeedOnlyWithoutSavedDraft();
     void claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes();
     void unreadableApprovalPointsToTerminal();
     void optionalQuestionsHaveExplicitSkipAndKeepDrafts();
@@ -521,6 +523,73 @@ void TestQuestionCard::unanswerableOpenCodeFormPointsToOpenCode()
     form.remove("answer_unavailable_reason"); form.remove("unavailable_reason"); form["question_hash"] = "form-hash-2";
     setQuestionReady(card, "opencode/session", form);
     QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), QString("Answer this request in Terminal."));
+}
+
+// hgs empties an OpenCode form whose text is too large to show; the card
+// still explains where to answer it and offers no Submit.
+void TestQuestionCard::oversizedOpenCodeFormShowsReasonWithoutSubmit()
+{
+    QuestionCard card; card.resize(700, 450); card.show();
+    QJsonObject form{{"question_id", "que_large"}, {"question_hash", "large-hash"}, {"run_id", "run"}, {"conversation_id", "ses_one"},
+        {"kind", "opencode_form"}, {"source", "opencode_native"}, {"answer_transport", "native_opencode"}, {"can_answer", false},
+        {"answerable", false}, {"questions", QJsonArray{}}, {"unavailable_reason", "Answer this form in OpenCode"}};
+    setQuestionReady(card, "opencode/session", form);
+    QVERIFY(card.isVisible()); QVERIFY(submit(card)->isHidden());
+    QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), QString("Answer this form in OpenCode"));
+}
+
+// OpenCode form defaults seed a new answer; a saved draft for the same
+// question wins, even an intentionally empty text. Nothing is sent by itself.
+void TestQuestionCard::openCodeFormDefaultsSeedOnlyWithoutSavedDraft()
+{
+    const auto form = [](const QString &hash, const QString &source = "opencode_native") {
+        QJsonObject card{{"question_id", "que_defaults"}, {"question_hash", hash}, {"run_id", "run"}, {"conversation_id", "ses_one"},
+            {"kind", "opencode_form"}, {"source", source}, {"answer_transport", "native_opencode"}, {"can_answer", true}, {"answerable", true}};
+        card["questions"] = QJsonArray{
+            QJsonObject{{"id", "name"}, {"header", "Name"}, {"question", "Your name"}, {"multi_select", false}, {"required", true},
+                {"allow_other", true}, {"input_kind", "text"}, {"options", QJsonArray{}}, {"default_text", "Ada Lovelace"}, {"max_length", 3}},
+            QJsonObject{{"id", "confirm"}, {"header", "Confirm"}, {"question", "Proceed?"}, {"multi_select", false}, {"required", true},
+                {"allow_other", false}, {"input_kind", "choice"}, {"default_option_ids", QJsonArray{"yes"}},
+                {"options", QJsonArray{QJsonObject{{"id", "yes"}, {"label", "Yes"}}, QJsonObject{{"id", "no"}, {"label", "No"}}}}},
+            QJsonObject{{"id", "tags"}, {"header", "Tags"}, {"question", "Pick tags"}, {"multi_select", true}, {"allow_multiple", true},
+                {"required", true}, {"allow_other", false}, {"input_kind", "choice"}, {"default_option_ids", QJsonArray{"a", "c", "missing"}},
+                {"min_items", 1}, {"max_items", 2},
+                {"options", QJsonArray{QJsonObject{{"id", "a"}, {"label", "Alpha"}}, QJsonObject{{"id", "b"}, {"label", "Beta"}}, QJsonObject{{"id", "c"}, {"label", "Gamma"}}}}}};
+        return card;
+    };
+    const auto modes = [](QuestionCard &card) { QStringList texts; for (auto *label : card.findChildren<QLabel *>("questionMode")) texts << label->text(); return texts; };
+    {
+        QuestionCard card; QSignalSpy sent(&card, &QuestionCard::answerRequested);
+        setQuestionReady(card, "opencode\nsession", form("hash-one"));
+        QCOMPARE(text(card, "name")->text(), QString("Ada")); QCOMPARE(text(card, "name")->maxLength(), 3);
+        QVERIFY(option(card, "yes")->isChecked()); QVERIFY(!option(card, "no")->isChecked());
+        QVERIFY(option(card, "a")->isChecked()); QVERIFY(!option(card, "b")->isChecked()); QVERIFY(option(card, "c")->isChecked());
+        QVERIFY2(modes(card).contains("Select 1 to 2"), qPrintable(modes(card).join(" | ")));
+        QVERIFY(submit(card)->isEnabled()); QTest::qWait(50); QCOMPARE(sent.size(), 0);
+        // An intentionally cleared answer is a saved choice.
+        text(card, "name")->clear();
+    }
+    {
+        QuestionCard restored; setQuestionReady(restored, "opencode\nsession", form("hash-one"));
+        QCOMPARE(text(restored, "name")->text(), QString()); QVERIFY(option(restored, "yes")->isChecked());
+        // A changed question starts again from its defaults.
+        setQuestionReady(restored, "opencode\nsession", form("hash-two"));
+        QCOMPARE(text(restored, "name")->text(), QString("Ada")); QVERIFY(option(restored, "c")->isChecked());
+    }
+    // A card without defaults, and another source's card, start empty as before.
+    auto legacy = form("hash-three"); auto items = legacy["questions"].toArray();
+    for (int i = 0; i < items.size(); ++i) {
+        auto item = items[i].toObject();
+        for (const auto *field : {"default_text", "default_option_ids", "max_length", "min_items", "max_items"}) item.remove(field);
+        items[i] = item;
+    }
+    legacy["questions"] = items;
+    for (const auto &card : {legacy, form("hash-four", "hook")}) {
+        QuestionCard plain; setQuestionReady(plain, "opencode\nsession", card);
+        QVERIFY(text(plain, "name")->text().isEmpty()); QCOMPARE(text(plain, "name")->maxLength(), 4096);
+        for (const auto *id : {"yes", "no", "a", "b", "c"}) QVERIFY2(!option(plain, id)->isChecked(), id);
+        QVERIFY(!modes(plain).contains("Select 1 to 2"));
+    }
 }
 
 void TestQuestionCard::unreadableApprovalPointsToTerminal()

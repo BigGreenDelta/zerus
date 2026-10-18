@@ -11,6 +11,7 @@
 #include "WorkspaceList.h"
 #include "MachinePlatform.h"
 #include "LocalLaunchWarning.h"
+#include "OpenCodeEffort.h"
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QToolButton>
@@ -35,11 +36,6 @@ QLabel *plainLabel(const QString &text = {}) {auto *l=new QLabel(text);l->setTex
 // Each OpenCode model row keeps its validated variants for the effort choice.
 constexpr int EffortRole=Qt::UserRole+10,EffortLabelRole=Qt::UserRole+11;
 bool controlText(const QString &text) {return std::any_of(text.cbegin(),text.cend(),[](QChar c){return c.category()==QChar::Other_Control;});}
-// As hgs accepts an OpenCode variant: short, no spaces, controls or slashes.
-bool validEffort(const QString &effort) {
-    return !effort.isEmpty()&&effort.toUtf8().size()<=40&&!controlText(effort)&&!effort.contains('/')
-        &&std::none_of(effort.cbegin(),effort.cend(),[](QChar c){return c.isSpace();});
-}
 // Folders of the selected computer: drive and UNC paths on the local Windows
 // machine (D16), POSIX paths elsewhere.
 MachinePlatform::Style folderStyle(const FleetState &fleet,const QString &host) {
@@ -732,7 +728,7 @@ void NewSessionDialog::updateModels()
             const auto variants=option["effort_options"].toArray(),variantLabels=option["effort_labels"].toArray();
             for(int variant=0;variant<qMin<qsizetype>(64,variants.size())&&efforts.size()<16;++variant){
                 const auto effort=variants[variant].toString();
-                if(!validEffort(effort)||efforts.contains(effort))continue;
+                if(!OpenCodeEffort::valid(effort)||efforts.contains(effort))continue;
                 auto effortLabel=variantLabels.at(variant).toString();if(effortLabel.isEmpty()||effortLabel.size()>80||controlText(effortLabel))effortLabel=effort;
                 efforts<<effort;effortLabels<<effortLabel;
             }

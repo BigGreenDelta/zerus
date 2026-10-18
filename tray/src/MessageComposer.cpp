@@ -1,4 +1,5 @@
 #include "MessageComposer.h"
+#include "OpenCodeEffort.h"
 #include "AttachmentViewer.h"
 #include "ComposerToolbar.h"
 #include "ContentScale.h"
@@ -1124,13 +1125,19 @@ void MessageComposer::updateSettingsEfforts()
         const auto efforts = option.value("effort_options").toArray();
         for (qsizetype index = 0; index < efforts.size(); ++index) {
             const QString id = efforts[index].toString();
-            if (id.isEmpty() || (m_modelDefaultEffort && m_efforts->findData(id) >= 0)) continue;
+            if (id.isEmpty() || (m_modelDefaultEffort && (!OpenCodeEffort::valid(id) || m_efforts->findData(id) >= 0))) continue;
             auto label = m_modelDefaultEffort ? labels.at(index).toString().trimmed() : QString();
             if (label.size() > 80 || std::any_of(label.cbegin(), label.cend(), [](QChar c) { return c.category() == QChar::Other_Control; })) label.clear();
             m_efforts->addItem(label.isEmpty() ? id : label, id);
         }
         break;
     }
+    // As the model list keeps an unknown current model, the session's current
+    // variant stays offered for its own model: Apply without edits keeps it.
+    const QString sessionModel = m_pendingModel.isEmpty() ? m_model : m_pendingModel;
+    const QString sessionEffort = pending ? m_pendingEffort : m_effort;
+    if (m_modelDefaultEffort && OpenCodeEffort::valid(sessionEffort) && m_models->currentData().toString() == sessionModel
+        && m_efforts->findData(sessionEffort) < 0) m_efforts->addItem(sessionEffort, sessionEffort);
     if (m_efforts->count() == 0) m_efforts->addItem(tr("Provider default"), QString());
     const int selected = m_efforts->findData(preferred);
     m_efforts->setCurrentIndex(selected >= 0 ? selected : 0); updateSettingsApply();

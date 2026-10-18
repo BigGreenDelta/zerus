@@ -79,6 +79,7 @@ private slots:
     void settingsUseStdinAndPinnedIdentityReceipt();
     void settingsRejectMismatchedReceipt_data();
     void settingsRejectMismatchedReceipt();
+    void openCodeSettingsErrorsDoNotNameTerminal();
     void effortFailures_data();
     void effortFailures();
     void effortLateResponsesKeepRequestIdentity();
@@ -669,6 +670,27 @@ void TestHgsClient::settingsRejectMismatchedReceipt_data()
     for (const QString field : {"request_id", "name", "run_id", "conversation_id", "effort", "model", "status",
                                 "stale", "killed", "malformed", "array"})
         QTest::newRow(field.toUtf8()) << field;
+}
+
+// OpenCode model and effort changes have no Terminal to check.
+void TestHgsClient::openCodeSettingsErrorsDoNotNameTerminal()
+{
+    QTemporaryDir directory;const auto program=directory.filePath("hgs");
+    QVERIFY(FakeCli::install(program,"#!/usr/bin/env python3\nimport json,os,sys\np=json.load(sys.stdin)\n"
+        "mode=open(__file__+'.mode').read().strip()\n"
+        "if mode=='exit':sys.exit(3)\n"
+        "print(json.dumps({'status':'applied','request_id':'other'}))\n"));
+    HgsClient client(FakeCli::program(program));QSignalSpy finished(&client,&HgsClient::settingsFinished);
+    for(const auto *mode:{"exit","ack"}) {
+        QVERIFY(FakeCli::replace(program+".mode",mode));
+        for(const auto openCode:{true,false}) {
+            finished.clear();
+            client.requestSettings({},openCode?"opencode/project/local":"codex/project/local","fixture/local","high","run","conversation",{},openCode);
+            QTRY_COMPARE(finished.size(),1);QVERIFY(!finished[0][1].toBool());const auto error=finished[0][3].toString();
+            if(openCode)QVERIFY2(!error.contains("Terminal")&&error.contains("Check the session before retrying"),qPrintable(error));
+            else QVERIFY2(error.contains("Check Terminal"),qPrintable(error));
+        }
+    }
 }
 
 void TestHgsClient::settingsRejectMismatchedReceipt()

@@ -771,6 +771,25 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         auto *column = new ActivityWidth::ColumnLayout; page->addLayout(column); m_activityColumns.append(column); return column;
     };
     activityColumn(activityLayout)->addWidget(m_nativeSignIn);
+    m_openCodeService = new QWidget; m_openCodeService->setObjectName("openCodeServiceBanner");
+    auto *serviceLayout = new QVBoxLayout(m_openCodeService); serviceLayout->setContentsMargins(14, 12, 14, 12);
+    m_openCodeServiceText = new QLabel; m_openCodeServiceText->setWordWrap(true); m_openCodeServiceText->setTextFormat(Qt::PlainText);
+    m_openCodeServiceText->setObjectName("openCodeServiceReason"); serviceLayout->addWidget(m_openCodeServiceText);
+    m_openCodeServiceStart = new QPushButton; m_openCodeServiceStart->setObjectName("openCodeServiceStart");
+    m_openCodeServiceStart->setToolTip(tr("Start the shared OpenCode service on this computer. Zerus never stops it."));
+    serviceLayout->addWidget(m_openCodeServiceStart, 0, Qt::AlignLeft); m_openCodeService->hide();
+    connect(m_openCodeServiceStart, &QPushButton::clicked, this, &SessionsWindow::startOpenCodeService);
+    activityColumn(activityLayout)->addWidget(m_openCodeService);
+    connect(&m_client, &HgsClient::accountsReady, this, [this](quint64 id, const QString &, const QJsonObject &) {
+        if (!m_openCodeStartRequest || id != m_openCodeStartRequest) return;
+        m_openCodeStartRequest = 0; showNotice(tr("OpenCode started on %1.").arg(m_openCodeStartMachine));
+        emit refreshRequested(); renderDetails(); inspect();
+    });
+    connect(&m_client, &HgsClient::accountsFailed, this, [this](quint64 id, const QString &, const QString &error) {
+        if (!m_openCodeStartRequest || id != m_openCodeStartRequest) return;
+        m_openCodeStartRequest = 0; showNotice(tr("Could not start OpenCode on %1: %2").arg(m_openCodeStartMachine, error), true);
+        renderDetails();
+    });
     m_contextUsage=new SessionUsage::ContextButton;m_contextUsage->setObjectName("activityContext");
     activityLayout->addWidget(m_activityView, 1);
     auto *inputColumn = activityColumn(activityLayout); inputColumn->addWidget(m_question);
@@ -868,7 +887,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(!m_removeQueuedRequest||id!=m_removeQueuedRequest)return;
         m_removeQueuedRequest=0;m_removeQueuedMessage.clear();
         if(m_selectedKey==m_removeQueuedKey){showNotice(ok?tr("Queued message removed."):error,!ok);renderDetails();inspect();}
-        else if(!ok)showNotice(tr("Could not remove the queued message from %1: %2").arg(m_removeQueuedName,error),true);
+        else {if(!ok)showNotice(tr("Could not remove the queued message from %1: %2").arg(m_removeQueuedName,error),true);renderDetails();}
         emit refreshRequested();
     });
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &receipt,const QString &error) {
@@ -3385,9 +3404,22 @@ void SessionsWindow::renderDetails()
     m_nativeSignIn->setVisible(s.cmd == "dsh" && entry->online && m_details.value("auth_required").toBool() && s.runtimeState == "live");
     setWorkspaceStyle(m_nativeSignIn, QString("QWidget#nativeSignInBanner { background:%1; border:1px solid %2; border-radius:8px; } QLabel { color:%3; background:transparent; border:0; }")
         .arg(m_dark ? "#40371e" : "#fff0ba", m_dark ? "#927140" : "#c6a15f", m_dark ? "#ffda76" : "#392900"));
+    // hgs reports a stopped OpenCode service with exactly this reason; inspection
+    // never starts it, so the session offers the explicit start.
+    const auto serviceReason = m_details.value("inspection_reason").toString();
+    const bool serviceStopped = s.cmd == "opencode" && m_details.value("inspection_unavailable").toBool()
+        && serviceReason.startsWith(QStringLiteral("OpenCode is not running on "));
+    m_openCodeService->setVisible(serviceStopped);
+    m_openCodeServiceText->setText(serviceReason + (serviceReason.endsWith('.') ? QString() : QStringLiteral(".")));
+    m_openCodeServiceStart->setText(m_openCodeStartRequest ? tr("Starting OpenCode…") : tr("Start OpenCode on %1").arg(entry->machine));
+    m_openCodeServiceStart->setEnabled(serviceStopped && entry->online && !m_openCodeStartRequest);
+    setWorkspaceStyle(m_openCodeService, QString("QWidget#openCodeServiceBanner { background:%1; border:1px solid %2; border-radius:8px; } QLabel { color:%3; background:transparent; border:0; }")
+        .arg(m_dark ? "#40371e" : "#fff0ba", m_dark ? "#927140" : "#c6a15f", m_dark ? "#ffda76" : "#392900"));
     auto activityDetails = m_details;
     if (!entry->online || !m_inspectError.isEmpty() || s.state != "running") activityDetails["runtime_state"] = "unavailable";
     activityDetails["queue_sending"] = m_queueSendRequest && m_queueSendKey == m_selectedKey;
+    // One removal at a time: every Remove waits while one runs.
+    if (m_removeQueuedRequest) activityDetails["queued_removal_busy"] = true;
     if (m_removeQueuedRequest && m_removeQueuedKey == m_selectedKey) activityDetails["queued_removal"] = m_removeQueuedMessage;
     if (!entry->online || !m_inspectError.isEmpty()) { auto queue=activityDetails["input_queue"].toObject(); queue["can_send_now"]=false; activityDetails["input_queue"]=queue; }
     m_activityView->setTimeline(activityDetails, m_events, m_localMessages.value(m_selectedKey), s.prompt, s.tracked);
@@ -3620,7 +3652,7 @@ void SessionsWindow::changeModelSettings(const QString &key, const QString &mode
     m_settingsKey = key; m_settingsRun = m_details.value("run_id").toString();
     m_settingsConversation = m_details.value("conversation_id").toString();
     m_settingsHost = entry->host; m_settingsName = entry->session.name; m_settingsAutomatic = false;
-    m_settingsRequest = m_client.requestSettings(entry->host, entry->session.name, model, effort, m_settingsRun, m_settingsConversation);
+    m_settingsRequest = m_client.requestSettings(entry->host, entry->session.name, model, effort, m_settingsRun, m_settingsConversation, {}, entry->session.cmd == "opencode");
     renderDetails();
 }
 
@@ -3957,6 +3989,16 @@ void SessionsWindow::continueAfterCompact(const QString &host, const QString &na
         deliverMessage(key,host,name,pending.run,pending.conversation,pending.text,pending.attachments,pending.retryId,pending.commandId,true,data);
         return;
     }
+}
+
+// Explicit only: hgs starts the shared service when none is registered and alive.
+void SessionsWindow::startOpenCodeService()
+{
+    const auto *entry = selected();
+    if (!entry || !entry->online || m_openCodeStartRequest || entry->session.cmd != "opencode" || !m_openCodeServiceStart->isEnabled()) return;
+    m_openCodeStartMachine = entry->machine;
+    m_openCodeStartRequest = m_client.requestAccounts(entry->host, {"start", "native-opencode", "--json"});
+    renderDetails();
 }
 
 void SessionsWindow::clearContext()
@@ -4334,10 +4376,12 @@ void SessionsWindow::renderQuestion(const Entry &entry, int navigation)
     for (const auto &value : m_details.value("pending_questions").toArray()) {
         const auto candidate = value.toObject();
         const auto id=candidate.value("question_id").toString();
-        if(id.isEmpty() || seen.contains(id) || candidate.value("questions").toArray().isEmpty())continue;
+        // A card without questions still explains itself when it cannot be answered
+        // here (hgs empties an oversized OpenCode form).
+        if(id.isEmpty() || seen.contains(id) || (candidate.value("questions").toArray().isEmpty() && candidate.value("can_answer").toBool(true)))continue;
         seen.insert(id);
         if(m_question->hasSubmittedAnswer(m_selectedKey,candidate))continue;
-        pendingQuestions+=candidate.value("questions").toArray().size();
+        pendingQuestions+=qMax<qsizetype>(1,candidate.value("questions").toArray().size());
         if(candidate.value("optional").toBool())optional.append(candidate);
         else if(question.isEmpty() || (!question.value("can_answer").toBool() && candidate.value("can_answer").toBool()))question=candidate;
     }

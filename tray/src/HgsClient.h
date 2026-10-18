@@ -220,8 +220,9 @@ public:
                            const QString &conversation, const QString &archive, const QString &generation, bool stop = false);
     void requestSubagentInspection(const QString &host, const QString &name, const QString &agentId, const QString &archiveId = {});
     quint64 requestEffort(const QString &host, const QString &name, const QString &effort, const QString &run, const QString &conversation);
+    // withoutTerminal: an OpenCode session, whose errors name no Terminal.
     quint64 requestSettings(const QString &host, const QString &name, const QString &model, const QString &effort,
-                            const QString &run, const QString &conversation, const QString &expectedPendingId = {});
+                            const QString &run, const QString &conversation, const QString &expectedPendingId = {}, bool withoutTerminal = false);
     quint64 requestSearch(const QString &host, const QString &query);
     quint64 requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});

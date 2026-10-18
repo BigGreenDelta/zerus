@@ -400,6 +400,8 @@ private slots:
     void openCodeRemovesUndeliveredMessageOnlyAfterConfirmation();
     void openCodeForgetsOnlyItsBindingWhileRunning();
     void openCodeForgetWithoutRunIdentityUsesKill();
+    void openCodeOversizedFormShowsItsReason();
+    void openCodeStoppedServiceOffersExplicitStart();
     void machineBatchCountsExcludeNativeOpenCodeSessions();
     void nativeLaunchStaysInWorkspace_data();
     void nativeLaunchStaysInWorkspace();
@@ -8296,6 +8298,11 @@ void TestSessionsWindow::openCodeRemovesUndeliveredMessageOnlyAfterConfirmation(
     const QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","running"},{"run_id",run},{"conversation_id",conversation},
         {"phase","idle"},{"activity","idle"},{"process_state","running"},{"runtime_state","live"},{"terminal_supported",false},
         {"allowed_actions",QJsonArray{"rename","forget","remove_queued"}},{"events",QJsonArray{undelivered}},{"replace_events",true},{"cursor",0}};
+    // A second OpenCode session with its own undelivered message.
+    const QString second="opencode/project/second";auto secondDetails=details;secondDetails["name"]=second;
+    secondDetails["run_id"]="second-run";secondDetails["conversation_id"]="ses_second";
+    auto secondMessage=undelivered;secondMessage["message_id"]="msg_Second01";secondMessage["detail"]="Second session request";
+    secondDetails["events"]=QJsonArray{secondMessage};
     QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
     const QByteArray answer="elif c=='session-action':\n"
         " import pathlib,time;p=json.load(sys.stdin);staged=pathlib.Path(__file__+'.remove.tmp')\n"
@@ -8304,13 +8311,15 @@ void TestSessionsWindow::openCodeRemovesUndeliveredMessageOnlyAfterConfirmation(
         " r={'request_id':p['request_id'],'name':a[1],'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],'status':'completed'}\n"
         " if pathlib.Path(__file__+'.fail').exists():r.update(status='failed',error='This message is no longer queued')\n"
         " print(json.dumps(r))\n"
-        "elif c=='inspect' and a[1:2]==["+FakeCli::pythonString(name)+"]:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact)))+")\n";
+        "elif c=='inspect' and a[1:2]==["+FakeCli::pythonString(name)+"]:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact)))+")\n"
+        "elif c=='inspect' and a[1:2]==["+FakeCli::pythonString(second)+"]:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(secondDetails).toJson(QJsonDocument::Compact)))+")\n";
     const auto fixture=m_dir->filePath("opencode-remove-queued"),removal=fixture+".remove";
     QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
     auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="opencode";session.runId=run;session.conversationId=conversation;
     session.tracked=true;session.activity="idle";session.phase="idle";session.processState="running";session.runtimeState="live";session.state="running";
     session.terminalSupported=false;session.actionsReported=true;session.allowedActions={"rename","forget","remove_queued"};
-    box.sessions={session};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    auto secondSession=session;secondSession.name=second;secondSession.runId="second-run";secondSession.conversationId="ses_second";
+    box.sessions={session,secondSession};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},name);
     auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
     settleSelectedInspection(composer,client,{},name,details);
@@ -8364,6 +8373,14 @@ void TestSessionsWindow::openCodeRemovesUndeliveredMessageOnlyAfterConfirmation(
     click();QVERIFY(asked);QTRY_VERIFY(QFileInfo::exists(removal));
     QTRY_VERIFY(activity->plainText().contains("Removing…"));QTRY_VERIFY(!activity->renderPending());
     bool linked=false;
+    for(auto block=activity->browser()->document()->begin();block.isValid();block=block.next())
+        for(auto it=block.begin();!it.atEnd();++it)linked|=it.fragment().charFormat().anchorHref().startsWith("hgs-message:");
+    QVERIFY(!linked);
+    // Another OpenCode session's Remove is muted too while this removal runs.
+    window.showSession({},second);QTRY_COMPARE(composer->sessionKey(),"\n"+second);
+    QTRY_VERIFY(activity->plainText().contains("Second session request"));QTRY_VERIFY(!activity->renderPending());
+    QVERIFY(activity->plainText().contains("Remove"));QVERIFY(!activity->plainText().contains("Removing…"));
+    linked=false;
     for(auto block=activity->browser()->document()->begin();block.isValid();block=block.next())
         for(auto it=block.begin();!it.atEnd();++it)linked|=it.fragment().charFormat().anchorHref().startsWith("hgs-message:");
     QVERIFY(!linked);
@@ -8481,6 +8498,74 @@ void TestSessionsWindow::openCodeForgetWithoutRunIdentityUsesKill()
     QFile calls(ended);QVERIFY(calls.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(calls.readAll().trimmed()).array(),QJsonArray({"kill",name}));
     QVERIFY(!QFileInfo::exists(fixture+".scoped"));
+}
+
+// hgs empties an OpenCode form that is too large to show. Its card still
+// appears with the reason instead of an unexplained "Needs attention".
+void TestSessionsWindow::openCodeOversizedFormShowsItsReason()
+{
+    const QString name="opencode/project/forms",run="forms-run",conversation="ses_forms";
+    const QJsonObject card{{"question_id","que_large"},{"question_hash","large-hash"},{"run_id",run},{"conversation_id",conversation},
+        {"kind","opencode_form"},{"status","pending"},{"source","opencode_native"},{"answer_transport","native_opencode"},{"agent_id","main"},
+        {"can_answer",false},{"answerable",false},{"approval",false},{"questions",QJsonArray{}},{"unavailable_reason","Answer this form in OpenCode"}};
+    const QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","running"},{"run_id",run},{"conversation_id",conversation},
+        {"phase","input"},{"activity","attention"},{"process_state","running"},{"runtime_state","live"},{"terminal_supported",false},
+        {"allowed_actions",QJsonArray{"rename","forget"}},{"pending_questions",QJsonArray{card}},{"attention_id","opencode_question:que_large"},
+        {"events",QJsonArray{}},{"replace_events",true},{"cursor",0}};
+    const auto fake=programInspecting("opencode-large-form",details);QVERIFY(!fake.isEmpty());
+    auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="opencode";session.runId=run;session.conversationId=conversation;
+    session.tracked=true;session.activity="attention";session.phase="input";session.processState="running";session.runtimeState="live";session.state="running";
+    session.terminalSupported=false;session.actionsReported=true;session.allowedActions={"rename","forget"};
+    box.sessions.append(session);state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(fake);keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);
+    auto *question=window.findChild<QuestionCard *>();QVERIFY(question);QTRY_VERIFY(question->isVisible());
+    QTRY_COMPARE(question->findChild<QLabel *>("questionStatus")->text(),QString("Answer this form in OpenCode"));
+    QVERIFY(question->findChild<QPushButton *>("submitQuestionAnswer")->isHidden());
+}
+
+// A stopped OpenCode service is started only by an explicit action on the
+// session, as in Accounts and New session.
+void TestSessionsWindow::openCodeStoppedServiceOffersExplicitStart()
+{
+    const QString name="opencode/project/stopped",run="stopped-run",conversation="ses_stopped";
+    const QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","unknown"},{"run_id",run},{"conversation_id",conversation},
+        {"phase","unknown"},{"activity","unknown"},{"process_state","unknown"},{"runtime_state","unknown"},{"terminal_supported",false},
+        {"allowed_actions",QJsonArray{"forget"}},{"inspection_unavailable",true},{"inspection_reason","OpenCode is not running on fixture"},
+        {"activity_detail","OpenCode is not running on fixture"},{"cursor",0}};
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer="elif c=='account' and a[1:2]==['start']:\n"
+        " open(__file__+'.started','a').write(json.dumps(sys.argv[1:])+'\\n')\n"
+        " print(json.dumps({'model_options':[],'settings_model':'','catalog_state':'ready','catalog_reason':'','catalog_at':1791018000}))\n"
+        "elif c=='inspect' and a[1:2]==["+FakeCli::pythonString(name)+"]:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact)))+")\n";
+    const auto fixture=m_dir->filePath("opencode-stopped-service"),started=fixture+".started";
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="opencode";session.runId=run;session.conversationId=conversation;
+    session.tracked=true;session.state="unknown";session.activity="unknown";session.terminalSupported=false;
+    session.actionsReported=true;session.allowedActions={"forget"};
+    box.sessions.append(session);state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);
+    auto *banner=window.findChild<QWidget *>("openCodeServiceBanner");auto *start=window.findChild<QPushButton *>("openCodeServiceStart");
+    QVERIFY(banner);QVERIFY(start);QTRY_VERIFY(banner->isVisible());
+    QCOMPARE(start->text(),QString("Start OpenCode on arch"));QVERIFY(start->isEnabled());
+    bool reason=false;for(auto *label:banner->findChildren<QLabel *>())reason|=label->text().contains("OpenCode is not running on fixture");QVERIFY(reason);
+    // Showing the session never starts anything.
+    QTest::qWait(100);QVERIFY(!QFileInfo::exists(started));
+    // Offline, the action waits for the computer.
+    auto offline=box;offline.ok=false;state.setLocal(offline,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QTRY_VERIFY(!start->isEnabled());start->click();QTest::qWait(100);QVERIFY(!QFileInfo::exists(started));
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QTRY_VERIFY(start->isEnabled());
+    start->click();QTRY_VERIFY(QFileInfo::exists(started));
+    QFile calls(started);QVERIFY(calls.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(calls.readAll().trimmed()).array(),QJsonArray({"account","start","native-opencode","--json"}));
+    const auto noticed=[&](const QString &text){for(auto *label:window.findChildren<QLabel *>())if(label->isVisible()&&label->text().contains(text))return true;return false;};
+    QTRY_VERIFY(noticed("OpenCode started on arch."));
+    // Other OpenCode states never show it.
+    auto running=details;running["state"]="running";running.remove("inspection_unavailable");running.remove("inspection_reason");
+    client->inspectionReady({},name,running);QTRY_VERIFY(!banner->isVisible());
 }
 
 void TestSessionsWindow::nativeLaunchStaysInWorkspace_data()

@@ -974,7 +974,7 @@ struct ActivityRenderResult {
             const auto queuedId=event.value("message_id").toString();
             if(delivery=="not_delivered" && !queuedId.isEmpty() && details.value("allowed_actions").toArray().contains(QStringLiteral("remove_queued"))) {
                 const auto removing=details.value("queued_removal").toString();
-                if(!removing.isEmpty())
+                if(!removing.isEmpty() || details.value("queued_removal_busy").toBool())
                     body+=QString("<table cellspacing='6' cellpadding='4'><tr><td bgcolor='%1' style='border:1px solid %2;color:%3;'>&nbsp;%4&nbsp;</td></tr></table>")
                         .arg(codeSurface,border,muted,escaped(removing==queuedId?tr("Removing…"):tr("Remove")));
                 else {
