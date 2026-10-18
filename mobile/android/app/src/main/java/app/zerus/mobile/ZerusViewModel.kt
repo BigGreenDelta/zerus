@@ -223,6 +223,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var unreadBoundaryCaptured=false
     // Marks submitted by this process; a failed submission is forgotten so the next view retries.
     private val sharedReadsSent=mutableSetOf<String>()
+    private val sharedReadsUnapplied=mutableMapOf<String,Int>()
     private var readAllShares:Job?=null
     fun conversationViewport(target:Target)=readState.record(target)?.viewport
     fun saveConversationViewport(target:Target,eventId:String,offset:Int) {
@@ -584,9 +585,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return SharedReadRequest(connection,target,payload,target.key+"\n"+payload)
     }
     private suspend fun sendSharedRead(request:SharedReadRequest) {
-        val completed=try { api.markRead(request.connection,request.target,request.payload).string("state")=="completed" }
-            catch(e:Exception) { if(e is CancellationException) { sharedReadsSent.remove(request.key);throw e };false }
-        if(!completed) sharedReadsSent.remove(request.key)
+        val receipt=try { api.markRead(request.connection,request.target,request.payload) }
+            catch(e:Exception) { sharedReadsSent.remove(request.key);if(e is CancellationException) throw e;return }
+        if(receipt.string("state")!="completed") { sharedReadsSent.remove(request.key);return }
+        if(SharedReadPolicies.applied(receipt,request.payload)) { sharedReadsUnapplied.remove(request.key);return }
+        // Completed without applying: the same mark may go again only after a delay, without holding Read all.
+        val unapplied=sharedReadsUnapplied[request.key] ?: 0
+        sharedReadsUnapplied[request.key]=unapplied+1
+        viewModelScope.launch { delay(SharedReadPolicies.retryDelayMs(unapplied));sharedReadsSent.remove(request.key) }
     }
     /** Tell the session's computer that this phone showed its current reply (C4 `mark_read`). */
     private fun shareRead(target:Target) {
