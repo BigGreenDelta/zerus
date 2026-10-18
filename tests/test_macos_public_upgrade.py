@@ -112,14 +112,121 @@ class PublicCaskBoundaries(unittest.TestCase):
                 archive.writestr(member, "A")
             upgrade.safe_archive(path)
 
+    def test_archive_rejects_symlink_ancestor_pivot(self):
+        # Every target alone is lexically inside the bundle; following earlier
+        # symlink ancestors changes the meaning of later '..' components.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pivot.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                for name, target in [("Zerus.app/a", "."), ("Zerus.app/a/b", "../outside"),
+                                     ("Zerus.app/a/b/c", ".."), ("Zerus.app/a/b/c/d", "..")]:
+                    member = zipfile.ZipInfo(name)
+                    member.external_attr = (stat.S_IFLNK | 0o777) << 16
+                    archive.writestr(member, target)
+                archive.writestr("Zerus.app/a/b/c/d/probe", "Never extract this fixture.")
+            with self.assertRaises(ValueError):
+                upgrade.safe_archive(path)
+
+    def test_archive_rejects_link_cycles_but_retains_framework_chains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "links.zip"
+            for cyclic in (True, False):
+                with zipfile.ZipFile(path, "w") as archive:
+                    if cyclic:
+                        links = [("Zerus.app/a", "b"), ("Zerus.app/b", "a")]
+                    else:
+                        base = "Zerus.app/Contents/Frameworks/QtCore.framework/"
+                        archive.writestr(base + "Versions/A/QtCore", "Synthetic framework binary")
+                        links = [(base + "Versions/Current", "A"), (base + "QtCore", "Versions/Current/QtCore")]
+                    for name, target in links:
+                        member = zipfile.ZipInfo(name)
+                        member.external_attr = (stat.S_IFLNK | 0o777) << 16
+                        archive.writestr(member, target)
+                if cyclic:
+                    with self.assertRaises(ValueError):
+                        upgrade.safe_archive(path)
+                else:
+                    upgrade.safe_archive(path)
+
     def test_owner_accounts_and_nonhosted_macs_are_refused(self):
         env = dict(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="macOS", RUNNER_TEMP="/tmp/fixture")
         with patch.object(upgrade.platform, "system", return_value="Darwin"), \
-                patch.object(upgrade.platform, "machine", return_value="arm64"):
+                patch.object(upgrade.platform, "machine", return_value="arm64"), \
+                patch.object(upgrade, "account_identity", return_value=(501, 501,
+                    types.SimpleNamespace(pw_uid=501, pw_name="example", pw_dir=str(Path("/Users") / "example")))):
             with self.assertRaises(ValueError):
                 upgrade.disposable_mac(env, Path("/Users") / "example")
             with self.assertRaises(ValueError):
                 upgrade.disposable_mac(dict(env, RUNNER_ENVIRONMENT="self-hosted"), Path("/Users") / "runner")
+
+    def test_runner_home_claim_cannot_override_actual_uid_account(self):
+        env = dict(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="macOS", RUNNER_TEMP="/tmp/fixture")
+        runner_home = Path("/Users") / "runner"
+        actual = types.SimpleNamespace(pw_uid=501, pw_name="example", pw_dir=str(Path("/Users") / "example"))
+        with patch.object(upgrade.platform, "system", return_value="Darwin"), \
+                patch.object(upgrade.platform, "machine", return_value="arm64"), \
+                patch.object(upgrade, "account_identity", return_value=(501, 501, actual), create=True), \
+                patch.object(upgrade.Path, "resolve", lambda path: path), \
+                patch.object(upgrade, "APP", Path("/nonexistent-qualification-fixture-app")):
+            with self.assertRaises(ValueError):
+                upgrade.disposable_mac(env, runner_home)
+            actual.pw_name, actual.pw_dir = "runner", str(runner_home)
+            upgrade.disposable_mac(env, runner_home)
+            actual.pw_dir = str(Path("/Users") / "example")
+            with self.assertRaises(ValueError):
+                upgrade.disposable_mac(env, runner_home)
+            actual.pw_dir = str(runner_home)
+            with patch.object(upgrade, "account_identity", return_value=(501, 0, actual)), self.assertRaises(ValueError):
+                upgrade.disposable_mac(env, runner_home)
+
+    def test_draft_snapshot_retains_all_durable_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            q = upgrade.Qualification(Path(tmp))
+            q.draft_file = Path(tmp) / "draft.json"
+            original = dict(version=1, key="fixture", text="Retained draft", position=7, anchor=3,
+                            label="Fixture label", form_state={"answer": "Keep this"}, next_attachment_number=2,
+                            sending=False, uncertain=False, attachments=[])
+            q.draft_file.write_text(json.dumps(original))
+            before = q.payload_state()
+            for field, lost in dict(position=0, anchor=0, label="", form_state={}, next_attachment_number=1).items():
+                q.draft_file.write_text(json.dumps(dict(original, **{field: lost})))
+                with self.subTest(field=field):
+                    self.assertNotEqual(before, q.payload_state())
+
+    def test_native_snapshot_samples_durable_and_live_target_bindings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            n = types.SimpleNamespace(root=root, name="claude/cask-fixture", pane="%7", run_id="run-original",
+                                      conversation_id="conversation-original", native_requests=[{}])
+            transcript = root / ".claude/projects/fixture" / (n.conversation_id + ".jsonl")
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text("Synthetic native transcript\n")
+            n.record_path = root / "record.json"
+            original = dict(name=n.name, run_id=n.run_id, conversation_id=n.conversation_id,
+                            pane=n.pane, pid=321, process_start="fixture-start")
+            n.record_path.write_text(json.dumps(original))
+            live = dict(run=n.run_id, name=n.name, pane=n.pane)
+            def tmux(*args):
+                if args[0] == "show-options":
+                    return live["run"]
+                return {"#{pane_pid}": "321", "#{pid}": "123", "#{session_name}": live["name"],
+                        "#{pane_id}": live["pane"]}[args[-1]]
+            n.tmux, n.screen = tmux, lambda: "Fixture complete."
+            q = upgrade.Qualification(root)
+            q.native, q.env = n, {}
+            q.run = lambda *args, **kwargs: "fixture-start"
+            self.assertEqual(q.native_state()["run"], n.run_id)
+            for field, changed in dict(run_id="run-changed", conversation_id="conversation-changed", pane="%8",
+                                       pid=322, process_start="changed-start", name="claude/other-fixture").items():
+                n.record_path.write_text(json.dumps(dict(original, **{field: changed})))
+                with self.subTest(durable_field=field), self.assertRaises(ValueError):
+                    q.native_state()
+            n.record_path.write_text(json.dumps(original))
+            for field, changed in dict(run="run-changed", name="claude/other-fixture", pane="%8").items():
+                previous, live[field] = live[field], changed
+                with self.subTest(live_field=field), self.assertRaises(ValueError):
+                    q.native_state()
+                live[field] = previous
 
     def test_install_native_signature_precedes_app_execution(self):
         with tempfile.TemporaryDirectory() as tmp:

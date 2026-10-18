@@ -123,7 +123,7 @@ def release_proof(cask, release, metadata_bytes, sums_bytes):
 
 def safe_archive(path):
     """Bound extraction and reject traversal/special entries before invoking ditto."""
-    seen, total = set(), 0
+    seen, links, total = set(), {}, 0
     with zipfile.ZipFile(path) as archive:
         for member in archive.infolist():
             name = member.filename.rstrip("/")
@@ -138,9 +138,48 @@ def safe_archive(path):
             if stat.S_ISLNK(mode):
                 require(member.file_size <= 4096, "Oversized ZIP symlink.")
                 target = archive.read(member).decode("utf-8")
-                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
-                require(not target.startswith("/") and "\\" not in target and
-                        (resolved == "Zerus.app" or resolved.startswith("Zerus.app/")), "Escaping ZIP symlink.")
+                require(target and not target.startswith("/") and "\\" not in target and "\0" not in target,
+                        "Escaping ZIP symlink.")
+                links[name] = target
+    # ditto must never write a member through an earlier (or later) stored
+    # symlink. Qt frameworks store their real Versions/A tree separately.
+    require("Zerus.app" not in links, "Bundle root cannot be a symlink.")
+    for name in seen:
+        parent = posixpath.dirname(name)
+        while parent:
+            require(parent not in links, "ZIP member has a stored symlink ancestor.")
+            parent = posixpath.dirname(parent)
+    for name, target in links.items():
+        pending = posixpath.dirname(name).split("/") + target.split("/")
+        resolved, followed = [], set()
+        steps = 0
+        while pending:
+            steps += 1
+            require(steps <= 512, "ZIP link resolution exceeds its bound.")
+            component, pending = pending[0], pending[1:]
+            if component in ("", "."):
+                continue
+            if component == "..":
+                require(len(resolved) > 1, "ZIP link escapes the bundle root.")
+                resolved.pop()
+                continue
+            resolved.append(component)
+            require(resolved[0] == "Zerus.app", "ZIP link escapes the bundle root.")
+            prefix = "/".join(resolved)
+            if prefix in links:
+                require(prefix not in followed, "Cyclic ZIP symlink graph.")
+                followed.add(prefix)
+                resolved.pop()
+                pending = links[prefix].split("/") + pending
+        require(resolved and resolved[0] == "Zerus.app", "ZIP link escapes the bundle root.")
+
+
+def account_identity():
+    # HOME/CI environment is not proof of the OS account used by CFPreferences
+    # or Homebrew. This is invoked only after the macOS platform guard.
+    import pwd
+    uid, euid = os.getuid(), os.geteuid()
+    return uid, euid, pwd.getpwuid(uid)
 
 
 def prepare_public(commit, channel, output):
@@ -176,7 +215,10 @@ def disposable_mac(env, home):
             and env.get("RUNNER_OS") == "macOS" and env.get("RUNNER_TEMP"),
             "This lifecycle test only runs on a disposable standard GitHub-hosted Mac.")
     resolved = home.resolve()
-    require(resolved.parent == Path("/Users") and resolved.name in ("runner", "runneradmin"),
+    uid, euid, account = account_identity()
+    require(uid > 0 and uid == euid == account.pw_uid and account.pw_name in ("runner", "runneradmin")
+            and resolved.parent == Path("/Users") and resolved.name == account.pw_name
+            and Path(account.pw_dir).resolve() == resolved,
             "Refusing a non-runner account.")
     require(not APP.exists() and not APP.is_symlink(), "A Zerus installation already exists.")
     require(not (home / "Library/Preferences" / (DOMAIN + ".plist")).exists(),
@@ -250,14 +292,16 @@ class Qualification:
         (folder / (digest + ".bin")).write_bytes(payload)
         self.draft_file = folder / "draft.json"
         self.draft_file.write_text(json.dumps({"version": 1, "key": key, "text": "Retain this private cask upgrade draft.",
-            "position": 7, "anchor": 7, "label": "Cask fixture", "form_state": {}, "next_attachment_number": 2,
+            "position": 7, "anchor": 3, "label": "Cask fixture", "form_state": {"fixture_answer": "Retain this staged answer"}, "next_attachment_number": 2,
             "sending": False, "uncertain": False, "attachments": [{"name": "fixture.txt", "mime": "text/plain",
             "reference": "fixture.txt", "sha256": digest, "bytes": len(payload)}]}))
         self.protected_draft = self.payload_state()
 
     def payload_state(self):
         draft = json.loads(self.draft_file.read_text())
-        return {key: draft[key] for key in ("key", "text", "attachments", "sending", "uncertain")}, {
+        # No durable field is volatile: preserve selection, form, label,
+        # attachment numbering and any future retained fields as well.
+        return draft, {
             p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in self.draft_file.parent.glob("*.bin")}
 
     def native_state(self):
@@ -269,8 +313,16 @@ class Qualification:
         require("Fixture complete." in n.screen(), "Native TUI no longer shows its completed private turn.")
         rows = list((n.root / ".claude/projects").glob("*/*.jsonl"))
         require(len(rows) == 1 and rows[0].stem == n.conversation_id, "Native conversation changed.")
-        return {"pane_pid": pane_pid, "server_pid": server_pid, "start": start, "run": n.run_id,
-                "server_start": server_start, "conversation": n.conversation_id, "pane": n.pane,
+        record = json.loads(n.record_path.read_text())
+        live_run = n.tmux("show-options", "-v", "-t", "=" + n.name + ":", "@hgs_run").strip()
+        live_name = n.tmux("display-message", "-p", "-t", n.pane, "#{session_name}").strip()
+        live_pane = n.tmux("display-message", "-p", "-t", n.pane, "#{pane_id}").strip()
+        require(record.get("name") == live_name == n.name and record.get("run_id") == live_run == n.run_id
+                and record.get("conversation_id") == rows[0].stem == n.conversation_id
+                and record.get("pane") == live_pane == n.pane and record.get("pid") == int(pane_pid)
+                and record.get("process_start") == start, "Durable/live native target binding changed.")
+        return {"pane_pid": pane_pid, "server_pid": server_pid, "start": start, "run": record["run_id"],
+                "server_start": server_start, "conversation": record["conversation_id"], "pane": live_pane,
                 "api_requests": len(n.native_requests)}
 
     def start_gui(self, phase):
