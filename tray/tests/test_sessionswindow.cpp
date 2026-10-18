@@ -308,6 +308,7 @@ private slots:
     void terminalDropKeepsActivityDraftAndDoesNotSubmit();
     void sessionContextMenuGuardsIdentityAndChanges();
     void sessionContextMenuSavedAndArchive();
+    void sessionContextMenuClearsSession();
     void compactMetadataAndSubagentRoster();
     void nativeSessionUsageStaysWithSelectedConversation();
     void subagentActivityKeepsMainDraftAndRejectsStaleHistory();
@@ -1840,8 +1841,17 @@ void TestSessionsWindow::compactWorkspaceGeometry()
     std::sort(row.begin(), row.end(), [](const QPushButton *a, const QPushButton *b) { return a->x() < b->x(); });
     QStringList header; for (const auto *button : row) header << button->objectName();
     QCOMPARE(header, (QStringList{"openSessionFolderAction", "openFolderShellAction", "headerCopySessionIdAction", "clearSessionAction", "more"}));
+    // The menu also names every header icon.
+    emit more->menu()->aboutToShow();
     QStringList menu; for (const auto *action : more->menu()->actions()) if (!action->isSeparator() && action->isVisible()) menu << action->objectName();
-    QCOMPARE(menu, (QStringList{"renameSessionAction", "forkSessionAction", "openSessionAction", "pauseAction", "forgetSessionAction"}));
+    QCOMPARE(menu, (QStringList{"menuOpenSessionFolderAction", "menuOpenFolderShellAction", "menuCopySessionIdAction", "renameSessionAction",
+        "forkSessionAction", "openSessionAction", "pauseAction", "menuClearSessionAction", "forgetSessionAction"}));
+    const QHash<QString, QString> mirrored{{"openSessionFolderAction", "menuOpenSessionFolderAction"}, {"openFolderShellAction", "menuOpenFolderShellAction"},
+        {"headerCopySessionIdAction", "menuCopySessionIdAction"}, {"clearSessionAction", "menuClearSessionAction"}};
+    for (const auto *button : row) if (button != more) {
+        const auto *action = more->menu()->findChild<QAction *>(mirrored.value(button->objectName()));
+        QVERIFY2(action, qPrintable(button->objectName())); QCOMPARE(action->isEnabled(), button->isEnabled());
+    }
     QCOMPARE(window.findChild<QAction *>("pauseAction")->text(), QString("Pause session"));
     QVERIFY(!window.findChild<QPushButton *>("restoreSessionAction")->isVisible());
 }
@@ -2459,7 +2469,14 @@ else: print('{}')
     QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);dialog->button(QMessageBox::Cancel)->click();});
     headerClear->click();QVERIFY(!QFileInfo::exists(capture));QCOMPARE(tabs->currentIndex(),1);
     QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));
+    // The menu names the icon and asks the same confirmation.
+    auto *menuClear=more->menu()->findChild<QAction *>("menuClearSessionAction");QVERIFY(menuClear);
+    emit more->menu()->aboutToShow();QVERIFY(menuClear->isVisible());QVERIFY(menuClear->isEnabled());QCOMPARE(menuClear->text(),QString("Clear session…"));
+    bool asked=false;
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);asked=true;dialog->button(QMessageBox::Cancel)->click();});
+    menuClear->trigger();QVERIFY(asked);QVERIFY(!QFileInfo::exists(capture));QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));
     details["clear_context_supported"]=false;applyDetails();QVERIFY(!headerClear->isEnabled());QVERIFY(!detailsClear->isEnabled());
+    emit more->menu()->aboutToShow();QVERIFY(!menuClear->isEnabled());
     details["clear_context_supported"]=true;applyDetails();QVERIFY(headerClear->isEnabled());
     details.remove("conversation_id");applyDetails();QTRY_VERIFY(!headerClear->isEnabled());
     details["conversation_id"]="conversation-one";applyDetails();QTRY_VERIFY(headerClear->isEnabled());settle();
@@ -2749,6 +2766,8 @@ else:print('{}')
     // A stopped agent cannot clear natively; the header menu offers a confirmed fresh start.
     auto *fresh=window.findChild<QAction *>("freshSessionAction");QVERIFY(fresh);QVERIFY(fresh->isVisible());QVERIFY(fresh->isEnabled());
     QVERIFY(!window.findChild<QPushButton *>("clearSessionAction")->isVisible());
+    auto *more=window.findChild<QPushButton *>("more");emit more->menu()->aboutToShow();
+    QVERIFY(!more->menu()->findChild<QAction *>("menuClearSessionAction")->isVisible());
     QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("startFreshConfirm");QVERIFY(dialog);
         QCOMPARE(dialog->defaultButton(),dialog->button(QMessageBox::Cancel));QVERIFY(dialog->text().contains(name));
         dialog->button(QMessageBox::Cancel)->click();});
@@ -5391,6 +5410,7 @@ void TestSessionsWindow::sessionContextMenuSavedAndArchive()
     QSignalSpy copies(&window, &SessionsWindow::copySessionCommandRequested);
     auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
     show(); QCOMPARE(action("contextChangeSession")->text(), QString("Resume session")); QVERIFY(action("contextArchiveSession"));
+    QVERIFY(action("contextStartFresh")); QVERIFY(!action("contextClearSession"));
     QCOMPARE(action("contextTerminateSession")->text(), QString("Forget saved session…"));
     QTimer::singleShot(0, &window, [&]() {
         auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); QVERIFY(dialog);
@@ -5399,7 +5419,7 @@ void TestSessionsWindow::sessionContextMenuSavedAndArchive()
     action("contextRenameSession")->trigger(); QCOMPARE(writes.size(), 0); menu->hide();
     for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
     list->setCurrentRow(0);
-    show(); QVERIFY(!action("contextOpenTerminal")); QVERIFY(!action("contextArchiveSession"));
+    show(); QVERIFY(!action("contextOpenTerminal")); QVERIFY(!action("contextArchiveSession")); QVERIFY(!action("contextClearSession"));
     QCOMPARE(action("contextCopyCommand")->text(), QString("Copy restore command"));
     QCOMPARE(action("contextChangeSession")->text(), QString("Restore session")); QVERIFY(!action("contextChangeSession")->isEnabled()); // Saved name collision.
     list->setCurrentRow(1); action("contextCopyCommand")->trigger(); QCOMPARE(copies.size(), 1);
@@ -5409,6 +5429,65 @@ void TestSessionsWindow::sessionContextMenuSavedAndArchive()
     });
     list->setCurrentRow(1); action("contextTerminateSession")->trigger(); QTRY_COMPARE(writes.size(), 1);
     QCOMPARE(writes[0][2].toString(), QString("kill\ncodex/website/navigation\n--archive\nrecent"));
+}
+
+void TestSessionsWindow::sessionContextMenuClearsSession()
+{
+    QTemporaryDir temp;const auto program=temp.filePath("hgs"),capture=temp.filePath("clear.json");
+    QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import sys,json,pathlib
+root=pathlib.Path(__file__).parent
+args=sys.argv[1:]
+if 'clear-context' in args:
+ p=json.load(sys.stdin);p['args']=args;staged=root/'clear.tmp';staged.write_text(json.dumps(p));staged.replace(root/'clear.json');print(json.dumps(dict(request_id=p['request_id'],name=args[2],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='confirmed')))
+elif 'inspect' in args:
+ name=next((a for a in args if '/' in a),'');f=root/(name.replace('/','_')+'.json');print(f.read_text() if f.exists() else '{}')
+else: print('{}')
+)PY");fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    // Each session reports its own details; background inspections may read them at any time.
+    const auto writeDetails=[&](const QString &name,const QJsonObject &details){
+        QVERIFY(FakeCli::replace(temp.filePath(QString(name).replace('/','_')+".json"),QJsonDocument(details).toJson()));};
+    const QJsonObject live{{"tracked",true},{"run_id","run-one"},{"phase","idle"},{"activity","idle"},{"runtime_state","live"},
+        {"process_state","running"},{"conversation_id","conversation-one"},{"clear_context_supported",true}};
+    auto busy=live;busy["run_id"]="run-two";busy["conversation_id"]="conversation-two";busy["clear_context_supported"]=false;
+    busy["clear_context_reason"]="Kimi is still working";
+    writeDetails("claude/infra/review",live);writeDetails("kimi/docs/research",busy);
+    auto state=fleet();auto box=state.local();box.sessions[1].runId="run-two";box.sessions[1].conversationId="conversation-two";
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    auto mac=*state.peer("mac");
+    mac.sessions[0].runId="run-one";mac.sessions[0].conversationId="conversation-one";state.setPeer(mac,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program));window.resize(1080,760);window.setFleet(state);window.show();
+    auto *list=window.findChild<QListWidget *>("sessionList");auto *menu=window.findChild<QMenu *>("sessionContextMenu");QVERIFY(menu);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    window.showSession("mac","claude/infra/review");const int target=list->currentRow();setComposerText(composer,"Keep this draft");
+    window.showSession({},"kimi/docs/research");const int other=list->currentRow();QVERIFY(target!=other);
+    const auto showMenu=[&](int row){menu->hide();const QPoint point=list->visualItemRect(list->item(row)).center();
+        QContextMenuEvent event(QContextMenuEvent::Mouse,point,list->viewport()->mapToGlobal(point));QApplication::sendEvent(list->viewport(),&event);
+        return menu->findChild<QAction *>("contextClearSession");};
+    auto *client=window.findChild<HgsClient *>();QSignalSpy finished(client,&HgsClient::sessionActionFinished);
+    // Another session's Clear waits for its own inspection, then selects it and confirms.
+    auto *clear=showMenu(target);QVERIFY(clear);QCOMPARE(clear->text(),QString("Clear session…"));QCOMPARE(list->currentRow(),other);
+    QTRY_VERIFY_WITH_TIMEOUT(clear->isEnabled(),10000);
+    bool asked=false;
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);asked=true;
+        QCOMPARE(dialog->defaultButton(),dialog->button(QMessageBox::Cancel));
+        QVERIFY(dialog->text().contains("claude/infra/review"));QVERIFY(dialog->text().contains("mac"));
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();return;}QFAIL("Missing clear confirmation");});
+    clear->trigger();QVERIFY(asked);QCOMPARE(list->currentRow(),target);QTRY_VERIFY(QFileInfo::exists(capture));
+    QFile sent(capture);QVERIFY(sent.open(QIODevice::ReadOnly));const auto payload=QJsonDocument::fromJson(sent.readAll()).object();sent.close();
+    QCOMPARE(payload["args"].toArray(),QJsonArray({"@mac","clear-context","claude/infra/review","--json"}));
+    QCOMPARE(payload["expected_run_id"].toString(),QString("run-one"));QCOMPARE(payload["expected_conversation_id"].toString(),QString("conversation-one"));
+    QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));
+    QTRY_COMPARE(finished.size(),1);QVERIFY(QFile::remove(capture));
+    // The selected session follows its header icon at once; Cancel sends nothing.
+    auto *headerClear=window.findChild<QPushButton *>("clearSessionAction");QTRY_VERIFY(headerClear->isEnabled());
+    clear=showMenu(target);QVERIFY(clear->isEnabled());asked=false;
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("clearSessionConfirm");QVERIFY(dialog);asked=true;dialog->button(QMessageBox::Cancel)->click();});
+    clear->trigger();QVERIFY(asked);QTest::qWait(100);QVERIFY(!QFileInfo::exists(capture));
+    // An unavailable reset explains itself and stays disabled.
+    clear=showMenu(other);QVERIFY(clear);QTRY_VERIFY_WITH_TIMEOUT(clear->toolTip().contains("Kimi is still working"),10000);
+    QVERIFY(!clear->isEnabled());QCOMPARE(list->currentRow(),target);menu->hide();
 }
 
 void TestSessionsWindow::sessionRowsHaveNoHoverPopup()
