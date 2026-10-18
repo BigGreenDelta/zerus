@@ -127,9 +127,13 @@ process to pause), Terminal, attachments, compaction, fork and child sessions
 ### Delivery
 
 Zerus pre-generates each message ID. If a response is lost, it reconciles the
-exact message (message list, inbox, same-ID repost) instead of guessing. A 4xx
-reply is a definite refusal and is never resent. Interrupted or failed delivery
-is never resubmitted automatically; an uncertain result stays for inspection.
+exact message (message list, then inbox) instead of guessing, and never posts
+the message again, so a message removed from the queue cannot come back. A 4xx
+reply is a definite refusal and is never resent. Removing a queued message is
+recorded before OpenCode is asked; once OpenCode confirms the removal, the
+request reports "Removed from the OpenCode queue before delivery". Interrupted
+or failed delivery, or a removal OpenCode did not confirm, is never resubmitted
+automatically; an uncertain result stays for inspection.
 
 ## OpenCode 1 conversations
 

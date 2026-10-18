@@ -42,6 +42,7 @@ DEFAULT_PORT = 49374
 FIXTURE_KEY = 'fixture-key-never-shown'
 NOT_RUNNING = 'OpenCode is not running'
 OPENCODE1 = 'This conversation belongs to OpenCode 1, which Zerus no longer supports'
+REMOVED = 'Removed from the OpenCode queue before delivery'
 
 
 def free_port():
@@ -585,8 +586,13 @@ class OpenCodeNative(unittest.TestCase):
         self.assertNotIn('remove_queued', cleared['allowed_actions'])
         refused = self.action(b, 'remove_queued', status='failed', message_id=message_id)
         self.assertIn('unavailable', refused['error'])
-        # A journaled message whose request never reached OpenCode is posted once, with its own ID.
-        lost = self.payload(b, text='Admitted after a lost request')
+        # A confirmed removal is the request's definite non-delivery.
+        removed = json.loads(self.receipt_path(request).read_text())
+        self.assertEqual((removed['status'], removed['reason']), ('refused', REMOVED))
+        self.assertIn(REMOVED, self.hgs(['send', name, '--json'], request, success=False).stderr)
+        # A journaled message whose request never reached OpenCode is never posted by a
+        # retry: OpenCode would admit an unknown ID, so its delivery stays uncertain.
+        lost = self.payload(b, text='Never posted after a lost request')
         lost_id = 'msg_' + native_suffix()
         digest = hashlib.sha256(json.dumps([name, lost], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         self.receipt_path(lost).write_text(json.dumps({
@@ -594,14 +600,14 @@ class OpenCodeNative(unittest.TestCase):
             'digest': digest, 'native_message_id': lost_id, 'text': lost['text'], 'submitted_text': lost['text'],
             'submitted_at': time.time(), 'at': time.time(), 'status': 'pending', 'attachments': [],
             'transport': 'native_opencode'}))
-        sent = self.hgs(['send', name, '--json'], lost)
-        self.assertEqual((sent['status'], sent['native_message_id']), ('submitted', lost_id))
-        self.wait(name, lambda v: v['phase'] == 'idle' and v.get('reply_id')
-                  and v['events'] and v['events'][-1]['type'] == 'Stop' and v['prompt'] == lost['text'])
+        failure = self.hgs(['send', name, '--json'], lost, success=False)
+        self.assertIn('Delivery uncertain; this request will not be replayed', failure.stderr)
+        self.assertEqual(json.loads(self.receipt_path(lost).read_text())['status'], 'pending')
+        self.assertEqual(self.inbox(conversation), [])
         users = self.user_messages(conversation)
-        self.assertEqual(sorted(text for _, text in users), sorted(['HOLD_NATIVE first turn', lost['text']]))
-        self.assertIn((lost_id, lost['text']), users)
+        self.assertEqual([text for _, text in users], ['HOLD_NATIVE first turn'])
         self.assertNotIn(message_id, [native_id for native_id, _ in users])
+        self.assertEqual(self.hgs(['inspect', name])['phase'], 'idle')
 
     def test_04_question_and_permission_answers(self):
         b = self.create()
@@ -788,6 +794,49 @@ class OpenCodeNative(unittest.TestCase):
         self.assert_private(started, account)
         self.assertTrue(account['installed'], account.get('install_reason'))
         self.assertNotIn('install_reason', account)
+
+    def test_10_a_message_removed_while_pending_is_never_resurrected(self):
+        b = self.create()
+        name, conversation = b['name'], b['conversation_id']
+        self.hgs(['send', name, '--json'], self.payload(b, text='HOLD_NATIVE first turn'))
+        self.assertTrue(self.model.holding.wait(30), 'the model never received the held turn')
+        working = self.wait(name, lambda v: v['phase'] == 'working' and v['interrupt_supported'])
+        text = 'Removed before delivery'
+        request = self.payload(b, text=text)
+        queued = self.hgs(['send', name, '--json'], request)
+        self.assertTrue(queued.get('queued'))
+        message_id = queued['native_message_id']
+        # OpenCode admitted the message, but hgs lost the response: its journal says pending.
+        receipt = json.loads(self.receipt_path(request).read_text())
+        receipt['status'] = 'pending'
+        receipt.pop('queued', None)
+        self.receipt_path(request).write_text(json.dumps(receipt))
+        self.assertEqual([item['id'] for item in self.inbox(conversation)], [message_id])
+        stop = {'request_id': str(uuid.uuid4()), 'expected_run_id': b['run_id'], 'expected_conversation_id': conversation,
+                'expected_turn_started': working['turn_started']}
+        self.hgs(['interrupt', name, '--json'], stop)
+        self.model.release.set()
+        self.wait(name, lambda v: v['phase'] == 'idle' and any(e.get('delivery_state') == 'not_delivered' for e in v['events']))
+        self.action(b, 'remove_queued', message_id=message_id)
+        self.assertEqual(self.inbox(conversation), [])
+        # The same request again must not admit the removed message a second time.
+        retry = subprocess.run([str(HGS), 'send', name, '--json'], env=self.env, cwd=self.workspace, text=True,
+                               capture_output=True, input=json.dumps(request), timeout=60)
+        until = time.monotonic() + 5
+        while time.monotonic() < until and message_id not in [i for i, _ in self.user_messages(conversation)]:
+            time.sleep(.25)
+        self.assertNotIn(message_id, [i for i, _ in self.user_messages(conversation)], 'the removed message was delivered')
+        self.assertNotIn(text, [t for _, t in self.user_messages(conversation)])
+        self.assertEqual(self.inbox(conversation), [])
+        self.assertEqual([r for r in self.model.requests if text in r['last_user']], [])
+        self.assertNotEqual(retry.returncode, 0, retry.stdout)
+        self.assertIn(REMOVED, retry.stderr)
+        receipt = json.loads(self.receipt_path(request).read_text())
+        self.assertEqual((receipt['status'], receipt['reason'], receipt['native_message_id']),
+                         ('refused', REMOVED, message_id))
+        self.assertIn(REMOVED, self.hgs(['send', name, '--json'], request, success=False).stderr)
+        self.assertEqual(self.inbox(conversation), [])
+        self.assertEqual(self.hgs(['inspect', name])['phase'], 'idle')
 
 
 if __name__ == '__main__':

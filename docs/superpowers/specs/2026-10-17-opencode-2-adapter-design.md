@@ -62,7 +62,9 @@ OpenCode 2.0.32 (`/openapi.json`, 119 paths):
   `metadata` object and the whole `permissions` list);
   `/api/session/active`.
 - Messages: `POST /prompt` with optional client message `id` (`^msg_`;
-  posting the same ID again returns the original admission), `text`, `files`
+  posting the same ID again returns the original admission while it is still
+  in `/inbox` or history; once `DELETE /inbox/{id}` removed it, the same ID is
+  admitted again as a new message), `text`, `files`
   (`uri`, `name`; at most 20 MiB each), `delivery` (`steer` or `queue`;
   `steer` when omitted) and `resume`. A queued prompt is listed in `/inbox`
   and `GET /message/{id}` returns 404 until OpenCode runs it; queued items
@@ -72,7 +74,9 @@ OpenCode 2.0.32 (`/openapi.json`, 119 paths):
   400 for an empty session); `/form`, `/form/{id}/reply`
   (`{"answer": {<key>: value}}`); `/permission`, `/permission/{id}/reply`
   (`once`, `always`, `reject`; a reject rejects every pending request of that
-  session); `/inbox` and `DELETE /inbox/{id}`.
+  session); `/inbox` and `DELETE /inbox/{id}` (it deletes the pending row and
+  keeps no tombstone; 204 even when the item had already left the inbox, 404
+  only for an unknown session).
 - Catalog routes (`/api/model`, `/api/provider`, `/api/integration`) take a
   `location`; a project `opencode.json` adds providers for that folder only.
   Their responses include provider `settings`, `headers` and `body`, which can
@@ -206,14 +210,27 @@ New session and launch validation use the selected project folder.
 - Bindings store run ID, session ID, directory and name. The service URL and
   password come only from the registration file.
 - Each message gets a pre-generated `msg_` ID recorded in the durable request
-  journal before `POST /prompt` with `delivery: queue` always. A lost
-  response is reconciled with `GET /message/{id}`, then `GET /inbox`, then by
-  posting the same ID again, which returns the original admission without a
-  second message. Only when the service stays unreachable does the result
-  remain uncertain for explicit inspection, as today.
+  journal, with a private index from that ID to its request, before
+  `POST /prompt` with `delivery: queue` always. A lost response is reconciled
+  with `GET /message/{id}`, then `GET /inbox`. Zerus never posts the same ID
+  again: OpenCode forgets an ID once its queued message is removed, so a
+  repost could deliver a message the user removed. A message found in
+  neither place, like an unreachable service, leaves the result uncertain for
+  explicit inspection, and the request is never replayed.
 - Pending inbox items appear in Activity as queued. After Stop they stay
   visible as not delivered, with Remove (`DELETE /inbox/{id}`) behind a
-  confirmation.
+  confirmation. Remove requires the item in this session's inbox, the session
+  not running and the ID absent from history. Before the DELETE, Zerus records
+  a removal intent for the session and message ID in private state (the
+  newest 5000 records): it forbids any repost but proves nothing. Because the
+  DELETE answers 204 even for an item that already left the inbox, Zerus then
+  reads the inbox and, after it, history; only a message gone from both is a
+  confirmed removal. Its request then reports the definite non-delivery
+  "Removed from the OpenCode queue before delivery" (a voice transcript
+  becomes failed), and every later reconciliation answers the same without
+  contacting OpenCode. A lost, failed or 404 DELETE keeps the intent: the
+  message counts as delivered if history shows it, otherwise it stays
+  uncertain.
 - Voice transcripts use the same guarded text path.
 - Every `PATCH` reads the session first and writes back the complete
   `metadata` object or `permissions` list, so the `zerus` metadata key and
