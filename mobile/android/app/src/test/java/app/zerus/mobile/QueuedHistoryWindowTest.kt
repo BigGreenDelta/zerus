@@ -65,6 +65,46 @@ class QueuedHistoryWindowTest {
         assertEquals(listOf("history:h1"),queued.inspection(inspected(replyRow),waiting).displayed.map { it.id })
     }
 
+    // OpenCode dates a queued message by its delivery: 12 s after this phone submitted it.
+    private val other = "22222222-2222-4222-8222-222222222222"
+    private val phone = OutgoingMessage(request,target,"Later",emptyList(),2.5,"submitted",3.0)
+    private fun own(rows:List<Event>) = ConversationMerge.merge(target,rows,listOf(phone)).let { merged ->
+        merged.recordedRequestIds to merged.events.filter { it.role == "You" }.map { it.id to it.delivery } }
+    /** A history page as hgs returns it: the stored row plus its canonical identity. */
+    private fun page(vararg rows:JSONObject) = HistoryPage.parse(target,"page",JSONObject().put("request_id","page")
+        .put("name",target.session).put("run_id",target.run).put("conversation_id",target.conversation).put("history_epoch","epoch")
+        .put("events",JSONArray(rows.toList())).put("head",JSONObject().put("complete",false))
+        .put("has_more_before",true).put("has_more_after",false).put("next_before","c1").put("next_after",JSONObject.NULL))
+
+    @Test fun aLongQueuedPhoneMessageMatchesOnceAtTheHeadAndOnItsLaterPage() {
+        val queued = head.inspection(inspected(replyRow,row("UserPromptSubmit","msg_Q","Later",15,"queued").put("request_id",request)))
+        assertEquals(setOf(request) to listOf("outgoing:$request" to "queued"),own(queued.displayed))
+        val delivered = page(row("UserPromptSubmit","msg_Q","Later",15).put("request_id",request).put("history_id","h2")
+            .put("history_cursor","c2").put("history_stream","provider").put("original_ids",JSONArray().put("journal:opencode_native:You:native:msg_Q")))
+        assertEquals(request,delivered.events.single().requestId)
+        val window = queued.merge(delivered,"after")
+        assertEquals(listOf("history:h1","history:h2"),window.displayed.map { it.id })
+        assertEquals(setOf(request) to listOf("outgoing:$request" to "recorded"),own(window.displayed))
+    }
+
+    @Test fun aPagedRowIndexedWithoutItsRequestTakesItFromTheExactInspectionRow() {
+        // Indexed by an older computer or outside its newest lookups: the stored row names no request.
+        val stored = durable(15,"You","UserPromptSubmit","msg_Q","Later")
+        val window = HistoryWindow(target,"epoch",listOf(reply,stored),null,"c15",false,false,true)
+        assertEquals(2,own(window.displayed).second.size)
+        val inspection = inspected(replyRow,row("UserPromptSubmit","msg_Q","Later",15).put("request_id",request))
+        val named = window.inspection(inspection)
+        assertEquals(listOf(stored.copy(requestId = request)),named.events.filter { it.role == "You" })
+        assertEquals(setOf(request) to listOf("outgoing:$request" to "recorded"),own(named.displayed))
+        // Never invented: no request, another message, another source, or a request it already names.
+        val unnamed = listOf(row("UserPromptSubmit","msg_Q","Later",15),
+            row("UserPromptSubmit","msg_other","Later",15).put("request_id",request),
+            row("UserPromptSubmit","msg_Q","Later",15).put("request_id",request).put("source","other_native"))
+        for(candidate in unnamed) assertEquals(listOf(stored),window.inspection(inspected(replyRow,candidate)).events.filter { it.role == "You" })
+        val elsewhere = HistoryWindow(target,"epoch",listOf(reply,stored.copy(requestId = other)),null,"c15",false,false,true)
+        assertEquals(listOf(other),elsewhere.inspection(inspection).events.filter { it.role == "You" }.map { it.requestId })
+    }
+
     @Test fun phoneMessageAndItsQueuedRowShowOneBubble() {
         val queued = head.inspection(waiting)
         val sent = OutgoingMessage(request,target,"Later",emptyList(),2.5,"submitted",3.0)

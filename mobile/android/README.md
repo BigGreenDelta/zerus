@@ -123,7 +123,7 @@ action, available only when the current agent and queued message allow it.
 An OpenCode message in the session inbox is a user bubble labelled **Queued**;
 after Stop it is labelled **Not delivered**. OpenCode dates a queued message by
 its delivery, so a phone message matches the OpenCode row that names its exact
-request UUID, queued or delivered; a row naming another request never matches,
+request UUID, queued, delivered or in paged history; a row naming another request never matches,
 and rows that name none keep the text/time rule. Inbox rows are not history: with
 paged history they follow the newest loaded message while the inspection reports
 them and never become a page, cursor or unread reply. Phones do not remove
