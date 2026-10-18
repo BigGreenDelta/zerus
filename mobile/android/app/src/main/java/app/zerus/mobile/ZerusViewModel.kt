@@ -1884,6 +1884,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             catch (e: RelayException) { if (e.status != 401) throw e }
             val next = connections.filterNot { it.id == connection.id }
             withContext(Dispatchers.IO) { store.saveConnections(next) }; connections = next
+            sharedReadRetries.forget(connection.id); scheduleSharedReadRetries()
             if (catalogErrorOwner == connection.id || detailReadErrorOwner?.first?.connectionId == connection.id) error = ""
             accountsWriter?.edit { rows -> rows.filterNot { it.key.connectionId==connection.id } }; accountsWriter?.flushAsync()
             inspections.values.filter { it.first.connectionId == connection.id }.forEach { it.second.cancel() }
