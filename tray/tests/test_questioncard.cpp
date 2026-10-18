@@ -686,7 +686,11 @@ void TestQuestionCard::openCodePermissionListsNativeChoicesAndConfirmsAlwaysAllo
     auto *approve = card.findChild<QPushButton *>("approveToolRequest"), *deny = card.findChild<QPushButton *>("denyToolRequest");
     const auto refused = openCodeCase("permission-allow-refused");
     QCOMPARE(refused.value("error").toString(), QString("Unknown answer option"));
-    QStringList chosen;
+    // Every option id the card emits during this test, from any control.
+    QStringList emitted;
+    connect(&card, &QuestionCard::answerRequested, &card, [&emitted](const QString &, const QString &, const QJsonArray &answers) {
+        for (const auto &answer : answers) for (const auto &id : answer.toObject().value("selected_option_ids").toArray()) emitted << id.toString();
+    });
     for (const QString name : {"permission-once", "permission", "permission-reject"}) {
         const auto contractCase = openCodeCase(name); QVERIFY2(!contractCase.isEmpty(), qPrintable(name));
         const auto permission = openCodeCard(contractCase); const auto expected = contractCase.value("answers").toArray();
@@ -703,13 +707,27 @@ void TestQuestionCard::openCodePermissionListsNativeChoicesAndConfirmsAlwaysAllo
             ids << item.value("id").toString();
         }
         QCOMPARE(ids, QStringList({"once", "always", "reject"}));
-        QVERIFY(!option(card, refused["answers"][0]["selected_option_ids"][0].toString()));
+        // Neither allow, which hgs refuses (permission-allow-refused), nor deny is offered.
+        for (const auto &synthesized : {refused["answers"][0]["selected_option_ids"][0].toString(), QString("deny")})
+            QVERIFY2(!option(card, synthesized), qPrintable(synthesized));
         QVERIFY(approve->isHidden()); QVERIFY(deny->isHidden());
         QCOMPARE(option(card, "reject")->accessibleDescription(), QString("Rejects every pending request in this session"));
         QStringList descriptions;
         for (auto *label : card.findChildren<QLabel *>("questionChoiceDescription")) if (label->isVisible()) descriptions << label->text();
         QVERIFY2(descriptions.contains("Rejects every pending request in this session"), qPrintable(descriptions.join(" | ")));
-        QCOMPARE(option(card, "always")->accessibleDescription(), QString("Applies beyond this request. Asks for confirmation."));
+        // Always allow shows what it saves, as reported, and that it asks for confirmation.
+        QString saves;
+        for (const auto &value : permission["questions"][0]["options"].toArray())
+            if (value.toObject().value("id") == "always") saves = value.toObject().value("description").toString();
+        QVERIFY2(saves.contains("printf *"), qPrintable(saves));
+        const QString always = saves + "\nApplies beyond this request. Asks for confirmation.";
+        QCOMPARE(option(card, "always")->accessibleDescription(), always);
+        QStringList alwaysText;
+        for (auto *label : option(card, "always")->parentWidget()->findChildren<QLabel *>()) {
+            QCOMPARE(label->textFormat(), Qt::PlainText); if (label->isVisible()) alwaysText << label->text();
+        }
+        QCOMPARE(alwaysText, QStringList({"Always allow", always}));
+        QVERIFY(option(card, "always")->parentWidget()->findChildren<MarkdownText *>().isEmpty());
         QCOMPARE(card.findChild<QLabel *>("questionHeading")->text(), QString("Agent needs your approval"));
         QCOMPARE(card.findChild<QLabel *>("questionPrompt")->text(), QString("shell\nprintf native-tool-output"));
         QCOMPARE(status(), QString("Review the request, then choose one of the agent's options."));
@@ -730,9 +748,9 @@ void TestQuestionCard::openCodePermissionListsNativeChoicesAndConfirmsAlwaysAllo
         submit(card)->click(); QCOMPARE(sent.size(), 1);
         QCOMPARE(sent.first()[0].toString(), QString("opencode\nsession")); QCOMPARE(sent.first()[1].toString(), QString("per_1"));
         QCOMPARE(sent.first()[2].toJsonArray(), expected);
-        chosen << sent.first()[2].toJsonArray().at(0)["selected_option_ids"][0].toString();
     }
-    QCOMPARE(chosen, QStringList({"once", "always", "reject"}));
+    // Only OpenCode's own decisions were ever emitted, never allow or deny.
+    QCOMPARE(emitted, QStringList({"once", "always", "reject"}));
     QCOMPARE(QJsonDocument(openCodeCase("permission-once").value("answers").toArray()).toJson(QJsonDocument::Compact),
         QByteArray(R"([{"question_id":"permission","selected_option_ids":["once"],"text":""}])"));
 }
@@ -773,6 +791,26 @@ void TestQuestionCard::openCodeFormTextMayStartWithSlashOrBang()
             QCOMPARE(status(), QString("Use Terminal for answers starting with / or !."));
             submit(card)->click(); QCOMPARE(sent.size(), 0);
         }
+    }
+    // A choice item that also takes its own answer accepts such text as Other.
+    const auto custom = openCodeCase("question-custom-text"); QVERIFY(!custom.isEmpty());
+    const auto choiceForm = openCodeCard(custom); const auto choiceId = choiceForm["questions"][0]["id"].toString();
+    QVERIFY(choiceForm["questions"][0]["allow_other"].toBool()); QVERIFY(!choiceForm["questions"][0]["options"].toArray().isEmpty());
+    for (const QString answer : {"/x", "!x"}) {
+        auto variant = choiceForm; variant["question_hash"] = "question-custom-text" + answer;
+        setQuestionReady(card, "opencode\nsession", variant); sent.clear();
+        other(card, choiceId)->click(); text(card, choiceId)->setText(answer);
+        QVERIFY2(submit(card)->isEnabled(), qPrintable(status()));
+        QVERIFY2(tabs->tabText(0).startsWith(QStringLiteral("✓ ")), qPrintable(tabs->tabText(0)));
+        QCOMPARE(status(), QString("Your choices are ready to send."));
+        submit(card)->click(); QCOMPARE(sent.size(), 1);
+        QCOMPARE(sent.first()[2].toJsonArray(),
+            (QJsonArray{QJsonObject{{"question_id", choiceId}, {"selected_option_ids", QJsonArray{}}, {"text", answer}}}));
+        // The same item from a terminal agent keeps the refusal.
+        variant["source"] = "hook"; variant["question_hash"] = "question-custom-text/hook" + answer;
+        setQuestionReady(card, "opencode\nsession", variant); sent.clear();
+        other(card, choiceId)->click(); text(card, choiceId)->setText(answer);
+        QVERIFY(!submit(card)->isEnabled()); QCOMPARE(status(), QString("Use Terminal for answers starting with / or !."));
     }
 }
 

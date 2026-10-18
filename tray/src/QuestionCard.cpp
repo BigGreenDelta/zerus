@@ -563,10 +563,13 @@ void QuestionCard::rebuild()
         const bool listed = !m_question.value("approval").toBool() || m_question.value("approval_choices").toBool();
         for (const auto &optionValue : question.value("options").toArray()) {
             const auto option = optionValue.toObject();
-            const QString description = option.value("scope") == "broader"
-                ? tr("Applies beyond this request. Asks for confirmation.") : option.value("description").toString();
+            // A broader option keeps its own description as reported, such as the
+            // patterns OpenCode's Always allow saves, and says it asks for confirmation.
+            const bool broader = option.value("scope") == "broader";
+            const QString own = option.value("description").toString(), confirmation = tr("Applies beyond this request. Asks for confirmation.");
+            const QString description = !broader ? own : own.isEmpty() ? confirmation : own + '\n' + confirmation;
             auto *choice = new Choice(form.multi, option.value("label").toString(), description, page,
-                literal || description.isEmpty() ? nullptr : markdownText("questionChoiceDescription", description));
+                literal || broader || description.isEmpty() ? nullptr : markdownText("questionChoiceDescription", description));
             choice->button->setObjectName("questionOption"); choice->button->setProperty("optionId", option.value("id").toString());
             choice->button->setProperty("questionId", form.id); group->addButton(choice->button);
             choice->button->setChecked(answer.options.contains(option.value("id").toString()));
