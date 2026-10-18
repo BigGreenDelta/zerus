@@ -11,6 +11,65 @@ import org.junit.Test
 import java.util.UUID
 
 class VoiceMessagesTest {
+    private fun refusal(entry: VoiceOutgoing, operation: String = entry.operationId, generation: Long = 1) = JSONObject()
+        .put("schema", 1).put("rejection", JSONObject().put("schema", 1).put("state", "rejected_before_acceptance")
+            .put("request_id", operation).put("message_id", entry.id).put("run_id", entry.target.run)
+            .put("conversation_id", entry.target.conversation).put("intent", VoiceRejection.intent(entry))
+            .put("payload_sha256", "c".repeat(64)).put("generation", generation).put("retry_token", UUID.randomUUID().toString())
+            .put("code", "route_unavailable").put("detail", "The recording was not accepted."))
+
+    @Test fun definitiveRefusalRestoresOriginalMediaIdentityAndPinsAcrossRestart() {
+        val original = entry().copy(profileRevision = 7)
+        val refused = VoiceRejection.accept(refusal(original), original, original.id)
+        assertTrue(refused.canRestoreUnsent)
+        assertEquals(original.audio, refused.audio)
+        assertEquals(original.id, refused.id)
+        assertEquals(original.machineId, refused.machineId)
+        assertEquals(original.profileRevision, refused.profileRevision)
+        assertNull(refused.message)
+        assertEquals(refused, VoiceCodec.decode(VoiceCodec.encode(VoiceState(outgoing = listOf(refused)))).outgoing.single())
+        val draft = VoiceDraft(original.target, original.machineId, original.profileId, audio, 200, 50.0, 7,
+            resubmissionId = original.id, rejection = refused.rejection)
+        assertEquals(draft, VoiceCodec.decode(VoiceCodec.encode(VoiceState(draft = draft))).draft)
+    }
+
+    @Test fun consumedRefusalCannotSettleALostRetryAndAcceptedReceiptWins() {
+        val original = entry()
+        val first = VoiceRejection.accept(refusal(original), original, original.id)
+        val operation = UUID.randomUUID().toString()
+        val retry = first.copy(uploadState = "uploading", operationId = operation, attemptedRejectionGeneration = 1)
+        val cold = VoiceCodec.decode(VoiceCodec.encode(VoiceState(outgoing = listOf(retry)))).outgoing.single()
+        assertEquals("uncertain", cold.state)
+        assertEquals(operation, cold.operationId)
+        assertEquals(1L, cold.attemptedRejectionGeneration)
+        val status = UUID.randomUUID().toString()
+        assertThrows(IllegalArgumentException::class.java) { VoiceRejection.accept(refusal(cold, status, 1), cold, status) }
+        assertFalse(cold.canRestoreUnsent)
+        val settled = VoiceRejection.accept(refusal(cold, status, 2), cold, status)
+        assertTrue(settled.canRestoreUnsent)
+        assertEquals(original.id, settled.id)
+        val accepted = cold.copy(message = message("submitted", 9))
+        assertEquals(accepted, VoiceRejection.accept(refusal(cold, status, 2), accepted, status))
+        assertThrows(Exception::class.java) { VoiceRejection.accept(JSONObject().put("schema", 1), cold, status) }
+    }
+
+    @Test fun refusalRequiresExactOperationConversationMediaAndProvider() {
+        val video = VideoDraft(audio.copy(name = "video.mp4", mime = "video/mp4"), 200, 480, 480)
+        val original = entry().copy(video = video, profileRevision = 4)
+        for ((key, value) in listOf("request_id" to UUID.randomUUID().toString(), "message_id" to UUID.randomUUID().toString(),
+            "run_id" to "other", "conversation_id" to "other", "generation" to 0, "retry_token" to "bad", "path" to "/synthetic")) {
+            val raw = refusal(original); raw.getJSONObject("rejection").put(key, value)
+            assertThrows(Exception::class.java) { VoiceRejection.accept(raw, original, original.id) }
+        }
+        for (local in listOf(original.copy(profileRevision = 5), original.copy(profileId = "other"), original.copy(machineId = UUID.randomUUID().toString()),
+            original.copy(audio = audio.copy(sha256 = "b".repeat(64))), original.copy(video = video.copy(width = 640)))) {
+            assertThrows(IllegalArgumentException::class.java) { VoiceRejection.accept(refusal(original), local, original.id) }
+        }
+        val coerced = refusal(original)
+        coerced.getJSONObject("rejection").getJSONObject("intent").getJSONObject("audio").put("bytes", original.audio!!.bytes.toString())
+        assertThrows(IllegalArgumentException::class.java) { VoiceRejection.accept(coerced, original, original.id) }
+        assertTrue(VoiceRejection.accept(refusal(original), original, original.id).canRestoreUnsent)
+    }
     @Test fun previewPreferenceRoundTripsWithoutChangingSavedMediaAndLegacyKeepsReleaseSend() {
         val original = VoiceState()
         val legacy = VoiceCodec.encode(original).apply { remove("preview_before_send") }

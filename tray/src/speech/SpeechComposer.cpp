@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QAudioOutput>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QEvent>
@@ -28,6 +29,8 @@
 #include <QVBoxLayout>
 #include <QtEndian>
 #include <cmath>
+#include <algorithm>
+#include <QJsonDocument>
 
 namespace {
 QByteArray wav(const QByteArray &pcm) {
@@ -99,7 +102,7 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
     connect(m_play,&QPushButton::clicked,this,&SpeechComposer::play);
     connect(m_refresh,&QPushButton::clicked,this,&SpeechComposer::loadProfiles);
     connect(m_provider,&QComboBox::currentIndexChanged,this,[this]{
-        if(m_syncing)return;
+        if(m_syncing || !m_rejection.isEmpty())return;
         const auto profile=m_provider->currentData().toJsonObject();
         if(!profile.isEmpty()){m_selectedProfile=profile;m_profileBound=true;m_profileError.clear();QSettings s;s.setValue("speech/machine_id",profile.value("machine_id").toString());s.setValue("speech/profile",profile.value("profile_id").toString());s.setValue("speech/profile_revision",profile.value("profile_revision").toVariant());saveProfileSelection();}
         update();
@@ -156,6 +159,7 @@ void SpeechComposer::syncTarget() {
     const auto key=m_composer->sessionKey();if(key==m_loadedKey)return;
     m_sendAfterSaved=false;
     ++m_generation;m_recorder->cancel();m_videoRecorder->cancel();stopPlayback();m_loadedKey=key;m_target=m_currentTarget();
+    m_rejection={};m_attemptedRejectionGeneration=0;m_operationId.clear();
     m_pcm.clear();m_video.clear();m_videoMeta={};m_captureVideo=false;m_id.clear();m_notice.clear();m_noticeKind=Notice::General;m_state=State::Idle;m_loading=!key.isEmpty();
     m_profilesLoading=false;m_profilesValidated=false;m_profileError.clear();m_selectedProfile=preferredProfile();m_profileBound=false;
     m_syncing=true;m_provider->clear();m_syncing=false;
@@ -172,6 +176,8 @@ void SpeechComposer::syncTarget() {
             m_videoMeta=meta.value("video").toObject();
             if(!m_videoMeta.isEmpty() && draft.attachments.size()==2){m_video=draft.attachments[1].data;m_captureVideo=true;}
             m_pcm=audio.mid(44);m_id=meta.value("id").toString();m_seconds=m_pcm.size()/32000;
+            m_operationId=meta.value("operation_id").toString(m_id);
+            m_rejection=meta.value("rejection").toObject();m_attemptedRejectionGeneration=meta.value("attempted_rejection_generation").toInteger();
             m_state=meta.value("submitted").toBool()?State::Uncertain:State::Preview;
             if(m_state==State::Uncertain)m_notice=tr("Submission was interrupted. Check this message; audio is never sent twice automatically.");
             loadProfiles();
@@ -269,7 +275,8 @@ void SpeechComposer::saveVoice(std::function<void(bool)> done,bool requireGenera
     draft.notice=tr("Open the original conversation to review or check this voice message.");
     draft.attachments.append({"voice.wav","audio/wav",wav(m_pcm),{}});
     draft.formState={{"kind","voice_message"},{"id",m_id},{"host",m_target.host},{"session",m_target.session},{"run",m_target.run},{"conversation",m_target.conversation},
-        {"speech",m_selectedProfile},{"submitted",m_state==State::Submitting || m_state==State::Uncertain}};
+        {"speech",m_selectedProfile},{"submitted",m_state==State::Submitting || m_state==State::Uncertain},
+        {"rejection",m_rejection},{"attempted_rejection_generation",m_attemptedRejectionGeneration},{"operation_id",m_operationId}};
     if(!m_video.isEmpty()){draft.attachments.append({"video.mp4","video/mp4",m_video,{}});draft.formState["video"]=m_videoMeta;}
     const auto generation=m_generation;
     m_store.saveDurableAsync(storageKey(),draft,this,[this,generation,done,requireGeneration](bool okay,const ComposerDraft &){if(!requireGeneration || generation==m_generation)done(okay);});
@@ -292,13 +299,19 @@ void SpeechComposer::send() {
     }
     stopPlayback();m_notice.clear();m_state=State::Submitting;update();
     const auto generation=m_generation;auto payload=identityPayload("submit");payload["request_id"]=m_id;payload["speech"]=chosen;
+    const auto previousAttempt=m_attemptedRejectionGeneration;
+    if(!m_rejection.isEmpty()){
+        payload["request_id"]=QUuid::createUuid().toString(QUuid::WithoutBraces);payload["message_id"]=m_id;payload["rejection"]=m_rejection;
+        m_attemptedRejectionGeneration=m_rejection.value("generation").toInteger();
+    }
+    m_operationId=payload.value("request_id").toString();
     QSettings settings;
     settings.setValue("speech/machine_id",chosen.value("machine_id").toString());settings.setValue("speech/profile",chosen.value("profile_id").toString());settings.setValue("speech/profile_revision",chosen.value("profile_revision").toVariant());
     payload["audio"]=QJsonObject{{"format","pcm_s16le"},{"sample_rate",16000},{"channels",1},{"data_base64",QString::fromLatin1(m_pcm.toBase64())}};
     const auto target=m_target;const auto key=storageKey();
     const auto video=m_video;const auto videoMeta=m_videoMeta;
-    saveVoice([this,generation,payload,target,key,video,videoMeta](bool saved) mutable {
-        if(!saved){if(generation==m_generation){m_state=State::Preview;m_notice=tr("Could not save the voice request. No audio was sent.");update();}return;}
+    saveVoice([this,generation,payload,target,key,video,videoMeta,previousAttempt](bool saved) mutable {
+        if(!saved){if(generation==m_generation){m_attemptedRejectionGeneration=previousAttempt;m_state=State::Preview;m_notice=tr("Could not save the voice request. No audio was sent.");update();}return;}
         // Explicit Send owns this immutable target even if navigation changes
         // while the local checkpoint is being written.
         if(!video.isEmpty()){
@@ -308,9 +321,9 @@ void SpeechComposer::send() {
                 if(guard)QMetaObject::invokeMethod(guard,[guard,generation,payload,target,key]{if(!guard)return;
                     guard->m_client->requestVoice(target.host,target.session,payload,[guard,generation,target,key,payload](const QJsonObject &reply,const QString &error){
                         if(!guard)return;
-                        if(generation==guard->m_generation){guard->result(reply,error);return;}
+                        if(generation==guard->m_generation){guard->result(reply,error,payload);return;}
                         const auto message=reply.value("message").toObject();
-                        if(error.isEmpty() && message.value("id")==payload.value("request_id") && message.value("run_id").toString()==target.run && message.value("conversation_id").toString()==target.conversation){
+                        if(error.isEmpty() && message.value("id")==payload.value(payload.contains("message_id")?"message_id":"request_id") && message.value("run_id").toString()==target.run && message.value("conversation_id").toString()==target.conversation){
                             emit guard->messageChanged(target.key,message);guard->m_store.saveDurableAsync(key,{},guard,[](bool,const ComposerDraft&){});
                         }
                     });
@@ -318,9 +331,9 @@ void SpeechComposer::send() {
             }));return;
         }
         m_client->requestVoice(target.host,target.session,payload,[this,generation,target,key,payload](const QJsonObject &reply,const QString &error){
-            if(generation==m_generation){result(reply,error);return;}
+            if(generation==m_generation){result(reply,error,payload);return;}
             const auto message=reply.value("message").toObject();
-            if(error.isEmpty() && message.value("id")==payload.value("request_id") && message.value("run_id")==target.run && message.value("conversation_id")==target.conversation){
+            if(error.isEmpty() && message.value("id")==payload.value(payload.contains("message_id")?"message_id":"request_id") && message.value("run_id")==target.run && message.value("conversation_id")==target.conversation){
                 emit messageChanged(target.key,message);m_store.saveDurableAsync(key,{},this,[](bool,const ComposerDraft&){});
             }
         });
@@ -329,10 +342,43 @@ void SpeechComposer::send() {
 void SpeechComposer::check() {
     if(m_id.isEmpty() || m_state!=State::Uncertain)return;
     m_state=State::Submitting;update();auto payload=identityPayload("status");payload["message_id"]=m_id;const auto generation=m_generation;
-    m_client->requestVoice(m_target.host,m_target.session,payload,[this,generation](const QJsonObject &reply,const QString &error){if(generation==m_generation)result(reply,error);});
+    m_client->requestVoice(m_target.host,m_target.session,payload,[this,generation,payload](const QJsonObject &reply,const QString &error){if(generation==m_generation)result(reply,error,payload);});
 }
-void SpeechComposer::result(const QJsonObject &reply,const QString &error) {
+void SpeechComposer::result(const QJsonObject &reply,const QString &error,const QJsonObject &request) {
+    if(m_id.isEmpty() || request.value(request.contains("message_id")?"message_id":"request_id").toString()!=m_id)return;
+    if(request.value("action")=="submit" && request.value("request_id").toString()!=m_operationId)return;
     const auto message=reply.value("message").toObject();
+    if(error.isEmpty() && message.isEmpty() && reply.contains("rejection")){
+        const auto proof=reply.value("rejection").toObject();
+        const QSet<QString> expected={"schema","state","request_id","message_id","run_id","conversation_id","intent","payload_sha256","generation","retry_token","code","detail"};
+        const auto keys=proof.keys();const auto generation=proof.value("generation").toInteger();
+        const auto digest=[](const QJsonValue &value){return QRegularExpression("^[0-9a-f]{64}$").match(value.toString()).hasMatch();};
+        const auto uuid=[](const QJsonValue &value){const auto text=value.toString();const QUuid id(text);return !id.isNull() && id.toString(QUuid::WithoutBraces)==text;};
+        const auto detail=proof.value("detail").toString();
+        auto intent=QJsonObject{{"speech",m_selectedProfile},{"audio",QJsonObject{{"format","pcm_s16le"},{"sample_rate",16000},{"channels",1},
+            {"bytes",m_pcm.size()+44},{"sha256",QString::fromLatin1(QCryptographicHash::hash(wav(m_pcm),QCryptographicHash::Sha256).toHex())}}}};
+        if(!m_video.isEmpty()){
+            auto media=m_videoMeta;media.remove("poster_base64");media["bytes"]=m_video.size();
+            media["sha256"]=QString::fromLatin1(QCryptographicHash::hash(m_video,QCryptographicHash::Sha256).toHex());
+            if(m_videoMeta.contains("poster_base64"))media["poster_sha256"]=QString::fromLatin1(QCryptographicHash::hash(QByteArray::fromBase64(m_videoMeta.value("poster_base64").toString().toLatin1()),QCryptographicHash::Sha256).toHex());
+            intent["video"]=media;
+        }
+        const auto oldGeneration=m_rejection.value("generation").toInteger();
+        const bool valid=reply.value("schema")==1 && QSet<QString>(keys.begin(),keys.end())==expected && QJsonDocument(proof).toJson(QJsonDocument::Compact).size()<=4096
+            && proof.value("schema")==1 && proof.value("state")=="rejected_before_acceptance"
+            && uuid(proof.value("request_id")) && uuid(proof.value("retry_token")) && proof.value("request_id")==request.value("request_id")
+            && proof.value("message_id")==m_id && proof.value("run_id")==m_target.run && proof.value("conversation_id")==m_target.conversation
+            && proof.value("intent").toObject()==intent && digest(proof.value("payload_sha256"))
+            && generation>m_attemptedRejectionGeneration && generation>=oldGeneration
+            && (m_rejection.isEmpty() || (proof.value("payload_sha256")==m_rejection.value("payload_sha256")
+                && (generation>oldGeneration || proof.value("retry_token")==m_rejection.value("retry_token"))))
+            && QStringList{"route_unavailable","storage_full","queue_full"}.contains(proof.value("code").toString())
+            && !detail.isEmpty() && detail.toUtf8().size()<=2000 && std::none_of(detail.begin(),detail.end(),[](QChar c){return c.category()==QChar::Other_Control;});
+        if(valid){
+            m_rejection=proof;m_state=State::Saving;m_notice=tr("The computer did not accept this recording. Send voice retries the same recording and provider.");update();
+            saveVoice([this](bool saved){m_state=saved?State::Preview:State::Uncertain;if(!saved)m_notice=tr("Could not save the refusal. Check this message before trying again.");update();});return;
+        }
+    }
     if(!error.isEmpty() || message.value("id").toString()!=m_id || message.value("run_id").toString()!=m_target.run || message.value("conversation_id").toString()!=m_target.conversation){
         m_state=State::Uncertain;m_notice=error.isEmpty()?tr("Voice submission is not confirmed. Check this message before trying another recording."):error;update();return;
     }
@@ -349,7 +395,7 @@ void SpeechComposer::result(const QJsonObject &reply,const QString &error) {
     m_store.saveDurableAsync(storageKey(),{},this,[this,generation](bool saved,const ComposerDraft &){
         if(generation!=m_generation)return;
         if(!saved){m_state=State::Uncertain;m_notice=tr("The message was accepted, but its local receipt could not be saved. Check it again.");update();return;}
-        m_pcm.clear();m_video.clear();m_videoMeta={};m_id.clear();m_state=State::Idle;m_notice.clear();update();
+        m_pcm.clear();m_video.clear();m_videoMeta={};m_id.clear();m_rejection={};m_attemptedRejectionGeneration=0;m_operationId.clear();m_state=State::Idle;m_notice.clear();update();
     });
 }
 void SpeechComposer::discard() {
@@ -357,7 +403,7 @@ void SpeechComposer::discard() {
     if(m_state==State::Uncertain){
         auto payload=identityPayload("cancel");payload["message_id"]=m_id;
         const auto generation=m_generation;m_state=State::Submitting;update();
-        m_client->requestVoice(m_target.host,m_target.session,payload,[this,generation](const QJsonObject &reply,const QString &error){if(generation==m_generation)result(reply,error);});
+        m_client->requestVoice(m_target.host,m_target.session,payload,[this,generation,payload](const QJsonObject &reply,const QString &error){if(generation==m_generation)result(reply,error,payload);});
         return;
     }
     if(!m_pcm.isEmpty()){
@@ -373,10 +419,10 @@ void SpeechComposer::discard() {
         m_store.saveDurableAsync(storageKey(),{},this,[this,generation](bool saved,const ComposerDraft&){
             if(generation!=m_generation)return;
             if(!saved){m_state=State::Preview;m_notice=tr("Could not discard the saved recording. Try again.");update();return;}
-            m_pcm.clear();m_video.clear();m_videoMeta={};m_id.clear();m_state=State::Idle;m_notice.clear();update();
+            m_pcm.clear();m_video.clear();m_videoMeta={};m_id.clear();m_rejection={};m_attemptedRejectionGeneration=0;m_operationId.clear();m_state=State::Idle;m_notice.clear();update();
         });return;
     }
-    ++m_generation;m_recorder->cancel();m_videoRecorder->cancel();m_sendAfterSaved=false;stopPlayback();m_pcm.clear();m_video.clear();m_videoMeta={};m_id.clear();m_state=State::Idle;m_notice.clear();m_noticeKind=Notice::General;
+    ++m_generation;m_recorder->cancel();m_videoRecorder->cancel();m_sendAfterSaved=false;stopPlayback();m_pcm.clear();m_video.clear();m_videoMeta={};m_id.clear();m_rejection={};m_attemptedRejectionGeneration=0;m_operationId.clear();m_state=State::Idle;m_notice.clear();m_noticeKind=Notice::General;
     if(!m_loadedKey.isEmpty())m_store.saveDurableAsync(storageKey(),{},this,[](bool,const ComposerDraft&){});update();
 }
 void SpeechComposer::stopPlayback(){if(m_player)m_player->stop();}
@@ -416,7 +462,7 @@ void SpeechComposer::update() {
     m_cancel->setActive(m_state==State::Starting || recording);
     const bool preview=!m_pcm.isEmpty();m_preview->setVisible(preview);m_previewLabel->setText(tr("Voice %1").arg(duration(m_seconds)));
     m_play->setText(m_player && m_player->playbackState()==QMediaPlayer::PlayingState?tr("Pause"):tr("Play"));
-    m_play->setEnabled(preview && m_state!=State::Submitting);m_discard->setEnabled(m_state==State::Preview || m_state==State::Uncertain);m_provider->setEnabled(m_state==State::Preview && m_profilesValidated && !m_profilesLoading);
+    m_play->setEnabled(preview && m_state!=State::Submitting);m_discard->setEnabled(m_state==State::Preview || m_state==State::Uncertain);m_provider->setEnabled(m_state==State::Preview && m_rejection.isEmpty() && m_profilesValidated && !m_profilesLoading);
     m_refresh->setEnabled(m_state==State::Preview && !m_profilesLoading);m_refresh->setText(m_profilesLoading?tr("Checking…"):tr("Refresh"));
     m_provider->setPlaceholderText(m_profilesLoading?tr("Checking providers…"):tr("Choose a voice provider"));m_provider->setToolTip(m_profileError);
     m_discard->setText(m_state==State::Uncertain?tr("Cancel message"):tr("Discard"));

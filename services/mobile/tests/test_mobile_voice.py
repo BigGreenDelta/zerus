@@ -63,6 +63,36 @@ class VoiceValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_request(changed)
 
+    def test_native_refusal_is_not_an_error_and_retry_pins_original_identity_and_body(self):
+        from zerus_mobile import voice_rejection
+        request = video_command()
+        payload = request["payload"]
+        proof = {"schema": 1, "state": "rejected_before_acceptance", "request_id": request["request_id"],
+                 "message_id": request["request_id"], "run_id": payload["expected_run_id"],
+                 "conversation_id": payload["expected_conversation_id"], "intent": voice_rejection.intent(payload),
+                 "payload_sha256": "a" * 64, "generation": 1, "retry_token": str(uuid.uuid4()),
+                 "code": "route_unavailable", "detail": "The recording was not accepted."}
+        self.assertTrue(voice.result_valid("voice_submit", {"schema": 1, "rejection": proof}, payload))
+        operation = str(uuid.uuid4())
+        retry = copy.deepcopy(request)
+        retry["request_id"] = retry["payload"]["request_id"] = operation
+        retry["payload"].update(message_id=request["request_id"], rejection=proof)
+        validate_request(retry)
+        for field, value in (("message_id", str(uuid.uuid4())), ("expected_run_id", "other"), ("expected_conversation_id", "other")):
+            wrong = copy.deepcopy(retry); wrong["payload"][field] = value
+            with self.assertRaises(ValueError): validate_request(wrong)
+        for field in ("speech", "audio", "video"):
+            wrong = copy.deepcopy(retry)
+            if field == "speech": wrong["payload"][field]["profile_id"] = "other"
+            elif field == "audio": wrong["payload"][field]["data_base64"] = base64.b64encode(bytes([1]) * 32000).decode()
+            else: wrong["payload"][field]["width"] = 640
+            with self.assertRaises(ValueError): validate_request(wrong)
+        for field, value in (("request_id", str(uuid.uuid4())), ("message_id", str(uuid.uuid4())), ("run_id", "other"),
+                             ("generation", True), ("retry_token", "bad"), ("path", "/synthetic")):
+            wrong = copy.deepcopy(proof); wrong[field] = value
+            self.assertFalse(voice.result_valid("voice_submit", {"schema": 1, "rejection": wrong}, payload))
+        self.assertFalse(voice.result_valid("voice_submit", {"schema": 1, "error": "not found"}, payload))
+
     def test_operations_keep_session_and_exact_native_identity(self):
         for operation in voice.OPERATIONS:
             request = command(operation)

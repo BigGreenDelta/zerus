@@ -211,8 +211,8 @@ contains `action`, `request_id`, `expected_run_id` and
   open until it ends itself.
 * `submit`: also contains `speech: {machine_id, profile_id}` and
   `audio: {format: "pcm_s16le", sample_rate: 16000, channels: 1, data_base64}`.
-  Recording duration is bounded to 120 seconds. The request UUID is the permanent
-  message UUID. Optional `video` contains `format: "mp4"`, `data_base64`,
+  Recording duration is bounded to 120 seconds. On the first submission, the
+  request UUID is the permanent message UUID. Optional `video` contains `format: "mp4"`, `data_base64`,
   `duration_ms` (100–60000), `width` and `height` (16–1920), and optional
   `poster_base64` (JPEG, at most 8192 decoded bytes). Video requests use at most
   10 MiB MP4 and 60 seconds PCM; audio/video duration may differ by at most
@@ -230,12 +230,44 @@ inside the existing relay envelope. `computer_id` identifies the conversation
 computer; `session` is its exact session name. The envelope's `payload` is the
 native request without `action`. Its `request_id` matches the outer request UUID.
 
+A definitive refusal before durable native acceptance returns `schema: 1` and
+`rejection`, instead of `message`. Its exact fields are `schema: 1`,
+`state: "rejected_before_acceptance"`, the current operation `request_id`, original
+`message_id`, `run_id`, `conversation_id`, immutable `intent`, `payload_sha256`,
+positive monotonic `generation`, UUID `retry_token`, `code` and bounded `detail`.
+Codes cover native admission's `route_unavailable`, `storage_full` and `queue_full`.
+`intent` retains the exact speech computer/profile/revision, PCM format/rate/channels
+and canonical WAV byte count/SHA-256, plus optional MP4 format/duration/dimensions/
+byte count/SHA-256 and poster SHA-256. Proofs are bounded to 4096 bytes. These are
+private admission receipts; native delivery receipts and agent adapters are unchanged.
+
+The refusal and its operation receipt commit atomically before returning. The saved
+barrier blocks the original request even if its route recovers or an old envelope
+arrives later. Explicit resubmission uses a fresh operation `request_id`, the original
+`message_id`, the current `rejection` proof, and exactly the original target, speech
+pins and media. Only the current generation/token can admit that same native message.
+Accepted messages take precedence over stale refusals and repeated operation IDs
+cannot change their body. The native store keeps at most 10000 refusal barriers and
+40000 admission operations; exhaustion fails closed. Barriers are not expired into
+permission for delayed envelopes to execute.
+
+Desktop returns a proven refused recording to preview; Android's existing Return to
+recording action retains its native ID and proof. Provider changes are disabled for
+that resubmission. Each client saves the consumed refusal generation before uploading.
+After a lost retry, a status copy at that same generation is **not** fresh authority:
+the in-flight retry might still execute. Only a strictly newer refusal or the accepted
+native message settles that attempt. Restart and reconnect never resend audio.
+Status-not-found, later agent replies, ordinary transport errors and provider discovery
+failures remain unconfirmed; they cannot authorize a new message identity or replay.
+No earlier unstructured remote failure is retroactively classified as definitive.
+
 Canonical history reconciles older voice provenance with a separate durable
 metadata cursor, independent of the newest 100-message inspection preview and
-the voice change-feed import cursor. Each pass reads at most 100 metadata rows
-and 512 KiB, checkpoints progress, and revisits older rows when outgoing native
-evidence or the history source generation changes. Index recreation starts a
-fresh sweep. Candidate lookups use indexed time or exact binding keys, stop at
+the voice change-feed import cursor. Each pass uses at most 100 metadata rows
+and a 512 KiB page budget (one oversized metadata row can make progress),
+checkpoints progress, and revisits older rows when outgoing native evidence or the history source generation changes. An in-progress bounded sweep
+finishes before adopting a newer generation, so continuous native updates cannot
+starve older rows. Index recreation starts a fresh sweep. Candidate lookups use indexed time or exact binding keys, stop at
 65 rows, and refuse over-budget or ambiguous matches across batch boundaries.
 Existing transcript, source-file identity and exact native binding proofs remain
 required; neither journal files nor complete provider transcripts are rescanned

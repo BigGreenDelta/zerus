@@ -89,7 +89,7 @@ internal class SpeechController(private val context: Context, private val model:
     private fun choose(selection: SpeechSelection, target: Target, previewId: String?): Boolean {
         if (!ready || recording || savingRecording || model.updateInstallPreparing || loading || profileTarget != target) return false
         val captured = draft
-        if (previewId != null && (captured?.audio?.id != previewId || captured.target != target)) return false
+        if (previewId != null && (captured?.audio?.id != previewId || captured.target != target || captured.rejection.isNotEmpty())) return false
         value = value.copy(selection = selection, draft = captured?.let {
             if (previewId != null) it.copy(machineId = selection.host?.computerId.orEmpty(), profileId = selection.profileId, profileRevision = selection.profileRevision) else it
         })
@@ -341,8 +341,10 @@ internal class SpeechController(private val context: Context, private val model:
         val reason = sendReason()
         if (reason.isNotBlank()) { notice = reason; return }
         if (model.voiceColdCache() && !allowColdCache) { notice = "Confirm sending with full context first."; return }
-        val id = UUID.randomUUID().toString()
-        val pending = VoiceOutgoing(id, captured.target, captured.machineId, captured.profileId, captured.audio, captured.durationMs, captured.createdAt, profileRevision = captured.profileRevision, video = captured.video)
+        val id = captured.resubmissionId.ifBlank { UUID.randomUUID().toString() }
+        val operationId = if (captured.rejection.isEmpty()) id else UUID.randomUUID().toString()
+        val pending = VoiceOutgoing(id, captured.target, captured.machineId, captured.profileId, captured.audio, captured.durationMs, captured.createdAt, profileRevision = captured.profileRevision, video = captured.video, rejection = captured.rejection,
+            attemptedRejectionGeneration = VoiceRejection.generation(captured.rejection), operationId = operationId)
         savingRecording = true; activeRequests = activeRequests + id
         scope.launch {
             var attempted = false
@@ -356,11 +358,12 @@ internal class SpeechController(private val context: Context, private val model:
                 val bytes = ByteArrayOutputStream()
                 audioStore.decrypt(captured.audio) { bytes.write(it) }
                 val payload = withContext(Dispatchers.Default) {
-                    VoiceProtocol.payload(captured.target, id)
+                    VoiceProtocol.payload(captured.target, operationId)
                         .put("speech", VoiceProtocol.provider(captured))
                         .put("audio", JSONObject().put("format", "pcm_s16le").put("sample_rate", 16_000).put("channels", 1)
                             .put("data_base64", Base64.getEncoder().encodeToString(VoiceProtocol.pcm(bytes.toByteArray()))))
                 }
+                if (captured.rejection.isNotEmpty()) payload.put("message_id", id).put("rejection", JSONObject(captured.rejection))
                 captured.video?.let { video ->
                     val original = ByteArrayOutputStream()
                     audioStore.decrypt(video.file) { original.write(it) }
@@ -368,10 +371,10 @@ internal class SpeechController(private val context: Context, private val model:
                 }
                 validateSend(captured, allowColdCache)
                 attempted = true
-                accept(pending, api.voice(route, captured.target, "voice_submit", payload, id))
+                accept(pending, api.voice(route, captured.target, "voice_submit", payload, operationId), operationId)
             } catch (error: Exception) {
                 withContext(NonCancellable) {
-                    update(id) { it.copy(uploadState = if (attempted) "uncertain" else "failed",
+                    update(id) { if (it.message != null || it.operationId != operationId) it else it.copy(uploadState = if (attempted) "uncertain" else "failed",
                         error = if (attempted) "Sending was not confirmed. Check this message's status; it has not been resent." else error.message.orEmpty()) }
                     try { persist() } catch (_: Exception) { notice = "Could not save the outcome. The original voice request remains recoverable." }
                 }
@@ -380,7 +383,13 @@ internal class SpeechController(private val context: Context, private val model:
             outgoing.find { it.id == id }?.takeIf { it.needsStatus }?.let { poll(it.id) }
         }
     }
-    private suspend fun accept(previous: VoiceOutgoing, raw: JSONObject) {
+    private suspend fun accept(previous: VoiceOutgoing, raw: JSONObject, operationId: String) {
+        val current = outgoing.find { it.id == previous.id } ?: return
+        if (current.operationId != previous.operationId) return
+        if (raw.has("rejection") && !raw.has("message")) {
+            val refused = VoiceRejection.accept(raw, current, operationId)
+            update(previous.id) { if (it.message == null) refused else it }; persist(); return
+        }
         val next = VoiceProtocol.response(raw, previous.effectiveTarget, previous.id)
         previous.audio?.let { require(next.audio.bytes == it.bytes && next.durationMs == previous.durationMs) { "The computer returned different audio metadata." } }
         previous.video?.let { local ->
@@ -394,7 +403,7 @@ internal class SpeechController(private val context: Context, private val model:
     private suspend fun status(entry: VoiceOutgoing) {
         val id = UUID.randomUUID().toString()
         val target = entry.effectiveTarget
-        accept(entry, api.voice(connection(target), target, "voice_status", VoiceProtocol.payload(target, id).put("message_id", entry.id), id))
+        accept(entry, api.voice(connection(target), target, "voice_status", VoiceProtocol.payload(target, id).put("message_id", entry.id), id), id)
     }
     fun checkStatus(entry: VoiceOutgoing) { poll(entry.id, force = true) }
     private fun poll(id: String, force: Boolean = false) {
@@ -442,7 +451,7 @@ internal class SpeechController(private val context: Context, private val model:
             activeRequests = activeRequests + entry.id
             try {
                 val id = UUID.randomUUID().toString(); val target = entry.effectiveTarget
-                accept(entry, api.voice(connection(target), target, "voice_cancel", VoiceProtocol.payload(target, id).put("message_id", entry.id), id))
+                accept(entry, api.voice(connection(target), target, "voice_cancel", VoiceProtocol.payload(target, id).put("message_id", entry.id), id), id)
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { update(entry.id) { it.copy(error = error.message ?: "Cancellation was not confirmed. Check status.") }; persist() }
             finally { activeRequests = activeRequests - entry.id }
@@ -458,12 +467,13 @@ internal class SpeechController(private val context: Context, private val model:
             } catch (_: Exception) { notice = "Could not remove the local voice receipt." }
         }
     }
-    /** Only a locally proven pre-transport failure may become a new editable recording. */
+    /** Native refusals retain their immutable identity and provider on explicit resubmission. */
     fun restoreUnsent(entry: VoiceOutgoing) {
         val current = outgoing.find { it.id == entry.id } ?: return
         if (current != entry || !current.canRestoreUnsent || current.audio == null ||
             current.id in activeRequests || draft != null || recording || savingRecording) return
-        val restored = VoiceDraft(current.target, current.machineId, current.profileId, current.audio, current.durationMs, current.createdAt, current.profileRevision, current.video)
+        val restored = VoiceDraft(current.target, current.machineId, current.profileId, current.audio, current.durationMs, current.createdAt, current.profileRevision, current.video,
+            resubmissionId = current.id.takeIf { current.rejection.isNotEmpty() }.orEmpty(), rejection = current.rejection)
         savingRecording = true
         scope.launch {
             try {

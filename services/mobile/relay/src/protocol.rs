@@ -413,7 +413,7 @@ pub fn request(v: &Value) -> Result<()> {
     } else {
         let extras: &[&str] = match op {
             "send" => &["text", "attachments", "expected_compaction_id", "agent_id"],
-            "voice_submit" => &["speech", "audio", "video"],
+            "voice_submit" => &["speech", "audio", "video", "message_id", "rejection"],
             "voice_status" | "voice_cancel" => &["message_id"],
             "answer" => &["question_id", "expected_question_hash", "answers"],
             "interrupt" => &["expected_turn_started"],
@@ -498,10 +498,11 @@ pub fn request(v: &Value) -> Result<()> {
                         .decode(p["audio"]["data_base64"].as_str().ok_or(Error::BAD)?)
                         .map_err(|_| Error::BAD)?;
                     let media =
-                        crate::voice_video::parse(video, id, pcm.len()).map_err(|_| Error::BAD)?;
+                        crate::voice_video::parse(video, crate::voice_rejection::message_id(p).as_str().ok_or(Error::BAD)?, pcm.len()).map_err(|_| Error::BAD)?;
                     // Drop decoded media before the canonical request buffer is allocated.
                     let _ = (media.bytes.len(), media.metadata);
                 }
+                crate::voice_rejection::validate_retry(p).map_err(|_|Error::BAD)?;
             }
             "voice_status" | "voice_cancel" => {
                 uuid(&p["message_id"], true)?;

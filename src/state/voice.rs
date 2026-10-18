@@ -11,6 +11,10 @@ use std::{
 };
 #[path = "../../services/mobile/relay/src/voice_video.rs"]
 mod video;
+#[path = "../../services/mobile/relay/src/voice_rejection.rs"]
+mod rejection;
+#[path = "voice/acceptance.rs"]
+mod acceptance;
 
 /// Voice messages need the speech service, the peer transport and a detached
 /// worker, which Phase 2 leaves out on Windows; `dispatch` refuses there.
@@ -73,7 +77,11 @@ fn prepare_request(value: &Value) -> Result<Option<video::Video>> {
         "expected_conversation_id",
     ];
     match string(value, "action") {
-        "submit" => { fields.extend(["speech", "audio"]); if object.contains_key("video") { fields.push("video"); } },
+        "submit" => {
+            fields.extend(["speech", "audio"]);
+            if object.contains_key("video") { fields.push("video"); }
+            if object.contains_key("rejection") || object.contains_key("message_id") { fields.extend(["message_id","rejection"]); }
+        },
         "status" | "cancel" => fields.push("message_id"),
         "profiles" => (),
         _ => return Err("Unknown voice action".into()),
@@ -106,9 +114,10 @@ fn prepare_request(value: &Value) -> Result<Option<video::Video>> {
             asr["profile_revision"] = revision.clone();
         }
         speech::validate_request(&asr).map_err(err)?;
+        rejection::validate_retry(value)?;
         if let Some(media) = value.get("video") {
             let pcm = STANDARD.decode(string(&value["audio"], "data_base64")).map_err(err)?;
-            return video::parse(media, string(value, "request_id"), pcm.len()).map(Some);
+            return video::parse(media, rejection::message_id(value).as_str().unwrap_or_default(), pcm.len()).map(Some);
         }
     }
     Ok(None)
@@ -205,6 +214,8 @@ impl Store {
         db.execute_batch("CREATE INDEX IF NOT EXISTS voice_native_time ON messages(conversation,json_extract(body,'$.native_submitted_at')) WHERE state='submitted';
             CREATE INDEX IF NOT EXISTS voice_native_provider ON messages(conversation,json_extract(body,'$.native_binding.provider_source'),json_extract(body,'$.native_binding.provider_message_id')) WHERE state='submitted';
             CREATE INDEX IF NOT EXISTS voice_native_journal ON messages(conversation,json_extract(body,'$.native_binding.journal_seq')) WHERE state='submitted';").map_err(err)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS voice_refusals(id TEXT PRIMARY KEY,digest TEXT NOT NULL,owner TEXT NOT NULL,proof TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS voice_admissions(id TEXT PRIMARY KEY,digest TEXT NOT NULL,message TEXT NOT NULL,reply TEXT NOT NULL);").map_err(err)?;
         Ok(Self { db })
     }
     fn open() -> Result<Self> {
@@ -251,11 +262,17 @@ impl Store {
     fn insert(&mut self, job: &Value, digest: &str, audio: &[u8]) -> Result<Value> {
         self.insert_media(job, digest, audio, &[])
     }
+    #[cfg(all(test, unix))]
     fn insert_media(&mut self, job: &Value, digest: &str, audio: &[u8], video: &[u8]) -> Result<Value> {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(err)?;
+        let accepted = Self::insert_media_in(&tx,job,digest,audio,video)?;
+        tx.commit().map_err(err)?;
+        Ok(accepted)
+    }
+    fn insert_media_in(tx: &rusqlite::Transaction<'_>, job: &Value, digest: &str, audio: &[u8], video: &[u8]) -> Result<Value> {
         let previous: Option<(String, String)> = tx
             .query_row(
                 "SELECT digest,body FROM messages WHERE id=?",
@@ -308,7 +325,6 @@ impl Store {
             ],
         )
         .map_err(err)?;
-        tx.commit().map_err(err)?;
         Ok(job.clone())
     }
     fn audio(&self, id: &str) -> Result<Vec<u8>> {
@@ -554,44 +570,45 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let config = crate::config::Config::load().map_err(|e| e.message)?;
     if request["action"] == "profiles" {
         let mut profiles = speech::voice_computers(&config)?;
-        profiles["features"] = json!(["voice_video"]);
+        profiles["features"] = json!(["voice_video","voice_rejection_v1"]);
         println!("{}", profiles);
         return Ok(0);
     }
     let mut store = Store::open()?;
     let job = if request["action"] == "submit" {
-        speech::voice_route(&config, string(&request["speech"], "machine_id"))?;
+        let route_unavailable = speech::voice_route(&config, string(&request["speech"], "machine_id")).is_err();
         let pcm = STANDARD
             .decode(string(&request["audio"], "data_base64"))
             .map_err(err)?;
         let audio = wav(&pcm);
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&json!([
-                    target["agent"],
-                    target["account_id"],
-                    target["agent_home"],
-                    request
-                ]))
-                .map_err(err)?
-            )
-        );
-        let id = string(&request, "request_id");
+        let id = rejection::message_id(&request).as_str().ok_or("Missing voice message identity")?;
         let mut job = json!({"id":id,"name":args[0],"run_id":target["run_id"],"conversation_id":target["conversation_id"],"agent":target["agent"],"backend":target["backend"],"agent_home":target["agent_home"],"account_id":target["account_id"],
             "created_at":now(),"revision":1,"state":"queued","speech":request["speech"],"attempt":0,
             "audio":{"request_id":id,"index":0,"name":"voice.wav","mime":"audio/wav","bytes":audio.len(),"duration_ms":(pcm.len()*1000/32000).max(1),"waveform":waveform(&pcm)}});
         if let Some(video) = &video { job["video"] = video.metadata.clone(); }
-        let accepted = store.insert_media(&job, &digest, &audio, video.as_ref().map_or(&[], |v| v.bytes.as_slice()))?;
+        let accepted = match store.admit(&request,&target,&job,&audio,video.as_ref().map_or(&[], |v|v.bytes.as_slice()),route_unavailable)? {
+            acceptance::Admission::Accepted(job) => job,
+            acceptance::Admission::Refused(proof) => {
+                println!("{}",json!({"schema":1,"rejection":proof}));
+                return Ok(0);
+            }
+        };
         // Failure to start a worker must not hide an accepted durable message.
         if ensure_worker().is_err() {
             eprintln!("hgs: voice message saved; worker startup is pending");
         }
         accepted
     } else {
-        let mut job = store
-            .get(string(&request, "message_id"))?
-            .ok_or("Voice message was not found")?;
+        let mut job = match store.get(string(&request,"message_id"))? {
+            Some(job) => job,
+            None => {
+                if let Some(proof) = store.refusal(&request,&target)? {
+                    println!("{}",json!({"schema":1,"rejection":proof}));
+                    return Ok(0);
+                }
+                return Err("Voice message was not found".into());
+            }
+        };
         if !belongs(&job, &target) {
             return Err("Voice message belongs to another conversation".into());
         }
@@ -603,7 +620,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         job
     };
     // Do not expose local target names, account paths, routes or delivery bytes.
-    println!("{}", json!({"schema":1,"message":public(&job)}));
+    println!("{}", json!({"schema":1,"request_id":request["request_id"],"message":public(&job)}));
     Ok(0)
 }
 

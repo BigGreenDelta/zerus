@@ -55,6 +55,38 @@ class VoiceMessageTests(SessionCase):
                 self.assertEqual(json.loads(call["stdin"]), {"action": action, **request["payload"]})
                 await self.assert_replays_once_delivered(request, result, process)
 
+    async def test_definitive_native_refusal_is_durable_and_explicit_retry_keeps_native_id(self):
+        from zerus_mobile import voice_rejection
+        request = submission("speech", "valid/voice_submit")
+        request["payload"]["audio"]["data_base64"] = base64.b64encode(bytes(3200)).decode()
+        payload = request["payload"]
+        proof = {"schema": 1, "state": "rejected_before_acceptance", "request_id": request["request_id"],
+                 "message_id": request["request_id"], "run_id": payload["expected_run_id"],
+                 "conversation_id": payload["expected_conversation_id"], "intent": voice_rejection.intent(payload),
+                 "payload_sha256": "a" * 64, "generation": 1, "retry_token": str(uuid.uuid4()),
+                 "code": "route_unavailable", "detail": "The recording was not accepted."}
+        answer = {"schema": 1, "rejection": proof}
+        self.script({"argv": ["voice", SESSION, "--json"], "stdout": answer})
+        process = await self.launch()
+        result = await self.submit(request, process)
+        self.assertEqual(result, {"state": "completed", "result": answer, "error": None})
+        await self.assert_replays_once_delivered(request, result, process)
+        native_id = request["request_id"]
+        retry = self.envelope("voice_submit", {**payload, "message_id": native_id, "rejection": proof})
+        # The harness pins the new envelope operation, while the native message stays original.
+        retry["payload"]["request_id"] = retry["request_id"]
+        accepted = voice_message(native_id)
+        self.script({"argv": ["voice", SESSION, "--json"], "stdout": accepted})
+        result = await self.submit(retry, process)
+        self.assertEqual(result, {"state": "completed", "result": accepted, "error": None})
+        await self.assert_replays_once_delivered(retry, result, process)
+        uploads = [json.loads(call["stdin"]) for call in self.native_calls()]
+        self.assertEqual(len(uploads), 2)
+        self.assertNotEqual(uploads[0]["request_id"], uploads[1]["request_id"])
+        self.assertEqual(uploads[1]["message_id"], native_id)
+        self.assertEqual(uploads[1]["audio"], uploads[0]["audio"])
+        self.assertEqual(uploads[1]["speech"], uploads[0]["speech"])
+
     async def test_a_mismatched_voice_acknowledgement_never_repeats(self):
         process = await self.launch()
         for name, state in (("valid/voice_submit", "uncertain"), ("valid/voice_cancel", "uncertain"),

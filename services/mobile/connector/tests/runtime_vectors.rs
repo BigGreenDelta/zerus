@@ -1025,3 +1025,51 @@ async fn video_voice_is_capability_gated_and_accepted_once_with_both_media() {
     )
     .unwrap());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn voice_refusal_and_explicit_retry_keep_separate_operation_and_native_receipts() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let harness = harness("voice-refusal");
+    let connector = &harness.connector;
+    capable(connector);
+    let id = "11111111-1111-4111-8111-111111111111";
+    let upload = json!({"request_id":id,"computer_id":"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb","operation":"voice_submit","session":"codex/example/session",
+        "payload":{"request_id":id,"expected_run_id":"run","expected_conversation_id":"conversation",
+        "speech":{"machine_id":"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb","profile_id":"fixture","profile_revision":7},
+        "audio":{"format":"pcm_s16le","sample_rate":16000,"channels":1,"data_base64":STANDARD.encode(vec![0u8;3200])}}});
+    let proof = json!({"schema":1,"state":"rejected_before_acceptance","request_id":id,"message_id":id,"run_id":"run","conversation_id":"conversation",
+        "intent":zerus_relay::voice_rejection::intent(&upload["payload"]).unwrap(),"payload_sha256":"a".repeat(64),"generation":1,
+        "retry_token":"33333333-3333-4333-8333-333333333333","code":"route_unavailable","detail":"The recording was not accepted."});
+    let refused = json!({"schema":1,"rejection":proof});
+    let argv = vec!["voice".into(),"codex/example/session".into(),"--json".into()];
+    connector.native.answer(argv.clone(),refused.clone());
+    assert_eq!(connector.execute(upload.clone()).await.unwrap(),Outcome::Finished(json!({"state":"completed","result":refused,"error":null})));
+    assert_eq!(connector.execute(upload.clone()).await.unwrap(),Outcome::Replayed);
+    let mut retry = upload.clone();
+    let operation = "22222222-2222-4222-8222-222222222222";
+    retry["request_id"]=json!(operation);retry["payload"]["request_id"]=json!(operation);
+    retry["payload"]["message_id"]=json!(id);retry["payload"]["rejection"]=proof.clone();
+    zerus_relay::protocol::request(&retry).unwrap();
+    let accepted=json!({"schema":1,"message":{"id":id,"run_id":"run","conversation_id":"conversation","state":"queued","revision":1}});
+    connector.native.answers.borrow_mut().clear();
+    connector.native.answer(argv,accepted.clone());
+    assert_eq!(connector.execute(retry.clone()).await.unwrap(),Outcome::Finished(json!({"state":"completed","result":accepted,"error":null})));
+    assert_eq!(connector.execute(retry.clone()).await.unwrap(),Outcome::Replayed);
+    assert_eq!(connector.native.calls.borrow().len(),2);
+    assert_eq!(connector.native.calls.borrow()[1]["payload"]["message_id"],id);
+    assert_eq!(connector.native.calls.borrow()[1]["payload"]["request_id"],operation);
+    for field in ["expected_run_id","expected_conversation_id","message_id"] {
+        let mut wrong=retry.clone();wrong["payload"][field]=json!("44444444-4444-4444-8444-444444444444");
+        assert!(zerus_relay::protocol::request(&wrong).is_err());
+        assert!(zerus_mobile_connector::speech::validate_voice("voice_submit",&wrong["payload"],operation).is_err());
+    }
+    let mut wrong=retry.clone();wrong["payload"]["speech"]["profile_revision"]=json!(8);
+    assert!(zerus_relay::protocol::request(&wrong).is_err());
+    wrong=retry.clone();wrong["payload"]["audio"]["data_base64"]=json!(STANDARD.encode(vec![1u8;3200]));
+    assert!(zerus_relay::protocol::request(&wrong).is_err());
+    for field in ["request_id","message_id","run_id","conversation_id","payload_sha256","generation","retry_token","state"] {
+        let mut wrong=refused.clone();wrong["rejection"][field]=json!("wrong");
+        assert!(!zerus_mobile_connector::speech::voice_result_valid("voice_submit",&wrong,&upload["payload"]).unwrap());
+    }
+    assert!(!zerus_mobile_connector::speech::voice_result_valid("voice_submit",&json!({"schema":1,"error":"not found"}),&upload["payload"]).unwrap());
+}

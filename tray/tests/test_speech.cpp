@@ -143,9 +143,36 @@ else:
         else:
             with (root / 'voice-actions').open('a') as log:
                 log.write(json.dumps(payload) + '\n')
-            message_id=payload['request_id'] if payload['action']=='submit' else payload['message_id']
+            message_id=payload.get('message_id',payload['request_id'])
             if payload['action']=='submit' and (root/'lost-submit').exists():
                 sys.exit(1)
+            if (root/'reject-voice').exists():
+                import base64, hashlib, struct
+                path=root/'voice-refusal'
+                proof=json.loads(path.read_text()) if path.exists() else None
+                if payload['action']=='submit':
+                    pcm=base64.b64decode(payload['audio']['data_base64'])
+                    header=struct.pack('<4sI4s4sIHHIIHH4sI',b'RIFF',len(pcm)+36,b'WAVE',b'fmt ',16,1,1,16000,32000,2,16,b'data',len(pcm))
+                    intent={'speech':payload['speech'],'audio':{'format':'pcm_s16le','sample_rate':16000,'channels':1,'bytes':len(pcm)+44,'sha256':hashlib.sha256(header+pcm).hexdigest()}}
+                    if 'video' in payload:
+                        movie=payload['video'];data=base64.b64decode(movie['data_base64'])
+                        intent['video']={k:movie[k] for k in ('format','duration_ms','width','height')}
+                        intent['video'].update(bytes=len(data),sha256=hashlib.sha256(data).hexdigest())
+                        if 'poster_base64' in movie:intent['video']['poster_sha256']=hashlib.sha256(base64.b64decode(movie['poster_base64'])).hexdigest()
+                    proof={'schema':1,'state':'rejected_before_acceptance','request_id':payload['request_id'],'message_id':message_id,
+                        'run_id':payload['expected_run_id'],'conversation_id':payload['expected_conversation_id'],'intent':intent,
+                        'payload_sha256':hashlib.sha256(json.dumps(intent,sort_keys=True).encode()).hexdigest(),
+                        'generation':1 if proof is None else proof['generation']+1,'retry_token':str(uuid.uuid4()),
+                        'code':'route_unavailable','detail':'The recording was not accepted.'}
+                    path.write_text(json.dumps(proof))
+                if proof is not None:
+                    proof['request_id']=payload['request_id']
+                    if (root/'bad-refusal').exists():
+                        field=(root/'bad-refusal').read_text()
+                        if field=='audio':proof['intent']['audio']['sha256']='a'*64
+                        elif field=='provider':proof['intent']['speech']['profile_id']='another-profile'
+                        else:proof[field]='another-identity'
+                    print(json.dumps({'schema':1,'rejection':proof}));sys.exit(0)
             media={}
             if 'video' in payload:
                 import base64
@@ -890,6 +917,78 @@ private slots:
         QCOMPARE(recorder->stops,0);QVERIFY(!recorder->cancelled);QVERIFY(composer.editor()->isReadOnly());
         composer.findChild<ToolbarChip *>("voiceCancel")->click();QVERIFY(recorder->cancelled);QVERIFY(!composer.editor()->isReadOnly());
         QVERIFY(!QFile::exists(dir.path()+"/voice-actions"));
+    }
+    void definitiveRefusalKeepsMediaAndNativeIdForExplicitResubmission_data() {
+        QTest::addColumn<bool>("video");QTest::newRow("audio")<<false;QTest::newRow("video")<<true;
+    }
+    void definitiveRefusalKeepsMediaAndNativeIdForExplicitResubmission() {
+        QFETCH(bool,video);QSettings().setValue("speech/video_mode",video);
+        QTemporaryDir dir;QFile flag(dir.path()+"/reject-voice");QVERIFY(flag.open(QIODevice::WriteOnly));flag.close();
+        const QString key="fixture\nrefused";
+        QString id;QJsonObject first;
+        {
+            MessageComposer composer;composer.setSessionKey(key);QTRY_VERIFY(!composer.isDraftLoading(key));
+            SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},new FixtureRecorder,{},new FixtureVideoRecorder);
+            QSignalSpy messages(&speech,&SpeechComposer::messageChanged);
+            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);recordOrPreview(voice);
+            auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());send->click();
+            QTRY_COMPARE(voiceActions(dir.path()).size(),1);QTRY_COMPARE(send->text(),"Send voice");QTRY_VERIFY(send->isEnabled());
+            first=QJsonDocument::fromJson(voiceActions(dir.path()).first()).object();id=first.value("request_id").toString();
+            QVERIFY(!id.isEmpty());QCOMPARE(messages.count(),0);QVERIFY(!composer.findChild<QComboBox *>("voiceProvider")->isEnabled());
+            ComposerDraftStore::flushWrites();
+        }
+        {
+            MessageComposer composer;composer.setSessionKey(key);QTRY_VERIFY(!composer.isDraftLoading(key));
+            SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},new FixtureRecorder,{},new FixtureVideoRecorder);
+            QSignalSpy messages(&speech,&SpeechComposer::messageChanged);auto *send=composer.findChild<QPushButton *>("voiceSend");
+            QTRY_VERIFY(send->isEnabled());QCOMPARE(send->text(),"Send voice");QCOMPARE(voiceActions(dir.path()).size(),1);
+            QVERIFY(QFile::remove(dir.path()+"/reject-voice"));send->click();QTRY_COMPARE(messages.count(),1);
+            const auto actions=voiceActions(dir.path(),2);QCOMPARE(actions.size(),2);
+            const auto retried=QJsonDocument::fromJson(actions[1]).object();
+            QCOMPARE(retried.value("message_id").toString(),id);QVERIFY(retried.value("request_id").toString()!=id);
+            QCOMPARE(retried.value("video"),first.value("video"));QCOMPARE(retried.value("audio"),first.value("audio"));QCOMPARE(retried.value("speech"),first.value("speech"));
+            QCOMPARE(retried.value("expected_run_id"),first.value("expected_run_id"));QCOMPARE(retried.value("expected_conversation_id"),first.value("expected_conversation_id"));
+            QCOMPARE(retried.value("rejection").toObject().value("generation").toInteger(),1);
+            QCOMPARE(messages[0][1].toJsonObject().value("id").toString(),id);
+        }
+    }
+    void lostRetrySurvivesRestartAndSameGenerationStatusCannotAuthorizeAnotherSend() {
+        QTemporaryDir dir;QFile flag(dir.path()+"/reject-voice");QVERIFY(flag.open(QIODevice::WriteOnly));flag.close();
+        const QString key="fixture\nlost-retry";QString id;
+        {
+            MessageComposer composer;composer.setSessionKey(key);QTRY_VERIFY(!composer.isDraftLoading(key));
+            SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},new FixtureRecorder);
+            auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);recordOrPreview(voice);
+            auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());send->click();
+            QTRY_COMPARE(voiceActions(dir.path()).size(),1);QTRY_COMPARE(send->text(),"Send voice");QTRY_VERIFY(send->isEnabled());
+            id=QJsonDocument::fromJson(voiceActions(dir.path()).first()).object().value("request_id").toString();
+            QFile lost(dir.path()+"/lost-submit");QVERIFY(lost.open(QIODevice::WriteOnly));lost.close();
+            send->click();QTRY_COMPARE(send->text(),"Check message");QCOMPARE(voiceActions(dir.path(),2).size(),2);ComposerDraftStore::flushWrites();
+        }
+        {
+            MessageComposer composer;composer.setSessionKey(key);QTRY_VERIFY(!composer.isDraftLoading(key));
+            SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},new FixtureRecorder);
+            QSignalSpy messages(&speech,&SpeechComposer::messageChanged);auto *send=composer.findChild<QPushButton *>("voiceSend");
+            QTRY_COMPARE(send->text(),"Check message");QTRY_VERIFY(send->isEnabled());QCOMPARE(voiceActions(dir.path()).size(),2);
+            send->click();QTRY_COMPARE(voiceActions(dir.path(),3).size(),3);QTRY_COMPARE(send->text(),"Check message");QTRY_VERIFY(send->isEnabled());
+            QCOMPARE(messages.count(),0);QVERIFY(!composer.findChild<QComboBox *>("voiceProvider")->isEnabled());
+            // The late retry may have executed. Only its native acceptance can settle it here.
+            QVERIFY(QFile::remove(dir.path()+"/reject-voice"));send->click();QTRY_COMPARE(messages.count(),1);
+            const auto actions=voiceActions(dir.path(),4);QCOMPARE(actions.size(),4);
+            for(int index=2;index<4;++index){const auto status=QJsonDocument::fromJson(actions[index]).object();QCOMPARE(status.value("action").toString(),"status");QCOMPARE(status.value("message_id").toString(),id);QVERIFY(!status.contains("audio"));}
+        }
+    }
+    void mismatchedRefusalCannotReturnToPreview_data() {
+        QTest::addColumn<QString>("field");for(const auto &field:{"request_id","message_id","run_id","conversation_id","audio","provider"})QTest::newRow(field)<<QString(field);
+    }
+    void mismatchedRefusalCannotReturnToPreview() {
+        QFETCH(QString,field);QTemporaryDir dir;QFile flag(dir.path()+"/reject-voice");QVERIFY(flag.open(QIODevice::WriteOnly));flag.close();
+        QFile bad(dir.path()+"/bad-refusal");QVERIFY(bad.open(QIODevice::WriteOnly));bad.write(field.toUtf8());bad.close();
+        MessageComposer composer;composer.setSessionKey("fixture\nbad-refusal");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));
+        SpeechComposer speech(fixture(dir.path()),&composer,[&]{return target(composer);},new FixtureRecorder);QSignalSpy messages(&speech,&SpeechComposer::messageChanged);
+        auto *voice=composer.findChild<ToolbarChip *>("voiceRecord");QTRY_VERIFY(voice->isEnabled());recordOrPreview(voice);recordOrPreview(voice);
+        auto *send=composer.findChild<QPushButton *>("voiceSend");QTRY_VERIFY(send->isEnabled());send->click();QTRY_COMPARE(send->text(),"Check message");
+        QCOMPARE(messages.count(),0);QCOMPARE(voiceActions(dir.path()).size(),1);QVERIFY(!voice->isEnabled());
     }
     void interruptedVoiceChecksSameIdentityWithoutReplay() {
         QTemporaryDir dir;MessageComposer composer;composer.setSessionKey("fixture\noriginal");

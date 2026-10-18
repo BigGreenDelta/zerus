@@ -44,7 +44,7 @@ private:
     void recorded(const QByteArray &base64);
     void send();
     void check();
-    void result(const QJsonObject &reply, const QString &error);
+    void result(const QJsonObject &reply, const QString &error, const QJsonObject &request);
     void discard();
     void syncTarget();
     void saveVoice(std::function<void(bool)> done, bool requireGeneration = true);
@@ -82,7 +82,9 @@ private:
     Target m_target;
     ComposerDraftStore m_store;
     QByteArray m_pcm;
-    QString m_id, m_notice, m_loadedKey;
+    QString m_id, m_notice, m_loadedKey, m_operationId;
+    QJsonObject m_rejection;
+    qint64 m_attemptedRejectionGeneration = 0;
     QString m_profileError;
     QJsonObject m_selectedProfile;
     bool m_loading = false, m_syncing = false;

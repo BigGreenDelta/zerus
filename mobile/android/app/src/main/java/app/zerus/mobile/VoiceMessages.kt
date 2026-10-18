@@ -15,12 +15,14 @@ data class VoiceMessage(val id: String, val runId: String, val conversationId: S
 }
 internal data class VoiceComputer(val id: String, val name: String, val profiles: List<SpeechProfile>)
 internal data class VoiceDraft(val target: Target, val machineId: String, val profileId: String,
-    val audio: Attachment, val durationMs: Int, val createdAt: Double, val profileRevision: Long? = null, val video: VideoDraft? = null) {
+    val audio: Attachment, val durationMs: Int, val createdAt: Double, val profileRevision: Long? = null, val video: VideoDraft? = null,
+    val resubmissionId: String = "", val rejection: String = "") {
     val selection get() = SpeechSelection(machineId.takeIf { it.isNotBlank() }?.let { MachineKey(target.connectionId, it) }, profileId, profileRevision)
 }
 internal data class VoiceOutgoing(val id: String, val target: Target, val machineId: String, val profileId: String,
     val audio: Attachment?, val durationMs: Int, val createdAt: Double, val message: VoiceMessage? = null,
-    val uploadState: String = "uploading", val error: String = "", val profileRevision: Long? = null, val video: VideoDraft? = null) {
+    val uploadState: String = "uploading", val error: String = "", val profileRevision: Long? = null, val video: VideoDraft? = null,
+    val rejection: String = "", val attemptedRejectionGeneration: Long = 0, val operationId: String = id) {
     val state get() = message?.state ?: uploadState
     val terminal get() = state in setOf("submitted", "failed", "cancelled", "uncertain")
     // Submitted receipts remain a local history/playback cache, not unsent drafts.
@@ -155,9 +157,9 @@ internal object VoiceRoutes {
 internal object VoiceCodec {
     private fun draft(value: VoiceDraft) = MessageCodec.targetJson(value.target).put("machine", value.machineId)
         .put("profile", value.profileId).put("profile_revision", value.profileRevision).put("audio", value.audio.toJson()).put("duration_ms", value.durationMs).put("created", value.createdAt)
-        .put("video", value.video?.let(VideoProtocol::draftJson))
+        .put("video", value.video?.let(VideoProtocol::draftJson)).put("resubmission_id", value.resubmissionId).put("rejection", value.rejection)
     private fun draft(raw: JSONObject) = VoiceDraft(MessageCodec.target(raw), raw.getString("machine"), raw.getString("profile"),
-        Attachment.fromJson(raw.getJSONObject("audio")), raw.getInt("duration_ms"), raw.getDouble("created"), SpeechProtocol.revision(raw), raw.optJSONObject("video")?.let(VideoProtocol::draft))
+        Attachment.fromJson(raw.getJSONObject("audio")), raw.getInt("duration_ms"), raw.getDouble("created"), SpeechProtocol.revision(raw), raw.optJSONObject("video")?.let(VideoProtocol::draft), raw.string("resubmission_id"), raw.string("rejection"))
     fun encode(value: VoiceState) = JSONObject().put("schema", 1)
         .put("selection", SpeechProtocol.encode(SpeechState(value.selection)).getJSONObject("selection")).put("video_mode", value.videoMode)
         .put("preview_before_send", value.previewBeforeSend)
@@ -165,7 +167,8 @@ internal object VoiceCodec {
             MessageCodec.targetJson(entry.target).put("id", entry.id).put("machine", entry.machineId).put("profile", entry.profileId).put("profile_revision", entry.profileRevision)
                 .put("audio", entry.audio?.toJson()).put("duration_ms", entry.durationMs).put("created", entry.createdAt)
                 .put("message", entry.message?.let(VoiceProtocol::json)).put("upload_state", entry.uploadState).put("error", entry.error)
-                .put("video", entry.video?.let(VideoProtocol::draftJson))
+                .put("video", entry.video?.let(VideoProtocol::draftJson)).put("rejection", entry.rejection)
+                .put("attempted_rejection_generation", entry.attemptedRejectionGeneration).put("operation_id", entry.operationId)
         }))
     fun decode(raw: JSONObject): VoiceState {
         require(raw.optInt("schema", 1) == 1)
@@ -176,7 +179,7 @@ internal object VoiceCodec {
                 val target = MessageCodec.target(row)
                 val message = row.optJSONObject("message")?.let { VoiceProtocol.response(JSONObject().put("schema", 1).put("message", it), target, id) }
                 VoiceOutgoing(id, target, row.getString("machine"), row.getString("profile"), row.optJSONObject("audio")?.let(Attachment::fromJson),
-                    row.getInt("duration_ms"), row.getDouble("created"), message, row.getString("upload_state"), row.string("error"), SpeechProtocol.revision(row), row.optJSONObject("video")?.let(VideoProtocol::draft)).recover()
+                    row.getInt("duration_ms"), row.getDouble("created"), message, row.getString("upload_state"), row.string("error"), SpeechProtocol.revision(row), row.optJSONObject("video")?.let(VideoProtocol::draft), row.string("rejection"), row.optLong("attempted_rejection_generation"), row.string("operation_id").ifBlank { id }).recover()
             }.also { require(it.map(VoiceOutgoing::id).distinct().size == it.size) }, raw.optBoolean("video_mode"), raw.optBoolean("preview_before_send"))
     }
 }
