@@ -18,9 +18,10 @@ import uuid
 from aiohttp import web
 
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_read, validate_send
-from . import archives, speech, speech_config, voice
+from . import analytics, archives, speech, speech_config, voice
 from .recovery import validate_recovery
 from .history import validate_history
+from .context import CLEAR_CONTEXT_DISMISS_FEATURE, validate_clear_context
 from .context import COMPUTER_OPERATIONS, validate_mobile_delivery, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
 from .launch import OPERATIONS as LAUNCH_OPERATIONS, validate as validate_launch
 from .routes import RouteError, MAX_PEERS
@@ -256,7 +257,7 @@ async def pair(request):
 async def capabilities(request):
     await auth(request, "devices")
     providers = ["fcm"] if request.app[PUSH_WORKER].fcm is not None else []
-    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES | {voice.video.FEATURE})})
+    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES | {voice.video.FEATURE, CLEAR_CONTEXT_DISMISS_FEATURE})})
 
 
 def small_response(request):
@@ -281,10 +282,14 @@ def validate_request(value):
     if str(uuid.UUID(request_id)) != request_id:
         raise web.HTTPBadRequest()
     text(value["computer_id"], 36)
-    text(value["session"], 1024, empty=value["operation"] == "archive_list" or value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
+    text(value["session"], 1024, empty=value["operation"] in analytics.OPERATIONS or value["operation"] == "archive_list" or value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
     op, payload = value["operation"], value["payload"]
     if not isinstance(op, str) or op not in OPERATIONS or not isinstance(payload, dict):
         raise web.HTTPBadRequest()
+    if op in analytics.OPERATIONS:
+        if value["session"] != "": raise ValueError("analytics reads use no session target")
+        analytics.validate(payload)
+        return
     if op == "archive_list":
         if value["session"] != "": raise ValueError("archive browsing uses no session target")
         archives.validate(payload)
@@ -340,7 +345,7 @@ def validate_request(value):
         validate_lifecycle(op, payload, request_id)
         return
     if op in CONTEXT_COMMANDS:
-        validate_context(payload, request_id)
+        (validate_clear_context if op == "clear_context" else validate_context)(payload, request_id)
         return
     if op in {"send_now", "settings", "process_output", "process_stop"}:
         validate_core(op, payload, request_id)

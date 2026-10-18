@@ -30,7 +30,11 @@ source tree with the interpreter running the tests, which needs `aiohttp`
 Outside Python mode only the modules listed under `rust` in `ported.json` run;
 the others skip. Within a ported module, a known operation missing from
 `rust_operations` expects the `unsupported operation` receipt; the connector's
-`runtime_vectors` test keeps that list equal to what the build implements. `test_bb_harness.py` and
+`runtime_vectors` test keeps that list equal to what the build implements.
+`rust-only-operations.json` lists the relay operations only the Rust connector
+executes, with the marker that gates each and its class; a Rust connector
+advertises them under that marker (`session_harness.advertised()`), and the
+connector's `CONNECTOR_ONLY` table must equal it. `test_bb_harness.py` and
 `test_bb_attachment_read.ScriptedAnswerTests` check the harness itself and
 always run. `test_bb_directories.NativeDirectoryTests`,
 `test_bb_speech.SpeechConfigurationTests.test_real_cli_manages_a_profile_without_inference`
@@ -175,10 +179,20 @@ and is reported but not compared: polls, single heartbeats, presence and peer
 heartbeats, and the periodic native reads (`PERIODIC`, also through a peer
 envelope). Instead each run's accepted heartbeats are summarized in a shape (the
 union of their body and snapshot keys and capability operations and features),
-which must match after one explicit capability projection: the maintained
+which must match after two explicit capability projections. The maintained
 Python connector never advertises `opencode_launch_effort`; the Rust connector
 must advertise exactly that additional feature when its operations include
-`launch`, and must omit it otherwise. The comparison checks complete local and
+`launch`, and must omit it otherwise. Python also never advertises an operation
+of `rust-only-operations.json`, the relay operations only the Rust connector
+executes (`remove_queued`, OpenCode queue removal, and the separate `git_status`
+read). Rust must advertise such an
+operation exactly when its operations include every operation its frozen
+marker gates in Python: `remove_queued` comes with the session actions
+(`forget` and the others), under the session-action marker. An operation behind
+a marker the vectors do not know is left out of the Rust shape, since a Python
+shape cannot show that marker; `session_harness.advertised()` checks it in the
+suites instead. In particular, the exact `git-status-v1` help line gates only
+the Rust Git read; it adds no operation to Python's frozen tables. The comparison checks complete local and
 peer heartbeat shapes, rejects malformed or duplicate arrays and keeps all
 other body/snapshot keys, operations and features exact. Raw traces stay intact.
 Native work and journal rows must match in number; result

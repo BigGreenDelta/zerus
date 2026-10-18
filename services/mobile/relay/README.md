@@ -172,6 +172,19 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   a completed row 5 seconds after the phone has read its terminal receipt
   (`result_read`) or 60 seconds after completion, so file bytes are carried,
   not kept. Submission requires the computer to advertise the operation.
+  `remove_queued` (OpenCode) is a session mutation with a durable request
+  identity, like `forget`: exact `expected_run_id`, nonempty
+  `expected_conversation_id` and one `message_id`, `msg_` followed by 1–124
+  ASCII letters, digits, `_` or `-`
+  ([shared with hgs, the desktop and the connector](../../../tests/fixtures/opencode-queued-message-ids.json));
+  any other field is rejected. Submission requires the computer to advertise
+  it, which only the Rust connector does, with the scoped session-action ABI.
+  An older hgs prints that marker too and refuses the request (an uncertain
+  receipt, nothing removed), so the session's `allowed_actions` listing
+  `remove_queued` is what shows that its hgs can remove a message; phones
+  require both. The golden vectors freeze the Python connector's tables, so
+  `tests/vectors.rs` names the operations they lack from
+  [`rust-only-operations.json`](../tests/rust-only-operations.json).
 - `json.rs` bounds depth and lexical structure before object materialization.
   Canonical ASCII escaping, key ordering, arbitrary integer precision and Python
   float formatting preserve API v1 request identities. A deterministic 20,000
@@ -345,6 +358,12 @@ operation only when both relay capabilities and the computer snapshot list it,
 so the relay, connector and app can be deployed in any order; replace all
 PostgreSQL workers together so every worker accepts and expires the operation.
 
+Queue removal (`remove_queued`) adds no table, column or index: it is an
+ordinary mutation with permanent request identity. Phones use it only when both
+relay capabilities and the computer snapshot list it, so the relay, connector
+and app can be deployed in any order; replace all PostgreSQL workers together so
+every worker accepts it.
+
 Stop the sole SQLite server before local administration or a runtime replacement;
 Rust refuses a second owner of that file. Never run Python and Rust SQLite
 writers simultaneously. SQLite-to-PostgreSQL is a distinct offline migration,
@@ -490,3 +509,34 @@ coordinated runtime replacement (fresh backup and isolated restore qualification
 Update the native CLI and connector before enabling the relay capability, then
 update clients; an older relay/CLI is reported as unavailable, not an empty page.
 No native agent or phone read-mark migration is needed.
+
+### Git checkout status reads
+
+`git_status` is a sessionless computer read offered by the Rust connector only
+when the native help contains `Mobile Git status ABI: git-status-v1`. A request
+has an empty session and exactly `{request_id,path}` as its payload; no
+run, conversation, agent or archive identity is accepted. The path must be an
+absolute POSIX path with a leading slash, control-free and at most 4096 UTF-8
+bytes, matching the existing mobile folder contract. Windows Git transport is
+unsupported and unqualified in v1. Normal verified
+local and one-hop routes apply; the read grants no forwarding or mutation
+authority. Exact duplicate receipts retain their existing identities.
+
+The operation shares the 5000-row workspace read quota and has a separate
+`git_status_history_v1` partial index for bounded terminal-row maintenance,
+with a retention ceiling of one hour. Existing `READ_SQL`, `read_history_v3`,
+other index definitions and mutation retention predicates remain unchanged.
+Deploy the additive index through the normal root-coordinated rollout; source
+qualification does not switch any existing gateway to the Rust connector.
+
+### Explicit prompt dismissal with context clear
+
+`clear_context` accepts the optional strict Boolean `dismiss_prompt` when both
+the relay and selected computer advertise `clear_context_dismiss`. Any presence,
+including `false`, requires that feature after exact duplicate receipt lookup.
+Omitting the field retains the ordinary request body/hash and validation;
+`compact_context` rejects it. The connector separately verifies the native HELP
+marker `Mobile clear-context ABI: dismiss-prompt-v1`. A `true` request requires
+fresh exact native identity, an unarchived session and actual Boolean
+`clear_context_dismiss: true`; the relay does not infer prompt eligibility.
+An uncertain receipt retains its original identity and never permits replay.

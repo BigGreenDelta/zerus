@@ -4,6 +4,7 @@ mod common;
 
 use common::*;
 use serde_json::Value;
+use zerus_mobile_connector::capabilities::{self, Class};
 use zerus_mobile_connector::config::{self, Environment};
 use zerus_mobile_connector::error::{
     INVALID_INTERVAL, INVALID_JSON, INVALID_SERVER_URL, INVALID_STATE, NON_ASCII_HOST,
@@ -326,14 +327,43 @@ fn journal_operation_sets_match_the_python_connector() {
         items.sort();
         items
     };
-    assert_eq!(sorted(zerus_relay::protocol::READS), set("READ_OPERATIONS"));
-    assert_eq!(sorted(zerus_relay::protocol::OPERATIONS), set("OPERATIONS"));
-    let mutations: Vec<&str> = zerus_relay::protocol::OPERATIONS
+    let python_reads: Vec<&str> = zerus_relay::protocol::READS
+        .iter()
+        .copied()
+        .filter(|operation| !capabilities::connector_only(operation))
+        .collect();
+    assert_eq!(sorted(&python_reads), set("READ_OPERATIONS"));
+    // The relay's set adds the operations only this connector executes, each
+    // journaled by its class: a mutation recovers as uncertain.
+    let only = capabilities::CONNECTOR_ONLY;
+    let python: Vec<&str> = zerus_relay::protocol::OPERATIONS
+        .iter()
+        .copied()
+        .filter(|operation| !capabilities::connector_only(operation))
+        .collect();
+    assert_eq!(
+        python.len() + only.len(),
+        zerus_relay::protocol::OPERATIONS.len()
+    );
+    assert_eq!(sorted(&python), set("OPERATIONS"));
+    let mutations: Vec<&str> = python
         .iter()
         .copied()
         .filter(|operation| journal::is_mutation(operation))
         .collect();
     assert_eq!(sorted(&mutations), set("MUTATIONS"));
+    for row in only {
+        let mutation = row.class == Class::Mutation;
+        assert_eq!(journal::is_mutation(row.operation), mutation, "{row:?}");
+        assert_eq!(
+            zerus_relay::protocol::READS.contains(&row.operation),
+            !mutation,
+            "{row:?}"
+        );
+        if mutation {
+            assert!(!journal::READ_CLASS_SQL.contains(row.operation), "{row:?}");
+        }
+    }
     let sql = &operations["sql"];
     assert_eq!(
         journal::READ_CLASS_SQL,

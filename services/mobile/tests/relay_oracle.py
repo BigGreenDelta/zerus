@@ -14,8 +14,9 @@ from __future__ import annotations
 import json
 import uuid
 
-from zerus_mobile import archives, hook_health, file_reads, speech, speech_config, voice
+from zerus_mobile import analytics, archives, hook_health, file_reads, speech, speech_config, voice
 from zerus_mobile.attachments import validate_read, validate_send
+from zerus_mobile.context import validate_clear_context
 from zerus_mobile.context import (COMPUTER_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS,
                                   validate_context, validate_core, validate_inspect, validate_lifecycle,
                                   validate_mark_read, validate_mobile_delivery)
@@ -73,10 +74,14 @@ def validate_request(value):
     if str(uuid.UUID(request_id)) != request_id:
         raise HTTPBadRequest()
     text(value["computer_id"], 36)
-    text(value["session"], 1024, empty=value["operation"] == "archive_list" or value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
+    text(value["session"], 1024, empty=value["operation"] in analytics.OPERATIONS or value["operation"] == "archive_list" or value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
     op, payload = value["operation"], value["payload"]
     if not isinstance(op, str) or op not in OPERATIONS or not isinstance(payload, dict):
         raise HTTPBadRequest()
+    if op in analytics.OPERATIONS:
+        if value["session"] != "": raise ValueError("analytics reads use no session target")
+        analytics.validate(payload)
+        return
     if op == "archive_list":
         if value["session"] != "": raise ValueError("archive browsing uses no session target")
         archives.validate(payload)
@@ -132,7 +137,7 @@ def validate_request(value):
         validate_lifecycle(op, payload, request_id)
         return
     if op in CONTEXT_COMMANDS:
-        validate_context(payload, request_id)
+        (validate_clear_context if op == "clear_context" else validate_context)(payload, request_id)
         return
     if op in {"send_now", "settings", "process_output", "process_stop"}:
         validate_core(op, payload, request_id)

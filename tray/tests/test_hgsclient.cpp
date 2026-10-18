@@ -87,6 +87,7 @@ private slots:
     void nativeLaunchReportsProcessResult();
     void nativeApiSessionsRetainExactCapabilities();
     void openCodeQueuedRemovalUsesScopedSessionAction();
+    void openCodeQueuedMessageIdsFollowSharedRule();
     void attachmentsUseCapturedIdentityAndValidateResponses();
     void downloadsRequireExactSavedFileReceipts();
     void cachedDownloadsPreserveRequestIdentityAndCleanFailures();
@@ -626,6 +627,38 @@ void TestHgsClient::openCodeQueuedRemovalUsesScopedSessionAction()
     QTRY_COMPARE(finished.size(),1);QVERIFY(finished[0][1].toBool());
     sent=call();QCOMPARE(sent["args"].toArray(),QJsonArray({"interrupt",name,"--json"}));
     QVERIFY(!sent["payload"].toObject().contains("action"));QVERIFY(!sent["payload"].toObject().contains("message_id"));
+}
+
+// The shared message ID shape (tests/fixtures/opencode-queued-message-ids.json),
+// which hgs, the mobile connector and the relay check too.
+void TestHgsClient::openCodeQueuedMessageIdsFollowSharedRule()
+{
+    QFile file(QStringLiteral(ZERUS_OPENCODE_QUEUED_MESSAGE_IDS));QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto fixture=QJsonDocument::fromJson(file.readAll()).object();
+    const auto accept=fixture.value("accept").toArray(),reject=fixture.value("reject").toArray();QVERIFY(accept.size()>=7);QVERIFY(reject.size()>=23);
+    QTemporaryDir directory;const auto program=directory.filePath("hgs");
+    QVERIFY(FakeCli::install(program,"#!/usr/bin/env python3\nimport json,sys\n"
+        "p=json.load(sys.stdin);a=sys.argv[1:]\n"
+        "open(__file__+'.call','w').write(json.dumps({'args':a,'payload':p}))\n"
+        "print(json.dumps({'request_id':p['request_id'],'name':a[-2],'run_id':p['expected_run_id'],"
+        "'conversation_id':p['expected_conversation_id'],'status':'completed'}))\n"));
+    HgsClient client(FakeCli::program(program));QSignalSpy finished(&client,&HgsClient::sessionActionFinished);
+    const QString name="opencode/project/local";
+    for(const auto &value:reject) {
+        const auto id=value.toString();finished.clear();
+        const auto request=client.requestRemoveQueued({},name,"run-one","ses_conversation",id);
+        QTRY_COMPARE(finished.size(),1);QCOMPARE(finished[0][0].toULongLong(),request);QVERIFY2(!finished[0][1].toBool(),qPrintable(id));
+        QCOMPARE(finished[0][3].toString(),QString("Choose the exact queued OpenCode message."));
+    }
+    QTest::qWait(100);QVERIFY(!QFile::exists(program+".call"));
+    for(const auto &value:accept) {
+        const auto id=value.toString();finished.clear();
+        const auto request=client.requestRemoveQueued({},name,"run-one","ses_conversation",id);
+        QTRY_COMPARE(finished.size(),1);QCOMPARE(finished[0][0].toULongLong(),request);QVERIFY2(finished[0][1].toBool(),qPrintable(id));
+        QFile call(program+".call");QVERIFY(call.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(call.readAll()).object()["payload"].toObject()["message_id"].toString(),id);
+        call.close();QVERIFY(QFile::remove(program+".call"));
+    }
 }
 
 void TestHgsClient::settingsUseStdinAndPinnedIdentityReceipt()
