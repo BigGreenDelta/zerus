@@ -223,6 +223,7 @@ object NativeParser {
             val historyId = value.string("history_id")
             return Event(if (historyId.isBlank()) originalId else "history:$historyId", role,
                 text, value.string("at", "timestamp"), at, if (source in setOf("hgs_delivery", "hgs_voice") && role == "You") value.string("message_id") else "", files, source,
+                delivery = if (role == "You") MessageDeliveryPresentation.inboxState(value) else "",
                 nativeType = type, submittedText = if (source == "hgs_delivery") value.string("submitted_text") else "",
                 originalId = originalId, historyId = historyId, historyCursor = value.string("history_cursor"),
                 historyEpoch = raw.string("history_epoch"), incomingSeq = (value.opt("incoming_seq") as? Number)?.toLong()?.takeIf { it >= 0 },
@@ -298,13 +299,16 @@ object NativeParser {
                 })
         }
         Question(card.string("question_id"), card.string("question_hash"), card.optJSONArray("questions")?.objects().orEmpty().map { prompt ->
-            Prompt(prompt.string("id"), prompt.string("question"), prompt.optJSONArray("options")?.objects().orEmpty().map {
+            fun bound(key: String, limit: Int) = (prompt.opt(key) as? Number)?.toLong()?.takeIf { it in 0..limit }?.toInt()
+            Prompt(prompt.string("id"), prompt.string("question", "prompt"), prompt.optJSONArray("options")?.objects().orEmpty().map {
                 Choice(it.string("id"), it.string("label"), it.string("description"))
             }, prompt.optBoolean("multi_select"), prompt.optBoolean("required", true), prompt.optBoolean("allow_other", false),
-                prompt.string("header"), prompt.string("body"), prompt.string("other_label"), prompt.string("other_description"))
+                prompt.string("header"), prompt.string("body"), prompt.string("other_label"), prompt.string("other_description"),
+                prompt.string("input_kind"), bound("min_length", 1_000_000), bound("max_length", 1_000_000), bound("min_items", 1000), bound("max_items", 1000),
+                prompt.optJSONArray("default_option_ids")?.let { ids -> (0 until minOf(ids.length(), 64)).mapNotNull { ids.opt(it) as? String } }.orEmpty())
         }, card.optBoolean("can_answer"), card.optBoolean("can_skip"), card.optBoolean("optional"),
             nativeDelivery?.status.orEmpty(), (card.opt("created_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it > 0 && it < 253402300800.0 } ?: 0.0,
-            card.string("source"), card.optBoolean("approval"), card.optBoolean("trust_request"), card.string("answer_unavailable_reason"),
+            card.string("source"), card.optBoolean("approval"), card.optBoolean("trust_request"), card.string("answer_unavailable_reason", "unavailable_reason"),
             card.string("run_id"), card.string("conversation_id"), card.string("tool_call_id"), nativeDelivery)
     }
 }

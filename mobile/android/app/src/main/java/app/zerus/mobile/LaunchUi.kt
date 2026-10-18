@@ -92,6 +92,7 @@ private val Amber = Color(0xFFFFCB7D)
     var provider by rememberSaveable(form) { mutableStateOf("") }
     var account by rememberSaveable(form) { mutableStateOf("") }
     var selectedModel by rememberSaveable(form) { mutableStateOf("") }
+    var selectedEffort by rememberSaveable(form) { mutableStateOf("") }
     var projectId by rememberSaveable(form) { mutableStateOf("") }
     var folder by rememberSaveable(form) { mutableStateOf("") }
     var browsedFolder by rememberSaveable(form) { mutableStateOf("") }
@@ -113,6 +114,11 @@ private val Amber = Color(0xFFFFCB7D)
     val accounts = remember(catalog,provider) { LaunchPresentation.accounts(catalog,provider) }
     val modelOptions = remember(catalog,provider,account) { LaunchPresentation.models(catalog,provider,account) }
     LaunchedEffect(provider,account,modelOptions) { if(selectedModel.isNotBlank() && modelOptions.none { it.value==selectedModel }) selectedModel="" }
+    val effortSupported = model.launchEffortSupported(machine)
+    val effortOptions = remember(catalog,provider,account,selectedModel,effortSupported) { LaunchPresentation.efforts(catalog,provider,account,selectedModel,effortSupported) }
+    // Changing the model drops an effort it does not offer; Create never sends a stale one.
+    LaunchedEffect(effortOptions) { if(selectedEffort.isNotBlank() && effortOptions.none { it.value==selectedEffort }) selectedEffort="" }
+    val effort = selectedEffort.takeIf { chosen -> effortOptions.any { it.value==chosen } }.orEmpty()
     val accountChoices = LaunchPresentation.accountChoices(catalog,machine,model.accountCatalogs,System.currentTimeMillis()/1000.0,provider,account)
     val projects = remember(catalog) { LaunchPresentation.projects(catalog) }
     val projectSupported = catalog?.opt("project_launch_supported") == true
@@ -180,8 +186,8 @@ private val Amber = Color(0xFFFFCB7D)
     fun requestClose() { if(busy) return;if(dirty) discarding = true else model.closeLaunch() }
     fun create() {
         if(busy || reason.isNotBlank()) return
-        if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId,selectedModel)
-        else model.launchSession(machine,provider,folder,tag,account,allowedCatalog,projectId,placement,selectedModel)
+        if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId,selectedModel,effort)
+        else model.launchSession(machine,provider,folder,tag,account,allowedCatalog,projectId,placement,selectedModel,effort)
     }
     fun selectFolder(path: String) { folder = path;browsedFolder = "";edited = true;model.browseLaunchDirectory(machine,path) }
     val canChoose = !busy && !model.launchWorktreeLoading && WorktreePresentation.entries(evidence).isNotEmpty()
@@ -315,6 +321,8 @@ private val Amber = Color(0xFFFFCB7D)
                         LaunchMenuField("Model",chosen?.label ?: "Native default model",!busy,
                             listOf("" to "Native default model") + modelOptions.map { it.value to it.label },selectedModel,
                             { selectedModel=it;edited=true },supporting=chosen?.value,choiceSupporting={ it },choiceSupportingMaxLines=3)
+                        if(effortOptions.isNotEmpty()) LaunchMenuField("Effort",effortOptions.find { it.value==effort }?.label ?: "Model default",!busy,
+                            listOf("" to "Model default") + effortOptions.map { it.value to it.label },effort,{ selectedEffort=it;edited=true })
                         LaunchHint("Models configured on $computer. Native default uses OpenCode's configuration.")
                     }
                     LaunchSection("Session name") {

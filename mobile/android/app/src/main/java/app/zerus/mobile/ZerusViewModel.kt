@@ -194,8 +194,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val scheduledReadScheduler=HistoryHeadScheduler()
     private val acknowledgedContexts = mutableSetOf<String>()
     private val contextObservations = mutableSetOf<String>()
-    private var relayFeatures = emptyMap<String,Set<String>>()
-    private var machineFeatures = emptyMap<MachineKey,Set<String>>()
+    // Observable so capability-gated controls (the OpenCode Effort row) appear when discovery finishes.
+    private var relayFeatures by mutableStateOf<Map<String,Set<String>>>(emptyMap())
+    private var machineFeatures by mutableStateOf<Map<MachineKey,Set<String>>>(emptyMap())
     private var parentSelection:Session?=null
     private var relayOperations by mutableStateOf<Map<String, Set<String>>>(emptyMap())
     private var machineOperations by mutableStateOf<Map<MachineKey, Set<String>>>(emptyMap())
@@ -345,14 +346,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(page.complete && verified) currentHistoryHeads+=ConversationReadPolicies.key(page.target) else currentHistoryHeads-=ConversationReadPolicies.key(page.target)
         refreshReadAttention()
     }
-    private fun publishWindow(target:Target,window:HistoryWindow,complete:Boolean=false,indexing:Boolean=false,boundary:String?=null) {
+    private fun publishWindow(target:Target,page:HistoryWindow,complete:Boolean=false,indexing:Boolean=false,boundary:String?=null) {
+        // A page reaching the head shows the latest inspection's inbox rows, never an older copy.
+        val inspected=(frames[target.key] ?: activeFrame?.takeIf { it.target==target })?.inspectedEvents
+        val window=if(page.atHead && inspected!=null) page.copy(inbox=HistoryInspection.inbox(inspected)) else page
         historyWindows[target.key]=window
         while(historyWindows.size>20) historyWindows.remove(historyWindows.keys.first())
         if(selected?.target != target) return
         if(!readPositionReady) pendingHistoryPosition=target.key
         pendingHistoryPublication=target.key
         val head=frames[target.key] ?: activeFrame?.takeIf { it.target==target } ?: return
-        installFrame(head.copy(events=window.events,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
+        installFrame(head.copy(events=window.displayed,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
     }
     private fun loadHistory(target:Target,direction:String,cursor:String="",latest:Boolean=false):Job? {
         if(selected?.target != target || olderLoading) return null
@@ -794,7 +798,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val changed=window!=null && incoming.window!=window && HistoryInspection.changed(window,incoming.inspectedEvents,priorInspection)
         if(changed) currentHistoryHeads-=ConversationReadPolicies.key(incoming.target)
         val guarded=window?.let { HistoryInspection.retain(it,incoming.window,incoming.inspectedEvents,priorInspection) }
-        val frame=if(guarded!=null && (incoming.window!=guarded || incoming.events!=guarded.events)) incoming.copy(events=guarded.events,presentation=null,truncated=incoming.truncated || guarded.hasBefore || guarded.hasAfter,window=guarded,indexComplete=historyComplete && !changed,indexing=historyIndexing) else incoming
+        val frame=if(guarded!=null && (incoming.window!=guarded || incoming.events!=guarded.displayed)) incoming.copy(events=guarded.displayed,presentation=null,truncated=incoming.truncated || guarded.hasBefore || guarded.hasAfter,window=guarded,indexComplete=historyComplete && !changed,indexing=historyIndexing) else incoming
         if(guarded!=null) historyWindows[incoming.target.key]=guarded
         activeFrame = frame; activeFrameVerified = verified
         if (frame.presentation == null) { activityVerified = false; historyCached = activity != null }
@@ -882,7 +886,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val incoming=NativeParser.events(raw)
                 val retained=RollingConversationHistory.merge(resolved,previous?.target,previous?.events.orEmpty(),incoming)
                 val window=currentWindow?.takeIf { it.atHead }?.inspection(incoming,previous?.inspectedEvents.orEmpty())
-                val events=window?.events ?: retained.events
+                val events=window?.displayed ?: retained.events
                 val nativeUnknown=currentWindow?.let { HistoryInspection.changed(it,incoming,previous?.inspectedEvents.orEmpty()) }==true
                 Triple(Frame(resolved,raw,events,NativeParser.questions(raw),observedAt,
                     raw.toString().toByteArray(Charsets.UTF_8).size+EventHistoryCodec.encode(events).toString().toByteArray(Charsets.UTF_8).size,
@@ -896,7 +900,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     latest?.let { HistoryInspection.retain(it,null,frame.inspectedEvents,previous?.inspectedEvents.orEmpty()) }
                 }
                 val changed=latest?.let { HistoryInspection.changed(it,frame.inspectedEvents,previous?.inspectedEvents.orEmpty()) }==true
-                frame.copy(events=guard?.events ?: frame.events,window=guard,presentation=null,indexComplete=complete && !changed,indexing=indexing) to guard
+                frame.copy(events=guard?.displayed ?: frame.events,window=guard,presentation=null,indexComplete=complete && !changed,indexing=indexing) to guard
             }
             val expectedWindow=rebased.base
             val (finalFrame,finalWindow)=rebased.value
@@ -1139,6 +1143,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+    /** The relay and this computer's connector accept an OpenCode model variant as `effort`; older ones never receive one. */
+    fun launchEffortSupported(machine:MachineKey)=LaunchPresentation.effortSupported(relayFeatures[machine.connectionId].orEmpty(),machineFeatures[machine].orEmpty())
+    fun nativeEffortsSupported(target:Target)=launchEffortSupported(MachineKey(target.connectionId,target.computerId))
     fun worktreeOperationsSupported(machine:MachineKey)=listOf("worktrees","worktree_create").all { it in relayOperations[machine.connectionId].orEmpty() && it in machineOperations[machine].orEmpty() }
     fun worktreeReason(machine:MachineKey):String {
         if(launchReason(machine).isNotBlank()) return launchReason(machine)
@@ -1208,24 +1215,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             } finally { actionFlights-=action.requestId;worktreeSubmitting=false }
         }
     }
-    private fun launchArguments(catalog:JSONObject,agent:String,directory:String,tag:String,accountId:String?,projectId:String,worktrees:JSONObject?,model:String=""):JSONObject {
-        check(catalog.optJSONArray("agents")?.let { array -> (0 until array.length()).any { array.optString(it) == agent } } == true) { "This native provider is unavailable." }
-        check(accountId != null && LaunchPresentation.accounts(catalog,agent).any { it.id == accountId }) { "Choose an offered account for the selected provider." }
-        val args=JSONObject().put("agent",agent).put("directory",directory).put("tag",tag).put("account_id",accountId)
-        if(model.isNotBlank()) {
-            check(LaunchPresentation.models(catalog,agent,accountId).any { it.value==model }) { "The native model changed. Review the current choices." }
-            args.put("model",model)
-        }
-        if(catalog.opt("project_launch_supported")==true) LaunchPresentation.projectArguments(catalog,projectId,directory,worktrees).let { fields -> fields.keys().forEach { key -> args.put(key,fields.get(key)) } }
-        else check(projectId.isBlank()) { "This computer does not support scoped project assignment." }
-        return SessionActionPolicies.arguments("launch",args)
-    }
-    fun launchSession(machine:MachineKey,agent:String,directory:String,tag:String,accountId:String?=null,expectedCatalog:String=launchCatalogSignature(),projectId:String="",worktrees:JSONObject?=null,model:String="") {
+    fun launchSession(machine:MachineKey,agent:String,directory:String,tag:String,accountId:String?=null,expectedCatalog:String=launchCatalogSignature(),projectId:String="",worktrees:JSONObject?=null,model:String="",effort:String="") {
         val reason=launchReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
         if(launchBusy || !launchVisible || launchMachine != machine || launchCatalogLoading || launchDirectoryLoading || launchWorktreeLoading || expectedCatalog != launchCatalogEvidence) { launchError="The creation details changed. Review the current choices.";return }
         val catalog=launchCatalogState ?: return
         if(!LaunchPresentation.selectedFolder(launchDirectoryState,directory)) { launchError="Select a folder from the current native browser.";return }
-        val args=try { launchArguments(catalog,agent,directory,tag,accountId,projectId,worktrees,model) } catch(e:Exception) { launchError=e.message.orEmpty();return }
+        val args=try { LaunchPresentation.arguments(catalog,agent,directory,tag,accountId,projectId,worktrees,model,effort,launchEffortSupported(machine)) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
         val action=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"launch",args.toString())
         val generation=launchGeneration;launchSubmitting=true;actionFlights+=action.requestId;launchError=""
@@ -1260,7 +1255,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
      * Desktop Auto: create the generated sibling worktree, verify its folder and catalog, then launch there.
      * Every step is pinned to this form; a failed or unknown creation is never replayed and never launches.
      */
-    fun launchWithWorktree(machine:MachineKey,agent:String,folder:String,tag:String,accountId:String?,expectedCatalog:String,projectId:String,model:String="") {
+    fun launchWithWorktree(machine:MachineKey,agent:String,folder:String,tag:String,accountId:String?,expectedCatalog:String,projectId:String,model:String="",effort:String="") {
         val reason=worktreeReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
         if(launchBusy || !launchVisible || launchMachine != machine || launchCatalogLoading || launchDirectoryLoading || launchWorktreeLoading || expectedCatalog != launchCatalogEvidence) { launchError="The creation details changed. Review the current choices.";return }
         // One generated branch per form: after any creation or failed attempt, only direct launches remain.
@@ -1272,7 +1267,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val branch=launchGeneratedName
         val destination=WorktreePresentation.automaticPath(evidence,branch)
         // Everything the session needs is checked before anything is created.
-        try { launchArguments(catalog,agent,destination,tag,accountId,projectId,WorktreePresentation.withCreated(evidence,destination),model) } catch(e:Exception) { launchError=e.message.orEmpty();return }
+        try { LaunchPresentation.arguments(catalog,agent,destination,tag,accountId,projectId,WorktreePresentation.withCreated(evidence,destination),model,effort,launchEffortSupported(machine)) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val (creation,arguments)=try { worktreeAction(machine,evidence,branch,"HEAD",destination) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
         val generation=launchGeneration
@@ -1303,7 +1298,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(blocked.isNotBlank() || expectedCatalog != launchCatalogEvidence) { launchError="Worktree created at $created. ${blocked.ifBlank { "The creation details changed." }} Start the session there when ready.";return@launch }
                 val project=LaunchPresentation.projects(catalog).find { it.id == projectId }
                 val placement=WorktreePresentation.placement(fresh,launchCreatedEvidence,project,created)
-                val args=try { launchArguments(catalog,agent,created,tag,accountId,projectId,placement,model) }
+                val args=try { LaunchPresentation.arguments(catalog,agent,created,tag,accountId,projectId,placement,model,effort,launchEffortSupported(machine)) }
                     catch(e:Exception) { launchError="Worktree created at $created. ${e.message.orEmpty()}";return@launch }
                 val launch=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"launch",args.toString())
                 launchStage="launching";launchSubmitting=true;actionFlights+=launch.requestId
@@ -1535,6 +1530,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val inspected=frame?.raw ?: activity ?: JSONObject()
         val reason = if(authorized == null) actionReason(target,operation) else authorizedSettingsReason(target,args,authorized,frame); if(reason.isNotBlank()) { error=reason; return }
         val arguments = try { SessionActionPolicies.arguments(operation,args) } catch(e:Exception) { error=e.message.orEmpty(); return }
+        SessionActionPolicies.effortReason(operation,arguments,nativeEffortsSupported(target)).takeIf { it.isNotBlank() }?.let { error=it; return }
         val eligibility = SessionActionPolicies.inspectReason(target,operation,arguments,inspected)
         if(eligibility.isNotBlank()) { error=eligibility; return }
         val connection = connections.find { it.id == target.connectionId } ?: return

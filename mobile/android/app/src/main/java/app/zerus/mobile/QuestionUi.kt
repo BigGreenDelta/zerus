@@ -111,7 +111,7 @@ import org.json.JSONObject
         } }.getOrDefault(emptyMap())
     }
     var options by remember(target.key, question.id, question.hash, native, draft.generation) {
-        mutableStateOf(question.prompts.associate { it.id to saved[it.id]?.optionIds.orEmpty().toSet() })
+        mutableStateOf(QuestionPolicies.initialOptions(question.prompts, saved))
     }
     var texts by remember(target.key, question.id, question.hash, native, draft.generation) {
         mutableStateOf(question.prompts.associate { it.id to saved[it.id]?.text.orEmpty() })
@@ -176,7 +176,8 @@ import org.json.JSONObject
     }
     val primaryEnabled = if (step.nextPage != null) editing && !submitPending && step.canAdvance else sendEnabled
     val currentPrompts = question.prompts.getOrNull(pageIndex)?.let(::listOf).orEmpty()
-    val otherPrompts = currentPrompts.filter { it.other && !question.approval }
+    val otherPrompts = currentPrompts.mapNotNull { prompt -> QuestionPolicies.textField(question, prompt)?.let { prompt to it } }
+    val submitVisible = QuestionPolicies.submitVisible(question)
     val lowerActions = question.prompts.size > 1 || question.canSkip || otherPrompts.isEmpty()
     val density = LocalDensity.current
     val readableHeightPx = with(density) { MaterialTheme.typography.bodyLarge.lineHeight.toPx() + 24.dp.toPx() }
@@ -226,7 +227,7 @@ import org.json.JSONObject
                         if (question.approval) {
                             SelectionContainer { Text(choice.label, style = MaterialTheme.typography.bodySmall) }
                             if (choice.description.isNotBlank()) SelectionContainer { Text(choice.description, style = MaterialTheme.typography.bodySmall) }
-                        } else QuestionOption(choice, prompt.multi, choice.id in options[prompt.id].orEmpty(), editing) {
+                        } else QuestionOption(choice, prompt.multi, choice.id in options[prompt.id].orEmpty(), QuestionPolicies.inputEnabled(question, editing)) {
                             val selected = options[prompt.id].orEmpty()
                             options = options + (prompt.id to if (prompt.multi) {
                                 if (choice.id in selected) selected - choice.id else selected + choice.id
@@ -242,10 +243,11 @@ import org.json.JSONObject
                     color = Color(0xFFFFCB7D), style = MaterialTheme.typography.labelSmall)
             }
             }
-            otherPrompts.forEachIndexed { index,prompt ->
+            otherPrompts.forEachIndexed { index,(prompt,field) ->
                 var focused by remember(target.key,question.id,question.hash,prompt.id) { mutableStateOf(false) }
                 Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.spacedBy(8.dp),verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(texts[prompt.id].orEmpty(), { value ->
+                OutlinedTextField(texts[prompt.id].orEmpty(), { typed ->
+                    val value = QuestionPolicies.limitText(typed, field.maxLength)
                     texts = texts + (prompt.id to value)
                     if (!prompt.multi && value.isNotBlank()) options = options + (prompt.id to emptySet())
                     persist()
@@ -256,11 +258,12 @@ import org.json.JSONObject
                             !event.isShiftPressed && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed) primaryAction()
                         true // Consume key up/repeats too; the field must not generate a second IME action.
                     }
-                }, label = { Text(prompt.otherLabel.ifBlank { "Other answer" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    singleLine = true, readOnly = !editing,
+                }, label = { Text(field.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    supportingText = if (field.maxLength != null) { { Text("${QuestionPolicies.characters(texts[prompt.id].orEmpty())}/${field.maxLength}") } } else null,
+                    singleLine = true, readOnly = !QuestionPolicies.inputEnabled(question, editing),
                     keyboardOptions = KeyboardOptions.Default.copy(imeAction = if(step.nextPage != null) ImeAction.Next else ImeAction.Send),
                     keyboardActions = KeyboardActions(onNext = { if(focused) primaryAction() }, onSend = { if(focused) primaryAction() }))
-                if(index == otherPrompts.lastIndex) QuestionActionButton(primaryEnabled,step,::primaryAction)
+                if(index == otherPrompts.lastIndex && submitVisible) QuestionActionButton(primaryEnabled,step,::primaryAction)
                 }
             }
             if (native != null) {
@@ -298,16 +301,16 @@ import org.json.JSONObject
                         Icon(Icons.Default.KeyboardArrowRight, "Next part")
                     }
                 }
-                if(question.canSkip || otherPrompts.isEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                if(question.canSkip || otherPrompts.isEmpty() && submitVisible) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Spacer(Modifier.weight(1f))
                 if (question.canSkip) TextButton(onClick = { model.send(target, question, JSONArray(question.prompts.map {
                     JSONObject().put("question_id", it.id).put("skip", true).put("selected_option_ids", JSONArray()).put("text", "")
                 })) }, enabled = editing && available, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Skip") }
-                if(otherPrompts.isEmpty()) QuestionActionButton(primaryEnabled,step,::primaryAction)
+                if(otherPrompts.isEmpty() && submitVisible) QuestionActionButton(primaryEnabled,step,::primaryAction)
                 }
             }
             if (!available) Text("Refresh to verify this request. Your answer is kept.", style = MaterialTheme.typography.bodySmall)
-            else if (!question.canAnswer) SelectionContainer { Text(question.unavailableReason.ifBlank { "Complete this request on your machine." }, style = MaterialTheme.typography.bodySmall) }
+            else if (!question.canAnswer) SelectionContainer { Text(QuestionPolicies.unavailableNotice(question), style = MaterialTheme.typography.bodySmall) }
             if (question.approval && !approvalSupported) Text("This approval cannot be answered here. Continue on your machine.", style = MaterialTheme.typography.bodySmall)
         }
     }

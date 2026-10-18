@@ -10,7 +10,26 @@ data class LaunchAccountChoice(val account:LaunchAccount,val title:String,val li
 }
 enum class LaunchLimitTone { Normal, Warning, Critical }
 data class LaunchLimitPace(val used:Double,val elapsed:Double?,val tone:LaunchLimitTone)
-data class LaunchModel(val value:String,val label:String)
+/** One OpenCode variant of a model, offered as launch effort. */
+data class LaunchEffort(val value:String,val label:String)
+/** One native effort: a validated ID and the computer's label when it reported a usable one. */
+data class NativeEffort(val value:String,val label:String?)
+/** The one reader of `effort_options`/`effort_labels` for New session and the model sheet. */
+object NativeEfforts {
+    const val MAX=16
+    /** Bounded, one token, no path separator. Membership is checked against the model's own list. */
+    fun valid(value:String) = value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size<=64 && value.none { it.isWhitespace() || it.isISOControl() || it=='/' }
+    /** Valid IDs in native order, first occurrence, at most [MAX]; labels come from `effort_labels` at the same index. */
+    fun parse(option:JSONObject?):List<NativeEffort> {
+        val ids=option?.optJSONArray("effort_options") ?: return emptyList()
+        val labels=option.optJSONArray("effort_labels")
+        return (0 until ids.length()).asSequence().mapNotNull { index ->
+            val id=(ids.opt(index) as? String)?.takeIf(::valid) ?: return@mapNotNull null
+            NativeEffort(id,(labels?.opt(index) as? String)?.takeIf { it.isNotBlank() && it.length<=80 && it.none(Char::isISOControl) })
+        }.distinctBy { it.value }.take(MAX).toList()
+    }
+}
+data class LaunchModel(val value:String,val label:String,val efforts:List<LaunchEffort> = emptyList())
 data class LaunchFolder(val path: String,val name: String)
 data class LaunchProjectFolder(val id:String,val path:String,val name:String)
 data class LaunchProject(val id:String,val name:String,val color:String,val folders:List<LaunchProjectFolder>)
@@ -67,7 +86,14 @@ object LaunchPresentation {
             (row.opt("auth_status") as? String)?.takeIf { it in setOf("signed_in","signed_out","expired","credentials_locked","desktop_session_unavailable","credentials_unavailable") } ?: "unknown",
             if(row.optJSONObject("usage") != null) AccountSnapshots.account(row) else null)
     }.distinctBy { it.id }
+    /** Relay and connector feature: `launch` and `settings` accept an OpenCode variant of the model as `effort`. */
+    const val OPENCODE_LAUNCH_EFFORT = "opencode_launch_effort"
+    /** Both the relay and the computer's connector must advertise it; older ones refuse native variant names. */
+    fun effortSupported(relayFeatures:Set<String>,computerFeatures:Set<String>) = OPENCODE_LAUNCH_EFFORT in relayFeatures && OPENCODE_LAUNCH_EFFORT in computerFeatures
     fun validModel(value:String) = value.isNotBlank() && value.length<=120 && value.contains('/') && value.none(Char::isISOControl)
+    fun validEffort(value:String) = NativeEfforts.valid(value)
+    /** The model's own variants in native order; a missing label shows the ID. */
+    private fun modelEfforts(option:JSONObject):List<LaunchEffort> = NativeEfforts.parse(option).map { LaunchEffort(it.value,it.label ?: it.value) }
     /** Only exact models offered by this computer's selected native OpenCode account. */
     fun models(raw:JSONObject?,provider:String,accountId:String):List<LaunchModel> {
         if(provider!="opencode") return emptyList()
@@ -75,8 +101,34 @@ object LaunchPresentation {
         return account.optJSONArray("model_options")?.objects().orEmpty().take(256).mapNotNull { option ->
             val value=((option.opt("value") ?: option.opt("id")) as? String)?.takeIf(::validModel) ?: return@mapNotNull null
             val label=(option.opt("label") as? String)?.takeIf { it.isNotBlank() && it.length<=160 && it.none(Char::isISOControl) } ?: value
-            LaunchModel(value,label)
+            LaunchModel(value,label,modelEfforts(option))
         }.distinctBy { it.value }
+    }
+    /**
+     * Effort choices for New session: the chosen OpenCode model's variants, only when the relay and the
+     * connector advertise [OPENCODE_LAUNCH_EFFORT] ([effortSupported]). Empty means no Effort row and no `effort` in the request.
+     */
+    fun efforts(raw:JSONObject?,provider:String,accountId:String,model:String,supported:Boolean):List<LaunchEffort> =
+        if(!supported || provider!="opencode" || model.isBlank()) emptyList()
+        else models(raw,provider,accountId).find { it.value==model }?.efforts.orEmpty()
+    /** The checked native launch request for the current form choices. */
+    fun arguments(catalog:JSONObject,agent:String,directory:String,tag:String,accountId:String?,projectId:String,worktrees:JSONObject?,
+        model:String="",effort:String="",effortSupported:Boolean=false):JSONObject {
+        check(catalog.optJSONArray("agents")?.let { array -> (0 until array.length()).any { array.optString(it) == agent } } == true) { "This native provider is unavailable." }
+        check(accountId != null && accounts(catalog,agent).any { it.id == accountId }) { "Choose an offered account for the selected provider." }
+        val args=JSONObject().put("agent",agent).put("directory",directory).put("tag",tag).put("account_id",accountId)
+        if(model.isNotBlank()) {
+            check(models(catalog,agent,accountId).any { it.value==model }) { "The native model changed. Review the current choices." }
+            args.put("model",model)
+        }
+        if(effort.isNotBlank()) {
+            check(effortSupported) { "This computer does not accept an OpenCode effort at launch. Choose Model default." }
+            check(efforts(catalog,agent,accountId,model,true).any { it.value==effort }) { "The model's effort choices changed. Review the current choices." }
+            args.put("effort",effort)
+        }
+        if(catalog.opt("project_launch_supported")==true) projectArguments(catalog,projectId,directory,worktrees).let { fields -> fields.keys().forEach { key -> args.put(key,fields.get(key)) } }
+        else check(projectId.isBlank()) { "This computer does not support scoped project assignment." }
+        return SessionActionPolicies.arguments("launch",args)
     }
     fun defaultAccount(accounts:List<LaunchAccount>,selected:String=""):String = accounts.firstOrNull { it.id == selected }?.id
         ?: accounts.singleOrNull { it.isDefault }?.id ?: accounts.firstOrNull()?.id.orEmpty()
@@ -156,7 +208,8 @@ object LaunchPresentation {
         result.put("accounts",JSONArray(agents(raw).flatMap { provider -> accounts(raw,provider) }.map { account ->
             JSONObject().put("id",account.id).put("provider",account.provider).put("label",account.label)
                 .put("native",account.native).put("is_default",account.isDefault).put("installed",account.installed).put("auth_status",account.authStatus)
-                .put("model_options",JSONArray(models(raw,account.provider,account.id).map { JSONObject().put("value",it.value).put("label",it.label) }))
+                .put("model_options",JSONArray(models(raw,account.provider,account.id).map { model -> JSONObject().put("value",model.value).put("label",model.label)
+                    .also { row -> if(model.efforts.isNotEmpty()) row.put("effort_options",JSONArray(model.efforts.map { it.value })).put("effort_labels",JSONArray(model.efforts.map { it.label })) } }))
                 .also { row -> account.usage?.let { row.put("usage",AccountSnapshots.accountJson(it).getJSONObject("usage")) } }
         }))
         val supported=raw.opt("project_launch_supported")==true
