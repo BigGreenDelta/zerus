@@ -701,6 +701,29 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         self.assertEqual(state["pending_questions"], [])
         self.assertEqual([event["type"] for event in state["events"]].count("QuestionAnswered"), 1)
 
+    def test_hgs_answers_a_question_taller_than_its_unviewed_pane(self):
+        name = self.launch("tall")
+        self.deliver_prompt(name, api.TALL_QUESTION)
+        # No client views the pane, so the session host grows it from 80x24
+        # until Claude redraws the whole panel; the screen is the only path here.
+        card = self.card(name, "hook")
+        self.assertEqual(card["answer_transport"], "claude_tui")
+        details = json.loads(self.hgs("__host", "call", json.dumps(
+            {"op": "pane_info", "target": {"name": name}})).stdout)["ok"]
+        self.assertEqual(details["width"], 80)
+        self.assertGreater(details["height"], 24)
+        payload, receipt = self.answer(name, card, [dict(question_id="q_0",
+                                                         selected_option_ids=["opt_0_0", "opt_0_2"], text="")])
+        expected = {"Which release should we prepare?": "API-ключи, Свои адреса"}
+
+        def recorded():
+            for row in self.transcript_rows(card["conversation_id"]):
+                result = row.get("toolUseResult")
+                if isinstance(result, dict) and "answers" in result:
+                    return result
+            return None
+        self.assertEqual(self.until("the answer in the transcript", recorded)["answers"], expected)
+
     def test_hgs_approves_a_write_once(self):
         name = self.launch("approval")
         self.deliver_prompt(name, api.WRITE)

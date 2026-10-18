@@ -363,8 +363,11 @@ then reused here.
     window-local `window-size`. It runs `resize-window -y ROWS`, then
     `set -wu window-size`, so the next client sets the size again. Width never
     changes.
-  - The host and Windows backends return `false` (fail closed) until host
-    parity is implemented.
+  - The Windows session host answers a `grow_unviewed` request only while no
+    client is attached to the pane: it keeps the width, never shrinks, and the
+    next attaching client sets the size again (`zerus-5dox`). A host that
+    predates the request answers `unsupported`, which the backend reports as
+    `false` (fail closed).
   - tmux 3.8 behavior was verified on isolated sockets: after unsetting, the
     size persists while detached; an attach takes the client's size; a resize
     while attached reverts to the client's size.
