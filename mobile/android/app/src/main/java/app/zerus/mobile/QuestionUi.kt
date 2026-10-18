@@ -114,16 +114,16 @@ import org.json.JSONObject
     fun answers() = QuestionPolicies.answers(question.prompts, options, texts)
     fun persist() { model.edit(target, texts.values.filter { it.isNotBlank() }.joinToString("\n"), question, answers().toString()) }
     val editing = draft.status == "editing" && native == null && model.pendingQuestionSend == null
-    val literalText = QuestionPolicies.literalText(question)
-    val error = QuestionPolicies.answerError(question.prompts, options, texts, literalText)
-    val complete = QuestionPolicies.complete(question.prompts, options, texts, literalText)
+    val formReplyText = QuestionPolicies.formReplyText(question)
+    val error = QuestionPolicies.answerError(question.prompts, options, texts, formReplyText)
+    val complete = QuestionPolicies.complete(question.prompts, options, texts, formReplyText)
     val submitGate = remember(target.key,question.id,question.hash,draft.generation) { QuestionSubmitGate() }
     var submitPending by remember(submitGate) { mutableStateOf(false) }
     val submitScope = rememberCoroutineScope()
     val sendEnabled = question.canAnswer && editing && complete && available && !submitPending
     fun submitAnswer() {
         val allowed = question.canAnswer && editing && available && !submitPending &&
-            model.draft(target,question).status == "editing" && QuestionPolicies.complete(question.prompts,options,texts,literalText)
+            model.draft(target,question).status == "editing" && QuestionPolicies.complete(question.prompts,options,texts,formReplyText)
         if(!submitGate.claim(allowed)) return
         submitPending = true
         persist()
@@ -163,7 +163,7 @@ import org.json.JSONObject
         }
     }
     val remaining = review.secondsRemaining(reviewNow)
-    val step = QuestionSteps.current(question.prompts, page, options, texts, literalText)
+    val step = QuestionSteps.current(question.prompts, page, options, texts, formReplyText)
     val pageIndex = step.page
     fun primaryAction() {
         if (step.nextPage != null) {
@@ -282,16 +282,19 @@ import org.json.JSONObject
             val sendNotice = model.questionSendNotice(target, question)
             if (sendNotice.isNotBlank()) Text(sendNotice, color = Color(0xFFFFCB7D), style = MaterialTheme.typography.bodySmall)
             fun submit(option: String) { model.send(target, question, QuestionPolicies.approvalAnswer(question, option)) }
+            // Outside the permission branch: a card that stops qualifying also drops an open confirmation.
+            AlwaysAllowDialog(alwaysAllow, question, question.canAnswer && editing && available && foreground, { alwaysAllow = it }) { model.send(target, question, it) }
             if (permission) {
                 val reviewed = reviewEligible && remaining == 0
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    OutlinedButton(onClick = { submit("reject") }, enabled = question.canAnswer && editing && available) { Text("Reject") }
-                    Button(onClick = { submit("once") }, enabled = reviewed) { Text(if (remaining > 0) "Allow once ($remaining)" else "Allow once") }
-                    if (QuestionPolicies.alwaysAllowOffered(question)) OutlinedButton(onClick = { alwaysAllow = alwaysAllow.request(question, reviewed) },
-                        enabled = reviewed) { Text("Always allow…") }
+                    QuestionPolicies.openCodePermissionActions(question).forEach { action ->
+                        val onClick = { if (action.confirmation) alwaysAllow = alwaysAllow.request(question, reviewed) else submit(action.option) }
+                        val enabled = action.enabled(question.canAnswer && editing && available, reviewed)
+                        if (action == OpenCodePermissionAction.AllowOnce) Button(onClick = onClick, enabled = enabled) { Text(action.label(remaining)) }
+                        else OutlinedButton(onClick = onClick, enabled = enabled) { Text(action.label(remaining)) }
+                    }
                 }
                 Text("Reject rejects every pending request in this session.", style = MaterialTheme.typography.bodySmall)
-                AlwaysAllowDialog(alwaysAllow, question, question.canAnswer && editing && available, { alwaysAllow = it }) { model.send(target, question, it) }
             } else if (question.approval) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { submit("deny") }, enabled = approvalSupported && question.canAnswer && editing && available) { Text("Deny") }
@@ -361,18 +364,23 @@ import org.json.JSONObject
 }
 
 /**
- * Always allow reaches beyond this request, so it asks first. The dialog closes without sending when the card
- * changed, stopped offering Always allow, or can no longer be answered here.
+ * Always allow reaches beyond this request, so it asks first and names what it saves. The dialog closes without
+ * sending when the card changed, stopped offering Always allow, can no longer be answered here, or the app left
+ * the foreground.
  */
-@Composable private fun AlwaysAllowDialog(confirmation: AlwaysAllowConfirmation, question: Question, editable: Boolean,
+@Composable private fun AlwaysAllowDialog(confirmation: AlwaysAllowConfirmation, question: Question, eligible: Boolean,
     onChange: (AlwaysAllowConfirmation) -> Unit, send: (JSONArray) -> Unit) {
-    val showing = confirmation.showing(question, editable)
+    val showing = confirmation.showing(question, eligible)
     LaunchedEffect(confirmation, showing) { if (confirmation.open && !showing) onChange(confirmation.cancel()) }
     if (!showing) return
     ObscureConversation()
+    val saved = QuestionPolicies.alwaysAllowDescription(question)
     ZerusAlertDialog(onDismissRequest = { onChange(confirmation.cancel()) },
         title = { Text("Always allow?") },
-        text = { Text("OpenCode will allow matching requests without asking again.") },
-        confirmButton = { TextButton(onClick = { onChange(confirmation.confirm(question, editable, send)) }) { Text("Always allow") } },
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("OpenCode will allow matching requests without asking again.")
+            if (saved.isNotBlank()) Text(saved)
+        } },
+        confirmButton = { TextButton(onClick = { onChange(confirmation.confirm(question, eligible, send)) }) { Text("Always allow") } },
         dismissButton = { TextButton(onClick = { onChange(confirmation.cancel()) }) { Text("Cancel") } })
 }

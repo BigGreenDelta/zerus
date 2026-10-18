@@ -117,7 +117,7 @@ class QuestionPoliciesTest {
 
     @Test fun openCodeFormTextMayStartWithSlashOrBang() {
         val form = card("opencode_native", JSONArray().put(textItem).put(choiceItem))
-        val literal = QuestionPolicies.literalText(form)
+        val literal = QuestionPolicies.formReplyText(form)
         assertTrue(literal)
         listOf("/tmp/report.txt", "!important", "  /x").forEach { text ->
             // Both the text item and the Other answer of a choice item.
@@ -139,7 +139,7 @@ class QuestionPoliciesTest {
         // An OpenCode approval card is not a form.
         val openCodeApproval = card("opencode_native", JSONArray().put(choiceItem), approval = true)
         (others + openCodeApproval).forEach { question ->
-            val literal = QuestionPolicies.literalText(question)
+            val literal = QuestionPolicies.formReplyText(question)
             assertFalse(question.source, literal)
             listOf("/command", "!rm -rf", "  /x").forEach { text ->
                 val texts = mapOf("c" to text)
@@ -198,19 +198,19 @@ class QuestionPoliciesTest {
         // Only after the same review as Allow once.
         assertFalse(AlwaysAllowConfirmation().request(question, reviewed = false).open)
         val open = AlwaysAllowConfirmation().request(question, reviewed = true)
-        assertTrue(open.open); assertTrue(open.showing(question, editable = true))
+        assertTrue(open.open); assertTrue(open.showing(question, eligible = true))
         // Cancel sends nothing, and a late Confirm after it sends nothing either.
         val cancelled = open.cancel()
         assertFalse(cancelled.open)
-        assertFalse(cancelled.confirm(question, editable = true) { sent += it }.open)
+        assertFalse(cancelled.confirm(question, eligible = true) { sent += it }.open)
         assertTrue(sent.isEmpty())
         // Confirm sends always once and closes.
-        val closed = open.confirm(question, editable = true) { sent += it }
+        val closed = open.confirm(question, eligible = true) { sent += it }
         assertFalse(closed.open)
         assertEquals(1, sent.size)
         assertEquals(listOf("always"), sent.single().getJSONObject(0).getJSONArray("selected_option_ids").let { ids -> (0 until ids.length()).map(ids::getString) })
         assertEquals("permission", sent.single().getJSONObject(0).getString("question_id"))
-        closed.confirm(question, editable = true) { sent += it }
+        closed.confirm(question, eligible = true) { sent += it }
         assertEquals(1, sent.size)
         // A card without Always allow cannot open it.
         val narrow = card("opencode_native", JSONArray().put(permission(choices = options("once", "reject"))), approval = true, choices = true)
@@ -228,15 +228,57 @@ class QuestionPoliciesTest {
             "unanswerable" to question.copy(canAnswer = false))
         changed.forEach { (name, current) ->
             val sent = mutableListOf<JSONArray>()
-            assertFalse(name, open.showing(current, editable = true))
-            assertFalse(name, open.confirm(current, editable = true) { sent += it }.open)
+            assertFalse(name, open.showing(current, eligible = true))
+            assertFalse(name, open.confirm(current, eligible = true) { sent += it }.open)
             assertTrue(name, sent.isEmpty())
         }
-        // No longer editable (sending, submitted, or the conversation is not verified).
+        // No longer eligible: sending, submitted, the conversation is not verified, or the app left the foreground.
         val sent = mutableListOf<JSONArray>()
-        assertFalse(open.showing(question, editable = false))
-        assertFalse(open.confirm(question, editable = false) { sent += it }.open)
+        assertFalse(open.showing(question, eligible = false))
+        assertFalse(open.confirm(question, eligible = false) { sent += it }.open)
         assertTrue(sent.isEmpty())
+    }
+
+    @Test fun permissionButtonsMapToTheirOptionsAndGates() {
+        val question = card("opencode_native", JSONArray().put(permission()), approval = true, choices = true)
+        val actions = QuestionPolicies.openCodePermissionActions(question)
+        assertEquals(listOf(OpenCodePermissionAction.Reject, OpenCodePermissionAction.AllowOnce, OpenCodePermissionAction.AlwaysAllow), actions)
+        assertEquals(listOf("reject", "once", "always"), actions.map { it.option })
+        assertEquals(listOf("Reject", "Allow once (3)", "Always allow…"), actions.map { it.label(3) })
+        assertEquals(listOf("Reject", "Allow once", "Always allow…"), actions.map { it.label(0) })
+        // Reject needs no review; Allow once and Always allow wait for it; only Always allow asks again first.
+        assertEquals(listOf(false, true, true), actions.map { it.review })
+        assertEquals(listOf(false, false, true), actions.map { it.confirmation })
+        assertEquals(listOf(true, false, false), actions.map { it.enabled(answerable = true, reviewed = false) })
+        assertEquals(listOf(true, true, true), actions.map { it.enabled(answerable = true, reviewed = true) })
+        assertEquals(listOf(false, false, false), actions.map { it.enabled(answerable = false, reviewed = true) })
+        // Each sends the one row of its own option.
+        actions.forEach { action ->
+            assertEquals(action.option, QuestionPolicies.approvalAnswer(question, action.option).getJSONObject(0).getJSONArray("selected_option_ids").getString(0))
+        }
+        // Without always there is no Always allow…; a card that does not qualify has no permission buttons.
+        val narrow = card("opencode_native", JSONArray().put(permission(choices = options("once", "reject"))), approval = true, choices = true)
+        assertEquals(listOf(OpenCodePermissionAction.Reject, OpenCodePermissionAction.AllowOnce), QuestionPolicies.openCodePermissionActions(narrow))
+        assertTrue(QuestionPolicies.openCodePermissionActions(card("claude_tool_approval", JSONArray().put(permission()), approval = true, choices = true)).isEmpty())
+        assertTrue(QuestionPolicies.openCodePermissionActions(question.copy(canAnswer = false)).isEmpty())
+    }
+
+    @Test fun alwaysAllowConfirmationNamesWhatItSaves() {
+        // hgs describes Always allow with the patterns OpenCode stops asking for; the dialog shows it verbatim.
+        val saved = "Allows without asking again: printf *"
+        val described = JSONArray().put(JSONObject().put("id", "once").put("label", "Allow once"))
+            .put(JSONObject().put("id", "always").put("label", "Always allow").put("description", saved).put("scope", "broader"))
+            .put(JSONObject().put("id", "reject").put("label", "Reject").put("description", "Rejects every pending request in this session"))
+        val question = card("opencode_native", JSONArray().put(permission(choices = described)), approval = true, choices = true)
+        assertEquals(saved, QuestionPolicies.alwaysAllowDescription(question))
+        val several = "Allows without asking again: git push *, git fetch *"
+        val wider = question.copy(prompts = listOf(question.prompts.single().copy(choices = question.prompts.single().choices.map {
+            if (it.id == "always") it.copy(description = several) else it })))
+        assertEquals(several, QuestionPolicies.alwaysAllowDescription(wider))
+        // Older cards without a description show only the fixed text; other cards have none.
+        assertEquals("", QuestionPolicies.alwaysAllowDescription(card("opencode_native", JSONArray().put(permission()), approval = true, choices = true)))
+        assertEquals("", QuestionPolicies.alwaysAllowDescription(question.copy(canAnswer = false)))
+        assertEquals("", QuestionPolicies.alwaysAllowDescription(card("claude_tool_approval", JSONArray().put(permission(choices = described)), approval = true, choices = true)))
     }
 
     @Test fun approvalRequiresExactNativeIds() {

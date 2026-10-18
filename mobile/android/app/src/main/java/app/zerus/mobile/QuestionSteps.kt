@@ -8,9 +8,9 @@ internal data class QuestionStep(val page: Int, val count: Int, val nextPage: In
 
 internal object QuestionSteps {
     fun current(prompts: List<Prompt>, page: Int, options: Map<String, Set<String>>,
-        texts: Map<String, String>, literalText: Boolean = false): QuestionStep {
+        texts: Map<String, String>, formReplyText: Boolean = false): QuestionStep {
         val index = page.coerceIn(0, (prompts.size - 1).coerceAtLeast(0))
-        val answered = prompts.map { QuestionPolicies.complete(listOf(it), options, texts, literalText) }
+        val answered = prompts.map { QuestionPolicies.complete(listOf(it), options, texts, formReplyText) }
         val complete = answered.isNotEmpty() && answered.all { it }
         val next = when {
             index < prompts.lastIndex -> index + 1
