@@ -19,11 +19,28 @@ number (`CFBundleVersion`), never in the marketing version.
 
 `.github/workflows/ios-testflight.yml` archives the exact main revision with the
 newest Xcode 26 or later and uploads it with `xcodebuild -exportArchive`
-(`method app-store-connect`, `destination upload`). Signing is automatic and
-cloud-managed through an App Store Connect API key: no certificate, profile or
-keychain is stored in the repository or on the runner, and the key file is
-removed after the job. `mobile/ios/scripts/testflight-upload.sh` does the work and
-checks the archived bundle ID, versions and channel before uploading.
+(`method app-store-connect`, `destination upload`). Signing is automatic: the
+archive is signed with an Apple Development identity, and the upload re-signs it
+with a cloud-managed distribution certificate through an App Store Connect API
+key. `mobile/ios/scripts/testflight-upload.sh` does the work and checks the
+archived bundle ID, versions and channel before uploading.
+
+A runner starts without a development identity, and automatic signing would then
+create a new development certificate on every run until the team reaches Apple's
+certificate limit. CI therefore imports one dedicated development identity into a
+temporary keychain. The script refuses to archive without it, requires exactly one
+valid Apple Development identity of the team in that keychain, and stops before
+uploading when the archive is signed by any other certificate. It removes the
+keychain, the identity file and the API key and restores the keychain search list
+on every exit. No certificate or profile is stored in the repository. On a
+maintainer's Mac the script uses that Mac's own development identity and refuses
+to import one.
+
+If an archive reports that the account has reached the maximum number of
+certificates, some run archived without the dedicated identity. Revoke only an
+`Apple Development: Created via API` certificate whose fingerprint matches the
+`codesign --sign` leaf in a CI archive log. Never revoke the dedicated CI identity
+or a personal, distribution or Developer ID certificate.
 
 - **Dev:** `ci.yml` job `dev-ios` calls the workflow after the CI gate of a main
   push succeeds, when the repository variable `IOS_TESTFLIGHT_ENABLED` is `true`.
@@ -42,7 +59,7 @@ checks the archived bundle ID, versions and channel before uploading.
   review in App Store Connect, together with the store listing.
 
 The upload job runs in the `ios-testflight` environment and verifies that it runs
-for `refs/heads/main` of `ufna/zerus`. Only `ci.yml` forwards the three secret
+for `refs/heads/main` of `ufna/zerus`. Only `ci.yml` forwards the five secret
 names; PR code and other workflows never receive them. The workflow has no cache
 access.
 
@@ -65,6 +82,14 @@ access.
    `APP_STORE_CONNECT_API_KEY_P8` (the `.p8` file contents),
    `APP_STORE_CONNECT_API_KEY_ID` and `APP_STORE_CONNECT_API_ISSUER_ID`, and the
    environment or repository variable `IOS_TEAM_ID` (the Apple Developer team ID).
+   Create one Apple Development certificate for CI alone: generate its key and
+   certificate signing request outside any login keychain, create the
+   certificate from the request, and pack the key and certificate into a PKCS#12
+   file with a random password and the legacy encryption that macOS
+   `security import` accepts. Store the base64 file as `IOS_DEVELOPMENT_P12` and
+   its password as `IOS_DEVELOPMENT_P12_PASSWORD`, note the certificate ID and
+   fingerprint privately, and delete the local files. A personal identity must not
+   be used.
 4. **TestFlight.** Add yourself to an internal testing group with automatic
    distribution, and install TestFlight on the phone. For the public beta, create
    an external group with a public link and fill in Test Information (beta

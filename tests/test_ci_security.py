@@ -1,12 +1,18 @@
 """Exercise the checked-in workflow trust predicate and final success gate."""
+import base64
 import datetime
+import hashlib
 import importlib.util
 import io
 import json
 from itertools import takewhile
 import os
 from pathlib import Path
+import plistlib
 import re
+import subprocess
+import sys
+import tempfile
 import textwrap
 from types import SimpleNamespace
 import unittest
@@ -1266,8 +1272,11 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn('test "$WORKFLOW_REPOSITORY" = ufna/zerus', upload)
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", upload), ["actions/checkout"])
         self.assertIn("persist-credentials: false", upload)
-        self.assertRegex(upload, r"if: always\(\)\n        run: rm -rf \"\$RUNNER_TEMP/app-store-connect\"")
-        asc_secrets = {"APP_STORE_CONNECT_API_KEY_P8", "APP_STORE_CONNECT_API_KEY_ID", "APP_STORE_CONNECT_API_ISSUER_ID"}
+        self.assertIn('if: always()\n        run: |\n          security delete-keychain '
+                      '"$RUNNER_TEMP/app-store-connect/signing.keychain-db" 2> /dev/null || true\n'
+                      '          rm -rf "$RUNNER_TEMP/app-store-connect"', upload)
+        asc_secrets = {"APP_STORE_CONNECT_API_KEY_P8", "APP_STORE_CONNECT_API_KEY_ID", "APP_STORE_CONNECT_API_ISSUER_ID",
+                       "IOS_DEVELOPMENT_P12", "IOS_DEVELOPMENT_P12_PASSWORD"}
         declarations = text.split("    secrets:\n", 1)[1].split("\n  workflow_dispatch:", 1)[0]
         self.assertEqual(set(re.findall(r"(?m)^      (\w+):$", declarations)), asc_secrets)
         for secret in asc_secrets:
@@ -1288,6 +1297,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         for workflow in (ROOT / ".github/workflows").glob("*.yml"):
             if workflow.name not in {"ci.yml", "ios-testflight.yml"}:
                 self.assertNotIn("APP_STORE_CONNECT_API", workflow.read_text(), workflow.name)
+                self.assertNotIn("IOS_DEVELOPMENT_P12", workflow.read_text(), workflow.name)
 
     def test_ios_testflight_dev_follows_only_a_successful_main_gate(self):
         expression = field(job(self.ci, "dev-ios"), "if")
@@ -1367,6 +1377,172 @@ class WorkflowSecurityTests(unittest.TestCase):
                     self.assertIn("    needs: publish\n", publish)
                     self.assertIn("group: release-publication", publish)
                     self.assertIn("persist-credentials: false", publish)
+
+
+SECURITY_STUB = r"""#!/usr/bin/env bash
+case "$1" in
+list-keychains)
+    if [ "${4:-}" = -s ]; then shift 4; echo "list-keychains-set $*" >> "$FAKE_LOG"; printf '%s\n' "$@" > "$FAKE_LIST"
+    else sed 's/.*/    "&"/' "$FAKE_LIST"; fi ;;
+create-keychain)
+    # Like macOS, a new keychain joins the user's search list.
+    echo "create-keychain $4" >> "$FAKE_LOG"; : > "$4"; echo "$4" >> "$FAKE_LIST" ;;
+delete-keychain) echo "delete-keychain $2" >> "$FAKE_LOG"; rm -f "$2" ;;
+import) echo "import" >> "$FAKE_LOG"; test -s "$2" ;;
+find-identity) printf '%s\n' "$FAKE_IDENTITIES" ;;
+find-certificate) cat "$FAKE_CERTIFICATE" ;;
+*) echo "$1" >> "$FAKE_LOG" ;;
+esac
+"""
+
+XCODEBUILD_STUB = r"""#!/usr/bin/env bash
+for argument in "$@"; do
+    if [ "$argument" = -exportArchive ]; then echo "export" >> "$FAKE_LOG"; exit 0; fi
+done
+echo "archive" >> "$FAKE_LOG"
+[ "${FAKE_ARCHIVE:-}" != fail ] || exit 65
+while [ "$#" -gt 0 ]; do [ "$1" != -archivePath ] || archive=$2; shift; done
+mkdir -p "$archive/Products/Applications/Zerus.app"
+cp "$FAKE_INFO_PLIST" "$archive/Products/Applications/Zerus.app/Info.plist"
+"""
+
+CODESIGN_STUB = r"""#!/usr/bin/env bash
+for argument in "$@"; do
+    case "$argument" in --extract-certificates=*) cp "$FAKE_LEAF" "${argument#*=}0" ;; esac
+done
+"""
+
+
+class TestflightUploadSigningTests(unittest.TestCase):
+    """The upload script with stand-ins for security, xcodebuild and codesign."""
+
+    script = ROOT / "mobile/ios/scripts/testflight-upload.sh"
+    team = "ABCDE12345"
+    password = "p12-password-for-tests"
+
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.temp)], check=True))
+        bin_dir = self.temp / "bin"
+        bin_dir.mkdir()
+        for name, body in (("security", SECURITY_STUB), ("xcodebuild", XCODEBUILD_STUB), ("codesign", CODESIGN_STUB)):
+            (bin_dir / name).write_text(body)
+            (bin_dir / name).chmod(0o755)
+        self.certificate, self.leaf, self.sha1 = self.make_certificate("ci", self.team)
+        _, self.other_leaf, _ = self.make_certificate("other", self.team)
+        version = (ROOT / "mobile/ios/DEV_VERSION").read_text().strip()
+        info = self.temp / "Info.plist"
+        info.write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": "app.zerus.mobile", "CFBundleShortVersionString": version,
+            "CFBundleVersion": "948", "ZerusBuildChannel": "dev", "ZerusApnsEnvironment": "production"}))
+        self.work = self.temp / "runner/app-store-connect"
+        self.log = self.temp / "calls.log"
+        self.original = str(self.temp / "login.keychain-db")
+        self.search_list = self.temp / "search-list"
+        self.search_list.write_text(self.original + "\n")
+        self.env = {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "HOME": str(self.temp),
+            "RUNNER_TEMP": str(self.temp / "runner"), "GITHUB_ACTIONS": "true", "CHANNEL": "dev",
+            "BUILD_NUMBER": "948", "SOURCE_COMMIT": "a" * 40, "TEAM_ID": self.team, "ASC_KEY": "fake-p8",
+            "ASC_KEY_ID": "ABCDEFGH12", "ASC_ISSUER_ID": "12345678-1234-1234-1234-123456789abc",
+            "IOS_DEVELOPMENT_P12": base64.b64encode(b"fake-p12").decode(),
+            "IOS_DEVELOPMENT_P12_PASSWORD": self.password,
+            "FAKE_LOG": str(self.log), "FAKE_LIST": str(self.search_list),
+            "FAKE_IDENTITIES": self.identities((self.sha1, "Apple Development: Created via API (TESTUID001)")),
+            "FAKE_CERTIFICATE": str(self.certificate), "FAKE_LEAF": str(self.leaf), "FAKE_INFO_PLIST": str(info),
+        }
+
+    def make_certificate(self, name, team):
+        pem, der = self.temp / f"{name}.pem", self.temp / f"{name}.der"
+        subject = f"/UID=TESTUID001/CN=Apple Development: Created via API (TESTUID001)/OU={team}/O=Example/C=US"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout",
+                        str(self.temp / f"{name}.key"), "-out", str(pem), "-days", "2", "-subj", subject],
+                       check=True, capture_output=True)
+        subprocess.run(["openssl", "x509", "-in", str(pem), "-outform", "DER", "-out", str(der)],
+                       check=True, capture_output=True)
+        return pem, der, hashlib.sha1(der.read_bytes()).hexdigest().upper()
+
+    @staticmethod
+    def identities(*entries):
+        lines = [f'  {index}) {sha1} "{name}"' for index, (sha1, name) in enumerate(entries, 1)]
+        return "\n".join(lines + [f"     {len(entries)} valid identities found"])
+
+    def run_upload(self, **changes):
+        env = {**self.env, **changes}
+        env = {key: value for key, value in env.items() if value is not None}
+        result = subprocess.run(["bash", str(self.script)], env=env, capture_output=True, text=True, timeout=60)
+        calls = self.log.read_text().splitlines() if self.log.exists() else []
+        self.assertNotIn(self.password, result.stdout + result.stderr + "\n".join(calls))
+        return result, calls
+
+    def assert_cleaned(self, calls):
+        keychain = str(self.work / "signing.keychain-db")
+        changed = calls.index(f"list-keychains-set {keychain} {self.original}")
+        self.assertEqual(calls[changed + 1:].count(f"list-keychains-set {self.original}"), 1)
+        self.assertIn(f"delete-keychain {keychain}", calls)
+        self.assertEqual(self.search_list.read_text().splitlines(), [self.original])
+        for name in ("signing.keychain-db", "development.p12", "AuthKey_ABCDEFGH12.p8"):
+            self.assertFalse((self.work / name).exists(), name)
+
+    def test_ci_requires_the_development_identity_before_signing(self):
+        for missing in ("IOS_DEVELOPMENT_P12", "IOS_DEVELOPMENT_P12_PASSWORD"):
+            with self.subTest(missing=missing):
+                result, calls = self.run_upload(**{missing: None})
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("IOS_DEVELOPMENT_P12 and IOS_DEVELOPMENT_P12_PASSWORD are missing", result.stderr)
+                self.assertEqual(calls, [])
+
+    def test_identity_import_is_refused_outside_ci(self):
+        result, calls = self.run_upload(GITHUB_ACTIONS=None)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("imported only on a CI runner", result.stderr)
+        self.assertEqual(calls, [])
+
+    def test_failed_archive_keeps_its_status_and_restores_the_keychains(self):
+        result, calls = self.run_upload(FAKE_ARCHIVE="fail")
+        self.assertEqual(result.returncode, 65)
+        self.assertNotIn("export", calls)
+        self.assert_cleaned(calls)
+
+    def test_archive_signed_by_another_identity_is_not_uploaded(self):
+        result, calls = self.run_upload(FAKE_LEAF=str(self.other_leaf))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("signed by an unexpected identity", result.stderr)
+        self.assertIn("archive", calls)
+        self.assertNotIn("export", calls)
+        self.assert_cleaned(calls)
+
+    def test_only_one_current_development_identity_of_the_team_is_accepted(self):
+        foreign, _, foreign_sha1 = self.make_certificate("foreign", "ZYXWV98765")
+        name = "Apple Development: Created via API (TESTUID001)"
+        cases = {
+            "none": {"FAKE_IDENTITIES": self.identities()},
+            "two": {"FAKE_IDENTITIES": self.identities((self.sha1, name), ("B" * 40, name))},
+            "distribution": {"FAKE_IDENTITIES": self.identities((self.sha1, "Apple Distribution: Example (ABCDE12345)"))},
+            "mismatch": {"FAKE_IDENTITIES": self.identities(("C" * 40, name))},
+            "team": {"FAKE_IDENTITIES": self.identities((foreign_sha1, name)), "FAKE_CERTIFICATE": str(foreign)},
+        }
+        for case, changes in cases.items():
+            with self.subTest(case=case):
+                self.log.unlink(missing_ok=True)
+                self.search_list.write_text(self.original + "\n")
+                result, calls = self.run_upload(**changes)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertNotIn("archive", calls)
+                self.assert_cleaned(calls)
+
+    def test_archive_signed_by_the_imported_identity_continues_to_the_upload(self):
+        result, calls = self.run_upload()
+        self.assertNotIn("unexpected identity", result.stderr)
+        self.assert_cleaned(calls)
+        if sys.platform == "darwin":
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls.count("export"), 1)
+        else:
+            # PlistBuddy exists only on macOS; the identity checks above ran first.
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("export", calls)
+
 
 if __name__ == "__main__":
     unittest.main()

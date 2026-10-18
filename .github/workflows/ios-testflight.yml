@@ -4,8 +4,9 @@ name: iOS TestFlight
 # Connect. Trusted main CI calls it for the Dev channel (TestFlight internal
 # testing) after the CI gate succeeds; a maintainer dispatches it from main for a
 # Stable App Store candidate. Only these callers forward the three App Store
-# Connect secret names; the upload job alone reads their values from the
-# ios-testflight environment, whose policy admits only main.
+# Connect secret names and the two of the dedicated CI development identity; the
+# upload job alone reads their values from the ios-testflight environment, whose
+# policy admits only main.
 on:
   workflow_call:
     inputs:
@@ -19,6 +20,10 @@ on:
       APP_STORE_CONNECT_API_KEY_ID:
         required: true
       APP_STORE_CONNECT_API_ISSUER_ID:
+        required: true
+      IOS_DEVELOPMENT_P12:
+        required: true
+      IOS_DEVELOPMENT_P12_PASSWORD:
         required: true
   workflow_dispatch:
     inputs:
@@ -87,7 +92,11 @@ jobs:
           ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          IOS_DEVELOPMENT_P12: ${{ secrets.IOS_DEVELOPMENT_P12 }}
+          IOS_DEVELOPMENT_P12_PASSWORD: ${{ secrets.IOS_DEVELOPMENT_P12_PASSWORD }}
         run: bash mobile/ios/scripts/testflight-upload.sh
       - name: Remove signing material
         if: always()
-        run: rm -rf "$RUNNER_TEMP/app-store-connect"
+        run: |
+          security delete-keychain "$RUNNER_TEMP/app-store-connect/signing.keychain-db" 2> /dev/null || true
+          rm -rf "$RUNNER_TEMP/app-store-connect"
