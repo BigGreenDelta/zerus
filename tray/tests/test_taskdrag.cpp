@@ -9,10 +9,13 @@
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
+#include <QDrag>
 #include <QDropEvent>
+#include <QElapsedTimer>
 #include <QLabel>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QPointer>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -53,6 +56,15 @@ bool drop(QWidget *target, const TaskDrag &drag, QPoint point = {}) {
 }
 void leave(QWidget *target) { QDragLeaveEvent event; QApplication::sendEvent(target, &event); }
 bool called(const QDir &dir, const QStringList &argv) { return FakeTasksCli::calls(dir).contains(argv); }
+// The platform's drag loop runs events while the person drags; offscreen has
+// none, so this one runs `during` in its place.
+class LoopingTasksView : public TasksView {
+public:
+    using TasksView::TasksView;
+    std::function<void()> during;
+protected:
+    Qt::DropAction execDrag(QDrag *drag) override { if (during) during(); drag->deleteLater(); return Qt::IgnoreAction; }
+};
 // A press at `from`, a move by `distance` with the button held, and the release.
 void pressMoveRelease(QWidget *widget, QPoint from, int distance) {
     const QPoint to = from + QPoint(0, distance);
@@ -77,6 +89,8 @@ private slots:
     void aLongToDoListScrollsAtItsEdgesWhileDragging();
     void theSessionListTakesTasksOfItsProject();
     void aDroppedSessionRepinsTheTask();
+    void aRowAListingDropsLivesUntilItsDragEnds();
+    void theHeaderLineAndTheReportStartDragsAndClicks();
 };
 
 void TestTaskDrag::initTestCase() {
@@ -279,6 +293,43 @@ void TestTaskDrag::aDroppedSessionRepinsTheTask() {
     QTRY_VERIFY(called(dir.path(), {"task", "target", "uuid-1", "codex/web", "--project", "project-1"}));
     // The row names its new session once hgs took it.
     QTRY_VERIFY(row(view, 1) && row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("codex/web"));
+}
+
+void TestTaskDrag::aRowAListingDropsLivesUntilItsDragEnds() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); LoopingTasksView view(&client); view.resize(760, 560); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_COMPARE(visibleRows(view).size(), 2);
+    QPointer<QWidget> source(row(view, 1)); bool kept = false, shown = true;
+    view.during = [&] {
+        // While the person drags, an agent sends the task: the next listing has it In progress.
+        QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "active"), FakeTasksCli::task(2, "todo")}));
+        view.refresh();
+        QElapsedTimer waited; waited.start();
+        while (visibleRows(view) != QStringList{"T-000002"} && waited.elapsed() < 5000) QTest::qWait(20);
+        kept = !source.isNull(); shown = source && source->isVisible();
+    };
+    // Qt goes on handling the move that started the drag; the row it reaches stays alive, hidden.
+    QMouseEvent move(QEvent::MouseMove, QPointF(100, 50 + QApplication::startDragDistance() + 2), QPointF(), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QTest::mousePress(source, Qt::LeftButton, {}, QPoint(100, 50)); QApplication::sendEvent(source, &move);
+    QVERIFY(move.isAccepted()); QVERIFY(kept); QVERIFY(!shown);
+    QTest::mouseRelease(source, Qt::LeftButton, {}, QPoint(100, 80));
+    // Once the drag is over the row goes.
+    QTRY_VERIFY(source.isNull());
+}
+
+void TestTaskDrag::theHeaderLineAndTheReportStartDragsAndClicks() {
+    QWidget host; auto *taskRow = new TaskRow(&host); host.resize(600, 100); taskRow->resize(600, 100); host.show();
+    QSignalSpy started(taskRow, &TaskRow::dragStarted), opened(taskRow, &TaskRow::opened);
+    taskRow->setTask(item(1, "todo"), {}, TaskColors::of(true), 0);
+    // A real press lands on the label under the pointer, and the moves and the release follow it there.
+    auto *meta = taskRow->findChild<QLabel *>("taskMeta"); const QPoint onMeta(20, meta->height() / 2);
+    pressMoveRelease(meta, onMeta, QApplication::startDragDistance() + 2); QCOMPARE(started.size(), 1);
+    pressMoveRelease(meta, onMeta, 0); QCOMPARE(opened.size(), 1);
+    // In review rows open from their report too.
+    taskRow->setTask(item(2, "review", {{"session", FakeTasksCli::pinned("codex/api")}, {"summary", "Token bucket; 6 tests."}}), {}, TaskColors::of(true), 0);
+    auto *summary = taskRow->findChild<QLabel *>("taskSummary"); QVERIFY(summary->isVisible());
+    pressMoveRelease(summary, QPoint(20, summary->height() / 2), 0); QCOMPARE(opened.size(), 2);
 }
 
 QTEST_MAIN(TestTaskDrag)

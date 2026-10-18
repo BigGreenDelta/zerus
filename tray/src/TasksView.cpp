@@ -176,7 +176,7 @@ void TasksView::setContext(const QString &projectId, const QString &projectName,
     if (project) {
         m_projectId = projectId; ++m_generation; m_board = {}; m_loaded = false; m_failing = false; m_error.clear(); m_showOlder = false;
         m_stage = QStringLiteral("todo");
-        for (auto *row : std::as_const(m_rows)) { row->hide(); row->setObjectName({}); row->deleteLater(); }
+        for (auto *row : std::as_const(m_rows)) retire(row);
         m_rows.clear();
         emit countsChanged(0, 0);   // until the new project's listing arrives
     }
@@ -302,7 +302,7 @@ void TasksView::render() {
     }
     for (auto it = m_rows.begin(); it != m_rows.end();) {
         if (shown.contains(it.key())) { ++it; continue; }
-        it.value()->hide(); it.value()->setObjectName({}); it.value()->deleteLater(); it = m_rows.erase(it);
+        retire(it.value()); it = m_rows.erase(it);
     }
     const int hidden = m_board.rows(m_stage, {m_host, m_session, false, v.now}).size() - m_board.rows(m_stage, v).size();
     const QString empty = v.only && hidden > 0 ? tr("No tasks of %1 here").arg(sessionLabel(m_host, m_session))
@@ -396,16 +396,28 @@ void TasksView::addTask(const QString &key, const QString &text) {
 
 void TasksView::startDrag(TaskRow *row, const QPoint &hotSpot) {
     if (m_projectId.isEmpty()) return;
-    // A listing may replace the row while the drag runs; the drag carries the task.
-    QPointer<TaskRow> source(row);
+    // A listing may take the row out of the list while the drag runs; the drag
+    // carries the task, and the row is kept until the drag ends.
+    m_dragSource = row;
     auto *drag = new QDrag(this);
     drag->setMimeData(TaskDrag::of(m_projectId, row->task()).mimeData());
     drag->setPixmap(row->grab()); drag->setHotSpot(hotSpot);
     row->setDragging(true);
-    drag->exec(Qt::MoveAction);
-    if (source) source->setDragging(false);
+    execDrag(drag);
+    const QPointer<TaskRow> source = std::exchange(m_dragSource, nullptr);
+    if (source) {
+        source->setDragging(false);
+        if (m_rows.value(source->task().uuid) != source) source->deleteLater();
+    }
     endListDrag();
 }
+
+void TasksView::retire(TaskRow *row) {
+    row->hide(); row->setObjectName({});
+    if (row != m_dragSource) row->deleteLater();
+}
+
+Qt::DropAction TasksView::execDrag(QDrag *drag) { return drag->exec(Qt::MoveAction); }
 
 bool TasksView::takesOnTile(const TaskDrag &drag, const QString &stage) const {
     const auto list = [](const QString &s) { return s == QLatin1String("todo") || s == QLatin1String("backlog"); };

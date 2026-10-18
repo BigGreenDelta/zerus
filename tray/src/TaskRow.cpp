@@ -84,7 +84,8 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     // The header's height is fixed, so showing the icons never moves anything.
     auto *header = new QWidget; header->setFixedHeight(26);
     auto *headerLayout = new QHBoxLayout(header); headerLayout->setContentsMargins(0, 0, 0, 0); headerLayout->setSpacing(8);
-    m_meta = new QLabel; m_meta->setObjectName("taskMeta"); m_meta->setTextFormat(Qt::RichText);
+    // The rich-text labels take no mouse input: presses, drags and clicks on them are the row's.
+    m_meta = new QLabel; m_meta->setObjectName("taskMeta"); m_meta->setTextFormat(Qt::RichText); m_meta->setTextInteractionFlags(Qt::NoTextInteraction);
     m_meta->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_actions = new QWidget; m_actions->setObjectName("taskActions");
     auto *actionsLayout = new QHBoxLayout(m_actions); actionsLayout->setContentsMargins(0, 0, 0, 0); actionsLayout->setSpacing(2);
@@ -94,6 +95,7 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     m_text->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     main->addWidget(m_text);
     m_summary = new QLabel; m_summary->setObjectName("taskSummary"); m_summary->setTextFormat(Qt::RichText); m_summary->setWordWrap(true);
+    m_summary->setTextInteractionFlags(Qt::NoTextInteraction);
     main->addSpacing(2); main->addWidget(m_summary); m_summary->hide();
 }
 
@@ -217,7 +219,8 @@ void TaskRow::mouseMoveEvent(QMouseEvent *event) {
     QWidget::mouseMoveEvent(event);
     if (!m_pressed || !(event->buttons() & Qt::LeftButton) || !TaskDrag::draggable(m_task)) return;
     if ((event->position().toPoint() - m_pressAt).manhattanLength() < QApplication::startDragDistance()) return;
-    m_pressed = false; emit dragStarted(m_pressAt);
+    // The row takes the move, so Qt hands it to no parent once the drag is over.
+    event->accept(); m_pressed = false; emit dragStarted(m_pressAt);
 }
 
 void TaskRow::setDragging(bool dragging) {

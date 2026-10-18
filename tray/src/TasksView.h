@@ -12,6 +12,7 @@
 class HgsClient;
 class MessageComposer;
 class QAbstractButton;
+class QDrag;
 class QLabel;
 class QPushButton;
 class QScrollArea;
@@ -81,9 +82,14 @@ protected:
     void hideEvent(QHideEvent *event) override;
     // Drops on the stage tiles and on the To do list.
     bool eventFilter(QObject *watched, QEvent *event) override;
+    // The platform's drag loop; listings and other events arrive while it runs.
+    virtual Qt::DropAction execDrag(QDrag *drag);
 private:
     // Drags a To do or Backlog row; the tiles and the session list take it.
     void startDrag(TaskRow *row, const QPoint &hotSpot);
+    // A row leaves the list. The row a drag runs from stays, hidden, until the drag
+    // ends: Qt is still delivering the move that started it.
+    void retire(TaskRow *row);
     // The To do and Backlog tiles take a task of this project from the other list.
     bool takesOnTile(const TaskDrag &drag, const QString &stage) const;
     // The To do list takes its own tasks to reorder them.
@@ -133,6 +139,7 @@ private:
     QWidget *m_listPage, *m_listHost, *m_dropLine;
     QVBoxLayout *m_list;
     QHash<QString, TaskRow *> m_rows;
+    QPointer<TaskRow> m_dragSource;
     QPushButton *m_older;
     MessageComposer *m_composer;
     QHash<quint64, std::pair<std::function<void(const QJsonObject &)>, std::function<void(const QString &)>>> m_pending;
