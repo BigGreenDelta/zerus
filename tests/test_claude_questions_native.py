@@ -122,8 +122,12 @@ class NativeClaudeQuestions(unittest.TestCase):
   hgs_env=['HGS_SESSION='+self.name,'HGS_RUN_ID='+self.run_id,'HGS_STATE_DIR='+str(self.state),'HGS_CONFIG_DIR='+str(self.root/'config')]+(['HGS_ANSWER_CHANNEL_SECONDS='+str(self.channel_seconds)] if hasattr(self,'channel_seconds') else [])
   self.tmux('new-session','-d','-s',self.name,'-x',columns,'-y',rows,'-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),*(hgs_env if channel else []),CLAUDE,*(['--dangerously-skip-permissions'] if permission_mode=='bypassPermissions' else []),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
   self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
-  self.wait_for(lambda:('Fixture complete.' if self.message_fixture else getattr(self,'panel_question','Do you want to proceed?') if self.approval_fixture else 'Enter to select' if tall else 'Which release should we prepare?') in self.screen())
-  transcript=next((self.root/'.claude/projects').glob('*/*.jsonl'));self.conversation_id=transcript.stem
+  # A drawn panel does not prove Claude has created its transcript yet. Both
+  # must be ready within the existing startup wait before the fixture binds it.
+  def ready():
+   shown=('Fixture complete.' if self.message_fixture else getattr(self,'panel_question','Do you want to proceed?') if self.approval_fixture else 'Enter to select' if tall else 'Which release should we prepare?') in self.screen()
+   return next((self.root/'.claude/projects').glob('*/*.jsonl'),None) if shown else None
+  transcript=self.wait_for(ready);self.conversation_id=transcript.stem
   pid=int(self.tmux('display-message','-p','-t',self.pane,'#{pane_pid}'))
   start=subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
   self.tmux('set-option','-t','='+self.name+':','@hgs_run',self.run_id)

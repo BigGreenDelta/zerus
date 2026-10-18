@@ -76,7 +76,7 @@ specific reason.
 | Panel (card `source`) | Agent | Channel C | Layer A |
 |---|---|---|---|
 | `hook` (AskUserQuestion) | Claude | PermissionRequest hook, verified by spike | fallback |
-| `claude_tool_approval` | Claude | PermissionRequest hook (allow or deny), to verify | in `zerus-6uhz` |
+| `claude_tool_approval` | Claude | PermissionRequest hook (allow or deny), main agent (P3) | in `zerus-6uhz` |
 | Claude's own questions (`refusal_fallback_preference`) | Claude | PermissionRequest without PreToolUse, to verify | fallback |
 | `claude_folder_trust`, `claude_permission_mode`, `claude_resume`, `claude_usage_limit`, terminal safety, auto-mode chooser | Claude | none known | only path |
 | `codex_async` | Codex | to investigate (hooks, app-server) | fallback |
@@ -262,6 +262,80 @@ owns this adapter (`zerus-pdmm`). Its spike verified the following on Claude
 
 Automatic approvals keep their durable private audit reservation before
 delivery. The channel is only another transport.
+
+### Implementation (P3, `zerus-pdmm`)
+
+- One channel worker serves both kinds. The registered group has no matcher,
+  and an AskUserQuestion-only group from an earlier hgs is widened in place.
+  Protocol files and `route`, `deliver`, `own`, `offer` and `claim` are
+  unchanged.
+- hgs records each active main-agent `PreToolUse` as the tool name and a
+  digest of its input, keyed by `tool_use_id`. Turn boundaries clear the
+  records, and more than 64 make every binding ambiguous. A request binds only
+  to the one record that began before it.
+- Each poll and the claim check the exact bound identity: process, run,
+  conversation, tool use, input and request time. A later identical request is
+  not the bound one and does not close it.
+- A Terminal answer sends the hook no signal. Inspection, `hgs answer` and the
+  worker's claim therefore also require Terminal to show a chooser. A complete
+  panel must match the request and no recorded child request; a clipped panel
+  counts only while no child request is recorded.
+- The worker takes an approval offer only while that proof holds, through the
+  same identity and capture as `hgs answer`. Until then the offer stays
+  unclaimed, and `hgs answer` retracts it with nothing sent.
+  - A retraction retires that channel, so the request continues on the screen.
+  - A refused agent identity never lets a decision go, before or after the
+    claim. This covers a pause, a provider error, another process and a
+    terminal of another run. After a claim the answer then stays uncertain and
+    locked.
+  - Only a capture that fails after the identity holds proves nothing and never
+    blocks the claim. Claude ignores a decision that arrives after a Terminal
+    answer.
+- A hook binds only to a request recorded in the last ten seconds. It binds
+  only to the one active tool call with the event's tool and input that began
+  before the hook started, as the first record it reads shows it. PreToolUse is
+  journaled before Claude asks. Without exactly one such call, the hook exits
+  and the screen remains. A later identical call is never adopted.
+- Before and after the claim, the screen is matched against the record that
+  was just checked.
+- The card always discloses the whole bound request (`request_body`): every
+  field of a Bash input, or the whole input of another tool. It never shows
+  another request's panel as the operation the hook grants.
+- The card's options:
+  - Claude's options are listed verbatim, and `panel_verified` is true, only
+    when a complete panel proves the exact operation (`proves`). That means the
+    main agent's "Bash command" title, the full command, the description if any,
+    and no other input field. The bound call must also be the only active main
+    Bash call (`channel::alone`), because the command match ignores how
+    whitespace wraps.
+  - The legacy file-name or host match is not proof. A Read of another file
+    with the same name can be queued in front, shown as "1 of 2" while the hook
+    waits for the second.
+  - Any other complete panel is left to the screen path, which acts on what it
+    shows.
+  - A clipped panel gives one-time Yes and No. An unreadable terminal gives no
+    hook card.
+  - Its free-text field, "Tell Claude what to do instead", maps to deny with
+    the message.
+  - Broader options, and the keys after an unclaimed offer, use only a proven
+    panel.
+- A visible safety warning is added, as its rows below the last fence, only
+  when it belongs to this request: the panel proves it, or, while the bound
+  call is the only active Bash call, the visible command rows of a clipped
+  panel end this command. Any diagnostic gutter below a visible chooser's last
+  fence that cannot be attributed and shown this way means no hook card,
+  whatever its text.
+- When the screen path answers a panel of another queued request, its
+  pre-existing bookkeeping settles the recorded request. That request then
+  waits in Terminal. This path is unchanged.
+- Automatic approvals accept `claude_hook` only with `panel_verified`, so only
+  for a proven Bash panel. This is the same one-time grant as on the screen
+  path.
+- Children are not answered through the channel. In Claude 2.1.296 they run in
+  the background, their requests appear only in the agents view, and switching
+  that view terminates the waiting hook. Claude then repeats `PreToolUse` and
+  `PermissionRequest` for the same tool use. No screen proof can show that a
+  child's request still waits.
 
 ## A, unviewed-terminal growth
 

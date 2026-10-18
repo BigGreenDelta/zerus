@@ -1,6 +1,7 @@
 //! Native answer channel: a waiting Claude `PermissionRequest` hook process and
 //! `hgs answer` meet through atomic files in one private directory per pending
-//! question, without the terminal. Exactly one of claim or retract wins an offer.
+//! question or tool approval, without the terminal. Exactly one of claim or
+//! retract wins an offer.
 
 use super::*;
 use serde::{Deserialize, Serialize};
@@ -131,6 +132,42 @@ fn claim(dir: &Path) -> Result<Option<Value>> {
     read(dir, CLAIMED)
         .map(Some)
         .ok_or_else(|| "claimed answer is unreadable".into())
+}
+
+/// Why a claimed answer must not go out: its question changed or was answered
+/// in Terminal, or an approval is no longer shown waiting by an agent whose
+/// identity holds (`waits`). Nothing is printed then; the answer stays the
+/// channel's, so `hgs answer` reports it uncertain and never sends it again.
+fn withheld(
+    kind: Kind,
+    current: Option<&Value>,
+    bound: &Value,
+    card: &Value,
+    event: &Value,
+    answered: bool,
+    waits: impl FnOnce(&Value) -> bool,
+) -> Option<&'static str> {
+    let changed = should_close(kind, current, bound, card).is_some()
+        || answered
+        || kind == Kind::Question && current.and_then(|current| bind(current, event)).as_ref() != Some(card);
+    if changed {
+        Some("question changed before delivery")
+    } else if kind == Kind::Approval && !current.is_some_and(waits) {
+        Some("approval not shown before delivery")
+    } else {
+        None
+    }
+}
+
+/// Take an offered answer to `kind` only when `ready`. An approval waits for
+/// the screen to show its request; until then the offer stays unclaimed, and
+/// `hgs answer` retracts it with nothing sent.
+fn take_offer(kind: Kind, dir: &Path, ready: impl FnOnce() -> bool) -> Result<Option<Value>> {
+    // An offer that appears after this look waits for the next poll.
+    if kind == Kind::Approval && (!dir.join(ANSWER).exists() || !ready()) {
+        return Ok(None);
+    }
+    claim(dir)
 }
 
 /// Withdraw the offer; false when the waiting process already claimed it.
@@ -279,6 +316,32 @@ const LIFETIME: f64 = 86_000.;
 const BIND: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(150);
 
+/// What a waiting process answers: an AskUserQuestion card, or a main-agent
+/// tool approval (`claude_approval::channel`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    Question,
+    Approval,
+}
+
+fn kind(event: &Value) -> Option<Kind> {
+    if asks(event) {
+        Some(Kind::Question)
+    } else if claude_approval::channel::requested(event) {
+        Some(Kind::Approval)
+    } else {
+        None
+    }
+}
+
+/// Claude's decision for the claimed `offer`.
+fn decision_kind(kind: Kind, event: &Value, card: &Value, offer: &Value) -> Result<Value> {
+    match kind {
+        Kind::Question => decision(event, card, offer),
+        Kind::Approval => claude_approval::channel::decision(offer),
+    }
+}
+
 /// The main agent's `PermissionRequest` for AskUserQuestion.
 fn asks(event: &Value) -> bool {
     string(event, "hook_event_name") == "PermissionRequest"
@@ -336,7 +399,13 @@ fn decision(event: &Value, card: &Value, offer: &Value) -> Result<Value> {
 }
 
 /// Why a waiting process must stop, given the current record of its session.
-fn should_close(current: Option<&Value>, bound: &Value, card: &Value) -> Option<&'static str> {
+/// An approval stays bound to its exact request: a later identical one is not it.
+fn should_close(
+    kind: Kind,
+    current: Option<&Value>,
+    bound: &Value,
+    card: &Value,
+) -> Option<&'static str> {
     let Some(current) = current else {
         return Some("session ended");
     };
@@ -346,9 +415,17 @@ fn should_close(current: Option<&Value>, bound: &Value, card: &Value) -> Option<
     if string(current, "conversation_id") != string(bound, "conversation_id") {
         return Some("conversation changed");
     }
-    let pending = &current["pending_questions"][string(card, "tool_call_id")];
-    if pending["question_hash"] != card["question_hash"] {
-        return Some("question resolved");
+    match kind {
+        Kind::Question => {
+            let pending = &current["pending_questions"][string(card, "tool_call_id")];
+            if pending["question_hash"] != card["question_hash"] {
+                return Some("question resolved");
+            }
+        }
+        Kind::Approval if !claude_approval::channel::pending(current, card) => {
+            return Some("approval resolved");
+        }
+        Kind::Approval => {}
     }
     if !process_alive(current) {
         return Some("agent exited");
@@ -435,8 +512,9 @@ extern "C" fn terminate(_: libc::c_int) {
 }
 
 /// `hgs __state answer-channel`: Claude's `PermissionRequest` hook for
-/// AskUserQuestion. It waits beside the native panel for an answer offered
-/// through `hgs answer` and prints Claude's allow with those answers. Anything
+/// AskUserQuestion and main-agent tool approvals. It waits beside the native
+/// panel for an answer offered through `hgs answer` and prints Claude's
+/// decision: allow with those answers, or the one-time approval. Anything
 /// else (another session, no exact card, an answer in Terminal, a timeout)
 /// ends it without output, and the panel stays. So does any error: nothing is
 /// printed before emitted.json. An offer this worker had not claimed lets
@@ -452,18 +530,32 @@ fn wait() -> Result<()> {
     else {
         return Ok(());
     };
+    let started = now();
     let event = stdin_json()?;
-    if !asks(&event) {
+    let Some(kind) = kind(&event) else {
         return Ok(());
-    }
+    };
+    // One proof that an approval still waits, before and after its claim.
+    let waits = claude_approval::channel::waits_now;
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t);
     }
     let until = Instant::now() + BIND;
+    // An approval stays with the one active tool call that the first record
+    // shows for it; without one it never binds, and a later call with the same
+    // input is another request.
+    let mut asked: Option<Option<String>> = None;
     let (record, card) = loop {
         if let Some(record) = read_run(&name, &token)? {
-            if let Some(card) = bind(&record, &event) {
+            let card = match kind {
+                Kind::Question => bind(&record, &event),
+                Kind::Approval => match asked.get_or_insert_with(|| claude_approval::channel::asked_use(&record, &event, started)) {
+                    Some(tool_use) => claude_approval::channel::bind_to(&record, &event, tool_use),
+                    None => return Ok(()),
+                },
+            };
+            if let Some(card) = card {
                 break (record, card);
             }
         }
@@ -498,7 +590,7 @@ fn wait() -> Result<()> {
             return Ok(());
         }
         let current = read_run(&name, &token)?;
-        if let Some(reason) = should_close(current.as_ref(), &record, &card) {
+        if let Some(reason) = should_close(kind, current.as_ref(), &record, &card) {
             close(&dir, reason);
             return Ok(());
         }
@@ -509,15 +601,17 @@ fn wait() -> Result<()> {
                 return Ok(());
             }
         }
-        if let Some(offer) = claim(&dir)? {
+        let ready = || current.as_ref().is_some_and(waits);
+        if let Some(offer) = take_offer(kind, &dir, ready)? {
             // The question must still be the bound one when its answer goes out.
+            // Claude tells the hook nothing of a Terminal approval: only the
+            // screen still showing the request proves it waits.
             let current = read_run(&name, &token)?;
-            let unchanged = should_close(current.as_ref(), &record, &card).is_none()
-                && current.as_ref().and_then(|record| bind(record, &event)).as_ref() == Some(&card)
-                && !transcript.answered(current.as_ref().unwrap_or(&record), &tool);
-            let output = decision(&event, &card, &offer);
-            if !unchanged || output.is_err() || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
-                close(&dir, if unchanged { "invalid answer" } else { "question changed before delivery" });
+            let answered = transcript.answered(current.as_ref().unwrap_or(&record), &tool);
+            let withheld = withheld(kind, current.as_ref(), &record, &card, &event, answered, waits);
+            let output = decision_kind(kind, &event, &card, &offer);
+            if withheld.is_some() || output.is_err() || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
+                close(&dir, withheld.unwrap_or("invalid answer"));
                 return Ok(());
             }
             write(&dir, EMITTED, &json!({"request_id":offer["request_id"],"at":now()}))?;
@@ -742,23 +836,23 @@ mod tests {
     fn channel_exits_when_card_or_run_changes() {
         let bound = live_record();
         let card = hook_card("toolu_1");
-        assert_eq!(should_close(Some(&bound), &bound, &card), None);
-        assert_eq!(should_close(None, &bound, &card), Some("session ended"));
+        assert_eq!(should_close(Kind::Question, Some(&bound), &bound, &card), None);
+        assert_eq!(should_close(Kind::Question, None, &bound, &card), Some("session ended"));
         let mut run = bound.clone();
         run["run_id"] = json!("run-2");
-        assert_eq!(should_close(Some(&run), &bound, &card), Some("run changed"));
+        assert_eq!(should_close(Kind::Question, Some(&run), &bound, &card), Some("run changed"));
         let mut conversation = bound.clone();
         conversation["conversation_id"] = json!("other");
-        assert_eq!(should_close(Some(&conversation), &bound, &card), Some("conversation changed"));
+        assert_eq!(should_close(Kind::Question, Some(&conversation), &bound, &card), Some("conversation changed"));
         let mut resolved = bound.clone();
         resolved["pending_questions"] = json!({});
-        assert_eq!(should_close(Some(&resolved), &bound, &card), Some("question resolved"));
+        assert_eq!(should_close(Kind::Question, Some(&resolved), &bound, &card), Some("question resolved"));
         let mut replaced = bound.clone();
         replaced["pending_questions"]["toolu_1"]["question_hash"] = json!("hash-2");
-        assert_eq!(should_close(Some(&replaced), &bound, &card), Some("question resolved"));
+        assert_eq!(should_close(Kind::Question, Some(&replaced), &bound, &card), Some("question resolved"));
         let mut exited = bound.clone();
         exited["process_start"] = json!("not this process");
-        assert_eq!(should_close(Some(&exited), &bound, &card), Some("agent exited"));
+        assert_eq!(should_close(Kind::Question, Some(&exited), &bound, &card), Some("agent exited"));
     }
 
     #[test]
@@ -941,6 +1035,90 @@ mod tests {
         gone.process_start = "not this process".into();
         write(dir, WAITING, &json!(gone)).unwrap();
         assert_eq!(route_in(dir, &record(), &card()), Route::Screen);
+    }
+
+    /// A main-agent approval bound to its one active tool call, in this process.
+    fn approval() -> (Value, Value, Value) {
+        let input = json!({"command":"printf hi > out.txt"});
+        let pid = std::process::id();
+        let record = json!({"agent":"claude","run_id":"run-1","conversation_id":"conversation-1","pid":pid,
+            "process_start":process_start(pid),"phase":"approval","pending_approval_at":now(),
+            "pending_approval":{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":input},
+            "claude_tool_uses":{"toolu_1":{"tool_name":"Bash","input":format!("{:x}", Sha256::digest(input.to_string().as_bytes())),"at":now()-1.}}});
+        let event = json!({"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":input,"session_id":"conversation-1"});
+        let card = claude_approval::channel::bind(&record, &event).unwrap();
+        (record, event, card)
+    }
+
+    #[test]
+    fn a_claimed_approval_goes_out_only_while_its_agent_still_waits() {
+        let (record, event, card) = approval();
+        assert_eq!(withheld(Kind::Approval, Some(&record), &record, &card, &event, false, |_| true), None);
+        // What a refused identity gives after the claim: nothing printed.
+        let refused = |checked: &Value| claude_approval::channel::waits(checked, Err("Session identity changed; open Terminal".into()), |_| unreachable!());
+        assert_eq!(withheld(Kind::Approval, Some(&record), &record, &card, &event, false, refused),
+            Some("approval not shown before delivery"));
+        assert_eq!(withheld(Kind::Approval, Some(&record), &record, &card, &event, true, |_| true),
+            Some("question changed before delivery"), "answered in Terminal");
+        assert_eq!(withheld(Kind::Approval, None, &record, &card, &event, false, |_| true),
+            Some("question changed before delivery"));
+        let mut finished = record.clone();
+        finished["claude_tool_uses"] = json!({});
+        assert_eq!(withheld(Kind::Approval, Some(&finished), &record, &card, &event, false, |_| true),
+            Some("question changed before delivery"));
+        // A question never asks the screen, and still needs its exact card.
+        let question = live_record();
+        let card = hook_card("toolu_1");
+        assert_eq!(withheld(Kind::Question, Some(&question), &question, &card, &self::event(), false, |_| unreachable!()), None);
+        let mut changed = question.clone();
+        changed["pending_questions"]["toolu_2"] = hook_card("toolu_2");
+        assert_eq!(withheld(Kind::Question, Some(&changed), &question, &card, &self::event(), false, |_| unreachable!()),
+            Some("question changed before delivery"), "identical questions are ambiguous");
+        assert_eq!(withheld(Kind::Question, Some(&question), &question, &card, &self::event(), true, |_| unreachable!()),
+            Some("question changed before delivery"));
+    }
+
+    #[test]
+    fn a_refused_identity_leaves_an_offer_unclaimed() {
+        let (temp, waiting) = channel(|dir| {
+            for _ in 0..40 {
+                let ready = || claude_approval::channel::waits(&json!({}), Err("Session identity changed; open Terminal".into()), |_| unreachable!());
+                assert!(take_offer(Kind::Approval, dir, ready).unwrap().is_none());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let screen = std::cell::Cell::new(0);
+        let error = deliver(temp.path(), &json!({"request_id":"one","decision":"allow"}), Duration::from_millis(200),
+            Duration::from_millis(200), || { screen.set(screen.get() + 1); Err("Nothing was sent".into()) }).unwrap_err();
+        assert_eq!((error.as_str(), screen.get()), ("Nothing was sent", 1));
+        assert!(!temp.path().join(CLAIMED).exists() && !temp.path().join(EMITTED).exists());
+        waiting.join().unwrap();
+    }
+
+    #[test]
+    fn an_approval_offer_stays_unclaimed_until_its_screen_shows_it() {
+        let (temp, waiting) = channel(|dir| {
+            for _ in 0..40 {
+                assert!(take_offer(Kind::Approval, dir, || false).unwrap().is_none());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let screen = std::cell::Cell::new(0);
+        let error = deliver(temp.path(), &json!({"request_id":"one","decision":"allow"}), Duration::from_millis(200),
+            Duration::from_millis(200), || { screen.set(screen.get() + 1); Err("Nothing was sent".into()) }).unwrap_err();
+        assert_eq!(error, "Nothing was sent", "a retracted offer is no uncertain delivery");
+        assert_eq!(screen.get(), 1);
+        assert!(!temp.path().join(CLAIMED).exists());
+        assert!(temp.path().join(RETRACTED).exists());
+        waiting.join().unwrap();
+        // Once shown, the approval is taken; a question never waits for it.
+        for (kind, ready) in [(Kind::Approval, true), (Kind::Question, false)] {
+            let temp = tempfile::tempdir().unwrap();
+            offer(temp.path(), &json!({"request_id":"two"})).unwrap();
+            assert_eq!(take_offer(kind, temp.path(), || ready).unwrap().unwrap()["request_id"], "two", "{kind:?}");
+        }
+        let empty = tempfile::tempdir().unwrap();
+        assert!(take_offer(Kind::Approval, empty.path(), || panic!("no offer, no capture")).unwrap().is_none());
     }
 
     #[test]

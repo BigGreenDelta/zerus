@@ -1057,8 +1057,9 @@ matching native acknowledgement determine delivery; uncertain attempts are
 never replayed automatically.
 
 With Claude Code 2.1.296 or later on Linux and macOS, hgs also registers its
-own `PermissionRequest` hook for AskUserQuestion, `hgs __state answer-channel`,
-beside its usual hooks.
+own `PermissionRequest` hook for AskUserQuestion and tool approvals,
+`hgs __state answer-channel`, beside its usual hooks. The entry an earlier hgs
+registered for AskUserQuestion alone is widened in place.
 - It waits next to Claude's question panel and is bound to the one exact
   pending question. **Submit** hands the answer to Claude through this hook
   instead of the terminal, so the question can be answered at any terminal
@@ -1073,7 +1074,7 @@ beside its usual hooks.
 - An answer, decline or cancellation in Terminal ends the hook, and so do a run
   change and its one-day deadline.
 - Sessions started before the hook was registered, Windows and other agents keep
-  Terminal delivery.
+  Terminal delivery. Tool approvals through this hook are described below.
 
 A disabled **Submit** always shows why, including while a saved answer is still
 loading.
@@ -1131,12 +1132,52 @@ shows either, and for an approved tool that is not a Bash command, the session
 stays at **Needs approval** until Claude's next event. Only a session waiting
 for such a request reads its terminal for this.
 
+While hgs's `PermissionRequest` hook waits beside a main-agent approval, the
+card answers through it, so a clipped panel no longer needs a larger Terminal.
+- The hook is bound to one exact request: the saved conversation, and the one
+  active tool call whose tool and input equal the request when the hook
+  starts. Without exactly one such call, the request is answered on screen as
+  above; a later identical call is another request.
+- A paused session, a provider error, or a terminal that no longer belongs to
+  the agent never lets a decision go through the hook.
+- Claude sends the hook no signal for an answer in Terminal, so the card and
+  the hook act only while Terminal still shows a chooser. A complete panel must
+  be this request.
+- The card always shows the whole request the hook answers: the Bash command,
+  its description and any other field, or the whole input of another tool.
+- Claude's own options appear only when a complete panel shows exactly that
+  operation. That means the main agent's Bash command, with its description if
+  any and no other field, and no other active Bash call. A file name or host
+  proves too little. For example, a Read of another file with the same name may
+  be queued in front of this one.
+- Any other complete panel is answered on the screen as above, acting on what
+  it shows. A clipped panel gives **Yes** and **No**. An unreadable terminal
+  gives no hook card.
+- A visible safety warning of any kind must belong to this request's command,
+  through a proven panel or the visible end of the command in a clipped one.
+  Otherwise there is no hook card.
+- **Yes** allows this one tool call without changing any permission setting.
+  **No** ends Claude's turn as in Terminal. **Tell Claude what to do instead**
+  denies the call with your message, and Claude continues without it.
+- Options that reach beyond this request go only through the verified panel,
+  with the second **Confirm**. A **Yes** or **No** that the hook does not take
+  within three seconds also goes through a verified panel; feedback it does not
+  take is not sent.
+- A decision the hook has taken is never sent again. Until Claude confirms it,
+  the card stays locked and is answered in Terminal.
+- `hgs answer` receipts report `transport` `claude_hook` or `claude_tui`.
+- Automatic approvals use the hook only for a card whose complete Bash panel
+  shows exactly that operation, with the same one-time choice.
+- Subagent and workflow requests keep the screen path. Claude 2.1.296 runs
+  subagents in the background and shows their requests outside the main screen.
+
 Claude's Bash safety confirmations, including warnings about possibly empty
 paths in `rm` commands, also appear in Activity with the native warning text.
 A visible safety confirmation makes the session **Needs approval** even if
 its permission hook was not recorded, and ordinary message sending waits for
 the decision. Without a matching permission request, or when the full command
-stays clipped, the card offers **Open Terminal**. With a complete matching request,
+stays clipped and no permission hook waits for it, the card offers **Open
+Terminal**. With a complete matching request,
 Activity can submit the native **Yes** or **No** choice. Claude's unattended
 denial countdown stays visible without replacing the request as it ticks.
 Desktop keeps the card's scroll, chosen option and review delay through these
