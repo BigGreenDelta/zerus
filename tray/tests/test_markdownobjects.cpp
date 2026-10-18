@@ -126,6 +126,7 @@ private slots:
     void selectedCodeKeepsTheSelectionLook();
     void denseShortCodeCostsAtHiDpiLikeOtherText();
     void decoratedCodeKeepsItsLinesAtHiDpi();
+    void selectedDenseCodeCostsAtHiDpiLikeOtherText();
 };
 
 void TestMarkdownObjects::resourcesAreDrawnAtScaleAndPixelRatio()
@@ -564,6 +565,47 @@ void TestMarkdownObjects::decoratedCodeKeepsItsLinesAtHiDpi()
             QVERIFY2(colors.size() == 2, qPrintable(QString("%1 colours in case %2 at %3x").arg(colors.size()).arg(variant).arg(ratio)));
         }
     }
+}
+
+void TestMarkdownObjects::selectedDenseCodeCostsAtHiDpiLikeOtherText()
+{
+    // The dense paragraph with one selection across most of its chips. Qt draws
+    // a selected range through further clips, each rasterized again whenever
+    // QPainter turns antialiasing on or off around a text item at 2x.
+    const auto theme = MarkdownTheme::github(true, QColor("#1d252e"), 1.25);
+    QString prose = QString::fromUtf8("Метки: убраны устаревшие (");
+    for (int i = 0; i < 40; ++i) prose += QString("`tag-%1`, ").arg(i);
+    prose += QString::fromUtf8("остальные остались на месте.");
+    QTextDocument doc; doc.setHtml(ContentScale::html(MarkdownHtml::render(prose, theme, {}), 1.25));
+    MarkdownObjects::convertChips(&doc, theme); doc.setTextWidth(850);
+    MarkdownObjects::prepareChips(&doc);
+    QTextCursor selected(&doc);
+    selected.setPosition(doc.find("tag-2").selectionStart() + 1);
+    selected.setPosition(doc.find("tag-37").selectionEnd() - 1, QTextCursor::KeepAnchor);
+    QTextCharFormat highlight; highlight.setBackground(QColor("#315873")); highlight.setForeground(Qt::white);
+    const QList<QAbstractTextDocumentLayout::Selection> selections{{selected, highlight}};
+    const QSizeF size = doc.documentLayout()->documentSize();
+    QPalette palette; palette.setColor(QPalette::Base, theme.canvas);
+    QAbstractTextDocumentLayout::PaintContext context; context.palette = palette; context.clip = QRectF(QPointF(), size);
+    context.selections = selections;
+    const auto cost = [&](qreal ratio) {
+        QImage image(qCeil(size.width() * ratio), qCeil(size.height() * ratio), QImage::Format_ARGB32_Premultiplied);
+        image.setDevicePixelRatio(ratio);
+        qint64 best = std::numeric_limits<qint64>::max();
+        for (int run = 0; run < 3; ++run) {
+            const auto start = threadCpuMs();
+            for (int frame = 0; frame < 20; ++frame) {
+                image.fill(theme.canvas); QPainter painter(&image);
+                doc.documentLayout()->draw(&painter, context);
+                MarkdownObjects::paintChips(&painter, &doc, context.clip, palette, selections);
+            }
+            best = std::min(best, threadCpuMs() - start);
+        }
+        return best;
+    };
+    const qint64 standard = cost(1), hiDpi = cost(2);
+    QVERIFY2(hiDpi < 8 * qMax<qint64>(standard, 5),
+             qPrintable(QString("%1 ms at 2x, %2 ms at 1x for 20 selected frames").arg(hiDpi).arg(standard)));
 }
 
 QTEST_MAIN(TestMarkdownObjects)

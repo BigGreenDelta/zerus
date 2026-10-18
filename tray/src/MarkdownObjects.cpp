@@ -103,6 +103,128 @@ private:
     mutable BackgroundEngine m_engine;
 };
 
+// Draws a QTextLayout onto another painter in two parts: everything but its
+// glyphs, or its glyphs alone. The inner painter has no device pixel ratio and
+// the target's world transform, so Qt never turns antialiasing on and off
+// around its text items, which makes the raster engine rasterize the whole
+// clip again for every item; the target applies its ratio once. Render hints
+// stay the target's. The target keeps the clip it had when the inner painter
+// began: when the inner painter drops or replaces its clips, the target
+// returns to that clip instead of losing it.
+class ForwardEngine final : public QPaintEngine {
+public:
+    enum Part { Backgrounds, Glyphs };
+    ForwardEngine(QPainter &target, Part part) : QPaintEngine(AllFeatures), m_target(target), m_part(part) {}
+    bool begin(QPaintDevice *) override { m_target.save(); return true; }
+    bool end() override { m_target.restore(); return true; }
+    Type type() const override { return User; }
+    void updateState(const QPaintEngineState &state) override
+    {
+        const auto dirty = state.state();
+        if (dirty & DirtyPen) m_pen = state.pen();
+        if (dirty & DirtyBrush) m_brush = state.brush();
+        if (dirty & DirtyBrushOrigin) m_brushOrigin = state.brushOrigin();
+        if (dirty & DirtyFont) m_font = state.font();
+        if (dirty & DirtyBackground) m_background = state.backgroundBrush();
+        if (dirty & DirtyBackgroundMode) m_backgroundMode = state.backgroundMode();
+        if (dirty & DirtyTransform) m_transform = state.transform();
+        if (dirty & DirtyCompositionMode) m_composition = state.compositionMode();
+        if (dirty & DirtyOpacity) m_opacity = state.opacity();
+        apply(dirty);
+        if (dirty & (DirtyClipPath | DirtyClipRegion)) {
+            const auto operation = state.clipOperation();
+            if (operation == Qt::NoClip || operation == Qt::ReplaceClip) reset();
+            if (operation != Qt::NoClip) {
+                if (dirty & DirtyClipPath) m_target.setClipPath(state.clipPath(), Qt::IntersectClip);
+                else m_target.setClipRegion(state.clipRegion(), Qt::IntersectClip);
+            }
+        } else if ((dirty & DirtyClipEnabled) && !state.isClipEnabled()) {
+            reset();
+        }
+    }
+    void drawTextItem(const QPointF &p, const QTextItem &item) override { if (m_part == Glyphs) m_target.drawTextItem(p, item); }
+    void drawPixmap(const QRectF &r, const QPixmap &p, const QRectF &s) override { if (m_part == Backgrounds) m_target.drawPixmap(r, p, s); }
+    void drawImage(const QRectF &r, const QImage &i, const QRectF &s, Qt::ImageConversionFlags f) override
+    {
+        if (m_part == Backgrounds) m_target.drawImage(r, i, s, f);
+    }
+    void drawPath(const QPainterPath &path) override { if (m_part == Backgrounds) m_target.drawPath(path); }
+    void drawRects(const QRectF *r, int n) override { if (m_part == Backgrounds) m_target.drawRects(r, n); }
+    void drawRects(const QRect *r, int n) override { if (m_part == Backgrounds) m_target.drawRects(r, n); }
+    void drawLines(const QLineF *l, int n) override { if (m_part == Backgrounds) m_target.drawLines(l, n); }
+    void drawLines(const QLine *l, int n) override { if (m_part == Backgrounds) m_target.drawLines(l, n); }
+    void drawEllipse(const QRectF &r) override { if (m_part == Backgrounds) m_target.drawEllipse(r); }
+    void drawEllipse(const QRect &r) override { if (m_part == Backgrounds) m_target.drawEllipse(r); }
+    void drawPoints(const QPointF *p, int n) override { if (m_part == Backgrounds) m_target.drawPoints(p, n); }
+    void drawPoints(const QPoint *p, int n) override { if (m_part == Backgrounds) m_target.drawPoints(p, n); }
+    void drawPolygon(const QPointF *p, int n, PolygonDrawMode mode) override
+    {
+        if (m_part != Backgrounds) return;
+        if (mode == PolylineMode) m_target.drawPolyline(p, n);
+        else if (mode == ConvexMode) m_target.drawConvexPolygon(p, n);
+        else m_target.drawPolygon(p, n, mode == WindingMode ? Qt::WindingFill : Qt::OddEvenFill);
+    }
+private:
+    void apply(DirtyFlags dirty)
+    {
+        if (dirty & DirtyTransform) m_target.setWorldTransform(m_transform);
+        if (dirty & DirtyPen) m_target.setPen(m_pen);
+        if (dirty & DirtyBrush) m_target.setBrush(m_brush);
+        if (dirty & DirtyBrushOrigin) m_target.setBrushOrigin(m_brushOrigin);
+        if (dirty & DirtyFont) m_target.setFont(m_font);
+        if (dirty & DirtyBackground) m_target.setBackground(m_background);
+        if (dirty & DirtyBackgroundMode) m_target.setBackgroundMode(m_backgroundMode);
+        if (dirty & DirtyCompositionMode) m_target.setCompositionMode(m_composition);
+        if (dirty & DirtyOpacity) m_target.setOpacity(m_opacity);
+    }
+    // The target as the inner painter began, with the inner painter's state but none of its clips.
+    void reset()
+    {
+        m_target.restore(); m_target.save();
+        apply(DirtyFlags(DirtyTransform | DirtyPen | DirtyBrush | DirtyBrushOrigin | DirtyFont | DirtyBackground
+                         | DirtyBackgroundMode | DirtyCompositionMode | DirtyOpacity));
+    }
+    QPainter &m_target;
+    const Part m_part;
+    QPen m_pen;
+    QBrush m_brush, m_background;
+    QPointF m_brushOrigin;
+    QFont m_font;
+    Qt::BGMode m_backgroundMode = Qt::TransparentMode;
+    QTransform m_transform;
+    QPainter::CompositionMode m_composition = QPainter::CompositionMode_SourceOver;
+    qreal m_opacity = 1;
+};
+
+// The target's logical geometry and resolution without its device pixel ratio.
+class ForwardDevice final : public QPaintDevice {
+public:
+    ForwardDevice(QPainter &target, ForwardEngine::Part part) : m_target(target.device()), m_engine(target, part) {}
+    QPaintEngine *paintEngine() const override { return &m_engine; }
+protected:
+    int metric(PaintDeviceMetric m) const override
+    {
+        // Images and pixmaps count physical pixels; widgets count logical ones.
+        const bool physical = m_target->devType() == QInternal::Image || m_target->devType() == QInternal::Pixmap;
+        const qreal ratio = physical ? m_target->devicePixelRatioF() : 1;
+        switch (m) {
+        case PdmWidth: return qCeil(m_target->width() / ratio);
+        case PdmHeight: return qCeil(m_target->height() / ratio);
+        case PdmWidthMM: return qRound(metric(PdmWidth) * 25.4 / m_target->logicalDpiX());
+        case PdmHeightMM: return qRound(metric(PdmHeight) * 25.4 / m_target->logicalDpiY());
+        case PdmDepth: return m_target->depth();
+        case PdmDpiX: case PdmPhysicalDpiX: return m_target->logicalDpiX();
+        case PdmDpiY: case PdmPhysicalDpiY: return m_target->logicalDpiY();
+        case PdmDevicePixelRatio: return 1;
+        case PdmDevicePixelRatioScaled: return devicePixelRatioFScale();
+        default: return 0;
+        }
+    }
+private:
+    const QPaintDevice *m_target;
+    mutable ForwardEngine m_engine;
+};
+
 // GitHub pads code .2em .4em, and 0 .2em inside headings.
 QPointF chipPadding(const QTextCharFormat &format)
 {
@@ -127,6 +249,35 @@ bool decorated(const QTextBlock &block, const QFont &documentFont)
     return false;
 }
 
+// Whether a ForwardEngine pass pair reproduces the block's selected text in
+// Qt's order: outlines, character backgrounds and inline objects paint
+// between its glyphs.
+bool separable(const QTextBlock &block)
+{
+    const auto plain = [](const QTextCharFormat &format) {
+        return format.textOutline().style() == Qt::NoPen && format.background().style() == Qt::NoBrush
+            && format.objectType() == QTextFormat::NoObject;
+    };
+    if (!plain(block.charFormat())) return false;
+    for (auto it = block.begin(); !it.atEnd(); ++it)
+        if (!plain(it.fragment().charFormat())) return false;
+    return true;
+}
+
+// A selection format that only colours text: opaque solid foreground and
+// background brushes, and optionally full-width. Qt merges a selection's
+// format into the text, so anything else may decorate or outline it.
+bool colouringSelection(const QTextCharFormat &format)
+{
+    const auto solid = [](const QBrush &brush) { return brush.style() == Qt::SolidPattern && brush.color().alpha() == 255; };
+    const auto properties = format.properties();
+    for (auto it = properties.cbegin(); it != properties.cend(); ++it)
+        if (it.key() != QTextFormat::ForegroundBrush && it.key() != QTextFormat::BackgroundBrush
+            && it.key() != QTextFormat::FullWidthSelection)
+            return false;
+    return solid(format.foreground()) && solid(format.background());
+}
+
 // Content and layout indexes are independent: resizing keeps the code runs but
 // rebuilds their block bounds. Paint only the blocks intersecting the viewport.
 class Chips final : public QObject {
@@ -137,7 +288,7 @@ public:
         QTextBlock block;
         QRectF bounds, padded;
         qsizetype begin = 0, end = 0;
-        bool decorated = false;
+        bool decorated = false, separable = false;
     };
     explicit Chips(QTextDocument *document) : QObject(document), m_document(document)
     {
@@ -175,7 +326,7 @@ public:
             while (i < code.size() && block.contains(code[i].start));
             const QRectF bounds = layout->blockBoundingRect(block);
             m_blocks.append({block, bounds, bounds.adjusted(-padding, -padding, padding, padding), begin, i,
-                             decorated(block, m_document->defaultFont())});
+                             decorated(block, m_document->defaultFont()), separable(block)});
         }
         std::sort(m_blocks.begin(), m_blocks.end(), [](const auto &a, const auto &b) { return a.padded.top() < b.padded.top(); });
         // Blocks in table columns need not be ordered vertically, or have equal
@@ -354,6 +505,7 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
     auto *layout = document->documentLayout();
     struct Piece { QPainterPath shape; QColor fill; QTextBlock block; };
     QList<Piece> pieces; QList<QTextBlock> blocks, decoratedBlocks;
+    QList<const Chips::BlockRuns *> entries;   // of `blocks`
     const auto &runs = chips->runs();
     for (const auto *entry : chips->visible(exposed)) {
         const auto block = entry->block; const auto bounds = entry->bounds;
@@ -387,7 +539,7 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
                 if (!last) shape.addRect(QRectF(rect.right() - square, rect.top(), square, rect.height()));
                 pieces.append({shape, run.format.colorProperty(ChipFill), block}); drawn = true;
             }
-            if (drawn && (blocks.isEmpty() || blocks.last() != block)) blocks.append(block);
+            if (drawn && (blocks.isEmpty() || blocks.last() != block)) { blocks.append(block); entries.append(entry); }
         }
     }
     if (pieces.isEmpty()) return;
@@ -488,19 +640,26 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
     // decorated blocks, whose lines draw their decorations after the glyphs, and
     // blocks whose layouts carry extra formats, which may add decorations.
     const bool scaled = painter->deviceTransform().type() >= QTransform::TxScale;
+    // A block with one selected or found range draws through a ForwardEngine
+    // pass pair instead: the raster target, on the opaque canvas whose tile was
+    // restored above, with nothing in the block that paints between its glyphs.
+    // The inner painters take the target's world transform, which the target
+    // combines with its own redirection and ratio; a view transform would apply
+    // twice. They start from QPainter's defaults, so the target must use the
+    // default brush origin and background mode too.
+    const bool forwardable = scaled && !background.isNull() && !painter->viewTransformEnabled()
+        && painter->paintEngine() && painter->paintEngine()->type() == QPaintEngine::Raster
+        && painter->brushOrigin() == QPointF() && painter->backgroundMode() == Qt::TransparentMode;
     for (const auto &batch : std::as_const(batches)) {
         const auto each = batch.block;
+        const auto *entry = entries.at(blocks.indexOf(each));
         QList<QTextLayout::FormatRange> ranges;
         for (const auto &selection : selections) {
             const int start = selection.cursor.selectionStart() - each.position(), end = selection.cursor.selectionEnd() - each.position();
             if (start < each.length() && end > 0 && end > start) ranges.append({start, end - start, selection.format});
         }
-        painter->save();
-        if (scaled && ranges.isEmpty() && !decoratedBlocks.contains(each) && each.layout()->formats().isEmpty())
-            painter->setRenderHint(QPainter::Antialiasing);
-        if (batch.sliced) painter->setClipRect(batch.clip, Qt::IntersectClip);
-        painter->setClipPath(batch.area, Qt::IntersectClip);
-        painter->setPen(palette.color(QPalette::Text));
+        const bool plain = !decoratedBlocks.contains(each) && each.layout()->formats().isEmpty();
+        const QPointF origin = layout->blockBoundingRect(each).topLeft() - each.layout()->position();
         QRectF textClip = batch.clip;
         if (batch.sliced) {
             qreal lineHeight = 0;
@@ -509,7 +668,31 @@ void MarkdownObjects::paintChips(QPainter *painter, QTextDocument *document, con
             // metrics, and slicing Qt's selection regions changes glyph edges.
             textClip.adjust(0, -lineHeight, 0, lineHeight);
         }
-        each.layout()->draw(painter, layout->blockBoundingRect(each).topLeft() - each.layout()->position(), ranges, textClip);
+        if (forwardable && plain && ranges.size() == 1 && entry->separable && colouringSelection(ranges.first().format)) {
+            // Qt fills the range's highlight, then draws its glyphs, then the
+            // others'. Repeat that drawing twice: the fills without antialiasing
+            // as before, then the glyphs with it set once, as Qt sets it for each.
+            for (const auto part : {ForwardEngine::Backgrounds, ForwardEngine::Glyphs}) {
+                painter->save();
+                if (part == ForwardEngine::Glyphs) painter->setRenderHint(QPainter::Antialiasing);
+                ForwardDevice device(*painter, part);
+                QPainter inner(&device);
+                inner.setWorldTransform(painter->worldTransform());
+                if (batch.sliced) inner.setClipRect(batch.clip, Qt::IntersectClip);
+                inner.setClipPath(batch.area, Qt::IntersectClip);
+                inner.setPen(palette.color(QPalette::Text));
+                each.layout()->draw(&inner, origin, ranges, textClip);
+                inner.end();
+                painter->restore();
+            }
+            continue;
+        }
+        painter->save();
+        if (scaled && ranges.isEmpty() && plain) painter->setRenderHint(QPainter::Antialiasing);
+        if (batch.sliced) painter->setClipRect(batch.clip, Qt::IntersectClip);
+        painter->setClipPath(batch.area, Qt::IntersectClip);
+        painter->setPen(palette.color(QPalette::Text));
+        each.layout()->draw(painter, origin, ranges, textClip);
         painter->restore();
     }
 
