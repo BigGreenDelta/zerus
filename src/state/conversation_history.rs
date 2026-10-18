@@ -1195,16 +1195,45 @@ fn bound_opencode_row(db: &Connection, binding: &Value) -> Result<Option<(String
     Ok(found.and_then(|(id, body)| serde_json::from_str::<Value>(&body).ok().map(|v| (id, v))))
 }
 
+/// Cross-page competition must use the same unique provider/journal eligibility
+/// as candidate collection. A source boundary alone also covers later repeated
+/// prompts; it does not make an already-bound old voice their owner.
+fn competing_voice_candidate(db: &Connection, voice_row: &Value, correlation: &Value, native_id: &str, native: &Value, sources: &Value) -> Result<bool> {
+    let binding=&correlation["native_binding"];
+    if voice_binding_matches(native,binding,correlation,sources) { return Ok(true); }
+    if !voice_after_boundary(native,correlation,sources) { return Ok(false); }
+    let Some(at)=correlation["native_submitted_at"].as_f64() else { return Ok(false); };
+    let mut query=db.prepare("SELECT id,body FROM messages WHERE role='outgoing' AND stream!='voice' AND at BETWEEN ? AND ? ORDER BY at,ordinal,id LIMIT 65")
+        .map_err(|e|e.to_string())?;
+    let rows=query.query_map(params![at-1.,at+30.],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+        .map_err(|e|e.to_string())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    // An over-budget competing window cannot establish uniqueness.
+    if rows.len()>64 || rows.iter().map(|(_,body)|body.len()).sum::<usize>()>512*1024 { return Ok(true); }
+    let rows:Vec<_>=rows.into_iter().filter_map(|(id,body)|serde_json::from_str::<Value>(&body).ok().map(|row|(id,row)))
+        .filter(|(_,row)| ["UserPromptSubmit","UserPromptQueued","UserMessage","TurnStarted"].contains(&string(row,"type"))
+            && string(row,"detail").trim()==string(voice_row,"detail").trim()
+            && voice_after_boundary(row,correlation,sources)).collect();
+    let providers:Vec<_>=rows.iter().filter(|(_,row)|!string(row,"source_offset").is_empty()).collect();
+    let journals:Vec<_>=rows.iter().filter(|(_,row)|row["seq"].as_i64().is_some()).collect();
+    Ok(matches!(providers.as_slice(),[provider] if provider.0==native_id
+        && (string(binding,"provider_source_offset").is_empty() || voice_binding_matches(&provider.1,binding,correlation,sources)))
+        || matches!(journals.as_slice(),[journal] if journal.0==native_id
+            && (binding["journal_seq"].is_null() || journal.1["seq"]==binding["journal_seq"])))
+}
+
 fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result<bool> {
     if request.agent_id.as_deref().is_some_and(|id| !id.is_empty()) { return Ok(true); }
     let sources: Value = get(db,"sources")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!([]));
     let generation = hash(&json!([get(db,"epoch")?,sources,get(db,"voice_native_generation")?]).to_string());
-    if get(db,"voice_reconcile_generation")?.as_deref() != Some(&generation) {
+    // Finish the bounded sweep already in progress before adopting a newer
+    // generation. Constant native traffic must not reset progress to row zero.
+    if get(db,"voice_reconcile_generation")?.is_none() {
         set(db,"voice_reconcile_after","0")?;
         set(db,"voice_reconcile_generation",&generation)?;
     }
     let after = get(db,"voice_reconcile_after")?.and_then(|value|value.parse::<i64>().ok()).unwrap_or(0);
     let (voices,next,complete) = voice::reconciliation_page(parent,after)?;
+    let page_ids:std::collections::BTreeSet<_>=voices.iter().map(|(row,_)|string(row,"message_id").to_owned()).collect();
     let mut possible = Vec::new();
     for (row,correlation) in voices {
         if correlation["state"] != "submitted" { continue; }
@@ -1260,14 +1289,19 @@ fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result
     for (voice_row, native_rows, binding) in &possible {
         if native_rows.iter().any(|(id,_)| possible.iter().filter(|(_,others,_)|others.iter().any(|(other,_)|other==id)).count()!=1) {continue;}
         let mut unique = true;
-        for (_,native) in native_rows {
+        for (native_id,native) in native_rows {
             let Some(candidates) = voice::reconciliation_candidates(parent,native)? else { unique=false;break; };
-            if candidates.iter().filter(|(other,correlation)|
-                string(other,"detail").trim() == string(voice_row,"detail").trim()
-                && (voice_binding_matches(native,&correlation["native_binding"],correlation,&sources)
-                    || voice_after_boundary(native,correlation,&sources))).count() != 1 {
-                unique=false;break;
+            let mut competitors=0;
+            for (other,correlation) in candidates {
+                if string(&other,"detail").trim()!=string(voice_row,"detail").trim() {continue;}
+                let id=string(&other,"message_id");
+                let competes=if page_ids.contains(id) {
+                    possible.iter().any(|(row,rows,_)|string(row,"message_id")==id && rows.iter().any(|(id,_)|id==native_id))
+                } else { competing_voice_candidate(db,&other,&correlation,native_id,native,&sources)? };
+                if competes {competitors+=1;}
+                if competitors>1 {break;}
             }
+            if competitors!=1 {unique=false;break;}
         }
         if !unique {continue;}
         let mut row = voice_row.clone();
@@ -1281,6 +1315,11 @@ fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result
             merge_row(db,&id,native_id,&row.to_string(),"UserMessage")?;
             queue(db,&id,at_of(native))?;
         }
+    }
+    if complete && get(db,"voice_reconcile_generation")?.as_deref()!=Some(&generation) {
+        set(db,"voice_reconcile_after","0")?;
+        set(db,"voice_reconcile_generation",&generation)?;
+        return Ok(false);
     }
     set(db,"voice_reconcile_after",&next.to_string())?;
     Ok(complete)

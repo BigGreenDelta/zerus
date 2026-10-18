@@ -145,6 +145,41 @@ class PublicHistoryContract(unittest.TestCase):
         self.complete()
         self.assertEqual(self.voice_metadata(ids[0])["native_binding"]["provider_message_id"], "late-old-native")
 
+    def test_bound_old_voice_does_not_compete_for_a_later_repeated_native_message(self):
+        self.write_source([self.message(0, incoming=False, at=1_700_000_000, text="repeated voice", message_id="first-native"),
+                           self.message(1, incoming=False, at=1_700_000_005, text="repeated voice", message_id="ordinary-native")])
+        start = self.transcript.stat().st_size
+        ids = self.seed_voice_metadata(250, repeated=(0, 200))
+        with closing(sqlite3.connect(self.state / "voice/messages.sqlite3")) as db, db:
+            for index in (0, 200):
+                job = json.loads(db.execute("SELECT body FROM messages WHERE id=?", (ids[index],)).fetchone()[0])
+                if index == 0:
+                    job["native_binding"] = dict(provider_message_id="first-native", provider_source="codex_transcript", provider_source_offset="0:0", journal_seq=1)
+                else:
+                    job["native_submitted_at"] = 1_700_000_010
+                    job["boundary"]["source_bytes"] = start
+                    job["boundary"]["journal_seq"] = 2
+                    job["native_binding"] = dict(journal_seq=3)
+                db.execute("UPDATE messages SET body=? WHERE id=?", (json.dumps(job), ids[index]))
+        self.append_source([self.message(2, incoming=False, at=1_700_000_011, text="repeated voice", message_id="second-native")])
+        rows = self.all_older(self.complete())
+        self.assertEqual(self.voice_metadata(ids[0])["native_binding"]["provider_message_id"], "first-native")
+        self.assertEqual(self.voice_metadata(ids[200])["native_binding"].get("provider_message_id"), "second-native")
+        self.assertEqual(len(rows), 251)
+        self.assertIn("ordinary-native", [row.get("message_id") for row in rows])
+
+    def test_native_updates_do_not_starve_the_current_old_voice_sweep(self):
+        ids = self.seed_voice_metadata(350)
+        self.history()
+        for index in range(8):
+            rows = [self.message(index + 500, incoming=False, at=1_700_100_000 + index, text=f"ordinary live prompt {index}")]
+            if index == 0:
+                rows.append(self.message(200, incoming=False, at=1_700_012_000, text="voice transcript 200", message_id="native-during-sweep"))
+            self.append_source(rows)
+            self.history()
+        self.assertEqual(self.voice_metadata(ids[200]).get("native_binding", {}).get("provider_message_id"), "native-during-sweep")
+        self.complete()
+
     def test_old_voice_reconciliation_survives_index_recreation_and_source_replacement(self):
         original = self.message(0, incoming=False, at=1_700_000_000,
                                 text="voice transcript 0", message_id="retained-native-id")
