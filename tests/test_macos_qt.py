@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import struct
 import sys
 import tarfile
 import tempfile
@@ -23,6 +24,33 @@ UPDATES = """<Updates>
  <PackageUpdate><Name>qt.qt6.6113.clang_64.debug</Name><Version>6.11.3-0-1</Version>
   <DownloadableArchives>qtbase-debug.7z</DownloadableArchives></PackageUpdate>
 </Updates>"""
+ARM64, X86_64 = 0x0100000C, 0x01000007
+LOAD, WEAK = 0xC, 0x80000018
+
+
+def macho(cputype, commands):
+    """A 64-bit Mach-O image with the given (command, name) load commands."""
+    body = b""
+    for command, name in commands:
+        # A dylib command has a name offset, a timestamp and two versions; a run path only its offset.
+        start = 12 if command == qt.LC_RPATH else 24
+        size = (start + len(name) + 8) // 8 * 8
+        body += struct.pack("<III", command, size, start) + bytes(start - 12) + name.encode().ljust(size - start, b"\0")
+    return struct.pack("<IiiIIIII", 0xFEEDFACF, cputype, 0, 2, len(commands), len(body), 0, 0) + body
+
+
+def universal(*images):
+    """A universal file of thin images at 16 KiB boundaries, as the official Qt ships them."""
+    entries, payload = b"", b""
+    for image in images:
+        cputype = struct.unpack_from("<i", image, 4)[0]
+        entries += struct.pack(">iiIII", cputype, 0, 0x4000 + len(payload), len(image), 14)
+        payload += image.ljust(-(-len(image) // 0x4000) * 0x4000, b"\0")
+    return (struct.pack(">II", 0xCAFEBABE, len(images)) + entries).ljust(0x4000, b"\0") + payload
+
+
+def framework(name):
+    return f"lib/{name}.framework/Versions/A/{name}"
 
 
 class PinnedQt(unittest.TestCase):
@@ -39,10 +67,11 @@ class PinnedQt(unittest.TestCase):
         qt.validate_pin(self.pin)
         self.assertEqual(self.pin["qt_version"], "6.11.2")
         names = " ".join(archive["path"] for archive in self.pin["archives"])
-        for module in ("qtbase", "qtsvg", "qtmultimedia", "qttools"):
+        # The build-time lrelease of qttools loads QtQml, which qtdeclarative provides.
+        for module in ("qtbase", "qtsvg", "qtmultimedia", "qttools", "qtdeclarative"):
             self.assertIn(module + "-", names)
-        # Qt WebEngine and the modules only it needs are not part of the bundle.
-        for module in ("qtdeclarative", "qtwebchannel", "qtpositioning", "qtwebengine"):
+        # Qt WebEngine and the modules only it needs are not pinned.
+        for module in ("qtwebchannel", "qtpositioning", "qtwebengine"):
             self.assertNotIn(module + "-", names)
 
     def test_pin_rejects_foreign_sources_and_malformed_entries(self):
@@ -74,6 +103,42 @@ class PinnedQt(unittest.TestCase):
         for name in ("/etc/passwd", "../outside", "lib/../../outside", ""):
             with self.assertRaises(ValueError, msg=name):
                 qt.check_members([name])
+
+    def image(self, prefix, name, run_path, *frameworks, weak=()):
+        """A universal image of the official layout that loads the Qt frameworks through @rpath."""
+        commands = [(LOAD, "@rpath/" + framework(item)[len("lib/"):]) for item in frameworks]
+        commands += [(WEAK, "@rpath/" + framework(item)[len("lib/"):]) for item in weak]
+        commands += [(LOAD, "/usr/lib/libSystem.B.dylib"), (qt.LC_RPATH, "@loader_path/" + run_path)]
+        path = prefix / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(universal(macho(X86_64, commands), macho(ARM64, commands)))
+
+    def test_build_tools_find_every_qt_framework_they_load(self):
+        # The official Qt 6.11.2 lrelease loads QtQml, which only qtdeclarative
+        # provides: without it dyld aborted lrelease at qrc_translations in CI.
+        prefix = self.root / "qt"
+        self.image(prefix, "bin/lrelease", "../lib", "QtCore", "QtNetwork", "QtQml")
+        self.image(prefix, framework("QtCore"), "../../../")
+        self.image(prefix, framework("QtNetwork"), "../../../", "QtCore")
+        missing = r"bin/lrelease: lrelease loads @rpath/QtQml\.framework/Versions/A/QtQml,"
+        with self.assertRaisesRegex(ValueError, missing):
+            qt.check_tools(prefix, ["bin/lrelease"])
+        self.image(prefix, framework("QtQml"), "../../../", "QtCore", "QtNetwork", weak=["QtQmlMeta"])
+        qt.check_tools(prefix, ["bin/lrelease"])
+        # Each loaded framework's own dependencies count too.
+        self.image(prefix, framework("QtQml"), "../../../", "QtCore", "QtNetwork", "QtQmlCore")
+        with self.assertRaisesRegex(ValueError, r"QtQml loads @rpath/QtQmlCore\."):
+            qt.check_tools(prefix, ["bin/lrelease"])
+        # A framework found only outside the prefix does not count.
+        self.image(self.root, framework("QtQmlCore"), "../../../", "QtCore")
+        self.image(prefix, framework("QtQml"), "../../../../../lib", "QtCore", "QtNetwork", "QtQmlCore")
+        with self.assertRaisesRegex(ValueError, r"QtQml loads @rpath/QtQmlCore\."):
+            qt.check_tools(prefix, ["bin/lrelease"])
+        # Nor does a missing tool or a file that is not a 64-bit Mach-O image.
+        (prefix / "bin/qmake").write_text("#!/bin/sh\n")
+        for tool in ("bin/lupdate", "bin/qmake"):
+            with self.assertRaises(ValueError, msg=tool):
+                qt.check_tools(prefix, [tool])
 
     def source(self, name, payload):
         path = self.root / "repository" / name
@@ -116,6 +181,24 @@ class PinnedQt(unittest.TestCase):
         with mock.patch("sys.stderr"), self.assertRaises(ValueError):
             qt.install(broken, tampered, base=(self.root / "repository").as_uri(), check_version=False)
         self.assertFalse((tampered / "bin").exists())
+
+    @unittest.skipUnless(shutil.which("bsdtar"), "bsdtar extracts the official 7-Zip archives")
+    def test_install_rejects_a_build_tool_with_a_missing_framework_before_running_qt(self):
+        payload = self.root / "payload"
+        self.image(payload, "bin/lrelease", "../lib", "QtCore", "QtQml")
+        self.image(payload, framework("QtCore"), "../../../")
+        bundle = self.root / "bundle.tar"
+        with tarfile.open(bundle, "w") as archive:
+            for name in ("bin", "lib"):
+                archive.add(payload / name, arcname=name)
+        entry = self.source("desktop/qt.test.clang_64/6.11.2-0-1qttools-MacOS.tar", bundle.read_bytes())
+        pin = {"qt_version": "6.11.2", "repository": qt.REPOSITORY, "archives": [entry],
+               "packages": [{"directory": "desktop", "name": "qt.test.clang_64", "archives": ["qttools"]}]}
+        with mock.patch.object(qt, "BUILD_TOOLS", ("bin/lrelease",)), mock.patch("sys.stdout"), \
+                mock.patch.object(qt.subprocess, "check_output") as run, \
+                self.assertRaisesRegex(ValueError, r"loads @rpath/QtQml\.framework/Versions/A/QtQml,"):
+            qt.install(pin, self.root / "qt", base=(self.root / "repository").as_uri())
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

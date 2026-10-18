@@ -8,6 +8,7 @@
       "archives": [
         "qtbase",
         "qtsvg",
+        "qtdeclarative",
         "qttools"
       ]
     },
@@ -29,6 +30,11 @@
       "path": "desktop/qt6_6112/qt6_6112/qt.qt6.6112.clang_64/6.11.2-0-202608131016qtsvg-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
       "size": 420077,
       "sha256": "c52f6cec6ce4b52ca017e0046345a85d33b2b73e0f6a93474bb7a60f8e829317"
+    },
+    {
+      "path": "desktop/qt6_6112/qt6_6112/qt.qt6.6112.clang_64/6.11.2-0-202608131016qtdeclarative-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
+      "size": 130537813,
+      "sha256": "ceb8e3f3830531a52de5007ef3f50ffc5525021feb132ee322f59583eb2903cf"
     },
     {
       "path": "desktop/qt6_6112/qt6_6112/qt.qt6.6112.clang_64/6.11.2-0-202608131016qttools-MacOS-MacOS_15-Clang-MacOS-MacOS_15-X86_64-ARM64.7z",
