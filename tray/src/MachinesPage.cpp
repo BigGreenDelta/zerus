@@ -387,16 +387,17 @@ void MachinesPage::updateControls() {
     m_reset->setEnabled(m_reset->isEnabled() && hasInheritedOverride);
     m_reset->setToolTip(tr("Restore the SSH settings of a machine from the shared configuration."));
     m_sessions->setEnabled(!busy && !m_new); m_accounts->setEnabled(!busy && !m_new); m_add->setEnabled(!busy); m_list->setEnabled(!busy); m_refresh->setEnabled(!busy);
-    // A control console has no sessions, accounts or SSH connection of its own.
+    // A control console has no sessions, accounts or SSH connection of its own, and
+    // no Windows computer is reached over SSH, so its page has no connection either.
     const bool console = local && !m_new && !m_fleet.local().localSessions;
+    const bool windows = local && !m_new && MachinePlatform::of(m_fleet.local().metrics, true) == MachinePlatform::Style::Windows;
     m_sessions->setVisible(!console); m_accounts->setVisible(!console);
-    for (int row = 0; row < m_form->rowCount(); ++row) m_form->setRowVisible(row, !console);
-    for (auto *button : {m_save, m_check, m_ssh, m_install, m_reset, m_remove}) button->setVisible(!console);
+    for (int row = 0; row < m_form->rowCount(); ++row) m_form->setRowVisible(row, !console && !windows);
+    for (auto *button : {m_save, m_check, m_ssh, m_install, m_reset, m_remove}) button->setVisible(!console && !windows);
     // Windows (spec D16): this computer shows its session host, and a control
     // console whose CLI reports one can enable local sessions.
     const auto &host = m_fleet.local().localHost;
-    const bool windowsHost = local && !m_new && !host.isEmpty()
-        && MachinePlatform::of(m_fleet.local().metrics, true) == MachinePlatform::Style::Windows;
+    const bool windowsHost = windows && !host.isEmpty();
     m_enableLocal->setVisible(local && !m_new && LocalSessionHost::canEnable(m_fleet.local())); m_enableLocal->setEnabled(!busy);
     m_localHost->setVisible(windowsHost);
     if (windowsHost) {

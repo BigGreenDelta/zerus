@@ -2731,11 +2731,12 @@ checks take longer than half a second. Settings are in
 `%APPDATA%\hgdev\hgs-tray.ini`, with drafts beside it, and one instance runs per
 user. When the local box reports `local_sessions: false`, the app offers remote
 machines only: in New session, Overview, the tray menu, Accounts, Projects and
-search. The Machines page lists this computer as a control console without SSH
-settings, with **Enable local sessions** (`hgs.exe session-host install`, after a
-confirmation), and shows the session host's state, PID, ConPTY, integrity level
-and Windows session in both modes. Without remote machines, New session, Accounts
-and automatic recovery send you to Machines: to add a remote machine and, where
+search. The Machines page lists this computer as a control console with
+**Enable local sessions** (`hgs.exe session-host install`, after a
+confirmation). In both modes, this computer's page has no SSH settings or
+actions; it shows the session host's state, PID, ConPTY, integrity level and
+Windows session. Without remote machines, New session, Accounts and automatic
+recovery send you to Machines: to add a remote machine and, where
 Machines offers **Enable local sessions**, to enable them. New session then has
 **Open Machines**, which only selects this computer there. Automatic recovery
 settings of a control console are saved to the first reachable remote machine, and
