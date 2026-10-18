@@ -64,6 +64,7 @@ struct QuestionCard: View {
     @State private var review = ApprovalReview()
     @State private var now = ProcessInfo.processInfo.systemUptime
     @State private var visible = false
+    @State private var confirmation: PermissionConfirmation?
 
     private var model: ConversationModel { app.conversation }
 
@@ -83,8 +84,10 @@ struct QuestionCard: View {
         // A card that cannot be answered here shows its reason and no Submit.
         let showsSubmit = QuestionPolicies.showsSubmit(question)
         let approvalSupported = QuestionPolicies.approvalSupported(question)
-        let eligible = visible && scenePhase == .active && available && editing && question.canAnswer && approvalSupported
+        let permission = QuestionPolicies.openCodePermission(question)
+        let eligible = visible && scenePhase == .active && available && editing && question.canAnswer && (approvalSupported || permission)
         let remaining = review.secondsRemaining(now: now)
+        let alwaysPermitted = confirmation?.answers(question, editing: editing, available: available) != nil
 
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -131,7 +134,23 @@ struct QuestionCard: View {
             if !error.isEmpty { Text(error).font(.footnote).foregroundStyle(Theme.amber) }
             let notice = model.questionSendNotice(target, question)
             if !notice.isEmpty { Text(notice).font(.footnote).foregroundStyle(Theme.amber) }
-            if question.approval {
+            if question.approval && permission {
+                HStack(spacing: 8) {
+                    Button("Reject") { approve("reject") }
+                        .buttonStyle(.bordered)
+                        .disabled(!(permission && question.canAnswer && editing && available))
+                    Button(remaining > 0 ? "Allow once (\(remaining))" : "Allow once") { approve("once") }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!(eligible && remaining == 0))
+                }
+                // Always allow reaches beyond this request, so it opens its own confirmation.
+                if let always = PermissionConfirmation(question) {
+                    Button("Always allow…") { confirmation = always }
+                        .buttonStyle(.bordered)
+                        .disabled(!(eligible && remaining == 0))
+                }
+                Text("Reject rejects every pending request in this session.").font(.footnote).foregroundStyle(Theme.muted)
+            } else if question.approval {
                 HStack(spacing: 8) {
                     Button("Deny") { approve("deny") }
                         .buttonStyle(.bordered)
@@ -163,12 +182,21 @@ struct QuestionCard: View {
                 Text(question.unavailableReason.isEmpty ? "Complete this request on your machine." : question.unavailableReason)
                     .font(.footnote).foregroundStyle(Theme.muted).textSelection(.enabled)
             }
-            if question.approval && !approvalSupported {
+            if question.approval && !approvalSupported && !permission {
                 Text("This approval cannot be answered here. Continue on your machine.").font(.footnote).foregroundStyle(Theme.muted)
             }
         }
         .padding(12)
         .background(Color(hex: 0x2B2923), in: RoundedRectangle(cornerRadius: 14))
+        .confirmationDialog("Always allow?", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }),
+                            titleVisibility: .visible) {
+            Button("Always allow", role: .destructive) { confirmAlways() }
+            Button("Cancel", role: .cancel) { confirmation = nil }
+        } message: {
+            Text("OpenCode will allow matching requests without asking again.")
+        }
+        // The confirmation closes, sending nothing, once its card changes or can no longer be answered or edited here.
+        .onChange(of: alwaysPermitted) { _, permitted in if !permitted { confirmation = nil } }
         .onAppear { load(identity: identity, draft: draft, native: native) }
         .onChange(of: identity) { load(identity: identity, draft: draft, native: native) }
         .onChange(of: eligible, initial: true) {
@@ -285,6 +313,7 @@ struct QuestionCard: View {
         loadedIdentity = identity
         gate = QuestionSubmitGate()
         submitting = false
+        confirmation = nil
         // This question's saved draft wins; form defaults and default_text only seed an unsaved one and are never sent by themselves.
         let opening = QuestionPolicies.opening(question.prompts, draftAnswers: draft.answers, native: native)
         options = opening.options
@@ -313,8 +342,17 @@ struct QuestionCard: View {
     }
 
     private func approve(_ option: String) {
-        guard let prompt = question.prompts.first else { return }
-        let payload = JSON.array([["question_id": .string(prompt.id), "selected_option_ids": [.string(option)], "text": ""]]).compact
+        guard let payload = QuestionPolicies.approvalAnswers(question, option)?.compact else { return }
+        Task { await model.sendQuestion(target, question, answers: payload) }
+    }
+
+    /// Sends Always allow only for the card that offered it, while it can still be answered and edited here.
+    private func confirmAlways() {
+        guard let pending = confirmation else { return }
+        confirmation = nil
+        let editing = model.draft(target, question).status == "editing" && QuestionPolicies.submitted(question, target) == nil &&
+            model.pendingQuestionSend == nil
+        guard let payload = pending.answers(question, editing: editing, available: available)?.compact else { return }
         Task { await model.sendQuestion(target, question, answers: payload) }
     }
 

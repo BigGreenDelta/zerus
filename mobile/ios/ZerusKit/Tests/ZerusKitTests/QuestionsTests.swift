@@ -148,6 +148,128 @@ final class QuestionPoliciesTests: XCTestCase {
         choices.choices = [Choice(id: "allow", label: "Yes", description: ""), Choice(id: "deny", label: "No", description: "")]
         approval.prompts = [choices]
         XCTAssertTrue(QuestionPolicies.approvalSupported(approval))
+        // Approve and Deny keep sending exactly today's row.
+        XCTAssertEqual(QuestionPolicies.approvalAnswers(approval, "allow")?.compact,
+                       JSON.array([["question_id": .string("q"), "selected_option_ids": [.string("allow")], "text": ""]]).compact)
+        XCTAssertEqual(QuestionPolicies.approvalAnswers(approval, "deny"), [["question_id": "q", "selected_option_ids": ["deny"], "text": ""]])
+        approval.prompts = []
+        XCTAssertNil(QuestionPolicies.approvalAnswers(approval, "allow"))
+    }
+
+    /// One native card with one item, as the computer reports it.
+    private func card(_ source: String = "opencode_native", approval: Bool = false, canAnswer: Bool = true, items: [JSONObject]) throws -> Question {
+        try XCTUnwrap(NativeEvents.questions(["pending_questions": [["question_id": "card", "question_hash": "hash", "can_answer": .bool(canAnswer),
+                                                                     "approval": .bool(approval), "source": .string(source), "run_id": "run",
+                                                                     "conversation_id": "conversation", "questions": .array(items.map(JSON.object))]]]).first)
+    }
+
+    func testCommandLikeAnswersStayOnTheComputerOutsideOpenCodeForms() throws {
+        let item: JSONObject = ["id": "q", "question": "Name", "options": [["id": "a", "label": "A"]], "allow_other": true]
+        let command = "Enter command-like answers on your computer."
+        for source in ["codex_async", "codex_tui", "claude_tool_approval", "claude_tui", "kimi_wire", "kimi_cache_hint", "dsh_native", "startup_terminal_choice", ""] {
+            for approval in [false, true] {
+                let question = try card(source, approval: approval, items: [item])
+                for text in ["/command", "!command", "  /padded"] {
+                    XCTAssertEqual(QuestionPolicies.answerError(question.prompts, options: [:], texts: ["q": text]), command, "\(source) \(text)")
+                    XCTAssertFalse(QuestionPolicies.complete(question.prompts, options: [:], texts: ["q": text]), "\(source) \(text)")
+                }
+            }
+        }
+        // An OpenCode permission is an approval, not a form: it keeps the rule.
+        let permission = try card(approval: true, items: [item])
+        XCTAssertEqual(QuestionPolicies.answerError(permission.prompts, options: [:], texts: ["q": "/command"]), command)
+        // An OpenCode form sends its text through the native form reply: the text item and Other text on a choice item.
+        let choice = try card(items: [item.putting("input_kind", "choice")])
+        let text = try card(items: [["id": "q", "header": "Path", "prompt": "Path", "options": [], "allow_other": true, "input_kind": "text"]])
+        for question in [choice, text] {
+            for value in ["/tmp/report.txt", "!important", " /padded"] {
+                XCTAssertEqual(QuestionPolicies.answerError(question.prompts, options: [:], texts: ["q": value]), "", value)
+                XCTAssertTrue(QuestionPolicies.complete(question.prompts, options: [:], texts: ["q": value]), value)
+                XCTAssertEqual(QuestionPolicies.answers(question.prompts, options: [:], texts: ["q": value]).array?.first?.string("text"), value)
+            }
+            // Every other text rule still applies.
+            XCTAssertEqual(QuestionPolicies.answerError(question.prompts, options: [:], texts: ["q": "/a\nb"]), "Answers must be one line and at most 4096 UTF-8 bytes.")
+            XCTAssertEqual(QuestionPolicies.answerError(question.prompts, options: [:], texts: ["q": "/" + String(repeating: "é", count: 2048)]),
+                           "Answers must be one line and at most 4096 UTF-8 bytes.")
+        }
+        let closed = try card(items: [item.putting("allow_other", false).putting("input_kind", "choice")])
+        XCTAssertEqual(QuestionPolicies.answerError(closed.prompts, options: [:], texts: ["q": "/purple"]), "This request does not accept an Other answer.")
+    }
+
+    private let permissionItem: JSONObject = ["id": "permission", "header": "Permission", "prompt": "shell\nprintf native-tool-output", "multi_select": false,
+                                              "allow_other": false, "required": true,
+                                              "options": [["id": "once", "label": "Allow once", "scope": "once"], ["id": "always", "label": "Always allow", "scope": "broader"],
+                                                          ["id": "reject", "label": "Reject", "description": "Rejects every pending request in this session", "scope": "once"]]]
+
+    private func options(_ ids: [String]) -> JSON { .array(ids.map { ["id": .string($0), "label": .string($0)] }) }
+
+    func testOnlyAnswerableOpenCodePermissionsUseTheirNativeChoices() throws {
+        let permission = try card(approval: true, items: [permissionItem])
+        XCTAssertTrue(QuestionPolicies.openCodePermission(permission))
+        XCTAssertFalse(QuestionPolicies.approvalSupported(permission), "allow/deny approvals keep their own rule")
+        XCTAssertTrue(QuestionPolicies.openCodePermission(try card(approval: true, items: [permissionItem.putting("options", options(["once", "reject"]))])),
+                      "Always allow is optional")
+        XCTAssertNil(PermissionConfirmation(try card(approval: true, items: [permissionItem.putting("options", options(["reject", "once"]))])),
+                     "no confirmation without Always allow")
+
+        // A Claude card with native approval choices stays unanswerable on phones, exactly as today.
+        let claude = try card("claude_tool_approval", approval: true, items: [["id": "approval", "question": "Run?", "header": "Bash", "allow_other": false,
+                                                                              "options": [["id": "1", "label": "Yes", "scope": "once"],
+                                                                                          ["id": "2", "label": "Yes, and don't ask again", "scope": "broader"],
+                                                                                          ["id": "3", "label": "No", "scope": "once"]]]])
+        XCTAssertFalse(QuestionPolicies.openCodePermission(claude))
+        XCTAssertFalse(QuestionPolicies.approvalSupported(claude))
+        XCTAssertNil(PermissionConfirmation(claude))
+        // An allow/deny card behaves exactly as today, whatever its source.
+        let allowDeny = try card(approval: true, items: [permissionItem.putting("options", options(["allow", "deny"]))])
+        XCTAssertFalse(QuestionPolicies.openCodePermission(allowDeny))
+        XCTAssertTrue(QuestionPolicies.approvalSupported(allowDeny))
+
+        let refused: [(String, Question)] = [
+            ("another agent", try card("claude_tool_approval", approval: true, items: [permissionItem])),
+            ("a form", try card(items: [permissionItem])),
+            ("not answerable", try card(approval: true, canAnswer: false, items: [permissionItem])),
+            ("another item id", try card(approval: true, items: [permissionItem.putting("id", "approval")])),
+            ("a multi prompt", try card(approval: true, items: [permissionItem.putting("multi_select", true)])),
+            ("a second prompt", try card(approval: true, items: [permissionItem, permissionItem.putting("id", "second")])),
+            ("an extra option", try card(approval: true, items: [permissionItem.putting("options", options(["once", "always", "reject", "allow"]))])),
+            ("an unknown option", try card(approval: true, items: [permissionItem.putting("options", options(["once", "reject", "later"]))])),
+            ("no once", try card(approval: true, items: [permissionItem.putting("options", options(["always", "reject"]))])),
+            ("no reject", try card(approval: true, items: [permissionItem.putting("options", options(["once", "always"]))])),
+            ("no prompt", try card(approval: true, items: [])),
+        ]
+        for (reason, question) in refused {
+            XCTAssertFalse(QuestionPolicies.openCodePermission(question), reason)
+            XCTAssertNil(PermissionConfirmation(question), reason)
+        }
+    }
+
+    func testAlwaysAllowIsSentOnlyForTheExactCardThatStillOffersIt() throws {
+        let permission = try card(approval: true, items: [permissionItem])
+        let confirmation = try XCTUnwrap(PermissionConfirmation(permission))
+        XCTAssertEqual(confirmation.answers(permission, editing: true, available: true)?.compact,
+                       #"[{"question_id":"permission","selected_option_ids":["always"],"text":""}]"#)
+        XCTAssertNil(confirmation.answers(permission, editing: false, available: true), "an answer is already being sent or was sent")
+        XCTAssertNil(confirmation.answers(permission, editing: true, available: false), "the request must be verified again")
+        let changes: [(String, (inout Question) -> Void)] = [
+            ("another hash", { $0.hash = "replacement" }),
+            ("another request", { $0.id = "other" }),
+            ("no longer answerable", { $0.canAnswer = false }),
+            ("Always allow withdrawn", { question in question.prompts[0].choices.removeAll { $0.id == "always" } }),
+            ("an extra option", { $0.prompts[0].choices.append(Choice(id: "allow", label: "Allow", description: "")) }),
+            ("another agent", { $0.source = "claude_tool_approval" }),
+            ("no longer an approval", { $0.approval = false }),
+        ]
+        for (reason, change) in changes {
+            var current = permission
+            change(&current)
+            XCTAssertNil(confirmation.answers(current, editing: true, available: true), reason)
+        }
+        // Benign polling metadata keeps the same request.
+        var polled = permission
+        polled.createdAt = 500
+        polled.delivery = "refreshed"
+        XCTAssertNotNil(confirmation.answers(polled, editing: true, available: true))
     }
 }
 

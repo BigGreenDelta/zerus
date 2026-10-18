@@ -207,7 +207,7 @@ final class OpenCodeTests: XCTestCase {
     func testFormContractCardsParseAnswerAndRefuseLikeTheComputer() throws {
         let contract = try SharedFixture.json("opencode-form-contract.json")
         let cases = contract.objects("cases")
-        XCTAssertEqual(cases.count, 11)
+        XCTAssertEqual(cases.count, 17)
         for example in cases {
             let name = example.string("name")
             let card = try XCTUnwrap(example.object("card"), name)
@@ -234,7 +234,19 @@ final class OpenCodeTests: XCTestCase {
                 }
                 XCTAssertEqual(prompt.defaultOptionIds, item.strings("default_option_ids"), name)
             }
-            guard !parsed.approval, let answers = example.array("answers")?.compactMap(\.object), !answers.isEmpty else { continue }
+            if parsed.approval {
+                // An OpenCode permission is answered with its native choices, never the allow/deny pair the computer refuses.
+                XCTAssertTrue(QuestionPolicies.openCodePermission(parsed), name)
+                XCTAssertFalse(QuestionPolicies.approvalSupported(parsed), name)
+                XCTAssertNotNil(PermissionConfirmation(parsed), name)
+                let answers = try XCTUnwrap(example.array("answers"), name)
+                let option = answers.first?.object?.strings("selected_option_ids").first ?? ""
+                let offered = parsed.prompts.first?.choices.contains { $0.id == option } == true
+                XCTAssertEqual(offered, example.has("reply"), name)
+                if offered { XCTAssertEqual(QuestionPolicies.approvalAnswers(parsed, option), .array(answers), name) }
+                continue
+            }
+            guard let answers = example.array("answers")?.compactMap(\.object), !answers.isEmpty else { continue }
             var options: [String: Set<String>] = [:], texts: [String: String] = [:]
             for answer in answers {
                 options[answer.string("question_id")] = Set(answer.strings("selected_option_ids"))
@@ -277,6 +289,90 @@ final class OpenCodeTests: XCTestCase {
         XCTAssertFalse(unsupported.canAnswer)
         XCTAssertEqual(unsupported.unavailableReason, "Answer this form in OpenCode")
         XCTAssertFalse(QuestionPolicies.showsSubmit(unsupported))
+    }
+
+    /// pl2u.5: a form answer reaches OpenCode's form reply, never a terminal, so text starting with / or ! is ordinary text there.
+    func testContractFormTextStartingWithSlashOrBangIsAnOrdinaryAnswer() throws {
+        let cases = Dictionary(uniqueKeysWithValues: try SharedFixture.json("opencode-form-contract.json").objects("cases").map { ($0.string("name"), $0) })
+        for name in ["plain-string-slash", "plain-string-bang"] {
+            let example = try XCTUnwrap(cases[name])
+            let card = try question(example)
+            let answers = try XCTUnwrap(example.array("answers"))
+            let text = try XCTUnwrap(answers.first?.object?.string("text"))
+            XCTAssertTrue(text.hasPrefix("/") || text.hasPrefix("!"), name)
+            XCTAssertEqual(QuestionPolicies.answerError(card.prompts, options: [:], texts: ["k": text]), "", name)
+            XCTAssertTrue(QuestionPolicies.complete(card.prompts, options: [:], texts: ["k": text]), name)
+            XCTAssertEqual(QuestionPolicies.answers(card.prompts, options: [:], texts: ["k": text]), .array(answers), name)
+            // The same card from any other agent keeps the text on the computer.
+            var other = try XCTUnwrap(example.object("card"))
+            other["source"] = "codex_tui"
+            let codex = try question(example.putting("card", .object(other)))
+            XCTAssertEqual(QuestionPolicies.answerError(codex.prompts, options: [:], texts: ["k": text]), "Enter command-like answers on your computer.", name)
+            XCTAssertFalse(QuestionPolicies.complete(codex.prompts, options: [:], texts: ["k": text]), name)
+        }
+        // Other text on an OpenCode choice item is form text too.
+        let choice = try question(try XCTUnwrap(cases["question-custom-text"]))
+        XCTAssertEqual(QuestionPolicies.answerError(choice.prompts, options: [:], texts: ["q0": "/purple"]), "")
+        XCTAssertTrue(QuestionPolicies.complete(choice.prompts, options: [:], texts: ["q0": "!purple"]))
+        XCTAssertEqual(QuestionPolicies.answers(choice.prompts, options: [:], texts: ["q0": "/purple"]).array?.first?.string("text"), "/purple")
+    }
+
+    /// pl2u.6: an optional form item may stay empty in the policy, Send, the answer rows and the send guard; required items do not.
+    func testOptionalFormItemsMayStayEmptyThroughSend() throws {
+        let contract = Dictionary(uniqueKeysWithValues: try SharedFixture.json("opencode-form-contract.json").objects("cases").map { ($0.string("name"), $0) })
+        let example = try XCTUnwrap(contract["plain-string-optional"])
+        let single = try question(example)
+        XCTAssertEqual(QuestionPolicies.opening(single.prompts, draftAnswers: "", native: nil).texts, ["k": ""])
+        XCTAssertTrue(QuestionPolicies.complete(single.prompts, options: [:], texts: [:]))
+        XCTAssertEqual(QuestionPolicies.answers(single.prompts, options: [:], texts: [:]), .array(try XCTUnwrap(example.array("answers"))))
+        XCTAssertTrue(QuestionSendPolicies.available(single, target, QuestionPolicies.answers(single.prompts, options: [:], texts: [:]).compact))
+
+        // A multi-part form: every part stays reachable and only the required one must be answered.
+        let name: JSONObject = ["id": "name", "header": "Name", "prompt": "Name", "options": [], "allow_other": true, "required": true, "input_kind": "text"]
+        let note: JSONObject = ["id": "note", "header": "Note", "prompt": "Note", "options": [], "allow_other": true, "required": false, "input_kind": "text"]
+        let pick: JSONObject = ["id": "pick", "header": "Pick", "prompt": "Pick", "options": [["id": "a", "label": "A"], ["id": "b", "label": "B"]],
+                                "multi_select": true, "min_items": 2, "allow_other": false, "required": false, "input_kind": "choice"]
+        let card = try XCTUnwrap(NativeEvents.questions(["pending_questions": [["question_id": "frm_2", "question_hash": "hash", "can_answer": true,
+                                                                                "source": "opencode_native", "run_id": "run", "conversation_id": "ses_A",
+                                                                                "questions": [.object(name), .object(note), .object(pick)]]]]).first)
+        XCTAssertFalse(QuestionPolicies.complete(card.prompts, options: [:], texts: [:]), "a required item is still enforced")
+        XCTAssertTrue(QuestionPolicies.complete(card.prompts, options: [:], texts: ["name": "Ada"]))
+        XCTAssertEqual(QuestionPolicies.answerError(card.prompts, options: [:], texts: ["name": "Ada"]), "")
+        let rows = QuestionPolicies.answers(card.prompts, options: [:], texts: ["name": "Ada"])
+        XCTAssertEqual(rows, [["question_id": "name", "selected_option_ids": [], "text": "Ada"], ["question_id": "note", "selected_option_ids": [], "text": ""],
+                              ["question_id": "pick", "selected_option_ids": [], "text": ""]])
+        XCTAssertTrue(QuestionSendPolicies.available(card, target, rows.compact))
+        // A partly answered optional item still meets its bounds.
+        XCTAssertEqual(QuestionPolicies.answerError(card.prompts, options: ["pick": ["a"]], texts: ["name": "Ada"]), "Choose at least 2 answers")
+        // Codex optional questions have no input_kind: they still need an answer or Skip.
+        var codex = card
+        codex.source = "codex_async"
+        codex.prompts = codex.prompts.map { prompt in
+            var copy = prompt
+            copy.inputKind = ""
+            return copy
+        }
+        XCTAssertFalse(QuestionPolicies.complete(codex.prompts, options: [:], texts: ["name": "Ada"]))
+    }
+
+    /// pl2u.4: OpenCode permissions are answered with their own choices; each button sends the contract's decision row.
+    func testPermissionButtonsSendTheContractDecisions() throws {
+        let cases = Dictionary(uniqueKeysWithValues: try SharedFixture.json("opencode-form-contract.json").objects("cases").map { ($0.string("name"), $0) })
+        let card = try question(try XCTUnwrap(cases["permission"]))
+        XCTAssertTrue(QuestionPolicies.openCodePermission(card))
+        XCTAssertFalse(QuestionPolicies.showsSubmit(card), "decisions use their own buttons")
+        for (option, name) in [("once", "permission-once"), ("always", "permission"), ("reject", "permission-reject")] {
+            let expected = JSON.array(try XCTUnwrap(cases[name]?.array("answers")))
+            XCTAssertEqual(QuestionPolicies.approvalAnswers(card, option), expected, name)
+            XCTAssertTrue(QuestionSendPolicies.available(card, target, try XCTUnwrap(QuestionPolicies.approvalAnswers(card, option)).compact), name)
+        }
+        // Always allow reaches beyond this request: it is sent only through its confirmation.
+        let confirmation = try XCTUnwrap(PermissionConfirmation(card))
+        XCTAssertEqual(confirmation.answers(card, editing: true, available: true), JSON.array(try XCTUnwrap(cases["permission"]?.array("answers"))))
+        // The computer refuses the old allow id; no button here produces it.
+        let refused = try XCTUnwrap(cases["permission-allow-refused"])
+        XCTAssertEqual(refused.string("error"), "Unknown answer option")
+        XCTAssertFalse(QuestionPolicies.approvalSupported(try question(refused)))
     }
 
     func testAnUnanswerableFormWithoutItemsStillShowsItsReason() throws {

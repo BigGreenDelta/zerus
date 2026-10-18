@@ -62,7 +62,7 @@ extension QuestionPolicies {
                 return "Answers must be one line and at most 4096 UTF-8 bytes."
             }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("/") || trimmed.hasPrefix("!") { return "Enter command-like answers on your computer." }
+            if !prompt.literalText && (trimmed.hasPrefix("/") || trimmed.hasPrefix("!")) { return "Enter command-like answers on your computer." }
             if selected.contains(where: { id in !prompt.choices.contains { $0.id == id } }) { return "An answer option changed. Review this request again." }
             if !trimmed.isEmpty && !prompt.other { return "This request does not accept an Other answer." }
             if !prompt.multi && selected.count + (trimmed.isEmpty ? 0 : 1) > 1 { return "Choose one answer for this question." }
@@ -141,6 +141,47 @@ extension QuestionPolicies {
     public static func approvalSupported(_ question: Question) -> Bool {
         guard question.approval, question.prompts.count == 1, let prompt = question.prompts.first, !prompt.multi else { return false }
         return prompt.choices.contains { $0.id == "allow" } && prompt.choices.contains { $0.id == "deny" }
+    }
+
+    /// An answerable OpenCode permission: Allow once, Reject and optionally Always allow, answered with those native ids.
+    /// Other approvals with native choices (Claude) stay on the computer; allow/deny approvals keep `approvalSupported`.
+    public static func openCodePermission(_ question: Question) -> Bool {
+        guard question.approval, question.source == "opencode_native", question.canAnswer, question.prompts.count == 1,
+              let prompt = question.prompts.first, prompt.id == "permission", !prompt.multi else { return false }
+        let ids = prompt.choices.map(\.id)
+        return ids.contains("once") && ids.contains("reject") && ids.allSatisfy { ["once", "always", "reject"].contains($0) }
+    }
+
+    /// The single answer row of an approval decision: one native option of its one prompt.
+    public static func approvalAnswers(_ question: Question, _ option: String) -> JSON? {
+        guard let prompt = question.prompts.first else { return nil }
+        return .array([["question_id": .string(prompt.id), "selected_option_ids": [.string(option)], "text": ""]])
+    }
+}
+
+/// "Always allow" on an OpenCode permission reaches beyond this one request, so it needs its own confirmation. That
+/// confirmation belongs to the exact card that offered it and sends only while that card still offers it and can be
+/// answered and edited here; otherwise it closes without sending.
+public struct PermissionConfirmation: Hashable, Sendable {
+    public static let option = "always"
+    public let questionId: String
+    public let questionHash: String
+
+    /// The confirmation an "Always allow…" tap opens, or nil when this card does not offer Always allow.
+    public init?(_ question: Question) {
+        guard Self.offered(question) else { return nil }
+        questionId = question.id
+        questionHash = question.hash
+    }
+
+    static func offered(_ question: Question) -> Bool {
+        QuestionPolicies.openCodePermission(question) && question.prompts[0].choices.contains { $0.id == option }
+    }
+
+    /// The answer to send when the person confirms, or nil to send nothing.
+    public func answers(_ current: Question, editing: Bool, available: Bool) -> JSON? {
+        guard current.id == questionId, current.hash == questionHash, Self.offered(current), editing, available else { return nil }
+        return QuestionPolicies.approvalAnswers(current, Self.option)
     }
 }
 
