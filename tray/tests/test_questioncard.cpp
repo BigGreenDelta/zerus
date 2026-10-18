@@ -1,4 +1,5 @@
 #include "QuestionCard.h"
+#include "ActivityWidth.h"
 #include "MarkdownObjects.h"
 #include "MarkdownText.h"
 #include "MonospaceFont.h"
@@ -174,6 +175,8 @@ private slots:
     void approvalAndTrustDisclosuresStayLiteral();
     void longProviderTextKeepsCompactWidth();
     void contentHeightPreservesActivityAndPinsFreeformAnswer();
+    void constrainedHeightDoesNotOverlapQuestionActions_data();
+    void constrainedHeightDoesNotOverlapQuestionActions();
     void currentQuestionAndOtherAnswerResizeTheForm();
     void reviewCountdownAndNextNavigation();
     void nativeCountdownPreservesScrollChoiceAndReview();
@@ -1210,6 +1213,67 @@ void TestQuestionCard::longProviderTextKeepsCompactWidth()
     card.setError("arch/session", "tool-question", token); QTest::qWait(25);
     QCOMPARE(card.width(), 480);
     QVERIFY(card.findChild<QLabel *>("questionStatus")->width() < card.width());
+}
+
+void TestQuestionCard::constrainedHeightDoesNotOverlapQuestionActions_data()
+{
+    QTest::addColumn<double>("scale");
+    QTest::newRow("normal") << 1.0;
+    QTest::newRow("large") << 1.5;
+    QTest::newRow("largest") << 2.0;
+}
+
+void TestQuestionCard::constrainedHeightDoesNotOverlapQuestionActions()
+{
+    QFETCH(double, scale);
+    QWidget activity; activity.setFixedSize(720, 550);
+    auto *layout = new QVBoxLayout(&activity); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(0);
+    // Queued input and the composer reserve real space outside the question card.
+    auto *history = new QTextBrowser; history->setMinimumHeight(150);
+    history->setPlainText(QString("Earlier reply and queued input preview\n").repeated(20));
+    layout->addWidget(history, 1);
+    auto *column = new ActivityWidth::ColumnLayout; column->setColumnWidth(600); layout->addLayout(column);
+    auto *card = new QuestionCard; column->addWidget(card);
+    auto *composer = new QLineEdit("Unsent message stays here"); composer->setFixedHeight(160); column->addWidget(composer);
+    auto data = request(); data["optional"] = true; data["can_skip"] = true;
+    auto question = data["questions"].toArray().first().toObject();
+    question["question"] = "Choose how to organize the next step. The explanation wraps across lines when the question uses larger text.";
+    data["questions"] = QJsonArray{question};
+    card->setContentScale(scale); setQuestionReady(*card, "constrained-fixture", data); activity.show();
+    auto *pages = card->findChild<QStackedWidget *>("questionPages");
+    auto *status = card->findChild<QLabel *>("questionStatus");
+    const auto inCard = [card](QWidget *widget) { return QRect(widget->mapTo(card, QPoint()), widget->size()); };
+    QTRY_VERIFY(card->isVisible());
+    const auto preview = qEnvironmentVariable("HGS_PREVIEW_DIR");
+    if (!preview.isEmpty()) { QDir().mkpath(preview); QTest::qWait(50); QVERIFY(activity.grab().save(preview + QString("/question-constrained-%1.png").arg(scale))); }
+    QTRY_VERIFY2(inCard(pages).bottom() < inCard(status).top(), "Question body overlaps status text");
+    QVERIFY2(inCard(status).bottom() < inCard(submit(*card)).top(), "Question status overlaps action buttons");
+    QVERIFY(card->rect().contains(inCard(submit(*card))));
+    QVERIFY(card->geometry().bottom() < composer->geometry().top());
+    auto *scroll = pages->currentWidget()->findChild<QScrollArea *>("questionContent");
+    QVERIFY(scroll->verticalScrollBar()->maximum() > 0);
+    option(*card, "opt_0_0")->click();
+    QVERIFY(submit(*card)->isEnabled());
+    QCOMPARE(composer->text(), QString("Unsent message stays here"));
+    QSignalSpy answer(card, &QuestionCard::answerRequested);
+    QCOMPARE(answer.size(), 0);
+    // The last choice remains reachable inside the scrolling body, above pinned actions.
+    scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum());
+    QVERIFY(inCard(pages).bottom() < inCard(status).top());
+    QVERIFY(card->rect().contains(inCard(submit(*card))));
+    const int shortHeight = card->height();
+    activity.setFixedSize(820, 720);
+    QTRY_VERIFY(card->height() > shortHeight);
+    activity.setFixedSize(720, 550);
+    QTRY_COMPARE(card->height(), shortHeight);
+    QVERIFY(option(*card, "opt_0_0")->isChecked());
+    QVERIFY(inCard(pages).bottom() < inCard(status).top());
+    QVERIFY(inCard(status).bottom() < inCard(submit(*card)).top());
+    QVERIFY(submit(*card)->visibleRegion().contains(submit(*card)->rect().center()));
+    QCOMPARE(QApplication::widgetAt(submit(*card)->mapToGlobal(submit(*card)->rect().center())), submit(*card));
+    QTest::mouseClick(submit(*card), Qt::LeftButton);
+    QCOMPARE(answer.size(), 1);
+    QCOMPARE(answer.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(), QJsonArray{"opt_0_0"});
 }
 
 void TestQuestionCard::contentHeightPreservesActivityAndPinsFreeformAnswer()
