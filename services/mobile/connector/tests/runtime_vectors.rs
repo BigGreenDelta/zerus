@@ -774,10 +774,33 @@ fn capability_markers_match_the_python_connector() {
         let advertised = flags.advertised(one_hop);
         assert_eq!(advertised["reasons"], wanted["reasons"], "{name}");
         for operation in advertised["operations"].as_array().unwrap() {
-            assert!(capabilities::implemented(operation.as_str().unwrap()));
+            let operation = operation.as_str().unwrap();
+            assert!(capabilities::implemented(operation));
             assert!(
-                wanted["operations"].as_array().unwrap().contains(operation),
-                "{name}"
+                wanted["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|wanted| wanted == operation)
+                    || capabilities::CONNECTOR_ONLY.contains(&operation),
+                "{name} {operation}"
+            );
+        }
+        // A connector-only operation comes with Python's session-action ABI.
+        let lifecycle = wanted["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "forget");
+        for operation in capabilities::CONNECTOR_ONLY {
+            assert_eq!(
+                advertised["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|advertised| advertised == operation),
+                lifecycle,
+                "{name} {operation}"
             );
         }
     }

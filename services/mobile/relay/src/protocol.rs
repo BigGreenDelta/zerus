@@ -102,6 +102,7 @@ pub const OPERATIONS: &[&str] = &[
     "process_output",
     "process_stop",
     "recovery_action",
+    "remove_queued",
     "rename",
     "restore",
     "resume",
@@ -526,6 +527,7 @@ pub fn request(v: &Value) -> Result<()> {
             "rename" => &["new_name", "archive_id"],
             "fork" => &["tag", "archive_id"],
             "restore" | "forget" => &["archive_id"],
+            "remove_queued" => &["message_id"],
             "terminal_input" => &["terminal_binding_id", "text", "enter", "key"],
             "file_read" => &[
                 "path",
@@ -561,6 +563,7 @@ pub fn request(v: &Value) -> Result<()> {
                 "voice_submit",
                 "voice_status",
                 "voice_cancel",
+                "remove_queued",
             ]
             .contains(&op),
         )?;
@@ -674,6 +677,7 @@ pub fn request(v: &Value) -> Result<()> {
             "restore" => {
                 uuid(&p["archive_id"], true)?;
             }
+            "remove_queued" => queued_message(&p["message_id"])?,
             "terminal_input" => terminal(p)?,
             "attachment_read" => attachment_read(p)?,
             "file_read" => file_read(p)?,
@@ -689,6 +693,22 @@ pub fn request(v: &Value) -> Result<()> {
         json::size(v, 6 * MIB)?;
     } else if op != "send" {
         json::size(v, MIB)?;
+    }
+    Ok(())
+}
+/// The OpenCode message a `remove_queued` names: `msg_` and 1-124 ASCII
+/// letters, digits, `_` or `-`, as hgs and the connector check it
+/// (`tests/fixtures/opencode-queued-message-ids.json`). The computer decides
+/// whether it is still queued and was never delivered.
+fn queued_message(v: &Value) -> Result<()> {
+    let s = v.as_str().ok_or(Error::BAD)?;
+    if !(5..=128).contains(&s.len())
+        || !s.starts_with("msg_")
+        || !s
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+    {
+        return Err(Error::BAD);
     }
     Ok(())
 }

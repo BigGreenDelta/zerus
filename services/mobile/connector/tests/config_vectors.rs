@@ -327,13 +327,29 @@ fn journal_operation_sets_match_the_python_connector() {
         items
     };
     assert_eq!(sorted(zerus_relay::protocol::READS), set("READ_OPERATIONS"));
-    assert_eq!(sorted(zerus_relay::protocol::OPERATIONS), set("OPERATIONS"));
-    let mutations: Vec<&str> = zerus_relay::protocol::OPERATIONS
+    // The relay's set adds the operations only this connector executes; they
+    // are journaled as mutations, so an in-flight one recovers as uncertain.
+    let only = zerus_mobile_connector::capabilities::CONNECTOR_ONLY;
+    let python: Vec<&str> = zerus_relay::protocol::OPERATIONS
+        .iter()
+        .copied()
+        .filter(|operation| !only.contains(operation))
+        .collect();
+    assert_eq!(
+        python.len() + only.len(),
+        zerus_relay::protocol::OPERATIONS.len()
+    );
+    assert_eq!(sorted(&python), set("OPERATIONS"));
+    let mutations: Vec<&str> = python
         .iter()
         .copied()
         .filter(|operation| journal::is_mutation(operation))
         .collect();
     assert_eq!(sorted(&mutations), set("MUTATIONS"));
+    for operation in only {
+        assert!(journal::is_mutation(operation), "{operation}");
+        assert!(!journal::READ_CLASS_SQL.contains(operation), "{operation}");
+    }
     let sql = &operations["sql"];
     assert_eq!(
         journal::READ_CLASS_SQL,

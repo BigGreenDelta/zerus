@@ -1,10 +1,11 @@
-"""Strict contract for the Rust-only OpenCode launch-effort capability."""
+"""Strict contracts for the Rust-only OpenCode launch-effort and queue-removal capabilities."""
 import copy
 import unittest
 
 from differential import canonical, differences
 
 FEATURE = "opencode_launch_effort"
+REMOVAL = "remove_queued"
 
 
 def trace(shape, kind="heartbeat", count=1):
@@ -99,6 +100,56 @@ class CapabilityProjectionTests(unittest.TestCase):
                 self.assertEqual(len(found), 1)
                 self.assertEqual((found[0]["kind"], found[0]["side"], found[0]["python"], found[0]["rust"]),
                                  (kind, "count", 1, 2))
+
+
+def action_shapes(actions=True):
+    """Shapes with or without the session actions that gate queue removal."""
+    python = {"body": ["presence", "snapshot"], "snapshot": ["mobile_capabilities", "sessions"],
+              "operations": ["forget", "inspect", "rename"] if actions else ["inspect"], "features": ["inspect_after"]}
+    rust = copy.deepcopy(python)
+    if actions:
+        rust["operations"] = sorted([*rust["operations"], REMOVAL])
+    return python, rust
+
+
+class QueueRemovalProjectionTests(unittest.TestCase):
+    def test_rust_offers_removal_exactly_with_the_session_actions(self):
+        for kind in ("heartbeat", "peer heartbeat"):
+            for actions in (False, True):
+                with self.subTest(kind=kind, actions=actions):
+                    python, rust = action_shapes(actions)
+                    left, right = trace(python, kind), trace(rust, kind)
+                    original = copy.deepcopy((left, right))
+                    self.assertEqual(differences(left, right), ([], 0))
+                    self.assertEqual((left, right), original)
+
+    def test_missing_rust_removal_fails_even_when_both_raw_shapes_are_equal(self):
+        python, _ = action_shapes()
+        self.assertTrue(differences(trace(python), trace(python))[0])
+
+    def test_python_never_advertises_removal_even_if_both_sides_do(self):
+        _, rust = action_shapes()
+        self.assertTrue(differences(trace(rust), trace(rust))[0])
+
+    def test_no_session_actions_never_authorize_removal_on_either_side(self):
+        python, rust = action_shapes(False)
+        for side in ("python", "rust", "both"):
+            with self.subTest(side=side):
+                left, right = copy.deepcopy(python), copy.deepcopy(rust)
+                if side in ("python", "both"):
+                    left["operations"] = sorted([*left["operations"], REMOVAL])
+                if side in ("rust", "both"):
+                    right["operations"] = sorted([*right["operations"], REMOVAL])
+                self.assertTrue(differences(trace(left), trace(right))[0])
+
+    def test_other_session_actions_stay_exact(self):
+        python, rust = action_shapes()
+        right = copy.deepcopy(rust)
+        right["operations"].remove("rename")
+        self.assertTrue(differences(trace(python), trace(right))[0])
+        right = copy.deepcopy(rust)
+        right["operations"].remove("forget")
+        self.assertTrue(differences(trace(python), trace(right))[0])
 
 
 if __name__ == "__main__":

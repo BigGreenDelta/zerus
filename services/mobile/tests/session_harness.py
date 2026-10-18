@@ -12,7 +12,8 @@ import asyncio
 import json
 import uuid
 
-from connector_harness import SERVICE, BlackBoxCase, HELP_TEXT, canonical_uuid, default_rules, listing, session_row
+from connector_harness import (IMPLEMENTATION, SERVICE, BlackBoxCase, HELP_TEXT, canonical_uuid, default_rules, listing,
+                               session_row)
 
 VECTORS = SERVICE / "vectors"
 OPERATIONS = json.loads((VECTORS / "operations.json").read_text())
@@ -23,6 +24,10 @@ _TEXTS = ({row["message"] for row in _ERRORS["raises"]} | {row["message"] for ro
           | {row["error"] for row in _RECEIPTS["receipts"].values()})
 # The connector's own listing, help probe and catalog reads.
 BACKGROUND = (["--help"], ["ls", "--json", "--local"], ["swarm", "get"], ["account", "ls"])
+# Operations only the Rust connector executes, with the marker that gates each
+# there (`CONNECTOR_ONLY` in capabilities.rs). The Python connector, whose
+# tables the vectors freeze, never advertises them.
+RUST_ONLY = {"remove_queued": "lifecycle"}
 
 
 def validation(family: str) -> tuple[dict, list[dict]]:
@@ -72,11 +77,15 @@ def help_text(*markers: str) -> str:
 
 def advertised(*markers: str) -> list[str]:
     """The operations a connector advertises with exactly these markers: an
-    optional operation needs every marker that lists it."""
+    optional operation needs every marker that lists it. A Rust connector adds
+    its own operations under their markers."""
     needed: dict[str, set[str]] = {}
     for marker in _MARKERS.values():
         for operation in marker["operations"]:
             needed.setdefault(operation, set()).add(marker["name"])
+    if IMPLEMENTATION != "python":
+        for operation, marker in RUST_ONLY.items():
+            needed[operation] = {marker}
     return sorted(set(OPERATIONS["capabilities"]["none"]["operations"])
                   | {operation for operation, names in needed.items() if names <= set(markers)})
 

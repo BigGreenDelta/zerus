@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "description": "OpenCode message ids that a remove_queued request may name, treated alike by every layer: hgs session-action (src/state/opencode.rs queued_message_id), the Rust connector (services/mobile/connector/src/mutations.rs validate_remove_queued) and the relay (services/mobile/relay/src/protocol.rs). An id is valid when it is msg_ followed by 1-124 ASCII letters, digits, '_' or '-' (at most 128 bytes in all). The id must still name a queued, not delivered message of the exact session; this list only fixes the shape rule.",
+  "accept": [
+    "msg_gVmstesSuU81H2vTHdmxp65tNI",
+    "msg_A",
+    "msg_0",
+    "msg__",
+    "msg_-",
+    "msg_a-b_c9",
+    "msg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "reject": [
+    "",
+    "msg_",
+    "msg",
+    "msgA",
+    "MSG_A",
+    "ses_A",
+    "_msg_A",
+    " msg_A",
+    "msg_A ",
+    "msg_a b",
+    "msg_a/b",
+    "msg_../x",
+    "msg_a.b",
+    "msg_a:b",
+    "msg_a\\b",
+    "msg_a\tb",
+    "msg_a\nb",
+    "msg_a\u0000b",
+    "msg_a\u007fb",
+    "msg_caf\u00e9",
+    "msg_\uff21",
+    "msg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "not-a-message"
+  ]
+}

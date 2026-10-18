@@ -953,12 +953,25 @@ control character or `/`, as `hgs` projects it): in `launch` for agent
 layer tests against; membership in the model's `effort_options` stays
 authoritative. The relay advertises `opencode_launch_effort` too; phones offer
 such names only when both the relay and the computer advertise it.
-The connector also accepts a `remove_queued` session action carrying an exact
-`msg_` `message_id`, run and conversation identity and journals it like other
-session actions, and an in-flight one recovers as uncertain after a restart.
-It is currently unreachable from phones and relay clients: the relay operation
-set does not list it, so the relay rejects it and the connector does not
-advertise it. Phones do not offer it in phase 1.
+`remove_queued` removes one OpenCode message that was never delivered. It is a
+session mutation with a durable request identity, like `forget`: the payload
+holds exactly `request_id`, the exact `expected_run_id`, a nonempty
+`expected_conversation_id` and one `message_id`, `msg_` followed by 1-124 ASCII
+letters, digits, `_` or `-` (at most 128 characters). The relay, the Rust
+connector and `hgs session-action` check the same shape, which
+`tests/fixtures/opencode-queued-message-ids.json` fixes; any other field is
+refused. The Rust connector advertises it exactly when its native hgs offers the
+scoped session-action ABI, as for the other session actions, journals it like
+them, and an in-flight one recovers as uncertain after a restart. The legacy
+Python connector never advertises or accepts it, so the relay refuses it for a
+computer still running that connector. hgs removes the message only while it is
+still queued and the session is not running; it never resends it. A phone may
+offer Remove only when both the relay and the computer advertise
+`remove_queued`, the row's `delivery_state` is `not_delivered` and the session's
+`allowed_actions` contains `remove_queued`, always after an explicit
+confirmation for that exact run, conversation and message. It shows the message
+removed only after a completed receipt; a failed or uncertain receipt keeps the
+row with its reason and is never retried automatically.
 
 Legacy live `inspect` accepts an empty payload; an archive supplies its canonical
 `archive_id`. The `inspect_after` and `inspect_agent` features add a journal

@@ -405,8 +405,9 @@ class RustHttpContracts(unittest.IsolatedAsyncioTestCase):
             await self.call('POST', '/v1/requests', invalid, expected=400)
         delivered = await self.call('GET', '/v1/node/requests', node=True)
         self.assertEqual(delivered['requests'][0]['payload'], value['payload'])
-        # The released operation set, as the golden vectors froze it from the connector.
-        self.assertEqual(set((await self.call('GET', '/v1/capabilities'))['operations']), OPERATIONS)
+        # The released operation set, as the golden vectors froze it from the
+        # Python connector, and the OpenCode removal only the Rust connector runs.
+        self.assertEqual(set((await self.call('GET', '/v1/capabilities'))['operations']), OPERATIONS | {'remove_queued'})
 
     async def test_set_mobile_delivery_request_validation(self):
         value = {'request_id': str(uuid.uuid4()), 'computer_id': self.node['node_id'],

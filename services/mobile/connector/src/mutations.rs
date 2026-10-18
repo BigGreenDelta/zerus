@@ -249,7 +249,9 @@ pub fn opencode_effort_offered(
     }
 }
 
-/// `remove_queued`: scoped identity plus one exact `msg_` message identity.
+/// `remove_queued`: scoped identity plus one exact `msg_` message identity,
+/// `msg_` and 1-124 ASCII letters, digits, `_` or `-` as hgs and the relay
+/// check it (`tests/fixtures/opencode-queued-message-ids.json`).
 pub fn validate_remove_queued(payload: &Value, request_id: &str) -> Result<(), String> {
     if !scoped(payload, request_id, &["message_id"], &["message_id"], true) {
         return Err(text("invalid scoped native operation fields"));
@@ -263,7 +265,9 @@ pub fn validate_remove_queued(payload: &Value, request_id: &str) -> Result<(), S
             id.len() <= 128
                 && id.len() > "msg_".len()
                 && id.starts_with("msg_")
-                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         });
     if valid {
         Ok(())
@@ -1230,6 +1234,7 @@ mod tests {
     fn remove_queued_needs_one_exact_message_identity() {
         let check = |extra: Value| validate("remove_queued", &scoped_payload(extra), "r");
         assert_eq!(check(json!({"message_id": "msg_abc123"})), Ok(()));
+        assert_eq!(check(json!({"message_id": "msg_a-b_c"})), Ok(()));
         assert!(check(json!({"message_id": "msg_".to_owned() + &"a".repeat(124)})).is_ok());
         for bad in [
             json!({}),

@@ -4,7 +4,8 @@
 //!
 //! An operation is advertised only when the native CLI offers it, as in
 //! Python, and this connector implements it; a later slice adds to
-//! [`IMPLEMENTED`]. Python resets every flag before probing, so a failed
+//! [`IMPLEMENTED`]. [`CONNECTOR_ONLY`] operations follow the same markers but
+//! are never Python's. Python resets every flag before probing, so a failed
 //! probe disables everything for 300 s; here a probe that fails keeps the
 //! previous flags (divergence a).
 use serde_json::{json, Map, Value};
@@ -69,6 +70,12 @@ const FEATURE_OPERATIONS: &[(&str, &str)] = &[
     ("launch_project", "launch"),
     ("gateway_one_hop", "send"),
 ];
+
+/// Operations of the relay's set that only this connector executes, each
+/// gated by its native marker like the others (`remove_queued` by the
+/// scoped session-action ABI). The Python connector never lists or
+/// advertises them, so they are outside [`Flags::python_operations`].
+pub const CONNECTOR_ONLY: &[&str] = &["remove_queued"];
 
 pub const LIFECYCLE: &[&str] = &[
     "archive",
@@ -171,6 +178,16 @@ impl Flags {
     /// Python's advertised operations, before this build's own filter.
     /// `fleet` is whether a fleet exists (always in the connector).
     pub fn python_operations(&self, fleet: bool) -> BTreeSet<&'static str> {
+        let mut operations = self.offered(fleet);
+        for operation in CONNECTOR_ONLY {
+            operations.remove(operation);
+        }
+        operations
+    }
+
+    /// The relay's operations the native CLI offers, by Python's formula,
+    /// with [`CONNECTOR_ONLY`] under the same markers.
+    fn offered(&self, fleet: bool) -> BTreeSet<&'static str> {
         let mut removed: BTreeSet<&str> = BTreeSet::new();
         let mut remove = |gate: bool, operations: &[&'static str]| {
             if !gate {
@@ -235,12 +252,12 @@ impl Flags {
         self.advertised_for(true, one_hop)
     }
 
-    /// `mobile_capabilities` as this build advertises it: Python's sets
-    /// limited to implemented operations and the features they carry. A
-    /// peer context has no fleet.
+    /// `mobile_capabilities` as this build advertises it: Python's sets and
+    /// [`CONNECTOR_ONLY`], limited to implemented operations, and the
+    /// features they carry. A peer context has no fleet.
     pub fn advertised_for(&self, fleet: bool, one_hop: bool) -> Value {
         let operations: Vec<&str> = self
-            .python_operations(fleet)
+            .offered(fleet)
             .into_iter()
             .filter(|operation| implemented(operation))
             .collect();
@@ -318,6 +335,7 @@ mod tests {
                 "pause",
                 "process_output",
                 "process_stop",
+                "remove_queued",
                 "rename",
                 "restore",
                 "resume",
@@ -360,5 +378,38 @@ mod tests {
             ])
         );
         assert_eq!(none["reasons"].as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn remove_queued_follows_the_session_action_abi_and_is_never_pythons() {
+        let advertises = |flags: Flags| {
+            flags.advertised(false)["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|operation| operation == "remove_queued")
+        };
+        let lifecycle = Flags::from_help("hgs session-action <session> --json\n");
+        assert!(lifecycle.lifecycle && advertises(lifecycle));
+        assert!(lifecycle.advertised_for(false, false)["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "remove_queued"));
+        // Every other marker without the session-action ABI never offers it.
+        let others = Flags::from_help(
+            "terminal <session> --json\nhistory <session> --json\n--launch-id\nread <session> --json\nrecovery action --scoped-json\n",
+        );
+        assert!(!others.lifecycle && !advertises(others));
+        assert!(!advertises(Flags::default()));
+        // Python's tables never list it, with or without the ABI.
+        for flags in [lifecycle, others, Flags::default()] {
+            for fleet in [false, true] {
+                assert!(!flags.python_operations(fleet).contains("remove_queued"));
+            }
+        }
+        assert!(CONNECTOR_ONLY.iter().all(|operation| implemented(operation)
+            && LIFECYCLE.contains(operation)
+            && OPERATIONS.contains(operation)));
     }
 }

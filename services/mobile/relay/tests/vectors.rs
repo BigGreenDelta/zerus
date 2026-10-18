@@ -283,7 +283,21 @@ fn operation_tables_match_the_python_connector() {
         items.sort();
         items
     };
-    assert_eq!(sorted(protocol::OPERATIONS), set(&["OPERATIONS"]));
+    // `remove_queued` (OpenCode) is executed only by the Rust connector: the
+    // Python connector, whose tables these vectors freeze, never lists it.
+    let python: Vec<&str> = protocol::OPERATIONS
+        .iter()
+        .copied()
+        .filter(|operation| *operation != "remove_queued")
+        .collect();
+    assert_eq!(python.len() + 1, protocol::OPERATIONS.len());
+    assert_eq!(sorted(&python), set(&["OPERATIONS"]));
+    for name in ["OPERATIONS", "MUTATIONS", "LIFECYCLE_OPERATIONS"] {
+        assert!(
+            !set(&[name]).contains(&"remove_queued".to_owned()),
+            "{name}"
+        );
+    }
     assert_eq!(sorted(protocol::READS), set(&["READ_OPERATIONS"]));
     assert_eq!(sorted(protocol::LAUNCH), set(&["LAUNCH_OPERATIONS"]));
     assert_eq!(sorted(protocol::COMPUTER), set(&["COMPUTER_OPERATIONS"]));

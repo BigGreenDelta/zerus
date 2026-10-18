@@ -15,9 +15,9 @@ not traced. Every allowlist entry cites one of the deliberate divergences a-k
 
 What a connector's clock drives (polls, single heartbeats, periodic native
 reads) is reported but not compared; a shape summarizing each run's heartbeats
-is. That shape applies the explicit Rust-only OpenCode launch-effort capability
-contract; all other keys and arrays still match exactly. Native work and journal
-rows also match in number.
+is. That shape applies the explicit Rust-only OpenCode capability contracts
+(launch effort and queue removal); all other keys and arrays still match
+exactly. Native work and journal rows also match in number.
 """
 from __future__ import annotations
 
@@ -316,11 +316,14 @@ def capability_projection(entries: collections.Counter, side: str) -> tuple[coll
 
     Only accepted local/peer heartbeat SHAPEs are projected. Python must never
     offer OpenCode effort; Rust must offer it exactly when it offers launch.
-    All other keys, operations, features and counts remain exact comparisons.
-    Raw trace files are never changed.
+    Python must never offer OpenCode queue removal (`remove_queued`); Rust must
+    offer it exactly when it offers the session actions (`forget`), whose
+    native marker gates both. All other keys, operations, features and counts
+    remain exact comparisons. Raw trace files are never changed.
     """
     projected, invalid, seen = collections.Counter(), [], set()
     feature = "opencode_launch_effort"
+    removal, actions = "remove_queued", "forget"
     for entry, count in entries.items():
         if not entry.startswith(("SHAPE heartbeat", "SHAPE peer heartbeat")):
             projected[entry] += count
@@ -340,13 +343,20 @@ def capability_projection(entries: collections.Counter, side: str) -> tuple[coll
                 raise ValueError("one shape of each heartbeat kind is required")
             seen.add(kind)
             offered = feature in shape["features"]
+            removable = removal in shape["operations"]
             if side == "python":
                 if offered:
                     raise ValueError("Python must not advertise OpenCode launch effort")
+                if removable:
+                    raise ValueError("Python must not advertise OpenCode queue removal")
                 if "launch" in shape["operations"]:
                     shape["features"] = sorted([*shape["features"], feature])
+                if actions in shape["operations"]:
+                    shape["operations"] = sorted([*shape["operations"], removal])
             elif offered != ("launch" in shape["operations"]):
                 raise ValueError("Rust OpenCode launch effort must match its launch operation")
+            elif removable != (actions in shape["operations"]):
+                raise ValueError("Rust OpenCode queue removal must match its session actions")
             projected["SHAPE " + kind + " " + canonical(shape)] += count
         except (ValueError, TypeError) as error:
             invalid.append({"kind": "relay", "side": side,

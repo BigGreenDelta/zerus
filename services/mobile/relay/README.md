@@ -172,6 +172,15 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   a completed row 5 seconds after the phone has read its terminal receipt
   (`result_read`) or 60 seconds after completion, so file bytes are carried,
   not kept. Submission requires the computer to advertise the operation.
+  `remove_queued` (OpenCode) is a session mutation with a durable request
+  identity, like `forget`: exact `expected_run_id`, nonempty
+  `expected_conversation_id` and one `message_id`, `msg_` followed by 1–124
+  ASCII letters, digits, `_` or `-`
+  ([shared with hgs and the connector](../../../tests/fixtures/opencode-queued-message-ids.json));
+  any other field is rejected. Submission requires the computer to advertise
+  it, which only the Rust connector does, with the scoped session-action ABI.
+  The golden vectors freeze the Python connector's tables, so `tests/vectors.rs`
+  names it as the one operation they lack.
 - `json.rs` bounds depth and lexical structure before object materialization.
   Canonical ASCII escaping, key ordering, arbitrary integer precision and Python
   float formatting preserve API v1 request identities. A deterministic 20,000
@@ -344,6 +353,12 @@ requests table once, briefly blocking writes on PostgreSQL. Phones use the
 operation only when both relay capabilities and the computer snapshot list it,
 so the relay, connector and app can be deployed in any order; replace all
 PostgreSQL workers together so every worker accepts and expires the operation.
+
+Queue removal (`remove_queued`) adds no table, column or index: it is an
+ordinary mutation with permanent request identity. Phones use it only when both
+relay capabilities and the computer snapshot list it, so the relay, connector
+and app can be deployed in any order; replace all PostgreSQL workers together so
+every worker accepts it.
 
 Stop the sole SQLite server before local administration or a runtime replacement;
 Rust refuses a second owner of that file. Never run Python and Rust SQLite
