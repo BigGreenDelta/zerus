@@ -176,18 +176,47 @@ fn fetch_with(
 }
 /// How long a read waits for the bindings lock before it skips its save.
 const PUBLISH_WAIT: Duration = Duration::from_millis(200);
+/// Set once a read in this process found the lock busy: later reads (the
+/// rest of a listing) try once and never wait again.
+static PUBLISH_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Saves the cache only under the bindings lock, which Forget holds while it
 /// removes a binding and its cache, and only while this exact binding (run
 /// and conversation) is still the one under its name. A Forget, rename or
 /// re-creation that ran during the read wins: nothing is saved and this
-/// conversation's cache is removed. Without the lock the save is skipped.
+/// conversation's cache is removed. Without the lock the save is skipped;
+/// an action that already holds it saves at once.
 fn publish(record: &Value, cache: &Path, page: &Page) {
-    let lock = root().join("opencode/bindings.lock");
-    let Ok(Some(_guard)) = lock_until(&lock, Instant::now() + PUBLISH_WAIT) else {
+    use std::sync::atomic::Ordering::Relaxed;
+    publish_with(
+        || {
+            let wait = if PUBLISH_BUSY.load(Relaxed) {
+                Duration::ZERO
+            } else {
+                PUBLISH_WAIT
+            };
+            let guard = super::try_bindings(wait);
+            if guard.is_none() {
+                PUBLISH_BUSY.store(true, Relaxed);
+            }
+            guard
+        },
+        || super::binding(string(record, "name")).ok(),
+        record,
+        cache,
+        page,
+    );
+}
+fn publish_with<G>(
+    lock: impl FnOnce() -> Option<G>,
+    current: impl FnOnce() -> Option<Value>,
+    record: &Value,
+    cache: &Path,
+    page: &Page,
+) {
+    let Some(_guard) = lock() else {
         return;
     };
-    let current = super::binding(string(record, "name")).ok();
-    publish_locked(record, cache, page, current.as_ref());
+    publish_locked(record, cache, page, current().as_ref());
 }
 fn publish_locked(record: &Value, cache: &Path, page: &Page, current: Option<&Value>) {
     let same = current.is_some_and(|binding| {
@@ -974,6 +1003,34 @@ mod tests {
         // Forgotten (no binding): nothing saved.
         publish_locked(&a, &cache, &page, None);
         assert!(!cache.exists());
+    }
+
+    #[test]
+    fn a_read_saves_nothing_without_the_lock_and_rechecks_the_binding_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let page = Page {
+            messages: vec![message("msg_1", "x")],
+            truncated: false,
+        };
+        let a = json!({"name": "opencode/p/t", "run_id": "run-a", "conversation_id": "ses_A"});
+        let b = json!({"name": "opencode/p/t", "run_id": "run-b", "conversation_id": "ses_B"});
+        // Lock busy: nothing is saved, the binding is not even read.
+        publish_with(
+            || None::<()>,
+            || panic!("read without the lock"),
+            &a,
+            &cache,
+            &page,
+        );
+        assert!(!cache.exists());
+        // Under the lock the binding is read then: swapped mid-read to B.
+        std::fs::write(&cache, b"{}").unwrap();
+        publish_with(|| Some(()), || Some(b.clone()), &a, &cache, &page);
+        assert!(!cache.exists());
+        // Unchanged binding: saved.
+        publish_with(|| Some(()), || Some(a.clone()), &a, &cache, &page);
+        assert!(load_at(&cache, &a).is_some());
     }
 
     #[test]

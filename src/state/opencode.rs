@@ -21,6 +21,48 @@ fn bindings() -> PathBuf {
 fn binding_path(name: &str) -> PathBuf {
     bindings().join(format!("{:x}.json", Sha256::digest(name.as_bytes())))
 }
+thread_local! {
+    /// Whether this thread holds opencode/bindings.lock. Code running under
+    /// an action's own lock (its inspection, an adoption) never waits on it.
+    static BINDINGS_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// opencode/bindings.lock, released when dropped. A guard taken while this
+/// thread already holds the lock holds nothing more.
+pub(super) struct Bindings(Option<Guard>);
+impl Drop for Bindings {
+    fn drop(&mut self) {
+        if self.0.take().is_some() {
+            BINDINGS_HELD.with(|held| held.set(false));
+        }
+    }
+}
+fn bindings_lock() -> PathBuf {
+    root().join("opencode/bindings.lock")
+}
+/// The bindings lock, waiting as long as another process holds it.
+fn lock_bindings() -> Result<Bindings> {
+    lock_bindings_at(&bindings_lock())
+}
+fn lock_bindings_at(path: &Path) -> Result<Bindings> {
+    if BINDINGS_HELD.with(std::cell::Cell::get) {
+        return Ok(Bindings(None));
+    }
+    let guard = lock(Some(path))?;
+    BINDINGS_HELD.with(|held| held.set(true));
+    Ok(Bindings(Some(guard)))
+}
+/// The bindings lock within `wait`, or None while another process holds it.
+pub(super) fn try_bindings(wait: Duration) -> Option<Bindings> {
+    try_bindings_at(&bindings_lock(), wait)
+}
+fn try_bindings_at(path: &Path, wait: Duration) -> Option<Bindings> {
+    if BINDINGS_HELD.with(std::cell::Cell::get) {
+        return Some(Bindings(None));
+    }
+    let guard = lock_until(path, Instant::now() + wait).ok()??;
+    BINDINGS_HELD.with(|held| held.set(true));
+    Some(Bindings(Some(guard)))
+}
 pub(crate) fn exists(name: &str) -> bool {
     binding_path(name).is_file()
 }
@@ -268,8 +310,7 @@ fn save_verdicts(keys: &[String]) {
 /// Rewrite an adopted binding so it is never checked again. Skipped when the
 /// binding lock is busy; the next poll tries again.
 fn adopt_binding(name: &str, conversation_id: &str) {
-    let deadline = Instant::now() + Duration::from_millis(200);
-    let Ok(Some(_guard)) = lock_until(&root().join("opencode/bindings.lock"), deadline) else {
+    let Some(_guard) = try_bindings(Duration::from_millis(200)) else {
         return;
     };
     if let Ok(mut record) = binding(name) {
@@ -348,7 +389,7 @@ pub(crate) fn launch(
         return Ok(());
     }
     let _writer = lock(None)?;
-    let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
+    let _guard = lock_bindings()?;
     if record_path(name).exists() || live()?.contains_key(name) {
         return Err(
             "This name belongs to an existing terminal session; it was left untouched".into(),
@@ -712,10 +753,15 @@ fn sent_requests(
     messages: &[Value],
     inbox: &Value,
 ) -> std::collections::HashMap<String, String> {
+    // A message delivered between the inbox and history reads is judged by
+    // its delivered copy only.
+    let delivered: std::collections::HashSet<&str> =
+        messages.iter().map(|m| string(m, "id")).collect();
     let queued = inbox["data"]
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|item| !delivered.contains(string(item, "id")))
         .map(|item| (item, &item["payload"]["text"]));
     queued
         .chain(messages.iter().rev().map(|message| (message, &message["text"])))
@@ -732,6 +778,7 @@ fn sent_requests(
             let receipt = ledger.sent(request)?;
             (receipt["native_message_id"] == id
                 && receipt["conversation_id"] == record["conversation_id"]
+                && receipt["run_id"] == record["run_id"]
                 && text.is_string()
                 && receipt["text"] == *text)
                 .then(|| (id.to_owned(), request.to_owned()))
@@ -1526,7 +1573,7 @@ fn answer_with(
     Ok(receipt)
 }
 pub(crate) fn interrupt(record: &Value) -> Result<()> {
-    let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
+    let _guard = lock_bindings()?;
     let original = binding(string(record, "name"))?;
     if record["run_id"] != original["run_id"]
         || record["conversation_id"] != original["conversation_id"]
@@ -1799,14 +1846,14 @@ pub(super) fn session_action(
     message_id: Option<&str>,
     scope: &session_action::Scope,
 ) -> Result<()> {
-    let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
+    let _guard = lock_bindings()?;
     let mut record = binding(name)?;
     action(&mut record, kind, new_name, message_id, Some(scope))
 }
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose an OpenCode session")?;
     let _guard = if command != "inspect" && command != "exists" {
-        Some(lock(Some(&root().join("opencode/bindings.lock")))?)
+        Some(lock_bindings()?)
     } else {
         None
     };
@@ -3029,7 +3076,7 @@ mod tests {
         let receipt = |id: &str, request: &str, text: &str| {
             atomic(
                 &ledger.receipt(request),
-                &json!({"request_id": request, "conversation_id": "ses_A",
+                &json!({"request_id": request, "conversation_id": "ses_A", "run_id": "run",
                     "native_message_id": id, "text": text})
                 .to_string(),
             )
@@ -3071,6 +3118,29 @@ mod tests {
         assert!(!found.contains_key(&format!("msg_{:026}", 5)));
     }
     #[test]
+    fn the_bindings_lock_never_waits_on_this_threads_own_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.lock");
+        let held = lock_bindings_at(&path).unwrap();
+        // An action's own inspection: granted at once, holding nothing more.
+        let started = Instant::now();
+        let inner = try_bindings_at(&path, Duration::from_secs(5)).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(inner);
+        // Another thread (as another process would) waits and gives up.
+        let other = path.clone();
+        let busy = std::thread::spawn(move || {
+            try_bindings_at(&other, Duration::from_millis(50)).is_none()
+        });
+        assert!(busy.join().unwrap());
+        drop(held);
+        let other = path.clone();
+        let free = std::thread::spawn(move || {
+            try_bindings_at(&other, Duration::from_millis(50)).is_some()
+        });
+        assert!(free.join().unwrap());
+    }
+    #[test]
     fn a_request_is_attributed_only_to_its_exact_message_body() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = Ledger(dir.path().into());
@@ -3082,7 +3152,7 @@ mod tests {
             .unwrap();
             atomic(
                 &ledger.receipt(request),
-                &json!({"request_id": request, "conversation_id": "ses_A",
+                &json!({"request_id": request, "conversation_id": "ses_A", "run_id": "run",
                     "native_message_id": id, "text": text, "status": "uncertain"})
                 .to_string(),
             )
@@ -3100,6 +3170,14 @@ mod tests {
         let expected: std::collections::HashMap<String, String> =
             [("msg_gVmstesSuU81H2vTHdmxp65tNI".to_owned(), b.to_owned())].into();
         assert_eq!(found, expected);
+        // A message in both reads is judged by its delivered copy: an edited
+        // delivered body is not attributed even though the queued copy matched.
+        let edited = vec![json!({"id": "msg_gVmstesSuU81H2vTHdmxp65tNI", "type": "user", "text": "edited on delivery"})];
+        assert!(sent_requests(&ledger, &status_record("ses_A"), &edited, &observed.inbox).is_empty());
+        // Another run of the same conversation is not this receipt's.
+        let mut other_run = status_record("ses_A");
+        other_run["run_id"] = json!("another-run");
+        assert!(sent_requests(&ledger, &other_run, &observed.page.messages, &observed.inbox).is_empty());
         // The delivered copy of the same message, with its exact body, too.
         let delivered = vec![json!({"id": "msg_gVmstesSuU81H2vTHdmxp65tNI", "type": "user", "text": "queued later"})];
         let found = sent_requests(&ledger, &status_record("ses_A"), &delivered, &json!({"data": []}));
