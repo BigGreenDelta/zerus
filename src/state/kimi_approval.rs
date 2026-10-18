@@ -1522,13 +1522,13 @@ mod tests {
         for spelled in [
             old_line.replace(
                 r#""type":"interaction.request""#,
-                r#""type":"interaction.request""#,
+                r#""type":"interactio\u006e.request""#,
             ),
             old_line.replace(
                 r#""type":"interaction.request""#,
-                r#""type":"interaction.request""#,
+                r#""\u0074ype":"interaction.request""#,
             ),
-            old_line.replace(r#""id":"approval_old""#, r#""id":"approval_old""#),
+            old_line.replace(r#""id":"approval_old""#, r#""id":"approval_ol\u0064""#),
         ] {
             assert_ne!(spelled, old_line);
             refused(format!("{spelled}\n{new}\n"), "Another Kimi request");
@@ -1563,7 +1563,7 @@ mod tests {
         // A closure decoded from escapes closes exactly that request.
         let closed = format!(
             "{old_line}\n{}\n{new}\n",
-            r#"{"type":"interaction.resolved","agentId":"main","id":"approval_old","response":{"decision":"approved"},"time":1100}"#
+            r#"{"type":"interaction.resolve\u0064","agentId":"main","id":"approval_ol\u0064","response":{"decision":"approved"},"time":1100}"#
         );
         fs::write(&wire, closed).unwrap();
         assert_eq!(bound(&r, &card).unwrap()["id"], "approval_new");
