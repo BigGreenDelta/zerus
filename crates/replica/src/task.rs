@@ -202,6 +202,7 @@ impl TaskDoc {
                 at: integer(&entry, "at").unwrap_or(0),
                 text: string(&entry, "text").unwrap_or_default(),
                 session: string(&entry, "session").and_then(|s| serde_json::from_str(&s).ok()),
+                request_id: string(&entry, "request_id"),
             });
         }
         // A merge orders entries appended on two replicas by peer, not by time;
@@ -246,7 +247,7 @@ impl TaskDoc {
         at: i64,
         text: &str,
         session: Option<&SessionKey>,
-    ) -> Result<()> {
+    ) -> Result<LoroMap> {
         let list = self.doc.get_list("log");
         let entry = list.insert_container(list.len(), LoroMap::new())?;
         entry.insert("kind", kind)?;
@@ -258,7 +259,7 @@ impl TaskDoc {
         if let Some(session) = session {
             entry.insert("session", serde_json::to_string(session)?)?;
         }
-        Ok(())
+        Ok(entry)
     }
 
     fn writable(&self) -> Result<()> {
@@ -380,7 +381,8 @@ impl TaskDoc {
         fields.insert("session", serde_json::to_string(session)?)?;
         fields.delete("cancelled_at")?;
         fields.delete("cancel_reason")?;
-        self.log("sent", actor, now, request_id, Some(session))?;
+        self.log("sent", actor, now, "", Some(session))?
+            .insert("request_id", request_id)?;
         self.doc.commit();
         Ok(())
     }
@@ -411,6 +413,10 @@ impl TaskDoc {
 
     pub fn record_cancel(&mut self, reason: &str, actor: &Actor, now: i64) -> Result<()> {
         self.require(&[Stage::Active], "only a task In progress can be cancelled")?;
+        // The reason becomes a comment, under the same rules.
+        if !reason.trim().is_empty() {
+            check_text(reason, "reason")?;
+        }
         let fields = self.fields();
         fields.insert("stage", Stage::Review.as_str())?;
         fields.insert("cancelled_at", now)?;
@@ -656,6 +662,33 @@ mod tests {
         assert_eq!(
             t.comment("x", &Actor::Person, 2).unwrap_err().to_string(),
             "Update Zerus to edit this task"
+        );
+    }
+
+    #[test]
+    fn a_cancel_reason_follows_the_comment_rules() {
+        let mut t = task(Stage::Todo);
+        t.record_send(&api(), "r", &Actor::Person, 2).unwrap();
+        let error = t
+            .record_cancel("stop\x1b[2J", &Actor::Person, 3)
+            .unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+        assert!(t
+            .record_cancel(&"x".repeat(70_000), &Actor::Person, 3)
+            .is_err());
+        assert_eq!(t.stage().unwrap(), Stage::Active);
+        t.record_cancel("", &Actor::Person, 4).unwrap();
+    }
+
+    #[test]
+    fn a_send_keeps_its_request_apart_from_the_text() {
+        let mut t = task(Stage::Todo);
+        t.record_send(&api(), "req-1", &Actor::Person, 2).unwrap();
+        let log = t.view().unwrap().log;
+        let sent = log.iter().find(|e| e.kind == "sent").unwrap();
+        assert_eq!(
+            (sent.text.as_str(), sent.request_id.as_deref()),
+            ("", Some("req-1"))
         );
     }
 

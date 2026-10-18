@@ -1,5 +1,5 @@
 //! The prompts Zerus pastes: the task prompt and the cancel message.
-use crate::schema::{Actor, TaskView, MAX_TEXT};
+use crate::schema::{check_controls, Actor, TaskView, MAX_TEXT};
 use crate::{Error, Result};
 
 /// How the prompt names the task tools: the MCP server, or `hgs task`
@@ -74,6 +74,7 @@ fn checked(text: String) -> Result<String> {
     if text.starts_with('/') || text.starts_with('!') {
         return Err(Error::new("a prompt cannot start with / or !"));
     }
+    check_controls(&text, "rendered prompt")?;
     Ok(text)
 }
 
@@ -140,6 +141,13 @@ mod tests {
         .unwrap()
         .view()
         .unwrap()
+    }
+
+    #[test]
+    fn a_rendered_prompt_refuses_terminal_control_characters() {
+        let template = format!("{DEFAULT_TASK_TEMPLATE}\x07");
+        let error = task_prompt(&template, &view(), "orchard", Tools::Cli).unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
     }
 
     #[test]

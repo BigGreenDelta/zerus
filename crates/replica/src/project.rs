@@ -1,5 +1,5 @@
 //! A project's task settings as one small Loro document.
-use crate::schema::{Actor, SessionKey, SCHEMA};
+use crate::schema::{check_controls, Actor, SessionKey, SCHEMA};
 use crate::{Error, Result};
 use loro::{ExportMode, LoroDoc, LoroValue, VersionVector};
 use serde::{Deserialize, Serialize};
@@ -133,6 +133,7 @@ impl ProjectDoc {
                     "the {name} template is longer than 16 KiB"
                 )));
             }
+            check_controls(template, &format!("{name} template"))?;
         }
         if settings.agent_limit < 0 {
             return Err(Error::new("the agent limit cannot be negative"));
@@ -151,6 +152,17 @@ impl ProjectDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn templates_refuse_terminal_control_characters() {
+        let mut project = ProjectDoc::new();
+        let settings = Settings {
+            task_template: format!("{DEFAULT_TASK_TEMPLATE}\x1b[31m"),
+            ..Settings::default()
+        };
+        let error = project.set_settings(&settings).unwrap_err();
+        assert!(error.to_string().contains("control characters"), "{error}");
+    }
 
     #[test]
     fn defaults_then_validated_changes() {

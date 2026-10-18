@@ -82,6 +82,9 @@ pub struct LogEntry {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionKey>,
+    /// A send's durable hgs request, for matching it to the paste receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// A task as callers read it.
@@ -112,7 +115,11 @@ pub(crate) fn check_text(text: &str, what: &str) -> Result<()> {
     if text.len() > MAX_TEXT {
         return Err(Error::new(format!("the {what} is longer than 64 KiB")));
     }
-    // hgs pastes only text: terminal control characters never reach an agent.
+    check_controls(text, what)
+}
+
+/// hgs pastes only text: terminal control characters never reach an agent.
+pub(crate) fn check_controls(text: &str, what: &str) -> Result<()> {
     if text
         .chars()
         .any(|c| c.is_control() && c != '\n' && c != '\t')
