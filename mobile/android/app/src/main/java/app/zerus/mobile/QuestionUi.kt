@@ -207,22 +207,22 @@ import org.json.JSONObject
                 currentPrompts.forEach { prompt ->
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (prompt.header.isNotBlank()) Text(prompt.header, style = MaterialTheme.typography.labelLarge)
-                        if(question.approval) Text(prompt.text, fontWeight = FontWeight.SemiBold)
+                        if(!QuestionPolicies.authoredMarkdown(question)) Text(prompt.text, fontWeight = FontWeight.SemiBold)
                         else ProvideTextStyle(LocalTextStyle.current.copy(fontWeight=FontWeight.SemiBold)) { MarkdownText(prompt.text) }
                         if (prompt.body.isNotBlank()) {
-                            if(question.approval) Text(prompt.body, fontFamily=FontFamily.Monospace)
+                            if(!QuestionPolicies.authoredMarkdown(question)) Text(prompt.body, fontFamily=FontFamily.Monospace)
                             else MarkdownText(prompt.body)
                         }
                     } }
                     if (prompt.otherDescription.isNotBlank()) {
-                        if(question.approval) SelectionContainer { Text(prompt.otherDescription, style=MaterialTheme.typography.bodySmall) }
+                        if(!QuestionPolicies.authoredMarkdown(question)) SelectionContainer { Text(prompt.otherDescription, style=MaterialTheme.typography.bodySmall) }
                         else ProvideTextStyle(MaterialTheme.typography.bodySmall) { MarkdownText(prompt.otherDescription) }
                     }
                     prompt.choices.forEach { choice ->
                         if (question.approval) {
                             SelectionContainer { Text(choice.label, style = MaterialTheme.typography.bodySmall) }
                             if (choice.description.isNotBlank()) SelectionContainer { Text(choice.description, style = MaterialTheme.typography.bodySmall) }
-                        } else QuestionOption(choice, prompt.multi, choice.id in options[prompt.id].orEmpty(), QuestionPolicies.inputEnabled(question, editing)) {
+                        } else QuestionOption(choice, prompt.multi, choice.id in options[prompt.id].orEmpty(), QuestionPolicies.inputEnabled(question, editing),markdown=QuestionPolicies.authoredMarkdown(question)) {
                             val selected = options[prompt.id].orEmpty()
                             options = options + (prompt.id to if (prompt.multi) {
                                 if (choice.id in selected) selected - choice.id else selected + choice.id
@@ -333,7 +333,7 @@ import org.json.JSONObject
     }
 }
 
-@Composable private fun QuestionOption(choice: Choice, multi: Boolean, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+@Composable private fun QuestionOption(choice: Choice, multi: Boolean, selected: Boolean, enabled: Boolean, markdown:Boolean, onClick: () -> Unit) {
     val select = if (multi) Modifier.toggleable(selected, enabled, Role.Checkbox) { onClick() }
         else Modifier.selectable(selected, enabled, Role.RadioButton, onClick)
     Surface(color = MaterialTheme.colorScheme.surface, shape = MaterialTheme.shapes.small,
@@ -342,7 +342,10 @@ import org.json.JSONObject
             if (multi) Checkbox(selected, null) else RadioButton(selected, null)
             Column(Modifier.padding(start = 8.dp)) {
                 Text(choice.label)
-                if (choice.description.isNotBlank()) ProvideTextStyle(MaterialTheme.typography.bodySmall) { MarkdownText(choice.description) }
+                if (choice.description.isNotBlank()) {
+                    if(markdown) ProvideTextStyle(MaterialTheme.typography.bodySmall) { MarkdownText(choice.description) }
+                    else Text(choice.description,style=MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }

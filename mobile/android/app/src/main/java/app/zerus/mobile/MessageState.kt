@@ -21,7 +21,12 @@ fun Target.resolvesTo(current: Target): Boolean = agentId.isBlank() && current.a
 data class MessageState(val drafts: List<Draft> = emptyList(), val outgoing: List<OutgoingMessage> = emptyList(), val pickerDraft: Draft? = null, val pickerId: String = "", val contextOperations: List<ContextOperation> = emptyList(), val sessionActions: List<SessionAction> = emptyList(), val conversationIndex: List<IndexedConversation> = emptyList(), val terminalBuffers:List<TerminalBuffer> = emptyList(), val machineAliases:List<MachineAlias> = emptyList(), val machineColors:List<MachineColorOverride> = emptyList(), val speechAppliedIds:List<String> = emptyList()) {
     fun action(action: SessionAction): MessageState {
         val next = sessionActions.filterNot { it.requestId == action.requestId } + action
-        return copy(sessionActions = next.filter { it.blocksSending || it.status == "scheduled" || it.needsProjectReview } + next.filterNot { it.blocksSending || it.status == "scheduled" || it.needsProjectReview }.takeLast(100))
+        // Only confirmed scheduled apply children enter the terminal retention pool.
+        // Keep the latest child referenced by a live original authorization.
+        val referenced=next.filter { it.operation=="settings" && it.status=="scheduled" && ScheduledSettingsAttempt.expectedPendingId(it)==null }.map { it.applyAttemptId }.toSet()
+        fun retain(value:SessionAction)=value.blocksSending || value.needsProjectReview || value.status=="scheduled" &&
+            (value.operation!="settings" || ScheduledSettingsAttempt.expectedPendingId(value)==null || value.requestId in referenced)
+        return copy(sessionActions = next.filter(::retain) + next.filterNot(::retain).takeLast(100))
     }
     fun context(operation: ContextOperation): MessageState {
         val next = contextOperations.filterNot { it.requestId == operation.requestId } + operation

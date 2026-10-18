@@ -348,7 +348,11 @@ and a fresh inspection permits the action. These include session lifecycle,
 queue Send now, model and effort changes, process output and Stop requested,
 scoped recovery controls, and exact child history. Scheduled model settings have
 one durable authorized apply attempt when native readiness is observed, including
-when another session is open. Uncertain actions expose their original receipt;
+when another session is open. If that attempt is confirmed as scheduled again,
+a later fresh NotReady → Ready transition in the same app process can authorize
+one new attempt, pinned to the exact pending ID, model and effort. Repeated Ready,
+restoration and checking an old receipt never grant that authority; unknown
+results are checked using their original request. Uncertain actions expose their original receipt;
 they are never retried automatically.
 
 Model and effort opens a sheet with a scrolling native model list and a pinned

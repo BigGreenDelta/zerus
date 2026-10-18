@@ -191,6 +191,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     val sessionActions get() = messageState.sessionActions.map { if(it.requestId !in actionFlights) it.recover() else it }
     private var contextFlights by mutableStateOf<Set<String>>(emptySet())
     private val pendingSettingsAttempts = mutableSetOf<String>()
+    private val scheduledSettingsRetry = ScheduledSettingsRetry()
     private val scheduledReadScheduler=HistoryHeadScheduler()
     private val acknowledgedContexts = mutableSetOf<String>()
     private val contextObservations = mutableSetOf<String>()
@@ -222,6 +223,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var unreadBoundaryCaptured=false
     // Marks submitted by this process; a failed submission is forgotten so the next view retries.
     private val sharedReadsSent=mutableSetOf<String>()
+    // Marks completed without being applied wait in one bounded table, released by one owned timer.
+    private val sharedReadRetries=SharedReadRetries()
+    private var sharedReadRetryTimer:Job?=null
     private var readAllShares:Job?=null
     fun conversationViewport(target:Target)=readState.record(target)?.viewport
     fun saveConversationViewport(target:Target,eventId:String,offset:Int) {
@@ -583,9 +587,21 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return SharedReadRequest(connection,target,payload,target.key+"\n"+payload)
     }
     private suspend fun sendSharedRead(request:SharedReadRequest) {
-        val completed=try { api.markRead(request.connection,request.target,request.payload).string("state")=="completed" }
-            catch(e:Exception) { if(e is CancellationException) { sharedReadsSent.remove(request.key);throw e };false }
-        if(!completed) sharedReadsSent.remove(request.key)
+        val receipt=try { api.markRead(request.connection,request.target,request.payload) }
+            catch(e:Exception) { sharedReadsSent.remove(request.key);if(e is CancellationException) throw e;return }
+        if(receipt.string("state")!="completed") { sharedReadsSent.remove(request.key);return }
+        if(SharedReadPolicies.applied(receipt,request.payload)) { sharedReadRetries.applied(request.key);return }
+        // Completed without applying: the same mark may go again only after a delay, without holding Read all.
+        // At capacity it stays sent, so nothing is ever resent beyond the bound.
+        if(sharedReadRetries.unapplied(request.key,request.target.connectionId,android.os.SystemClock.elapsedRealtime())!=null) scheduleSharedReadRetries()
+    }
+    /**
+     * The one owned timer: it wakes at the earliest due mark and lets exactly the released marks go again.
+     * Rescheduling cancels it, and a late wakeup releases only marks that are due by the monotonic clock.
+     */
+    private fun scheduleSharedReadRetries() {
+        sharedReadRetryTimer?.cancel()
+        sharedReadRetryTimer=viewModelScope.launch { sharedReadRetries.releaseWhenDue(android.os.SystemClock::elapsedRealtime) { sharedReadsSent.remove(it) } }
     }
     /** Tell the session's computer that this phone showed its current reply (C4 `mark_read`). */
     private fun shareRead(target:Target) {
@@ -613,7 +629,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var activityVerified by mutableStateOf(false); private set
     var historyCached by mutableStateOf(false); private set
     var conversationHistoryTruncated by mutableStateOf(false); private set
-    private data class Frame(val target: Target, val raw: JSONObject, val events: List<Event>, val questions: List<Question>, val observedAt: Long, val bytes: Int, val truncated: Boolean = false, var presentation: Presentation? = null,val window:HistoryWindow?=null,val indexComplete:Boolean=false,val indexing:Boolean=false,val unreadBoundary:String?=null,val inspectedEvents:List<Event> = emptyList())
+    private data class Frame(val target: Target, val raw: JSONObject, val events: List<Event>, val questions: List<Question>, val observedAt: Long, val bytes: Int, val truncated: Boolean = false, var presentation: Presentation? = null,val window:HistoryWindow?=null,val indexComplete:Boolean=false,val indexing:Boolean=false,val unreadBoundary:String?=null,val inspectedEvents:List<Event> = emptyList(),val settingsInspectionStartNanos:Long=0)
     private data class Presentation(val messages: List<OutgoingMessage>, val events: List<Event>, val questions: List<Question>)
     private val pageCache=ConversationPageCache(application)
     private val historyCache = ConversationCache(application)
@@ -878,6 +894,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         inspections[target.key]?.let { return it.second }
         val observedAt = System.currentTimeMillis()
         val task = viewModelScope.async {
+            val settingsInspectionStartNanos=android.os.SystemClock.elapsedRealtimeNanos()
             val raw = api.inspect(connection, target)
             val resolved = if (target.archiveId.isNotBlank()) target else target.copy(run = raw.string("run_id"), conversation = raw.string("conversation_id"))
             val previous = frames[resolved.key]
@@ -890,7 +907,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val nativeUnknown=currentWindow?.let { HistoryInspection.changed(it,incoming,previous?.inspectedEvents.orEmpty()) }==true
                 Triple(Frame(resolved,raw,events,NativeParser.questions(raw),observedAt,
                     raw.toString().toByteArray(Charsets.UTF_8).size+EventHistoryCodec.encode(events).toString().toByteArray(Charsets.UTF_8).size,
-                    retained.truncated || previous?.truncated==true || raw.optBoolean("mobile_history_truncated"),window=window,indexComplete=historyComplete && !nativeUnknown,indexing=historyIndexing,inspectedEvents=incoming),retained.supersededIds,window)
+                    retained.truncated || previous?.truncated==true || raw.optBoolean("mobile_history_truncated"),window=window,indexComplete=historyComplete && !nativeUnknown,indexing=historyIndexing,inspectedEvents=incoming,settingsInspectionStartNanos=settingsInspectionStartNanos),retained.supersededIds,window)
             }
             // A page can publish during Default parsing. Rebase before mutating the
             // window map, so the older inspection snapshot cannot erase that page.
@@ -921,10 +938,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         task.invokeOnCompletion { viewModelScope.launch { if (inspections[target.key]?.second === task) inspections.remove(target.key) } }
         return task
     }
-    private fun authorizedSettingsReason(target:Target,args:JSONObject,authorized:SessionAction,frame:Frame?):String {
+    private fun authorizedSettingsReason(target:Target,args:JSONObject,authorized:SessionAction,frame:Frame?,retry:ScheduledSettingsRetry.Grant?=null):String {
         if(updateInstallPreparing) return "Saving drafts for an app update."
         val raw=frame?.raw ?: return "No fresh settings inspection."
-        if(frame.target != target || target.agentId.isNotBlank() || target.archiveId.isNotBlank() || authorized.operation != "settings" || authorized.status != "scheduled" || authorized.applyAttemptId.isNotBlank() ||
+        val age=android.os.SystemClock.elapsedRealtimeNanos()-frame.settingsInspectionStartNanos
+        if(frame.settingsInspectionStartNanos<=0 || age !in 0..10_000_000_000L) return "No fresh settings inspection."
+        if(retry!=null && (retry.original!=authorized || retry.target!=target || args.opt("model")!=retry.model || args.opt("effort")!=retry.effort || args.opt("expected_pending_id")!=retry.pendingId)) return "The authorized settings identity changed."
+        if(frame.target != target || target.agentId.isNotBlank() || target.archiveId.isNotBlank() || authorized.operation != "settings" || authorized.status != "scheduled" || (authorized.applyAttemptId.isNotBlank() && retry==null) ||
             authorized.target.connectionId != target.connectionId || authorized.target.computerId != target.computerId || authorized.target.session != target.session || authorized.target.conversation != target.conversation ||
             raw.string("name") != target.session || raw.string("run_id") != target.run || raw.string("conversation_id") != target.conversation ||
             raw.string("pending_settings_id") != authorized.pendingId || args.string("expected_pending_id") != authorized.pendingId || raw.string("settings_apply_when") != "now" || raw.string("phase") != "idle" || raw.string("activity") != "idle") return "The authorized settings identity changed."
@@ -932,7 +952,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return SessionActionPolicies.inspectReason(target,"settings",args,raw)
     }
     private suspend fun watchScheduledSettings() {
-        val authorized=messageState.sessionActions.filter { it.operation == "settings" && it.status == "scheduled" && it.applyAttemptId.isBlank() && it.pendingId.isNotBlank() &&
+        val authorized=messageState.sessionActions.filter { it.operation == "settings" && it.status == "scheduled" && (it.applyAttemptId.isBlank() || scheduledSettingsRetry.tracks(it)) && it.pendingId.isNotBlank() &&
             runCatching { JSONObject(it.arguments).string("expected_pending_id").isBlank() }.getOrDefault(false) }
         if(authorized.isEmpty()) return
         val candidates=mutableListOf<Triple<Connection,SessionAction,Target>>()
@@ -941,7 +961,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             for(intent in authorized.filter { it.target.connectionId==connection.id }) {
                 val computer=computers.find { it.string("id")==intent.target.computerId && it.optBoolean("online") } ?: continue
                 val row=computer.optJSONObject("snapshot")?.optJSONArray("sessions")?.objects().orEmpty().find { it.string("name")==intent.target.session && it.string("conversation_id")==intent.target.conversation && it.string("archive_id").isBlank() } ?: continue
-                if(row.string("activity")!="idle" || row.string("phase")!="idle") continue
+                if(intent.applyAttemptId.isBlank() && (row.string("activity")!="idle" || row.string("phase")!="idle")) continue
+                if(intent.applyAttemptId.isNotBlank() && row.string("run_id")!=intent.target.run) continue
                 candidates+=Triple(connection,intent,intent.target.copy(run=row.string("run_id")))
             }
         }
@@ -958,22 +979,32 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     private fun observeScheduledSettings(frame: Frame) {
-        val raw=frame.raw; val pending=raw.string("pending_settings_id")
-        if(pending.isBlank() || raw.string("settings_apply_when") != "now" || raw.string("activity") != "idle" || raw.string("phase") != "idle") return
-        val key=frame.target.key + ":" + pending
-        if(key in pendingSettingsAttempts) return
-        val authorized=messageState.sessionActions.lastOrNull { action -> action.operation == "settings" && action.status == "scheduled" && action.applyAttemptId.isBlank() && action.pendingId == pending &&
+        val raw=frame.raw;val pending=raw.string("pending_settings_id")
+        if(pending.isBlank() || frame.settingsInspectionStartNanos<=0) return
+        val online=connections.any { it.id==frame.target.connectionId } && machines.any { it.connectionId==frame.target.connectionId && it.id==frame.target.computerId && it.online }
+        val authorized=messageState.sessionActions.lastOrNull { action -> action.operation == "settings" && action.status == "scheduled" && action.pendingId == pending &&
+            (action.applyAttemptId.isBlank() || scheduledSettingsRetry.tracks(action)) &&
             runCatching { JSONObject(action.arguments).string("expected_pending_id").isBlank() }.getOrDefault(false) &&
             action.target.connectionId == frame.target.connectionId && action.target.computerId == frame.target.computerId && action.target.session == frame.target.session && action.target.conversation == frame.target.conversation } ?: return
-        if(messageState.sessionActions.any { action -> action.operation == "settings" && action.target.connectionId == frame.target.connectionId &&
+        val retry=if(authorized.applyAttemptId.isBlank()) null else {
+            val child=messageState.sessionActions.find { it.requestId==authorized.applyAttemptId } ?: return
+            scheduledSettingsRetry.inspect(authorized,child,frame.target,raw,frame.settingsInspectionStartNanos,android.os.SystemClock.elapsedRealtimeNanos(),true,online) ?: return
+        }
+        if(raw.string("settings_apply_when") != "now" || raw.string("activity") != "idle" || raw.string("phase") != "idle") return
+        val key=frame.target.key + ":" + pending
+        if(retry==null && (key in pendingSettingsAttempts || messageState.sessionActions.any { action -> action.operation == "settings" && action.target.connectionId == frame.target.connectionId &&
             action.target.computerId == frame.target.computerId && action.target.session == frame.target.session && action.target.conversation == frame.target.conversation &&
-            runCatching { JSONObject(action.arguments).string("expected_pending_id") == pending }.getOrDefault(false) }) return
-        val args=JSONObject(authorized.arguments)
+            runCatching { JSONObject(action.arguments).string("expected_pending_id") == pending }.getOrDefault(false) })) return
+        val args=if(retry==null) JSONObject(authorized.arguments) else JSONObject().put("model",retry.model).put("effort",retry.effort)
         if(listOf("model","effort").any { args.has(it) && raw.string("pending_" + it) != args.string(it) }) return
         args.put("expected_pending_id",pending)
-        if(authorizedSettingsReason(frame.target,args,authorized,frame).isNotBlank()) return
-        pendingSettingsAttempts += key
-        submitSessionAction(frame.target,"settings",args,authorized,frame)
+        if(authorizedSettingsReason(frame.target,args,authorized,frame,retry).isNotBlank()) {
+            retry?.let(scheduledSettingsRetry::discard)
+            return
+        }
+        val consumed=retry?.let { scheduledSettingsRetry.consume(it) ?: return }
+        if(retry==null) pendingSettingsAttempts += key
+        submitSessionAction(frame.target,"settings",args,authorized,frame,retry=consumed)
     }
     var launchMachine by mutableStateOf<MachineKey?>(null);private set
     var launchVisible by mutableStateOf(false);private set
@@ -1527,9 +1558,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         sessionMenuRequest = null
         return request.operation.takeIf { request.navigation == navigationId && request.target == target }
     }
-    private fun submitSessionAction(target:Target,operation:String,args:JSONObject,authorized:SessionAction?=null,frame:Frame?=null,terminalBuffer:TerminalBuffer?=null) {
+    private fun submitSessionAction(target:Target,operation:String,args:JSONObject,authorized:SessionAction?=null,frame:Frame?=null,terminalBuffer:TerminalBuffer?=null,retry:ScheduledSettingsRetry.ConsumedGrant?=null) {
         val inspected=frame?.raw ?: activity ?: JSONObject()
-        val reason = if(authorized == null) actionReason(target,operation) else authorizedSettingsReason(target,args,authorized,frame); if(reason.isNotBlank()) { error=reason; return }
+        val reason = if(authorized == null) actionReason(target,operation) else authorizedSettingsReason(target,args,authorized,frame,retry?.grant); if(reason.isNotBlank()) { error=reason; return }
         val nativeEfforts = nativeEffortsSupported(target,inspected)
         SessionActionPolicies.effortReason(operation,args,nativeEfforts).takeIf { it.isNotBlank() }?.let { error=it; return }
         val arguments = try { SessionActionPolicies.arguments(operation,args,nativeEfforts) } catch(e:Exception) { error=e.message.orEmpty(); return }
@@ -1545,7 +1576,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 durable({ state ->
                     if(terminalBuffer != null) TerminalBuffers.enqueue(state,terminalBuffer,action) else if(authorized == null) state.action(action) else {
-                        ScheduledSettingsAttempt.begin(state,authorized,action)
+                        ScheduledSettingsAttempt.begin(state,authorized,action,retry)
                     }
                 }, { current,written ->
                     var next=if(terminalBuffer == null) current.action(written.sessionActions.first { it.requestId == action.requestId }) else TerminalBuffers.acknowledge(current,written,terminalBuffer,action)
@@ -1566,7 +1597,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val initial=try { api.submit(connection,target,operation,payload,action.requestId) }
                     catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429); throw e }
                 val receipt = if(operation == "terminal_input") api.await(connection,initial,50,100) else api.await(connection,initial)
-                settleSessionAction(action,receipt)
+                settleSessionAction(action,receipt,authorized)
                 val completed=messageState.sessionActions.find { it.requestId == action.requestId }
                 if(operation == "terminal_input") { if(selected?.target == target && terminalVisible) terminalSnapshot(target) }
                 else if(completed != null) when(SessionActionFollowUp.kind(completed,selected?.target,navigationId==navigation)) {
@@ -1640,7 +1671,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         catch(_:Exception) { if(navigationId==navigation && selected?.target==original) actionResultNotice="The computer confirmed the action. Its destination is not reachable yet. Open the confirmed result when connected; your original draft remains saved." }
         finally { resolvingActionResults-=action.requestId }
     }
-    private suspend fun settleSessionAction(action: SessionAction,receipt: JSONObject) {
+    private suspend fun settleSessionAction(action: SessionAction,receipt: JSONObject,scheduledAuthorization:SessionAction?=null) {
         val result = SessionActionPolicies.result(action,receipt)
         if(result.status=="applied" && action.operation in setOf("archive","terminate","restore","forget","rename"))archive.refresh()
         durable({ state -> state.sessionActions.find { it.requestId == action.requestId }?.let { current ->
@@ -1654,6 +1685,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             written.sessionActions.find { it.applyAttemptId == action.requestId }?.let { next=next.action(it) }
             next
         })
+        // Only this process's authorized submit callback can establish another cycle.
+        // Receipt checking/restoration deliberately uses the default null authorization.
+        if(scheduledAuthorization!=null && result.operation=="settings" && result.status=="scheduled") {
+            val original=messageState.sessionActions.find { it.requestId==scheduledAuthorization.requestId && it.applyAttemptId==action.requestId } ?: return
+            val child=messageState.sessionActions.find { it.requestId==action.requestId && it==result } ?: return
+            receipt.optJSONObject("result")?.let { scheduledSettingsRetry.register(original,child,android.os.SystemClock.elapsedRealtimeNanos(),it) }
+        }
     }
     fun recoveryActionReason(target:Target,jobId:String,choice:String):String {
         val reason=actionReason(target,"recovery_action");if(reason.isNotBlank()) return reason
@@ -1846,6 +1884,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             catch (e: RelayException) { if (e.status != 401) throw e }
             val next = connections.filterNot { it.id == connection.id }
             withContext(Dispatchers.IO) { store.saveConnections(next) }; connections = next
+            sharedReadRetries.forget(connection.id); scheduleSharedReadRetries()
+            if (catalogErrorOwner == connection.id || detailReadErrorOwner?.first?.connectionId == connection.id) error = ""
             accountsWriter?.edit { rows -> rows.filterNot { it.key.connectionId==connection.id } }; accountsWriter?.flushAsync()
             inspections.values.filter { it.first.connectionId == connection.id }.forEach { it.second.cancel() }
             inspections.entries.removeAll { it.value.first.connectionId == connection.id }
@@ -1913,7 +1953,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     successfulConnections += connection.id
                     if (catalogGate.owns(operation.id) && connections == originalConnections && catalogErrorOwner == connection.id) error = ""
                 } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { if (catalogGate.owns(operation.id) && selected == null) {
+                catch (e: Exception) { if (catalogGate.owns(operation.id) && connections == originalConnections && selected == null) {
                     error = "${connection.displayName}: ${ReadFailure.message(e, "sessions")}"; catalogErrorOwner = connection.id
                 } }
             }
