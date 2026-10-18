@@ -172,7 +172,8 @@ public:
 
     // Асинхронно: `hgs ls --json --local`. Один exec, единицы миллисекунд.
     void requestLocal();
-    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {});
+    // OpenCode effort is a variant of the chosen model: it is passed only with a model.
+    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {}, const QString &effort = {});
     void launchNativeSession(const QString &host, const QString &target, const QString &name, const QString &account, const QString &launchId);
     // Асинхронно: `hgs @<peer> ls --json`. Пир, который спит, — это ok:false, а не ошибка.
     // peerReady() carries a box whose host is this alias (see BoxState::host).
@@ -222,8 +223,9 @@ public:
                            const QString &conversation, const QString &archive, const QString &generation, bool stop = false);
     void requestSubagentInspection(const QString &host, const QString &name, const QString &agentId, const QString &archiveId = {});
     quint64 requestEffort(const QString &host, const QString &name, const QString &effort, const QString &run, const QString &conversation);
+    // withoutTerminal: an OpenCode session, whose errors name no Terminal.
     quint64 requestSettings(const QString &host, const QString &name, const QString &model, const QString &effort,
-                            const QString &run, const QString &conversation, const QString &expectedPendingId = {});
+                            const QString &run, const QString &conversation, const QString &expectedPendingId = {}, bool withoutTerminal = false);
     quint64 requestSearch(const QString &host, const QString &query);
     quint64 requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});
@@ -247,6 +249,14 @@ public:
     quint64 requestClearContext(const QString &host, const QString &name, const QString &run, const QString &conversation, bool dismissPrompt = false);
     quint64 requestInterrupt(const QString &host, const QString &name, const QString &run,
                              const QString &conversation, double turnStarted);
+    // `hgs [@host] session-action <name> --json` with action remove_queued: removes
+    // one OpenCode inbox message that was not delivered. Only a completed receipt
+    // succeeds; failed and uncertain receipts report their error.
+    quint64 requestRemoveQueued(const QString &host, const QString &name, const QString &run,
+                                const QString &conversation, const QString &messageId);
+    // `hgs [@host] session-action <name> --json` with action forget: removes only
+    // the Zerus binding of that exact run and conversation (OpenCode keeps it).
+    quint64 requestForgetBinding(const QString &host, const QString &name, const QString &run, const QString &conversation);
     quint64 requestAnswerQuestion(const QString &host, const QString &name,
                                   const QJsonObject &question, const QJsonArray &answers, const QString &durableRequestId = {});
     // `hgs [@host] read <session> --json`: the host applies each field only while

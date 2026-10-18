@@ -395,7 +395,8 @@ import org.json.JSONObject
     var selectedModel by remember(target) { mutableStateOf(snapshot.pendingModel.ifBlank { snapshot.model }) }
     var selectedEffort by remember(target) { mutableStateOf(if(snapshot.pendingId.isNotBlank()) snapshot.pendingEffort else snapshot.effort) }
     val choice = snapshot.models.find { it.id == selectedModel }
-    val efforts = choice?.efforts ?: snapshot.efforts
+    val nativeEfforts = model.nativeEffortsSupported(target,model.activity)
+    val efforts = SessionDetailsPresentation.effortChoices(snapshot,selectedModel,nativeEfforts)
     val applyingPending = snapshot.pendingId.isNotBlank() && selectedModel == snapshot.pendingModel && selectedEffort == snapshot.pendingEffort
     val reason = model.actionReason(target,"settings").ifBlank {
         when {
@@ -410,10 +411,10 @@ import org.json.JSONObject
         NativeSettingsSheetContent(snapshot,target.session,selectedModel,selectedEffort,reason,
             onModelChange = { id ->
                 selectedModel = id
-                if(selectedEffort !in snapshot.models.first { it.id == id }.efforts) selectedEffort = ""
+                if(selectedEffort !in SessionDetailsPresentation.effortChoices(snapshot,id,nativeEfforts)) selectedEffort = ""
             },onEffortChange = { selectedEffort = it },
             onApply = { model.updateSettings(target,selectedModel,selectedEffort,if(applyingPending) snapshot.pendingId else "");onDismiss() },
-            onDismiss = onDismiss)
+            onDismiss = onDismiss,nativeEfforts = nativeEfforts)
     }
 }
 

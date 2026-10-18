@@ -745,20 +745,26 @@ Full Linux and macOS CLI CI also run `python3
 scripts/ci/agent-compatibility.py`, and the Windows real-agent job runs it on
 Windows ([above](#windows-real-agents-through-the-session-host)). Each reviewed
 version in `scripts/ci/agent-compatibility.json` names the official npm package
-for one target, `linux-x64`, `darwin-arm64` or `win32-x64`, with an exact version
-and SHA-512 integrity pin. The runner selects the pins for its host and refuses an
-agent that has none. The Codex matrix pins 0.162.0 for Linux and Windows and
-retains 0.160.1 (a resident-session regression boundary) on Linux only. The Claude
-Code matrix pins 2.1.296 for all three targets, so macOS runs Claude Code alone.
-Only the native executable is extracted into a disposable directory (`claude.exe`
-and `codex.exe` on Windows, never Codex's sandbox setup program or its other
-helpers); agent binaries are neither committed nor bundled. The runner treats
+for one target, `linux-x64`, `linux-x64-baseline`, `darwin-arm64` or `win32-x64`,
+with an exact version and SHA-512 integrity pin. The runner selects the pins for its
+host and refuses an agent that has none. The Codex matrix pins 0.162.0 for Linux and
+Windows and retains 0.160.1 (a resident-session regression boundary) on Linux only.
+The Claude Code matrix pins 2.1.296 for all three targets. The OpenCode matrix pins
+its reviewed minimum, 2.0.32, for Linux and macOS; on x86_64 Linux it uses the
+`@opencode/cli-linux-x64-baseline` package, which runs without AVX2 on every x86_64
+host. macOS therefore runs Claude Code and OpenCode, and Windows, where Zerus has no
+OpenCode adapter, runs Codex and Claude Code. Only the native executable is
+extracted into a disposable directory (`claude.exe` and `codex.exe` on Windows,
+never Codex's sandbox setup program or its other helpers; OpenCode's `bin/opencode`);
+agent binaries are neither committed nor bundled. The runner treats
 skipped or empty native suites as failures. It writes each suite's output to
 files rather than pipes, so a process a suite leaves behind cannot keep the run
-waiting, and a suite that times out still leaves its log. `--agent claude` or
-`--agent codex` limits a local run to one matrix. `--hgs` names the build under
-test (default: `HGS_TEST_BIN`, else the debug build). The suites get a private
-home; of the caller's `HGS_` variables only `HGS_TEST_CONPTY_DIR` reaches them. On
+waiting, and a suite that times out still leaves its log. `--agent claude`,
+`--agent codex` or `--agent opencode` limits a local run to one matrix. `--hgs`
+names the build under test (default: `HGS_TEST_BIN`, else the debug build). The
+suites get a private home; of the caller's `HGS_` variables only
+`HGS_TEST_CONPTY_DIR` reaches them, and none of its `OPENCODE_` variables do. The
+runner's OpenCode version and help probes also get private XDG folders. On
 Windows the runner's own version, help and schema probes also get a private
 `USERPROFILE`, `APPDATA` and `LOCALAPPDATA`, while the suites keep the real
 profile: each case gives its hosts and agents a profile of its own, and Codex
@@ -772,6 +778,27 @@ context window. Each test launches the real TUI under `env -i`, or through a tra
 API key, a loopback or local fake API and no nonessential traffic, so no account,
 telemetry or model request leaves the runner. On Windows each agent runs its class of
 `tests/test_windows_native_agents.py` through the session host instead.
+
+OpenCode runs `tests/test_opencode_native.py` with `ZERUS_TEST_OPENCODE_NATIVE=1`,
+where a missing OpenCode, or one other than 2.x at or above the minimum, fails
+rather than skips. The suite gives OpenCode and `hgs` a private HOME, private XDG
+config, data, cache and state folders, private `hgs` state and tmux folders, and an
+offline catalog (`OPENCODE_DISABLE_MODELS_FETCH`, `OPENCODE_DISABLE_AUTOUPDATE` and
+`OPENCODE_DISABLE_LSP`). Before anything can start a service it runs `opencode
+service set port` with a free private port, never OpenCode's default 49374, so
+the background service that `hgs` starts registers only in the private state folder
+and the developer's own service is never contacted. Its provider is a keyless local
+OpenAI-compatible fixture that holds turns open, calls the `question` and `shell`
+tools and answers HTTP 401 on request. The tests cover a stopped service (unknown
+state, never started by inspection, listing or sending), a start that replaces only
+a dead registration, Zerus session IDs and metadata, lost launch and message
+responses without duplicates, a queued message through Stop and Remove, history,
+question forms and permissions, model and effort changes, provider errors, OpenCode
+1 bindings (adopted when migrated, otherwise stopped with only Forget), an older
+version, a missing required route, a live registration that never answers, and the
+explicit Start OpenCode action with its allowlisted catalog. Each test stops its
+private service with `opencode service stop`; the suite then fails if any process
+carrying its private root outlived it.
 
 Real native checks run at 95x47 and 110x35 terminal sizes with animations explicitly
 enabled and disabled. Animated 95x47 checks require the actual released settled
@@ -814,9 +841,15 @@ write into the home while it is deleted.
 
 The separate **Agent upstream compatibility** workflow runs daily at 04:41 UTC
 and is also available manually on upstream main. It discovers published Codex,
-Claude Code, Kimi Code and DeepSeek Harness versions from their official package
-indexes, links their official release notes and tests the latest Codex and
-Claude Code as additional canaries. It does not advance reviewed pins or install
+Claude Code, OpenCode, Kimi Code and DeepSeek Harness versions from their official
+package indexes, links their official release notes and tests the latest Codex,
+Claude Code and OpenCode as additional canaries. OpenCode follows a minimum version
+policy: Zerus accepts any 2.x at or above the reviewed minimum whose service offers
+every operation it uses, so its pin is that minimum, and the canary qualifies the
+newest `@opencode/cli` release each day and reports an incompatibility without
+changing the pin. The report labels the newest OpenCode as newer than, the same as
+or older than the reviewed minimum, and flags another major version or a prerelease
+for review. It does not advance reviewed pins or install
 anything on development machines. Its hosted job has read-only repository
 access, no cache access and no publication credentials. Reports, native logs
 and public protocol schemas expire after three days. A discovery or
@@ -825,8 +858,8 @@ missing coverage.
 
 Codex protocol schemas are generated separately with and without experimental
 APIs. The report compares the latest canary with the newest reviewed pin and
-lists added/removed methods and added/removed/changed schemas. Changes to Codex
-and Claude Code CLI help appear with a generated diff per agent. A detected
+lists added/removed methods and added/removed/changed schemas. Changes to Codex,
+Claude Code and OpenCode CLI help appear with a generated diff per agent. A detected
 addition is a review candidate, not evidence that Zerus supports it or that a
 signed-in account can use it. For Kimi this workflow currently discovers
 versions only. DeepSeek's existing pinned keyless contract fixture runs in full
@@ -838,6 +871,7 @@ To run the reviewed matrix or inspect current upstream changes locally:
 cargo build --locked
 python3 scripts/ci/agent-compatibility.py
 python3 scripts/ci/agent-compatibility.py --agent claude
+python3 scripts/ci/agent-compatibility.py --agent opencode
 python3 scripts/ci/agent-compatibility.py --latest
 ```
 

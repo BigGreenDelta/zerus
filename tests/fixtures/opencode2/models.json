@@ -1,0 +1,305 @@
+{
+ "data": [
+  {
+   "capabilities": {
+    "input": [
+     "text"
+    ],
+    "output": [
+     "text"
+    ],
+    "tools": true
+   },
+   "cost": [],
+   "enabled": true,
+   "family": "qwen3moe",
+   "id": "qwen3-coder:30b",
+   "limit": {
+    "context": 262144,
+    "output": 32000
+   },
+   "modelID": "qwen3-coder:30b",
+   "name": "qwen3-coder:30b",
+   "package": "@opencode/ai/providers/openai-compatible",
+   "providerID": "ollama",
+   "settings": {
+    "apiKey": "",
+    "baseURL": "http://127.0.0.1:11434/v1",
+    "provider": "ollama"
+   },
+   "status": "active",
+   "time": {
+    "released": 0
+   },
+   "variants": []
+  },
+  {
+   "capabilities": {
+    "input": [
+     "text",
+     "image"
+    ],
+    "output": [
+     "text"
+    ],
+    "tools": true
+   },
+   "cost": [],
+   "enabled": true,
+   "id": "local",
+   "limit": {
+    "context": 32768,
+    "output": 2048
+   },
+   "modelID": "local",
+   "name": "Native fixture",
+   "package": "@opencode/ai/providers/openai-compatible",
+   "providerID": "fixture",
+   "settings": {
+    "apiKey": "fixture-secret-key",
+    "baseURL": "http://127.0.0.1:9/v1",
+    "provider": "fixture"
+   },
+   "status": "active",
+   "time": {
+    "released": 0
+   },
+   "variants": [
+    {
+     "id": "low",
+     "settings": {
+      "reasoningEffort": "low"
+     }
+    },
+    {
+     "id": "medium",
+     "settings": {
+      "reasoningEffort": "medium"
+     }
+    },
+    {
+     "id": "high",
+     "settings": {
+      "reasoningEffort": "high"
+     }
+    }
+   ]
+  },
+  {
+   "capabilities": {
+    "input": [
+     "text",
+     "image"
+    ],
+    "output": [
+     "text"
+    ],
+    "tools": true
+   },
+   "cost": [],
+   "enabled": true,
+   "id": "alternate",
+   "limit": {
+    "context": 32768,
+    "output": 2048
+   },
+   "modelID": "alternate",
+   "name": "Alternate fixture",
+   "package": "@opencode/ai/providers/openai-compatible",
+   "providerID": "fixture",
+   "settings": {
+    "apiKey": "fixture-secret-key",
+    "baseURL": "http://127.0.0.1:9/v1",
+    "provider": "fixture"
+   },
+   "status": "active",
+   "time": {
+    "released": 0
+   },
+   "variants": [
+    {
+     "id": "low",
+     "settings": {
+      "reasoningEffort": "low"
+     }
+    },
+    {
+     "id": "medium",
+     "settings": {
+      "reasoningEffort": "medium"
+     }
+    },
+    {
+     "id": "high",
+     "settings": {
+      "reasoningEffort": "high"
+     }
+    }
+   ]
+  },
+  {
+   "capabilities": {
+    "input": [
+     "text"
+    ],
+    "output": [
+     "text"
+    ],
+    "temperature": true,
+    "tools": true
+   },
+   "compatibility": {
+    "reasoningField": "reasoning_content"
+   },
+   "cost": [
+    {
+     "cache": {
+      "read": 0,
+      "write": 0
+     },
+     "input": 0,
+     "output": 0
+    }
+   ],
+   "enabled": true,
+   "id": "ll-alpha-free",
+   "limit": {
+    "context": 262144,
+    "output": 65536
+   },
+   "modelID": "ll-alpha-free",
+   "name": "LL Alpha Free",
+   "package": "@opencode/ai/providers/openai-compatible",
+   "providerID": "opencode",
+   "settings": {
+    "apiKey": "public",
+    "baseURL": "https://opencode.ai/inference/openai/v1",
+    "provider": "opencode"
+   },
+   "status": "active",
+   "time": {
+    "released": 1792022400000
+   },
+   "variants": [
+    {
+     "id": "low",
+     "settings": {
+      "reasoningEffort": "low"
+     }
+    },
+    {
+     "id": "medium",
+     "settings": {
+      "reasoningEffort": "medium"
+     }
+    },
+    {
+     "id": "high",
+     "settings": {
+      "reasoningEffort": "high"
+     }
+    },
+    {
+     "id": "xhigh",
+     "settings": {
+      "reasoningEffort": "xhigh"
+     }
+    },
+    {
+     "id": "max",
+     "settings": {
+      "reasoningEffort": "max"
+     }
+    }
+   ]
+  },
+  {
+   "capabilities": {
+    "input": [
+     "text",
+     "image"
+    ],
+    "output": [
+     "text"
+    ],
+    "temperature": true,
+    "tools": true
+   },
+   "compatibility": {
+    "reasoningField": "reasoning_content"
+   },
+   "cost": [
+    {
+     "cache": {
+      "read": 0,
+      "write": 0
+     },
+     "input": 0,
+     "output": 0
+    }
+   ],
+   "enabled": true,
+   "family": "nemotron-free",
+   "id": "nemotron-3.5-super-vl-free",
+   "limit": {
+    "context": 1048576,
+    "input": 1048576,
+    "output": 131072
+   },
+   "modelID": "nemotron-3.5-super-vl-free",
+   "name": "Nemotron 3.5 Super VL Free",
+   "package": "@opencode/ai/providers/openai-compatible",
+   "providerID": "opencode",
+   "settings": {
+    "apiKey": "public",
+    "baseURL": "https://opencode.ai/inference/openai/v1",
+    "provider": "opencode"
+   },
+   "status": "active",
+   "time": {
+    "released": 1792022400000
+   },
+   "variants": [
+    {
+     "id": "none",
+     "settings": {
+      "reasoningEffort": "none"
+     }
+    },
+    {
+     "id": "minimal",
+     "settings": {
+      "reasoningEffort": "minimal"
+     }
+    },
+    {
+     "id": "low",
+     "settings": {
+      "reasoningEffort": "low"
+     }
+    },
+    {
+     "id": "medium",
+     "settings": {
+      "reasoningEffort": "medium"
+     }
+    },
+    {
+     "id": "high",
+     "settings": {
+      "reasoningEffort": "high"
+     }
+    },
+    {
+     "id": "xhigh",
+     "settings": {
+      "reasoningEffort": "xhigh"
+     }
+    }
+   ]
+  }
+ ],
+ "location": {
+  "directory": "/home/example"
+ }
+}

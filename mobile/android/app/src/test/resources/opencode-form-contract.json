@@ -1,0 +1,878 @@
+{
+ "version": 1,
+ "description": "Shared OpenCode 2 form and permission contract. Each case has 'form' (the native OpenCode form or permission), 'card' (the fields a client asserts on the Zerus card built from it; 'card.item' holds the expected fields of its first question item and 'card.question_count' the item count), 'answers' (Zerus answers: question_id, selected_option_ids, text) and the outcome 'reply' (the native reply body) or 'error' (the exact refusal text). Cases that cannot be answered have no answers.",
+ "cases": [
+  {
+   "name": "question-single",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "q0",
+      "title": "Color",
+      "description": "Pick a color",
+      "type": "string",
+      "options": [
+       {
+        "value": "Green",
+        "label": "Green",
+        "description": "First"
+       },
+       {
+        "value": "Blue",
+        "label": "Blue",
+        "description": "Second"
+       }
+      ],
+      "custom": true
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "item": {
+     "id": "q0",
+     "header": "Color",
+     "prompt": "Pick a color",
+     "options": [
+      {
+       "id": "Green",
+       "label": "Green",
+       "description": "First"
+      },
+      {
+       "id": "Blue",
+       "label": "Blue",
+       "description": "Second"
+      }
+     ],
+     "multi_select": false,
+     "allow_multiple": false,
+     "allow_other": true,
+     "required": true,
+     "input_kind": "choice"
+    },
+    "question_count": 1
+   },
+   "answers": [
+    {
+     "question_id": "q0",
+     "selected_option_ids": [
+      "Green"
+     ],
+     "text": ""
+    }
+   ],
+   "reply": {
+    "answer": {
+     "q0": "Green"
+    }
+   }
+  },
+  {
+   "name": "question-custom-text",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "q0",
+      "title": "Color",
+      "description": "Pick a color",
+      "type": "string",
+      "options": [
+       {
+        "value": "Green",
+        "label": "Green",
+        "description": "First"
+       },
+       {
+        "value": "Blue",
+        "label": "Blue",
+        "description": "Second"
+       }
+      ],
+      "custom": true
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "item": {
+     "id": "q0",
+     "header": "Color",
+     "prompt": "Pick a color",
+     "options": [
+      {
+       "id": "Green",
+       "label": "Green",
+       "description": "First"
+      },
+      {
+       "id": "Blue",
+       "label": "Blue",
+       "description": "Second"
+      }
+     ],
+     "multi_select": false,
+     "allow_multiple": false,
+     "allow_other": true,
+     "required": true,
+     "input_kind": "choice"
+    },
+    "question_count": 1
+   },
+   "answers": [
+    {
+     "question_id": "q0",
+     "selected_option_ids": [],
+     "text": "Purple"
+    }
+   ],
+   "reply": {
+    "answer": {
+     "q0": "Purple"
+    }
+   }
+  },
+  {
+   "name": "question-custom-forbidden",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "q0",
+      "title": "Color",
+      "description": "Pick a color",
+      "type": "string",
+      "options": [
+       {
+        "value": "Green",
+        "label": "Green",
+        "description": "First"
+       },
+       {
+        "value": "Blue",
+        "label": "Blue",
+        "description": "Second"
+       }
+      ],
+      "custom": false
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "item": {
+     "id": "q0",
+     "header": "Color",
+     "prompt": "Pick a color",
+     "options": [
+      {
+       "id": "Green",
+       "label": "Green",
+       "description": "First"
+      },
+      {
+       "id": "Blue",
+       "label": "Blue",
+       "description": "Second"
+      }
+     ],
+     "multi_select": false,
+     "allow_multiple": false,
+     "allow_other": false,
+     "required": true,
+     "input_kind": "choice"
+    },
+    "question_count": 1
+   },
+   "answers": [
+    {
+     "question_id": "q0",
+     "selected_option_ids": [],
+     "text": "Purple"
+    }
+   ],
+   "error": "Choose one of the offered answers"
+  },
+  {
+   "name": "multiselect",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "k",
+      "title": "Pick",
+      "type": "multiselect",
+      "maxItems": 2,
+      "options": [
+       {
+        "value": "a",
+        "label": "A"
+       },
+       {
+        "value": "b",
+        "label": "B"
+       },
+       {
+        "value": "c",
+        "label": "C"
+       }
+      ]
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "item": {
+     "id": "k",
+     "header": "Pick",
+     "prompt": "Pick",
+     "options": [
+      {
+       "id": "a",
+       "label": "A"
+      },
+      {
+       "id": "b",
+       "label": "B"
+      },
+      {
+       "id": "c",
+       "label": "C"
+      }
+     ],
+     "multi_select": true,
+     "allow_multiple": true,
+     "allow_other": false,
+     "required": true,
+     "max_items": 2,
+     "input_kind": "choice"
+    },
+    "question_count": 1
+   },
+   "answers": [
+    {
+     "question_id": "k",
+     "selected_option_ids": [
+      "a",
+      "c"
+     ],
+     "text": ""
+    }
+   ],
+   "reply": {
+    "answer": {
+     "k": [
+      "a",
+      "c"
+     ]
+    }
+   }
+  },
+  {
+   "name": "multiselect-too-many",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "k",
+      "title": "Pick",
+      "type": "multiselect",
+      "maxItems": 2,
+      "options": [
+       {
+        "value": "a",
+        "label": "A"
+       },
+       {
+        "value": "b",
+        "label": "B"
+       },
+       {
+        "value": "c",
+        "label": "C"
+       }
+      ]
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "item": {
+     "id": "k",
+     "header": "Pick",
+     "prompt": "Pick",
+     "options": [
+      {
+       "id": "a",
+       "label": "A"
+      },
+      {
+       "id": "b",
+       "label": "B"
+      },
+      {
+       "id": "c",
+       "label": "C"
+      }
+     ],
+     "multi_select": true,
+     "allow_multiple": true,
+     "allow_other": false,
+     "required": true,
+     "max_items": 2,
+     "input_kind": "choice"
+    },
+    "question_count": 1
+   },
+   "answers": [
+    {
+     "question_id": "k",
+     "selected_option_ids": [
+      "a",
+      "b",
+      "c"
+     ],
+     "text": ""
+    }
+   ],
+   "error": "Choose at most 2 answers"
+  },
+  {
+   "name": "boolean",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "k",
+      "title": "Proceed",
+      "type": "boolean",
+      "default": true
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "question_count": 1,
+    "item": {
+     "id": "k",
+     "header": "Proceed",
+     "options": [
+      {
+       "id": "yes",
+       "label": "Yes"
+      },
+      {
+       "id": "no",
+       "label": "No"
+      }
+     ],
+     "default_option_ids": [
+      "yes"
+     ],
+     "multi_select": false,
+     "allow_other": false,
+     "required": true,
+     "input_kind": "choice",
+     "prompt": "Proceed"
+    }
+   },
+   "answers": [
+    {
+     "question_id": "k",
+     "selected_option_ids": [
+      "no"
+     ],
+     "text": ""
+    }
+   ],
+   "reply": {
+    "answer": {
+     "k": false
+    }
+   }
+  },
+  {
+   "name": "plain-string",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "k",
+      "title": "Name",
+      "type": "string",
+      "maxLength": 5
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "question_count": 1,
+    "item": {
+     "id": "k",
+     "header": "Name",
+     "options": [],
+     "allow_other": true,
+     "multi_select": false,
+     "required": true,
+     "input_kind": "text",
+     "max_length": 5,
+     "prompt": "Name"
+    }
+   },
+   "answers": [
+    {
+     "question_id": "k",
+     "selected_option_ids": [],
+     "text": "toolong"
+    }
+   ],
+   "error": "Answer is longer than 5 characters"
+  },
+  {
+   "name": "unsupported-number",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "n",
+      "title": "Count",
+      "type": "number"
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": false,
+    "can_answer": false,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "unavailable_reason": "Answer this form in OpenCode",
+    "question_count": 1
+   }
+  },
+  {
+   "name": "oversized",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "k0",
+      "title": "T0",
+      "type": "string"
+     },
+     {
+      "key": "k1",
+      "title": "T1",
+      "type": "string"
+     },
+     {
+      "key": "k2",
+      "title": "T2",
+      "type": "string"
+     },
+     {
+      "key": "k3",
+      "title": "T3",
+      "type": "string"
+     },
+     {
+      "key": "k4",
+      "title": "T4",
+      "type": "string"
+     },
+     {
+      "key": "k5",
+      "title": "T5",
+      "type": "string"
+     },
+     {
+      "key": "k6",
+      "title": "T6",
+      "type": "string"
+     },
+     {
+      "key": "k7",
+      "title": "T7",
+      "type": "string"
+     },
+     {
+      "key": "k8",
+      "title": "T8",
+      "type": "string"
+     },
+     {
+      "key": "k9",
+      "title": "T9",
+      "type": "string"
+     },
+     {
+      "key": "k10",
+      "title": "T10",
+      "type": "string"
+     },
+     {
+      "key": "k11",
+      "title": "T11",
+      "type": "string"
+     },
+     {
+      "key": "k12",
+      "title": "T12",
+      "type": "string"
+     },
+     {
+      "key": "k13",
+      "title": "T13",
+      "type": "string"
+     },
+     {
+      "key": "k14",
+      "title": "T14",
+      "type": "string"
+     },
+     {
+      "key": "k15",
+      "title": "T15",
+      "type": "string"
+     },
+     {
+      "key": "k16",
+      "title": "T16",
+      "type": "string"
+     },
+     {
+      "key": "k17",
+      "title": "T17",
+      "type": "string"
+     },
+     {
+      "key": "k18",
+      "title": "T18",
+      "type": "string"
+     },
+     {
+      "key": "k19",
+      "title": "T19",
+      "type": "string"
+     },
+     {
+      "key": "k20",
+      "title": "T20",
+      "type": "string"
+     },
+     {
+      "key": "k21",
+      "title": "T21",
+      "type": "string"
+     },
+     {
+      "key": "k22",
+      "title": "T22",
+      "type": "string"
+     },
+     {
+      "key": "k23",
+      "title": "T23",
+      "type": "string"
+     },
+     {
+      "key": "k24",
+      "title": "T24",
+      "type": "string"
+     },
+     {
+      "key": "k25",
+      "title": "T25",
+      "type": "string"
+     },
+     {
+      "key": "k26",
+      "title": "T26",
+      "type": "string"
+     },
+     {
+      "key": "k27",
+      "title": "T27",
+      "type": "string"
+     },
+     {
+      "key": "k28",
+      "title": "T28",
+      "type": "string"
+     },
+     {
+      "key": "k29",
+      "title": "T29",
+      "type": "string"
+     },
+     {
+      "key": "k30",
+      "title": "T30",
+      "type": "string"
+     },
+     {
+      "key": "k31",
+      "title": "T31",
+      "type": "string"
+     },
+     {
+      "key": "k32",
+      "title": "T32",
+      "type": "string"
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": false,
+    "can_answer": false,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "unavailable_reason": "Answer this form in OpenCode",
+    "question_count": 32
+   }
+  },
+  {
+   "name": "conditional",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "a",
+      "title": "A",
+      "type": "boolean"
+     },
+     {
+      "key": "b",
+      "title": "B",
+      "type": "string",
+      "when": [
+       {
+        "key": "a",
+        "op": "eq",
+        "value": true
+       }
+      ]
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": false,
+    "can_answer": false,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "unavailable_reason": "Answer this form in OpenCode",
+    "question_count": 2
+   }
+  },
+  {
+   "name": "permission",
+   "form": {
+    "id": "per_1",
+    "sessionID": "ses_A",
+    "action": "shell",
+    "resources": [
+     "printf native-tool-output"
+    ],
+    "save": [
+     "printf *"
+    ],
+    "source": {
+     "type": "tool",
+     "messageID": "msg_1",
+     "id": "call_1"
+    }
+   },
+   "card": {
+    "question_id": "per_1",
+    "kind": "opencode_permission",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": true,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "question_count": 1,
+    "item": {
+     "id": "permission",
+     "header": "Permission",
+     "prompt": "shell\nprintf native-tool-output",
+     "multi_select": false,
+     "allow_other": false,
+     "required": true,
+     "options": [
+      {
+       "id": "once",
+       "label": "Allow once"
+      },
+      {
+       "id": "always",
+       "label": "Always allow"
+      },
+      {
+       "id": "reject",
+       "label": "Reject",
+       "description": "Rejects every pending request in this session"
+      }
+     ]
+    }
+   },
+   "answers": [
+    {
+     "question_id": "permission",
+     "selected_option_ids": [
+      "always"
+     ],
+     "text": ""
+    }
+   ],
+   "reply": {
+    "decision": "always"
+   }
+  }
+ ]
+}

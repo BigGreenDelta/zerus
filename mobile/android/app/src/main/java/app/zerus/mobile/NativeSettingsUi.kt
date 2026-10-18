@@ -39,11 +39,12 @@ import kotlinx.coroutines.flow.first
 @Composable internal fun NativeSettingsSheetContent(
     settings: NativeSettings,scope: String,selectedModel: String,selectedEffort: String,reason: String,
     onModelChange: (String) -> Unit,onEffortChange: (String) -> Unit,
-    onApply: () -> Unit,onDismiss: () -> Unit,modifier: Modifier = Modifier,
+    onApply: () -> Unit,onDismiss: () -> Unit,modifier: Modifier = Modifier,nativeEfforts: Boolean = false,
 ) {
     var effortPage by remember { mutableStateOf(false) }
     val modelLabel = settings.models.find { it.id == selectedModel }?.label ?: selectedModel.ifBlank { "Not reported" }
-    val efforts = (listOf("") + (settings.models.find { it.id == selectedModel }?.efforts ?: settings.efforts)).distinct()
+    val efforts = SessionDetailsPresentation.effortChoices(settings,selectedModel,nativeEfforts)
+    fun effortLabel(effort: String) = SessionDetailsPresentation.effortLabel(settings,selectedModel,effort)
     val modelsScroll = rememberLazyListState()
     val effortsScroll = rememberLazyListState()
     val currentScroll = if(effortPage) effortsScroll else modelsScroll
@@ -72,7 +73,7 @@ import kotlinx.coroutines.flow.first
                 color = MaterialTheme.colorScheme.onSurfaceVariant,maxLines = 2,overflow = TextOverflow.Ellipsis)
             if(settings.pendingId.isNotBlank()) {
                 val pendingLabel = settings.models.find { it.id == settings.pendingModel }?.label ?: settings.pendingModel
-                Text("Pending: $pendingLabel / ${effortLabel(settings.pendingEffort)}",style = MaterialTheme.typography.bodySmall,
+                Text("Pending: $pendingLabel / ${SessionDetailsPresentation.effortLabel(settings,settings.pendingModel,settings.pendingEffort)}",style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,overflow = TextOverflow.Ellipsis)
             }
             if(effortPage) Text(modelLabel,style = MaterialTheme.typography.labelLarge)
@@ -138,10 +139,4 @@ import kotlinx.coroutines.flow.first
             else Spacer(Modifier.size(24.dp))
         }
     }
-}
-
-private fun effortLabel(effort: String) = when(effort) {
-    "" -> "Default"
-    "xhigh" -> "Extra high"
-    else -> effort.replaceFirstChar { it.uppercase() }
 }

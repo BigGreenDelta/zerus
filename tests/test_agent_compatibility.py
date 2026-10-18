@@ -69,9 +69,13 @@ class AgentCompatibility(unittest.TestCase):
     def test_each_agent_accepts_only_its_own_official_distribution(self):
         payload = self.archive(name=compat.AGENTS['claude']['members']['linux-x64'])
         darwin = self.package(payload, 'claude', 'darwin-arm64')
+        opencode = self.package(payload, 'opencode', 'linux-x64-baseline')
         cases = [('codex', self.package(payload, 'claude')), ('claude', self.package(payload, 'codex')),
+                 ('opencode', self.package(payload, 'claude')), ('claude', opencode),
                  # A target must match its URL, and Codex has no reviewed macOS package.
-                 ('claude', dict(darwin, target='linux-x64')), ('codex', dict(self.package(payload), target='darwin-arm64'))]
+                 ('claude', dict(darwin, target='linux-x64')), ('codex', dict(self.package(payload), target='darwin-arm64')),
+                 # OpenCode's x86_64 Linux pin is the baseline package, and it has no Windows package.
+                 ('opencode', dict(opencode, target='linux-x64')), ('opencode', dict(opencode, target='win32-x64'))]
         for agent, package in cases:
             with self.subTest(agent=agent, url=package['url'], target=package['target']), \
                     tempfile.TemporaryDirectory() as temporary, patch.object(
@@ -102,6 +106,12 @@ class AgentCompatibility(unittest.TestCase):
         self.assertEqual([(package['version'], package['target']) for package in manifest['codex']
                           if package.get('retained')], [('0.160.1', 'linux-x64')])
         self.assertEqual({package['target'] for package in manifest['claude']}, {'linux-x64', 'darwin-arm64', 'win32-x64'})
+        # OpenCode pins its reviewed minimum, which its canary never moves.
+        self.assertEqual(sorted((package['version'], package['target']) for package in manifest['opencode']),
+                         [('2.0.32', 'darwin-arm64'), ('2.0.32', 'linux-x64-baseline')])
+        policies = {row['name']: row.get('policy') for row in manifest['upstream']}
+        self.assertEqual(policies['OpenCode'], 'minimum')
+        self.assertEqual({name for name, policy in policies.items() if policy}, {'OpenCode'})
 
     def test_only_an_older_retained_version_may_skip_a_target(self):
         def pin(version, target, **extra):
@@ -110,7 +120,8 @@ class AgentCompatibility(unittest.TestCase):
         retained = dict(retained='fixture regression boundary')
         claude = [pin('2.0.0', target) for target in compat.AGENTS['claude']['members']]
         codex = [pin('1.0.0', 'linux-x64', **retained), pin('1.1.0', 'linux-x64'), pin('1.1.0', 'win32-x64')]
-        compat.check_manifest({'codex': codex, 'claude': claude})
+        opencode = [pin('2.0.0', target) for target in compat.AGENTS['opencode']['members']]
+        compat.check_manifest({'codex': codex, 'claude': claude, 'opencode': opencode})
         for label, pins, message in [
                 ('current version without Windows', codex[:2], 'needs a pin for every target'),
                 ('newest version retained', [pin('1.1.0', 'linux-x64', **retained)], 'only an older'),
@@ -121,7 +132,7 @@ class AgentCompatibility(unittest.TestCase):
                 ('unsupported target', [*codex, pin('1.1.0', 'darwin-arm64')], 'unsupported target'),
                 ('no version', [], 'no reviewed version')]:
             with self.subTest(label), self.assertRaisesRegex(ValueError, message):
-                compat.check_manifest({'codex': pins, 'claude': claude})
+                compat.check_manifest({'codex': pins, 'claude': claude, 'opencode': opencode})
 
     def test_changed_package_bytes_fail_before_extraction(self):
         payload = self.archive()
@@ -195,6 +206,18 @@ class AgentCompatibility(unittest.TestCase):
         self.assertEqual(rows[0]['reviewed_versions'], ['0.160.1', '0.162.0'])
         self.assertEqual(rows[1]['error'], 'fixture unavailable')
 
+    def test_opencode_releases_are_labelled_against_the_reviewed_minimum(self):
+        [source] = [row for row in json.loads(compat.MANIFEST.read_text())['upstream'] if row['name'] == 'OpenCode']
+        for published, review in [('2.0.32', 'same as the reviewed minimum'),
+                                  ('2.1.0', 'newer than the reviewed minimum; see its canary'),
+                                  ('2.0.9', 'older than the reviewed minimum'),
+                                  ('3.0.0', 'another major version than the reviewed minimum; needs review'),
+                                  ('1.18.35', 'another major version than the reviewed minimum; needs review'),
+                                  ('2.0.33-beta.1', 'needs review')]:
+            with self.subTest(published), patch.object(compat, 'fetch_json', return_value={'version': published}):
+                [row] = compat.discover_upstream({'upstream': [source]})
+                self.assertEqual(row['review'], review)
+
     def test_latest_claude_canary_uses_the_official_platform_package(self):
         manifest = json.loads(compat.MANIFEST.read_text())
         pinned = next(package['version'] for package in reversed(manifest['claude']) if package['target'] == 'linux-x64')
@@ -236,6 +259,43 @@ class AgentCompatibility(unittest.TestCase):
         self.assertIn('## Real Claude Code contracts', summary)
         self.assertNotIn('Codex contracts', summary)
 
+    def test_latest_opencode_canary_tests_the_newest_release_without_moving_its_minimum(self):
+        manifest = json.loads(compat.MANIFEST.read_text())
+        before = compat.MANIFEST.read_bytes()
+        metadata = {'version': '2.1.0', 'dist': {
+            'tarball': compat.AGENTS['opencode']['tarball'].format(version='2.1.0', target='linux-x64-baseline'),
+            'integrity': 'sha512-fixture'}}
+
+        def published(source):
+            value = '2.1.0' if source['name'] == 'OpenCode' else (source['reviewed_versions'] or ['0.0.1'])[-1]
+            for key in reversed(source['version_path']):
+                value = {key: value}
+            return value
+
+        responses = {source['url']: published(source) for source in manifest['upstream']}
+        responses[compat.AGENTS['opencode']['metadata'].format(version='2.1.0', target='linux-x64-baseline')] = metadata
+
+        def qualify(agent, package, work, results, hgs):
+            return {'agent': agent, 'version': package['version'], 'target': package['target'], 'status': 'passed'}
+
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(compat, 'fetch_json', side_effect=lambda url: responses[url]), \
+                patch.object(compat, 'qualify', side_effect=qualify), \
+                patch.object(compat, 'host_target', return_value='linux-x64'), \
+                patch.object(compat.sys, 'argv', ['agent-compatibility.py', '--latest', '--agent', 'opencode',
+                                                  '--results', temporary]):
+            failed = compat.main()
+            report = json.loads((Path(temporary) / 'report.json').read_text())
+            summary = (Path(temporary) / 'summary.md').read_text()
+        self.assertFalse(failed, report['errors'])
+        self.assertEqual(report['canary_versions'], {'opencode': '2.1.0'})
+        self.assertEqual([(row['version'], row['target']) for row in report['contracts']],
+                         [('2.0.32', 'linux-x64-baseline'), ('2.1.0', 'linux-x64-baseline')])
+        row = next(row for row in report['upstream'] if row['name'] == 'OpenCode')
+        self.assertEqual(row['review'], 'newer than the reviewed minimum; see its canary')
+        self.assertIn('## Real OpenCode contracts', summary)
+        self.assertEqual(compat.MANIFEST.read_bytes(), before)
+
     def test_host_target_selects_its_pinned_agents_and_rejects_unreviewed_ones(self):
         qualified = []
 
@@ -244,10 +304,13 @@ class AgentCompatibility(unittest.TestCase):
             return {'agent': agent, 'version': package['version'], 'target': package['target'], 'status': 'passed'}
 
         for target, arguments, expected in [
+                # OpenCode runs its baseline x86_64 package on Linux.
                 ('linux-x64', [], [('codex', '0.160.1', 'linux-x64'), ('codex', '0.162.0', 'linux-x64'),
-                                   ('claude', '2.1.296', 'linux-x64')]),
-                ('darwin-arm64', [], [('claude', '2.1.296', 'darwin-arm64')]),
+                                   ('claude', '2.1.296', 'linux-x64'), ('opencode', '2.0.32', 'linux-x64-baseline')]),
+                ('linux-x64', ['--agent', 'opencode'], [('opencode', '2.0.32', 'linux-x64-baseline')]),
+                ('darwin-arm64', [], [('claude', '2.1.296', 'darwin-arm64'), ('opencode', '2.0.32', 'darwin-arm64')]),
                 ('darwin-arm64', ['--agent', 'codex'], SystemExit),
+                ('win32-x64', ['--agent', 'opencode'], SystemExit),
                 # The retained Codex 0.160.1 has no Windows pin.
                 ('win32-x64', [], [('codex', '0.162.0', 'win32-x64'), ('claude', '2.1.296', 'win32-x64')]),
                 ('win32-arm64', [], SystemExit),
@@ -265,7 +328,9 @@ class AgentCompatibility(unittest.TestCase):
                 else:
                     self.assertFalse(compat.main())
                     self.assertEqual(qualified, expected)
-                    self.assertIn('(' + target + '): passed', (Path(temporary) / 'summary.md').read_text())
+                    summary = (Path(temporary) / 'summary.md').read_text()
+                    for _, _, package_target in expected:
+                        self.assertIn('(' + package_target + '): passed', summary)
 
     def test_host_target_names_64_bit_windows_as_its_npm_packages_do(self):
         for system, machine, expected in [('Windows', 'AMD64', 'win32-x64'), ('Windows', 'ARM64', 'win32-arm64'),
@@ -276,9 +341,18 @@ class AgentCompatibility(unittest.TestCase):
                     patch.object(compat.platform, 'machine', return_value=machine):
                 self.assertEqual(compat.host_target(), expected)
 
+    def test_host_targets_map_only_where_an_agent_names_another_package(self):
+        self.assertEqual(compat.agent_target('opencode', 'linux-x64'), 'linux-x64-baseline')
+        self.assertEqual(compat.agent_target('opencode', 'darwin-arm64'), 'darwin-arm64')
+        for agent in ('codex', 'claude'):
+            for target in ('linux-x64', 'darwin-arm64', 'win32-x64'):
+                self.assertEqual(compat.agent_target(agent, target), target)
+
     def test_windows_runs_only_the_session_host_suites(self):
         classes = {'claude': 'NativeWindowsClaude', 'codex': 'NativeWindowsCodex'}
-        for agent, spec in compat.AGENTS.items():
+        self.assertEqual({agent for agent, spec in compat.AGENTS.items() if 'win32-x64' in spec['members']}, set(classes))
+        for agent in classes:
+            spec = compat.AGENTS[agent]
             windows = compat.target_spec(agent, 'win32-x64')
             self.assertEqual(windows['suites'], ['test_windows_native_agents.' + classes[agent]])
             self.assertEqual(windows['variable'], spec['variable'])
@@ -292,6 +366,7 @@ class AgentCompatibility(unittest.TestCase):
         interpreter; returns the report row, the suite runs, the results folder and the
         profile each probe of the executable saw."""
         runs, profiles = [], []
+        self.probe_environments = []
 
         def run(argv, **options):
             self.assertIs(options['stdin'], compat.subprocess.DEVNULL)
@@ -302,6 +377,7 @@ class AgentCompatibility(unittest.TestCase):
 
         def probe(native, arguments, env, timeout=60):
             profiles.append(env['USERPROFILE'])
+            self.probe_environments.append(env)
             if arguments == ['--version']:
                 return compat.AGENTS[agent]['version_output'].format('1.2.3') + '\n'
             if arguments[:2] == ['app-server', 'generate-json-schema']:
@@ -320,6 +396,7 @@ class AgentCompatibility(unittest.TestCase):
                 patch.object(compat.subprocess, 'run', side_effect=run), \
                 patch.dict(compat.os.environ, {'HGS_TEST_CONPTY_DIR': 'C:\\fixture\\conpty',
                                                'HGS_SESSION': 'fixture-live-session',
+                                               'XDG_STATE_HOME': '/fixture-live-state',
                                                'USERPROFILE': 'C:\\Users\\fixture-runner'}), \
                 patch('sys.stdout', io.StringIO()):
             row = compat.qualify(agent, package, work, results, Path('hgs-under-test'))
@@ -327,6 +404,8 @@ class AgentCompatibility(unittest.TestCase):
 
     def test_windows_qualifies_each_agent_once_through_the_session_host(self):
         for agent, spec in compat.AGENTS.items():
+            if 'win32-x64' not in spec['members']:
+                continue
             with self.subTest(agent=agent):
                 row, runs, directory, profiles = self.qualify_fixture(agent, 'win32-x64')
                 self.assertEqual(row['status'], 'passed', row.get('error'))
@@ -357,6 +436,25 @@ class AgentCompatibility(unittest.TestCase):
         self.assertEqual(row['schema_stable']['methods'], ['thread/start'])
         self.assertEqual(set(profiles), {'C:\\Users\\fixture-runner'})
 
+    def test_opencode_suite_is_opted_in_and_probes_keep_private_xdg_folders(self):
+        for target in compat.AGENTS['opencode']['members']:
+            with self.subTest(target=target):
+                row, runs, directory, profiles = self.qualify_fixture('opencode', target)
+                self.assertEqual(row['status'], 'passed', row.get('error'))
+                [(suites, env, timeout)] = runs
+                self.assertEqual((suites, timeout), (['test_opencode_native'], compat.AGENTS['opencode']['timeout']))
+                self.assertEqual(env['ZERUS_TEST_OPENCODE_NATIVE'], '1')
+                self.assertEqual(Path(env['ZERUS_TEST_OPENCODE_BIN']).name, 'native')
+                # The suite builds its own private folders; the runner's version and help
+                # probes never write OpenCode's logs or state into the caller's.
+                self.assertEqual(len(self.probe_environments), 2)
+                for probe_env in self.probe_environments:
+                    for key in ('XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME'):
+                        self.assertTrue(Path(probe_env[key]).is_relative_to(probe_env['HOME']), key)
+        for agent in ('codex', 'claude'):
+            self.qualify_fixture(agent, 'linux-x64')
+            self.assertTrue(all(env.get('XDG_STATE_HOME') == '/fixture-live-state' for env in self.probe_environments))
+
     def test_a_suite_that_times_out_keeps_its_log(self):
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / 'default.log'
@@ -378,9 +476,14 @@ class AgentCompatibility(unittest.TestCase):
         env = dict(os.environ, PYTHONPATH=str(ROOT / 'tests'))
         for spec in compat.AGENTS.values():
             env.pop(spec['variable'], None)
+            for key in spec.get('environment', {}):
+                env.pop(key, None)
         # macOS runs the Linux suites; Windows its session host suites.
-        matrices = [(agent + ' ' + target, compat.target_spec(agent, target)['suites'])
-                    for agent in compat.AGENTS for target in ('linux-x64', 'win32-x64')]
+        matrices = {}
+        for agent, spec in compat.AGENTS.items():
+            for target in spec['members']:
+                matrices.setdefault(tuple(compat.target_spec(agent, target)['suites']), agent + ' ' + target)
+        matrices = [(name, list(suites)) for suites, name in matrices.items()]
         for name, suites in [('empty', [])] + matrices:
             with self.subTest(name):
                 result = subprocess.run([compat.sys.executable, '-c', compat.NATIVE_RUNNER, *suites], env=env,
@@ -396,6 +499,7 @@ class AgentCompatibility(unittest.TestCase):
                 'HGS_SESSION': 'fixture-live-session', 'HGS_RUN_ID': 'fixture-live-run',
                 'HGS_ACCOUNT': 'fixture-account', 'CODEX_HOME': '/fixture-live-home',
                 'CLAUDE_CONFIG_DIR': '/fixture-live-claude', 'CLAUDECODE': '1',
+                'OPENCODE_CONFIG': '/fixture-live-opencode.json', 'OPENCODE_SERVER_PASSWORD': 'fixture-password',
                 'OPENAI_API_KEY': 'fixture-key', 'ANTHROPIC_API_KEY': 'fixture-key',
                 'HGS_TEST_CONPTY_DIR': '/fixture-conpty', 'SYSTEMROOT': 'C:\\Windows', 'PATHEXT': '.COM;.EXE',
                 'TEMP': '/fixture-temp', 'USERPROFILE': '/fixture-live-profile'}):
@@ -407,7 +511,7 @@ class AgentCompatibility(unittest.TestCase):
             self.assertEqual(env['PYTHONUTF8'], '1')
             self.assertEqual(env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'], '1')
             for key in ('HGS_SESSION', 'HGS_RUN_ID', 'HGS_ACCOUNT', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
-                        'CLAUDE_CONFIG_DIR', 'CLAUDECODE'):
+                        'CLAUDE_CONFIG_DIR', 'CLAUDECODE', 'OPENCODE_CONFIG', 'OPENCODE_SERVER_PASSWORD'):
                 self.assertNotIn(key, env)
             # The suites' own inputs and what Windows programs need pass through. So
             # does the real profile: the Windows suites place their projects by it.

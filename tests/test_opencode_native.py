@@ -1,7 +1,15 @@
-"""Opt-in released OpenCode contract, private homes and a keyless model.
+"""Opt-in OpenCode 2 qualification: private homes, a private service port and a keyless model.
 
-ZERUS_TEST_OPENCODE_NATIVE=1 makes missing/wrong native binaries failures.
-No live agents, credentials or inferencing services are used.
+ZERUS_TEST_OPENCODE_NATIVE=1 makes a missing or unbuilt hgs, a missing OpenCode, or an
+OpenCode other than 2.x at or above the reviewed minimum a failure; without it the suite
+is skipped. ZERUS_TEST_OPENCODE_BIN names the OpenCode executable (default: `opencode`
+on PATH); its folder leads hgs's PATH, so hgs starts that executable.
+
+Every OpenCode and hgs command runs with private HOME and XDG directories, a private
+service port and an offline catalog, so the developer's own OpenCode service, settings
+and sessions are never touched. Each test stops its private service; the suite then
+verifies that no process still carries its private root. No live agents, credentials or
+inferencing services are used.
 """
 import base64
 import hashlib
@@ -9,399 +17,827 @@ import http.server
 import json
 import os
 from pathlib import Path
+import random
+import re
 import shutil
 import signal
+import socket
+import string
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 import uuid
 
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs'))
-NATIVE = os.environ.get('ZERUS_TEST_OPENCODE_BIN', shutil.which('opencode') or '')
+NATIVE = os.environ.get('ZERUS_TEST_OPENCODE_BIN') or shutil.which('opencode') or ''
+MINIMUM = (2, 0, 32)
+# OpenCode's default service port; the suite never uses it.
+DEFAULT_PORT = 49374
+# A fixture key in the private configuration; it must never appear in hgs output.
+FIXTURE_KEY = 'fixture-key-never-shown'
+NOT_RUNNING = 'OpenCode is not running'
+OPENCODE1 = 'This conversation belongs to OpenCode 1, which Zerus no longer supports'
+REMOVED = 'Removed from the OpenCode queue before delivery'
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
+def native_suffix():
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=26))
+
+
+def owned_processes(marker):
+    """(pid, command) of every other process whose command line or environment holds
+    `marker`: the private root, which only processes this suite started carry."""
+    found, needle = [], marker.encode()
+    proc = Path('/proc')
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                continue
+            try:
+                command = (entry / 'cmdline').read_bytes()
+                if needle not in command and needle not in (entry / 'environ').read_bytes():
+                    continue
+            except OSError:
+                continue
+            found.append((int(entry.name), command.replace(b'\0', b' ').decode(errors='replace').strip()))
+        return found
+    # macOS: BSD ps shows the environment of the user's own processes with -E.
+    listing = subprocess.run(['ps', '-E', '-ww', '-x', '-o', 'pid=,command='], capture_output=True,
+                             text=True, errors='replace', timeout=30)
+    if listing.returncode:
+        raise RuntimeError('Cannot list processes: ' + listing.stderr[-500:])
+    for line in listing.stdout.splitlines():
+        pid, _, command = line.strip().partition(' ')
+        if pid.isdigit() and int(pid) != os.getpid() and marker in command:
+            found.append((int(pid), command[:300]))
+    return found
 
 
 class Model(http.server.BaseHTTPRequestHandler):
-    requests = []
-    def log_message(self, *_): pass
+    """A keyless OpenAI-compatible model. A marker in the newest user message selects
+    the reply: HOLD_NATIVE holds the turn open, QUESTION_NATIVE calls OpenCode 2's
+    `question` tool, BASH_NATIVE its `shell` tool and ERROR_NATIVE answers HTTP 401."""
+
+    def log_message(self, *_):
+        pass
+
+    def do_GET(self):
+        body = json.dumps({'object': 'list', 'data': [{'id': 'local', 'object': 'model'},
+                                                      {'id': 'alternate', 'object': 'model'}]}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        self.requests.append(body)
-        text = '\n'.join(str(m.get('content', '')) for m in body.get('messages', []) if m.get('role') == 'user')
-        if 'HOLD_NATIVE' in text:
-            self.server.holding.set()
-            self.server.release.wait(20)
-        last_user = next((str(m.get('content','')) for m in reversed(body.get('messages',[])) if m.get('role')=='user'), '')
+        messages = body.get('messages', [])
+        tools = [tool.get('function', {}).get('name') for tool in body.get('tools', [])]
+        last_user = next((str(m.get('content', '')) for m in reversed(messages) if m.get('role') == 'user'), '')
+        self.server.requests.append({'model': body.get('model'), 'tools': tools, 'last_user': last_user[:200],
+                                     'options': {k: v for k, v in body.items() if k not in ('messages', 'tools')}})
         if 'ERROR_NATIVE' in last_user:
-            self.send_response(401);self.send_header('Content-Type','application/json');self.end_headers()
-            self.wfile.write(json.dumps({'error':{'message':'Fixture provider rejected','code':'invalid_api_key'}}).encode());return
+            error = json.dumps({'error': {'message': 'Fixture provider rejected', 'code': 'invalid_api_key'}}).encode()
+            self.send_response(401)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(error)))
+            self.end_headers()
+            self.wfile.write(error)
+            return
         tool = None
-        if not any(m.get('role')=='tool' for m in body.get('messages',[])):
-            if 'QUESTION_NATIVE' in last_user: tool = ('question', {'questions':[{'question':'Pick a color','header':'Color','options':[{'label':'Green','description':'First'},{'label':'Blue','description':'Second'}]}]})
-            elif 'BASH_NATIVE' in last_user: tool = ('bash',{'command':'printf native-tool-output','description':'Print isolated fixture output'})
-            elif 'TASK_NATIVE' in last_user and any(t.get('function',{}).get('name')=='task' for t in body.get('tools',[])):
-                tool = ('task',{'description':'Native fixture child','prompt':'CHILD_NATIVE_HOLD child work','subagent_type':'general'})
-            elif 'CHILD_NATIVE_HOLD' in last_user:
+        # Only an agent turn offers tools; a turn that just received a tool result replies.
+        if tools and not any(m.get('role') == 'tool' for m in messages[-2:]):
+            if 'HOLD_NATIVE' in last_user:
                 self.server.holding.set()
-                self.server.release.wait(20)
+                self.server.release.wait(60)
+            elif 'QUESTION_NATIVE' in last_user:
+                tool = ('question', {'questions': [{'question': 'Pick a color', 'header': 'Color', 'options': [
+                    {'label': 'Green', 'description': 'First'}, {'label': 'Blue', 'description': 'Second'}]}]})
+            elif 'BASH_NATIVE' in last_user:
+                tool = ('shell', {'command': 'printf native-tool-output', 'description': 'Print isolated fixture output'})
         if tool:
-            choices=[{'index':0,'delta':{'tool_calls':[{'index':0,'id':'call_fixture','type':'function','function':{'name':tool[0],'arguments':json.dumps(tool[1])}}]},'finish_reason':None}, {'index':0,'delta':{},'finish_reason':'tool_calls'}]
+            call = {'index': 0, 'id': 'call_' + uuid.uuid4().hex[:12], 'type': 'function',
+                    'function': {'name': tool[0], 'arguments': json.dumps(tool[1])}}
+            choices = [{'index': 0, 'delta': {'tool_calls': [call]}, 'finish_reason': None},
+                       {'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]
         else:
-            choices = [{'index': 0, 'delta': {'content': 'Native child reply' if 'CHILD_NATIVE' in last_user else 'Native OpenCode reply'}, 'finish_reason': None},
-                   {'index': 0, 'delta': {}, 'finish_reason': 'stop'}]
+            choices = [{'index': 0, 'delta': {'content': 'Native OpenCode reply'}, 'finish_reason': None},
+                       {'index': 0, 'delta': {}, 'finish_reason': 'stop'}]
         try:
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.end_headers()
             for choice in choices:
-                v = {'id': 'chatcmpl-fixture', 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': 'fixture', 'choices': [choice]}
-                self.wfile.write(('data: ' + json.dumps(v) + '\n\n').encode())
+                chunk = {'id': 'chatcmpl-fixture', 'object': 'chat.completion.chunk', 'created': int(time.time()),
+                         'model': body.get('model', 'fixture'), 'choices': [choice]}
+                self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
                 self.wfile.flush()
             self.wfile.write(b'data: [DONE]\n\n')
-        except (BrokenPipeError, ConnectionResetError): pass
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+def stub_service(version, pid, openapi=None):
+    """A loopback HTTP stub that answers like an OpenCode service of `version`."""
+    class Stub(http.server.BaseHTTPRequestHandler):
+        seen = []
+
+        def log_message(self, *_):
+            pass
+
+        def answer(self, status, value):
+            body = json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            Stub.seen.append(('GET', self.path))
+            if self.path == '/api/info':
+                self.answer(200, {'version': version, 'pid': pid, 'urls': []})
+            elif self.path == '/openapi.json' and openapi is not None:
+                self.answer(200, openapi)
+            else:
+                self.answer(404, {'message': 'Not found'})
+
+        def other(self):
+            Stub.seen.append((self.command, self.path))
+            self.answer(404, {'message': 'Not found'})
+        do_POST = do_PATCH = do_DELETE = do_PUT = other
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, Stub.seen
 
 
 @unittest.skipUnless(os.environ.get('ZERUS_TEST_OPENCODE_NATIVE') == '1', 'explicit private native qualification required')
 class OpenCodeNative(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if not NATIVE or not HGS.is_file(): raise RuntimeError('Configured native suite requires OpenCode and built hgs')
-        version = subprocess.check_output([NATIVE, '--version'], text=True).strip()
-        if version != '1.18.35': raise RuntimeError('Native suite requires reviewed OpenCode1.18.35, got ' + version)
+        if not NATIVE or not Path(NATIVE).is_file() or not HGS.is_file():
+            raise RuntimeError('The opted-in OpenCode suite requires OpenCode 2 and a built hgs')
         cls.temp = tempfile.TemporaryDirectory(prefix='zerus-opencode-native-')
         cls.root = Path(cls.temp.name)
-        cls.workspace = cls.root / 'workspace'; cls.workspace.mkdir()
-        cls.home = cls.root / 'home'; cls.home.mkdir()
-        cls.config = cls.root / 'config'; cls.config.mkdir()
-        cls.native_config = cls.root / 'native-config'; cls.native_config.mkdir()
-        cls.state = cls.root / 'state'
+        cls.model = None
+        try:
+            cls.prepare()
+        except BaseException:
+            cls.cleanup()
+            raise
+
+    @classmethod
+    def prepare(cls):
+        root = cls.root
+        # Registration files this suite wrote itself, byte for byte.
+        cls.fake_registrations = set()
+        cls.workspace = root / 'workspace'
+        cls.state = root / 'hgs-state'
+        for path in ['home', 'xdg-config/opencode', 'xdg-data', 'xdg-cache', 'xdg-state', 'workspace',
+                     'hgs-config', 'hgs-state']:
+            (root / path).mkdir(parents=True)
+        # hgs lists tmux sessions too; an existing private TMUX_TMPDIR keeps it off the
+        # user's default server, where a missing directory would fall back to it.
+        (root / 'tmux').mkdir(mode=0o700)
         cls.model = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Model)
-        cls.model.holding = threading.Event(); cls.model.release = threading.Event()
-        cls.thread = threading.Thread(target=cls.model.serve_forever, daemon=True); cls.thread.start()
-        native = {'model': 'fixture/local', 'small_model': 'fixture/local', 'share': 'disabled',
-                  'permission': {'*': 'ask', 'question':'allow', 'task':'allow'}, 'provider': {'fixture': {'npm': '@ai-sdk/openai-compatible',
-                  'name': 'Private keyless fixture', 'options': {'baseURL': f'http://127.0.0.1:{cls.model.server_port}/v1'},
-                  'models': {'local': {'name': 'Native fixture', 'limit': {'context': 32768, 'output': 2048}}, 'alternate': {'name':'Alternate fixture','limit':{'context':32768,'output':2048}}}}}}
-        (cls.native_config / 'opencode.json').write_text(json.dumps(native))
-        cls.env = {'PATH': os.environ['PATH'], 'LANG': 'C.UTF-8', 'HOME': str(cls.home),
-                   'XDG_DATA_HOME': str(cls.root / 'data'), 'XDG_CACHE_HOME': str(cls.root / 'cache'),
-                   'XDG_CONFIG_HOME': str(cls.root / 'xdg-config'), 'OPENCODE_CONFIG_DIR': str(cls.native_config),
-                   'OPENCODE_DISABLE_AUTOUPDATE': 'true', 'OPENCODE_DISABLE_MODELS_FETCH': 'true',
-                   'OPENCODE_DISABLE_LSP': 'true', 'HGS_CONFIG_DIR': str(cls.config),
-                   'HGS_STATE_DIR': str(cls.state), 'HGS_PEERS': '', 'HGS_SELF': 'fixture', 'HGS_TAB': '0'}
-        cls.receipt = {'version': version, 'fixture': 'owned native OpenCode + keyless local model'}
+        cls.model.holding, cls.model.release, cls.model.requests = threading.Event(), threading.Event(), []
+        threading.Thread(target=cls.model.serve_forever, daemon=True).start()
+        native = Path(NATIVE).absolute()
+        cls.env = {'PATH': os.pathsep.join([str(native.parent), os.environ.get('PATH', '')]), 'LANG': 'C.UTF-8',
+                   'HOME': str(root / 'home'), 'XDG_CONFIG_HOME': str(root / 'xdg-config'),
+                   'XDG_DATA_HOME': str(root / 'xdg-data'), 'XDG_CACHE_HOME': str(root / 'xdg-cache'),
+                   'XDG_STATE_HOME': str(root / 'xdg-state'), 'OPENCODE_DISABLE_MODELS_FETCH': 'true',
+                   'OPENCODE_DISABLE_AUTOUPDATE': 'true', 'OPENCODE_DISABLE_LSP': 'true',
+                   'HGS_CONFIG_DIR': str(root / 'hgs-config'), 'HGS_STATE_DIR': str(cls.state),
+                   'HGS_PEERS': '', 'HGS_SELF': 'fixture', 'HGS_TAB': '0', 'TMUX_TMPDIR': str(root / 'tmux')}
+        found = shutil.which('opencode', path=cls.env['PATH'])
+        if not found or not os.path.samefile(found, native):
+            raise RuntimeError('hgs would not start the OpenCode under test: ' + str(found))
+        version = cls.opencode('--version').stdout.strip()
+        match = re.fullmatch(r'(?:opencode )?v?(\d+)\.(\d+)\.(\d+)', version)
+        parts = tuple(int(part) for part in match.groups()) if match else None
+        if not parts or parts[0] != MINIMUM[0] or parts < MINIMUM:
+            raise RuntimeError('The OpenCode suite requires OpenCode %d.%d.%d or newer 2.x, got %r' % (*MINIMUM, version))
+        cls.version = '%d.%d.%d' % parts
+        config = {'$schema': 'https://opencode.ai/config.json', 'model': 'fixture/local', 'small_model': 'fixture/local',
+                  'permission': {'*': 'ask', 'question': 'allow', 'read': 'allow'},
+                  'provider': {'fixture': {'npm': '@ai-sdk/openai-compatible', 'name': 'Private keyless fixture',
+                                           'options': {'baseURL': f'http://127.0.0.1:{cls.model.server_port}/v1',
+                                                       'apiKey': FIXTURE_KEY},
+                                           'models': {'local': {'name': 'Native fixture', 'limit': {'context': 32768, 'output': 2048}},
+                                                      'alternate': {'name': 'Alternate fixture',
+                                                                    'limit': {'context': 32768, 'output': 2048}}}}}}
+        (root / 'xdg-config/opencode/opencode.json').write_text(json.dumps(config))
+        # A private service port before anything can start the service.
+        cls.port = free_port()
+        while cls.port == DEFAULT_PORT:
+            cls.port = free_port()
+        cls.opencode('service', 'set', 'port', str(cls.port))
+        configured = json.loads((root / 'xdg-config/opencode/service.json').read_text())
+        if configured.get('port') != cls.port:
+            raise RuntimeError('OpenCode did not record the private service port')
+
+    @classmethod
+    def opencode(cls, *args):
+        """An OpenCode command, always under the private environment."""
+        run = subprocess.run([NATIVE, *args], env=cls.env, cwd=cls.workspace, stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=60)
+        if run.returncode:
+            raise RuntimeError('opencode %s failed: %s' % (' '.join(args), (run.stderr or run.stdout)[-800:]))
+        return run
+
+    @classmethod
+    def registration_path(cls):
+        return cls.root / 'xdg-state/opencode/service.json'
+
+    @classmethod
+    def native_processes(cls):
+        return [process for process in owned_processes(str(cls.root)) if 'opencode' in process[1]]
+
+    @classmethod
+    def stop_service(cls):
+        """Stop the service OpenCode registered privately and wait until no process
+        carries the private root. A registration this suite wrote itself (a stub, a hung
+        port or an exited process) is deleted, never handed to `opencode service stop`."""
+        registration = cls.registration_path()
+        try:
+            written = registration.read_bytes()
+        except OSError:
+            written = None
+        if written in cls.fake_registrations:
+            registration.unlink()
+        elif written is not None:
+            cls.opencode('service', 'stop')
+        until = time.monotonic() + 15
+        while owned_processes(str(cls.root)) and time.monotonic() < until:
+            time.sleep(.2)
+
+    @classmethod
+    def reap(cls):
+        """Stop whatever still carries the private root, only this suite's processes;
+        returns what was found."""
+        leftovers = owned_processes(str(cls.root))
+        for sig in (signal.SIGTERM, signal.SIGKILL) if leftovers else ():
+            for pid, _ in owned_processes(str(cls.root)):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    pass
+            time.sleep(1)
+        return leftovers
+
+    @classmethod
+    def cleanup(cls):
+        try:
+            if cls.model:
+                cls.model.release.set()
+            if hasattr(cls, 'env'):
+                cls.stop_service()
+        finally:
+            leftovers = cls.reap()
+            if cls.model:
+                cls.model.shutdown()
+                cls.model.server_close()
+            cls.temp.cleanup()
+        if leftovers:
+            raise RuntimeError('Processes outlived the private OpenCode service: ' + json.dumps(leftovers))
 
     @classmethod
     def tearDownClass(cls):
-        cls.model.release.set(); cls.model.shutdown(); cls.model.server_close(); cls.thread.join(5)
-        # Stop only the native host created inside this unique private state.
-        for file in cls.state.glob('opencode/hosts/*/host.json'):
-            data = json.loads(file.read_text()); pid = data['pid']
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError: pass
-        cls.temp.cleanup()
+        cls.cleanup()
 
-    def command(self, args, payload=None, success=True):
-        run = subprocess.run([str(HGS), *args], env=self.env, cwd=self.workspace,
-                             input=None if payload is None else json.dumps(payload), text=True, capture_output=True, timeout=50)
-        if success: self.assertEqual(run.returncode, 0, run.stderr)
-        else: self.assertNotEqual(run.returncode, 0, run.stdout)
+    def setUp(self):
+        self.model.holding.clear()
+        self.model.release.clear()
+        self.model.requests.clear()
+        self.addCleanup(self.stop_and_check)
+        self.addCleanup(self.model.release.set)
+
+    def stop_and_check(self):
+        """Each test ends with its private service stopped and nothing left behind, so a
+        leak is reported by the test that caused it."""
+        self.stop_service()
+        self.assertEqual(self.reap(), [], 'processes outlived this test')
+
+    def hgs(self, args, payload=None, success=True):
+        run = subprocess.run([str(HGS), *args], env=self.env, cwd=self.workspace, text=True, capture_output=True,
+                             input=None if payload is None else json.dumps(payload), timeout=60)
+        if success:
+            self.assertEqual(run.returncode, 0, run.stderr)
+        else:
+            self.assertNotEqual(run.returncode, 0, run.stdout)
         return json.loads(run.stdout) if run.returncode == 0 and run.stdout.strip().startswith(('{', '[')) else run
 
-    def create(self):
+    def launch(self, tag, *options, success=True):
+        return self.hgs(['opencode', str(self.workspace), '--new', '-n', tag, '-d', '--launch-id', str(uuid.uuid4()),
+                         '--account', 'native-opencode', *options], success=success)
+
+    def create(self, *options):
         tag = uuid.uuid4().hex[:10]
-        self.command(['opencode', str(self.workspace), '--new', '-n', tag, '-d', '--launch-id', str(uuid.uuid4()), '--account', 'native-opencode', '--model', 'fixture/local'])
-        return self.command(['inspect', f'opencode/workspace/{tag}'])
+        self.launch(tag, '--model', 'fixture/local', *options)
+        return self.hgs(['inspect', f'opencode/workspace/{tag}'])
 
     def payload(self, binding, **extra):
         return {'request_id': str(uuid.uuid4()), 'expected_run_id': binding['run_id'],
                 'expected_conversation_id': binding['conversation_id'], **extra}
 
-    def wait(self, name, predicate, timeout=20):
+    def action(self, binding, action, status='completed', **extra):
+        """A scoped session action; its receipt, not the exit status, reports a refusal."""
+        receipt = self.hgs(['session-action', binding['name'], '--json'], {**self.payload(binding, action=action), **extra})
+        self.assertEqual(receipt['status'], status, receipt)
+        return receipt
+
+    def wait(self, name, predicate, timeout=40):
         until = time.monotonic() + timeout
-        while time.monotonic() < until:
-            value = self.command(['inspect', name])
-            if predicate(value): return value
-            time.sleep(.15)
-        self.fail('Native state did not settle: ' + json.dumps(value))
+        while True:
+            value = self.hgs(['inspect', name])
+            if predicate(value):
+                return value
+            if time.monotonic() > until:
+                self.fail('Native state did not settle: ' + json.dumps(value)[-3000:])
+            time.sleep(.25)
 
-    def api(self, binding, suffix, body=None, method=None):
-        data = json.loads(next(self.state.glob('opencode/hosts/*/host.json')).read_text())
-        url = f"http://127.0.0.1:{data['port']}/api/session/{binding['conversation_id']}{suffix}"
-        headers = {'Authorization': 'Basic ' + base64.b64encode(('opencode:' + data['password']).encode()).decode(), 'Content-Type': 'application/json'}
-        req = urllib.request.Request(url, headers=headers, data=None if body is None else json.dumps(body).encode(), method=method)
-        with urllib.request.urlopen(req, timeout=30) as response:
-            raw = response.read(); return json.loads(raw) if raw else None
+    def binding_path(self, name):
+        return self.state / 'opencode/bindings' / (hashlib.sha256(name.encode()).hexdigest() + '.json')
 
-    def test_01_catalog_launch_history_exact_identity_and_no_replay(self):
-        profiles = self.command(['account', 'ls'])['profiles']
-        native = next(p for p in profiles if p['id'] == 'native-opencode')
-        self.assertIn('fixture/local', [m['value'] for m in native['model_options']])
-        self.assertFalse(self.state.joinpath('opencode/hosts').exists())
-        legacy='opencode/workspace/legacy-collision'
-        self.state.mkdir(exist_ok=True)
-        legacy_file=self.state/(hashlib.sha256(legacy.encode()).hexdigest()+'.json')
-        legacy_bytes=json.dumps({'name':legacy,'cmd':'opencode','agent':'opencode','run_id':'retained-terminal','cwd':str(self.workspace)}).encode()
-        legacy_file.write_bytes(legacy_bytes)
-        collision=self.command(['opencode',str(self.workspace),'--new','-n','legacy-collision','-d','--account','native-opencode','--model','fixture/local'],success=False)
-        self.assertIn('existing terminal session',collision.stderr)
-        self.assertEqual(legacy_file.read_bytes(),legacy_bytes)
-        self.assertFalse(self.state.joinpath('opencode/hosts').exists())
-        b = self.create(); name = b['name']
-        self.assertFalse(b['terminal_supported']); self.assertFalse(b['compact_context_supported'])
-        for field in ['expected_run_id', 'expected_conversation_id']:
-            self.command(['send', name, '--json'], {**self.payload(b, text='wrong-target'), field: 'wrong'}, False)
-        request = self.payload(b, text='Literal\\\nmessage')
-        first = self.command(['send', name, '--json'], request)
+    def save_binding(self, tag, **fields):
+        """A binding written as an earlier hgs would have left it."""
+        name = 'opencode/workspace/' + tag
+        record = {'backend': 'opencode', 'agent': 'opencode', 'name': name, 'cwd': os.path.realpath(self.workspace),
+                  'run_id': str(uuid.uuid4()), 'conversation_id': 'ses_' + native_suffix(), 'created': time.time(),
+                  'launch_id': None, 'agent_home': str(self.root / 'xdg-config/opencode'), **fields}
+        path = self.binding_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record))
+        return record
+
+    def receipt_path(self, request):
+        return self.state / 'opencode/receipts' / (request['request_id'] + '.json')
+
+    def registration(self):
+        return json.loads(self.registration_path().read_text())
+
+    def write_registration(self, value):
+        path = self.registration_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        written = json.dumps(value).encode()
+        self.fake_registrations.add(written)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, 'wb') as file:
+            file.write(written)
+        return written
+
+    def api(self, method, path, body=None):
+        """This test's own request to its private service, authenticated as hgs is."""
+        registration = self.registration()
+        headers = {'Content-Type': 'application/json'}
+        if registration.get('password'):
+            token = base64.b64encode(('opencode:' + registration['password']).encode()).decode()
+            headers['Authorization'] = 'Basic ' + token
+        request = urllib.request.Request(registration['url'].rstrip('/') + path, method=method, headers=headers,
+                                         data=None if body is None else json.dumps(body).encode())
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read()
+                return response.status, json.loads(raw) if raw else None
+        except urllib.error.HTTPError as error:
+            with error:
+                raw = error.read()
+            return error.code, json.loads(raw) if raw else None
+
+    def session(self, conversation_id):
+        status, answer = self.api('GET', '/api/session/' + conversation_id)
+        self.assertEqual(status, 200, answer)
+        return answer['data']
+
+    def user_messages(self, conversation_id):
+        status, page = self.api('GET', f'/api/session/{conversation_id}/message?limit=100')
+        self.assertEqual(status, 200, page)
+        return [(m['id'], m.get('text')) for m in page['data'] if m.get('type') == 'user']
+
+    def inbox(self, conversation_id):
+        status, answer = self.api('GET', f'/api/session/{conversation_id}/inbox')
+        self.assertEqual(status, 200, answer)
+        return answer['data']
+
+    def listing(self):
+        rows = self.hgs(['ls', '--local', '--json', '--no-archives'])['sessions']
+        return {row['name']: row for row in rows if row.get('backend') == 'opencode'}
+
+    def account(self):
+        profiles = self.hgs(['account', 'ls'])['profiles']
+        return next(profile for profile in profiles if profile['id'] == 'native-opencode')
+
+    def assert_private(self, *values):
+        text = json.dumps(values)
+        self.assertNotIn(FIXTURE_KEY, text)
+        if self.registration_path().exists():
+            registration = self.registration()
+            if registration.get('password'):
+                self.assertNotIn(registration['password'], text)
+
+    def test_01_not_running_reports_unknown_and_never_starts(self):
+        self.stop_service()
+        self.assertFalse(self.registration_path().exists())
+        binding = self.save_binding('saved-' + uuid.uuid4().hex[:8], service='opencode2')
+        name = binding['name']
+        row = self.hgs(['inspect', name])
+        self.assertTrue(row['inspection_unavailable'])
+        self.assertIn(NOT_RUNNING, row['inspection_reason'])
+        # Native state stays unknown, never stopped; clients keep the transcript they show.
+        self.assertEqual((row['state'], row['phase'], row['activity']), ('unknown', 'unknown', 'unknown'))
+        self.assertEqual(row['allowed_actions'], ['forget'])
+        self.assertNotIn('events', row)
+        self.assertFalse(row['send_supported'])
+        listed = self.listing()[name]
+        self.assertEqual((listed['state'], listed['phase']), ('unknown', 'unknown'))
+        self.assertIn(NOT_RUNNING, listed['inspection_reason'])
+        account = self.account()
+        self.assertEqual(account['catalog_state'], 'not_running')
+        self.assertIn(NOT_RUNNING, account['catalog_reason'])
+        # Sending is explicit, but it never starts the service either.
+        request = self.payload(binding, text='never sent')
+        failure = self.hgs(['send', name, '--json'], request, success=False)
+        self.assertIn(NOT_RUNNING, failure.stderr)
+        self.assertFalse(self.receipt_path(request).exists())
+        self.assertFalse(self.registration_path().exists())
+        self.assertEqual(self.native_processes(), [])
+
+    def test_02_launch_starts_service_with_own_ids_and_history(self):
+        self.stop_service()
+        # A registration left by a service that is gone does not block the start.
+        gone = subprocess.Popen(['true'])
+        gone.wait()
+        self.write_registration({'id': 'svc_gone', 'version': self.version, 'url': f'http://127.0.0.1:{self.port}',
+                                 'pid': gone.pid, 'password': 'gone-password'})
+        tag, launch_id = uuid.uuid4().hex[:10], str(uuid.uuid4())
+        self.hgs(['opencode', str(self.workspace), '--new', '-n', tag, '-d', '--launch-id', launch_id,
+                  '--account', 'native-opencode', '--model', 'fixture/local'])
+        registration = self.registration()
+        self.assertNotEqual(registration['pid'], gone.pid)
+        os.kill(registration['pid'], 0)
+        self.assertEqual(registration['url'].rstrip('/'), f'http://127.0.0.1:{self.port}')
+        self.assertTrue(self.native_processes())
+        name = 'opencode/workspace/' + tag
+        b = self.hgs(['inspect', name])
+        self.assertRegex(b['conversation_id'], r'^ses_[A-Za-z0-9]{26}$')
+        self.assertEqual(b['launch_id'], launch_id)
+        self.assertFalse(b['terminal_supported'])
+        self.assertFalse(b['native_ui_available'])
+        self.assertEqual((b['state'], b['phase'], b['settings_model']), ('running', 'idle', 'fixture/local'))
+        session = self.session(b['conversation_id'])
+        self.assertEqual(session['metadata']['zerus'], {'run_id': b['run_id'], 'launch_id': launch_id})
+        self.assertEqual(session['location']['directory'], os.path.realpath(self.workspace))
+        self.assertEqual(session['location']['directory'], b['cwd'])
+        self.assertEqual((session['model']['providerID'], session['model']['id'], session['title']), ('fixture', 'local', tag))
+        request = self.payload(b, text='hello')
+        first = self.hgs(['send', name, '--json'], request)
         self.assertEqual(first['status'], 'submitted')
-        self.assertEqual(self.command(['send', name, '--json'], request), first)
-        self.command(['send', name, '--json'], {**request, 'text': 'changed'}, False)
+        self.assertRegex(first['native_message_id'], r'^msg_[A-Za-z0-9]{26}$')
+        # The same request ID returns the same receipt; other text under it is refused.
+        self.assertEqual(self.hgs(['send', name, '--json'], request), first)
+        self.hgs(['send', name, '--json'], {**request, 'text': 'changed'}, success=False)
+        for field in ['expected_run_id', 'expected_conversation_id']:
+            self.hgs(['send', name, '--json'], {**self.payload(b, text='wrong target'), field: 'wrong'}, success=False)
         done = self.wait(name, lambda v: v['phase'] == 'idle' and v.get('reply_id'))
-        self.assertEqual([e['detail'] for e in done['events'] if e['type'] == 'UserPromptSubmit'], ['Literal\\\nmessage'])
-        self.assertTrue(any(e['detail'] == 'Native OpenCode reply' for e in done['events']))
-        page = self.command(['history', name, '--json'], self.payload(b, limit=100))
+        events = [(e['type'], e['detail']) for e in done['events']]
+        self.assertEqual([detail for kind, detail in events if kind == 'UserPromptSubmit'], ['hello'])
+        prompt = events.index(('UserPromptSubmit', 'hello'))
+        reply = events.index(('AgentMessage', 'Native OpenCode reply'))
+        stop = next(i for i, (kind, _) in enumerate(events) if kind == 'Stop')
+        self.assertLess(prompt, reply)
+        self.assertLess(reply, stop)
+        page = self.hgs(['history', name, '--json'], self.payload(b, limit=100))
         self.assertTrue(page['head']['complete'])
-        self.assertFalse(done['native_ui_available'])
-        self.assertNotIn('password', json.dumps(done))
-        # Simulate loss of the native response after the real durable admission.
-        receipt = self.state / 'opencode/receipts' / (request['request_id'] + '.json')
-        pending = json.loads(receipt.read_text()); pending['status'] = 'pending'; receipt.write_text(json.dumps(pending))
-        reconciled = self.command(['send', name, '--json'], request)
-        self.assertEqual(reconciled['status'], 'submitted')
-        final = self.command(['inspect', name])
-        self.assertEqual(len([e for e in final['events'] if e['type'] == 'UserPromptSubmit']), 1)
+        self.assertTrue(any(e.get('detail') == 'Native OpenCode reply' for e in page['events']), page)
+        self.assert_private(b, first, done, page)
+        # The response to an admitted message is lost: the same request finds it, once.
+        receipt = json.loads(self.receipt_path(request).read_text())
+        receipt['status'] = 'pending'
+        self.receipt_path(request).write_text(json.dumps(receipt))
+        self.assertEqual(self.hgs(['send', name, '--json'], request)['status'], 'submitted')
+        self.assertEqual(self.user_messages(b['conversation_id']), [(first['native_message_id'], 'hello')])
+        # The response to a launch is lost: the journaled session ID is created once.
+        lost_tag, lost_id = uuid.uuid4().hex[:10], 'ses_' + native_suffix()
+        run_id, cwd = str(uuid.uuid4()), os.path.realpath(self.workspace)
+        body = {'id': lost_id, 'location': {'directory': cwd}, 'title': lost_tag,
+                'metadata': {'zerus': {'run_id': run_id, 'launch_id': None}}, 'model': {'providerID': 'fixture', 'id': 'local'}}
+        self.save_binding(lost_tag, service='opencode2', run_id=run_id, conversation_id=lost_id, creation_pending=True,
+                          creation_body=body)
+        self.assertEqual(self.api('GET', '/api/session/' + lost_id)[0], 404)
+        for _ in range(2):
+            self.hgs(['opencode', str(self.workspace), '-n', lost_tag, '-d', '--account', 'native-opencode'])
+        created = self.session(lost_id)
+        self.assertEqual((created['title'], created['metadata']['zerus']['run_id']), (lost_tag, run_id))
+        saved = json.loads(self.binding_path('opencode/workspace/' + lost_tag).read_text())
+        self.assertNotIn('creation_pending', saved)
+        status, sessions = self.api('GET', '/api/session?limit=100')
+        self.assertEqual(status, 200, sessions)
+        self.assertEqual([s['id'] for s in sessions['data'] if s.get('title') == lost_tag], [lost_id])
+        self.assertEqual(self.hgs(['inspect', 'opencode/workspace/' + lost_tag])['phase'], 'idle')
 
-    def test_02_authoritative_working_interrupt_pause_resume_and_rename(self):
-        b = self.create(); name = b['name']; self.model.holding.clear(); self.model.release.clear()
-        self.command(['send', name, '--json'], self.payload(b, text='HOLD_NATIVE'))
-        self.assertTrue(self.model.holding.wait(10))
+    def test_03_lost_response_and_queue_never_duplicate(self):
+        b = self.create()
+        name, conversation = b['name'], b['conversation_id']
+        self.hgs(['send', name, '--json'], self.payload(b, text='HOLD_NATIVE first turn'))
+        self.assertTrue(self.model.holding.wait(30), 'the model never received the held turn')
         working = self.wait(name, lambda v: v['phase'] == 'working' and v['interrupt_supported'])
-        self.command(['pause', name], success=False)
-        self.command(['send', name, '--json'], self.payload(b, text='busy-refused'), False)
-        self.command(['interrupt', name, '--json'], self.payload(b, expected_turn_started=working['turn_started'] + 1), False)
-        self.command(['interrupt', name, '--json'], self.payload(b, expected_turn_started=working['turn_started']))
+        request = self.payload(b, text='Queued while working')
+        queued = self.hgs(['send', name, '--json'], request)
+        self.assertEqual(queued['status'], 'submitted')
+        self.assertTrue(queued.get('queued'))
+        message_id = queued['native_message_id']
+        # The admission's response is lost: the journal still says pending.
+        receipt = json.loads(self.receipt_path(request).read_text())
+        receipt['status'] = 'pending'
+        self.receipt_path(request).write_text(json.dumps(receipt))
+        again = self.hgs(['send', name, '--json'], request)
+        self.assertEqual((again['status'], again['native_message_id']), ('submitted', message_id))
+        self.assertEqual([item['id'] for item in self.inbox(conversation)], [message_id])
+        view = self.wait(name, lambda v: any(e.get('delivery_state') == 'queued' for e in v['events']))
+        rows = [e for e in view['events'] if e['detail'] == 'Queued while working']
+        self.assertEqual([(e['message_id'], e['delivery_state']) for e in rows], [(message_id, 'queued')])
+        self.assertNotIn('remove_queued', view['allowed_actions'])
+        # Stop ends the turn; the queued message stays, not delivered.
+        stop = {'request_id': str(uuid.uuid4()), 'expected_run_id': b['run_id'], 'expected_conversation_id': conversation,
+                'expected_turn_started': working['turn_started']}
+        self.hgs(['interrupt', name, '--json'], stop)
         self.model.release.set()
-        self.wait(name, lambda v: v['phase'] != 'working')
-        self.command(['session-action', name, '--json'], self.payload(b, action='pause'))
-        self.assertEqual(self.command(['inspect', name])['state'], 'paused')
-        self.command(['session-action', name, '--json'], self.payload(b, action='resume'))
-        resumed = self.command(['inspect', name]); self.assertEqual(resumed['conversation_id'], b['conversation_id']); self.assertNotEqual(resumed['run_id'], b['run_id'])
-        self.command(['send', name, '--json'], self.payload(b, text='old-run'), False)
-        new_name = name + '-renamed'
-        self.command(['session-action', name, '--json'], self.payload(resumed, action='rename', new_name=new_name))
-        self.assertEqual(self.command(['inspect', new_name])['conversation_id'], b['conversation_id'])
+        stopped = self.wait(name, lambda v: v['phase'] == 'idle'
+                            and any(e.get('delivery_state') == 'not_delivered' for e in v['events']))
+        self.assertIn('remove_queued', stopped['allowed_actions'])
+        self.assertEqual([item['id'] for item in self.inbox(conversation)], [message_id])
+        self.action(b, 'remove_queued', message_id=message_id)
+        self.assertEqual(self.inbox(conversation), [])
+        cleared = self.wait(name, lambda v: not any(e.get('delivery_state') for e in v['events']))
+        self.assertNotIn('remove_queued', cleared['allowed_actions'])
+        refused = self.action(b, 'remove_queued', status='failed', message_id=message_id)
+        self.assertIn('unavailable', refused['error'])
+        # A confirmed removal is the request's definite non-delivery.
+        removed = json.loads(self.receipt_path(request).read_text())
+        self.assertEqual((removed['status'], removed['reason']), ('refused', REMOVED))
+        self.assertIn(REMOVED, self.hgs(['send', name, '--json'], request, success=False).stderr)
+        # A journaled message whose request never reached OpenCode is never posted by a
+        # retry: OpenCode would admit an unknown ID, so its delivery stays uncertain.
+        lost = self.payload(b, text='Never posted after a lost request')
+        lost_id = 'msg_' + native_suffix()
+        digest = hashlib.sha256(json.dumps([name, lost], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        self.receipt_path(lost).write_text(json.dumps({
+            'request_id': lost['request_id'], 'name': name, 'run_id': b['run_id'], 'conversation_id': conversation,
+            'digest': digest, 'native_message_id': lost_id, 'text': lost['text'], 'submitted_text': lost['text'],
+            'submitted_at': time.time(), 'at': time.time(), 'status': 'pending', 'attachments': [],
+            'transport': 'native_opencode'}))
+        failure = self.hgs(['send', name, '--json'], lost, success=False)
+        self.assertIn('Delivery uncertain; this request will not be replayed', failure.stderr)
+        self.assertEqual(json.loads(self.receipt_path(lost).read_text())['status'], 'pending')
+        self.assertEqual(self.inbox(conversation), [])
+        users = self.user_messages(conversation)
+        self.assertEqual([text for _, text in users], ['HOLD_NATIVE first turn'])
+        self.assertNotIn(message_id, [native_id for native_id, _ in users])
+        self.assertEqual(self.hgs(['inspect', name])['phase'], 'idle')
 
-    def test_03_native_permission_exact_answer(self):
-        b = self.create(); name = b['name']; result = []
-        def ask(): result.append(self.api(b, '/permission', {'id': 'per_' + uuid.uuid4().hex, 'action': 'bash', 'resources': ['fixture-command']}))
-        thread = threading.Thread(target=ask); thread.start()
+    def test_04_question_and_permission_answers(self):
+        b = self.create()
+        name = b['name']
+        self.hgs(['send', name, '--json'], self.payload(b, text='QUESTION_NATIVE pick a color'))
         data = self.wait(name, lambda v: v['pending_questions'])
-        card = data['pending_questions'][0]
-        self.assertTrue(card['can_answer']); self.assertTrue(card['approval'])
+        self.assertEqual((data['phase'], data['activity']), ('input', 'attention'))
+        self.assertTrue(data.get('attention_id'))
+        [card] = data['pending_questions']
+        self.assertEqual((card['kind'], card['can_answer'], card['approval']), ('opencode_form', True, False))
+        [item] = card['questions']
+        self.assertEqual([o['label'] for o in item['options']], ['Green', 'Blue'])
+        green = next(o['id'] for o in item['options'] if o['label'] == 'Green')
+        # A pending question blocks new messages instead of queueing them behind it.
+        self.hgs(['send', name, '--json'], self.payload(b, text='not while asked'), success=False)
         request = self.payload(b, question_id=card['question_id'], expected_question_hash=card['question_hash'],
+                               answers=[{'question_id': item['id'], 'selected_option_ids': [green], 'text': ''}])
+        self.hgs(['answer', name, '--json'], {**request, 'expected_question_hash': 'changed'}, success=False)
+        self.assertEqual(self.hgs(['answer', name, '--json'], request)['status'], 'answered')
+        self.hgs(['answer', name, '--json'], request, success=False)
+        final = self.wait(name, lambda v: v['phase'] == 'idle' and v.get('reply_id'))
+        self.assertTrue(any(e['type'] == 'PreToolUse' and e['tool'] == 'question' for e in final['events']))
+        self.assertTrue(any(e['type'] == 'PostToolUse' and e['tool'] == 'question' and '"Green"' in e['detail']
+                            for e in final['events']), final['events'])
+        self.assertEqual(final['pending_questions'], [])
+        tool = self.create()
+        self.hgs(['send', tool['name'], '--json'], self.payload(tool, text='BASH_NATIVE run the fixture command'))
+        data = self.wait(tool['name'], lambda v: v['pending_questions'])
+        [card] = data['pending_questions']
+        self.assertEqual((card['kind'], card['can_answer'], card['approval']), ('opencode_permission', True, True))
+        [item] = card['questions']
+        self.assertEqual([o['id'] for o in item['options']], ['once', 'always', 'reject'])
+        self.assertIn('printf native-tool-output', item['prompt'])
+        request = self.payload(tool, question_id=card['question_id'], expected_question_hash=card['question_hash'],
                                answers=[{'question_id': 'permission', 'selected_option_ids': ['once'], 'text': ''}])
-        self.command(['answer', name, '--json'], {**request, 'expected_question_hash': 'changed'}, False)
-        self.assertEqual(self.command(['answer', name, '--json'], request)['status'], 'answered')
-        thread.join(10); self.assertFalse(thread.is_alive()); self.assertTrue(result)
-        self.command(['answer', name, '--json'], request, False)
+        self.assertEqual(self.hgs(['answer', tool['name'], '--json'], request)['status'], 'answered')
+        final = self.wait(tool['name'], lambda v: v['phase'] == 'idle' and v.get('reply_id'))
+        self.assertTrue(any(e['type'] == 'PostToolUse' and e['tool'] == 'shell' and 'native-tool-output' in e['detail']
+                            for e in final['events']), final['events'])
+        self.assert_private(data, final)
 
-    def test_04_native_question_and_real_tool_state(self):
-        b=self.create();name=b['name'];self.command(['send',name,'--json'],self.payload(b,text='QUESTION_NATIVE'))
-        data=self.wait(name,lambda v:any(not q['approval'] for q in v['pending_questions']))
-        card=next(q for q in data['pending_questions'] if not q['approval'])
-        request=self.payload(b,question_id=card['question_id'],expected_question_hash=card['question_hash'],answers=[{'question_id':'0','selected_option_ids':['0'],'text':''}])
-        self.command(['answer',name,'--json'],request)
-        final=self.wait(name,lambda v:v['phase']=='idle' and v.get('reply_id'))
-        self.assertTrue(any(e['type']=='PreToolUse' and e['tool']=='question' for e in final['events']))
-        self.assertTrue(any(e['type']=='PostToolUse' for e in final['events']))
-        tool=self.create();self.command(['send',tool['name'],'--json'],self.payload(tool,text='BASH_NATIVE'))
-        data=self.wait(tool['name'],lambda v:any(q['approval'] for q in v['pending_questions']))
-        card=data['pending_questions'][0]
-        self.command(['answer',tool['name'],'--json'],self.payload(tool,question_id=card['question_id'],expected_question_hash=card['question_hash'],answers=[{'question_id':'permission','selected_option_ids':['once'],'text':''}]))
-        final=self.wait(tool['name'],lambda v:v['phase']=='idle' and v.get('reply_id'))
-        self.assertTrue(any(e['type']=='PostToolUse' and 'native-tool-output' in e['detail'] for e in final['events']))
+    def test_05_model_effort_and_provider_error(self):
+        b = self.create('--effort', 'low')
+        name = b['name']
+        self.assertEqual((b['settings_model'], b['effort']), ('fixture/local', 'low'))
+        self.assertEqual(self.session(b['conversation_id'])['model'], {'providerID': 'fixture', 'id': 'local', 'variant': 'low'})
+        options = {row['value']: row for row in b['model_options']}
+        self.assertEqual(set(options['fixture/alternate']['effort_options']), {'low', 'medium', 'high'})
+        self.hgs(['settings', name, '--json'], self.payload(b, model='fixture/alternate', effort='extreme'), success=False)
+        self.hgs(['settings', name, '--json'], self.payload(b, model='fixture/missing', effort=''), success=False)
+        applied = self.hgs(['settings', name, '--json'], self.payload(b, model='fixture/alternate', effort='high'))
+        self.assertEqual((applied['status'], applied['model'], applied['effort']), ('applied', 'fixture/alternate', 'high'))
+        self.assertEqual(self.session(b['conversation_id'])['model'],
+                         {'providerID': 'fixture', 'id': 'alternate', 'variant': 'high'})
+        changed = self.hgs(['inspect', name])
+        self.assertEqual((changed['settings_model'], changed['effort']), ('fixture/alternate', 'high'))
+        self.hgs(['send', name, '--json'], self.payload(b, text='ERROR_NATIVE fail'))
+        error = self.wait(name, lambda v: v['phase'] == 'error')
+        self.assertEqual(error['activity'], 'attention')
+        self.assertTrue(any(e['type'] == 'StopFailure' and 'Fixture provider rejected' in e['detail'] for e in error['events']))
+        self.assertIn('Fixture provider rejected', json.dumps(error))
+        # The failed turn went to the changed model with the changed effort.
+        turns = [r for r in self.model.requests if 'ERROR_NATIVE' in r['last_user'] and r['tools']]
+        self.assertTrue(turns)
+        self.assertEqual({(r['model'], r['options'].get('reasoning_effort')) for r in turns}, {('alternate', 'high')})
+        self.assert_private(b, changed, error)
 
-    def test_05_model_change_native_error_and_read_marks(self):
-        b=self.create();name=b['name']
-        self.command(['settings',name,'--json'],self.payload(b,model='fixture/alternate'))
-        self.assertEqual(self.command(['inspect',name])['settings_model'],'fixture/alternate')
-        self.command(['send',name,'--json'],self.payload(b,text='ERROR_NATIVE'))
-        error=self.wait(name,lambda v:v['phase']=='error')
-        self.assertEqual(error['activity'],'attention')
-        self.assertIn('Fixture provider rejected',json.dumps(error))
-        self.assertTrue(error.get('attention_id'))
-        self.assertNotIn('password',json.dumps(error))
+    def test_06_legacy_binding(self):
+        current = self.create()
+        cwd = os.path.realpath(self.workspace)
+        refused = self.save_binding('legacy-' + uuid.uuid4().hex[:8], conversation_id='ses_' + uuid.uuid4().hex,
+                                    paused=True, native_data_home=str(self.root / 'opencode1-data'))
+        # A session OpenCode 2 migrated keeps its OpenCode 1 ID and directory.
+        migrated_id = 'ses_' + uuid.uuid4().hex
+        status, created = self.api('POST', '/api/session', {'id': migrated_id, 'location': {'directory': cwd}, 'title': 'migrated'})
+        self.assertEqual(status, 200, created)
+        migrated = self.save_binding('migrated-' + uuid.uuid4().hex[:8], conversation_id=migrated_id, paused=True)
+        rows = self.listing()
+        legacy = rows[refused['name']]
+        self.assertEqual((legacy['state'], legacy['allowed_actions']), ('stopped', ['forget']))
+        self.assertEqual(legacy['inspection_reason'], OPENCODE1)
+        self.assertEqual((rows[current['name']]['state'], rows[current['name']]['phase']), ('running', 'idle'))
+        self.assertIn('rename', rows[current['name']]['allowed_actions'])
+        self.assertEqual((rows[migrated['name']]['state'], rows[migrated['name']]['phase']), ('running', 'idle'))
+        adopted = json.loads(self.binding_path(migrated['name']).read_text())
+        self.assertEqual(adopted['service'], 'opencode2')
+        self.assertNotIn('paused', adopted)
+        inspected = self.hgs(['inspect', refused['name']])
+        self.assertEqual((inspected['state'], inspected['allowed_actions']), ('stopped', ['forget']))
+        self.assertEqual(inspected['inspection_reason'], OPENCODE1)
+        full = self.hgs(['inspect', current['name']])
+        self.assertEqual(full['phase'], 'idle')
+        self.assertIn('fixture/local', [row['value'] for row in full['model_options']])
+        self.hgs(['send', refused['name'], '--json'], self.payload(refused, text='never delivered'), success=False)
+        # Forget removes only the Zerus binding; OpenCode's sessions stay.
+        for record in (refused, migrated):
+            self.action(record, 'forget')
+            self.assertFalse(self.binding_path(record['name']).exists())
+        self.assertTrue(self.binding_path(current['name']).exists())
+        self.assertEqual(self.session(migrated_id)['id'], migrated_id)
+        self.assertEqual(self.session(current['conversation_id'])['id'], current['conversation_id'])
+        self.assertEqual(set(self.listing()) & {refused['name'], migrated['name']}, set())
+        self.assertEqual(self.hgs(['inspect', current['name']])['phase'], 'idle')
 
-    def test_06_voice_transcript_delivers_once_and_audio_stays_in_history(self):
-        from test_speech import Server, load
-        import fcntl
-        b=self.create();name=b['name']
-        settings=self.config/'speech.json'
-        settings.write_text(json.dumps({'schema':1,'state_dir':str(self.root/'asr'),'profiles':[{'id':'fixture','name':'Fixture','adapter':'fixture','model':'fixture','language':'ru','text':'Voice native fixture transcript'}]}))
-        server=Server(load(settings),test_mode=True);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-        log=(self.root/'voice-worker.log').open('ab')
-        worker=subprocess.Popen([str(HGS),'voice','worker'],env=self.env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=log)
-        try:
-            for _ in range(60):
-                path=self.state/'voice/worker.lock'
-                if path.exists():
-                    with path.open('rb') as stream:
-                        try:fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                        except BlockingIOError:break
-                time.sleep(.05)
-            else:self.fail('Owned voice worker did not obtain its private lock')
-            machine=self.command(['swarm','__mobile-peer-identity','--json'])['machine_id']
-            payload=self.payload(b,action='submit',speech={'machine_id':machine,'profile_id':'fixture'},audio={'format':'pcm_s16le','sample_rate':16000,'channels':1,'data_base64':base64.b64encode(b'\x10\x01'*16000).decode()})
-            accepted=self.command(['voice',name,'--json'],payload)['message']
-            until=time.monotonic()+20
-            while time.monotonic()<until:
-                result=self.command(['voice',name,'--json'],self.payload(b,action='status',message_id=accepted['id']))['message']
-                if result['state']=='submitted':break
-                time.sleep(.2)
-            else:self.fail('Native voice failed: '+json.dumps(result)+(self.root/'voice-worker.log').read_text())
-            self.assertEqual(result['transcript'],'Voice native fixture transcript')
-            self.assertEqual(self.command(['voice',name,'--json'],payload)['message']['id'],accepted['id'])
-            final=self.wait(name,lambda v:v['phase']=='idle' and v.get('reply_id'))
-            self.assertEqual(len([e for e in final['events'] if e['type']=='UserPromptSubmit' and e['detail']=='Voice native fixture transcript']),1)
-            self.assertTrue(final['voice_messages'])
-            page=self.command(['history',name,'--json'],self.payload(b,limit=100))
-            self.assertTrue(page['head']['complete'])
-            self.assertTrue(any(e.get('voice') or e.get('type')=='VoiceMessage' for e in page['events']),page)
-            audio=self.command(['attachment',name,'--request',accepted['id'],'--index','0','--conversation',b['conversation_id']])
-            self.assertTrue(audio['data_base64'])
-        finally:
-            worker.terminate();worker.wait(10);log.close();server.shutdown();server.server_close();thread.join(5)
+    def live_stand_in(self):
+        """A disposable live process to register as the service: if hgs ever ran OpenCode's
+        own start here, OpenCode could stop that process, never this test runner."""
+        child = subprocess.Popen(['sleep', '600'], stdin=subprocess.DEVNULL)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        return child
 
-    def test_07_corrupt_or_hung_metadata_never_replaces_a_resident_host(self):
-        b=self.create();file=next(self.state.glob('opencode/hosts/*/host.json'));original=file.read_text();metadata=json.loads(original)
-        try:
-            bad={**metadata,'version':'unreviewed'};file.write_text(json.dumps(bad))
-            failure=self.command(['resume',b['name'],'-d'],success=False)
-            self.assertIn('Invalid private OpenCode host metadata',failure.stderr)
-            self.assertEqual(json.loads(file.read_text()),bad)
-            file.write_text(original)
-            for missing in ['pid','process_start']:
-                bad={k:v for k,v in metadata.items() if k!=missing};file.write_text(json.dumps(bad))
-                failure=self.command(['resume',b['name'],'-d'],success=False)
-                self.assertIn('Invalid private OpenCode host metadata',failure.stderr)
-                self.assertEqual(json.loads(file.read_text()),bad)
-            file.write_text(original)
-            with __import__('socket').socket() as sock:
-                sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
-            bad={**metadata,'port':port};file.write_text(json.dumps(bad))
-            failure=self.command(['resume',b['name'],'-d'],success=False)
-            self.assertIn('left running',failure.stderr)
-            self.assertEqual(json.loads(file.read_text()),bad)
-            file.write_text(original)
-            self.assertEqual(self.command(['inspect',b['name']])['conversation_id'],b['conversation_id'])
-        finally:file.write_text(original)
+    def assert_never_started(self, registration, stand_in):
+        self.assertEqual(self.registration_path().read_bytes(), registration)
+        self.assertIsNone(stand_in.poll(), 'the registered process was stopped')
+        self.assertEqual(self.native_processes(), [])
 
-    def test_08_lost_http_response_reconciles_by_get_and_never_reposts(self):
-        b=self.create();name=b['name'];file=next(self.state.glob('opencode/hosts/*/host.json'));original=file.read_text();native=json.loads(original)
-        class Proxy(http.server.BaseHTTPRequestHandler):
-            submissions=0
-            def log_message(self,*_):pass
-            def do_GET(self):self.forward()
-            def do_POST(self):self.forward()
-            def forward(self):
-                body=self.rfile.read(int(self.headers.get('Content-Length',0)))
-                req=urllib.request.Request(f"http://127.0.0.1:{native['port']}"+self.path,headers={'Authorization':self.headers['Authorization'],'Content-Type':'application/json'},data=body if self.command=='POST' else None,method=self.command)
-                with urllib.request.urlopen(req,timeout=15) as result:
-                    data=result.read();status=result.status
-                if self.command=='POST' and self.path.endswith('/prompt'):
-                    Proxy.submissions+=1;self.close_connection=True;return
-                self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
-        proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Proxy);thread=threading.Thread(target=proxy.serve_forever,daemon=True);thread.start()
-        try:
-            file.write_text(json.dumps({**native,'port':proxy.server_port}))
-            request=self.payload(b,text='Lost response exactly once')
-            self.command(['send',name,'--json'],request,False)
-            receipt=self.state/'opencode/receipts'/(request['request_id']+'.json')
-            self.assertEqual(json.loads(receipt.read_text())['status'],'pending')
-            self.assertEqual(self.command(['send',name,'--json'],request)['status'],'submitted')
-            self.assertEqual(Proxy.submissions,1)
-            final=self.wait(name,lambda v:v['phase']=='idle' and v.get('reply_id'))
-            self.assertEqual(len([e for e in final['events'] if e['type']=='UserPromptSubmit']),1)
-            # Unknown admission remains uncertain; no attempt is authorized by
-            # merely supplying the old UUID again.
-            unknown=self.payload(b,text='Never admitted')
-            pending={'request_id':unknown['request_id'],'name':name,'run_id':b['run_id'],'conversation_id':b['conversation_id'],'text':unknown['text'],'status':'pending','native_message_id':'msg_'+unknown['request_id'].replace('-',''),'digest':hashlib.sha256(json.dumps([name,unknown],sort_keys=True,separators=(',',':')).encode()).hexdigest()}
-            (self.state/'opencode/receipts'/(unknown['request_id']+'.json')).write_text(json.dumps(pending))
-            self.command(['send',name,'--json'],unknown,False)
-            self.assertEqual(Proxy.submissions,1)
-        finally:
-            file.write_text(original);proxy.shutdown();proxy.server_close();thread.join(5)
+    def test_07_incompatible_service(self):
+        self.stop_service()
+        saved = self.save_binding('incompatible-' + uuid.uuid4().hex[:8], service='opencode2')
+        openapi = json.loads((REPO / 'tests/fixtures/opencode2/openapi-2.0.32.json').read_text())
+        del openapi['paths']['/api/session/{sessionID}/inbox']
+        stand_in = self.live_stand_in()
+        for version, reason in [('2.0.31', 'OpenCode 2.0.31 is not supported; install OpenCode 2.0.32 or newer 2.x'),
+                                ('2.0.40', 'OpenCode 2.0.40 lacks GET /api/session/{sessionID}/inbox; update OpenCode or Zerus')]:
+            with self.subTest(version=version):
+                server, seen = stub_service(version, stand_in.pid, openapi)
+                try:
+                    registration = self.write_registration({
+                        'id': 'svc_stub_' + uuid.uuid4().hex[:8], 'version': version, 'pid': stand_in.pid,
+                        'url': f'http://127.0.0.1:{server.server_port}', 'password': 'stub-password'})
+                    row = self.hgs(['inspect', saved['name']])
+                    self.assertTrue(row['inspection_unavailable'])
+                    self.assertEqual((row['inspection_reason'], row['state']), (reason, 'unknown'))
+                    account = self.account()
+                    self.assertEqual((account['catalog_state'], account['catalog_reason']), ('incompatible', reason))
+                    tag = 'refused-' + uuid.uuid4().hex[:8]
+                    self.assertIn(reason, self.launch(tag, '--model', 'fixture/local', success=False).stderr)
+                    self.assertFalse(self.binding_path('opencode/workspace/' + tag).exists())
+                    self.assertIn(reason, self.hgs(['account', 'start', 'native-opencode'], success=False).stderr)
+                    self.assert_never_started(registration, stand_in)
+                    self.assertEqual({method for method, _ in seen}, {'GET'})
+                    self.assertTrue({path for _, path in seen} <= {'/api/info', '/openapi.json'}, seen)
+                finally:
+                    server.shutdown()
+                    server.server_close()
 
-    def test_09_inline_config_never_bootstraps_an_unbound_host(self):
-        original=self.env
-        self.env={**original,'HGS_STATE_DIR':str(self.root/'inline-state'),'OPENCODE_CONFIG_CONTENT':json.dumps({'model':'other/invisible','permission':{'*':'allow'},'provider':{'other':{'options':{'apiKey':'INLINE_SECRET_SENTINEL'}}}})}
-        try:
-            account=next(p for p in self.command(['account','ls'])['profiles'] if p['id']=='native-opencode')
-            self.assertEqual(account['model_options'],[])
-            self.assertIn('Inline OpenCode configuration',account['model_catalog_reason'])
-            blocked=self.command(['opencode',str(self.workspace),'--new','-n','inline-blocked','-d','--account','native-opencode','--model','fixture/local'],success=False)
-            self.assertIn('Inline OpenCode configuration',blocked.stderr)
-            self.assertNotIn('INLINE_SECRET_SENTINEL',blocked.stderr+json.dumps(account))
-            self.assertFalse((self.root/'inline-state/opencode').exists())
-        finally:self.env=original
+    def test_08_never_replaces_a_live_registration(self):
+        self.stop_service()
+        # A live registered process whose port accepts connections but never answers.
+        stand_in = self.live_stand_in()
+        with socket.socket() as hung:
+            hung.bind(('127.0.0.1', 0))
+            hung.listen(16)
+            registration = self.write_registration({
+                'id': 'svc_hung', 'version': self.version, 'pid': stand_in.pid,
+                'url': f'http://127.0.0.1:{hung.getsockname()[1]}', 'password': 'hung-password'})
+            tag = 'hung-' + uuid.uuid4().hex[:8]
+            failure = self.launch(tag, '--model', 'fixture/local', success=False)
+            self.assertRegex(failure.stderr, 'OpenCode is (not responding|starting)')
+            self.assertFalse(self.binding_path('opencode/workspace/' + tag).exists())
+            failure = self.hgs(['account', 'start', 'native-opencode'], success=False)
+            self.assertRegex(failure.stderr, 'OpenCode is (not responding|starting)')
+            self.assertEqual(self.account()['catalog_state'], 'unreachable')
+            self.assert_never_started(registration, stand_in)
 
-    def test_10_classic_children_are_exact_read_only_and_never_inherit_parent_state(self):
-        b=self.create();name=b['name']
-        empty=self.command(['inspect',name])
-        self.assertEqual((empty['subagent_source'],empty['subagents'],empty['subagent_total_count']),('opencode_native',{},0))
-        self.assertTrue(empty['subagent_counts_complete'])
-        # The reviewed native API runtime offers no task tool. Another OpenCode
-        # process sharing this data home (`opencode run`, like the TUI) creates
-        # the child with its classic runtime.
-        self.model.holding.clear();self.model.release.clear()
-        log=(self.root/'classic-run.log').open('ab')
-        run=subprocess.Popen([NATIVE,'run','--session',b['conversation_id'],'--model','fixture/local','TASK_NATIVE delegate'],env=self.env,
-                             cwd=self.workspace,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
-        try:
-            self.assertTrue(self.model.holding.wait(30),'classic child did not start')
-            running=self.wait(name,lambda v:len(v['subagents'])==1)
-            child_id,child=next(iter(running['subagents'].items()))
-            self.assertTrue(child_id.startswith('ses_'));self.assertNotEqual(child_id,b['conversation_id'])
-            # This host does not own that process: the open turn stays unknown.
-            self.assertEqual(child['state'],'unknown');self.assertEqual(running['subagent_active_count'],0)
-            self.assertEqual(running['subagent_unknown_count'],1);self.assertFalse(running['subagent_counts_complete'])
-            view=self.command(['inspect',name,'--agent',child_id,'--skip-processes'])
-            self.assertEqual((view['name'],view['agent_id'],view['parent_conversation_id'],view['conversation_id'],view['run_id']),
-                             (name,child_id,b['conversation_id'],b['conversation_id']+'/'+child_id,b['run_id']))
-            self.assertEqual(view['phase'],'unknown');self.assertFalse(view['send_supported']);self.assertTrue(view['read_only'])
-            self.assertEqual((view['allowed_actions'],view['pending_questions']),([],[]))
-            self.command(['send',name,'--json'],{**self.payload(b,text='child-refused'),'agent_id':child_id},False)
-        finally:
-            self.model.release.set()
-            try:code=run.wait(60)
-            except subprocess.TimeoutExpired:
-                os.killpg(run.pid,signal.SIGTERM);code=run.wait(10)
-            log.close()
-        self.assertEqual(code,0,(self.root/'classic-run.log').read_text())
-        done=self.wait(name,lambda v:v['subagents'].get(child_id,{}).get('state')=='finished')
-        self.assertEqual((done['subagent_active_count'],done['subagent_completed_count'],done['subagent_unknown_count']),(0,1,0))
-        self.assertTrue(done['subagent_counts_complete'])
-        self.assertEqual(done['subagents'][child_id]['tracking_evidence']['source'],'opencode_native_messages')
-        view=self.command(['inspect',name,'--agent',child_id])
-        self.assertEqual(view['phase'],'idle')
-        self.assertTrue(any(e['type']=='UserPromptSubmit' and 'CHILD_NATIVE_HOLD' in e['detail'] for e in view['events']))
-        self.assertTrue(any(e['type']=='AgentMessage' and e['detail']=='Native child reply' for e in view['events']))
-        page=self.command(['history',name,'--json'],{**self.payload(b,limit=100),'agent_id':child_id})
-        self.assertTrue(any(e.get('detail')=='Native child reply' for e in page['events']),page)
-        other=self.create()
-        for foreign in [b['conversation_id'],other['conversation_id'],'ses_'+'0'*26,'../child']:
-            self.command(['inspect',name,'--agent',foreign],success=False)
-        self.command(['history',name,'--json'],{**self.payload(b,limit=100),'agent_id':other['conversation_id']},False)
-        # A working parent never makes its finished child working.
-        self.model.holding.clear();self.model.release.clear()
-        self.command(['send',name,'--json'],self.payload(b,text='HOLD_NATIVE parent turn'))
-        self.assertTrue(self.model.holding.wait(10))
-        try:
-            working=self.wait(name,lambda v:v['phase']=='working')
-            self.assertEqual(working['subagents'][child_id]['state'],'finished');self.assertEqual(working['subagent_active_count'],0)
-        finally:self.model.release.set()
-        self.wait(name,lambda v:v['phase']!='working')
+    def test_09_explicit_start_and_account_catalog(self):
+        self.stop_service()
+        started = self.hgs(['account', 'start', 'native-opencode'])
+        self.assertTrue(self.native_processes())
+        self.assertEqual(self.registration()['url'].rstrip('/'), f'http://127.0.0.1:{self.port}')
+        until = time.monotonic() + 30
+        account = self.account()
+        while account['catalog_state'] == 'loading' and time.monotonic() < until:
+            time.sleep(.5)
+            account = self.account()
+        self.assertEqual(account['catalog_state'], 'ready', account)
+        self.assertEqual(account['settings_model'], 'fixture/local')
+        options = {row['value']: row for row in account['model_options']}
+        for value in ('fixture/local', 'fixture/alternate'):
+            self.assertEqual(set(options[value]['effort_options']), {'low', 'medium', 'high'})
+        self.assertEqual(options['fixture/local']['provider_label'], 'Private keyless fixture')
+        self.assertNotIn(f'127.0.0.1:{self.model.server_port}', json.dumps(account))
+        self.assert_private(started, account)
+        self.assertTrue(account['installed'], account.get('install_reason'))
+        self.assertNotIn('install_reason', account)
+
+    def test_10_a_message_removed_while_pending_is_never_resurrected(self):
+        b = self.create()
+        name, conversation = b['name'], b['conversation_id']
+        self.hgs(['send', name, '--json'], self.payload(b, text='HOLD_NATIVE first turn'))
+        self.assertTrue(self.model.holding.wait(30), 'the model never received the held turn')
+        working = self.wait(name, lambda v: v['phase'] == 'working' and v['interrupt_supported'])
+        text = 'Removed before delivery'
+        request = self.payload(b, text=text)
+        queued = self.hgs(['send', name, '--json'], request)
+        self.assertTrue(queued.get('queued'))
+        message_id = queued['native_message_id']
+        # OpenCode admitted the message, but hgs lost the response: its journal says pending.
+        receipt = json.loads(self.receipt_path(request).read_text())
+        receipt['status'] = 'pending'
+        receipt.pop('queued', None)
+        self.receipt_path(request).write_text(json.dumps(receipt))
+        self.assertEqual([item['id'] for item in self.inbox(conversation)], [message_id])
+        stop = {'request_id': str(uuid.uuid4()), 'expected_run_id': b['run_id'], 'expected_conversation_id': conversation,
+                'expected_turn_started': working['turn_started']}
+        self.hgs(['interrupt', name, '--json'], stop)
+        self.model.release.set()
+        self.wait(name, lambda v: v['phase'] == 'idle' and any(e.get('delivery_state') == 'not_delivered' for e in v['events']))
+        self.action(b, 'remove_queued', message_id=message_id)
+        self.assertEqual(self.inbox(conversation), [])
+        # The same request again must not admit the removed message a second time.
+        retry = subprocess.run([str(HGS), 'send', name, '--json'], env=self.env, cwd=self.workspace, text=True,
+                               capture_output=True, input=json.dumps(request), timeout=60)
+        until = time.monotonic() + 5
+        while time.monotonic() < until and message_id not in [i for i, _ in self.user_messages(conversation)]:
+            time.sleep(.25)
+        self.assertNotIn(message_id, [i for i, _ in self.user_messages(conversation)], 'the removed message was delivered')
+        self.assertNotIn(text, [t for _, t in self.user_messages(conversation)])
+        self.assertEqual(self.inbox(conversation), [])
+        self.assertEqual([r for r in self.model.requests if text in r['last_user']], [])
+        self.assertNotEqual(retry.returncode, 0, retry.stdout)
+        self.assertIn(REMOVED, retry.stderr)
+        receipt = json.loads(self.receipt_path(request).read_text())
+        self.assertEqual((receipt['status'], receipt['reason'], receipt['native_message_id']),
+                         ('refused', REMOVED, message_id))
+        self.assertIn(REMOVED, self.hgs(['send', name, '--json'], request, success=False).stderr)
+        self.assertEqual(self.inbox(conversation), [])
+        self.assertEqual(self.hgs(['inspect', name])['phase'], 'idle')
+
+
+if __name__ == '__main__':
+    unittest.main()

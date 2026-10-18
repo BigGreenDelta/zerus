@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use zerus_mobile_connector::capabilities::Flags;
 use zerus_mobile_connector::execute::{Outcome, GENERIC};
 use zerus_mobile_connector::journal::{Journal, RESTART_ERROR};
+use zerus_mobile_connector::mutations::validate_for_session;
 use zerus_mobile_connector::native::{self, Call, Native, NativeError, NativeResult, Output};
 use zerus_mobile_connector::runtime::{Connector, Settings};
 
@@ -23,11 +24,13 @@ const CONVERSATION: &str = "fixture-conversation";
 struct Scripted {
     answers: RefCell<HashMap<Vec<String>, Value>>,
     calls: RefCell<Vec<Vec<String>>>,
+    payloads: RefCell<Vec<Option<Value>>>,
 }
 
 impl Native for Scripted {
     async fn call(&self, call: Call) -> NativeResult {
         self.calls.borrow_mut().push(call.argv.clone());
+        self.payloads.borrow_mut().push(call.payload.clone());
         match self.answers.borrow().get(&call.argv) {
             Some(answer) => Ok(Output::Json(answer.clone())),
             None => Err(NativeError::Failed(native::FAILED)),
@@ -229,4 +232,233 @@ async fn only_a_live_action_target_becomes_inspectable_at_once() {
         assert_eq!(result["state"], status, "{result}");
         assert_eq!(sessions(), [SESSION.to_owned()].into(), "{status}");
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn remove_queued_is_a_journaled_session_action_with_exact_identity() {
+    let harness = Harness::new("mutation-remove-queued");
+    let id = "f5a6b7c8-d9ea-5fb0-8c1d-2e3f40516273";
+    let mut acknowledged = ack(id, json!("completed"));
+    acknowledged["message_id"] = json!("msg_01");
+    harness.answer(&["session-action", SESSION, "--json"], acknowledged);
+    let mut payload = identity();
+    payload["message_id"] = json!("msg_01");
+    let result = harness.run("remove_queued", id, payload.clone()).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(result["result"]["message_id"], "msg_01");
+    assert_eq!(harness.calls(), [["session-action", SESSION, "--json"]]);
+    // An acknowledgement for another message is not the removal asked for.
+    let other = "06b7c8d9-eafb-5c01-9d2e-3f4051627384";
+    let mut wrong = ack(other, json!("completed"));
+    wrong["message_id"] = json!("msg_02");
+    harness.answer(&["session-action", SESSION, "--json"], wrong);
+    let result = harness.run("remove_queued", other, payload).await;
+    assert_eq!(result["state"], "uncertain", "{result}");
+    // A malformed message identity never reaches native hgs.
+    let before = harness.calls().len();
+    let bad = "17c8d9ea-fb0c-5d12-8e3f-405162738495";
+    let mut payload = identity();
+    payload["message_id"] = json!("not-a-message");
+    let result = harness.run("remove_queued", bad, payload).await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(harness.calls().len(), before);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_opencode_settings_effort_must_be_offered_for_the_model() {
+    let harness = Harness::new("mutation-opencode-settings");
+    const OPENCODE: &str = "opencode/example/session";
+    harness
+        .connector
+        .state
+        .borrow_mut()
+        .sessions
+        .insert(OPENCODE.into());
+    harness.answer(
+        &["inspect", OPENCODE],
+        json!({"name": OPENCODE, "run_id": RUN, "conversation_id": CONVERSATION,
+               "settings_change_supported": true, "settings_model": "fixture/local",
+               "model_options": [{"id": "fixture/local", "effort_options": ["low", "high"]}]}),
+    );
+    let run = |id: &'static str, effort: &'static str| {
+        let harness = &harness;
+        async move {
+            let mut payload = identity();
+            payload["effort"] = json!(effort);
+            payload["request_id"] = json!(id);
+            let request = json!({"request_id": id, "operation": "settings",
+                                 "session": OPENCODE, "payload": payload});
+            match harness.connector.execute(request).await.unwrap() {
+                Outcome::Finished(receipt) => receipt,
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    let refused = run("27d9eafb-0c1d-5e23-9f40-516273849506", "ultra").await;
+    assert_eq!(
+        refused,
+        receipt("failed", "effort is not offered for this model")
+    );
+    assert_eq!(harness.calls().len(), 1);
+    harness.answer(
+        &["settings", OPENCODE, "--json"],
+        json!({"request_id": "38eafb0c-1d2e-5f34-8051-627384950617", "name": OPENCODE,
+               "run_id": RUN, "conversation_id": CONVERSATION, "status": "applied",
+               "effort": "high"}),
+    );
+    let applied = run("38eafb0c-1d2e-5f34-8051-627384950617", "high").await;
+    assert_eq!(applied["state"], "completed", "{applied}");
+}
+
+/// The OpenCode effort shape contract every layer shares with the native
+/// catalog projection; `effort_options` membership stays authoritative.
+const EFFORT_IDS: &str = include_str!("../../../../tests/fixtures/opencode-effort-ids.json");
+const FIXED_EFFORTS: [&str; 11] = [
+    "", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on",
+];
+
+fn effort_ids(kind: &str) -> Vec<String> {
+    let fixture: Value = serde_json::from_str(EFFORT_IDS).unwrap();
+    let ids: Vec<String> = fixture[kind]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect();
+    assert!(!ids.is_empty(), "{kind}");
+    ids
+}
+
+#[test]
+fn the_shared_fixture_decides_every_settings_effort_shape() {
+    let accepts = |session: &str, effort: &str| {
+        let mut payload = identity();
+        payload["request_id"] = json!("r");
+        payload["effort"] = json!(effort);
+        validate_for_session("settings", session, &payload, "r").is_ok()
+    };
+    for id in effort_ids("accept") {
+        assert!(accepts("opencode/p/t", &id), "{id:?}");
+    }
+    for id in effort_ids("reject") {
+        // An empty effort selects the model's default.
+        assert_eq!(accepts("opencode/p/t", &id), id.is_empty(), "{id:?}");
+    }
+    // Every other session keeps the fixed list.
+    for session in ["codex/p/t", "claude/p/t", "kimi/p/t", "dsh/p/t"] {
+        for fixed in FIXED_EFFORTS {
+            assert!(accepts(session, fixed), "{session} {fixed}");
+        }
+        for id in effort_ids("accept")
+            .into_iter()
+            .chain(effort_ids("reject"))
+            .filter(|id| !FIXED_EFFORTS.contains(&id.as_str()))
+        {
+            assert!(!accepts(session, &id), "{session} {id:?}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn only_an_effort_the_session_model_offers_reaches_the_settings_payload() {
+    let harness = Harness::new("mutation-opencode-effort-ids");
+    const OPENCODE: &str = "opencode/example/session";
+    harness
+        .connector
+        .state
+        .borrow_mut()
+        .sessions
+        .insert(OPENCODE.into());
+    harness.answer(
+        &["inspect", OPENCODE],
+        json!({"name": OPENCODE, "run_id": RUN, "conversation_id": CONVERSATION,
+               "settings_change_supported": true, "settings_model": "fixture/local",
+               "model_options": [{"id": "fixture/local", "effort_options": ["think:deep", "caf\u{e9}"]},
+                                 {"id": "fixture/other", "effort_options": ["low"]}]}),
+    );
+    let run = |id: &'static str, extra: Value| {
+        let harness = &harness;
+        async move {
+            let mut payload = identity();
+            for (key, value) in extra.as_object().unwrap() {
+                payload[key] = value.clone();
+            }
+            payload["request_id"] = json!(id);
+            let request = json!({"request_id": id, "operation": "settings",
+                                 "session": OPENCODE, "payload": payload});
+            match harness.connector.execute(request).await.unwrap() {
+                Outcome::Finished(receipt) => receipt,
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    // Well formed but not offered by the current or the requested model:
+    // refused from the session's own inspection before any native write.
+    let refusals = [
+        (
+            "49fb0c1d-2e3f-5045-9162-738495061728",
+            json!({"effort": "low\u{2014}deep"}),
+        ),
+        (
+            "5a0c1d2e-3f40-5156-a273-849506172839",
+            json!({"effort": "low"}),
+        ),
+        (
+            "6b1d2e3f-4051-5267-b384-95061728394a",
+            json!({"model": "fixture/other", "effort": "think:deep"}),
+        ),
+    ];
+    for (id, extra) in refusals {
+        let before = harness.calls().len();
+        let refused = run(id, extra.clone()).await;
+        let expected = receipt("failed", "effort is not offered for this model");
+        assert_eq!(refused, expected, "{extra}");
+        assert_eq!(
+            harness.calls()[before..],
+            [["inspect", OPENCODE]],
+            "{extra}"
+        );
+        let stored: Value =
+            serde_json::from_str(&harness.connector.journal.replay(id).unwrap()).unwrap();
+        assert_eq!(stored, expected, "{extra}");
+    }
+    // An offered colon id reaches native hgs unchanged, in the JSON payload only.
+    let id = "7c2e3f40-5162-5378-8495-061728394a5b";
+    harness.answer(
+        &["settings", OPENCODE, "--json"],
+        json!({"request_id": id, "name": OPENCODE, "run_id": RUN,
+               "conversation_id": CONVERSATION, "status": "applied", "effort": "think:deep"}),
+    );
+    let applied = run(id, json!({"effort": "think:deep"})).await;
+    assert_eq!(applied["state"], "completed", "{applied}");
+    assert_eq!(
+        harness.calls().last().unwrap(),
+        &["settings", OPENCODE, "--json"]
+    );
+    let written = harness.connector.native.payloads.borrow().last().cloned();
+    assert_eq!(written.unwrap().unwrap()["effort"], "think:deep");
+}
+
+#[test]
+fn an_in_flight_remove_queued_recovers_as_uncertain_after_a_restart() {
+    umask();
+    let scratch = Scratch::new("mutation-remove-queued-restart");
+    let state = scratch.path("state");
+    let journal = Journal::open(&state, "fixture-binding", EPOCH).unwrap();
+    let removal = "28d9eafb-0c1d-5e23-9f40-516273849507";
+    let read = "39eafb0c-1d2e-5f34-8051-627384950618";
+    assert!(journal
+        .claim(removal, "remove_queued", None, EPOCH)
+        .unwrap());
+    assert!(journal.claim(read, "no_such_read", None, EPOCH).unwrap());
+    journal.close();
+    // The connector restarted while both were running.
+    let journal = Journal::open(&state, "fixture-binding", EPOCH + 1.0).unwrap();
+    let stored =
+        |id: &str| -> Value { serde_json::from_str(&journal.replay(id).unwrap()).unwrap() };
+    assert_eq!(stored(removal), receipt("uncertain", RESTART_ERROR));
+    assert_eq!(stored(read), receipt("failed", RESTART_ERROR));
+    assert!(zerus_mobile_connector::journal::is_mutation(
+        "remove_queued"
+    ));
 }

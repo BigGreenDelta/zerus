@@ -441,7 +441,7 @@ pub fn validate(
     match operation {
         "history" => validate_history(payload, request_id)?,
         "process_output" => validate_process_output(payload, request_id)?,
-        _ => crate::mutations::validate(operation, payload, request_id)?,
+        _ => crate::mutations::validate_for_session(operation, session, payload, request_id)?,
     }
     match json::python_default_len(payload, false) {
         Ok(size) if size > MAX_PAYLOAD => Err(error(crate::native::REQUEST_TOO_LARGE)),

@@ -259,6 +259,14 @@ private:
     QString m_interruptName, m_interruptMachine;
     quint64 m_queueSendRequest = 0;
     QString m_queueSendKey;
+    // One confirmed OpenCode inbox removal at a time.
+    quint64 m_removeQueuedRequest = 0;
+    QString m_removeQueuedKey, m_removeQueuedMessage, m_removeQueuedName;
+    void removeQueuedMessage(const QString &messageId);
+    // A confirmed OpenCode Forget that removes only the Zerus binding.
+    quint64 m_forgetBindingRequest = 0;
+    QString m_forgetBindingName;
+    bool queuedMessageRemovable(const QString &messageId) const;
     void runSessionMenuAction(const Entry &original, SessionMenuAction action);
     bool selectSessionEntry(const Entry &original);
     QString selectedDirectory() const;
@@ -446,6 +454,13 @@ private:
     ActivityView *m_activityView = nullptr;
     class ProcessView *m_processes = nullptr;
     QWidget *m_nativeSignIn = nullptr;
+    // A stopped OpenCode service: started only by this explicit action.
+    QWidget *m_openCodeService = nullptr;
+    QLabel *m_openCodeServiceText = nullptr;
+    QPushButton *m_openCodeServiceStart = nullptr;
+    quint64 m_openCodeStartRequest = 0;
+    QString m_openCodeStartMachine;
+    void startOpenCodeService();
     ActivityView *m_subagentView = nullptr;
     QStackedWidget *m_activityStack = nullptr;
     QLabel *m_subagentTitle = nullptr, *m_subagentHint = nullptr;

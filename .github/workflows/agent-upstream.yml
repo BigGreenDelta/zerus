@@ -17,7 +17,7 @@ jobs:
   canary:
     if: github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event.repository.private == false
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 2
     steps:
@@ -32,7 +32,7 @@ jobs:
           echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - run: cargo build --locked
-      - name: Discover releases, compare capabilities and test latest Codex and Claude Code
+      - name: Discover releases, compare capabilities and test latest Codex, Claude Code and OpenCode
         run: python3 scripts/ci/agent-compatibility.py --latest
       - name: Retain public compatibility evidence
         if: always()

@@ -1,0 +1,37 @@
+{
+ "data": [
+  {
+   "fields": [
+    {
+     "custom": true,
+     "description": "Pick a color",
+     "key": "q0",
+     "options": [
+      {
+       "description": "First",
+       "label": "Green",
+       "value": "Green"
+      },
+      {
+       "description": "Second",
+       "label": "Blue",
+       "value": "Blue"
+      }
+     ],
+     "title": "Color",
+     "type": "string"
+    }
+   ],
+   "id": "frm_14bb2df2500101YAecuyKBa9qA",
+   "metadata": {
+    "kind": "question",
+    "tool": {
+     "id": "call_mgrimcii",
+     "messageID": "msg_14bb2df17001mGPCg2h4EGlMmX"
+    }
+   },
+   "sessionID": "ses_1R9rkqMLhkLndQ3Lk34ReM0yWf",
+   "title": "Questions"
+  }
+ ]
+}

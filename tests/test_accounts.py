@@ -52,8 +52,28 @@ class Accounts(unittest.TestCase):
         previous=self.env.get("PATH","");self.env["PATH"]=str(fake)+":"+previous
         try:
             planned=self.run_hgs('account','login','native-opencode','--dry-run')
-            self.assertIn(b'opencode auth login',planned.stdout)
+            self.assertIn(b'Connect OpenCode providers with `opencode auth login` in a terminal on this computer',planned.stdout)
             self.assertFalse(marker.exists())
+            refused=self.run_hgs('account','login','native-opencode',ok=False)
+            self.assertIn(b'in a terminal on this computer',refused.stderr)
+            self.assertFalse(marker.exists())
+        finally:self.env["PATH"]=previous
+
+    def test_native_opencode_row_without_a_service_and_start_scope(self):
+        fake=self.bin;binary=fake/"opencode"
+        binary.write_text("#!/bin/sh\n[ \"$1\" = --version ] && echo v2.0.32 || exit 9\n");binary.chmod(0o700)
+        previous=self.env.get("PATH","");self.env["PATH"]=str(fake)+":"+previous
+        try:
+            row=[p for p in self.ls()['profiles'] if p['id']=='native-opencode'][0]
+            self.assertTrue(row['installed'])
+            self.assertEqual(row['catalog_state'],'not_running')
+            self.assertEqual(row['model_options'],[])
+            binary.write_text("#!/bin/sh\n[ \"$1\" = --version ] && echo 1.4.0 || exit 9\n")
+            row=[p for p in self.ls()['profiles'] if p['id']=='native-opencode'][0]
+            self.assertFalse(row['installed'])
+            self.assertIn('OpenCode 1.4.0 is not supported',row['install_reason'])
+            refused=self.run_hgs('account','start','native-codex',ok=False)
+            self.assertIn(b'Only the native OpenCode account has a service to start',refused.stderr)
         finally:self.env["PATH"]=previous
 
     def test_defaults_do_not_touch_agent_homes(self):

@@ -56,7 +56,7 @@ struct ConversationView: View {
                                                              detailProgress: model.detailProgress, historyLoading: model.olderLoading,
                                                              historyProgress: historyProgress, demo: app.demo, resolved: raw != nil)
         let loading = loadStatus?.initial == true
-        let offered = Set(questions.filter { !$0.prompts.isEmpty && !$0.id.isEmpty && QuestionPolicies.submitted($0, target) == nil }.map(\.id)).count
+        let offered = Set(questions.filter { QuestionPolicies.shown($0) && QuestionPolicies.submitted($0, target) == nil }.map(\.id)).count
         let keys = Self.keys(events: events, questions: questions, warning: warning, bounded: bounded, unreadBoundary: unreadBoundary, loading: loading)
         let online = model.activityVerified || app.demo
         let available = online && model.activityVerified && !model.contextBlocked(target)

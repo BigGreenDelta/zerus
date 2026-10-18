@@ -1,0 +1,12 @@
+{
+ "data": {
+  "delivery": "steer",
+  "id": "msg_14bb33695001TPJC5sZ8raUR5i",
+  "payload": {},
+  "sessionID": "ses_IycejmWY8RpJq1aeBnnIpbaNAt",
+  "time": {
+   "created": 1792271398550
+  },
+  "type": "compaction"
+ }
+}

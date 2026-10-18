@@ -23,11 +23,14 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
     public var originalIds: [String]
     public var detailTruncated: Bool
     public var voice: VoiceMessage?
+    /// A message the native agent has not admitted yet: "queued" or "not_delivered" (OpenCode). It is shown only
+    /// from the current inspection and never becomes history. Optional so older cached rows still decode.
+    public var deliveryState: String?
 
     public init(id: String, role: String, text: String, time: String, at: Double = 0, requestId: String = "", attachments: [DisplayedAttachment] = [],
                 source: String = "", delivery: String = "", outgoingId: String = "", nativeType: String = "", submittedText: String = "",
                 originalId: String = "", historyId: String = "", historyCursor: String = "", historyEpoch: String = "", incomingSeq: Int64? = nil,
-                originalIds: [String] = [], detailTruncated: Bool = false, voice: VoiceMessage? = nil) {
+                originalIds: [String] = [], detailTruncated: Bool = false, voice: VoiceMessage? = nil, deliveryState: String? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -48,6 +51,7 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
         self.originalIds = originalIds
         self.detailTruncated = detailTruncated
         self.voice = voice
+        self.deliveryState = deliveryState
     }
 
     /// Serialized-size estimate used for the bounded history window.
@@ -55,7 +59,7 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
         // Separate statements: one long `+` chain takes the type checker tens of seconds.
         var size = 260
         let fields: [String] = [id, role, text, time, requestId, source, delivery, outgoingId, nativeType, submittedText, originalId,
-                                historyId, historyCursor, historyEpoch]
+                                historyId, historyCursor, historyEpoch, deliveryState ?? ""]
         for field in fields { size += field.utf8.count }
         for value in originalIds { size += value.utf8.count + 3 }
         for file in attachments {
@@ -69,6 +73,19 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
             for value in texts { size += value.utf8.count }
         }
         return size
+    }
+}
+
+/// The label of a message the native agent has not admitted. Phones offer no removal in phase 1.
+public enum QueuedDelivery {
+    public static let states: Set<String> = ["queued", "not_delivered"]
+
+    public static func label(_ state: String?) -> String {
+        switch state {
+        case "queued": "Queued"
+        case "not_delivered": "Not delivered"
+        default: ""
+        }
     }
 }
 
@@ -89,6 +106,15 @@ public struct Prompt: Codable, Hashable, Sendable {
     public var body: String
     public var otherLabel: String
     public var otherDescription: String
+    /// Form item fields (OpenCode): "choice" or "text"; empty for other agents, whose rules are unchanged.
+    public var inputKind = ""
+    public var minLength: Int?
+    public var maxLength: Int?
+    public var minItems: Int?
+    public var maxItems: Int?
+    public var defaultOptionIds: [String] = []
+    /// The prefilled answer of a native OpenCode text item (`default_text`), bounded like a typed answer; "" otherwise.
+    public var defaultText = ""
 }
 
 public struct NativeQuestionAnswer: Codable, Hashable, Sendable {
@@ -401,7 +427,8 @@ public enum NativeEvents {
                          attachments: files, source: source, nativeType: type,
                          submittedText: source == "hgs_delivery" ? value.string("submitted_text") : "", originalId: originalId, historyId: historyId,
                          historyCursor: value.string("history_cursor"), historyEpoch: raw.string("history_epoch"), incomingSeq: incoming,
-                         originalIds: originalIds, detailTruncated: value.bool("detail_truncated"), voice: voice)
+                         originalIds: originalIds, detailTruncated: value.bool("detail_truncated"), voice: voice,
+                         deliveryState: QueuedDelivery.states.contains(value.string("delivery_state")) ? value.string("delivery_state") : nil)
         }
         func replaces(_ provider: JSONObject, _ hook: JSONObject) -> Bool {
             provider.string("type") == "AgentMessage" && inScope(provider) && inScope(hook) && hook.string("type") == "Stop" &&
@@ -503,6 +530,30 @@ public enum NativeEvents {
         return "Waiting for the agent to confirm its input state."
     }
 
+    /// A reported non-negative whole-number bound; anything else is no bound.
+    static func limit(_ raw: JSONObject, _ key: String) -> Int? {
+        guard case .int(let value)? = raw[key], value >= 0, value <= 1_000_000 else { return nil }
+        return Int(value)
+    }
+
+    /// Only an explicit native OpenCode text item seeds its text: one line, clipped to `max_length` characters and the
+    /// 4096-byte answer bound. Anything else has no default text.
+    static func defaultText(_ item: JSONObject, source: String) -> String {
+        guard source == "opencode_native", item.string("input_kind") == "text", case .string(let text)? = item["default_text"],
+              !text.unicodeScalars.contains(where: PairingInvite.isISOControl) else { return "" }
+        let characters = limit(item, "max_length") ?? Int.max
+        var clipped = String.UnicodeScalarView()
+        var count = 0, bytes = 0
+        for scalar in text.unicodeScalars {
+            let size = String(scalar).utf8.count
+            if count == characters || bytes + size > 4096 { break }
+            clipped.append(scalar)
+            count += 1
+            bytes += size
+        }
+        return String(clipped)
+    }
+
     public static func questions(_ raw: JSONObject) -> [Question] {
         raw.objects("pending_questions").map { card in
             let delivery = card.object("answer_delivery").map { delivery in
@@ -518,15 +569,19 @@ public enum NativeEvents {
             if let value = card["created_at"]?.numberValue, value.isFinite, value > 0, value < 253_402_300_800 { created = value }
             return Question(id: card.string("question_id"), hash: card.string("question_hash"),
                             prompts: card.objects("questions").map { prompt in
-                                Prompt(id: prompt.string("id"), text: prompt.string("question"),
+                                Prompt(id: prompt.string("id"), text: prompt.string("question", "prompt"),
                                        choices: prompt.objects("options").map { Choice(id: $0.string("id"), label: $0.string("label"), description: $0.string("description")) },
                                        multi: prompt.bool("multi_select"), required: prompt.bool("required", default: true),
                                        other: prompt.bool("allow_other"), header: prompt.string("header"), body: prompt.string("body"),
-                                       otherLabel: prompt.string("other_label"), otherDescription: prompt.string("other_description"))
+                                       otherLabel: prompt.string("other_label"), otherDescription: prompt.string("other_description"),
+                                       inputKind: ["choice", "text"].contains(prompt.string("input_kind")) ? prompt.string("input_kind") : "",
+                                       minLength: limit(prompt, "min_length"), maxLength: limit(prompt, "max_length"),
+                                       minItems: limit(prompt, "min_items"), maxItems: limit(prompt, "max_items"),
+                                       defaultOptionIds: prompt.strings("default_option_ids"), defaultText: defaultText(prompt, source: card.string("source")))
                             },
                             canAnswer: card.bool("can_answer"), canSkip: card.bool("can_skip"), optional: card.bool("optional"),
                             delivery: delivery?.status ?? "", createdAt: created, source: card.string("source"), approval: card.bool("approval"),
-                            trustRequest: card.bool("trust_request"), unavailableReason: card.string("answer_unavailable_reason"),
+                            trustRequest: card.bool("trust_request"), unavailableReason: card.string("answer_unavailable_reason", "unavailable_reason"),
                             run: card.string("run_id"), conversation: card.string("conversation_id"), toolCallId: card.string("tool_call_id"),
                             answerDelivery: delivery)
         }

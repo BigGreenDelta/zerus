@@ -1,5 +1,11 @@
 import Foundation
 
+/// The choices and texts a question card opens with.
+public struct QuestionOpening: Hashable, Sendable {
+    public let options: [String: Set<String>]
+    public let texts: [String: String]
+}
+
 public struct QuestionQueue: Sendable {
     public let selected: Question?
     public let optional: [Question]
@@ -19,9 +25,15 @@ extension QuestionPolicies {
 
     public static func key(_ question: Question) -> String { question.id + ":" + question.hash }
 
+    /// A card with items, or one that cannot be answered here (hgs clears the items of an oversized form); the card
+    /// shows its reason, or a fallback when none is reported.
+    public static func shown(_ question: Question) -> Bool {
+        !question.id.isEmpty && (!question.prompts.isEmpty || !question.canAnswer)
+    }
+
     public static func queue(_ questions: [Question], _ target: Target, chosen: String) -> QuestionQueue {
         var seen = Set<String>()
-        let distinct = questions.filter { !$0.id.isEmpty && !$0.prompts.isEmpty && seen.insert($0.id).inserted }
+        let distinct = questions.filter { shown($0) && seen.insert($0.id).inserted }
         let submitted = distinct.filter { self.submitted($0, target) != nil }
         let offered = distinct.filter { question in !submitted.contains(question) }
         let required = offered.filter { !$0.optional }
@@ -54,15 +66,77 @@ extension QuestionPolicies {
             if selected.contains(where: { id in !prompt.choices.contains { $0.id == id } }) { return "An answer option changed. Review this request again." }
             if !trimmed.isEmpty && !prompt.other { return "This request does not accept an Other answer." }
             if !prompt.multi && selected.count + (trimmed.isEmpty ? 0 : 1) > 1 { return "Choose one answer for this question." }
+            // Form item bounds, worded as the computer refuses them; reported only by OpenCode forms.
+            let characters = text.unicodeScalars.count, values = selected.count + (trimmed.isEmpty ? 0 : 1)
+            if let max = prompt.maxLength, !text.isEmpty, characters > max { return "Answer is longer than \(max) characters" }
+            if let min = prompt.minLength, !text.isEmpty, characters < min { return "Answer is shorter than \(min) characters" }
+            if let max = prompt.maxItems, prompt.multi, values > max { return "Choose at most \(max) answers" }
+            if let min = prompt.minItems, prompt.multi, values > 0, values < min { return "Choose at least \(min) answers" }
         }
         return ""
     }
 
+    /// Every required answer is present; an optional form item (OpenCode `required: false`) may stay empty.
     public static func complete(_ prompts: [Prompt], options: [String: Set<String>], texts: [String: String]) -> Bool {
         !prompts.isEmpty && answerError(prompts, options: options, texts: texts).isEmpty && prompts.allSatisfy { prompt in
-            !(options[prompt.id] ?? []).isEmpty || prompt.other && !(texts[prompt.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            !(options[prompt.id] ?? []).isEmpty || prompt.other && !(texts[prompt.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                !prompt.inputKind.isEmpty && !prompt.required
         }
     }
+
+    /// The answers a card opens with. A saved draft of this exact question (or its native submission) wins for every item
+    /// it records, including an intentionally empty text; otherwise form defaults seed the choices and an OpenCode text
+    /// item's `default_text`. Seeded answers are only shown: nothing is saved, confirmed or sent until the person acts.
+    public static func opening(_ prompts: [Prompt], draftAnswers: String, native: NativeQuestionDelivery?) -> QuestionOpening {
+        var saved: [String: NativeQuestionAnswer] = [:]
+        if let native {
+            for answer in native.answers { saved[answer.questionId] = answer }
+        } else if let rows = (try? JSON.parse(draftAnswers))?.array {
+            for row in rows.compactMap(\.object) {
+                let id = row.string("question_id")
+                saved[id] = NativeQuestionAnswer(questionId: id, optionIds: row.strings("selected_option_ids"), text: row.string("text"), skip: row.bool("skip"))
+            }
+        }
+        let choices = native == nil ? defaults(prompts) : [:]
+        let options = prompts.map { prompt in (prompt.id, saved[prompt.id].map { Set($0.optionIds) } ?? choices[prompt.id] ?? []) }
+        let texts = prompts.map { prompt in (prompt.id, saved[prompt.id]?.text ?? (native == nil ? prompt.defaultText : "")) }
+        return QuestionOpening(options: Dictionary(options, uniquingKeysWith: { first, _ in first }),
+                               texts: Dictionary(texts, uniquingKeysWith: { first, _ in first }))
+    }
+
+    /// Preselected form answers (`default_option_ids`) among the offered options; one for a single-answer item.
+    public static func defaults(_ prompts: [Prompt]) -> [String: Set<String>] {
+        var result: [String: Set<String>] = [:]
+        for prompt in prompts {
+            let offered = prompt.defaultOptionIds.filter { id in prompt.choices.contains { $0.id == id } }
+            if let first = offered.first { result[prompt.id] = prompt.multi ? Set(offered) : [first] }
+        }
+        return result
+    }
+
+    /// The reported length bounds of a text answer, or "".
+    public static func textHint(_ prompt: Prompt) -> String {
+        switch (prompt.minLength, prompt.maxLength) {
+        case let (min?, max?): min == max ? "\(max) characters" : "\(min)–\(max) characters"
+        case let (nil, max?): "Up to \(max) characters"
+        case let (min?, nil): "At least \(min) characters"
+        default: ""
+        }
+    }
+
+    /// The reported answer-count bounds of a multiple-choice item, or "".
+    public static func choiceHint(_ prompt: Prompt) -> String {
+        guard prompt.multi else { return "" }
+        switch (prompt.minItems, prompt.maxItems) {
+        case let (min?, max?): return min == max ? "Choose \(max)" : "Choose \(min)–\(max)"
+        case let (nil, max?): return "Choose up to \(max)"
+        case let (min?, nil): return "Choose at least \(min)"
+        default: return ""
+        }
+    }
+
+    /// Submit appears only on a card that can be answered here; approvals use their own buttons.
+    public static func showsSubmit(_ question: Question) -> Bool { question.canAnswer && !question.approval }
 
     public static func approvalSupported(_ question: Question) -> Bool {
         guard question.approval, question.prompts.count == 1, let prompt = question.prompts.first, !prompt.multi else { return false }

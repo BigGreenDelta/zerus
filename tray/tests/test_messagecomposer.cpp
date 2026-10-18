@@ -196,6 +196,8 @@ private slots:
     void renamePreservesDraft();
     void retryOfAnotherMessagePreservesDraftAndUncertainty();
     void modelSettingsPreserveDraftAndDistinguishPending();
+    void openCodeModelSettingsOfferModelDefaultEffort();
+    void openCodeEffortIdsFollowSharedRule();
     void modelSettingsShowProviderNoticeBeforeApply();
     void modelSettingsUnavailableExplainsWhy();
     void modelSettingsFitNarrowColumn();
@@ -929,6 +931,74 @@ void TestMessageComposer::modelSettingsPreserveDraftAndDistinguishPending()
     setSessionReady(composer, "mac/other"); QVERIFY(!composer.findChild<QFrame *>("sessionSettingsPopup")->isVisible());
     apply->click(); QCOMPARE(changes.size(), 1);
     setSessionReady(composer, "arch/session"); QCOMPARE(composer.editor()->toPlainText(), QString("[File #1] Keep this draft"));
+}
+
+// OpenCode effort is a variant of the model, and no variant is the model's own
+// default: the popup shows the session's actual effort and changes nothing on its own.
+void TestMessageComposer::openCodeModelSettingsOfferModelDefaultEffort()
+{
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    const QJsonArray options{QJsonObject{{"id", "fixture/local"}, {"value", "fixture/local"}, {"label", "Local fixture"},
+            {"effort_options", QJsonArray{"low", "high"}}, {"effort_labels", QJsonArray{"Low", "High"}}},
+        QJsonObject{{"id", "fixture/plain"}, {"value", "fixture/plain"}, {"label", "Plain fixture"}, {"effort_options", QJsonArray{}}, {"effort_labels", QJsonArray{}}}};
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    QSignalSpy changes(&composer, &MessageComposer::settingsRequested);
+    composer.show(); QTest::qWait(20);
+    auto *button = composer.findChild<QPushButton *>("sessionModelSettings"); button->click();
+    auto *models = composer.findChild<QComboBox *>("sessionModelChoice");
+    auto *efforts = composer.findChild<QComboBox *>("sessionEffortChoice");
+    auto *apply = composer.findChild<QPushButton *>("applySessionSettings");
+    const auto shown = [&] { QStringList texts; for (int i = 0; i < efforts->count(); ++i) texts << efforts->itemText(i); return texts; };
+    QCOMPARE(shown(), QStringList({"Default", "Low", "High"})); QCOMPARE(efforts->currentData().toString(), QString());
+    QVERIFY(efforts->isEnabled()); QVERIFY(!apply->isEnabled());
+    efforts->setCurrentIndex(efforts->findData("high")); QVERIFY(apply->isEnabled());
+    efforts->setCurrentIndex(0); QVERIFY(!apply->isEnabled());
+    // A model change alone keeps the model default.
+    models->setCurrentIndex(models->findData("fixture/plain")); QCOMPARE(shown(), QStringList({"Default"}));
+    QCOMPARE(efforts->currentData().toString(), QString()); QVERIFY(apply->isEnabled());
+    apply->click(); QCOMPARE(changes.size(), 1); QCOMPARE(changes[0], QVariantList({"opencode/session", "fixture/plain", ""}));
+    // A session with a variant shows it and can return to the model default.
+    composer.setModelSettings("fixture/local", "high", options, true, {}, {}, {}, "now", true);
+    button->click(); QCOMPARE(efforts->currentData().toString(), QString("high")); QCOMPARE(efforts->currentText(), QString("High"));
+    QVERIFY(!apply->isEnabled());
+    efforts->setCurrentIndex(0); QVERIFY(apply->isEnabled());
+    apply->click(); QCOMPARE(changes.size(), 2); QCOMPARE(changes[1], QVariantList({"opencode/session", "fixture/local", ""}));
+    // A current variant the model no longer lists stays the current choice, so
+    // Apply without edits never resets it; another model drops it.
+    composer.setModelSettings("fixture/local", "max", options, true, {}, {}, {}, "now", true);
+    button->click(); QCOMPARE(shown(), QStringList({"Default", "Low", "High", "max"}));
+    QCOMPARE(efforts->currentData().toString(), QString("max")); QVERIFY(!apply->isEnabled());
+    models->setCurrentIndex(models->findData("fixture/plain")); QCOMPARE(shown(), QStringList({"Default"}));
+    models->setCurrentIndex(models->findData("fixture/local")); QCOMPARE(efforts->currentData().toString(), QString());
+    QCOMPARE(changes.size(), 2);
+    // Other agents keep their variant list without a default entry.
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now");
+    button->click(); QCOMPARE(shown(), QStringList({"low", "high"})); QCOMPARE(efforts->currentData().toString(), QString("low"));
+}
+
+// The shared variant shape rule (tests/fixtures/opencode-effort-ids.json):
+// OpenCode offers only valid ids; other agents' lists are unchanged.
+void TestMessageComposer::openCodeEffortIdsFollowSharedRule()
+{
+    QFile file(QStringLiteral(ZERUS_OPENCODE_EFFORT_IDS)); QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto fixture = QJsonDocument::fromJson(file.readAll()).object();
+    const auto accept = fixture.value("accept").toArray(), reject = fixture.value("reject").toArray();
+    QVERIFY(accept.size() >= 10); QVERIFY(reject.size() >= 13);
+    QJsonArray ids; for (const auto &id : accept) ids.append(id); for (const auto &id : reject) ids.append(id);
+    const QJsonArray options{QJsonObject{{"id", "fixture/ids"}, {"value", "fixture/ids"}, {"effort_options", ids}, {"effort_labels", ids}}};
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session"); composer.show();
+    auto *button = composer.findChild<QPushButton *>("sessionModelSettings");
+    auto *efforts = composer.findChild<QComboBox *>("sessionEffortChoice");
+    const auto offered = [&] { QStringList data; for (int i = 0; i < efforts->count(); ++i) data << efforts->itemData(i).toString(); return data; };
+    composer.setModelSettings("fixture/ids", {}, options, true, {}, {}, {}, "now", true); button->click();
+    QStringList expected{QString()}; for (const auto &id : accept) expected << id.toString();
+    QCOMPARE(offered(), expected);
+    for (const auto &id : reject) QVERIFY2(efforts->findData(id.toString()) < 0 || id.toString().isEmpty(), qPrintable(id.toString()));
+    composer.findChild<QPushButton *>("cancelSessionSettings")->click();
+    // Another agent's list keeps every non-empty id, as before.
+    composer.setModelSettings("fixture/ids", {}, options, true, {}, {}, {}, "now"); button->click();
+    QStringList unchanged; for (const auto &id : ids) if (!id.toString().isEmpty()) unchanged << id.toString();
+    QCOMPARE(offered(), unchanged);
 }
 
 void TestMessageComposer::modelSettingsShowProviderNoticeBeforeApply()

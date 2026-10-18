@@ -43,6 +43,49 @@ public struct LaunchLimitPace: Hashable, Sendable {
 public struct LaunchModel: Hashable, Sendable {
     public let value: String
     public let label: String
+    /// The model's own native effort variants (OpenCode), in catalog order.
+    public var efforts: [EffortOption] = []
+}
+
+/// One native effort choice; `label` is the computer's name for it, or the familiar name of a standard level.
+public struct EffortOption: Hashable, Sendable {
+    public let value: String
+    public let label: String
+
+    public init(value: String, label: String) {
+        self.value = value
+        self.label = label
+    }
+
+    /// The display name of an effort that has no native label; "" is the native default.
+    public static func text(_ value: String) -> String {
+        switch value {
+        case "": "Default"
+        case "xhigh": "Extra high"
+        default: value.prefix(1).uppercased() + value.dropFirst()
+        }
+    }
+
+    /// The native catalog's variant ID shape, shared by every layer (tests/fixtures/opencode-effort-ids.json): non-empty,
+    /// at most 40 UTF-8 bytes, without Unicode whitespace, control characters or "/". Model membership is checked separately.
+    public static func valid(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 40 &&
+            !value.unicodeScalars.contains { $0 == "/" || $0.properties.isWhitespace || $0.properties.generalCategory == .control }
+    }
+
+    /// `effort_labels` names `effort_options` by position; a missing or unusable label keeps the familiar name.
+    /// At most the first 16 well-formed variants are offered, never malformed or repeated ones.
+    public static func options(_ values: [String], labels: [String]) -> [EffortOption] {
+        let named = labels.count == values.count
+        var seen = Set<String>()
+        var result: [EffortOption] = []
+        for (index, value) in values.enumerated() {
+            if result.count == 16 { break }
+            guard valid(value), seen.insert(value).inserted else { continue }
+            result.append(EffortOption(value: value, label: named && LaunchPresentation.usableLabel(labels[index]) ? labels[index] : text(value)))
+        }
+        return result
+    }
 }
 
 public struct LaunchFolder: Hashable, Sendable {
@@ -91,6 +134,14 @@ public struct LaunchReadiness: Hashable, Sendable {
 
 public enum LaunchPresentation {
     public static let agentIds: Set<String> = ["codex", "claude", "kimi", "dsh", "opencode"]
+    /// Relay and connector feature: an OpenCode launch may carry one of the chosen model's `effort_options`, and a
+    /// model change may request any of its native variants instead of only the relay's fixed levels.
+    public static let effortFeature = "opencode_launch_effort"
+
+    /// Both hops must accept it: an older relay or connector refuses an effort it does not know.
+    public static func effortSupported(relay: Set<String>?, computer: Set<String>?) -> Bool {
+        relay?.contains(effortFeature) == true && computer?.contains(effortFeature) == true
+    }
 
     /// Catalog order is kept; the query matches project names and this computer's folder names and paths.
     public static func filterProjects(_ projects: [LaunchProject], _ query: String) -> [LaunchProject] {
@@ -159,6 +210,11 @@ public enum LaunchPresentation {
         }
     }
 
+    /// A native display name: non-blank, at most 160 UTF-16 units and free of control characters.
+    public static func usableLabel(_ text: String) -> Bool {
+        !text.trimmingCharacters(in: .whitespaces).isEmpty && text.utf16.count <= 160 && !text.unicodeScalars.contains(where: PairingInvite.isISOControl)
+    }
+
     public static func validModel(_ value: String) -> Bool {
         !value.trimmingCharacters(in: .whitespaces).isEmpty && value.utf16.count <= 120 && value.contains("/") &&
             !value.unicodeScalars.contains(where: PairingInvite.isISOControl)
@@ -174,10 +230,46 @@ public enum LaunchPresentation {
             let rawValue = option["value"] ?? option["id"]
             guard case .string(let value)? = rawValue, validModel(value), seen.insert(value).inserted else { return nil }
             var label = value
-            if case .string(let text)? = option["label"], !text.trimmingCharacters(in: .whitespaces).isEmpty, text.utf16.count <= 160,
-               !text.unicodeScalars.contains(where: PairingInvite.isISOControl) { label = text }
-            return LaunchModel(value: value, label: label)
+            if case .string(let text)? = option["label"], usableLabel(text) { label = text }
+            let efforts = EffortOption.options(option.strings("effort_options"), labels: option.strings("effort_labels"))
+            return LaunchModel(value: value, label: label, efforts: efforts)
         }
+    }
+
+    /// The chosen OpenCode model's effort variants, offered only when this computer's connector accepts launch effort.
+    public static func efforts(_ raw: JSONObject?, provider: String, accountId: String, model: String, supported: Bool) -> [EffortOption] {
+        guard supported, provider == "opencode", !model.isEmpty else { return [] }
+        return models(raw, provider: provider, accountId: accountId).first { $0.value == model }?.efforts ?? []
+    }
+
+    /// The exact launch request for the current catalog. `effort` is sent only for an offered variant of the chosen
+    /// model and only when the computer's connector accepts it; otherwise the request is exactly the older one.
+    public static func arguments(_ catalog: JSONObject, agent: String, directory: String, tag: String, accountId: String?, projectId: String,
+                                 worktrees: JSONObject?, model: String = "", effort: String = "", effortSupported: Bool = false) throws -> JSONObject {
+        guard agents(catalog).contains(agent) else { throw ZerusError.invalid("This native provider is unavailable.") }
+        guard let accountId, accounts(catalog, agent).contains(where: { $0.id == accountId }) else {
+            throw ZerusError.invalid("Choose an offered account for the selected provider.")
+        }
+        var args: JSONObject = ["agent": .string(agent), "directory": .string(directory), "tag": .string(tag), "account_id": .string(accountId)]
+        if !model.isEmpty {
+            guard models(catalog, provider: agent, accountId: accountId).contains(where: { $0.value == model }) else {
+                throw ZerusError.invalid("The native model changed. Review the current choices.")
+            }
+            args["model"] = .string(model)
+        }
+        if !effort.isEmpty {
+            guard efforts(catalog, provider: agent, accountId: accountId, model: model, supported: effortSupported).contains(where: { $0.value == effort }) else {
+                throw ZerusError.invalid("The native effort changed. Review the current choices.")
+            }
+            args["effort"] = .string(effort)
+        }
+        if catalog["project_launch_supported"] == .bool(true) {
+            let fields = try projectArguments(catalog, projectId: projectId, directory: directory, worktrees: worktrees)
+            for key in fields.keys { args[key] = fields[key] }
+        } else if !projectId.isEmpty {
+            throw ZerusError.invalid("This computer does not support scoped project assignment.")
+        }
+        return try SessionActionPolicies.arguments("launch", args)
     }
 
     public static func defaultAccount(_ accounts: [LaunchAccount], selected: String = "") -> String {
@@ -311,8 +403,13 @@ public enum LaunchPresentation {
         result["accounts"] = .array(providers.flatMap { provider in accounts(raw, provider) }.map { account in
             var row: JSONObject = ["id": .string(account.id), "provider": .string(account.provider), "label": .string(account.label), "native": .bool(account.native),
                                    "is_default": .bool(account.isDefault), "installed": .bool(account.installed), "auth_status": .string(account.authStatus),
-                                   "model_options": .array(models(raw, provider: account.provider, accountId: account.id).map {
-                                       .object(["value": .string($0.value), "label": .string($0.label)])
+                                   "model_options": .array(models(raw, provider: account.provider, accountId: account.id).map { model in
+                                       var option: JSONObject = ["value": .string(model.value), "label": .string(model.label)]
+                                       if !model.efforts.isEmpty {
+                                           option["effort_options"] = JSON(model.efforts.map(\.value))
+                                           option["effort_labels"] = JSON(model.efforts.map(\.label))
+                                       }
+                                       return .object(option)
                                    })]
             if let usage = account.usage { row["usage"] = AccountSnapshots.accountJSON(usage)["usage"] }
             return .object(row)

@@ -8,9 +8,23 @@ inline bool action(const SessionInfo &session, const QString &operation, const Q
 {
     if (details.value("allowed_actions").isArray()) return details.value("allowed_actions").toArray().contains(operation);
     if (session.actionsReported) return session.allowedActions.contains(operation);
-    // Older terminal adapters keep their existing client behavior. OpenCode's
-    // initial native API contract only permits these four lifecycle operations.
-    return session.cmd != "opencode" || QStringList{"pause", "resume", "rename", "forget"}.contains(operation);
+    // Older terminal adapters keep their existing client behavior. An OpenCode 2
+    // session has no process of its own to pause or resume: without reported
+    // actions only its Zerus binding can be renamed or forgotten.
+    return session.cmd != "opencode" || QStringList{"rename", "forget"}.contains(operation);
+}
+// An OpenCode 2 session has no process for Zerus to stop. While it allows
+// forget and not terminate, Forget removes only its Zerus binding, even while
+// it runs; the conversation stays in OpenCode.
+inline bool forgetsBindingOnly(const SessionInfo &session, const QJsonObject &details = {})
+{
+    return session.cmd == "opencode" && action(session, "forget", details) && !action(session, "terminate", details);
+}
+// The operation behind a session's Terminate / Forget entry: other running
+// sessions terminate first.
+inline QString endOperation(const SessionInfo &session, const QJsonObject &details = {})
+{
+    return session.state == "running" && !forgetsBindingOnly(session, details) ? QStringLiteral("terminate") : QStringLiteral("forget");
 }
 inline QString actionReason(const SessionInfo &session, const QString &operation, const QJsonObject &details = {})
 {

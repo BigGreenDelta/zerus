@@ -8,6 +8,7 @@ use crate::pyvalue::{
 };
 use serde_json::{json, Map, Value};
 use zerus_relay::json;
+use zerus_relay::protocol::opencode_effort_id;
 
 pub const REFRESH_SECONDS: f64 = 300.0;
 pub const CATALOG_SECONDS: f64 = 30.0;
@@ -124,6 +125,91 @@ fn decimal(text: &str, whole: Option<usize>, fraction: Option<usize>) -> bool {
         })
 }
 
+/// Removes `key` from every OpenCode model entry of one account row.
+fn strip_model_key(row: &mut Value, key: &str) {
+    if let Some(Value::Array(options)) = row.get_mut("model_options") {
+        for option in options {
+            if let Some(option) = option.as_object_mut() {
+                option.remove(key);
+            }
+        }
+    }
+}
+
+/// The optional OpenCode model details, least valuable first: a projection
+/// over the bound loses these before it is refused.
+const DEGRADE_KEYS: [&str; 2] = ["effort_labels", "effort_options"];
+
+/// Drops the optional model details, one kind at a time, until the document
+/// built from `rows` fits the bound. Returns whether it fits.
+fn fit_rows(rows: &mut [Value], document: impl Fn(&[Value]) -> Value) -> bool {
+    let fits = |rows: &[Value]| {
+        json::python_default_len(&document(rows), true).unwrap_or(usize::MAX) <= MAX_CATALOG_BYTES
+    };
+    if fits(rows) {
+        return true;
+    }
+    for key in DEGRADE_KEYS {
+        for row in rows.iter_mut() {
+            strip_model_key(row, key);
+        }
+        if fits(rows) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Variants one model offers: at most 8 native effort ids and, in the same
+/// order, their labels. Anything malformed drops the entry, never the model.
+fn effort_options(row: &Map<String, Value>) -> Option<(Value, Value)> {
+    let efforts = row.get("effort_options")?.as_array()?;
+    let labels = row.get("effort_labels").and_then(Value::as_array);
+    let mut ids: Vec<Value> = Vec::new();
+    let mut shown: Vec<Value> = Vec::new();
+    for (index, effort) in efforts.iter().enumerate() {
+        let Some(id) = effort.as_str().filter(|id| opencode_effort_id(id)) else {
+            continue;
+        };
+        if ids.iter().any(|known| known == id) {
+            continue;
+        }
+        if ids.len() == 8 {
+            break;
+        }
+        let label = labels
+            .and_then(|labels| labels.get(index))
+            .and_then(|label| text(Some(label), 40))
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| id.into());
+        ids.push(json!(id));
+        shown.push(json!(label));
+    }
+    (!ids.is_empty()).then_some((Value::Array(ids), Value::Array(shown)))
+}
+
+/// OpenCode catalog state and reasons, bounded and only when present.
+fn opencode_status(profile: &Map<String, Value>, public: &mut Map<String, Value>) {
+    if let Some(state) = member(
+        profile.get("catalog_state"),
+        &[
+            "ready",
+            "loading",
+            "not_running",
+            "disabled",
+            "incompatible",
+            "unreachable",
+        ],
+    ) {
+        public.insert("catalog_state".into(), json!(state));
+    }
+    for key in ["catalog_reason", "install_reason"] {
+        if let Some(reason) = text(profile.get(key), 200).filter(|reason| !reason.is_empty()) {
+            public.insert(key.into(), json!(reason));
+        }
+    }
+}
+
 /// `accounts.model_options(profile)`: configured IDs and labels only.
 pub fn model_options(profile: &Map<String, Value>) -> Value {
     let rows = match profile.get("model_options") {
@@ -164,7 +250,22 @@ pub fn model_options(profile: &Map<String, Value>) -> Value {
         let label = text(row.get("label"), 160)
             .filter(|label| !label.is_empty())
             .unwrap_or_else(|| value.into());
-        result.push(json!({"value": value, "label": label, "provider": provider}));
+        let mut option = Map::new();
+        option.insert("value".into(), json!(value));
+        option.insert("label".into(), json!(label));
+        option.insert("provider".into(), json!(provider));
+        if let Some(label) = text(row.get("provider_label"), 160).filter(|label| !label.is_empty())
+        {
+            option.insert("provider_label".into(), json!(label));
+        }
+        if let Some(Value::Bool(free)) = row.get("free") {
+            option.insert("free".into(), json!(free));
+        }
+        if let Some((efforts, labels)) = effort_options(row) {
+            option.insert("effort_options".into(), efforts);
+            option.insert("effort_labels".into(), labels);
+        }
+        result.push(Value::Object(option));
     }
     Value::Array(result)
 }
@@ -358,6 +459,7 @@ pub fn catalog(raw: &Value) -> PyResult<Vec<(String, Entry)>> {
         }
         if provider == "opencode" {
             public.insert("model_options".into(), model_options(profile));
+            opencode_status(profile, &mut public);
         }
         let seed = usage(profile.get("account_status").unwrap_or(&Value::Null));
         let auth_revision = match profile.get("auth_revision") {
@@ -392,17 +494,36 @@ pub fn catalog(raw: &Value) -> PyResult<Vec<(String, Entry)>> {
             },
         ));
     }
-    let projected: Vec<Value> = entries
-        .iter()
-        .map(|(_, entry)| {
-            let mut row = entry.public.clone();
-            row.insert("usage".into(), entry.usage.clone());
-            Value::Object(row)
-        })
-        .collect();
-    if json::python_default_len(&Value::Array(projected), true).unwrap_or(usize::MAX)
-        > MAX_CATALOG_BYTES
-    {
+    let projected = |entries: &[(String, Entry)]| -> Vec<Value> {
+        entries
+            .iter()
+            .map(|(_, entry)| {
+                let mut row = entry.public.clone();
+                row.insert("usage".into(), entry.usage.clone());
+                Value::Object(row)
+            })
+            .collect()
+    };
+    let size = |rows: &[Value]| {
+        json::python_default_len(&Value::Array(rows.to_vec()), true).unwrap_or(usize::MAX)
+    };
+    let mut rows = projected(&entries);
+    if size(&rows) > MAX_CATALOG_BYTES {
+        for key in DEGRADE_KEYS {
+            for (_, entry) in &mut entries {
+                let mut model_options = Value::Object(std::mem::take(&mut entry.public));
+                strip_model_key(&mut model_options, key);
+                if let Value::Object(public) = model_options {
+                    entry.public = public;
+                }
+            }
+            rows = projected(&entries);
+            if size(&rows) <= MAX_CATALOG_BYTES {
+                break;
+            }
+        }
+    }
+    if size(&rows) > MAX_CATALOG_BYTES {
         return Err(PyError::value(
             "native account projection exceeds size limit",
         ));
@@ -565,16 +686,20 @@ impl AccountCache {
             row.insert("usage".into(), data);
             rows.push(Value::Object(row));
         }
-        let mut result = json!({"schema": 1, "available": self.available, "stale": self.stale,
-                                "refresh_interval_seconds": 300, "accounts": rows});
-        if let Some(checked) = self.checked_at {
-            result["checked_at"] = number(checked);
-        }
-        if json::python_default_len(&result, true).unwrap_or(usize::MAX) > MAX_CATALOG_BYTES {
+        let document = |rows: &[Value]| {
+            let mut result = json!({"schema": 1, "available": self.available,
+                                    "stale": self.stale,
+                                    "refresh_interval_seconds": 300, "accounts": rows});
+            if let Some(checked) = self.checked_at {
+                result["checked_at"] = number(checked);
+            }
+            result
+        };
+        if !fit_rows(&mut rows, document) {
             return json!({"schema": 1, "available": false, "stale": true,
                           "refresh_interval_seconds": 300, "accounts": []});
         }
-        result
+        document(&rows)
     }
 }
 
@@ -633,6 +758,7 @@ pub fn launch_catalog(raw: &Value) -> PyResult<Value> {
         account.insert("auth_status".into(), json!(status));
         if provider == "opencode" {
             account.insert("model_options".into(), model_options(row));
+            opencode_status(row, &mut account);
         }
         if !cached.is_empty() {
             account.insert("usage".into(), usage(&Value::Object(cached.clone())));
@@ -643,13 +769,13 @@ pub fn launch_catalog(raw: &Value) -> PyResult<Value> {
         }
     }
     agents.sort();
-    let result = json!({"accounts": accounts, "agents": agents});
-    if json::python_default_len(&result, true).unwrap_or(usize::MAX) > MAX_CATALOG_BYTES {
+    let document = |accounts: &[Value]| json!({"accounts": accounts, "agents": agents});
+    if !fit_rows(&mut accounts, document) {
         return Err(PyError::value(
             "native launch account projection exceeds size limit",
         ));
     }
-    Ok(result)
+    Ok(document(&accounts))
 }
 
 #[cfg(test)]

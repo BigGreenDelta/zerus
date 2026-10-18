@@ -16,11 +16,24 @@ object SessionActionPolicies {
     val lifecycle = setOf("pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget")
     val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "directory_create", "recovery_action")
     val terminalKeys=setOf("Enter","Escape","Tab","BTab","BSpace","Up","Down","Left","Right","Home","End","PPage","NPage","DC","C-c","C-d","C-l","C-a","C-e","C-u","C-w")
+    /** Effort names every relay accepts in `settings`. */
+    val relayEfforts = setOf("", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on")
+    /** Other native names (OpenCode variants) need `opencode_launch_effort` on both the relay and the connector. */
+    fun effortReason(operation: String, args: JSONObject, nativeNames: Boolean): String =
+        if (operation == "settings" && !nativeNames && args.has("effort") && args.optString("effort") !in relayEfforts)
+            "Choose an effort offered for this session." else ""
     private fun uuid(value: String) = runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)
-    fun arguments(operation: String, raw: JSONObject): JSONObject {
+    /**
+     * Model-specific native effort names belong only to an OpenCode session: an `opencode/` name whose current
+     * inspection reports agent `opencode`, on a relay and computer that both advertise `opencode_launch_effort`.
+     * Every other provider keeps [relayEfforts].
+     */
+    fun nativeEfforts(target: Target, inspected: JSONObject?, advertised: Boolean) =
+        advertised && target.session.startsWith("opencode/") && inspected?.string("agent") == "opencode"
+    fun arguments(operation: String, raw: JSONObject, nativeEfforts: Boolean = false): JSONObject {
         require(operation in operations) { "Unsupported session action." }
         val allowed = when(operation) { "rename" -> setOf("new_name"); "fork" -> setOf("tag"); "send_now" -> setOf("queue_id")
-            "launch" -> setOf("agent","directory","tag","account_id","model","swarm_id","project_id","project_folder_id","add_folder","worktree_folder_id","worktree_common_dir")
+            "launch" -> setOf("agent","directory","tag","account_id","model","effort","swarm_id","project_id","project_folder_id","add_folder","worktree_folder_id","worktree_common_dir")
             "worktree_create" -> setOf("path","common_dir","destination","branch","base")
             "directory_create" -> setOf("path")
             "recovery_action" -> setOf("job_id","action")
@@ -40,7 +53,8 @@ object SessionActionPolicies {
             "settings" -> {
                 require(args.has("model") || args.has("effort")) { "Choose a model or effort." }
                 if(args.has("model")) require(args.getString("model").let { it.isNotBlank() && it.length <= 120 && it.none(Char::isISOControl) }) { "Invalid model." }
-                if(args.has("effort")) require(args.getString("effort") in setOf("", "off", "none", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")) { "Invalid effort." }
+                // The fixed names; OpenCode variants only when [nativeEfforts]. inspectReason checks the model's own options.
+                if(args.has("effort")) require(args.getString("effort").let { it in relayEfforts || nativeEfforts && LaunchPresentation.validEffort(it) }) { "Invalid effort." }
                 if(args.has("expected_pending_id")) require(uuid(args.getString("expected_pending_id"))) { "The pending settings identity changed." }
             }
             "worktree_create" -> {
@@ -50,6 +64,7 @@ object SessionActionPolicies {
             "launch" -> {
                 require(args.getString("agent") in setOf("codex","claude","kimi","dsh","opencode"))
                 if(args.has("model")) require(args.getString("agent")=="opencode" && LaunchPresentation.validModel(args.getString("model"))) { "Choose a valid native OpenCode model." }
+                if(args.has("effort")) require(args.getString("agent")=="opencode" && args.has("model") && LaunchPresentation.validEffort(args.getString("effort"))) { "Choose an offered OpenCode effort." }
                 require(args.getString("directory").let { it.startsWith('/') && it.length <= 4096 && it.none(Char::isISOControl) })
                 require(args.getString("tag").let { it.isNotBlank() && it.trim() == it && it.toByteArray(Charsets.UTF_8).size <= 120 && it.none { c -> c == '/' || c == '\\' || c == ':' || c == '.' || c.isISOControl() } })
                 if(args.has("account_id")) require(args.getString("account_id").let { it.isNotBlank() && it.length <= 256 && it.none(Char::isISOControl) })

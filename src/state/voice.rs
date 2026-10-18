@@ -806,10 +806,26 @@ fn receipt(job: &Value) -> Result<Option<Value>> {
     {
         return Err("Native request UUID conflicts with this voice message".into());
     }
-    if job["agent"]=="opencode" || job["backend"]=="opencode" {
-        let record=current(job)?; opencode::reconcile_receipt(&record,&mut value)?;
+    if job["agent"] == "opencode" || job["backend"] == "opencode" {
+        let record = current(job)?;
+        reconciled_opencode_receipt(&mut value, |value| {
+            opencode::reconcile_receipt(&record, value)
+        })?;
     }
     Ok(Some(value))
+}
+/// A definite refusal, stored or found while reconciling, is an answer for
+/// settle, not an identity error.
+fn reconciled_opencode_receipt(
+    value: &mut Value,
+    reconcile: impl FnOnce(&mut Value) -> Result<bool>,
+) -> Result<()> {
+    if let Err(error) = reconcile(value) {
+        if value["status"] != "refused" {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 fn settle(job: &mut Value, receipt: Option<&Value>, interrupted: bool) {
     if let Some(receipt) = receipt {
@@ -817,6 +833,24 @@ fn settle(job: &mut Value, receipt: Option<&Value>, interrupted: bool) {
         job["native_submitted_at"] = receipt["submitted_at"].clone();
         if receipt["status"] == "submitted" {
             job["state"] = json!("submitted");
+            // OpenCode's message ID is the exact native row of this message.
+            let id = string(receipt, "native_message_id");
+            if (job["agent"] == "opencode" || job["backend"] == "opencode")
+                && opencode::native_id(id, "msg_")
+                && !job["native_binding"].is_object()
+            {
+                job["native_binding"] =
+                    json!({"provider_message_id": id, "provider_source": "opencode_native"});
+            }
+            return;
+        }
+        // OpenCode records a definite 4xx refusal; it was never admitted.
+        if receipt["status"] == "refused" {
+            let reason = receipt["reason"]
+                .as_str()
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("OpenCode refused this message");
+            failure(job, "delivery_refused", reason);
             return;
         }
     }
@@ -1446,6 +1480,63 @@ mod tests {
         let mut refused = job();
         settle(&mut refused, None, false);
         assert_eq!(refused["state"], "waiting_agent");
+    }
+    #[test]
+    fn a_refused_opencode_receipt_fails_the_job_definitely() {
+        let mut refused = job();
+        refused["agent"] = json!("opencode");
+        settle(
+            &mut refused,
+            Some(&json!({"status":"refused","reason":"HTTP 400: bad","submitted_at":2.})),
+            true,
+        );
+        assert_eq!(refused["state"], "failed");
+        assert_eq!(refused["error_code"], "delivery_refused");
+        assert_eq!(refused["error"], "HTTP 400: bad");
+        assert_eq!(refused["native_receipt_status"], "refused");
+        let mut bare = job();
+        settle(&mut bare, Some(&json!({"status":"refused"})), false);
+        assert_eq!(bare["state"], "failed");
+        assert_eq!(bare["error"], "OpenCode refused this message");
+    }
+    #[test]
+    fn a_refused_receipt_passes_reconciliation_for_settle() {
+        // Stored or newly discovered refusals reach settle; other errors do not.
+        let mut stored = json!({"status":"refused","reason":"HTTP 400: bad"});
+        assert!(reconciled_opencode_receipt(&mut stored, |_| Err("refused".into())).is_ok());
+        let mut discovered = json!({"status":"pending"});
+        assert!(reconciled_opencode_receipt(&mut discovered, |value| {
+            value["status"] = json!("refused");
+            Err("refused".into())
+        })
+        .is_ok());
+        assert_eq!(discovered["status"], "refused");
+        let mut unknown = json!({"status":"pending"});
+        assert_eq!(
+            reconciled_opencode_receipt(&mut unknown, |_| Err("unreachable".into())).unwrap_err(),
+            "unreachable"
+        );
+        let mut submitted = json!({"status":"submitted"});
+        assert!(reconciled_opencode_receipt(&mut submitted, |_| Ok(true)).is_ok());
+    }
+    #[test]
+    fn a_submitted_opencode_voice_job_is_bound_to_its_native_message() {
+        let id = "msg_gVmstesSuU81H2vTHdmxp65tNI";
+        let receipt = |message: &str| json!({"status":"submitted","submitted_at":2.,"native_message_id":message,"transport":"native_opencode"});
+        let mut voice = job();
+        voice["agent"] = json!("opencode");
+        settle(&mut voice, Some(&receipt(id)), true);
+        assert_eq!(voice["state"], "submitted");
+        let binding = json!({"provider_message_id":id,"provider_source":"opencode_native"});
+        assert_eq!(voice["native_binding"], binding);
+        assert_eq!(public(&voice)["native_binding"], binding);
+        let mut invalid = job();
+        invalid["agent"] = json!("opencode");
+        settle(&mut invalid, Some(&receipt("../x")), true);
+        assert!(invalid.get("native_binding").is_none());
+        let mut terminal = job();
+        settle(&mut terminal, Some(&receipt(id)), true);
+        assert!(terminal.get("native_binding").is_none());
     }
     #[test]
     fn restart_keeps_exact_native_payload_and_audio() {

@@ -44,9 +44,12 @@ data class Event(val id: String, val role: String, val text: String, val time: S
 data class DisplayedAttachment(val name: String, val mime: String, val bytes: Long, val reference: String = "",
     val messageId: String = "", val index: Int = -1, val localId: String = "", val sha256: String = "")
 data class Choice(val id: String, val label: String, val description: String)
+/** One question item. The additive OpenCode form fields are optional bounds and defaults. */
 data class Prompt(val id: String, val text: String, val choices: List<Choice>, val multi: Boolean,
     val required: Boolean, val other: Boolean, val header: String = "", val body: String = "",
-    val otherLabel: String = "", val otherDescription: String = "")
+    val otherLabel: String = "", val otherDescription: String = "", val inputKind: String = "",
+    val minLength: Int? = null, val maxLength: Int? = null, val minItems: Int? = null, val maxItems: Int? = null,
+    val defaults: List<String> = emptyList(), val defaultText: String = "")
 data class Question(val id: String, val hash: String, val prompts: List<Prompt>, val canAnswer: Boolean,
     val canSkip: Boolean, val optional: Boolean, val delivery: String, val createdAt: Double = 0.0,
     val source: String = "", val approval: Boolean = false, val trustRequest: Boolean = false,

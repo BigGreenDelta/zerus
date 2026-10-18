@@ -1,4 +1,5 @@
 #include "MessageComposer.h"
+#include "OpenCodeEffort.h"
 #include "AttachmentViewer.h"
 #include "ComposerToolbar.h"
 #include "ContentScale.h"
@@ -1063,9 +1064,9 @@ void MessageComposer::showSavedDrafts()
 
 void MessageComposer::setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,
                                      bool enabled, const QString &reason, const QString &pendingModel,
-                                     const QString &pendingEffort, const QString &applyWhen)
+                                     const QString &pendingEffort, const QString &applyWhen, bool modelDefaultEffort)
 {
-    m_model = model; m_effort = effort; m_modelOptions = options; m_settingsEnabled = enabled;
+    m_model = model; m_effort = effort; m_modelOptions = options; m_settingsEnabled = enabled; m_modelDefaultEffort = modelDefaultEffort;
     m_settingsReason = reason; m_pendingModel = pendingModel; m_pendingEffort = pendingEffort; m_applyWhen = applyWhen;
     updateSettingsButton();
     if (m_settingsPopup->isVisible()) updateSettingsApply();
@@ -1109,18 +1110,34 @@ void MessageComposer::openSettings()
 
 void MessageComposer::updateSettingsEfforts()
 {
-    const QString preferred = m_efforts->isVisible() && !m_efforts->currentData().toString().isEmpty()
-        ? m_efforts->currentData().toString() : m_pendingEffort.isEmpty() ? m_effort : m_pendingEffort;
+    const bool pending = !m_pendingModel.isEmpty() || !m_pendingEffort.isEmpty();
+    // The model default is an explicit choice there, so an empty current
+    // choice is kept like any other.
+    const QString preferred = m_efforts->isVisible() && (m_modelDefaultEffort || !m_efforts->currentData().toString().isEmpty())
+        ? m_efforts->currentData().toString() : m_modelDefaultEffort ? (pending ? m_pendingEffort : m_effort)
+        : m_pendingEffort.isEmpty() ? m_effort : m_pendingEffort;
     const QSignalBlocker blocker(m_efforts); m_efforts->clear();
+    if (m_modelDefaultEffort) m_efforts->addItem(tr("Default"), QString());
     for (const auto &value : m_modelOptions) {
         const auto option = value.toObject();
         if (option.value("id").toString() != m_models->currentData().toString()) continue;
-        for (const auto &effort : option.value("effort_options").toArray()) {
-            const QString id = effort.toString();
-            if (!id.isEmpty()) m_efforts->addItem(id, id);
+        const auto labels = option.value("effort_labels").toArray();
+        const auto efforts = option.value("effort_options").toArray();
+        for (qsizetype index = 0; index < efforts.size(); ++index) {
+            const QString id = efforts[index].toString();
+            if (id.isEmpty() || (m_modelDefaultEffort && (!OpenCodeEffort::valid(id) || m_efforts->findData(id) >= 0))) continue;
+            auto label = m_modelDefaultEffort ? labels.at(index).toString().trimmed() : QString();
+            if (label.size() > 80 || std::any_of(label.cbegin(), label.cend(), [](QChar c) { return c.category() == QChar::Other_Control; })) label.clear();
+            m_efforts->addItem(label.isEmpty() ? id : label, id);
         }
         break;
     }
+    // As the model list keeps an unknown current model, the session's current
+    // variant stays offered for its own model: Apply without edits keeps it.
+    const QString sessionModel = m_pendingModel.isEmpty() ? m_model : m_pendingModel;
+    const QString sessionEffort = pending ? m_pendingEffort : m_effort;
+    if (m_modelDefaultEffort && OpenCodeEffort::valid(sessionEffort) && m_models->currentData().toString() == sessionModel
+        && m_efforts->findData(sessionEffort) < 0) m_efforts->addItem(sessionEffort, sessionEffort);
     if (m_efforts->count() == 0) m_efforts->addItem(tr("Provider default"), QString());
     const int selected = m_efforts->findData(preferred);
     m_efforts->setCurrentIndex(selected >= 0 ? selected : 0); updateSettingsApply();
@@ -1148,7 +1165,7 @@ void MessageComposer::updateSettingsApply()
     for (const auto &value : m_modelOptions) offered |= value.toObject().value("id").toString() == m_models->currentData().toString();
     const bool enabled = m_settingsEnabled && m_popupKey == m_key && !isSending(m_key);
     m_models->setEnabled(enabled && m_models->count() > 1);
-    m_efforts->setEnabled(enabled && offered && !m_efforts->currentData().toString().isEmpty());
+    m_efforts->setEnabled(enabled && offered && (m_modelDefaultEffort ? m_efforts->count() > 1 : !m_efforts->currentData().toString().isEmpty()));
     const QString intendedModel = m_pendingModel.isEmpty() ? m_model : m_pendingModel;
     const bool pending = !m_pendingModel.isEmpty() || !m_pendingEffort.isEmpty();
     const QString intendedEffort = pending ? m_pendingEffort : m_effort;

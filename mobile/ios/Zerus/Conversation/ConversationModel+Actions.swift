@@ -106,6 +106,11 @@ extension ConversationModel {
         return request.navigation == navigationId && request.target == target ? request.operation : nil
     }
 
+    /// OpenCode effort variants beyond the relay's fixed levels need the feature on the relay and this computer.
+    func effortVariants(_ target: Target, _ raw: JSONObject) -> Bool {
+        SessionActionPolicies.effortVariants(agent: raw.string("agent"), relay: app.relayFeatures[target.connectionId], computer: app.machineFeatures[target.machineKey])
+    }
+
     func submitSessionAction(_ target: Target, _ operation: String, _ args: JSONObject, authorized: SessionAction? = nil, frame: ConversationFrame? = nil,
                              terminalBuffer: TerminalBuffer? = nil) {
         let inspected = frame?.raw ?? activity ?? [:]
@@ -115,7 +120,7 @@ extension ConversationModel {
             return
         }
         let arguments: JSONObject
-        do { arguments = try SessionActionPolicies.arguments(operation, args) } catch {
+        do { arguments = try SessionActionPolicies.arguments(operation, args, effortVariants: effortVariants(target, inspected)) } catch {
             app.error = AppModel.message(error, fallback: "Invalid action.")
             return
         }
@@ -622,6 +627,9 @@ extension ConversationModel {
             contextBlocked(target) || preparingTargets.contains(target.key) || normalizedOutgoing.contains(where: { $0.belongs(to: target) && $0.blocksSending }) {
             return "Resolve pending delivery first."
         }
+        // A scheduled OpenCode variant is refused here once the relay or computer no longer accepts it.
+        do { _ = try SessionActionPolicies.arguments("settings", args, effortVariants: effortVariants(target, raw)) }
+        catch { return AppModel.message(error, fallback: "Invalid settings.") }
         return SessionActionPolicies.inspectReason(target, "settings", args, raw)
     }
 

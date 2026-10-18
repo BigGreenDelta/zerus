@@ -69,6 +69,7 @@ final class SessionActionTests: XCTestCase {
         XCTAssertEqual("", SessionActionPolicies.inspectReason(target, "settings", ["model": "a", "effort": "high"], raw))
         XCTAssertEqual("The selected model is no longer in the native catalog.", SessionActionPolicies.inspectReason(target, "settings", ["model": "c"], raw))
         XCTAssertEqual("The selected effort is unavailable for this model.", SessionActionPolicies.inspectReason(target, "settings", ["model": "b", "effort": "high"], raw))
+        XCTAssertEqual("The selected effort is unavailable for this model.", SessionActionPolicies.inspectReason(target, "settings", ["model": "a", "effort": "turbo"], raw))
         XCTAssertEqual("The pending settings changed.", SessionActionPolicies.inspectReason(target, "settings", ["model": "a", "expected_pending_id": "q"], raw))
         var unsupported = raw
         unsupported["settings_change_supported"] = false

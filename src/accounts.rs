@@ -301,14 +301,19 @@ fn list(config: &Config) -> Result<Value> {
             "native":true,"credential_file":false,"auth_status":"unknown","portable":false,"installed":platform::available("dsh")}));
     }
     if platform::available("opencode") || catalog.hidden_profiles.contains("native-opencode") {
-        let row=json!({"id":"native-opencode","provider":"opencode","label":catalog.native_labels.get("native-opencode").map(String::as_str).unwrap_or(default_label("opencode")),"home":native_home(config,"opencode"),"native":true,"credential_file":false,"auth_status":"native_configuration","portable":false,"installed":platform::available("opencode"),"permission_mode_supported":false});
+        let row=json!({"id":"native-opencode","provider":"opencode","label":catalog.native_labels.get("native-opencode").map(String::as_str).unwrap_or(default_label("opencode")),"home":native_home(config,"opencode"),"native":true,"credential_file":false,"auth_status":"native_configuration","portable":false,"installed":false,"permission_mode_supported":false});
         #[cfg(unix)]
         let row = {
             let mut row = row;
-            let models = crate::state::opencode::catalog();
-            row["model_options"] = models["model_options"].clone();
-            row["settings_model"] = models["settings_model"].clone();
-            row["model_catalog_reason"] = models["model_catalog_reason"].clone();
+            let (installed, reason) = crate::state::opencode::install_state();
+            row["installed"] = json!(installed);
+            if !installed {
+                row["install_reason"] = json!(reason);
+            }
+            let models = crate::state::opencode::catalog(None);
+            for key in ["model_options", "settings_model", "catalog_state", "catalog_reason", "catalog_at"] {
+                row[key] = models[key].clone();
+            }
             row
         };
         rows.push(row);
@@ -479,6 +484,13 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         "inspect"=>{println!("{}",inspection::inspect(config,args)?);},
         "set-key"=>{println!("{}",deepseek::set_key(config,args,dry)?);},
         "install"=>return install::run(id,dry),
+        "start"=>{
+            if id!="native-opencode" {return Err(Error::new(1,"Only the native OpenCode account has a service to start"));}
+            #[cfg(unix)]
+            {if dry {println!("Start the shared OpenCode service");return Ok(0);}println!("{}",crate::state::opencode::start_from_accounts().map_err(|e|Error::new(1,e))?);}
+            #[cfg(not(unix))]
+            return Err(Error::new(2,platform::LOCAL_SESSIONS_UNSUPPORTED));
+        },
         "default"=>{
             if id.is_empty() {println!("{}",list(config)?);return Ok(0);}
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
@@ -544,7 +556,11 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         },
         "login"=>{
             if id=="native-dsh" {return crate::native_ui::open(config,"","@account",dry);}
-            if id=="native-opencode" {if dry {println!("opencode auth login");return Ok(0);}let status=platform::status(Command::new("opencode").args(["auth","login"]))?;return Ok(status.code().unwrap_or(1));}
+            if id=="native-opencode" {
+                const GUIDANCE: &str = "Connect OpenCode providers with `opencode auth login` in a terminal on this computer";
+                if dry {println!("{GUIDANCE}");return Ok(0);}
+                return Err(Error::new(1,GUIDANCE));
+            }
             let (p,home,native)=lookup(config,id)?; let key=home_var(&p.provider)?;
             let arguments: Vec<&str> = if p.provider == "claude" && !native { vec!["auth", "login", "--claudeai"] }
                 else if p.provider == "claude" { vec!["auth", "login"] } else { vec!["login"] };

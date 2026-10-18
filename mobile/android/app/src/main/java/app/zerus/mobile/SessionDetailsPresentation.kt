@@ -14,12 +14,13 @@ data class SessionDetailsView(val fields: List<ContextDetail>, val goal: List<Co
     val tasks: List<DetailTaskList>, val agents: List<DetailAgent>, val agentNotice: String,
     val processes: List<DetailProcess>, val processNotes: List<String>, val processComplete: Boolean,
     val generation: String, val recorded: Boolean)
-data class NativeModelChoice(val id: String, val label: String, val efforts: List<String>)
+/** [effortLabels] maps native effort IDs to labels the computer reported (OpenCode variants). */
+data class NativeModelChoice(val id: String, val label: String, val efforts: List<String>, val effortLabels: Map<String, String> = emptyMap())
 data class NativeSettings(val model: String, val effort: String, val models: List<NativeModelChoice>, val efforts: List<String>,
     val pendingModel: String, val pendingEffort: String, val pendingId: String, val applyWhen: String,
     val supported: Boolean, val reason: String, val notice: String = "") {
     /** Relevant semantic fields only; timestamps and unrelated history polls do not invalidate a dialog. */
-    val signature get() = JSONArray(listOf(model, effort, models.map { listOf(it.id, it.label, it.efforts) }, efforts,
+    val signature get() = JSONArray(listOf(model, effort, models.map { listOf(it.id, it.label, it.efforts, it.effortLabels.entries.map { entry -> listOf(entry.key, entry.value) }) }, efforts,
         pendingModel, pendingEffort, pendingId, applyWhen, supported, reason, notice)).toString()
 }
 
@@ -29,10 +30,28 @@ object SessionDetailsPresentation {
     }?.toLong()
     private fun strings(raw: JSONArray?): List<String> = raw?.let { values -> (0 until values.length()).mapNotNull { values.opt(it) as? String } }.orEmpty()
     fun settings(raw: JSONObject?) = NativeSettings(raw?.string("settings_model").orEmpty().ifBlank { raw?.string("model").orEmpty() }, raw?.string("effort").orEmpty(),
-        raw?.optJSONArray("model_options")?.objects().orEmpty().map { NativeModelChoice(it.string("id"), it.string("label").ifBlank { it.string("id") }, strings(it.optJSONArray("effort_options"))) },
-        strings(raw?.optJSONArray("effort_options")), raw?.string("pending_model").orEmpty(), raw?.string("pending_effort").orEmpty(),
+        raw?.optJSONArray("model_options")?.objects().orEmpty().map { option -> NativeEfforts.parse(option).let { efforts ->
+            NativeModelChoice(option.string("id"), option.string("label").ifBlank { option.string("id") }, efforts.map { it.value },
+                efforts.mapNotNull { effort -> effort.label?.let { effort.value to it } }.toMap()) } },
+        NativeEfforts.parse(raw).map { it.value }, raw?.string("pending_model").orEmpty(), raw?.string("pending_effort").orEmpty(),
         raw?.string("pending_settings_id").orEmpty(), raw?.string("settings_apply_when").orEmpty(), raw?.optBoolean("settings_change_supported") == true,
         raw?.string("settings_change_reason").orEmpty(), raw?.string("settings_change_notice").orEmpty())
+
+    /**
+     * Effort page rows for [model]: Default first, then that model's own options, else the session's list.
+     * Without [nativeNames] (relay and connector `opencode_launch_effort`) only names every relay accepts remain.
+     */
+    fun effortChoices(settings: NativeSettings, model: String, nativeNames: Boolean): List<String> =
+        (listOf("") + (settings.models.find { it.id == model }?.efforts ?: settings.efforts)).distinct()
+            .filter { nativeNames || it in SessionActionPolicies.relayEfforts }
+    /** The computer's label for this model's effort ([NativeEfforts]), else the shared name. */
+    fun effortLabel(settings: NativeSettings, model: String, effort: String): String =
+        effort.takeIf { it.isNotEmpty() }?.let { settings.models.find { choice -> choice.id == model }?.effortLabels?.get(it) } ?: effortLabel(effort)
+    fun effortLabel(effort: String) = when(effort) {
+        "" -> "Default"
+        "xhigh" -> "Extra high"
+        else -> effort.replaceFirstChar { it.uppercase() }
+    }
 
     fun parse(raw: JSONObject?, target: Target, verified: Boolean): SessionDetailsView {
         val record = raw ?: JSONObject()

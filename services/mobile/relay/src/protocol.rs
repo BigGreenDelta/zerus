@@ -119,6 +119,7 @@ pub const OPERATIONS: &[&str] = &[
 pub const FEATURES: &[&str] = &[
     "inspect_after",
     "inspect_agent",
+    "opencode_launch_effort",
     "presence_alerts",
     "send_agent",
     "voice_video",
@@ -527,12 +528,18 @@ pub fn request(v: &Value) -> Result<()> {
                     return Err(Error::BAD);
                 }
                 if let Some(e) = p.get("effort") {
+                    // The fixed names, or for an OpenCode session a native
+                    // effort id: the connector decides per model.
+                    let opencode = v["session"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("opencode/"));
                     if ![
                         "", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max",
                         "ultra", "on",
                     ]
                     .iter()
                     .any(|x| e == x)
+                        && !(opencode && e.as_str().is_some_and(opencode_effort_id))
                     {
                         return Err(Error::BAD);
                     }
@@ -592,6 +599,17 @@ fn agent(v: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// An OpenCode effort (model variant) id, exactly as the native catalog
+/// projects it: non-empty, at most 40 UTF-8 bytes, and no whitespace, control
+/// character or `/`. Shared with the connector; the model's `effort_options`
+/// decide membership. `tests/fixtures/opencode-effort-ids.json` fixes the shape.
+pub fn opencode_effort_id(s: &str) -> bool {
+    (1..=40).contains(&s.len())
+        && !s
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '/')
+}
+
 fn tag(v: &Value, launch: bool) -> Result<()> {
     let s = text(v, 120, false)?;
     if s.len() > 120 || s.trim() != s || s.contains(['/', '.', ':']) || (launch && s.contains('\\'))
@@ -692,6 +710,7 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
                 &[
                     "account_id",
                     "model",
+                    "effort",
                     "swarm_id",
                     "project_id",
                     "project_folder_id",
@@ -731,6 +750,16 @@ fn launch(op: &str, p: &Value, id: &str) -> Result<()> {
                     || !provider.bytes().enumerate().all(|(i, c)| {
                         c.is_ascii_alphanumeric() || c == b'_' || (i > 0 && b".-".contains(&c))
                     })
+                {
+                    return Err(Error::BAD);
+                }
+            }
+            if let Some(effort) = p.get("effort") {
+                // Additive: only OpenCode with a model; the connector checks
+                // the value against that model's offered variants.
+                if p["agent"] != "opencode"
+                    || p.get("model").is_none()
+                    || !effort.as_str().is_some_and(opencode_effort_id)
                 {
                     return Err(Error::BAD);
                 }

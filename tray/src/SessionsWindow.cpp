@@ -778,6 +778,25 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         auto *column = new ActivityWidth::ColumnLayout; page->addLayout(column); m_activityColumns.append(column); return column;
     };
     activityColumn(activityLayout)->addWidget(m_nativeSignIn);
+    m_openCodeService = new QWidget; m_openCodeService->setObjectName("openCodeServiceBanner");
+    auto *serviceLayout = new QVBoxLayout(m_openCodeService); serviceLayout->setContentsMargins(14, 12, 14, 12);
+    m_openCodeServiceText = new QLabel; m_openCodeServiceText->setWordWrap(true); m_openCodeServiceText->setTextFormat(Qt::PlainText);
+    m_openCodeServiceText->setObjectName("openCodeServiceReason"); serviceLayout->addWidget(m_openCodeServiceText);
+    m_openCodeServiceStart = new QPushButton; m_openCodeServiceStart->setObjectName("openCodeServiceStart");
+    m_openCodeServiceStart->setToolTip(tr("Start the shared OpenCode service on this computer. Zerus never stops it."));
+    serviceLayout->addWidget(m_openCodeServiceStart, 0, Qt::AlignLeft); m_openCodeService->hide();
+    connect(m_openCodeServiceStart, &QPushButton::clicked, this, &SessionsWindow::startOpenCodeService);
+    activityColumn(activityLayout)->addWidget(m_openCodeService);
+    connect(&m_client, &HgsClient::accountsReady, this, [this](quint64 id, const QString &, const QJsonObject &) {
+        if (!m_openCodeStartRequest || id != m_openCodeStartRequest) return;
+        m_openCodeStartRequest = 0; showNotice(tr("OpenCode started on %1.").arg(m_openCodeStartMachine));
+        emit refreshRequested(); renderDetails(); inspect();
+    });
+    connect(&m_client, &HgsClient::accountsFailed, this, [this](quint64 id, const QString &, const QString &error) {
+        if (!m_openCodeStartRequest || id != m_openCodeStartRequest) return;
+        m_openCodeStartRequest = 0; showNotice(tr("Could not start OpenCode on %1: %2").arg(m_openCodeStartMachine, error), true);
+        renderDetails();
+    });
     m_contextUsage=new SessionUsage::ContextButton;m_contextUsage->setObjectName("activityContext");
     activityLayout->addWidget(m_activityView, 1);
     auto *inputColumn = activityColumn(activityLayout); inputColumn->addWidget(m_question);
@@ -865,6 +884,19 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(cacheUsage,&QPushButton::clicked,this,[this]{m_cacheStatus->closePopover();setInspectorVisible(true);m_inspector->setCurrentIndex(1);});
     // Close first: the confirmation dialog must not open over a popup.
     connect(m_cacheClear,&QPushButton::clicked,this,[this]{m_cacheStatus->closePopover();clearContext();});
+    connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
+        if(!m_forgetBindingRequest||id!=m_forgetBindingRequest)return;
+        m_forgetBindingRequest=0;m_pending=false;
+        showNotice(ok?tr("Zerus forgot %1. The conversation stays in OpenCode.").arg(m_forgetBindingName):error,!ok);
+        emit refreshRequested();rebuild();inspect();
+    });
+    connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
+        if(!m_removeQueuedRequest||id!=m_removeQueuedRequest)return;
+        m_removeQueuedRequest=0;m_removeQueuedMessage.clear();
+        if(m_selectedKey==m_removeQueuedKey){showNotice(ok?tr("Queued message removed."):error,!ok);renderDetails();inspect();}
+        else {if(!ok)showNotice(tr("Could not remove the queued message from %1: %2").arg(m_removeQueuedName,error),true);renderDetails();}
+        emit refreshRequested();
+    });
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &receipt,const QString &error) {
         if(id!=m_clearRequest)return;
         m_clearRequest=0;
@@ -2323,7 +2355,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     if(!path.isEmpty())dialog.selectPath(path, false);
     if(!account.isNull())dialog.selectAccount(account);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
-        [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model) {
+        [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort) {
             const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_pendingLaunches.insert(id, QJsonObject{{"host", host}, {"cmd", cmd}, {"tag", name}, {"group", group},
                 {"target", target}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
@@ -2339,7 +2371,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
             });
             if (!openTerminal || cmd=="dsh" || cmd=="opencode") {
                 showNotice(tr("Starting session…"));
-                m_client.launchDetachedSession(host,cmd,target,name,account,id,model);
+                m_client.launchDetachedSession(host,cmd,target,name,account,id,model,effort);
             } else emit newSessionRequested(host, cmd, target, name, account, id);
         });
     connect(&dialog, &NewSessionDialog::manageProjectsRequested, this, &SessionsWindow::showProjects);
@@ -3334,9 +3366,10 @@ void SessionsWindow::renderDetails()
     m_renameAction->setEnabled(NativeSessionCapabilities::action(s,"rename",m_details) && entry->online && !updating && !s.name.section('/', 0, 0).isEmpty() && !s.name.section('/', 1, 1).isEmpty() && (!archived || !s.archiveId.isEmpty()));
     m_archiveAction->setVisible(s.cmd != "dsh" && (s.state == "paused" || s.state == "stopped"));
     m_archiveAction->setEnabled(!updating && NativeSessionCapabilities::action(s,"archive",m_details));
-    m_forgetAction->setEnabled(!updating && NativeSessionCapabilities::action(s,s.state=="running"?"terminate":"forget",m_details));
-    m_forgetAction->setToolTip(s.cmd=="opencode" && s.state=="running" ? tr("Pause OpenCode before forgetting its saved session.") : QString());
-    m_forgetAction->setText(archived ? tr("Forget archived session…") : s.state == "running" ? tr("Terminate session…") : tr("Forget saved session…"));
+    const auto endOperation=NativeSessionCapabilities::endOperation(s,m_details);
+    m_forgetAction->setEnabled(!updating && NativeSessionCapabilities::action(s,endOperation,m_details));
+    m_forgetAction->setToolTip(NativeSessionCapabilities::forgetsBindingOnly(s,m_details) ? tr("Zerus forgets this session. The conversation stays in OpenCode.") : QString());
+    m_forgetAction->setText(archived ? tr("Forget archived session…") : endOperation == "terminate" ? tr("Terminate session…") : tr("Forget saved session…"));
     const auto questionError=m_details.value("pending_questions_error").toString();
     QString hint;
     if (terminating) hint = tr("Waiting for the session to stop. Its native conversation history is kept.");
@@ -3387,9 +3420,23 @@ void SessionsWindow::renderDetails()
     m_nativeSignIn->setVisible(s.cmd == "dsh" && entry->online && m_details.value("auth_required").toBool() && s.runtimeState == "live");
     setWorkspaceStyle(m_nativeSignIn, QString("QWidget#nativeSignInBanner { background:%1; border:1px solid %2; border-radius:8px; } QLabel { color:%3; background:transparent; border:0; }")
         .arg(m_dark ? "#40371e" : "#fff0ba", m_dark ? "#927140" : "#c6a15f", m_dark ? "#ffda76" : "#392900"));
+    // hgs reports a stopped OpenCode service with exactly this reason; inspection
+    // never starts it, so the session offers the explicit start.
+    const auto serviceReason = m_details.value("inspection_reason").toString();
+    const bool serviceStopped = s.cmd == "opencode" && m_details.value("inspection_unavailable").toBool()
+        && serviceReason.startsWith(QStringLiteral("OpenCode is not running on "));
+    m_openCodeService->setVisible(serviceStopped);
+    m_openCodeServiceText->setText(serviceReason + (serviceReason.endsWith('.') ? QString() : QStringLiteral(".")));
+    m_openCodeServiceStart->setText(m_openCodeStartRequest ? tr("Starting OpenCode…") : tr("Start OpenCode on %1").arg(entry->machine));
+    m_openCodeServiceStart->setEnabled(serviceStopped && entry->online && !m_openCodeStartRequest);
+    setWorkspaceStyle(m_openCodeService, QString("QWidget#openCodeServiceBanner { background:%1; border:1px solid %2; border-radius:8px; } QLabel { color:%3; background:transparent; border:0; }")
+        .arg(m_dark ? "#40371e" : "#fff0ba", m_dark ? "#927140" : "#c6a15f", m_dark ? "#ffda76" : "#392900"));
     auto activityDetails = m_details;
     if (!entry->online || !m_inspectError.isEmpty() || s.state != "running") activityDetails["runtime_state"] = "unavailable";
     activityDetails["queue_sending"] = m_queueSendRequest && m_queueSendKey == m_selectedKey;
+    // One removal at a time: every Remove waits while one runs.
+    if (m_removeQueuedRequest) activityDetails["queued_removal_busy"] = true;
+    if (m_removeQueuedRequest && m_removeQueuedKey == m_selectedKey) activityDetails["queued_removal"] = m_removeQueuedMessage;
     if (!entry->online || !m_inspectError.isEmpty()) { auto queue=activityDetails["input_queue"].toObject(); queue["can_send_now"]=false; activityDetails["input_queue"]=queue; }
     m_activityView->setTimeline(activityDetails, m_events, m_localMessages.value(m_selectedKey), s.prompt, s.tracked);
     m_composer->setAttachmentAvailability(s.cmd!="opencode" && m_details.value("attachments_supported").toBool(true),
@@ -3415,7 +3462,7 @@ void SessionsWindow::renderDetails()
     m_composer->setModelSettings(m_details.value("settings_model").toString(s.model), s.effort, m_details.value("model_options").toArray(), settingsProblem.isEmpty(),
         settingsProblem.isEmpty() ? m_details.value("settings_change_reason").toString() : settingsProblem,
         m_details.value("pending_model").toString(), m_details.value("pending_effort").toString(),
-        m_details.value("settings_apply_when").toString());
+        m_details.value("settings_apply_when").toString(), s.cmd == "opencode");
     m_composer->setSettingsNotice(m_details.value("settings_change_notice").toString());
     renderQuestion(*entry);
     updateSessionFeedback();
@@ -3622,7 +3669,7 @@ void SessionsWindow::changeModelSettings(const QString &key, const QString &mode
     m_settingsKey = key; m_settingsRun = m_details.value("run_id").toString();
     m_settingsConversation = m_details.value("conversation_id").toString();
     m_settingsHost = entry->host; m_settingsName = entry->session.name; m_settingsAutomatic = false;
-    m_settingsRequest = m_client.requestSettings(entry->host, entry->session.name, model, effort, m_settingsRun, m_settingsConversation);
+    m_settingsRequest = m_client.requestSettings(entry->host, entry->session.name, model, effort, m_settingsRun, m_settingsConversation, {}, entry->session.cmd == "opencode");
     renderDetails();
 }
 
@@ -3767,8 +3814,44 @@ QString SessionsWindow::messageBlockReason(const Entry &entry) const
     return {};
 }
 
+bool SessionsWindow::queuedMessageRemovable(const QString &messageId) const
+{
+    const auto *entry=selected();
+    if(!entry||!entry->online||!m_inspectError.isEmpty()||m_removeQueuedRequest||entry->session.cmd!="opencode"
+        ||m_details.value("run_id").toString().isEmpty()||!NativeSessionCapabilities::action(entry->session,"remove_queued",m_details))return false;
+    return std::any_of(m_events.cbegin(),m_events.cend(),[&messageId](const QJsonValue &value){
+        const auto event=value.toObject();
+        return event.value("message_id").toString()==messageId&&event.value("delivery_state")=="not_delivered";
+    });
+}
+
+// Removing an OpenCode inbox message is destructive: it is confirmed, and sent
+// only while the same conversation still reports that message as not delivered.
+void SessionsWindow::removeQueuedMessage(const QString &messageId)
+{
+    if(messageId.isEmpty()||!queuedMessageRemovable(messageId)||findChild<QMessageBox *>("removeQueuedConfirm"))return;
+    const auto *entry=selected();
+    const auto key=m_selectedKey,host=entry->host,name=entry->session.name;
+    const auto run=m_details.value("run_id").toString(),conversation=m_details.value("conversation_id").toString();
+    QMessageBox dialog(QMessageBox::Warning,tr("Remove queued message"),tr("Remove this queued message? It has not been delivered to OpenCode."),QMessageBox::NoButton,this);
+    dialog.setObjectName("removeQueuedConfirm");dialog.setTextFormat(Qt::PlainText);
+    auto *confirm=dialog.addButton(tr("Remove"),QMessageBox::DestructiveRole);
+    auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);
+    dialog.exec();
+    if(dialog.clickedButton()!=confirm)return;
+    entry=selected();
+    if(!entry||m_selectedKey!=key||entry->host!=host||entry->session.name!=name||m_details.value("run_id")!=run
+        ||m_details.value("conversation_id")!=conversation||!queuedMessageRemovable(messageId)){
+        showNotice(tr("The queued message changed. Check Activity before removing it."),true);return;
+    }
+    m_removeQueuedKey=key;m_removeQueuedMessage=messageId;m_removeQueuedName=name;
+    m_removeQueuedRequest=m_client.requestRemoveQueued(host,name,run,conversation,messageId);
+    renderDetails();
+}
+
 void SessionsWindow::messageAction(const QString &id,const QString &action)
 {
+    if(action=="remove_queued"){removeQueuedMessage(id);return;}
     const auto *entry=selected();if(!entry)return;
     auto &messages=m_localMessages[m_selectedKey];
     for(int i=0;i<messages.size();++i) {
@@ -3923,6 +4006,16 @@ void SessionsWindow::continueAfterCompact(const QString &host, const QString &na
         deliverMessage(key,host,name,pending.run,pending.conversation,pending.text,pending.attachments,pending.retryId,pending.commandId,true,data);
         return;
     }
+}
+
+// Explicit only: hgs starts the shared service when none is registered and alive.
+void SessionsWindow::startOpenCodeService()
+{
+    const auto *entry = selected();
+    if (!entry || !entry->online || m_openCodeStartRequest || entry->session.cmd != "opencode" || !m_openCodeServiceStart->isEnabled()) return;
+    m_openCodeStartMachine = entry->machine;
+    m_openCodeStartRequest = m_client.requestAccounts(entry->host, {"start", "native-opencode", "--json"});
+    renderDetails();
 }
 
 void SessionsWindow::clearContext()
@@ -4300,10 +4393,12 @@ void SessionsWindow::renderQuestion(const Entry &entry, int navigation)
     for (const auto &value : m_details.value("pending_questions").toArray()) {
         const auto candidate = value.toObject();
         const auto id=candidate.value("question_id").toString();
-        if(id.isEmpty() || seen.contains(id) || candidate.value("questions").toArray().isEmpty())continue;
+        // A card without questions still explains itself when it cannot be answered
+        // here (hgs empties an oversized OpenCode form).
+        if(id.isEmpty() || seen.contains(id) || (candidate.value("questions").toArray().isEmpty() && candidate.value("can_answer").toBool(true)))continue;
         seen.insert(id);
         if(m_question->hasSubmittedAnswer(m_selectedKey,candidate))continue;
-        pendingQuestions+=candidate.value("questions").toArray().size();
+        pendingQuestions+=qMax<qsizetype>(1,candidate.value("questions").toArray().size());
         if(candidate.value("optional").toBool())optional.append(candidate);
         else if(question.isEmpty() || (!question.value("can_answer").toBool() && candidate.value("can_answer").toBool()))question=candidate;
     }
@@ -4632,8 +4727,9 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     add(tr("Copy session reference"), "contextCopyReference", SessionMenuAction::CopyReference, original.online && !target.runId.isEmpty());
     add(tr("Copy folder path"), "contextCopyFolder", SessionMenuAction::CopyFolder, !directory.isEmpty());
     m_sessionMenu->addSeparator();
-    add(archived ? tr("Forget archived session…") : original.session.state == "running" ? tr("Terminate session…") : tr("Forget saved session…"),
-        "contextTerminateSession", SessionMenuAction::Terminate, available && NativeSessionCapabilities::action(target,target.state=="running"?"terminate":"forget") && (!archived || !target.archiveId.isEmpty()),NativeSessionCapabilities::actionReason(target,target.state=="running"?"terminate":"forget"));
+    const auto endOperation=NativeSessionCapabilities::endOperation(target);
+    add(archived ? tr("Forget archived session…") : endOperation == "terminate" ? tr("Terminate session…") : tr("Forget saved session…"),
+        "contextTerminateSession", SessionMenuAction::Terminate, available && NativeSessionCapabilities::action(target,endOperation) && (!archived || !target.archiveId.isEmpty()),NativeSessionCapabilities::actionReason(target,endOperation));
     m_sessionMenu->popup(position);
 }
 
@@ -4915,15 +5011,21 @@ void SessionsWindow::renameSession()
 
 void SessionsWindow::terminateSession()
 {
-    const auto *e = selected(); if (!e || !e->online || isTerminating(*e) || m_pending || !m_renameKey.isEmpty()
-        || !NativeSessionCapabilities::action(e->session,e->session.state=="running"?"terminate":"forget",m_details)) return;
+    const auto *e = selected(); if (!e || !e->online || isTerminating(*e) || m_pending || !m_renameKey.isEmpty() || m_forgetBindingRequest
+        || !NativeSessionCapabilities::action(e->session,NativeSessionCapabilities::endOperation(e->session,m_details),m_details)) return;
     const Entry original = *e;
     const QString host = e->host, name = e->session.name, archiveId = e->session.archiveId;
-    const bool live = e->session.state == "running", archived = e->session.state == "archived";
+    const bool archived = e->session.state == "archived";
+    // OpenCode keeps its conversation; with a known identity only the binding goes.
+    const auto run = m_details.value("run_id").toString(e->session.runId), conversation = m_details.value("conversation_id").toString(e->session.conversationId);
+    const bool bindingOnly = !archived && NativeSessionCapabilities::forgetsBindingOnly(e->session,m_details);
+    const bool scopedForget = bindingOnly && !run.isEmpty();
+    const bool live = e->session.state == "running" && !bindingOnly;
     const bool keepArchive = live && e->session.tracked && QStringList{"codex","claude","kimi"}.contains(e->session.cmd);
     QMessageBox confirm(QMessageBox::Warning, live ? tr("Terminate session?") : archived ? tr("Forget archived session?") : tr("Forget saved session?"),
         live ? (keepArchive ? tr("Stop %1 and move its recorded conversation to Archive? Running processes will stop; the conversation history is kept.").arg(name) : tr("Terminate %1? Its running processes will stop. No HGS archive is available for this session; any native conversation history is kept.").arg(name))
              : archived ? tr("Remove this archived instance of %1 from HGS? Other sessions with this name and the agent’s native conversation history are kept.").arg(name)
+             : bindingOnly ? tr("Forget %1 in Zerus? The conversation stays in OpenCode; only Zerus forgets it.").arg(name)
              : tr("Remove %1 from HGS? The agent’s native conversation history is kept.").arg(name), QMessageBox::Yes | QMessageBox::Cancel, this);
     confirm.setObjectName("terminateSessionConfirm"); confirm.setTextFormat(Qt::PlainText);
     confirm.setInformativeText(tr("Computer: %1").arg(original.machine));
@@ -4932,9 +5034,18 @@ void SessionsWindow::terminateSession()
     confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
     if (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original)) return;
     const auto *current = selected();
-    if (!current || !current->online || isTerminating(*current) || m_pending || !m_renameKey.isEmpty()) return;
-    if ((current->session.state == "running") != live) {
+    if (!current || !current->online || isTerminating(*current) || m_pending || !m_renameKey.isEmpty() || m_forgetBindingRequest) return;
+    const bool currentBindingOnly = !archived && NativeSessionCapabilities::forgetsBindingOnly(current->session,m_details);
+    if ((current->session.state == "running" && !currentBindingOnly) != live || currentBindingOnly != bindingOnly) {
         showNotice(tr("The session state changed. Open its actions again."), true); return;
+    }
+    if (scopedForget) {
+        if (m_details.value("run_id").toString(current->session.runId) != run || m_details.value("conversation_id").toString(current->session.conversationId) != conversation) {
+            showNotice(tr("The session state changed. Open its actions again."), true); return;
+        }
+        m_pending = true; m_restoreKey.clear(); m_forgetBindingName = name;
+        m_forgetBindingRequest = m_client.requestForgetBinding(host, name, run, conversation);
+        renderDetails(); return;
     }
     m_pending = true; m_restoreKey.clear();
     if(live){

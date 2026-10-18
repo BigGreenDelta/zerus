@@ -1,15 +1,17 @@
-//! OpenCode's reviewed native API, authenticated on loopback. Native hosts
-//! outlive HGS and the GUI; manifests contain bindings, never provider keys.
+//! OpenCode 2's shared background service, authenticated on loopback.
+//! Bindings hold Zerus and session identities, never provider keys.
 use super::*;
-use base64::{engine::general_purpose::STANDARD, Engine};
+#[allow(dead_code)] // the OpenCode 2 gate is consumed by later phase 1 tasks
+mod catalog;
+mod forms;
+mod history;
+mod service;
+pub(crate) use catalog::{catalog, install_state, start_from_accounts};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::process::{Command, Stdio};
+use std::fs;
+use std::io::Read;
 use std::time::{Duration, Instant};
 
-pub(crate) const VERSION: &str = "1.18.35";
 fn bindings() -> PathBuf {
     root().join("opencode/bindings")
 }
@@ -33,7 +35,7 @@ pub(super) fn binding(name: &str) -> Result<Value> {
     }
     Ok(record)
 }
-fn native_id(id: &str, prefix: &str) -> bool {
+pub(super) fn native_id(id: &str, prefix: &str) -> bool {
     id.starts_with(prefix)
         && id.len() <= 128
         && id
@@ -53,593 +55,274 @@ pub(crate) fn config_home() -> PathBuf {
                 .join("opencode")
         })
 }
-fn data_home() -> PathBuf {
-    nonempty_env("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".local/share"))
-}
-fn identity() -> Value {
-    json!({"agent_home":config_home(),"native_data_home":data_home(),"native_config_file":nonempty_env("OPENCODE_CONFIG").unwrap_or_default()})
-}
-fn host_dir(record: &Value) -> PathBuf {
-    root().join("opencode/hosts").join(format!(
-        "{:x}",
-        Sha256::digest(
-            json!([
-                record["agent_home"],
-                record["native_data_home"],
-                record["native_config_file"]
-            ])
-            .to_string()
-            .as_bytes()
-        )
-    ))
-}
-fn host(record: &Value) -> Result<Value> {
-    let bytes = fs::read(host_dir(record).join("host.json"))
-        .map_err(|_| "OpenCode host is unavailable; explicitly resume the session".to_owned())?;
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid private OpenCode host metadata")?;
-    if value["version"] != VERSION
-        || value["port"].as_u64().is_none_or(|p| p == 0 || p > 65535)
-        || string(&value, "password").len() != 36
-        || string(&value, "generation").is_empty()
-        || value["pid"]
-            .as_u64()
-            .is_none_or(|pid| pid <= 1 || pid > u32::MAX as u64)
-        || string(&value, "process_start").is_empty()
-        || string(&value, "process_start").len() > 512
-    {
-        return Err("Invalid private OpenCode host metadata".into());
-    }
-    Ok(value)
-}
-struct Frame {
-    header_end: usize,
-    end: usize,
-    status: u16,
-    chunked: bool,
-}
-fn frame(bytes: &[u8]) -> Result<Option<Frame>> {
-    let Some(split) = bytes.windows(4).position(|p| p == b"\r\n\r\n") else {
-        if bytes.len() > 32768 {
-            return Err("Native HTTP headers exceed bounds".into());
-        }
-        return Ok(None);
-    };
-    if split > 32768 {
-        return Err("Native HTTP headers exceed bounds".into());
-    }
-    let header = std::str::from_utf8(&bytes[..split]).map_err(|_| "Invalid native HTTP headers")?;
-    let mut lines = header.split("\r\n");
-    let mut status_line = lines
-        .next()
-        .ok_or("Missing native HTTP status")?
-        .split_whitespace();
-    if !matches!(status_line.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
-        return Err("Invalid native HTTP protocol".into());
-    }
-    let status = status_line
-        .next()
-        .and_then(|s| s.parse::<u16>().ok())
-        .filter(|s| (100..600).contains(s))
-        .ok_or("Invalid native HTTP status")?;
-    let mut length = None;
-    let mut chunked = false;
-    for line in lines {
-        let (name, value) = line.split_once(':').ok_or("Invalid native HTTP header")?;
-        if name.eq_ignore_ascii_case("content-length") {
-            if length.is_some() {
-                return Err("Duplicate native Content-Length".into());
+/// A fresh OpenCode identifier: the prefix and 26 random letters or digits.
+pub(super) fn new_id(prefix: &str) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut suffix = String::with_capacity(26);
+    // Bytes 6 and 8 of a v4 UUID carry fixed version and variant bits, so
+    // only the other 14 are random. 248 = 4 * 62: bytes at or above it are
+    // dropped to avoid modulo bias.
+    while suffix.len() < 26 {
+        for (index, byte) in uuid::Uuid::new_v4().into_bytes().into_iter().enumerate() {
+            if index != 6 && index != 8 && byte < 248 && suffix.len() < 26 {
+                suffix.push(ALPHABET[byte as usize % ALPHABET.len()] as char);
             }
-            let n = value.trim();
-            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-                return Err("Invalid native Content-Length".into());
-            }
-            length = Some(
-                n.parse::<usize>()
-                    .map_err(|_| "Native Content-Length exceeds bounds")?,
-            );
-        }
-        if name.eq_ignore_ascii_case("transfer-encoding") {
-            if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
-                return Err("Unsupported native Transfer-Encoding".into());
-            }
-            chunked = true;
         }
     }
-    if chunked && length.is_some() {
-        return Err("Conflicting native HTTP framing".into());
-    }
-    let body_start = split + 4;
-    let end = if chunked {
-        let mut offset = body_start;
-        loop {
-            let rest = &bytes[offset..];
-            let Some(n) = rest.windows(2).position(|p| p == b"\r\n") else {
-                return Ok(None);
-            };
-            if n > 1024 {
-                return Err("Native HTTP chunk header exceeds bounds".into());
-            }
-            let raw = std::str::from_utf8(&rest[..n]).map_err(|_| "Invalid native chunk size")?;
-            let size_text = raw.split(';').next().unwrap_or("");
-            if size_text.is_empty() || !size_text.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err("Invalid native chunk size".into());
-            }
-            let size = usize::from_str_radix(size_text, 16)
-                .map_err(|_| "Native chunk size exceeds bounds")?;
-            offset += n + 2;
-            if size == 0 {
-                let trailers = &bytes[offset..];
-                if trailers.starts_with(b"\r\n") {
-                    break offset + 2;
-                }
-                let Some(trailer_end) = trailers.windows(4).position(|p| p == b"\r\n\r\n") else {
-                    return Ok(None);
-                };
-                if trailer_end > 32768 {
-                    return Err("Native HTTP trailers exceed bounds".into());
-                }
-                let trailer = std::str::from_utf8(&trailers[..trailer_end])
-                    .map_err(|_| "Invalid native HTTP trailer")?;
-                if trailer.split("\r\n").any(|line| !line.contains(':')) {
-                    return Err("Invalid native HTTP trailer".into());
-                }
-                break offset + trailer_end + 4;
-            }
-            let next = offset
-                .checked_add(size)
-                .and_then(|n| n.checked_add(2))
-                .ok_or("Native chunk size exceeds bounds")?;
-            if next > 32 * 1024 * 1024 {
-                return Err("Native chunk body exceeds bounds".into());
-            }
-            if next > bytes.len() {
-                return Ok(None);
-            }
-            if &bytes[next - 2..next] != b"\r\n" {
-                return Err("Invalid native chunk boundary".into());
-            }
-            offset = next;
-        }
-    } else if let Some(length) = length {
-        let end = body_start
-            .checked_add(length)
-            .filter(|n| *n <= 32 * 1024 * 1024)
-            .ok_or("Native HTTP body exceeds bounds")?;
-        if bytes.len() < end {
-            return Ok(None);
-        }
-        end
-    } else if status == 204 {
-        body_start
-    } else {
-        return Err("Missing native HTTP body framing".into());
-    };
-    Ok(Some(Frame {
-        header_end: body_start,
-        end,
-        status,
-        chunked,
-    }))
+    format!("{prefix}{suffix}")
 }
-fn decode_response(bytes: &[u8]) -> Result<Value> {
-    let framing = frame(bytes)?.ok_or("Incomplete native HTTP response; delivery uncertain")?;
-    if framing.end != bytes.len() {
-        return Err("Unexpected bytes after native HTTP response".into());
-    }
-    let raw = &bytes[framing.header_end..framing.end];
-    let mut decoded = Vec::new();
-    let body = if framing.chunked {
-        let mut rest = raw;
-        loop {
-            let n = rest
-                .windows(2)
-                .position(|p| p == b"\r\n")
-                .ok_or("Invalid native chunk")?;
-            let size = usize::from_str_radix(
-                std::str::from_utf8(&rest[..n])
-                    .map_err(|_| "Invalid native chunk")?
-                    .split(';')
-                    .next()
-                    .unwrap_or(""),
-                16,
-            )
-            .map_err(|_| "Invalid native chunk")?;
-            rest = &rest[n + 2..];
-            if size == 0 {
-                break;
-            }
-            decoded.extend_from_slice(&rest[..size]);
-            rest = &rest[size + 2..];
-        }
-        decoded.as_slice()
-    } else {
-        raw
-    };
-    if !(200..300).contains(&framing.status) {
-        let reason = serde_json::from_slice::<Value>(body)
-            .ok()
-            .map(|v| {
-                v["message"]
-                    .as_str()
-                    .or(v["data"]["message"].as_str())
-                    .unwrap_or("Native operation refused")
-                    .to_owned()
-            })
-            .unwrap_or_else(|| "Native operation refused".into());
-        return Err(format!("OpenCode HTTP {}: {reason}", framing.status));
-    }
-    if body.is_empty() {
-        return Ok(Value::Null);
-    }
-    serde_json::from_slice(body)
-        .map_err(|_| "Invalid native JSON response; delivery uncertain".into())
-}
-fn http(host: &Value, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-    http_until(
-        host,
-        method,
-        path,
-        body,
-        Instant::now() + Duration::from_secs(10),
-    )
-}
-fn http_until(
-    host: &Value,
-    method: &str,
-    path: &str,
-    body: Option<&Value>,
-    deadline: Instant,
-) -> Result<Value> {
-    let address = std::net::SocketAddr::from((
-        [127, 0, 0, 1],
-        host["port"].as_u64().ok_or("Missing native endpoint")? as u16,
-    ));
-    let mut socket = TcpStream::connect_timeout(
-        &address,
-        deadline
-            .checked_duration_since(Instant::now())
-            .ok_or("Native HTTP deadline exceeded")?
-            .min(Duration::from_secs(2)),
-    )
-    .map_err(|_| "OpenCode host is unavailable; explicitly resume the session".to_owned())?;
-    socket
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| e.to_string())?;
-    socket
-        .set_write_timeout(Some(
-            deadline
-                .checked_duration_since(Instant::now())
-                .ok_or("Native HTTP deadline exceeded")?
-                .min(Duration::from_secs(5)),
-        ))
-        .map_err(|e| e.to_string())?;
-    let body = body.map(Value::to_string).unwrap_or_default();
-    let auth = STANDARD.encode(format!("opencode:{}", string(host, "password")));
-    let headers=format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic {auth}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len());
-    socket
-        .write_all(headers.as_bytes())
-        .and_then(|_| socket.write_all(body.as_bytes()))
-        .map_err(|e| format!("Native request delivery uncertain: {e}"))?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or("Native HTTP deadline exceeded; delivery uncertain")?;
-        socket
-            .set_read_timeout(Some(remaining))
-            .map_err(|e| e.to_string())?;
-        let n = socket
-            .read(&mut chunk)
-            .map_err(|e| format!("Native response delivery uncertain: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..n]);
-        if bytes.len() > 32 * 1024 * 1024 {
-            return Err("Native response exceeds bounds; delivery uncertain".into());
-        }
-        if frame(&bytes)?.is_some() {
-            break;
-        }
-    }
-    decode_response(&bytes)
-}
-fn rpc(record: &Value, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-    http(&host(record)?, method, path, body)
-}
-fn endpoint(record: &Value, suffix: &str) -> String {
+fn session_path(record: &Value, suffix: &str) -> String {
     format!("/api/session/{}{suffix}", string(record, "conversation_id"))
 }
-fn ensure_host(record: &Value) -> Result<()> {
-    file_configuration_only()?;
-    let dir = host_dir(record);
-    private_dir(&dir)?;
-    let _guard = lock(Some(&dir.join("start.lock")))?;
-    if dir.join("host.json").exists() {
-        let previous = host(record)?;
-        if let Ok(health) = http(&previous, "GET", "/global/health", None) {
-            if health["healthy"] == true && health["version"] == VERSION {
-                return Ok(());
-            }
-            return Err("The resident OpenCode host is incompatible; it was left running".into());
-        }
-        // Never replace a hung host; the launcher may be systemd-run rather
-        // than OpenCode, so also refuse any listener at its recorded endpoint.
-        let pid = previous["pid"].as_u64().unwrap_or(0) as u32;
-        if pid > 0
-            && !string(&previous, "process_start").is_empty()
-            && process_start(pid) == string(&previous, "process_start")
-        {
-            return Err("The resident OpenCode host is not responding; it was left running".into());
-        }
-        let address = std::net::SocketAddr::from((
-            [127, 0, 0, 1],
-            previous["port"].as_u64().unwrap_or(0) as u16,
-        ));
-        if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
-            return Err(
-                "The private native endpoint is still occupied; it was left untouched".into(),
-            );
-        }
-    }
-    let version = crate::platform::output(Command::new("opencode").arg("--version"))
-        .map_err(|_| format!("Install OpenCode {VERSION} on this computer"))?;
-    if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != VERSION {
-        return Err(format!(
-            "This native adapter requires reviewed OpenCode {VERSION}"
-        ));
-    }
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    drop(listener);
-    let mut metadata = json!({"version":VERSION,"port":port,"password":uuid::Uuid::new_v4().to_string(),"generation":uuid::Uuid::new_v4().to_string()});
-    let log = crate::platform::private_open(OpenOptions::new().create(true).append(true))
-        .open(dir.join("host.log"))
-        .map_err(|e| e.to_string())?;
-    let mut command = Command::new("opencode");
-    #[cfg(target_os = "linux")]
-    {
-        let runtime = PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }));
-        if runtime.join("systemd/private").exists() && crate::platform::available("systemd-run") {
-            command = Command::new("systemd-run");
-            command
-                .args([
-                    "--user",
-                    "--scope",
-                    "--quiet",
-                    "--collect",
-                    "--expand-environment=no",
-                    "--unit",
-                ])
-                .arg(format!("hgs-opencode-{}", uuid::Uuid::new_v4()))
-                .args(["--", "opencode"])
-                .env("XDG_RUNTIME_DIR", runtime);
-        }
-    }
-    command
-        .args(["serve", "--hostname", "127.0.0.1", "--port"])
-        .arg(port.to_string())
-        .env("OPENCODE_SERVER_USERNAME", "opencode")
-        .env("OPENCODE_SERVER_PASSWORD", string(&metadata, "password"))
-        .env("OPENCODE_CONFIG_DIR", string(record, "agent_home"))
-        .env("XDG_DATA_HOME", string(record, "native_data_home"))
-        .env_remove("OPENCODE_CONFIG_CONTENT")
-        .env_remove("OPENCODE_CONFIG")
-        .current_dir(home())
-        .stdin(Stdio::null())
-        .stdout(log.try_clone().map_err(|e| e.to_string())?)
-        .stderr(log);
-    for key in [
-        "HGS_SESSION",
-        "HGS_RUN_ID",
-        "HGS_ACCOUNT_ID",
-        "HGS_ACCOUNT_HOME",
-        "HGS_AGENT",
-    ] {
-        command.env_remove(key);
-    }
-    if !string(record, "native_config_file").is_empty() {
-        command.env("OPENCODE_CONFIG", string(record, "native_config_file"));
-    }
-    // Detach only the dedicated native host: its own session outlives the
-    // launching terminal and HGS process.
-    let mut child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
-    metadata["pid"] = json!(child.id());
-    metadata["process_start"] = json!(process_start(child.id()));
-    atomic(&dir.join("host.json"), &metadata.to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(35);
-    while Instant::now() < deadline {
-        if let Ok(health) = http(&metadata, "GET", "/global/health", None) {
-            if health["healthy"] == true && health["version"] == VERSION {
-                return Ok(());
-            }
-        }
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
-            return Err("OpenCode host failed to start; inspect its private host log".into());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err("OpenCode is still starting; explicitly resume when ready".into())
-}
+use service::Response;
 
-// JSONC syntax is accepted by OpenCode configuration. Strip only comments
-// and trailing commas outside quoted strings; never change URL or key bytes.
-fn configuration_json(bytes: &[u8]) -> Result<Value> {
-    let mut clean = bytes.to_vec();
-    let mut i = 0;
-    let mut quoted = false;
-    let mut escaped = false;
-    while i < clean.len() {
-        let byte = clean[i];
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-            i += 1;
-            continue;
-        }
-        if byte == b'"' {
-            quoted = true;
-            i += 1;
-            continue;
-        }
-        if byte == b'/' && clean.get(i + 1) == Some(&b'/') {
-            while i < clean.len() && !matches!(clean[i], b'\n' | b'\r') {
-                clean[i] = b' ';
-                i += 1;
-            }
-            continue;
-        }
-        if byte == b'/' && clean.get(i + 1) == Some(&b'*') {
-            clean[i] = b' ';
-            clean[i + 1] = b' ';
-            i += 2;
-            let mut closed = false;
-            while i + 1 < clean.len() {
-                if clean[i] == b'*' && clean[i + 1] == b'/' {
-                    clean[i] = b' ';
-                    clean[i + 1] = b' ';
-                    i += 2;
-                    closed = true;
-                    break;
-                }
-                if !matches!(clean[i], b'\n' | b'\r') {
-                    clean[i] = b' ';
-                }
-                i += 1;
-            }
-            if !closed {
-                return Err("Unclosed native configuration comment".into());
-            }
-            continue;
-        }
-        i += 1;
-    }
-    quoted = false;
-    escaped = false;
-    for i in 0..clean.len() {
-        let byte = clean[i];
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-            continue;
-        }
-        if byte == b'"' {
-            quoted = true;
-        } else if byte == b','
-            && clean[i + 1..]
-                .iter()
-                .find(|c| !c.is_ascii_whitespace())
-                .is_some_and(|c| matches!(c, b'}' | b']'))
-        {
-            clean[i] = b' ';
-        }
-    }
-    serde_json::from_slice(&clean).map_err(|_| "Native OpenCode configuration is invalid".into())
-}
-fn file_configuration_only() -> Result<()> {
-    if nonempty_env("OPENCODE_CONFIG_CONTENT").is_some() {
-        return Err("Inline OpenCode configuration is not supported by this adapter; use the host opencode.json file".into());
-    }
-    Ok(())
-}
-/// Accounts never start a server or expose provider credentials. Explicitly
-/// configured model IDs are enough for a cold local-model launch picker.
-pub(crate) fn catalog() -> Value {
-    if let Err(reason) = file_configuration_only() {
-        return json!({"model_options":[],"settings_model":"","model_catalog_source":"unavailable","model_catalog_reason":reason});
-    }
-    let mut paths = vec![
-        config_home().join("opencode.json"),
-        config_home().join("opencode.jsonc"),
-    ];
-    if let Some(p) = nonempty_env("OPENCODE_CONFIG") {
-        paths.push(p.into());
-    }
-    let mut models = BTreeMap::<String, Value>::new();
-    let mut selected = String::new();
-    for path in paths {
-        let Ok(bytes) = fs::read(path) else { continue };
-        if bytes.len() > 1_048_576 {
-            continue;
-        }
-        let Ok(value) = configuration_json(&bytes) else {
-            continue;
-        };
-        if let Some(v) = value["model"].as_str() {
-            selected = v.into();
-        }
-        for (provider, definition) in value["provider"].as_object().into_iter().flatten() {
-            for (id, model) in definition["models"].as_object().into_iter().flatten() {
-                let key = format!("{provider}/{id}");
-                if model_ref(&key).is_err() {
-                    continue;
-                }
-                models.insert(key.clone(),json!({"id":key,"value":key,"effort_options":[],"label":model.get("name").and_then(Value::as_str).unwrap_or(id),"provider":provider}));
-            }
-        }
-    }
-    if model_ref(&selected).is_ok() {
-        models.entry(selected.clone()).or_insert_with(
-            || json!({"id":selected,"value":selected,"effort_options":[],"label":selected}),
-        );
-    }
-    json!({"model_options":models.into_values().collect::<Vec<_>>(),"settings_model":selected,"model_catalog_source":"native_configuration"})
-}
-fn offered_model(value: &str) -> Result<Value> {
-    let model = model_ref(value)?;
-    if !catalog()["model_options"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|row| row["id"] == value)
-    {
-        return Err("This OpenCode model is not in the current native configuration; refresh its model catalog".into());
-    }
-    Ok(model)
-}
-fn model_ref(value: &str) -> Result<Value> {
-    let (provider, id) = value
-        .split_once('/')
-        .ok_or("Choose provider/model for OpenCode")?;
-    if provider.is_empty()
-        || id.is_empty()
-        || value.len() > 256
-        || value.chars().any(|c| c.is_control() || c.is_whitespace())
-    {
-        return Err("Invalid OpenCode provider/model".into());
-    }
-    Ok(json!({"providerID":provider,"id":id}))
-}
 pub(crate) fn account_context(name: &str) -> Result<Value> {
     let record = binding(name)?;
     Ok(
         json!({"provider":"opencode","id":"native-opencode","home":record["agent_home"],"run_id":record["run_id"]}),
     )
 }
+enum Legacy {
+    Current,
+    Adopted,
+    Unsupported,
+}
+/// Pure decision for a binding written before the OpenCode 2 adapter: it is
+/// adopted only when the migration completed and OpenCode 2 returns exactly
+/// this session in exactly this directory.
+fn legacy_verdict(record: &Value, migration: &Value, session: Option<&Value>) -> Legacy {
+    if record["service"] == "opencode2" {
+        return Legacy::Current;
+    }
+    let (Some(id), Some(cwd)) = (
+        record["conversation_id"].as_str().filter(|v| !v.is_empty()),
+        record["cwd"].as_str().filter(|v| !v.is_empty()),
+    ) else {
+        return Legacy::Unsupported;
+    };
+    let data = session.map(|value| &value["data"]);
+    if migration["status"] == "completed"
+        && data.is_some_and(|data| {
+            data["id"].as_str() == Some(id) && data["location"]["directory"].as_str() == Some(cwd)
+        })
+    {
+        Legacy::Adopted
+    } else {
+        Legacy::Unsupported
+    }
+}
+type Reply = std::result::Result<Response, String>;
+fn refusal_text(response: &Response) -> String {
+    let reason = response.body["message"]
+        .as_str()
+        .or(response.body["data"]["message"].as_str())
+        .unwrap_or("Native operation refused");
+    format!("OpenCode HTTP {}: {reason}", response.status)
+}
+fn successful(response: &Response) -> bool {
+    (200..300).contains(&response.status)
+}
+/// Whether the migration finished. Only a successful reply answers; any
+/// transport or HTTP failure is an error, never "not migrated".
+fn migration_completed(reply: &Reply) -> Result<bool> {
+    match reply {
+        Err(why) => Err(why.clone()),
+        Ok(response) if !successful(response) => Err(refusal_text(response)),
+        Ok(response) => {
+            let body = if response.body["data"].is_object() {
+                &response.body["data"]
+            } else {
+                &response.body
+            };
+            Ok(body["status"] == "completed")
+        }
+    }
+}
+/// The verdict once the migration completed: a missing session is
+/// Unsupported, any other failure is an error.
+fn settled_verdict(record: &Value, session: &Reply) -> Result<Legacy> {
+    match session {
+        Err(why) => Err(why.clone()),
+        Ok(response) if response.status == 404 => Ok(Legacy::Unsupported),
+        Ok(response) if !successful(response) => Err(refusal_text(response)),
+        Ok(response) => Ok(legacy_verdict(
+            record,
+            &json!({"status": "completed"}),
+            Some(&response.body),
+        )),
+    }
+}
+/// The mapping from the two native replies to a verdict. The flag says the
+/// verdict is settled for this service (the migration finished) and may be
+/// cached; the session is requested only after a completed migration.
+fn legacy_decision(
+    record: &Value,
+    migration: &Reply,
+    session: impl FnOnce() -> Reply,
+) -> Result<(Legacy, bool)> {
+    if record["service"] == "opencode2" {
+        return Ok((Legacy::Current, false));
+    }
+    if !migration_completed(migration)? {
+        return Ok((Legacy::Unsupported, false));
+    }
+    settled_verdict(record, &session()).map(|verdict| (verdict, true))
+}
+/// `migration` is fetched at most once per caller and only when needed.
+fn legacy_state(
+    service: &service::Service,
+    record: &Value,
+    migration: &mut Option<Reply>,
+) -> Result<(Legacy, bool)> {
+    if record["service"] == "opencode2" {
+        return Ok((Legacy::Current, false));
+    }
+    let reply =
+        migration.get_or_insert_with(|| service.raw("GET", "/api/experimental/migration/v1", None));
+    legacy_decision(record, reply, || {
+        service.raw("GET", &session_path(record, ""), None)
+    })
+}
+/// Drop OpenCode 1 fields and mark the binding as an OpenCode 2 binding.
+fn modernize(record: &mut Value) {
+    let map = record.as_object_mut().unwrap();
+    for key in [
+        "paused",
+        "native_data_home",
+        "native_config_file",
+        "creation_pending",
+        "creation_body",
+    ] {
+        map.remove(key);
+    }
+    record["service"] = json!("opencode2");
+}
+const VERDICT_LIMIT: usize = 5000;
+fn verdict_path() -> PathBuf {
+    root().join("opencode/legacy-verdicts.json")
+}
+fn verdict_key(record: &Value, registration: &service::Registration) -> String {
+    format!(
+        "{}\n{}\n{}\n{}",
+        string(record, "name"),
+        string(record, "conversation_id"),
+        registration.id,
+        registration.pid
+    )
+}
+fn load_verdicts() -> Vec<String> {
+    let Ok(file) = fs::File::open(verdict_path()) else {
+        return Vec::new();
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > 4 * 1024 * 1024
+    {
+        return Vec::new();
+    }
+    serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value["unsupported"].as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .take(VERDICT_LIMIT)
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+fn save_verdicts(keys: &[String]) {
+    let path = verdict_path();
+    if let Some(parent) = path.parent() {
+        if private_dir(parent).is_err() {
+            return;
+        }
+    }
+    let _ = atomic(&path, &json!({"unsupported": keys}).to_string());
+}
+/// Rewrite an adopted binding so it is never checked again. Skipped when the
+/// binding lock is busy; the next poll tries again.
+fn adopt_binding(name: &str, conversation_id: &str) {
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let Ok(Some(_guard)) = lock_until(&root().join("opencode/bindings.lock"), deadline) else {
+        return;
+    };
+    if let Ok(mut record) = binding(name) {
+        if record["conversation_id"] == conversation_id {
+            modernize(&mut record);
+            let _ = save(&record);
+        }
+    }
+}
+enum Refusal {
+    /// The service definitely refused the creation (HTTP 4xx).
+    Definite(String),
+    Other(String),
+}
+fn creation_reply(
+    reply: Reply,
+    acknowledged: &dyn Fn(&Value) -> bool,
+) -> std::result::Result<(), Refusal> {
+    match reply {
+        Ok(response) if successful(&response) => {
+            if acknowledged(&response.body) {
+                Ok(())
+            } else {
+                Err(Refusal::Other(
+                    "OpenCode creation acknowledgement did not match; inspect before resuming"
+                        .into(),
+                ))
+            }
+        }
+        Ok(response) if (400..500).contains(&response.status) => {
+            Err(Refusal::Definite(refusal_text(&response)))
+        }
+        Ok(response) => Err(Refusal::Other(refusal_text(&response))),
+        Err(why) => Err(Refusal::Other(why)),
+    }
+}
+/// After a lost or uncertain creation reply: ask for this exact ID, and only
+/// when it does not exist POST the same body once (the ID makes it idempotent).
+fn reconcile_creation(
+    get: &mut dyn FnMut() -> Reply,
+    post: &mut dyn FnMut() -> Reply,
+    acknowledged: &dyn Fn(&Value) -> bool,
+) -> std::result::Result<(), Refusal> {
+    if let Ok(response) = get() {
+        if successful(&response) {
+            return creation_reply(Ok(response), acknowledged);
+        }
+    }
+    creation_reply(post(), acknowledged)
+}
+/// The first POST; a definite refusal or acknowledgement ends it, anything
+/// uncertain is reconciled.
+fn create_session(
+    get: &mut dyn FnMut() -> Reply,
+    post: &mut dyn FnMut() -> Reply,
+    acknowledged: &dyn Fn(&Value) -> bool,
+) -> std::result::Result<(), Refusal> {
+    match post() {
+        Ok(response) if successful(&response) || (400..500).contains(&response.status) => {
+            creation_reply(Ok(response), acknowledged)
+        }
+        _ => reconcile_creation(get, post, acknowledged),
+    }
+}
 pub(crate) fn launch(
     name: &str,
     cwd: &str,
     launch_id: Option<&str>,
     model: Option<&str>,
+    effort: Option<&str>,
     dry: bool,
     new_only: bool,
 ) -> Result<()> {
-    file_configuration_only()?;
-    let selected = model.map(offered_model).transpose()?;
     if dry {
         println!("Create native OpenCode session {name} in {cwd}");
         return Ok(());
@@ -660,275 +343,221 @@ pub(crate) fn launch(
     if mode != "provider" {
         return Err("OpenCode uses its native permission configuration; select Provider settings for this account".into());
     }
-    if exists(name) {
-        if new_only {
-            return Err("This OpenCode session name already exists".into());
+    let present = exists(name);
+    if present && new_only {
+        return Err("This OpenCode session name already exists".into());
+    }
+    let cwd = if present {
+        None
+    } else {
+        let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
+        if !cwd.is_dir() {
+            return Err("OpenCode requires an existing directory".into());
         }
+        Some(cwd)
+    };
+    let service = service::ensure_started()?;
+    if present {
         let mut record = binding(name)?;
-        ensure_host(&record)?;
-        verify_session(&record)?;
-        record["paused"] = json!(false);
-        save(&record)?;
+        if resumes_pending(&record) {
+            return resume_pending(&service, record);
+        }
+        let (verdict, _) = legacy_state(&service, &record, &mut None)?;
+        let adopted = match verdict {
+            Legacy::Current => false,
+            Legacy::Adopted => true,
+            Legacy::Unsupported => {
+                return Err(
+                    "This conversation belongs to OpenCode 1, which Zerus no longer supports"
+                        .into(),
+                )
+            }
+        };
+        verify_session(&service, &record)?;
+        if adopted {
+            modernize(&mut record);
+            save(&record)?;
+        }
         return Ok(());
     }
-    let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
-    if !cwd.is_dir() {
-        return Err("OpenCode requires an existing directory".into());
-    }
-    let mut record = identity();
-    for (key,value) in json!({"backend":"opencode","agent":"opencode","name":name,"cwd":cwd,"launch_id":launch_id,"run_id":uuid::Uuid::new_v4().to_string(),"conversation_id":format!("ses_{}",uuid::Uuid::new_v4().simple()),"created":now(),"paused":false,"creation_pending":true}).as_object().unwrap() {record[key]=value.clone();}
-    ensure_host(&record)?;
-    // Persist the chosen native ID before the first creation attempt. Resume
-    // reads this exact ID; it never retries POST after an uncertain handoff.
-    save(&record)?;
-    let mut body = json!({"id":record["conversation_id"],"location":{"directory":record["cwd"]}});
+    let cwd = cwd.unwrap();
+    let selected = model
+        .map(|value| catalog::offered_model(&service, &cwd, value, effort.unwrap_or("")))
+        .transpose()?;
+    let mut record = json!({"backend":"opencode","service":"opencode2","agent":"opencode","name":name,"cwd":cwd,"launch_id":launch_id,"run_id":uuid::Uuid::new_v4().to_string(),"conversation_id":new_id("ses_"),"created":now(),"agent_home":config_home(),"creation_pending":true});
+    let mut body = creation_body(&record);
     if let Some(model) = selected {
         body["model"] = model;
     }
-    let result = rpc(&record, "POST", "/api/session", Some(&body))?;
-    if result["data"]["id"] != record["conversation_id"]
-        || result["data"]["location"]["directory"] != record["cwd"]
-    {
-        return Err(
-            "OpenCode creation acknowledgement did not match; inspect before resuming".into(),
-        );
-    }
-    record.as_object_mut().unwrap().remove("creation_pending");
-    save(&record)
+    // Persist the chosen native ID and exact body before the first creation
+    // attempt so one launch never has two identities.
+    record["creation_body"] = body;
+    save(&record)?;
+    finish_creation(&service, record, true)
 }
-fn verify_session(record: &Value) -> Result<Value> {
-    let result = rpc(record, "GET", &endpoint(record, ""), None)?;
-    if result["data"]["id"] != record["conversation_id"]
-        || result["data"]["location"]["directory"] != record["cwd"]
+fn creation_body(record: &Value) -> Value {
+    let name = string(record, "name");
+    let tag = name.rsplit('/').next().unwrap_or(name);
+    json!({"id":record["conversation_id"],"location":{"directory":record["cwd"]},"title":tag,"metadata":{"zerus":{"run_id":record["run_id"],"launch_id":record["launch_id"]}}})
+}
+/// Only OpenCode 2 bindings are reconciled against the service; an OpenCode 1
+/// binding goes through the legacy verdict and is never POSTed or deleted.
+fn resumes_pending(record: &Value) -> bool {
+    record["creation_pending"] == true && record["service"] == "opencode2"
+}
+/// A binding left with creation_pending (crash or lost reply) is reconciled
+/// instead of blocking its name.
+fn resume_pending(service: &service::Service, record: Value) -> Result<()> {
+    finish_creation(service, record, false)
+}
+fn finish_creation(service: &service::Service, mut record: Value, first: bool) -> Result<()> {
+    let body = if record["creation_body"].is_object() {
+        record["creation_body"].clone()
+    } else {
+        creation_body(&record)
+    };
+    let acknowledged = |value: &Value| {
+        value["data"]["id"] == record["conversation_id"]
+            && value["data"]["location"]["directory"] == record["cwd"]
+    };
+    let path = session_path(&record, "");
+    let mut get = || service.raw("GET", &path, None);
+    let mut post = || service.raw("POST", "/api/session", Some(&body));
+    let result = if first {
+        create_session(&mut get, &mut post, &acknowledged)
+    } else {
+        reconcile_creation(&mut get, &mut post, &acknowledged)
+    };
+    match result {
+        Ok(()) => {
+            let map = record.as_object_mut().unwrap();
+            map.remove("creation_pending");
+            map.remove("creation_body");
+            save(&record)
+        }
+        Err(Refusal::Definite(reason)) => {
+            let _ = fs::remove_file(binding_path(string(&record, "name")));
+            Err(reason)
+        }
+        Err(Refusal::Other(reason)) => Err(reason),
+    }
+}
+fn verify_session(native: &dyn Native, record: &Value) -> Result<Value> {
+    exact_session(record, get(native, &session_path(record, ""))?)
+}
+/// The session object of a `GET /api/session/{id}` answer, only when it is
+/// exactly this binding's session in this binding's directory.
+fn exact_session(record: &Value, answer: Value) -> Result<Value> {
+    if answer["data"]["id"] != record["conversation_id"]
+        || answer["data"]["location"]["directory"] != record["cwd"]
     {
         return Err("The exact native OpenCode session or directory changed".into());
     }
-    Ok(result["data"].clone())
+    Ok(answer["data"].clone())
 }
-fn history(record: &Value) -> Result<Vec<Value>> {
-    let cache = root().join("opencode/history").join(format!(
-        "{:x}.json",
-        Sha256::digest(
-            json!([record["native_data_home"], record["conversation_id"]])
-                .to_string()
-                .as_bytes()
-        )
-    ));
-    let _guard = lock(Some(&cache.with_extension("lock")))?;
-    let generation = host(record)?["generation"].clone();
-    let cached = fs::metadata(&cache)
-        .ok()
-        .filter(|m| m.len() <= 16 * 1024 * 1024)
-        .and_then(|_| fs::read(&cache).ok())
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .unwrap_or(Value::Null);
-    let mut rows = if cached["generation"] == generation {
-        cached["rows"].as_array().cloned().unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let mut byte_count = rows.iter().map(|e| e.to_string().len()).sum::<usize>();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut after = rows
-        .last()
-        .and_then(|e| e["durable"]["seq"].as_i64())
-        .unwrap_or(0);
-    for _ in 0..100 {
-        if Instant::now() >= deadline {
-            return Err("Native history deadline exceeded".into());
-        }
-        let page = http_until(
-            &host(record)?,
-            "GET",
-            &endpoint(record, &format!("/history?limit=100&after={after}")),
-            None,
-            deadline.min(Instant::now() + Duration::from_secs(10)),
-        )?;
-        let batch = page["data"].as_array().ok_or("Invalid OpenCode history")?;
-        if batch.is_empty() && page["hasMore"] == true {
-            return Err("OpenCode history pagination made no progress".into());
-        }
-        for event in batch {
-            if event["data"]["sessionID"] != record["conversation_id"] {
-                return Err("Native history belongs to another conversation".into());
-            }
-            let seq = event["durable"]["seq"]
-                .as_i64()
-                .ok_or("Native history lacks a durable sequence")?;
-            if seq <= after {
-                return Err("Native history sequence is not ordered".into());
-            }
-            byte_count = byte_count.saturating_add(event.to_string().len());
-            if byte_count > 16 * 1024 * 1024 {
-                return Err("Native history exceeds its cumulative byte bound".into());
-            }
-            after = seq;
-            rows.push(event.clone());
-        }
-        if rows.len() > 10000 {
-            return Err("OpenCode history exceeds the bounded scan".into());
-        }
-        if page["hasMore"] == false {
-            atomic(
-                &cache,
-                &json!({"generation":generation,"rows":rows}).to_string(),
-            )?;
-            return Ok(rows);
-        }
-    }
-    Err("OpenCode history exceeds the bounded scan; no complete-history claim was made".into())
-}
-fn event_rows(native: &[Value]) -> Vec<Value> {
-    let mut rows = Vec::new();
-    for event in native {
-        let data = &event["data"];
-        let kind = string(event, "type");
-        let (typ, detail, tool) = match kind {
-            "session.next.prompted" => (
-                "UserPromptSubmit",
-                string(&data["prompt"], "text").to_owned(),
-                String::new(),
-            ),
-            "session.next.text.ended" => (
-                "AgentMessage",
-                string(data, "text").to_owned(),
-                String::new(),
-            ),
-            "session.next.tool.called" => (
-                "PreToolUse",
-                journal::clipped(&data["input"], 32000),
-                string(data, "tool").to_owned(),
-            ),
-            "session.next.tool.success" => (
-                "PostToolUse",
-                data["content"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                String::new(),
-            ),
-            "session.next.tool.failed" => (
-                "PostToolUse",
-                journal::clipped(&data["error"], 32000),
-                String::new(),
-            ),
-            "session.next.step.failed" => {
-                ("StopFailure", error_detail(&data["error"]), String::new())
-            }
-            "session.next.step.ended" => ("Stop", String::new(), String::new()),
-            _ => continue,
-        };
-        rows.push(json!({"type":typ,"detail":detail,"tool":tool,"at":data["timestamp"].as_f64().unwrap_or(0.0)/1000.0,"seq":event["durable"]["seq"],"source":"opencode_native","agent_id":"","message_id":data.get("messageID").unwrap_or(&data["assistantMessageID"]),"reply_id":if typ=="AgentMessage"{data["assistantMessageID"].clone()}else{Value::Null}}));
-    }
-    rows
-}
-fn error_detail(value: &Value) -> String {
-    value["message"]
-        .as_str()
-        .or(value["data"]["message"].as_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| journal::clipped(value, 32000))
-}
-fn cards(record: &Value, questions: &Value, permissions: &Value) -> Vec<Value> {
-    let mut cards = Vec::new();
-    for (kind, pending) in [("question", questions), ("permission", permissions)] {
-        for native in pending.as_array().into_iter().flatten() {
-            if native["sessionID"] != record["conversation_id"] {
-                continue;
-            }
-            let mut items = Vec::new();
-            if kind == "permission" {
-                items.push(json!({"id":"permission","header":"Permission","prompt":format!("{}\n{}",string(native,"action"),native["resources"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")),"allow_multiple":false,"multi_select":false,"required":true,"question":format!("{}\n{}",string(native,"action"),native["resources"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")),"allow_other":false,"options":[{"id":"once","label":"Allow once"},{"id":"always","label":"Always allow"},{"id":"reject","label":"Reject"}]}));
-            } else {
-                for (i, q) in native["questions"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .enumerate()
-                {
-                    items.push(json!({"id":i.to_string(),"header":q["header"],"prompt":q["question"],"question":q["question"],"multi_select":q["multiple"].as_bool().unwrap_or(false),"required":true,"allow_multiple":q["multiple"].as_bool().unwrap_or(false),"allow_other":q["custom"].as_bool().unwrap_or(true),"options":q["options"].as_array().into_iter().flatten().enumerate().map(|(j,o)|json!({"id":j.to_string(),"label":o["label"],"description":o["description"]})).collect::<Vec<_>>() }));
-                }
-            }
-            let hash = format!(
-                "{:x}",
-                Sha256::digest(
-                    json!([record["run_id"], record["conversation_id"], native])
-                        .to_string()
-                        .as_bytes()
-                )
-            );
-            cards.push(json!({"question_id":native["id"],"question_hash":hash,"run_id":record["run_id"],"conversation_id":record["conversation_id"],"kind":format!("opencode_{kind}"),"status":"pending","answerable":true,"can_answer":true,"approval":kind=="permission","answer_transport":"native_opencode","agent_id":"main","questions":items,"source":"opencode_native"}));
-        }
-    }
-    cards
-}
-fn normalize(
-    record: &Value,
-    session: &Value,
+/// What one inspection read from the service for one session.
+struct Observed {
+    /// The session object.
+    session: Value,
     active: bool,
-    native: &[Value],
-    questions: &Value,
-    permissions: &Value,
-    available: bool,
-) -> Value {
-    let pending = cards(record, questions, permissions);
-    let alive = available && record["paused"] != true && !session.is_null();
-    let error_event = native
-        .iter()
-        .rev()
-        .find_map(|e| match string(e, "type") {
-            "session.next.step.failed" => Some(e.clone()),
-            "session.next.prompted" | "session.next.step.started" | "session.next.step.ended" => {
-                Some(Value::Null)
-            }
-            _ => None,
-        })
-        .unwrap_or(Value::Null);
-    let error = error_event["data"]["error"].clone();
+    page: history::Page,
+    /// The `/inbox` response.
+    inbox: Value,
+    forms: Value,
+    permissions: Value,
+}
+/// The status of one binding; `None` when the service could not be read,
+/// which keeps native state unknown rather than stopped.
+fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
+    let available = observed.is_some();
+    let null = Value::Null;
+    let session = observed.map_or(&null, |o| &o.session);
+    let active = observed.is_some_and(|o| o.active);
+    let messages: &[Value] = observed.map_or(&[], |o| &o.page.messages);
+    let pending = observed.map_or_else(Vec::new, |o| forms::cards(record, &o.forms, &o.permissions));
+    let failure = history::last_error(messages);
     let phase = if !available {
         "unknown"
     } else if !pending.is_empty() {
         "input"
     } else if active {
         "working"
-    } else if error.is_object() {
+    } else if failure.is_some() {
         "error"
     } else {
         "idle"
     };
-    let parts = string(record, "name").splitn(3, '/').collect::<Vec<_>>();
-    let events = event_rows(native);
-    let reply = events.iter().rev().find(|e| e["type"] == "AgentMessage");
-    let prompt = events
+    let (activity, summary) = match phase {
+        "input" => ("attention", "Needs attention"),
+        "working" => ("busy", "Working"),
+        "error" => ("attention", "Provider request failed"),
+        "idle" => ("idle", "Ready"),
+        _ => ("unknown", "Inspection unavailable"),
+    };
+    let delivered = history::rows(messages);
+    // A message admitted between the inbox and history reads is shown once.
+    let ids: std::collections::HashSet<&str> = messages.iter().map(|m| string(m, "id")).collect();
+    let queued: Vec<Value> = observed
+        .map_or_else(Vec::new, |o| history::queued_rows(&o.inbox, !active))
+        .into_iter()
+        .filter(|row| !ids.contains(string(row, "message_id")))
+        .collect();
+    // A reply becomes the session's reply once OpenCode completed it, so a
+    // read mark taken while it streams never covers its final text.
+    let reply = delivered
+        .iter()
+        .rev()
+        .find(|e| e["type"] == "AgentMessage" && e["streaming"] != true);
+    let prompt = delivered
         .iter()
         .rev()
         .find(|e| e["type"] == "UserPromptSubmit");
-    let turn_started = native
-        .iter()
-        .rev()
-        .find(|e| {
-            matches!(
-                string(e, "type"),
-                "session.next.step.started" | "session.next.prompted"
-            )
-        })
-        .and_then(|e| e["data"]["timestamp"].as_f64())
-        .unwrap_or(0.0)
-        / 1000.0;
+    let turn_started = prompt.and_then(|r| r["at"].as_f64()).unwrap_or(0.0);
     let mut allowed = if available {
-        vec!["rename"]
+        vec!["rename", "forget"]
     } else {
-        vec!["resume"]
+        vec!["forget"]
     };
-    if available && !active {
-        allowed.push("forget");
-        allowed.push(if alive { "pause" } else { "resume" });
+    if !active
+        && queued
+            .iter()
+            .any(|row| row["delivery_state"] == "not_delivered")
+    {
+        allowed.push("remove_queued");
     }
-    let mut value = json!({"name":record["name"],"cmd":"opencode","agent":"opencode","backend":"opencode","project":parts.get(1),"tag":parts.get(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],"launch_id":record["launch_id"],"created":record["created"],"cwd":record["cwd"],"cwd_source":"native_session","tracked":true,"resumable":true,"attached":0,"clients":[],"state":if alive{"running"}else if record["paused"]==true{"paused"}else{"stopped"},"process_state":if alive{"running"}else{"exited"},"runtime_state":if alive{"live"}else{"stopped"},"conversation_state":"active","phase":phase,"activity":if !pending.is_empty() || error.is_object(){"attention"}else if active{"busy"}else if alive{"idle"}else{"unknown"},"activity_summary":if !pending.is_empty(){"Needs attention"}else if active{"Working"}else if error.is_object(){"Provider request failed"}else if alive{"Ready"}else{"Stopped"},"activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["message_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),"last_event_at":session["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":turn_started,"account_id":"native-opencode","account_home":record["agent_home"],"model":session["model"]["id"],"model_provider":session["model"]["providerID"],"settings_model":format!("{}/{}",string(&session["model"],"providerID"),string(&session["model"],"id"))});
-    for (key,item) in json!({"send_available":alive && !active && pending.is_empty(),"send_supported":alive && !active && pending.is_empty(),"settings_change_supported":alive && !active && pending.is_empty(),"interrupt_supported":alive && active && turn_started>0.0,"terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),"native_ui_available":false,"bulk_lifecycle_supported":false,"attachments_supported":false,"clear_context_supported":false,"clear_context_reason":"OpenCode context reset is not available in this adapter","compact_context_supported":false,"compact_context_reason":"OpenCode compaction is not yet qualified in this adapter","allowed_actions":allowed,"action_reasons":{"archive":"OpenCode archives are not supported by this adapter","fork":"OpenCode forks are not supported by this adapter","terminate":"Use Stop or Pause for this native OpenCode session","restore":"OpenCode archives are not supported by this adapter"},"pending_questions":pending,"events":events,"replace_events":true,"cursor":0,"history_truncated":false}).as_object().unwrap() {value[key]=item.clone();}
+    let model = &session["model"];
+    let settings_model = match (string(model, "providerID"), string(model, "id")) {
+        ("", _) | (_, "") => Value::Null,
+        (provider, id) => json!(format!("{provider}/{id}")),
+    };
+    let effort = model["variant"]
+        .as_str()
+        .filter(|variant| !variant.is_empty() && *variant != "default")
+        .map_or(Value::Null, |variant| json!(variant));
+    let (state, process_state, runtime_state) = if available {
+        ("running", "running", "live")
+    } else {
+        ("unknown", "unknown", "unknown")
+    };
+    let parts = string(record, "name").splitn(3, '/').collect::<Vec<_>>();
+    let idle = available && pending.is_empty();
+    let mut events = delivered.clone();
+    events.extend(queued);
+    let mut value = json!({"name":record["name"],"cmd":"opencode","agent":"opencode","backend":"opencode","project":parts.get(1),"tag":parts.get(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],"launch_id":record["launch_id"],"created":record["created"],"cwd":record["cwd"],"cwd_source":"native_session","tracked":true,"resumable":true,"attached":0,"clients":[],
+        "state":state,"process_state":process_state,"runtime_state":runtime_state,"conversation_state":"active","phase":phase,"activity":activity,"activity_summary":summary,
+        "activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
+        "last_event_at":session["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":turn_started,"account_id":"native-opencode","account_home":record["agent_home"],
+        "model":model["id"],"model_provider":model["providerID"],"settings_model":settings_model,"effort":effort});
+    let controls = json!({"send_available":idle,"send_supported":idle,"settings_change_supported":idle && !active,"interrupt_supported":available && active,
+        "terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),"native_ui_available":false,"bulk_lifecycle_supported":false,"attachments_supported":false,
+        "clear_context_supported":false,"clear_context_reason":"OpenCode context reset is not available in this adapter",
+        "compact_context_supported":false,"compact_context_reason":"OpenCode compaction arrives in a later update",
+        "allowed_actions":allowed,"action_reasons":{"pause":"OpenCode sessions have no separate process to pause","resume":"OpenCode sessions have no separate process to pause",
+            "archive":"OpenCode archives are not supported","restore":"OpenCode archives are not supported","fork":"OpenCode fork arrives in a later update","terminate":"Use Stop for this OpenCode session"},
+        "pending_questions":pending,"events":events,"replace_events":true,"cursor":0,"history_truncated":observed.is_some_and(|o| o.page.truncated)});
+    for (key, item) in controls.as_object().into_iter().flatten() {
+        value[key] = item.clone();
+    }
     if !pending.is_empty() {
         value["attention_id"] = json!(format!(
             "opencode_question:{}",
@@ -939,420 +568,261 @@ fn normalize(
                 .join("\n")
         ));
     }
-    if error.is_object() && !active && pending.is_empty() {
-        let failure = provider_errors::event(
-            &format!(
-                "opencode-error-{}",
-                error_event["durable"]["seq"].as_i64().unwrap_or(0)
-            ),
-            session["time"]["updated"].as_f64().unwrap_or(0.0) / 1000.0,
-            &error_detail(&error),
+    if let (Some(failure), "error") = (&failure, phase) {
+        let error = provider_errors::event(
+            &format!("opencode-error-{}", string(failure, "id")),
+            failure["at"].as_f64().unwrap_or(0.0),
+            string(failure, "message"),
             "opencode_native",
         );
-        provider_errors::apply(&mut value, &failure);
+        provider_errors::apply(&mut value, &error);
     }
     value
 }
-// The reviewed release creates children only with its classic `task` tool,
-// for example in the OpenCode TUI or `opencode run` sharing this data home.
-// Their own native messages are the only exact turn evidence the API host has;
-// it does not own those processes, so it never reports such a child as working.
-const CHILD_ROSTER: usize = 64;
-const CHILD_HISTORY: usize = 200;
-
-fn child_unknown(reason: &str) -> Value {
-    json!({"state":"unknown","reason":reason})
+/// A row without a reading of the session: no events, so clients keep the
+/// transcript they already show, and the reason as its detail.
+fn unread(record: &Value, reason: &str) -> Value {
+    let mut row = normalize(record, None);
+    if let Some(map) = row.as_object_mut() {
+        map.remove("events");
+        map.remove("replace_events");
+    }
+    row["activity_detail"] = json!(reason);
+    row["inspection_reason"] = json!(reason);
+    row
 }
-
-/// Exact children by native `parentID`. Any contradictory row makes the whole
-/// membership unavailable rather than silently dropping a child.
-fn children(record: &Value, deadline: Instant) -> Result<Vec<Value>> {
-    let parent = string(record, "conversation_id");
-    let listed = http_until(
-        &host(record)?,
-        "GET",
-        &format!("/session/{parent}/children"),
-        None,
-        deadline,
-    )?;
-    exact_children(record, &listed)
+/// A binding whose service could not be read: unknown, with the reason.
+fn unavailable(record: &Value, reason: String) -> Value {
+    let mut row = unread(record, &reason);
+    row["inspection_unavailable"] = json!(true);
+    row
 }
-fn exact_children(record: &Value, listed: &Value) -> Result<Vec<Value>> {
-    let parent = string(record, "conversation_id");
-    let rows = listed.as_array().ok_or("Invalid OpenCode child list")?;
-    if rows.len() > 10000 {
-        return Err("OpenCode child list exceeds bounds".into());
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for row in rows {
-        let id = string(row, "id");
-        if !native_id(id, "ses_")
-            || id == parent
-            || row["parentID"] != record["conversation_id"]
-            || !seen.insert(id)
-        {
-            return Err("OpenCode child list does not match the exact parent conversation".into());
-        }
-    }
-    let mut rows = rows.clone();
-    let created = |row: &Value| row["time"]["created"].as_f64().unwrap_or(0.0);
-    rows.sort_by(|a, b| {
-        created(b)
-            .total_cmp(&created(a))
-            .then_with(|| string(a, "id").cmp(string(b, "id")))
-    });
-    Ok(rows)
-}
-
-/// A child's latest turn ends exactly as the reviewed classic loop decides:
-/// its newest message is a completed assistant step with a terminal finish and
-/// no tool call still awaiting a follow-up step, or an abort/provider error
-/// completed that step. Any other shape stays unknown: another OpenCode process
-/// may still own the turn, or a crashed one abandoned it.
-fn child_turn(child: &str, latest: &Value) -> Value {
-    let info = &latest["info"];
-    if info["sessionID"] != child || !native_id(string(info, "id"), "msg_") {
-        return child_unknown("The child's native message identity did not match");
-    }
-    let open = "Turn end not recorded; another OpenCode process may still be running it";
-    if info["role"] != "assistant" {
-        return child_unknown(open);
-    }
-    let Some(completed) = info["time"]["completed"].as_f64().filter(|t| *t > 0.0) else {
-        return child_unknown(open);
-    };
-    let ended = |kind: &str, detail: String| json!({"state":"finished","kind":kind,"at":completed/1000.0,"native_id":info["id"],"detail":detail});
-    if info["error"].is_object() {
-        if info["error"]["name"] == "MessageAbortedError" {
-            return ended("turn_interrupted", "Native child turn interrupted".into());
-        }
-        let mut failed = ended(
-            "turn_failed",
-            journal::clipped(&json!(error_detail(&info["error"])), 240),
-        );
-        failed["error"] = json!(true);
-        return failed;
-    }
-    let finish = string(info, "finish");
-    let follow_up = latest["parts"].as_array().into_iter().flatten().any(|part| {
-        part["type"] == "tool"
-            && part["metadata"]["providerExecuted"] != true
-            && !(part["state"]["status"] == "error" && part["state"]["metadata"]["interrupted"] == true)
-    });
-    if finish.is_empty() || ["tool-calls", "unknown"].contains(&finish) || follow_up {
-        return child_unknown(open);
-    }
-    ended("turn_completed", "Native child turn completed".into())
-}
-
-fn child_model(info: &Value) -> Value {
-    let (provider, id) = (string(&info["model"], "providerID"), string(&info["model"], "id"));
-    if provider.is_empty() || id.is_empty() {
-        Value::Null
-    } else {
-        json!(format!("{provider}/{id}"))
-    }
-}
-
-/// Parent summaries use only bounded per-child native reads. A child beyond the
-/// roster bound or the time budget remains a member with unknown state.
-fn child_roster(record: &Value, value: &mut Value) {
-    let deadline = Instant::now() + Duration::from_secs(4);
-    let listed = match children(record, deadline) {
-        Ok(rows) => rows,
-        Err(error) => {
-            value["subagent_source"] = json!("unavailable");
-            value["subagent_reason"] = json!(error);
-            value["subagent_counts_complete"] = json!(false);
-            value["subagent_total_count"] = Value::Null;
-            value["subagents"] = json!({});
-            return;
-        }
-    };
-    let native = host(record);
-    let evidence = listed
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let id = string(row, "id");
-            if index >= CHILD_ROSTER {
-                return child_unknown("This child is beyond the bounded native roster");
-            }
-            let page = native.clone().and_then(|native| {
-                http_until(
-                    &native,
-                    "GET",
-                    &format!("/session/{id}/message?limit=1"),
-                    None,
-                    deadline,
-                )
-            });
-            match page {
-                Ok(page) => match page.as_array().map(Vec::as_slice) {
-                    Some([latest]) => child_turn(id, latest),
-                    Some([]) => child_unknown("No native turn has been recorded for this child"),
-                    _ => child_unknown("Invalid native child messages"),
-                },
-                Err(error) => child_unknown(&error),
-            }
-        })
-        .collect::<Vec<_>>();
-    summarize_children(value, &listed, &evidence);
-}
-/// Counts never include an active child: the API host does not own the classic
-/// process running one. Unknown states keep the totals incomplete.
-fn summarize_children(value: &mut Value, listed: &[Value], evidence: &[Value]) {
-    let mut roster = serde_json::Map::new();
-    let (mut completed, mut unknown) = (0, 0);
-    for (row, evidence) in listed.iter().zip(evidence) {
-        let id = string(row, "id");
-        let finished = evidence["state"] == "finished";
-        let created = row["time"]["created"].as_f64().unwrap_or(0.0) / 1000.0;
-        let updated = row["time"]["updated"].as_f64().unwrap_or(0.0) / 1000.0;
-        let mut child = json!({"name":journal::clipped(&row["title"],200),"agent_profile":row["agent"],"model":child_model(row),
-            "started":created,"updated":if finished {evidence["at"].as_f64().unwrap_or(updated).max(updated)} else {updated},
-            "state":if finished {"finished"} else {"unknown"},"current_tool":""});
-        if finished {
-            completed += 1;
-            child["detail"] = evidence["detail"].clone();
-            child["completion_source"] = json!("opencode_native_messages");
-            child["tracking_evidence"] = json!({"source":"opencode_native_messages","kind":evidence["kind"],"at":evidence["at"],"native_id":evidence["native_id"]});
-            if evidence["error"] == true {
-                child["display_state"] = json!("error");
-            }
-        } else {
-            unknown += 1;
-            child["detail"] = evidence["reason"].clone();
-        }
-        roster.insert(id.to_owned(), child);
-    }
-    unknown += listed.len().saturating_sub(evidence.len());
-    value["subagent_source"] = json!("opencode_native");
-    value["subagents"] = Value::Object(roster);
-    value["subagent_active_count"] = json!(0);
-    value["subagent_count"] = json!(0);
-    value["subagent_completed_count"] = json!(completed);
-    value["subagent_unknown_count"] = json!(unknown);
-    value["subagent_total_count"] = json!(listed.len());
-    value["subagent_counts_complete"] = json!(unknown == 0);
-}
-
-fn child_events(child: &str, messages: &[Value]) -> Result<Vec<Value>> {
-    let mut rows = Vec::new();
-    let row = |typ: &str, detail: String, tool: &str, at: f64, id: &str, reply: Value| {
-        json!({"type":typ,"detail":detail,"tool":tool,"at":at,"source":"opencode_native","agent_id":child,"message_id":id,"reply_id":reply})
-    };
-    for message in messages {
-        let info = &message["info"];
-        let id = string(info, "id");
-        let parts = message["parts"].as_array().ok_or("Invalid native child message")?;
-        if info["sessionID"] != child
-            || !native_id(id, "msg_")
-            || parts
-                .iter()
-                .any(|p| p["sessionID"] != child || p["messageID"] != id || !native_id(string(p, "id"), "prt_"))
-        {
-            return Err("Native child history belongs to another conversation".into());
-        }
-        let created = info["time"]["created"].as_f64().unwrap_or(0.0) / 1000.0;
-        let at = |part: &Value| {
-            part["time"]["end"]
-                .as_f64()
-                .or(part["state"]["time"]["end"].as_f64())
-                .map(|t| t / 1000.0)
-                .unwrap_or(created)
-        };
-        let text = |part: &Value| part["type"] == "text" && part["synthetic"] != true && part["ignored"] != true;
-        match string(info, "role") {
-            "user" => {
-                let prompt = parts
-                    .iter()
-                    .filter(|p| text(p))
-                    .filter_map(|p| p["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                rows.push(row("UserPromptSubmit", prompt, "", created, id, Value::Null));
-            }
-            "assistant" => {
-                for part in parts {
-                    let part_id = string(part, "id");
-                    if text(part) {
-                        rows.push(row("AgentMessage", string(part, "text").to_owned(), "", at(part), part_id, json!(id)));
-                    } else if part["type"] == "tool" {
-                        let state = &part["state"];
-                        let title = journal::clipped(&state["title"], 32000);
-                        let call = if title.is_empty() { journal::clipped(&json!(state["input"].to_string()), 32000) } else { title };
-                        rows.push(row("PreToolUse", call, string(part, "tool"), at(part), part_id, Value::Null));
-                        let result = match string(state, "status") {
-                            "completed" => Some(journal::clipped(&state["output"], 32000)),
-                            "error" => Some(journal::clipped(&state["error"], 32000)),
-                            _ => None,
-                        };
-                        if let Some(result) = result {
-                            rows.push(row("PostToolUse", result, string(part, "tool"), at(part), &format!("{part_id}:result"), Value::Null));
-                        }
-                    }
-                }
-                let end = info["time"]["completed"].as_f64().map(|t| t / 1000.0);
-                if info["error"].is_object() && info["error"]["name"] != "MessageAbortedError" {
-                    rows.push(row("StopFailure", error_detail(&info["error"]), "", end.unwrap_or(created), &format!("{id}:failure"), Value::Null));
-                } else if let Some(end) = end {
-                    rows.push(row("Stop", String::new(), "", end, &format!("{id}:stop"), Value::Null));
-                }
-            }
-            _ => {}
-        }
-    }
-    for (index, event) in rows.iter_mut().enumerate() {
-        event["seq"] = json!(index + 1);
-    }
-    Ok(rows)
-}
-
-/// Read-only child view. Identity is the exact native child whose recorded
-/// parent is this binding's conversation; its state is its own evidence only.
-fn child(record: &Value, id: &str) -> Result<Value> {
-    let parent = string(record, "conversation_id");
-    if !native_id(id, "ses_") || id == parent {
-        return Err("Invalid OpenCode child identity".into());
-    }
-    let session = verify_session(record)?;
-    let info = rpc(record, "GET", &format!("/api/session/{id}"), None)?["data"].clone();
-    if info["id"] != id || info["parentID"] != record["conversation_id"] {
-        return Err("This OpenCode child does not belong to the exact parent conversation".into());
-    }
-    let page = rpc(
+/// A binding that OpenCode 2 did not migrate: stopped, and only Forget.
+fn legacy_row(record: &Value) -> Value {
+    let mut row = unread(
         record,
-        "GET",
-        &format!("/session/{id}/message?limit={CHILD_HISTORY}"),
-        None,
-    )?;
-    let messages = page.as_array().ok_or("Invalid OpenCode child history")?;
-    if messages.len() > CHILD_HISTORY {
-        return Err("OpenCode child history exceeds its requested bound".into());
-    }
-    let events = child_events(id, messages)?;
-    let evidence = messages.last().map_or_else(
-        || child_unknown("No native turn has been recorded for this child"),
-        |latest| child_turn(id, latest),
+        "This conversation belongs to OpenCode 1, which Zerus no longer supports",
     );
-    let mut value = normalize(record, &session, false, &[], &Value::Null, &Value::Null, true);
-    let finished = evidence["state"] == "finished";
-    let reply = events.iter().rev().find(|e| e["type"] == "AgentMessage");
-    let summary = match string(&evidence, "kind") {
-        "turn_completed" => "Ready",
-        "turn_interrupted" => "Interrupted",
-        "turn_failed" => "Turn failed",
-        _ => "Status unavailable",
-    };
-    for (key,item) in json!({"agent_id":id,"parent_conversation_id":parent,"conversation_id":format!("{parent}/{id}"),
-        "created":info["time"]["created"].as_f64().unwrap_or(0.0)/1000.0,"cwd":info["location"]["directory"],
-        "phase":if finished {"idle"} else {"unknown"},"activity":if finished {"idle"} else {"unknown"},"activity_summary":summary,
-        "activity_detail":if finished {reply.map(|r|r["detail"].clone()).unwrap_or(evidence["detail"].clone())} else {evidence["reason"].clone()},
-        "prompt":events.iter().rev().find(|e| e["type"]=="UserPromptSubmit").map(|r|r["detail"].clone()),
-        "reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
-        "last_event_at":info["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":0.0,
-        "model":info["model"]["id"],"model_provider":info["model"]["providerID"],"settings_model":child_model(&info),"agent_profile":info["agent"],
-        "send_available":false,"send_supported":false,"read_only":true,"settings_change_supported":false,"interrupt_supported":false,
-        "allowed_actions":[],"pending_questions":[],"events":events,"history_truncated":messages.len()==CHILD_HISTORY,
-        "history_scope":"Native OpenCode subagent history","tracking_evidence":if finished {json!({"source":"opencode_native_messages","kind":evidence["kind"],"at":evidence["at"],"native_id":evidence["native_id"]})} else {Value::Null}}).as_object().unwrap() {value[key]=item.clone();}
-    if let Some(map) = value.as_object_mut() {
-        map.remove("attention_id");
+    row["state"] = json!("stopped");
+    row["process_state"] = json!("exited");
+    row["runtime_state"] = json!("stopped");
+    row["activity_summary"] = json!("OpenCode 1 conversation");
+    row
+}
+/// One GET that must succeed.
+fn get(native: &dyn Native, path: &str) -> Result<Value> {
+    let response = native.raw("GET", path, None)?;
+    if successful(&response) {
+        return Ok(response.body);
     }
-    value["host_generation"] = host(record)?["generation"].clone();
-    value["attachment_messages"] = json!([]);
-    value["voice_messages"] = json!([]);
-    value["processes"] = json!({"items":[],"complete":false,"source":"opencode_native","reason":"OpenCode child process controls are not available"});
-    Ok(value)
+    let reason = response.body["message"]
+        .as_str()
+        .or(response.body["data"]["message"].as_str())
+        .unwrap_or("Native operation refused");
+    Err(format!(
+        "OpenCode HTTP {}: {}",
+        response.status,
+        journal::clipped(&json!(reason), 300)
+    ))
 }
-
-pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
-    let record = binding(name)?;
-    if let Some(id) = agent_id {
-        return child(&record, id);
+/// The sessions OpenCode is running now, keyed by session ID.
+fn active_sessions(native: &dyn Native) -> Result<Value> {
+    let active = get(native, "/api/session/active")?;
+    if !active["data"].is_object() {
+        return Err("Invalid OpenCode session activity".into());
     }
-    let mut value = parent_view(name, &record, true)?;
-    waits::decorate(std::slice::from_mut(&mut value));
-    Ok(value)
+    Ok(active["data"].clone())
 }
-// Delivery, answer, interrupt and lifecycle checks need only the parent's
-// own state; they never wait for the bounded child roster.
-pub(crate) fn own_state(name: &str) -> Result<Value> {
-    parent_view(name, &binding(name)?, false)
+fn pending_requests(native: &dyn Native, record: &Value, suffix: &str) -> Result<Value> {
+    let answer = get(native, &session_path(record, suffix))?;
+    if !answer["data"].is_array() {
+        return Err("Invalid OpenCode pending requests".into());
+    }
+    Ok(answer["data"].clone())
 }
-fn parent_view(name: &str, record: &Value, roster: bool) -> Result<Value> {
-    let record = record.clone();
-    let session = verify_session(&record)?;
-    let active = rpc(&record, "GET", "/api/session/active", None)?;
-    let questions = rpc(&record, "GET", &endpoint(&record, "/question"), None)?;
-    let permissions = rpc(&record, "GET", &endpoint(&record, "/permission"), None)?;
-    let native = history(&record)?;
-    let mut result = normalize(
-        &record,
-        &session,
-        active["data"]
-            .get(string(&record, "conversation_id"))
-            .is_some(),
-        &native,
-        &questions["data"],
-        &permissions["data"],
-        true,
-    );
-    result["host_generation"] = host(&record)?["generation"].clone();
-    result["attachment_messages"] = attachments::messages(&record, "");
-    result["voice_messages"] =
-        conversation_history::inspected_voice_messages(&record, &result, None);
-    let configured = catalog();
-    result["model_options"] = configured["model_options"].clone();
-    result["processes"] = json!({"items":[],"complete":false,"source":"opencode_native","reason":"Individual OpenCode shell process controls are not yet qualified"});
-    if roster {
-        child_roster(&record, &mut result);
+/// Everything one session's status needs, given the shared activity map.
+fn observe(
+    native: &dyn Native,
+    record: &Value,
+    active: &Value,
+    history: impl FnOnce() -> Result<history::Page>,
+) -> Result<Observed> {
+    let session = exact_session(record, get(native, &session_path(record, ""))?)?;
+    let forms = pending_requests(native, record, "/form")?;
+    let permissions = pending_requests(native, record, "/permission")?;
+    // The inbox first: an item admitted meanwhile is then in the history
+    // read; one listed in both is shown once.
+    let inbox = get(native, &session_path(record, "/inbox"))?;
+    if !inbox["data"].is_array() {
+        return Err("Invalid OpenCode inbox".into());
+    }
+    let page = history()?;
+    Ok(Observed {
+        session,
+        active: active.get(string(record, "conversation_id")).is_some(),
+        page,
+        inbox,
+        forms,
+        permissions,
+    })
+}
+#[derive(Clone, Copy, PartialEq)]
+enum Detail {
+    /// A session list row: status only.
+    Listing,
+    /// The session's own state for an action.
+    Own,
+    /// `hgs inspect`: also the model options for its folder.
+    Full,
+}
+fn processes() -> Value {
+    json!({"items":[],"complete":false,"source":"opencode_native","reason":"Individual OpenCode shell process controls are not yet qualified"})
+}
+fn parent_view(
+    service: &service::Service,
+    record: &Value,
+    active: &Value,
+    detail: Detail,
+) -> Result<Value> {
+    let observed = observe(service, record, active, || history::fetch(service, record))?;
+    let mut result = normalize(record, Some(&observed));
+    if detail != Detail::Listing {
+        result["attachment_messages"] = attachments::messages(record, "");
+        result["voice_messages"] =
+            conversation_history::inspected_voice_messages(record, &result, None);
+    }
+    if detail == Detail::Full {
+        let cwd = PathBuf::from(string(record, "cwd"));
+        result["model_options"] = catalog(Some(&cwd))["model_options"].clone();
     }
     let questions = result["pending_questions"]
         .as_array()
         .cloned()
         .unwrap_or_default();
-    read_marks::enrich(&mut result, &read_marks::load(), name, Some(&questions));
+    read_marks::enrich(
+        &mut result,
+        &read_marks::load(),
+        string(record, "name"),
+        Some(&questions),
+    );
     Ok(result)
+}
+/// Inspects bindings against one service connection: at most one
+/// `/api/session/active` and one migration check per instance.
+struct Inspector {
+    service: std::result::Result<service::Service, service::Unavailable>,
+    computer: String,
+    active: Option<Result<Value>>,
+    migration: Option<Reply>,
+    verdicts: Option<Vec<String>>,
+    verdicts_changed: bool,
+}
+impl Inspector {
+    /// Never starts the service.
+    fn connect() -> Self {
+        Inspector {
+            service: service::connect(),
+            computer: crate::platform::hostname(),
+            active: None,
+            migration: None,
+            verdicts: None,
+            verdicts_changed: false,
+        }
+    }
+    fn row(&mut self, record: &Value, detail: Detail) -> Value {
+        let mut row = self.view(record, detail);
+        if detail != Detail::Listing && row.get("processes").is_none() {
+            row["processes"] = processes();
+        }
+        row
+    }
+    fn view(&mut self, record: &Value, detail: Detail) -> Value {
+        let service = match &self.service {
+            Err(why) => return unavailable(record, why.reason(&self.computer)),
+            Ok(service) => service,
+        };
+        let key = verdict_key(record, &service.reg);
+        let known = record["service"] != "opencode2"
+            && self
+                .verdicts
+                .get_or_insert_with(load_verdicts)
+                .contains(&key);
+        let state = if known {
+            Ok((Legacy::Unsupported, false))
+        } else {
+            legacy_state(service, record, &mut self.migration)
+        };
+        let mut current = record.clone();
+        match state {
+            Err(reason) => return unavailable(record, reason),
+            Ok((Legacy::Unsupported, settled)) => {
+                if settled && !known {
+                    let keys = self.verdicts.get_or_insert_with(load_verdicts);
+                    if keys.len() >= VERDICT_LIMIT {
+                        keys.clear();
+                    }
+                    keys.push(key);
+                    self.verdicts_changed = true;
+                }
+                return legacy_row(record);
+            }
+            Ok((Legacy::Adopted, _)) => {
+                adopt_binding(string(record, "name"), string(record, "conversation_id"));
+                modernize(&mut current);
+            }
+            Ok((Legacy::Current, _)) => {}
+        }
+        let active = match self.active.get_or_insert_with(|| active_sessions(service)) {
+            Ok(active) => active,
+            Err(reason) => return unavailable(record, reason.clone()),
+        };
+        parent_view(service, &current, active, detail)
+            .unwrap_or_else(|reason| unavailable(record, reason))
+    }
+    fn finish(self) {
+        if self.verdicts_changed {
+            save_verdicts(self.verdicts.as_deref().unwrap_or(&[]));
+        }
+    }
+}
+pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
+    let record = binding(name)?;
+    if agent_id.is_some() {
+        return Err("OpenCode child sessions arrive in a later update".into());
+    }
+    let mut inspector = Inspector::connect();
+    let mut value = inspector.row(&record, Detail::Full);
+    inspector.finish();
+    waits::decorate(std::slice::from_mut(&mut value));
+    Ok(value)
+}
+/// The session's own state for delivery, answer, interrupt and lifecycle
+/// checks; unknown with its reason while the service is unavailable.
+pub(crate) fn own_state(name: &str) -> Result<Value> {
+    let record = binding(name)?;
+    let mut inspector = Inspector::connect();
+    let value = inspector.row(&record, Detail::Own);
+    inspector.finish();
+    Ok(value)
 }
 pub(crate) fn snapshots() -> Result<Vec<Value>> {
     let Ok(entries) = fs::read_dir(bindings()) else {
         return Ok(Vec::new());
     };
+    let records: Vec<Value> = entries
+        .flatten()
+        .take(5000)
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|record| record["backend"] == "opencode")
+        .collect();
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut inspector = Inspector::connect();
     let mut rows = Vec::new();
-    for entry in entries.flatten().take(5000) {
-        let Ok(bytes) = fs::read(entry.path()) else {
-            continue;
-        };
-        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        if record["backend"] != "opencode" {
-            continue;
-        }
-        let row = inspect(string(&record, "name"), None).unwrap_or_else(|error| {
-            let mut unavailable = normalize(
-                &record,
-                &Value::Null,
-                false,
-                &[],
-                &Value::Null,
-                &Value::Null,
-                false,
-            );
-            unavailable["state"] = json!(if record["paused"] == true {
-                "paused"
-            } else {
-                "unknown"
-            });
-            unavailable["process_state"] = json!("unknown");
-            unavailable["runtime_state"] = json!("unknown");
-            unavailable["activity_summary"] = json!("Inspection unavailable");
-            unavailable["inspection_unavailable"] = json!(true);
-            unavailable["inspection_reason"] = json!(error);
-            unavailable
-        });
-        let mut row = row;
+    for record in &records {
+        let mut row = inspector.row(record, Detail::Listing);
         if let Some(map) = row.as_object_mut() {
             for key in [
                 "events",
@@ -1366,6 +836,7 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         }
         rows.push(row);
     }
+    inspector.finish();
     Ok(rows)
 }
 fn checked_request(record: &Value) -> Result<Value> {
@@ -1389,37 +860,333 @@ fn checked_request(record: &Value) -> Result<Value> {
     }
     Ok(request)
 }
-pub(super) fn reconcile_receipt(record: &Value, receipt: &mut Value) -> Result<bool> {
-    if receipt["status"] == "submitted" {
-        return Ok(true);
+/// The native OpenCode 2 operations that delivery needs.
+trait Native {
+    fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response>;
+    /// The same request, ending no later than `deadline`.
+    fn raw_until(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        _deadline: Instant,
+    ) -> Result<Response> {
+        self.raw(method, path, body)
     }
-    verify_session(record)?;
-    let id = string(receipt, "native_message_id");
-    if !native_id(id, "msg_")
+}
+impl Native for service::Service {
+    fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+        service::Service::raw(self, method, path, body)
+    }
+    fn raw_until(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Response> {
+        let deadline = deadline.min(Instant::now() + Duration::from_secs(10));
+        service::request(&self.reg, method, path, body, deadline)
+    }
+}
+#[derive(Debug)]
+enum Delivery {
+    Delivered,
+    Queued,
+    /// The service definitively rejected the message (a 4xx answer).
+    Refused(String),
+}
+fn refusal_reason(response: &Response) -> String {
+    let text = response.body["message"]
+        .as_str()
+        .or(response.body["data"]["message"].as_str())
+        .unwrap_or("request rejected");
+    let clean: String = text.chars().filter(|c| !c.is_control()).take(160).collect();
+    format!("HTTP {}: {clean}", response.status)
+}
+fn refused(reason: &str) -> String {
+    if reason == REMOVED {
+        return REMOVED.into();
+    }
+    format!("OpenCode refused this message: {reason}")
+}
+const MISMATCH: &str = "Native message acknowledgement did not match; delivery uncertain";
+const UNCERTAIN: &str = "Native message ID has conflicting text; delivery uncertain";
+const UNCERTAIN_STATE: &str = "Native delivery state is uncertain";
+const UNCERTAIN_REPLAY: &str = "Delivery uncertain; this request will not be replayed. Inspect native history before creating a new request";
+/// The definite non-delivery of a message the user removed from the queue.
+const REMOVED: &str = "Removed from the OpenCode queue before delivery";
+const REMOVAL_UNCONFIRMED: &str =
+    "OpenCode did not confirm the removal; Zerus will not send this message again";
+const REMOVALS_UNREADABLE: &str = "OpenCode removal records cannot be read";
+const REMOVAL_LIMIT: usize = 5000;
+/// Private delivery state under `opencode/`: receipts by request ID, an
+/// index from native message ID to request ID, the removal records and the
+/// lock that orders receipt changes.
+struct Ledger(PathBuf);
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Removal {
+    /// Written before the DELETE: forbids any repost, proves nothing.
+    Intended,
+    /// OpenCode confirmed the message left the queue without delivery.
+    Removed,
+}
+impl Ledger {
+    fn current() -> Self {
+        Ledger(root().join("opencode"))
+    }
+    fn receipt(&self, request_id: &str) -> PathBuf {
+        self.0.join("receipts").join(format!("{request_id}.json"))
+    }
+    fn index(&self, message_id: &str) -> PathBuf {
+        self.0
+            .join("receipt-index")
+            .join(format!("{message_id}.json"))
+    }
+    fn lock(&self) -> Result<Guard> {
+        lock(Some(&self.0.join("receipts.lock")))
+    }
+    fn removals_path(&self) -> PathBuf {
+        self.0.join("removed-messages.json")
+    }
+    /// Every removal record, oldest first. A missing file has none; any
+    /// other failure is an error, never "none".
+    fn removals(&self) -> Result<Vec<Value>> {
+        let file = match fs::File::open(self.removals_path()) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err(REMOVALS_UNREADABLE.into()),
+        };
+        let mut bytes = Vec::new();
+        if file
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > 4 * 1024 * 1024
+        {
+            return Err(REMOVALS_UNREADABLE.into());
+        }
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| value["removals"].as_array().cloned())
+            .ok_or_else(|| REMOVALS_UNREADABLE.into())
+    }
+    fn removal(&self, record: &Value, message_id: &str) -> Result<Option<Removal>> {
+        Ok(self
+            .removals()?
+            .iter()
+            .find(|e| {
+                e["conversation_id"] == record["conversation_id"] && e["message_id"] == message_id
+            })
+            .map(|e| {
+                if e["state"] == "removed" {
+                    Removal::Removed
+                } else {
+                    Removal::Intended
+                }
+            }))
+    }
+    /// Record a removal of one session's message, keeping the newest
+    /// `REMOVAL_LIMIT`. Callers hold the bindings lock.
+    fn record_removal(&self, record: &Value, message_id: &str, state: Removal) -> Result<()> {
+        let mut entries = self.removals()?;
+        entries.retain(|e| {
+            e["conversation_id"] != record["conversation_id"] || e["message_id"] != message_id
+        });
+        let state = if state == Removal::Removed {
+            "removed"
+        } else {
+            "intended"
+        };
+        entries.push(json!({"conversation_id":record["conversation_id"],"message_id":message_id,"state":state,"at":now()}));
+        let excess = entries.len().saturating_sub(REMOVAL_LIMIT);
+        entries.drain(..excess);
+        atomic(
+            &self.removals_path(),
+            &json!({ "removals": entries }).to_string(),
+        )
+    }
+    /// The request ID and session that sent a native message, if indexed.
+    fn indexed(&self, message_id: &str) -> Option<Value> {
+        let bytes = fs::read(self.index(message_id)).ok()?;
+        let value: Value = serde_json::from_slice(&bytes).ok()?;
+        uuid::Uuid::parse_str(string(&value, "request_id")).ok()?;
+        Some(value)
+    }
+}
+/// Mark one receipt as a definite non-delivery after a confirmed removal.
+fn refuse_removed(ledger: &Ledger, record: &Value, message_id: &str) -> Result<()> {
+    let Some(index) = ledger.indexed(message_id) else {
+        return Ok(());
+    };
+    let path = ledger.receipt(string(&index, "request_id"));
+    let _guard = ledger.lock()?;
+    let Ok(bytes) = fs::read(&path) else {
+        return Ok(());
+    };
+    let mut receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if receipt["native_message_id"] != message_id
+        || receipt["conversation_id"] != record["conversation_id"]
+        || receipt["status"] == "refused"
+    {
+        return Ok(());
+    }
+    receipt["status"] = json!("refused");
+    receipt["reason"] = json!(REMOVED);
+    atomic(&path, &receipt.to_string())
+}
+/// A receipt whose message was confirmed removed becomes that definite
+/// non-delivery before anything else is read; nothing is sent for it.
+fn apply_removal(ledger: &Ledger, record: &Value, receipt: &mut Value, path: &Path) -> Result<()> {
+    let id = string(receipt, "native_message_id").to_owned();
+    if receipt["status"] == "refused"
+        || receipt["conversation_id"] != record["conversation_id"]
+        || !native_id(&id, "msg_")
+        || !matches!(ledger.removal(record, &id), Ok(Some(Removal::Removed)))
+    {
+        return Ok(());
+    }
+    let _guard = ledger.lock()?;
+    receipt["status"] = json!("refused");
+    receipt["reason"] = json!(REMOVED);
+    atomic(path, &receipt.to_string())
+}
+/// Resolve one message ID exactly from native state. It is never posted
+/// again: OpenCode 2.0.32 forgets an ID once its queued message is removed,
+/// so a repost could deliver a message the user removed. A message in
+/// neither history nor the inbox stays uncertain.
+fn reconcile(
+    native: &dyn Native,
+    ledger: &Ledger,
+    record: &Value,
+    message_id: &str,
+    text: &str,
+) -> Result<Delivery> {
+    let removal = ledger.removal(record, message_id)?;
+    if removal == Some(Removal::Removed) {
+        return Ok(Delivery::Refused(REMOVED.into()));
+    }
+    let found = native.raw(
+        "GET",
+        &session_path(record, &format!("/message/{message_id}")),
+        None,
+    )?;
+    match found.status {
+        200 => {
+            let data = &found.body["data"];
+            if data["type"] == "user" && data["id"] == message_id && data["text"] == text {
+                return Ok(Delivery::Delivered);
+            }
+            return Err(UNCERTAIN.into());
+        }
+        404 if found.body["_tag"] == "MessageNotFoundError" => {}
+        _ => return Err(UNCERTAIN_STATE.into()),
+    }
+    // An unconfirmed removal: only history can still answer.
+    if removal.is_some() {
+        return Err(UNCERTAIN_STATE.into());
+    }
+    let inbox = native.raw("GET", &session_path(record, "/inbox"), None)?;
+    if inbox.status != 200 {
+        return Err(UNCERTAIN_STATE.into());
+    }
+    match inbox.body["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["id"] == message_id)
+    {
+        Some(item) if item["payload"]["text"] == text => Ok(Delivery::Queued),
+        Some(_) => Err(UNCERTAIN.into()),
+        None => Err(UNCERTAIN_STATE.into()),
+    }
+}
+fn running_service() -> Result<service::Service> {
+    // Sending is explicit, but phase 1 does not start the service for it.
+    service::connect().map_err(|why| why.reason(&crate::platform::hostname()))
+}
+fn check_receipt_identity(record: &Value, receipt: &Value) -> Result<()> {
+    if !native_id(string(receipt, "native_message_id"), "msg_")
         || receipt["conversation_id"] != record["conversation_id"]
         || receipt["run_id"] != record["run_id"]
     {
         return Err("Native receipt identity changed".into());
     }
-    let native = history(record)?;
-    let admission = native
-        .iter()
-        .find(|e| e["type"] == "session.next.prompt.admitted" && e["data"]["messageID"] == id);
-    if let Some(event) = admission {
-        if event["data"]["prompt"]["text"] != receipt["text"] {
-            return Err("Native message ID has conflicting text; delivery uncertain".into());
+    Ok(())
+}
+/// Reconcile one receipt; a definite refusal is recorded in it.
+fn settle(
+    native: &dyn Native,
+    ledger: &Ledger,
+    record: &Value,
+    receipt: &mut Value,
+    path: &Path,
+) -> Result<Delivery> {
+    check_receipt_identity(record, receipt)?;
+    let id = string(receipt, "native_message_id").to_owned();
+    let text = string(receipt, "text").to_owned();
+    let outcome = reconcile(native, ledger, record, &id, &text)?;
+    // A removal recorded since the inbox was read wins over that read.
+    let _guard = ledger.lock()?;
+    let outcome = match (outcome, ledger.removal(record, &id)?) {
+        (Delivery::Queued, Some(Removal::Intended)) => return Err(UNCERTAIN_STATE.into()),
+        (Delivery::Queued, Some(Removal::Removed)) => Delivery::Refused(REMOVED.into()),
+        (outcome, _) => outcome,
+    };
+    match &outcome {
+        Delivery::Delivered | Delivery::Queued => receipt["status"] = json!("submitted"),
+        Delivery::Refused(reason) => {
+            receipt["status"] = json!("refused");
+            receipt["reason"] = json!(reason);
         }
-        receipt["status"] = json!("submitted");
-        receipt["native_seq"] = event["durable"]["seq"].clone();
-        atomic(
-            &root()
-                .join("opencode/receipts")
-                .join(format!("{}.json", string(receipt, "request_id"))),
-            &receipt.to_string(),
-        )?;
-        return Ok(true);
+    }
+    atomic(path, &receipt.to_string())?;
+    Ok(outcome)
+}
+pub(super) fn reconcile_receipt(record: &Value, receipt: &mut Value) -> Result<bool> {
+    reconcile_receipt_with(&Ledger::current(), record, receipt, running_service)
+}
+/// Core of `reconcile_receipt`: a confirmed removal answers without
+/// connecting; otherwise the exact native session is read.
+fn reconcile_receipt_with<N: Native>(
+    ledger: &Ledger,
+    record: &Value,
+    receipt: &mut Value,
+    connect: impl FnOnce() -> Result<N>,
+) -> Result<bool> {
+    let path = ledger.receipt(string(receipt, "request_id"));
+    apply_removal(ledger, record, receipt, &path)?;
+    match receipt["status"].as_str() {
+        Some("submitted") => return Ok(true),
+        Some("refused") => return Err(refused(string(receipt, "reason"))),
+        _ => {}
+    }
+    let native = connect()?;
+    verify_session(&native, record)?;
+    match settle(&native, ledger, record, receipt, &path)? {
+        Delivery::Refused(reason) => Err(refused(&reason)),
+        _ => Ok(true),
+    }
+}
+/// Whether a form or permission is waiting on the user for this session.
+fn waiting_for_user(native: &dyn Native, record: &Value) -> Result<bool> {
+    for suffix in ["/form", "/permission"] {
+        let answer = native.raw("GET", &session_path(record, suffix), None)?;
+        if answer.status != 200 {
+            return Err("OpenCode pending requests could not be read; no message was sent".into());
+        }
+        if answer.body["data"].as_array().is_none_or(|v| !v.is_empty()) {
+            return Ok(true);
+        }
     }
     Ok(false)
+}
+fn session_active(native: &dyn Native, record: &Value) -> bool {
+    native
+        .raw("GET", "/api/session/active", None)
+        .ok()
+        .filter(|r| r.status == 200)
+        .is_some_and(|r| r.body["data"].get(string(record, "conversation_id")).is_some())
 }
 fn send(record: &Value, request: &Value) -> Result<Value> {
     if !string(request, "agent_id").is_empty() {
@@ -1443,54 +1210,137 @@ fn send(record: &Value, request: &Value) -> Result<Value> {
     if text.trim().is_empty() {
         return Err("Message is empty".into());
     }
-    let path = root()
-        .join("opencode/receipts")
-        .join(format!("{}.json", string(request, "request_id")));
     let digest = format!(
         "{:x}",
         Sha256::digest(json!([record["name"], request]).to_string().as_bytes())
     );
-    let message_id = format!("msg_{}", string(request, "request_id").replace('-', ""));
+    let service = running_service()?;
+    deliver(
+        &service,
+        &Ledger::current(),
+        record,
+        request,
+        digest,
+        session_graph::target_receipt(record),
+    )
+}
+/// Core of `send`: everything after validation, against any native service.
+fn deliver(
+    native: &dyn Native,
+    ledger: &Ledger,
+    record: &Value,
+    request: &Value,
+    digest: String,
+    graph_target: Option<Value>,
+) -> Result<Value> {
+    let text = string(request, "text");
+    let path = &ledger.receipt(string(request, "request_id"));
     if path.exists() {
-        let mut prior: Value = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+        let mut prior: Value = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         if prior["digest"] != digest {
             return Err("This request ID was already used for another message".into());
         }
-        if reconcile_receipt(record, &mut prior)? {
-            return Ok(prior);
+        apply_removal(ledger, record, &mut prior, path)?;
+        match prior["status"].as_str() {
+            Some("submitted") => return Ok(prior),
+            Some("refused") => return Err(refused(string(&prior, "reason"))),
+            _ => {}
         }
-        return Err("Delivery uncertain; this request will not be replayed. Inspect native history before creating a new request".into());
+        verify_native(native, record)?;
+        return match settle(native, ledger, record, &mut prior, path) {
+            Ok(Delivery::Refused(reason)) => Err(refused(&reason)),
+            Ok(_) => Ok(prior),
+            Err(_) => Err(UNCERTAIN_REPLAY.into()),
+        };
     }
-    let current = own_state(string(record, "name"))?;
-    if current["send_available"] != true {
+    verify_native(native, record)?;
+    if waiting_for_user(native, record)? {
         return Err(
-            "OpenCode is stopped, working or waiting for an exact question; no message was sent"
-                .into(),
+            "OpenCode is waiting for an exact question or permission; no message was sent".into(),
         );
     }
+    let message_id = new_id("msg_");
     let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"digest":digest,"native_message_id":message_id,"text":text,"submitted_text":text,"submitted_at":now(),"at":now(),"status":"pending","attachments":[],"transport":"native_opencode"});
-    if let Some(target) = session_graph::target_receipt(record) {
+    if let Some(target) = graph_target {
         receipt["graph_target"] = target;
     }
-    atomic(&path, &receipt.to_string())?;
-    let answer = rpc(
-        record,
-        "POST",
-        &endpoint(record, "/prompt"),
-        Some(&json!({"id":message_id,"prompt":{"text":text},"delivery":"queue"})),
+    let queued = session_active(native, record);
+    // The index first: a receipt is never written without it, so a removal
+    // can find the receipt of the message it removes.
+    atomic(
+        &ledger.index(&message_id),
+        &json!({"request_id":request["request_id"],"conversation_id":record["conversation_id"]})
+            .to_string(),
     )?;
-    if answer["data"]["id"] != message_id
-        || answer["data"]["sessionID"] != record["conversation_id"]
-        || answer["data"]["prompt"]["text"] != text
-        || answer["data"]["admittedSeq"].as_u64().is_none()
-    {
-        return Err("Native message acknowledgement did not match; delivery uncertain".into());
+    atomic(path, &receipt.to_string())?;
+    let posted = native.raw(
+        "POST",
+        &session_path(record, "/prompt"),
+        Some(&json!({"id":message_id,"text":text,"delivery":"queue"})),
+    );
+    match posted {
+        Ok(answer) if (200..300).contains(&answer.status) => {
+            let data = &answer.body["data"];
+            if data["id"] != message_id
+                || data["sessionID"] != record["conversation_id"]
+                || data["payload"]["text"] != text
+            {
+                return Err(MISMATCH.into());
+            }
+        }
+        Ok(answer) if (400..500).contains(&answer.status) => {
+            let reason = refusal_reason(&answer);
+            receipt["status"] = json!("refused");
+            receipt["reason"] = json!(reason);
+            atomic(path, &receipt.to_string())?;
+            return Err(refused(&reason));
+        }
+        // A transport error or a 5xx leaves the admission unknown.
+        _ => match settle(native, ledger, record, &mut receipt, path) {
+            Ok(Delivery::Refused(reason)) => return Err(refused(&reason)),
+            Ok(_) => {}
+            Err(_) => return Err(UNCERTAIN_REPLAY.into()),
+        },
     }
     receipt["status"] = json!("submitted");
-    receipt["native_seq"] = answer["data"]["admittedSeq"].clone();
-    atomic(&path, &receipt.to_string())?;
+    if queued {
+        receipt["queued"] = json!(true);
+    }
+    atomic(path, &receipt.to_string())?;
     Ok(receipt)
+}
+fn verify_native(native: &dyn Native, record: &Value) -> Result<()> {
+    let result = native.raw("GET", &session_path(record, ""), None)?;
+    if result.status != 200
+        || result.body["data"]["id"] != record["conversation_id"]
+        || result.body["data"]["location"]["directory"] != record["cwd"]
+    {
+        return Err("The exact native OpenCode session or directory changed".into());
+    }
+    Ok(())
+}
+/// The route and body of one reply, from the pending card, the exact native
+/// request it was made from, and the answers.
+fn reply_for(card: &Value, native: &Value, answers: &[Value]) -> Result<(String, Value)> {
+    let id = string(card, "question_id");
+    if card["kind"] == "opencode_permission" {
+        let decision = forms::permission_decision(answers)?;
+        Ok((
+            format!("/permission/{id}/reply"),
+            json!({"decision": decision}),
+        ))
+    } else {
+        Ok((
+            format!("/form/{id}/reply"),
+            forms::form_answer(card, native, answers)?,
+        ))
+    }
+}
+const CHANGED: &str = "This question changed or is no longer pending";
+/// Server text safe to show: control characters removed, at most 200 chars.
+fn clip_text(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(200).collect()
 }
 fn answer(record: &Value, request: &Value) -> Result<Value> {
     let current = own_state(string(record, "name"))?;
@@ -1502,79 +1352,73 @@ fn answer(record: &Value, request: &Value) -> Result<Value> {
             q["question_id"] == request["question_id"]
                 && q["question_hash"] == request["expected_question_hash"]
         })
-        .ok_or("This question changed or is no longer pending")?;
+        .ok_or(CHANGED)?;
     let path = root()
         .join("opencode/answers")
         .join(format!("{}.json", string(request, "request_id")));
+    answer_with(&running_service()?, record, request, card, &path)
+}
+/// Core of `answer`: the journal, the exact native request and the reply.
+fn answer_with(
+    native: &dyn Native,
+    record: &Value,
+    request: &Value,
+    card: &Value,
+    path: &Path,
+) -> Result<Value> {
     if path.exists() {
         return Err("This answer was already attempted; refresh its native acknowledgement".into());
     }
     let raw = request["answers"]
         .as_array()
         .ok_or("Answers are required")?;
-    let mut labels = Vec::new();
-    let items = card["questions"]
-        .as_array()
-        .ok_or("Invalid native question schema")?;
-    if raw.len() != items.len() {
-        return Err("Answer every question exactly once".into());
-    }
-    for item in items {
-        let matches = raw
-            .iter()
-            .filter(|a| a["question_id"] == item["id"])
-            .collect::<Vec<_>>();
-        if matches.len() != 1 {
-            return Err("Question answers are missing or duplicated".into());
-        }
-        let answer = matches[0];
-        let selected = answer["selected_option_ids"]
-            .as_array()
-            .ok_or("Invalid selected answers")?;
-        if item["allow_multiple"] != true && selected.len() > 1 {
-            return Err("This question accepts one answer".into());
-        }
-        let mut values = Vec::new();
-        for id in selected {
-            let option = item["options"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|o| o["id"] == *id)
-                .ok_or("Unknown answer option")?;
-            values.push(option["label"].clone());
-        }
-        if !string(answer, "text").is_empty() {
-            if item["allow_other"] != true {
-                return Err("Choose an offered permission outcome".into());
-            }
-            values.push(answer["text"].clone());
-        }
-        if values.is_empty() {
-            return Err("An answer is required".into());
-        }
-        labels.push(json!(values));
-    }
-    let id = string(card, "question_id");
-    let (suffix, body) = if card["kind"] == "opencode_permission" {
-        let id = raw[0]["selected_option_ids"][0]
-            .as_str()
-            .ok_or("Choose a permission outcome")?;
-        if raw[0]["selected_option_ids"].as_array().unwrap().len() != 1 {
-            return Err("Choose one permission outcome".into());
-        }
-        (
-            format!("/permission/{}/reply", string(card, "question_id")),
-            json!({"reply":id}),
-        )
+    // The exact native request the card was made from, read again now.
+    let suffix = if card["kind"] == "opencode_permission" {
+        "/permission"
     } else {
-        (format!("/question/{id}/reply"), json!({"answers":labels}))
+        "/form"
     };
+    let pending = pending_requests(native, record, suffix)?;
+    let found = pending
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|n| n["id"] == card["question_id"])
+        .ok_or(CHANGED)?;
+    let none = json!([]);
+    let one = json!([found]);
+    let again = if suffix == "/form" {
+        forms::cards(record, &one, &none)
+    } else {
+        forms::cards(record, &none, &one)
+    };
+    if again.first().map(|c| &c["question_hash"]) != Some(&card["question_hash"]) {
+        return Err(CHANGED.into());
+    }
+    let (route, body) = reply_for(card, found, raw)?;
     let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"status":"pending"});
-    atomic(&path, &receipt.to_string())?;
-    rpc(record, "POST", &endpoint(record, &suffix), Some(&body))?;
+    atomic(path, &receipt.to_string())?;
+    // A 4xx is a definite refusal; anything else leaves the delivery unknown
+    // and the pending journal blocks a replay.
+    let reply = native.raw("POST", &session_path(record, &route), Some(&body))?;
+    if (400..500).contains(&reply.status) {
+        receipt["status"] = json!("refused");
+        atomic(path, &receipt.to_string())?;
+        if reply.body["_tag"] == "FormInvalidAnswerError" {
+            let reason = reply.body["message"].as_str().unwrap_or("invalid answer");
+            return Err(format!("OpenCode rejected this answer: {}", clip_text(reason)));
+        }
+        return Err(CHANGED.into());
+    }
+    if !successful(&reply) {
+        let reason = reply.body["message"]
+            .as_str()
+            .or(reply.body["data"]["message"].as_str())
+            .unwrap_or("Native operation failed");
+        return Err(format!("OpenCode HTTP {}: {}", reply.status, clip_text(reason)));
+    }
     receipt["status"] = json!("answered");
-    atomic(&path, &receipt.to_string())?;
+    atomic(path, &receipt.to_string())?;
     Ok(receipt)
 }
 pub(crate) fn interrupt(record: &Value) -> Result<()> {
@@ -1589,28 +1433,199 @@ pub(crate) fn interrupt(record: &Value) -> Result<()> {
     if current["interrupt_supported"] != true || current["turn_started"] != record["turn_started"] {
         return Err("OpenCode turn changed before interruption".into());
     }
-    rpc(
-        &original,
-        "POST",
-        &endpoint(&original, "/interrupt"),
-        Some(&json!({})),
+    interrupt_with(&running_service()?, &original)
+}
+/// Core of `interrupt`: success when OpenCode says it interrupted the turn or
+/// the session is no longer running.
+fn interrupt_with(native: &dyn Native, record: &Value) -> Result<()> {
+    let reply = native.raw("POST", &session_path(record, "/interrupt"), Some(&json!({})))?;
+    let said = reply.body["interrupted"] == true || reply.body["data"]["interrupted"] == true;
+    if successful(&reply) && said {
+        return Ok(());
+    }
+    // A failed lookup never counts as "not running".
+    if let Ok(active) = active_sessions(native) {
+        if active.get(string(record, "conversation_id")).is_none() {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "OpenCode did not confirm the interruption ({})",
+        refusal_reason(&reply)
+    ))
+}
+const NOT_QUEUED: &str = "This message is no longer queued";
+/// The exact native message ID of a `remove_queued` request.
+fn queued_id(request: &Value) -> Result<String> {
+    let id = string(request, "message_id");
+    if !native_id(id, "msg_") {
+        return Err("Choose the exact queued OpenCode message".into());
+    }
+    Ok(id.to_owned())
+}
+/// Whether a message ID is in this session's history: `Some(true)` when
+/// delivered, `Some(false)` only for OpenCode's exact MessageNotFoundError.
+fn delivered(native: &dyn Native, record: &Value, id: &str) -> Result<Option<bool>> {
+    let found = native.raw(
+        "GET",
+        &session_path(record, &format!("/message/{id}")),
+        None,
     )?;
+    Ok(match found.status {
+        200 => Some(true),
+        404 if found.body["_tag"] == "MessageNotFoundError" => Some(false),
+        _ => None,
+    })
+}
+/// Whether this session's inbox lists the message, or None when unreadable.
+fn listed(native: &dyn Native, record: &Value, id: &str) -> Option<bool> {
+    let inbox = native
+        .raw("GET", &session_path(record, "/inbox"), None)
+        .ok()?;
+    if inbox.status != 200 {
+        return None;
+    }
+    let items = inbox.body["data"].as_array()?;
+    Some(items.iter().any(|item| item["id"] == id))
+}
+/// Core of `remove_queued`: a message can be removed only while it sits in
+/// the inbox of this session, which is not running, and was never delivered.
+/// A removal intent is recorded before the DELETE so no retry ever posts
+/// the message again; only a removal OpenCode confirms makes its receipt a
+/// definite non-delivery. `before_delete` runs once, immediately before the
+/// DELETE, so a clean refusal is never recorded as a possible change.
+fn remove_queued_with(
+    native: &dyn Native,
+    ledger: &Ledger,
+    record: &Value,
+    id: &str,
+    before_delete: impl FnOnce(),
+) -> Result<()> {
+    let conversation = &record["conversation_id"];
+    let inbox = get(native, &session_path(record, "/inbox"))?;
+    let item = inbox["data"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["id"] == id))
+        .ok_or(NOT_QUEUED)?;
+    if item["sessionID"] != *conversation {
+        return Err(NOT_QUEUED.into());
+    }
+    let active = active_sessions(native)?;
+    if active.get(string(record, "conversation_id")).is_some() {
+        return Err(NOT_QUEUED.into());
+    }
+    match delivered(native, record, id)? {
+        Some(false) => {}
+        Some(true) => return Err(NOT_QUEUED.into()),
+        None => return Err("OpenCode could not confirm this message is still queued".into()),
+    }
+    if ledger
+        .indexed(id)
+        .is_some_and(|index| index["conversation_id"] != *conversation)
+    {
+        return Err(NOT_QUEUED.into());
+    }
+    ledger.record_removal(record, id, Removal::Intended)?;
+    before_delete();
+    let reply = native.raw("DELETE", &session_path(record, &format!("/inbox/{id}")), None)?;
+    if reply.status == 404 {
+        return Err(NOT_QUEUED.into());
+    }
+    if !successful(&reply) {
+        return Err(format!("OpenCode could not remove this message ({})", refusal_reason(&reply)));
+    }
+    // OpenCode 2.0.32 answers 204 even when the message had already left the
+    // inbox, so read again: the inbox first, then history, because delivery
+    // moves a message from one to the other in a single transaction.
+    if listed(native, record, id) != Some(false) {
+        return Err(REMOVAL_UNCONFIRMED.into());
+    }
+    match delivered(native, record, id) {
+        Ok(Some(false)) => {}
+        Ok(Some(true)) => return Err(NOT_QUEUED.into()),
+        _ => return Err(REMOVAL_UNCONFIRMED.into()),
+    }
+    ledger.record_removal(record, id, Removal::Removed)?;
+    // Best effort: the removal record gives every later read the same answer.
+    let _ = refuse_removed(ledger, record, id);
     Ok(())
 }
+/// Core of a model change: set the exact model, then read it back.
+fn change_model(native: &dyn Native, record: &Value, model: &Value) -> Result<()> {
+    let reply = native.raw(
+        "POST",
+        &session_path(record, "/model"),
+        Some(&json!({"model": model})),
+    )?;
+    if !successful(&reply) {
+        return Err(format!("OpenCode refused this model change ({})", refusal_reason(&reply)));
+    }
+    let seen = verify_session(native, record)?["model"].clone();
+    // A model without an explicit variant reports "default".
+    let variant_ok = match model["variant"].as_str() {
+        Some(variant) => seen["variant"] == variant,
+        None => true,
+    };
+    if seen["id"] != model["id"] || seen["providerID"] != model["providerID"] || !variant_ok {
+        return Err(
+            "Native OpenCode model change was not confirmed; inspect before retrying".into(),
+        );
+    }
+    Ok(())
+}
+/// Core of rename: set only the title, then read it back.
+fn change_title(native: &dyn Native, record: &Value, title: &str) -> Result<()> {
+    let reply = native.raw(
+        "PATCH",
+        &session_path(record, ""),
+        Some(&json!({"title": title})),
+    )?;
+    if !successful(&reply) {
+        return Err(format!("OpenCode refused this rename ({})", refusal_reason(&reply)));
+    }
+    if verify_session(native, record)?["title"] != title {
+        return Err(
+            "Native OpenCode rename acknowledgement did not match; inspect before retrying".into(),
+        );
+    }
+    Ok(())
+}
+const NO_PROCESS: &str = "OpenCode sessions have no separate process to pause";
 fn action(
     record: &mut Value,
     action: &str,
     new_name: Option<&str>,
+    message_id: Option<&str>,
     scope: Option<&session_action::Scope>,
 ) -> Result<()> {
-    if !["pause", "resume", "rename", "forget"].contains(&action) {
+    action_in(
+        &Ledger::current(),
+        running_service,
+        record,
+        action,
+        new_name,
+        message_id,
+        scope,
+    )
+}
+/// Core of `action`, against any native service and private state.
+fn action_in<N: Native>(
+    ledger: &Ledger,
+    connect: impl FnOnce() -> Result<N>,
+    record: &mut Value,
+    action: &str,
+    new_name: Option<&str>,
+    message_id: Option<&str>,
+    scope: Option<&session_action::Scope>,
+) -> Result<()> {
+    if ["pause", "resume"].contains(&action) {
+        return Err(NO_PROCESS.into());
+    }
+    if !["rename", "forget", "remove_queued"].contains(&action) {
         return Err("This OpenCode lifecycle action is not supported".into());
     }
     if let Some(scope) = scope {
         scope.check(record)?;
-    }
-    if action == "resume" {
-        ensure_host(record)?;
     }
     let current = own_state(string(record, "name"))?;
     if !current["allowed_actions"]
@@ -1620,6 +1635,18 @@ fn action(
         return Err("This action is unavailable for the exact OpenCode session".into());
     }
     let old = string(record, "name").to_owned();
+    if action == "remove_queued" {
+        let id = queued_id(&json!({"message_id": message_id}))?;
+        remove_queued_with(&connect()?, ledger, record, &id, || {
+            if let Some(scope) = scope {
+                scope.changing();
+            }
+        })?;
+        if let Some(scope) = scope {
+            scope.result_record(record);
+        }
+        return Ok(());
+    }
     if action == "rename" {
         let new = new_name.ok_or("Choose a new OpenCode name")?;
         let a = old.split('/').collect::<Vec<_>>();
@@ -1642,34 +1669,14 @@ fn action(
         if let Some(scope) = scope {
             scope.changing();
         }
-        let renamed = rpc(
-            record,
-            "PATCH",
-            &format!("/session/{}", string(record, "conversation_id")),
-            Some(&json!({"title":b[2]})),
-        )?;
-        if renamed["id"] != record["conversation_id"] || renamed["title"] != b[2] {
-            return Err(
-                "Native OpenCode rename acknowledgement did not match; inspect before retrying"
-                    .into(),
-            );
-        }
+        change_title(&connect()?, record, b[2])?;
         record["name"] = json!(new);
     } else if let Some(scope) = scope {
         scope.changing();
     }
-    match action {
-        "pause" => record["paused"] = json!(true),
-        "resume" => {
-            record["paused"] = json!(false);
-            record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
-            record.as_object_mut().unwrap().remove("creation_pending");
-        }
-        "forget" => {
-            archive::remove_synced(&binding_path(&old))?;
-            return Ok(());
-        }
-        _ => {}
+    if action == "forget" {
+        archive::remove_synced(&binding_path(&old))?;
+        return Ok(());
     }
     save(record)?;
     if action == "rename" && new_name != Some(old.as_str()) {
@@ -1684,11 +1691,12 @@ pub(super) fn session_action(
     name: &str,
     kind: &str,
     new_name: Option<&str>,
+    message_id: Option<&str>,
     scope: &session_action::Scope,
 ) -> Result<()> {
     let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
     let mut record = binding(name)?;
-    action(&mut record, kind, new_name, Some(scope))
+    action(&mut record, kind, new_name, message_id, Some(scope))
 }
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose an OpenCode session")?;
@@ -1727,10 +1735,13 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if own_state(name)?["settings_change_supported"] != true {
                 return Err("OpenCode must be live and idle before changing its model".into());
             }
-            if !string(&request, "effort").is_empty() {
-                return Err("OpenCode effort controls are not yet qualified".into());
-            }
-            let model = offered_model(string(&request, "model"))?;
+            let service = running_service()?;
+            let model = catalog::offered_model(
+                &service,
+                Path::new(string(&record, "cwd")),
+                string(&request, "model"),
+                string(&request, "effort"),
+            )?;
             let path = root()
                 .join("opencode/settings")
                 .join(format!("{}.json", string(&request, "request_id")));
@@ -1740,27 +1751,25 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 );
             }
             atomic(&path, &json!({"status":"pending"}).to_string())?;
-            rpc(
-                &record,
-                "POST",
-                &endpoint(&record, "/model"),
-                Some(&json!({"model":model})),
-            )?;
-            let verified_model = verify_session(&record)?["model"].clone();
-            if verified_model["id"] != model["id"]
-                || verified_model["providerID"] != model["providerID"]
-            {
-                return Err(
-                    "Native OpenCode model change was not confirmed; inspect before retrying"
-                        .into(),
-                );
-            }
+            change_model(&service, &record, &model)?;
             println!(
                 "{}",
-                json!({"status":"applied","scope":"session","request_id":request["request_id"],"name":name,"run_id":record["run_id"],"conversation_id":record["conversation_id"],"model":request["model"]})
+                json!({"status":"applied","scope":"session","request_id":request["request_id"],"name":name,"run_id":record["run_id"],"conversation_id":record["conversation_id"],"model":request["model"],"effort":request["effort"]})
             );
         }
-        "pause" | "resume" | "rename" | "forget" => {
+        "remove_queued" => {
+            let id = queued_id(&json!({"message_id": args.get(1)}))?;
+            if own_state(name)?["allowed_actions"]
+                .as_array()
+                .is_none_or(|values| values.iter().all(|v| v != "remove_queued"))
+            {
+                return Err(NOT_QUEUED.into());
+            }
+            remove_queued_with(&running_service()?, &Ledger::current(), &record, &id, || {})?;
+            println!("{}", own_state(name)?);
+        }
+        "pause" | "resume" => return Err(NO_PROCESS.into()),
+        "rename" | "forget" => {
             if args.iter().any(|v| v == "--dry-run") {
                 println!("{command} native OpenCode {name}");
                 return Ok(0);
@@ -1774,6 +1783,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 args.get(1)
                     .filter(|v| !v.starts_with('-'))
                     .map(String::as_str),
+                None,
                 None,
             )?;
         }
@@ -1790,219 +1800,1598 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     #[test]
-    fn jsonc_preserves_literal_urls_and_handles_comments_and_trailing_commas() {
-        let value=configuration_json(br#"{ // visible model config
-          "model":"ollama/qwen3-coder:30b", /* comment */
-          "provider":{"ollama":{"options":{"baseURL":"http://127.0.0.1:11434/v1"},"models":{"qwen3-coder:30b":{"name":"local",},},},},
-        }"#).unwrap();
-        assert_eq!(
-            value["provider"]["ollama"]["options"]["baseURL"],
-            "http://127.0.0.1:11434/v1"
-        );
-        assert_eq!(value["model"], "ollama/qwen3-coder:30b");
-        assert!(configuration_json(b"{ /* unclosed").is_err());
+    fn new_ids_match_opencode_and_stored_ids_keep_the_existing_check() {
+        for prefix in ["ses_", "msg_"] {
+            let id = new_id(prefix);
+            assert_eq!(id.len(), 30);
+            assert!(id[4..].bytes().all(|b| b.is_ascii_alphanumeric()));
+            assert!(native_id(&id, prefix));
+        }
+        assert_ne!(new_id("ses_"), new_id("ses_"));
+        // OpenCode 1 bindings used ses_ plus 32 hex characters; they stay valid.
+        assert!(native_id("ses_0123456789abcdef0123456789abcdef", "ses_"));
+        assert!(native_id("ses_eb44cc196ffeOcEUMCZm4t66t7", "ses_"));
+        assert!(!native_id("ses_bad id", "ses_"));
     }
     #[test]
-    fn chunked_native_response_is_bounded_and_complete() {
+    fn legacy_bindings_are_adopted_only_for_their_own_migrated_session() {
+        let record = json!({"conversation_id": "ses_0123456789abcdef0123456789abcdef", "cwd": "/workspace/fixture", "native_data_home": "/x"});
+        let session = json!({"data": {"id": "ses_0123456789abcdef0123456789abcdef", "location": {"directory": "/workspace/fixture"}}});
+        assert!(matches!(
+            legacy_verdict(&record, &json!({"status": "completed"}), Some(&session)),
+            Legacy::Adopted
+        ));
+        assert!(matches!(
+            legacy_verdict(&record, &json!({"status": "running"}), Some(&session)),
+            Legacy::Unsupported
+        ));
+        assert!(matches!(
+            legacy_verdict(&record, &json!({"status": "completed"}), None),
+            Legacy::Unsupported
+        ));
+        let moved = json!({"data": {"id": "ses_0123456789abcdef0123456789abcdef", "location": {"directory": "/elsewhere"}}});
+        assert!(matches!(
+            legacy_verdict(&record, &json!({"status": "completed"}), Some(&moved)),
+            Legacy::Unsupported
+        ));
+        let current = json!({"conversation_id": "ses_x", "cwd": "/w", "service": "opencode2"});
+        assert!(matches!(
+            legacy_verdict(&current, &json!({}), None),
+            Legacy::Current
+        ));
+    }
+    #[test]
+    fn legacy_verdict_needs_exact_nonempty_identity() {
+        let done = json!({"status": "completed"});
+        let record = json!({"conversation_id": "ses_a", "cwd": "/workspace/fixture"});
+        let good =
+            json!({"data": {"id": "ses_a", "location": {"directory": "/workspace/fixture"}}});
+        assert!(matches!(
+            legacy_verdict(&record, &done, Some(&good)),
+            Legacy::Adopted
+        ));
+        let other =
+            json!({"data": {"id": "ses_b", "location": {"directory": "/workspace/fixture"}}});
+        assert!(matches!(
+            legacy_verdict(&record, &done, Some(&other)),
+            Legacy::Unsupported
+        ));
+        assert!(matches!(
+            legacy_verdict(&record, &done, Some(&json!({}))),
+            Legacy::Unsupported
+        ));
+        for bad in [
+            json!({"cwd": "/w"}),
+            json!({"conversation_id": "ses_a"}),
+            json!({"conversation_id": "", "cwd": ""}),
+        ] {
+            let blank = json!({"data": {"id": bad["conversation_id"], "location": {"directory": bad["cwd"]}}});
+            assert!(matches!(
+                legacy_verdict(&bad, &done, Some(&blank)),
+                Legacy::Unsupported
+            ));
+        }
+    }
+    fn reply(status: u16, body: Value) -> Reply {
+        Ok(Response { status, body })
+    }
+    #[test]
+    fn only_definite_answers_make_a_binding_unsupported() {
+        let record = json!({"conversation_id": "ses_a", "cwd": "/w"});
+        let session = || {
+            reply(
+                200,
+                json!({"data": {"id": "ses_a", "location": {"directory": "/w"}}}),
+            )
+        };
+        let verdict = |m: Reply, s: Reply| legacy_decision(&record, &m, || s);
+        let done = || reply(200, json!({"data": {"status": "completed"}}));
+        assert!(matches!(
+            verdict(done(), session()),
+            Ok((Legacy::Adopted, true))
+        ));
+        assert!(matches!(
+            verdict(done(), reply(404, json!({}))),
+            Ok((Legacy::Unsupported, true))
+        ));
+        assert!(matches!(
+            verdict(
+                done(),
+                reply(
+                    200,
+                    json!({"data": {"id": "ses_z", "location": {"directory": "/w"}}})
+                )
+            ),
+            Ok((Legacy::Unsupported, true))
+        ));
+        // Not completed: unsupported but not settled, and no session request.
+        let pending = legacy_decision(&record, &reply(200, json!({"status": "running"})), || {
+            panic!("no session GET")
+        });
+        assert!(matches!(pending, Ok((Legacy::Unsupported, false))));
+        // Errors never become a verdict.
+        assert!(verdict(Err("refused".into()), session()).is_err());
+        assert!(verdict(reply(500, json!({})), session()).is_err());
+        assert!(verdict(done(), Err("timeout".into())).is_err());
+        assert!(verdict(done(), reply(503, json!({}))).is_err());
+        let current = json!({"service": "opencode2"});
+        assert!(matches!(
+            legacy_decision(&current, &Err("x".into()), || panic!("none")),
+            Ok((Legacy::Current, false))
+        ));
+    }
+    fn ack(value: &Value) -> bool {
+        value["data"]["id"] == "ses_a"
+    }
+    fn counted(
+        get: Reply,
+        post: Reply,
+        first: bool,
+    ) -> (std::result::Result<(), Refusal>, usize, usize) {
+        let (mut gets, mut posts) = (0, 0);
+        let mut g = || {
+            gets += 1;
+            get.clone()
+        };
+        let mut p = || {
+            posts += 1;
+            post.clone()
+        };
+        let result = if first {
+            create_session(&mut g, &mut p, &ack)
+        } else {
+            reconcile_creation(&mut g, &mut p, &ack)
+        };
+        (result, gets, posts)
+    }
+    #[test]
+    fn lost_creation_replies_are_reconciled_without_a_second_identity() {
+        let found = reply(200, json!({"data": {"id": "ses_a"}}));
+        let (result, gets, posts) = counted(found.clone(), Err("lost".into()), false);
+        assert!(result.is_ok() && gets == 1 && posts == 0);
+        let (result, gets, posts) = counted(reply(404, json!({})), found.clone(), false);
+        assert!(result.is_ok() && gets == 1 && posts == 1);
+        let wrong = reply(200, json!({"data": {"id": "ses_other"}}));
+        let (result, _, posts) = counted(wrong, found.clone(), false);
+        assert!(matches!(result, Err(Refusal::Other(_))) && posts == 0);
+        let (result, _, posts) = counted(reply(404, json!({})), wrong_ack(), false);
+        assert!(matches!(result, Err(Refusal::Other(_))) && posts == 1);
+        // First attempt: a definite refusal ends it; a lost reply reconciles.
+        let (result, gets, posts) =
+            counted(found.clone(), reply(400, json!({"message": "bad"})), true);
+        assert!(matches!(result, Err(Refusal::Definite(_))) && gets == 0 && posts == 1);
+        let (result, gets, posts) = counted(found.clone(), Err("lost".into()), true);
+        assert!(result.is_ok() && gets == 1 && posts == 1);
+    }
+    fn wrong_ack() -> Reply {
+        reply(200, json!({"data": {"id": "ses_other"}}))
+    }
+    #[test]
+    fn session_paths_use_the_conversation_id() {
+        let record = json!({"conversation_id": "ses_abc"});
+        assert_eq!(session_path(&record, ""), "/api/session/ses_abc");
         assert_eq!(
-            decode_response(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{\"a\":1}\r\n0\r\n\r\n"
+            session_path(&record, "/prompt"),
+            "/api/session/ses_abc/prompt"
+        );
+    }
+    struct Scripted(std::cell::RefCell<Vec<(String, u16, Value)>>);
+    impl Native for Scripted {
+        fn raw(&self, method: &str, path: &str, _: Option<&Value>) -> Result<Response> {
+            let mut script = self.0.borrow_mut();
+            let (expected, status, body) = script.remove(0);
+            assert_eq!(expected, format!("{method} {path}"));
+            Ok(Response { status, body })
+        }
+    }
+    fn fixture(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).unwrap()
+    }
+    #[test]
+    fn a_queued_message_is_found_in_the_inbox_after_a_lost_response() {
+        let record = json!({"conversation_id": "ses_A"});
+        let inbox = fixture(include_bytes!("../../tests/fixtures/opencode2/inbox_busy.json"));
+        let queued = inbox["data"][0]["id"].as_str().unwrap().to_owned();
+        let native = Scripted(std::cell::RefCell::new(vec![
+            (
+                format!("GET /api/session/ses_A/message/{queued}"),
+                404,
+                fixture(include_bytes!("../../tests/fixtures/opencode2/message_not_found.json")),
+            ),
+            ("GET /api/session/ses_A/inbox".into(), 200, inbox.clone()),
+        ]));
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            reconcile(
+                &native,
+                &Ledger(dir.path().into()),
+                &record,
+                &queued,
+                "queued later"
             )
             .unwrap(),
-            json!({"a":1})
-        );
-        assert!(decode_response(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{}").is_err());
+            Delivery::Queued
+        ));
     }
     #[test]
-    fn partial_reads_cannot_extend_the_absolute_native_deadline() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let worker = std::thread::spawn(move || {
-            let (mut peer, _) = listener.accept().unwrap();
-            let mut request = [0u8; 2048];
-            let _ = peer.read(&mut request);
-            peer.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n")
-                .unwrap();
-            for _ in 0..30 {
-                if peer.write_all(b"n").is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        });
-        let started = Instant::now();
-        let result = http_until(
-            &json!({"port":port,"password":"fixture"}),
-            "GET",
-            "/fixture",
-            None,
-            started + Duration::from_millis(120),
-        );
-        let elapsed = started.elapsed();
-        assert!(result.is_err());
-        assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
-        worker.join().unwrap();
-    }
-    #[test]
-    fn malformed_native_http_never_acknowledges_mutations() {
-        for raw in [
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnull\r\n0\r\n".as_slice(),
-            b"HTTP/1.1 200 OK\r\nContent-Length: junk\r\n\r\nnull",
-            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnull\r\n0\r\n\r\n",
-            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nnull",
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnullXX0\r\n\r\n",
-        ] {assert!(decode_response(raw).is_err(),"{}",String::from_utf8_lossy(raw));}
+    fn an_unknown_message_is_uncertain_and_never_reposted() {
+        let prompt = fixture(include_bytes!("../../tests/fixtures/opencode2/prompt.json"));
+        let session = prompt["data"]["sessionID"].as_str().unwrap().to_owned();
+        let record = json!({"conversation_id": session});
+        let id = prompt["data"]["id"].as_str().unwrap().to_owned();
+        let native = Scripted(std::cell::RefCell::new(vec![
+            (
+                format!("GET /api/session/{session}/message/{id}"),
+                404,
+                json!({"_tag": "MessageNotFoundError"}),
+            ),
+            (
+                format!("GET /api/session/{session}/inbox"),
+                200,
+                json!({"data": []}),
+            ),
+        ]));
+        let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            decode_response(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap(),
-            Value::Null
+            reconcile(&native, &Ledger(dir.path().into()), &record, &id, "hello").unwrap_err(),
+            UNCERTAIN_STATE
         );
-        assert_eq!(decode_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nnull\r\n0\r\nX-Native: yes\r\n\r\n").unwrap(),Value::Null);
+        assert!(native.0.borrow().is_empty());
     }
     #[test]
-    fn native_states_and_question_identity_do_not_depend_on_terminal() {
-        let record = json!({"name":"opencode/test/one","run_id":"run","conversation_id":"ses_one"});
-        let session = json!({"model":{"id":"local","providerID":"fixture"}});
-        let pending = json!([{"id":"que_one","sessionID":"ses_one","questions":[{"question":"Pick","header":"Pick","options":[{"label":"One"}]}]}]);
-        let idle = normalize(
+    fn conflicting_text_for_the_same_id_is_uncertain() {
+        let record = json!({"conversation_id": "ses_A"});
+        let native = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/ses_A/message/msg_X".into(),
+            200,
+            json!({"data": {"id": "msg_X", "type": "user", "text": "other"}}),
+        )]));
+        let dir = tempfile::tempdir().unwrap();
+        assert!(reconcile(
+            &native,
+            &Ledger(dir.path().into()),
             &record,
-            &session,
-            false,
-            &[],
-            &Value::Null,
-            &Value::Null,
-            true,
-        );
-        assert_eq!(idle["phase"], "idle");
-        assert_eq!(idle["terminal_supported"], false);
-        let working = normalize(
-            &record,
-            &session,
-            true,
-            &[],
-            &Value::Null,
-            &Value::Null,
-            true,
-        );
-        assert_eq!(working["phase"], "working");
-        assert_eq!(working["send_available"], false);
-        let input = normalize(&record, &session, true, &[], &pending, &Value::Null, true);
-        assert_eq!(input["phase"], "input");
-        assert_eq!(input["pending_questions"][0]["answerable"], true);
-        assert_ne!(input["attention_id"], idle["attention_id"]);
+            "msg_X",
+            "hello"
+        )
+        .is_err());
     }
     #[test]
-    fn exact_native_history_has_stable_ids_and_literal_text() {
-        let native = vec![
-            json!({"type":"session.next.prompted","durable":{"seq":2},"data":{"timestamp":1000,"messageID":"msg_one","prompt":{"text":"literal\\\ntext"}}}),
-            json!({"type":"session.next.text.ended","durable":{"seq":7},"data":{"timestamp":2000,"assistantMessageID":"msg_two","text":"answer"}}),
-        ];
-        let events = event_rows(&native);
-        assert_eq!(events[0]["detail"], "literal\\\ntext");
-        assert_eq!(events[1]["reply_id"], "msg_two");
-        assert_eq!(events[1]["seq"], 7);
-    }
-    // Shapes recorded from the reviewed release's classic task-tool children.
-    fn assistant(child: &str, completed: Option<u64>, finish: Option<&str>, error: Value, parts: Value) -> Value {
-        let mut info = json!({"id":"msg_1406139c9002","sessionID":child,"role":"assistant","time":{"created":1792081476041_u64},"parentID":"msg_1406139c9001","agent":"general"});
-        if let Some(t) = completed { info["time"]["completed"] = json!(t); }
-        if let Some(f) = finish { info["finish"] = json!(f); }
-        if !error.is_null() { info["error"] = error; }
-        json!({"info":info,"parts":parts})
+    fn pending_forms_or_permissions_block_sending_but_a_busy_session_does_not() {
+        let record = json!({"conversation_id": "ses_A"});
+        let empty = || json!({"data": []});
+        let native = Scripted(std::cell::RefCell::new(vec![
+            ("GET /api/session/ses_A/form".into(), 200, empty()),
+            ("GET /api/session/ses_A/permission".into(), 200, empty()),
+        ]));
+        assert!(!waiting_for_user(&native, &record).unwrap());
+        let permissions = fixture(include_bytes!("../../tests/fixtures/opencode2/permissions.json"));
+        let native = Scripted(std::cell::RefCell::new(vec![
+            ("GET /api/session/ses_A/form".into(), 200, empty()),
+            ("GET /api/session/ses_A/permission".into(), 200, permissions),
+        ]));
+        assert!(waiting_for_user(&native, &record).unwrap());
+        let busy = fixture(include_bytes!("../../tests/fixtures/opencode2/active_busy.json"));
+        let record = json!({"conversation_id": "ses_IycejmWY8RpJq1aeBnnIpbaNAt"});
+        let native = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/active".into(),
+            200,
+            busy,
+        )]));
+        assert!(session_active(&native, &record));
     }
     #[test]
-    fn child_turn_requires_the_native_loop_exit_and_keeps_open_turns_unknown() {
-        let child = "ses_ebf9b81dcffe0BQL0Ct6wWuwaX";
-        let text = json!([{"id":"prt_a","sessionID":child,"messageID":"msg_1406139c9002","type":"step-start"},
-            {"id":"prt_b","sessionID":child,"messageID":"msg_1406139c9002","type":"text","text":"Child reply"}]);
-        let done = child_turn(child, &assistant(child, Some(1792081690267), Some("stop"), Value::Null, text.clone()));
-        assert_eq!(done["state"], "finished");
-        assert_eq!(done["kind"], "turn_completed");
-        assert_eq!(done["native_id"], "msg_1406139c9002");
-        // Running in another process, between tool steps, or abandoned.
-        for open in [
-            assistant(child, None, None, Value::Null, text.clone()),
-            assistant(child, Some(1), Some("tool-calls"), Value::Null, text.clone()),
-            assistant(child, Some(1), Some("unknown"), Value::Null, text.clone()),
-            assistant(child, Some(1), None, Value::Null, text.clone()),
-            assistant(child, Some(1), Some("stop"), Value::Null, json!([{"id":"prt_c","type":"tool","tool":"bash","state":{"status":"completed"}}])),
-            json!({"info":{"id":"msg_1406139c9003","sessionID":child,"role":"user","time":{"created":1}},"parts":[]}),
-        ] {
-            assert_eq!(child_turn(child, &open)["state"], "unknown", "{open}");
+    fn only_opencode2_bindings_resume_a_pending_creation() {
+        assert!(resumes_pending(&json!({"service":"opencode2","creation_pending":true})));
+        assert!(!resumes_pending(&json!({"creation_pending":true})));
+        assert!(!resumes_pending(&json!({"service":"opencode1","creation_pending":true})));
+        assert!(!resumes_pending(&json!({"service":"opencode2"})));
+    }
+    type Step = (String, Result<Response>);
+    struct Live {
+        script: std::cell::RefCell<Vec<Step>>,
+        posted: std::cell::RefCell<Vec<Value>>,
+        dir: PathBuf,
+        path: PathBuf,
+    }
+    impl Native for Live {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            let (expected, reply) = self.script.borrow_mut().remove(0);
+            assert_eq!(expected, format!("{method} {path}"));
+            if method == "POST" {
+                let receipt: Value =
+                    serde_json::from_slice(&fs::read(&self.path).unwrap()).unwrap();
+                assert_eq!(receipt["status"], "pending");
+                assert_eq!(receipt["native_message_id"], body.unwrap()["id"]);
+                self.posted.borrow_mut().push(body.unwrap().clone());
+            }
+            reply
         }
-        // Provider-executed and interrupted tool calls do not await a follow-up.
-        let settled = json!([{"id":"prt_d","type":"tool","metadata":{"providerExecuted":true},"state":{"status":"completed"}},
-            {"id":"prt_e","type":"tool","state":{"status":"error","metadata":{"interrupted":true}}}]);
-        assert_eq!(child_turn(child, &assistant(child, Some(1), Some("stop"), Value::Null, settled))["state"], "finished");
-        let aborted = child_turn(child, &assistant(child, Some(1792081883704), None, json!({"name":"MessageAbortedError","data":{"message":"Aborted"}}), text.clone()));
-        assert_eq!(aborted["kind"], "turn_interrupted");
-        assert!(aborted.get("error").is_none());
-        let failed = child_turn(child, &assistant(child, Some(2), None, json!({"name":"APIError","data":{"message":"Fixture provider rejected"}}), text.clone()));
-        assert_eq!(failed["kind"], "turn_failed");
-        assert_eq!(failed["error"], true);
-        assert_eq!(failed["detail"], "Fixture provider rejected");
-        assert_eq!(child_turn(child, &assistant(child, None, None, json!({"name":"APIError"}), text.clone()))["state"], "unknown");
-        // Another session's message never settles this child.
-        assert_eq!(child_turn("ses_other", &assistant(child, Some(1), Some("stop"), Value::Null, text))["state"], "unknown");
+    }
+    fn ok(body: Value) -> Result<Response> {
+        Ok(Response { status: 200, body })
+    }
+    fn status(status: u16, body: Value) -> Result<Response> {
+        Ok(Response { status, body })
+    }
+    fn live(dir: &Path, steps: Vec<(&str, Result<Response>)>) -> Live {
+        Live {
+            script: std::cell::RefCell::new(
+                steps.into_iter().map(|(p, r)| (p.to_owned(), r)).collect(),
+            ),
+            posted: Default::default(),
+            dir: dir.into(),
+            path: dir
+                .join("receipts")
+                .join(format!("{}.json", string(&request(), "request_id"))),
+        }
+    }
+    fn session_record() -> Value {
+        json!({"name":"w","run_id":"r1","conversation_id":"ses_A","cwd":"/x"})
+    }
+    fn request() -> Value {
+        json!({"request_id":"11111111-1111-4111-8111-111111111111","text":"hello"})
+    }
+    fn preflight() -> Vec<(&'static str, Result<Response>)> {
+        vec![
+            ("GET /api/session/ses_A", ok(json!({"data":{"id":"ses_A","location":{"directory":"/x"}}}))),
+            ("GET /api/session/ses_A/form", ok(json!({"data":[]}))),
+            ("GET /api/session/ses_A/permission", ok(json!({"data":[]}))),
+            ("GET /api/session/active", ok(json!({"data":{}}))),
+        ]
+    }
+    fn run(native: &Live, digest: &str) -> Result<Value> {
+        deliver(
+            native,
+            &Ledger(native.dir.clone()),
+            &session_record(),
+            &request(),
+            digest.into(),
+            None,
+        )
     }
     #[test]
-    fn child_membership_is_exact_and_counts_never_claim_active_work() {
-        let record = json!({"conversation_id":"ses_parent"});
-        let row = |id: &str, parent: &str, created: u64| json!({"id":id,"parentID":parent,"title":format!("{id} (@general subagent)"),"agent":"general","model":{"id":"local","providerID":"fixture"},"time":{"created":created,"updated":created+5}});
-        let listed = exact_children(&record, &json!([row("ses_old","ses_parent",1000), row("ses_new","ses_parent",2000)])).unwrap();
-        assert_eq!(listed.iter().map(|r| string(r, "id")).collect::<Vec<_>>(), ["ses_new", "ses_old"]);
-        for contradictory in [
-            json!([row("ses_one","ses_other",1)]),
-            json!([row("ses_parent","ses_parent",1)]),
-            json!([row("ses_one","ses_parent",1), row("ses_one","ses_parent",2)]),
-            json!([row("bad/id","ses_parent",1)]),
+    fn a_message_is_journaled_before_the_post_and_marked_queued_when_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps[3] = ("GET /api/session/active", ok(json!({"data":{"ses_A":{"type":"running"}}})));
+        steps.push(("POST /api/session/ses_A/prompt", ok(json!(null))));
+        let native = live(dir.path(), steps);
+        struct Echo<'a>(&'a Live);
+        impl Native for Echo<'_> {
+            fn raw(&self, m: &str, p: &str, b: Option<&Value>) -> Result<Response> {
+                if m == "POST" {
+                    let _ = self.0.raw(m, p, b)?;
+                    let id = b.unwrap()["id"].clone();
+                    return ok(json!({"data":{"id":id,"sessionID":"ses_A","payload":{"text":"hello"}}}));
+                }
+                self.0.raw(m, p, b)
+            }
+        }
+        let receipt = deliver(
+            &Echo(&native),
+            &Ledger(native.dir.clone()),
+            &session_record(),
+            &request(),
+            "d".into(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(receipt["status"], "submitted");
+        assert_eq!(receipt["queued"], true);
+        assert!(native.script.borrow().is_empty());
+        let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
+        assert_eq!(saved["status"], "submitted");
+    }
+    #[test]
+    fn a_refused_post_is_recorded_and_never_reposted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps.push(("POST /api/session/ses_A/prompt", status(400, json!({"message":"bad"}))));
+        let native = live(dir.path(), steps);
+        let error = run(&native, "d").unwrap_err();
+        assert_eq!(error, "OpenCode refused this message: HTTP 400: bad");
+        let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
+        assert_eq!(saved["status"], "refused");
+        let retry = live(dir.path(), vec![]);
+        assert_eq!(run(&retry, "d").unwrap_err(), error);
+        assert!(retry.posted.borrow().is_empty());
+        let other = live(dir.path(), vec![]);
+        assert!(run(&other, "e").unwrap_err().contains("already used"));
+    }
+    #[test]
+    fn a_mismatched_acknowledgement_is_uncertain_without_a_repost() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps.push((
+            "POST /api/session/ses_A/prompt",
+            ok(json!({"data":{"id":"msg_other","sessionID":"ses_A","payload":{"text":"hello"}}})),
+        ));
+        let native = live(dir.path(), steps);
+        assert_eq!(run(&native, "d").unwrap_err(), MISMATCH);
+        assert_eq!(native.posted.borrow().len(), 1);
+        let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
+        assert_eq!(saved["status"], "pending");
+    }
+    #[test]
+    fn a_transport_error_reconciles_and_a_retry_reuses_the_same_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps.push(("POST /api/session/ses_A/prompt", Err("reset".into())));
+        steps.push(("GET /api/session/ses_A/message/ID", status(500, json!({}))));
+        let native = live(dir.path(), steps);
+        // The message ID is generated inside, so match the path loosely.
+        struct Loose<'a>(&'a Live);
+        impl Native for Loose<'_> {
+            fn raw(&self, m: &str, p: &str, b: Option<&Value>) -> Result<Response> {
+                let p = if p.contains("/message/") { "/api/session/ses_A/message/ID" } else { p };
+                self.0.raw(m, p, b)
+            }
+        }
+        let error = deliver(
+            &Loose(&native),
+            &Ledger(native.dir.clone()),
+            &session_record(),
+            &request(),
+            "d".into(),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("Delivery uncertain"));
+        let first = native.posted.borrow()[0]["id"].as_str().unwrap().to_owned();
+        let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
+        assert_eq!(saved["status"], "pending");
+        assert_eq!(saved["native_message_id"], first);
+        // Same request and digest: reconcile only; the message is now found.
+        let retry = live(
+            dir.path(),
+            vec![
+                ("GET /api/session/ses_A", ok(json!({"data":{"id":"ses_A","location":{"directory":"/x"}}}))),
+                ("GET /api/session/ses_A/message/ID", ok(json!({"data":{"id":first,"type":"user","text":"hello"}}))),
+            ],
+        );
+        let receipt = deliver(
+            &Loose(&retry),
+            &Ledger(retry.dir.clone()),
+            &session_record(),
+            &request(),
+            "d".into(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(receipt["status"], "submitted");
+        assert_eq!(receipt["native_message_id"], first);
+        assert!(retry.posted.borrow().is_empty());
+    }
+    #[test]
+    fn only_a_message_not_found_404_reads_the_inbox() {
+        let record = json!({"conversation_id": "ses_A"});
+        let native = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/ses_A/message/msg_X".into(),
+            404,
+            json!({"_tag": "SessionNotFoundError"}),
+        )]));
+        let dir = tempfile::tempdir().unwrap();
+        assert!(reconcile(
+            &native,
+            &Ledger(dir.path().into()),
+            &record,
+            "msg_X",
+            "hello"
+        )
+        .is_err());
+        assert!(native.0.borrow().is_empty());
+    }
+    /// How the fake answers a DELETE of a queued message.
+    #[derive(Clone, Copy, Default, PartialEq)]
+    enum Deletion {
+        /// Removed, 204.
+        #[default]
+        Removes,
+        /// Removed, but the response is lost.
+        LostAfterRemoving,
+        /// Not removed, HTTP 500.
+        Fails,
+        /// Not removed, HTTP 404.
+        Missing,
+        /// Gone without a trace, HTTP 404.
+        MissingAndGone,
+        /// Delivered by a racing turn first; OpenCode 2.0.32 still answers 204.
+        DeliveredFirst,
+    }
+    /// One OpenCode 2.0.32 session `ses_A` in directory `/x`, modelled on the
+    /// pinned upstream inbox: a prompt ID is deduplicated only against the
+    /// current inbox and delivered messages, so a removed ID is admitted again.
+    #[derive(Default)]
+    struct World {
+        active: bool,
+        down: bool,
+        lose_post: bool,
+        deletion: Deletion,
+        inbox: Vec<Value>,
+        messages: Vec<Value>,
+        posts: usize,
+        deletes: usize,
+        calls: usize,
+    }
+    struct Fake(std::cell::RefCell<World>);
+    impl Native for &Fake {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            let mut w = self.0.borrow_mut();
+            w.calls += 1;
+            if w.down {
+                return Err("connection refused".into());
+            }
+            let reply = |status: u16, body: Value| Ok(Response { status, body });
+            if let Some(id) = path.strip_prefix("/api/session/ses_A/message/") {
+                assert_eq!(method, "GET");
+                return match w.messages.iter().find(|m| m["id"] == id) {
+                    Some(m) => reply(200, json!({ "data": m })),
+                    None => reply(404, json!({"_tag": "MessageNotFoundError"})),
+                };
+            }
+            if let Some(id) = path.strip_prefix("/api/session/ses_A/inbox/") {
+                assert_eq!(method, "DELETE");
+                w.deletes += 1;
+                let id = id.to_owned();
+                let present = w.inbox.iter().any(|i| i["id"] == id.as_str());
+                let remove = |w: &mut World| w.inbox.retain(|i| i["id"] != id.as_str());
+                return match w.deletion {
+                    Deletion::Removes => {
+                        remove(&mut w);
+                        reply(204, Value::Null)
+                    }
+                    Deletion::LostAfterRemoving => {
+                        remove(&mut w);
+                        Err("connection reset".into())
+                    }
+                    Deletion::Fails => reply(500, json!({"message": "busy"})),
+                    Deletion::Missing => reply(404, json!({"_tag": "SessionNotFoundError"})),
+                    Deletion::MissingAndGone => {
+                        remove(&mut w);
+                        reply(404, json!({"_tag": "SessionNotFoundError"}))
+                    }
+                    Deletion::DeliveredFirst => {
+                        if present {
+                            remove(&mut w);
+                            w.messages
+                                .push(json!({"id": id, "type": "user", "text": "hello"}));
+                        }
+                        reply(204, Value::Null)
+                    }
+                };
+            }
+            match (method, path) {
+                ("GET", "/api/session/active") => {
+                    let data = if w.active {
+                        json!({"ses_A": {}})
+                    } else {
+                        json!({})
+                    };
+                    reply(200, json!({ "data": data }))
+                }
+                ("GET", "/api/session/ses_A") => reply(
+                    200,
+                    json!({"data": {"id": "ses_A", "location": {"directory": "/x"}}}),
+                ),
+                ("GET", "/api/session/ses_A/form") | ("GET", "/api/session/ses_A/permission") => {
+                    reply(200, json!({"data": []}))
+                }
+                ("GET", "/api/session/ses_A/inbox") => reply(200, json!({"data": w.inbox.clone()})),
+                ("POST", "/api/session/ses_A/prompt") => {
+                    w.posts += 1;
+                    let body = body.unwrap();
+                    let item = json!({"id": body["id"], "sessionID": "ses_A", "type": "user", "delivery": "queue", "payload": {"text": body["text"]}});
+                    let known = w.inbox.iter().any(|i| i["id"] == body["id"])
+                        || w.messages.iter().any(|m| m["id"] == body["id"]);
+                    if !known {
+                        if w.active {
+                            w.inbox.push(item.clone());
+                        } else {
+                            w.messages.push(
+                                json!({"id": body["id"], "type": "user", "text": body["text"]}),
+                            );
+                        }
+                    }
+                    if w.lose_post {
+                        // The process loses the service right after the POST.
+                        w.down = true;
+                        return Err("connection reset".into());
+                    }
+                    reply(200, json!({ "data": item }))
+                }
+                _ => panic!("unexpected {method} {path}"),
+            }
+        }
+    }
+    impl Fake {
+        fn new() -> Self {
+            Fake(Default::default())
+        }
+        fn w(&self) -> std::cell::RefMut<'_, World> {
+            self.0.borrow_mut()
+        }
+        /// The message `hello` of `request()` was admitted while the session
+        /// was busy, every response after the POST was lost, and the user
+        /// then stopped the session: the receipt is pending, the message
+        /// queued and removable.
+        fn queued_while_pending(dir: &Path) -> (Self, String) {
+            let fake = Fake::new();
+            fake.w().active = true;
+            fake.w().lose_post = true;
+            let error = t_deliver(&fake, dir).unwrap_err();
+            assert_eq!(error, UNCERTAIN_REPLAY);
+            let receipt = t_receipt(dir);
+            assert_eq!(receipt["status"], "pending");
+            let id = receipt["native_message_id"].as_str().unwrap().to_owned();
+            let mut w = fake.w();
+            assert_eq!(w.posts, 1);
+            assert_eq!(w.inbox.len(), 1);
+            w.down = false;
+            w.lose_post = false;
+            w.active = false;
+            drop(w);
+            (fake, id)
+        }
+    }
+    fn t_receipt_path(dir: &Path) -> PathBuf {
+        dir.join("receipts")
+            .join(format!("{}.json", string(&request(), "request_id")))
+    }
+    fn t_receipt(dir: &Path) -> Value {
+        serde_json::from_slice(&fs::read(t_receipt_path(dir)).unwrap()).unwrap()
+    }
+    fn t_deliver(fake: &Fake, dir: &Path) -> Result<Value> {
+        deliver(
+            &fake,
+            &Ledger(dir.into()),
+            &session_record(),
+            &request(),
+            "d".into(),
+            None,
+        )
+    }
+    fn t_remove(fake: &Fake, dir: &Path, id: &str) -> Result<()> {
+        remove_queued_with(&fake, &Ledger(dir.into()), &session_record(), id, || {})
+    }
+    fn t_reconcile(fake: &Fake, dir: &Path, id: &str) -> Result<Delivery> {
+        reconcile(&fake, &Ledger(dir.into()), &session_record(), id, "hello")
+    }
+    fn t_reconcile_receipt(fake: &Fake, dir: &Path, receipt: &mut Value) -> Result<bool> {
+        reconcile_receipt_with(&Ledger(dir.into()), &session_record(), receipt, || Ok(fake))
+    }
+    const T_REMOVED: &str = "Removed from the OpenCode queue before delivery";
+    #[test]
+    fn a_message_removed_while_its_receipt_is_pending_is_never_reposted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        t_remove(&fake, dir.path(), &id).unwrap();
+        assert!(fake.w().inbox.is_empty());
+        // The same request again: a definite non-delivery, never a second POST.
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), T_REMOVED);
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), T_REMOVED);
+        let w = fake.w();
+        assert_eq!((w.posts, w.deletes), (1, 1));
+        assert!(w.inbox.is_empty() && w.messages.is_empty());
+        let receipt = t_receipt(dir.path());
+        assert_eq!(
+            (receipt["status"].as_str(), receipt["reason"].as_str()),
+            (Some("refused"), Some(T_REMOVED))
+        );
+        assert_eq!(receipt["native_message_id"], id);
+    }
+    #[test]
+    fn a_late_reconciliation_after_removal_is_refused_without_contacting_opencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        let mut receipt = t_receipt(dir.path());
+        // A receipt the removal could not find by its message ID.
+        let _ = fs::remove_dir_all(dir.path().join("receipt-index"));
+        t_remove(&fake, dir.path(), &id).unwrap();
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+        let calls = fake.w().calls;
+        assert_eq!(
+            t_reconcile_receipt(&fake, dir.path(), &mut receipt).unwrap_err(),
+            T_REMOVED
+        );
+        assert_eq!(fake.w().calls, calls);
+        assert_eq!(fake.w().posts, 1);
+        assert_eq!(
+            (receipt["status"].as_str(), receipt["reason"].as_str()),
+            (Some("refused"), Some(T_REMOVED))
+        );
+        assert_eq!(t_receipt(dir.path()), receipt);
+    }
+    #[test]
+    fn a_message_in_neither_history_nor_inbox_is_uncertain_and_never_posted() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        assert!(t_reconcile(&fake, dir.path(), "msg_X").is_err());
+        assert_eq!(fake.w().posts, 0);
+        // A journaled request whose POST never reached OpenCode is not sent either.
+        let (fake, _) = Fake::queued_while_pending(dir.path());
+        fake.w().inbox.clear();
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+        assert_eq!(fake.w().posts, 1);
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+    }
+    #[test]
+    fn stale_removal_targets_are_refused_without_a_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let item = |session: &str| json!({"id": "msg_Q", "sessionID": session, "type": "user", "delivery": "queue", "payload": {"text": "hello"}});
+        // Each refusal is clean: no DELETE and no removal record.
+        let refused_untouched = |fake: &Fake| {
+            assert_eq!(t_remove(fake, dir.path(), "msg_Q").unwrap_err(), NOT_QUEUED);
+            assert_eq!(fake.w().deletes, 0);
+            let ledger = Ledger(dir.path().into());
+            assert_eq!(ledger.removal(&session_record(), "msg_Q").unwrap(), None);
+            assert!(!ledger.removals_path().exists());
+        };
+        // Not queued.
+        refused_untouched(&Fake::new());
+        // Already delivered: present in history. Without the history check
+        // before the DELETE this would record an intent and DELETE.
+        let fake = Fake::new();
+        fake.w().inbox.push(item("ses_A"));
+        fake.w()
+            .messages
+            .push(json!({"id": "msg_Q", "type": "user", "text": "hello"}));
+        refused_untouched(&fake);
+        // Listed for another session.
+        let fake = Fake::new();
+        fake.w().inbox.push(item("ses_B"));
+        refused_untouched(&fake);
+        // The session is running.
+        let fake = Fake::new();
+        fake.w().inbox.push(item("ses_A"));
+        fake.w().active = true;
+        refused_untouched(&fake);
+    }
+    /// A scoped Remove for another run or session is refused before any
+    /// native call or removal record.
+    #[test]
+    fn a_removal_for_another_run_or_session_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let fake = Fake::new();
+        fake.w().inbox.push(json!({"id": "msg_Q", "sessionID": "ses_A", "type": "user", "delivery": "queue", "payload": {"text": "hello"}}));
+        // No binding exists under this name, so nothing past the identity
+        // check could succeed either.
+        let name = format!("opencode/p/{}", uuid::Uuid::new_v4());
+        for (run, conversation) in [("r2", "ses_A"), ("r1", "ses_B")] {
+            let scope = session_action::Scope::expecting(&name, run, conversation);
+            let mut record =
+                json!({"name": name, "run_id": "r1", "conversation_id": "ses_A", "cwd": "/x"});
+            let connected = std::cell::Cell::new(false);
+            let error = action_in(
+                &ledger,
+                || {
+                    connected.set(true);
+                    Ok(&fake)
+                },
+                &mut record,
+                "remove_queued",
+                None,
+                Some("msg_Q"),
+                Some(&scope),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "Session identity changed; no replacement session was selected"
+            );
+            assert!(!connected.get());
+            assert!(!scope.was_changing());
+            let w = fake.w();
+            assert_eq!((w.calls, w.deletes, w.inbox.len()), (0, 0, 1));
+            drop(w);
+            assert_eq!(ledger.removal(&session_record(), "msg_Q").unwrap(), None);
+            assert!(!ledger.removals_path().exists());
+        }
+    }
+    #[test]
+    fn a_lost_or_failed_delete_never_allows_a_repost() {
+        for deletion in [Deletion::LostAfterRemoving, Deletion::Fails] {
+            let dir = tempfile::tempdir().unwrap();
+            let (fake, id) = Fake::queued_while_pending(dir.path());
+            fake.w().deletion = deletion;
+            assert!(t_remove(&fake, dir.path(), &id).is_err());
+            assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+            assert_eq!(fake.w().posts, 1);
+            assert_eq!(t_receipt(dir.path())["status"], "pending");
+            assert!(fake.w().messages.is_empty());
+        }
+    }
+    #[test]
+    fn a_missing_delete_is_delivered_only_when_history_shows_it() {
+        // 404, and the message is later delivered: reported delivered.
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        fake.w().deletion = Deletion::Missing;
+        assert_eq!(t_remove(&fake, dir.path(), &id).unwrap_err(), NOT_QUEUED);
+        let mut w = fake.w();
+        w.inbox.clear();
+        w.messages
+            .push(json!({"id": id, "type": "user", "text": "hello"}));
+        drop(w);
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap()["status"], "submitted");
+        assert_eq!(t_receipt(dir.path())["status"], "submitted");
+        // 404, and the message is nowhere: uncertain, never posted again.
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        fake.w().deletion = Deletion::MissingAndGone;
+        assert_eq!(t_remove(&fake, dir.path(), &id).unwrap_err(), NOT_QUEUED);
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+        assert_eq!(fake.w().posts, 1);
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+    }
+    #[test]
+    fn a_204_for_a_message_delivered_meanwhile_is_not_a_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        fake.w().deletion = Deletion::DeliveredFirst;
+        assert_eq!(t_remove(&fake, dir.path(), &id).unwrap_err(), NOT_QUEUED);
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap()["status"], "submitted");
+        assert_eq!(fake.w().posts, 1);
+    }
+    #[test]
+    fn a_crash_between_the_intent_and_the_delete_never_reposts() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        // The intent was written, then the process died before the DELETE.
+        ledger
+            .record_removal(&session_record(), &id, Removal::Intended)
+            .unwrap();
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+        let mut receipt = t_receipt(dir.path());
+        assert!(t_reconcile_receipt(&fake, dir.path(), &mut receipt).is_err());
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+        let w = fake.w();
+        assert_eq!((w.posts, w.inbox.len()), (1, 1));
+        drop(w);
+        // Removing it again confirms the removal.
+        t_remove(&fake, dir.path(), &id).unwrap();
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), T_REMOVED);
+        assert_eq!(fake.w().posts, 1);
+        assert!(fake.w().messages.is_empty());
+    }
+    #[test]
+    fn a_message_indexed_for_another_session_is_not_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        atomic(
+            &ledger.index("msg_Q"),
+            &json!({"request_id": "22222222-2222-4222-8222-222222222222", "conversation_id": "ses_B"}).to_string(),
+        )
+        .unwrap();
+        let fake = Fake::new();
+        fake.w().inbox.push(json!({"id": "msg_Q", "sessionID": "ses_A", "type": "user", "payload": {"text": "hello"}}));
+        assert_eq!(
+            t_remove(&fake, dir.path(), "msg_Q").unwrap_err(),
+            NOT_QUEUED
+        );
+        assert_eq!(fake.w().deletes, 0);
+        assert_eq!(ledger.removal(&session_record(), "msg_Q").unwrap(), None);
+    }
+    #[test]
+    fn removal_records_are_bounded_and_unreadable_ones_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let entries: Vec<Value> = (0..REMOVAL_LIMIT)
+            .map(|n| json!({"conversation_id": "ses_A", "message_id": format!("msg_{n}"), "state": "removed"}))
+            .collect();
+        atomic(
+            &ledger.removals_path(),
+            &json!({ "removals": entries }).to_string(),
+        )
+        .unwrap();
+        ledger
+            .record_removal(&session_record(), "msg_new", Removal::Intended)
+            .unwrap();
+        let kept = ledger.removals().unwrap();
+        assert_eq!(kept.len(), REMOVAL_LIMIT);
+        assert_eq!(kept[0]["message_id"], "msg_1");
+        assert_eq!(
+            ledger.removal(&session_record(), "msg_new").unwrap(),
+            Some(Removal::Intended)
+        );
+        // Unreadable records never read as "no removal" and block a removal.
+        fs::write(ledger.removals_path(), b"{\"removals\":").unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        assert!(t_reconcile(&fake, dir.path(), &id).is_err());
+        assert!(t_remove(&fake, dir.path(), &id).is_err());
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+        let w = fake.w();
+        assert_eq!((w.posts, w.deletes), (1, 0));
+    }
+    fn opencode2(name: &str) -> Value {
+        let path = format!(
+            "{}/tests/fixtures/opencode2/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+    fn observed(messages: &str, active: bool, inbox: Value) -> Observed {
+        let mut page = opencode2(messages)["data"].as_array().unwrap().clone();
+        page.reverse();
+        Observed {
+            session: json!({"id":"ses_A","model":{"id":"local","providerID":"fixture","variant":"default"},"time":{"updated":5000}}),
+            active,
+            page: history::Page {
+                messages: page,
+                truncated: false,
+            },
+            inbox,
+            forms: json!([]),
+            permissions: json!([]),
+        }
+    }
+    fn status_record(id: &str) -> Value {
+        json!({"name":"opencode/project/one","run_id":"run","conversation_id":id,"cwd":"/x"})
+    }
+    fn no_inbox() -> Value {
+        json!({"data": []})
+    }
+    #[test]
+    fn an_idle_session_is_ready_for_messages_and_settings() {
+        let value = normalize(
+            &status_record("ses_A"),
+            Some(&observed("messages", false, no_inbox())),
+        );
+        assert_eq!(value["phase"], "idle");
+        assert_eq!(value["activity"], "idle");
+        assert_eq!(value["activity_summary"], "Ready");
+        assert_eq!(value["state"], "running");
+        assert_eq!(value["send_available"], true);
+        assert_eq!(value["settings_change_supported"], true);
+        assert_eq!(value["interrupt_supported"], false);
+        assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
+        assert_eq!(value["settings_model"], "fixture/local");
+        assert!(value["effort"].is_null());
+        assert_eq!(value["events"].as_array().unwrap().len(), 3);
+        assert_eq!(value["reply_id"], "msg_14bb2d63e001NhfRTKy4frROM8");
+        assert_eq!(value["activity_detail"], "Native OpenCode reply");
+        assert_eq!(value["prompt"], "hello");
+        assert_eq!(value["turn_started"], 1792271373.881);
+        assert_eq!(value["history_truncated"], false);
+        for key in [
+            "terminal_supported",
+            "attachments_supported",
+            "native_ui_available",
+            "compact_context_supported",
+        ] {
+            assert_eq!(value[key], false, "{key}");
+        }
+        assert_eq!(
+            value["action_reasons"]["pause"],
+            "OpenCode sessions have no separate process to pause"
+        );
+        assert_eq!(
+            value["action_reasons"]["fork"],
+            "OpenCode fork arrives in a later update"
+        );
+        assert_eq!(
+            value["action_reasons"]["terminate"],
+            "Use Stop for this OpenCode session"
+        );
+        assert_eq!(
+            value["compact_context_reason"],
+            "OpenCode compaction arrives in a later update"
+        );
+        assert!(value.get("attention_id").is_none());
+    }
+    #[test]
+    fn a_running_session_is_working_and_still_accepts_queued_messages() {
+        let inbox = opencode2("inbox_busy");
+        let value = normalize(
+            &status_record("ses_A"),
+            Some(&observed("messages", true, inbox)),
+        );
+        assert_eq!(value["phase"], "working");
+        assert_eq!(value["activity"], "busy");
+        assert_eq!(value["activity_summary"], "Working");
+        assert_eq!(value["send_available"], true);
+        assert_eq!(value["interrupt_supported"], true);
+        assert_eq!(value["settings_change_supported"], false);
+        let events = value["events"].as_array().unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[3]["delivery_state"], "queued");
+        assert_eq!(events[3]["detail"], "queued later");
+        assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
+        // Queued text is not the prompt the agent is working on.
+        assert_eq!(value["prompt"], "hello");
+    }
+    #[test]
+    fn after_stop_queued_messages_are_not_delivered_and_removable() {
+        let value = normalize(
+            &status_record("ses_A"),
+            Some(&observed("messages", false, opencode2("inbox_busy"))),
+        );
+        assert_eq!(value["phase"], "idle");
+        assert_eq!(value["events"][3]["delivery_state"], "not_delivered");
+        assert_eq!(
+            value["allowed_actions"],
+            json!(["rename", "forget", "remove_queued"])
+        );
+    }
+    #[test]
+    fn a_message_admitted_between_reads_is_shown_once() {
+        let inbox = json!({"data":[{"id":"msg_6kezDqwZEklnh8eFGVy3UbP6iX","type":"user","payload":{"text":"hello"},"time":{"created":1}}]});
+        let value = normalize(
+            &status_record("ses_A"),
+            Some(&observed("messages", false, inbox)),
+        );
+        assert_eq!(value["events"].as_array().unwrap().len(), 3);
+        assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
+    }
+    #[test]
+    fn replies_route_to_the_form_or_permission_with_validated_bodies() {
+        let record = json!({"run_id":"run","conversation_id":"ses_A"});
+        let form = json!({"id":"frm_1","sessionID":"ses_A","title":"Q","fields":[{"key":"q0","title":"C","type":"string"}]});
+        let card = forms::cards(&record, &json!([form]), &json!([])).remove(0);
+        let ask = [json!({"question_id":"q0","selected_option_ids":[],"text":"hi"})];
+        assert_eq!(
+            reply_for(&card, &form, &ask).unwrap(),
+            (
+                "/form/frm_1/reply".to_owned(),
+                json!({"answer":{"q0":"hi"}})
+            )
+        );
+        let permission =
+            json!({"id":"per_1","sessionID":"ses_A","action":"shell","resources":["x"]});
+        let card = forms::cards(&record, &json!([]), &json!([permission])).remove(0);
+        let ok = [json!({"question_id":"permission","selected_option_ids":["reject"],"text":""})];
+        assert_eq!(
+            reply_for(&card, &permission, &ok).unwrap(),
+            (
+                "/permission/per_1/reply".to_owned(),
+                json!({"decision":"reject"})
+            )
+        );
+        assert!(reply_for(&card, &permission, &ask).is_err());
+    }
+    struct Answering {
+        forms: std::cell::RefCell<Value>,
+        reply: Result<Response>,
+        posted: std::cell::RefCell<Vec<(String, Value)>>,
+    }
+    impl Native for Answering {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            if method == "GET" {
+                assert_eq!(path, "/api/session/ses_A/form");
+                return ok(json!({"data": self.forms.borrow().clone()}));
+            }
+            self.posted.borrow_mut().push((path.to_owned(), body.unwrap().clone()));
+            self.reply.clone()
+        }
+    }
+    fn answering(reply: Result<Response>) -> (Answering, Value, Value) {
+        let form = json!({"id":"frm_1","sessionID":"ses_A","title":"Q","fields":[{"key":"q0","title":"C","type":"string"}]});
+        let card = forms::cards(&session_record(), &json!([form.clone()]), &json!([])).remove(0);
+        let request = json!({"request_id":"r1","question_id":"frm_1","expected_question_hash":card["question_hash"],
+            "answers":[{"question_id":"q0","selected_option_ids":[],"text":"hi"}]});
+        let native = Answering { forms: json!([form]).into(), reply, posted: Default::default() };
+        (native, card, request)
+    }
+    fn journal(path: &Path) -> Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+    #[test]
+    fn a_4xx_answer_is_refused_once_and_never_retried() {
+        for tag in ["FormAlreadySettledError", "FormNotFoundError"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("r1.json");
+            let (native, card, request) = answering(status(409, json!({"_tag":tag,"message":"gone"})));
+            let record = session_record();
+            assert_eq!(answer_with(&native, &record, &request, &card, &path).unwrap_err(), CHANGED);
+            assert_eq!(native.posted.borrow().len(), 1);
+            assert_eq!(native.posted.borrow()[0].0, "/api/session/ses_A/form/frm_1/reply");
+            assert_eq!(journal(&path)["status"], "refused");
+            assert!(answer_with(&native, &record, &request, &card, &path).is_err());
+            assert_eq!(native.posted.borrow().len(), 1);
+        }
+    }
+    #[test]
+    fn an_invalid_answer_shows_the_clipped_server_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r1.json");
+        let message = format!("bad\u{7}{}", "y".repeat(500));
+        let (native, card, request) =
+            answering(status(400, json!({"_tag":"FormInvalidAnswerError","message":message})));
+        let error = answer_with(&native, &session_record(), &request, &card, &path).unwrap_err();
+        assert_eq!(error, format!("OpenCode rejected this answer: bad{}", "y".repeat(197)));
+        assert_eq!(journal(&path)["status"], "refused");
+    }
+    #[test]
+    fn a_changed_native_request_is_not_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r1.json");
+        let (native, card, request) = answering(status(204, json!({})));
+        native.forms.borrow_mut()[0]["title"] = json!("Changed");
+        assert_eq!(answer_with(&native, &session_record(), &request, &card, &path).unwrap_err(), CHANGED);
+        assert!(native.posted.borrow().is_empty());
+        assert!(!path.exists());
+        *native.forms.borrow_mut() = json!([]);
+        assert_eq!(answer_with(&native, &session_record(), &request, &card, &path).unwrap_err(), CHANGED);
+        assert!(native.posted.borrow().is_empty());
+    }
+    #[test]
+    fn an_unknown_delivery_stays_pending_and_blocks_a_replay() {
+        for reply in [status(503, json!({"message":"down\u{7}"})), Err("reset".to_owned())] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("r1.json");
+            let (native, card, request) = answering(reply);
+            let record = session_record();
+            assert!(answer_with(&native, &record, &request, &card, &path).is_err());
+            assert_eq!(journal(&path)["status"], "pending");
+            assert!(answer_with(&native, &record, &request, &card, &path)
+                .unwrap_err()
+                .contains("already attempted"));
+            assert_eq!(native.posted.borrow().len(), 1);
+        }
+    }
+    #[test]
+    fn an_accepted_answer_is_journaled_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r1.json");
+        let (native, card, request) = answering(status(204, json!({})));
+        let receipt = answer_with(&native, &session_record(), &request, &card, &path).unwrap();
+        assert_eq!(receipt["status"], "answered");
+        assert_eq!(native.posted.borrow()[0].1, json!({"answer":{"q0":"hi"}}));
+    }
+    #[test]
+    fn pending_forms_or_permissions_need_attention_before_work() {
+        let forms = opencode2("forms_question");
+        let id = forms["data"][0]["sessionID"].as_str().unwrap();
+        let mut seen = observed("messages_question", true, no_inbox());
+        seen.forms = forms["data"].clone();
+        let value = normalize(&status_record(id), Some(&seen));
+        assert_eq!(value["phase"], "input");
+        assert_eq!(value["activity"], "attention");
+        assert_eq!(value["activity_summary"], "Needs attention");
+        assert_eq!(value["send_available"], false);
+        assert_eq!(value["settings_change_supported"], false);
+        assert_eq!(value["interrupt_supported"], true);
+        assert_eq!(
+            value["attention_id"],
+            "opencode_question:frm_14bb2df2500101YAecuyKBa9qA"
+        );
+        let permissions = opencode2("permissions");
+        let id = permissions["data"][0]["sessionID"].as_str().unwrap();
+        let mut seen = observed("messages", false, no_inbox());
+        seen.permissions = permissions["data"].clone();
+        let value = normalize(&status_record(id), Some(&seen));
+        assert_eq!(value["phase"], "input");
+        assert_eq!(value["pending_questions"][0]["kind"], "opencode_permission");
+        // Another session's request never needs this session's attention.
+        let value = normalize(&status_record("ses_A"), Some(&seen));
+        assert_eq!(value["phase"], "idle");
+    }
+    #[test]
+    fn a_failed_turn_is_a_provider_error_until_work_resumes() {
+        let record = status_record("ses_A");
+        let value = normalize(
+            &record,
+            Some(&observed("messages_error", false, no_inbox())),
+        );
+        assert_eq!(value["phase"], "error");
+        assert_eq!(value["activity"], "attention");
+        assert_eq!(
+            value["provider_error"]["message_id"],
+            "opencode-error-msg_14bb546e7001QR5FwtWF0VburA"
+        );
+        assert_eq!(value["provider_error"]["at"], 1792271533.799);
+        assert_eq!(value["last_error"], "Fixture provider rejected");
+        let busy = normalize(&record, Some(&observed("messages_error", true, no_inbox())));
+        assert_eq!(busy["phase"], "working");
+        assert!(busy.get("provider_error").is_none());
+    }
+    #[test]
+    fn an_unreadable_service_is_unknown_and_allows_only_forget() {
+        let record = status_record("ses_A");
+        let value = unavailable(&record, "OpenCode is not running on fixture".into());
+        assert_eq!(value["state"], "unknown");
+        assert_eq!(value["phase"], "unknown");
+        assert_eq!(value["activity"], "unknown");
+        assert_eq!(value["send_available"], false);
+        assert_eq!(value["interrupt_supported"], false);
+        assert_eq!(value["allowed_actions"], json!(["forget"]));
+        assert_eq!(value["inspection_unavailable"], true);
+        assert_eq!(
+            value["inspection_reason"],
+            "OpenCode is not running on fixture"
+        );
+        assert_eq!(
+            value["activity_detail"],
+            "OpenCode is not running on fixture"
+        );
+        let legacy = legacy_row(&record);
+        assert_eq!(legacy["state"], "stopped");
+        assert_eq!(legacy["allowed_actions"], json!(["forget"]));
+        assert!(legacy.get("inspection_unavailable").is_none());
+        assert_eq!(legacy["activity_detail"], legacy["inspection_reason"]);
+        // Without a reading, clients keep the transcript they already show.
+        for row in [&value, &legacy] {
+            assert!(row.get("events").is_none());
+            assert!(row.get("replace_events").is_none());
+        }
+    }
+    #[test]
+    fn a_streaming_reply_is_shown_but_not_yet_the_session_reply() {
+        let mut seen = observed("messages", true, no_inbox());
+        seen.page.messages.truncate(2);
+        seen.page.messages[1]["time"]
+            .as_object_mut()
+            .unwrap()
+            .remove("completed");
+        let value = normalize(&status_record("ses_A"), Some(&seen));
+        assert_eq!(value["events"][1]["detail"], "Native OpenCode reply");
+        assert!(value["reply_id"].is_null());
+        assert!(value["activity_detail"].is_null());
+    }
+    #[test]
+    fn effort_is_the_session_variant_and_truncation_is_reported() {
+        let mut seen = observed("messages", false, no_inbox());
+        seen.session["model"]["variant"] = json!("high");
+        seen.page.truncated = true;
+        let value = normalize(&status_record("ses_A"), Some(&seen));
+        assert_eq!(value["effort"], "high");
+        assert_eq!(value["history_truncated"], true);
+    }
+    #[test]
+    fn one_inspection_reads_each_route_once_and_the_activity_map_is_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "ses_IycejmWY8RpJq1aeBnnIpbaNAt";
+        let record = status_record(id);
+        let session = json!({"data":{"id":id,"location":{"directory":"/x"},"model":{"id":"local","providerID":"fixture"}}});
+        let messages = opencode2("messages");
+        let next = messages["cursor"]["next"].as_str().unwrap().to_owned();
+        let native = Scripted(std::cell::RefCell::new(vec![
+            (format!("GET /api/session/{id}"), 200, session.clone()),
+            (
+                format!("GET /api/session/{id}/form"),
+                200,
+                json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/permission"),
+                200,
+                json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/inbox"),
+                200,
+                opencode2("inbox_busy"),
+            ),
+            (
+                format!("GET /api/session/{id}/message?limit=100&order=desc"),
+                200,
+                messages,
+            ),
+            (
+                format!("GET /api/session/{id}/message?limit=100&cursor={next}"),
+                200,
+                json!({"data": [], "cursor": {"next": null}}),
+            ),
+        ]));
+        let active = opencode2("active_busy")["data"].clone();
+        let cache = dir.path().join("history.json");
+        let seen = observe(&native, &record, &active, || {
+            history::fetch_at(&native, &record, &cache)
+        })
+        .unwrap();
+        assert!(native.0.borrow().is_empty());
+        assert!(seen.active);
+        assert_eq!(seen.page.messages.len(), 3);
+        assert_eq!(normalize(&record, Some(&seen))["phase"], "working");
+        // The next poll reuses the cached history after one page.
+        let native = Scripted(std::cell::RefCell::new(vec![
+            (format!("GET /api/session/{id}"), 200, session),
+            (
+                format!("GET /api/session/{id}/form"),
+                200,
+                json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/permission"),
+                200,
+                json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/inbox"),
+                200,
+                json!({"data": []}),
+            ),
+            (
+                format!("GET /api/session/{id}/message?limit=100&order=desc"),
+                200,
+                opencode2("messages"),
+            ),
+        ]));
+        let seen = observe(&native, &record, &json!({}), || {
+            history::fetch_at(&native, &record, &cache)
+        })
+        .unwrap();
+        assert!(native.0.borrow().is_empty());
+        assert!(!seen.active);
+        assert_eq!(seen.page.messages.len(), 3);
+    }
+    #[test]
+    fn a_moved_session_or_invalid_answers_fail_the_inspection() {
+        let record = status_record("ses_A");
+        let moved = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/ses_A".into(),
+            200,
+            json!({"data":{"id":"ses_A","location":{"directory":"/elsewhere"}}}),
+        )]));
+        let none = || -> Result<history::Page> { panic!("no history read") };
+        assert!(observe(&moved, &record, &json!({}), none).is_err());
+        let invalid = Scripted(std::cell::RefCell::new(vec![
+            (
+                "GET /api/session/ses_A".into(),
+                200,
+                json!({"data":{"id":"ses_A","location":{"directory":"/x"}}}),
+            ),
+            (
+                "GET /api/session/ses_A/form".into(),
+                200,
+                json!({"data": {}}),
+            ),
+        ]));
+        assert!(observe(&invalid, &record, &json!({}), none).is_err());
+        let refused = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/session/active".into(),
+            500,
+            json!({"message": "busy"}),
+        )]));
+        assert_eq!(
+            active_sessions(&refused).unwrap_err(),
+            "OpenCode HTTP 500: busy"
+        );
+    }
+
+    /// Scripted answers that also record every request body.
+    struct Seen {
+        script: std::cell::RefCell<Vec<(String, u16, Value)>>,
+        bodies: std::cell::RefCell<Vec<(String, Option<Value>)>>,
+    }
+    impl Native for Seen {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            let (expected, status, reply) = self.script.borrow_mut().remove(0);
+            assert_eq!(expected, format!("{method} {path}"));
+            self.bodies
+                .borrow_mut()
+                .push((expected, body.cloned()));
+            Ok(Response { status, body: reply })
+        }
+    }
+    fn seen(steps: Vec<(&str, u16, Value)>) -> Seen {
+        Seen {
+            script: std::cell::RefCell::new(
+                steps.into_iter().map(|(p, s, b)| (p.to_owned(), s, b)).collect(),
+            ),
+            bodies: Default::default(),
+        }
+    }
+    fn bound() -> Value {
+        json!({"name":"opencode/p/t","conversation_id":"ses_A","cwd":"/x"})
+    }
+    fn session_with(model: Value, title: &str) -> Value {
+        json!({"data":{"id":"ses_A","location":{"directory":"/x"},"model":model,"title":title}})
+    }
+    #[test]
+    fn settings_validate_effort_against_the_model_variants() {
+        let rows = catalog::project(&fixture(include_bytes!(
+            "../../tests/fixtures/opencode2/models.json"
+        )));
+        assert_eq!(
+            catalog::model_ref(&rows, "fixture/local", "high").unwrap(),
+            json!({"providerID": "fixture", "id": "local", "variant": "high"})
+        );
+        assert_eq!(
+            catalog::model_ref(&rows, "fixture/local", "").unwrap(),
+            json!({"providerID": "fixture", "id": "local"})
+        );
+        assert!(catalog::model_ref(&rows, "fixture/local", "ultra").is_err());
+        assert!(catalog::model_ref(&rows, "fixture/missing", "").is_err());
+    }
+    #[test]
+    fn remove_queued_requires_an_exact_message_id() {
+        assert!(queued_id(&json!({"message_id": "msg_gVmstesSuU81H2vTHdmxp65tNI"})).is_ok());
+        assert!(queued_id(&json!({"message_id": "../x"})).is_err());
+        assert!(queued_id(&json!({})).is_err());
+    }
+    #[test]
+    fn interrupt_succeeds_when_acknowledged_or_already_stopped() {
+        let ok = seen(vec![(
+            "POST /api/session/ses_A/interrupt",
+            200,
+            json!({"interrupted": true}),
+        )]);
+        interrupt_with(&ok, &bound()).unwrap();
+        let idle = seen(vec![
+            ("POST /api/session/ses_A/interrupt", 200, json!({"interrupted": false})),
+            ("GET /api/session/active", 200, json!({"data": {}})),
+        ]);
+        interrupt_with(&idle, &bound()).unwrap();
+        let running = seen(vec![
+            ("POST /api/session/ses_A/interrupt", 200, json!({"interrupted": false})),
+            ("GET /api/session/active", 200, json!({"data": {"ses_A": {}}})),
+        ]);
+        assert!(interrupt_with(&running, &bound()).is_err());
+        let unknown = seen(vec![
+            ("POST /api/session/ses_A/interrupt", 500, json!({"message": "down"})),
+            ("GET /api/session/active", 500, json!({"message": "down"})),
+        ]);
+        assert!(interrupt_with(&unknown, &bound()).is_err());
+    }
+    #[test]
+    fn a_queued_message_is_removed_only_while_stopped_and_still_queued() {
+        let inbox = json!({"data":[{"id":"msg_A","sessionID":"ses_A","type":"user","payload":{"text":"x"}}]});
+        let unknown = json!({"_tag": "MessageNotFoundError"});
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let ok = seen(vec![
+            ("GET /api/session/ses_A/inbox", 200, inbox.clone()),
+            ("GET /api/session/active", 200, json!({"data": {}})),
+            ("GET /api/session/ses_A/message/msg_A", 404, unknown.clone()),
+            ("DELETE /api/session/ses_A/inbox/msg_A", 204, Value::Null),
+            ("GET /api/session/ses_A/inbox", 200, json!({"data": []})),
+            ("GET /api/session/ses_A/message/msg_A", 404, unknown.clone()),
+        ]);
+        let calls = std::cell::Cell::new(0);
+        remove_queued_with(&ok, &ledger, &bound(), "msg_A", || {
+            // The intent is durable before the DELETE.
+            assert_eq!(
+                ledger.removal(&bound(), "msg_A").unwrap(),
+                Some(Removal::Intended)
+            );
+            calls.set(calls.get() + 1)
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert!(ok.script.borrow().is_empty());
+        assert_eq!(
+            ledger.removal(&bound(), "msg_A").unwrap(),
+            Some(Removal::Removed)
+        );
+        // Removal records are per session.
+        assert_eq!(
+            ledger
+                .removal(&json!({"conversation_id": "ses_B"}), "msg_A")
+                .unwrap(),
+            None
+        );
+        let gone = seen(vec![(
+            "GET /api/session/ses_A/inbox",
+            200,
             json!({"data":[]}),
-        ] {
-            assert!(exact_children(&record, &contradictory).is_err(), "{contradictory}");
-        }
-        let mut parent = json!({"phase":"working","activity":"busy"});
-        let finished = json!({"state":"finished","kind":"turn_failed","at":3.0,"native_id":"msg_x","detail":"failed","error":true});
-        summarize_children(&mut parent, &listed, &[child_unknown("open"), finished]);
-        // A working parent never makes its children working.
-        assert_eq!(parent["subagents"]["ses_new"]["state"], "unknown");
-        assert_eq!(parent["subagents"]["ses_new"]["detail"], "open");
-        assert_eq!(parent["subagents"]["ses_old"]["state"], "finished");
-        assert_eq!(parent["subagents"]["ses_old"]["display_state"], "error");
-        assert_eq!(parent["subagents"]["ses_old"]["tracking_evidence"]["native_id"], "msg_x");
-        assert_eq!(parent["subagents"]["ses_old"]["model"], "fixture/local");
-        assert_eq!(parent["subagent_active_count"], 0);
-        assert_eq!(parent["subagent_completed_count"], 1);
-        assert_eq!(parent["subagent_unknown_count"], 1);
-        assert_eq!(parent["subagent_total_count"], 2);
-        assert_eq!(parent["subagent_counts_complete"], false);
-        assert_eq!(parent["phase"], "working");
-        let mut idle = json!({});
-        summarize_children(&mut idle, &[], &[]);
-        assert_eq!(idle["subagent_counts_complete"], true);
-        assert_eq!(idle["subagent_total_count"], 0);
+        )]);
+        assert_eq!(
+            remove_queued_with(&gone, &ledger, &bound(), "msg_A", || panic!("no change"))
+                .unwrap_err(),
+            NOT_QUEUED
+        );
+        let active = seen(vec![
+            ("GET /api/session/ses_A/inbox", 200, inbox.clone()),
+            (
+                "GET /api/session/active",
+                200,
+                json!({"data": {"ses_A": {}}}),
+            ),
+        ]);
+        assert_eq!(
+            remove_queued_with(&active, &ledger, &bound(), "msg_A", || panic!("no change"))
+                .unwrap_err(),
+            NOT_QUEUED
+        );
+        // History that cannot be read is not "never delivered".
+        let unread = seen(vec![
+            ("GET /api/session/ses_A/inbox", 200, inbox.clone()),
+            ("GET /api/session/active", 200, json!({"data": {}})),
+            (
+                "GET /api/session/ses_A/message/msg_A",
+                500,
+                json!({"message": "down"}),
+            ),
+        ]);
+        let fresh = Ledger(dir.path().join("unread"));
+        assert_eq!(
+            remove_queued_with(&unread, &fresh, &bound(), "msg_A", || panic!("no change"))
+                .unwrap_err(),
+            "OpenCode could not confirm this message is still queued"
+        );
+        // It reached the history read, and nothing was recorded or deleted.
+        assert!(unread.script.borrow().is_empty());
+        assert_eq!(fresh.removal(&bound(), "msg_A").unwrap(), None);
+        assert!(!fresh.removals_path().exists());
+        // A 204 whose message is still listed is not a confirmed removal.
+        let listed = seen(vec![
+            ("GET /api/session/ses_A/inbox", 200, inbox.clone()),
+            ("GET /api/session/active", 200, json!({"data": {}})),
+            ("GET /api/session/ses_A/message/msg_A", 404, unknown.clone()),
+            ("DELETE /api/session/ses_A/inbox/msg_A", 204, Value::Null),
+            ("GET /api/session/ses_A/inbox", 200, inbox),
+        ]);
+        let other = Ledger(dir.path().join("other"));
+        assert_eq!(
+            remove_queued_with(&listed, &other, &bound(), "msg_A", || {}).unwrap_err(),
+            REMOVAL_UNCONFIRMED
+        );
+        assert_eq!(
+            other.removal(&bound(), "msg_A").unwrap(),
+            Some(Removal::Intended)
+        );
     }
     #[test]
-    fn child_history_is_bound_to_its_own_session_and_messages() {
-        let child = "ses_child";
-        let user = json!({"info":{"id":"msg_1","sessionID":child,"role":"user","time":{"created":1000}},
-            "parts":[{"id":"prt_1","sessionID":child,"messageID":"msg_1","type":"text","text":"literal\\\nwork"},
-                     {"id":"prt_2","sessionID":child,"messageID":"msg_1","type":"text","text":"hidden","synthetic":true}]});
-        let reply = json!({"info":{"id":"msg_2","sessionID":child,"role":"assistant","time":{"created":2000,"completed":4000},"finish":"stop"},
-            "parts":[{"id":"prt_3","sessionID":child,"messageID":"msg_2","type":"tool","tool":"bash","state":{"status":"completed","title":"Print","input":{"command":"printf x"},"output":"x","time":{"end":3000}}},
-                     {"id":"prt_4","sessionID":child,"messageID":"msg_2","type":"text","text":"Child reply","time":{"end":3500}}]});
-        let events = child_events(child, &[user.clone(), reply.clone()]).unwrap();
-        let kinds = events.iter().map(|e| string(e, "type").to_owned()).collect::<Vec<_>>();
-        assert_eq!(kinds, ["UserPromptSubmit", "PreToolUse", "PostToolUse", "AgentMessage", "Stop"]);
-        assert_eq!(events[0]["detail"], "literal\\\nwork");
-        assert_eq!(events[2]["detail"], "x");
-        assert_eq!(events[3]["reply_id"], "msg_2");
-        assert_eq!(events[3]["message_id"], "prt_4");
-        assert_eq!(events[3]["at"], 3.5);
-        assert!(events.iter().all(|e| e["agent_id"] == child && e["source"] == "opencode_native"));
-        let mut foreign = reply.clone();
-        foreign["parts"][1]["sessionID"] = json!("ses_other");
-        assert!(child_events(child, &[user.clone(), foreign]).is_err());
-        let mut moved = reply;
-        moved["info"]["sessionID"] = json!("ses_other");
-        assert!(child_events(child, &[user, moved]).is_err());
+    fn a_model_variant_is_sent_and_verified() {
+        let model = json!({"providerID":"fixture","id":"local","variant":"high"});
+        let ok = seen(vec![
+            ("POST /api/session/ses_A/model", 204, Value::Null),
+            ("GET /api/session/ses_A", 200, session_with(model.clone(), "t")),
+        ]);
+        change_model(&ok, &bound(), &model).unwrap();
+        assert_eq!(ok.bodies.borrow()[0].1, Some(json!({"model": model})));
+        let wrong = seen(vec![
+            ("POST /api/session/ses_A/model", 204, Value::Null),
+            (
+                "GET /api/session/ses_A",
+                200,
+                session_with(json!({"providerID":"fixture","id":"local","variant":"low"}), "t"),
+            ),
+        ]);
+        assert_eq!(
+            change_model(&wrong, &bound(), &model).unwrap_err(),
+            "Native OpenCode model change was not confirmed; inspect before retrying"
+        );
+    }
+    #[test]
+    fn the_default_effort_sends_no_variant_and_accepts_default() {
+        let model = json!({"providerID":"fixture","id":"local"});
+        let ok = seen(vec![
+            ("POST /api/session/ses_A/model", 204, Value::Null),
+            (
+                "GET /api/session/ses_A",
+                200,
+                session_with(json!({"providerID":"fixture","id":"local","variant":"default"}), "t"),
+            ),
+        ]);
+        change_model(&ok, &bound(), &model).unwrap();
+        assert_eq!(ok.bodies.borrow()[0].1, Some(json!({"model": model})));
+        let other = seen(vec![
+            ("POST /api/session/ses_A/model", 204, Value::Null),
+            (
+                "GET /api/session/ses_A",
+                200,
+                session_with(json!({"providerID":"fixture","id":"other"}), "t"),
+            ),
+        ]);
+        assert!(change_model(&other, &bound(), &model).is_err());
+    }
+    #[test]
+    fn rename_sends_only_the_title_and_verifies_it() {
+        let ok = seen(vec![
+            ("PATCH /api/session/ses_A", 204, Value::Null),
+            ("GET /api/session/ses_A", 200, session_with(json!({}), "new")),
+        ]);
+        change_title(&ok, &bound(), "new").unwrap();
+        assert_eq!(ok.bodies.borrow()[0].1, Some(json!({"title": "new"})));
+        let stale = seen(vec![
+            ("PATCH /api/session/ses_A", 204, Value::Null),
+            ("GET /api/session/ses_A", 200, session_with(json!({}), "old")),
+        ]);
+        assert!(change_title(&stale, &bound(), "new").is_err());
+    }
+    #[test]
+    fn pause_and_resume_explain_that_there_is_no_process() {
+        let mut record = bound();
+        for kind in ["pause", "resume"] {
+            assert_eq!(
+                action(&mut record, kind, None, None, None).unwrap_err(),
+                NO_PROCESS
+            );
+        }
     }
 }

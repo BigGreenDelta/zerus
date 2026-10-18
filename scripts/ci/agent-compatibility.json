@@ -40,6 +40,20 @@
       "integrity": "sha512-g2aYBzYM5YTDio0ulAoGIGgtGRMa08WAecer4wuOUrKPwVPRfyRdmoZI01BNS8jF9yupDmQycBMuBcVui/VGNw=="
     }
   ],
+  "opencode": [
+    {
+      "version": "2.0.32",
+      "target": "linux-x64-baseline",
+      "url": "https://registry.npmjs.org/@opencode/cli-linux-x64-baseline/-/cli-linux-x64-baseline-2.0.32.tgz",
+      "integrity": "sha512-NrB4iglJb7vGZWJ6B0qVH1EMHhWBZ4ADsAG9W0xLanzgxJ6eLEEsGBvxRX0cm/KPag5E/N0yZGsDVDZYcnz/OQ=="
+    },
+    {
+      "version": "2.0.32",
+      "target": "darwin-arm64",
+      "url": "https://registry.npmjs.org/@opencode/cli-darwin-arm64/-/cli-darwin-arm64-2.0.32.tgz",
+      "integrity": "sha512-wASwXBsWaOAYcZrh4ZLl4oaVxPCUAGVb7zZvXBBF8TjWE4uWgY0D2tj6gn80JfcO3b/s9woM6dP/gKqYKK2EdQ=="
+    }
+  ],
   "upstream": [
     {
       "name": "Codex",
@@ -54,6 +68,14 @@
       "version_path": ["version"],
       "notes": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
       "reviewed_versions": ["2.1.296"]
+    },
+    {
+      "name": "OpenCode",
+      "url": "https://registry.npmjs.org/@opencode/cli/latest",
+      "version_path": ["version"],
+      "notes": "https://github.com/anomalyco/opencode/releases",
+      "policy": "minimum",
+      "reviewed_versions": ["2.0.32"]
     },
     {
       "name": "Kimi Code",

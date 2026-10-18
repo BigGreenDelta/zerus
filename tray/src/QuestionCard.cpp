@@ -475,12 +475,32 @@ void QuestionCard::rebuild()
     while (m_pages->count()) { auto *page = m_pages->widget(0); m_pages->removeWidget(page); delete page; }
     while (m_tabs->count()) m_tabs->removeTab(0);
     const auto draft = m_drafts.value(m_key);
+    // OpenCode reports its form defaults and bounds. Defaults only seed an answer
+    // that has no saved draft yet (an intentionally emptied one stays empty) and
+    // are never sent by themselves.
+    const bool openCode = m_question.value("source") == "opencode_native";
+    const bool seed = openCode && !m_key.isEmpty() && !m_loadingKeys.contains(m_key) && !draft.sending && !draft.submitted && !draft.answered;
     int index = 0;
     for (const auto &value : m_question.value("questions").toArray()) {
         const auto question = value.toObject(); Form form;
         form.id = question.value("id").toString(); form.multi = question.value("multi_select").toBool();
         form.allowOther = question.value("allow_other").toBool(); form.required = question.value("required").toBool(true);
-        const auto answer = draft.answers.value(form.id);
+        const int maxLength = openCode ? qBound(0, question.value("max_length").toInt(), 4096) : 0;
+        if (openCode && form.multi) {
+            form.minItems = qMax(0, question.value("min_items").toInt()); form.maxItems = qMax(0, question.value("max_items").toInt());
+        }
+        auto answer = draft.answers.value(form.id);
+        if (seed && !form.id.isEmpty() && !draft.answers.contains(form.id)) {
+            Answer seeded;
+            QSet<QString> offered;
+            for (const auto &option : question.value("options").toArray()) offered.insert(option.toObject().value("id").toString());
+            for (const auto &id : question.value("default_option_ids").toArray()) {
+                if (!offered.contains(id.toString()) || (!form.multi && !seeded.options.isEmpty())) continue;
+                seeded.options.insert(id.toString());
+            }
+            if (form.allowOther && offered.isEmpty()) seeded.text = question.value("default_text").toString().left(maxLength > 0 ? maxLength : 4096);
+            if (!seeded.options.isEmpty() || !seeded.text.isEmpty()) { answer = seeded; m_drafts[m_key].answers.insert(form.id, seeded); }
+        }
         auto *formPage = new QWidget;
         auto *formLayout = new QVBoxLayout(formPage); formLayout->setContentsMargins(0, 0, 0, 0); formLayout->setSpacing(7);
         auto *scroll = new QScrollArea; scroll->setObjectName("questionContent");
@@ -507,7 +527,9 @@ void QuestionCard::rebuild()
                 column->addWidget(detail);
             } else column->addWidget(markdownText("questionBody", body));
         }
-        auto *mode = new QLabel(form.multi ? tr("Select one or more") : tr("Select one")); mode->setObjectName("questionMode"); column->addWidget(mode);
+        const QString multiMode = form.minItems > 0 && form.maxItems > 0 ? tr("Select %1 to %2").arg(form.minItems).arg(form.maxItems)
+            : form.minItems > 0 ? tr("Select at least %1").arg(form.minItems) : form.maxItems > 0 ? tr("Select up to %1").arg(form.maxItems) : tr("Select one or more");
+        auto *mode = new QLabel(form.multi ? multiMode : tr("Select one")); mode->setObjectName("questionMode"); column->addWidget(mode);
         auto *group = new QButtonGroup(page); group->setExclusive(!form.multi);
         // Claude approvals list native options verbatim. Hide only the
         // synthesized Approve/Deny pairs, which have their own buttons.
@@ -538,7 +560,7 @@ void QuestionCard::rebuild()
             }
             form.text = new QLineEdit; form.text->setObjectName("questionFreeText"); form.text->setProperty("questionId", form.id);
             form.text->setPlaceholderText(tr("Write your answer…")); form.text->setAccessibleName(tr("Your answer to %1").arg(promptText));
-            form.text->setMinimumHeight(35); form.text->setMaxLength(4096); form.text->setText(answer.text);
+            form.text->setMinimumHeight(35); form.text->setMaxLength(maxLength > 0 ? maxLength : 4096); form.text->setText(answer.text);
             // Keep the answer reachable while a long prompt or option list scrolls.
             formLayout->addWidget(form.text); connect(form.text, &QLineEdit::textChanged, this, [this] { capture(); });
             connect(form.text, &QLineEdit::returnPressed, this, [this] {
@@ -677,7 +699,8 @@ QJsonArray QuestionCard::answers(bool *valid) const
         const bool custom = form.allowOther && (form.options.isEmpty() || answer.other);
         const QString text = custom ? answer.text.trimmed() : QString();
         if ((selected.isEmpty() && text.isEmpty()) || (custom && text.isEmpty())
-            || (!form.multi && selected.size() > 1) || !customAnswerProblem(text).isEmpty() || form.id.isEmpty()) complete = false;
+            || (!form.multi && selected.size() > 1) || !customAnswerProblem(text).isEmpty() || form.id.isEmpty()
+            || (!custom && form.minItems > 0 && selected.size() < form.minItems) || (!custom && form.maxItems > 0 && selected.size() > form.maxItems)) complete = false;
         result.append(QJsonObject{{"question_id", form.id}, {"selected_option_ids", selected}, {"text", text}});
     }
     if (valid) *valid = complete;
@@ -729,7 +752,8 @@ void QuestionCard::updateControls()
     m_skip->setEnabled(optional && m_available && m_question.value("can_skip").toBool() && !locked && !draft.uncertain);
     // Without native options, an approval can only be answered in Terminal.
     const bool buttons=approval&&!choices&&supported&&!m_forms.isEmpty()&&!m_forms.first().options.isEmpty();
-    m_submit->setVisible(!readOnly&&(!approval||(choices&&supported))&&page==m_forms.size()-1);
+    // A card without questions (an oversized OpenCode form) only explains itself.
+    m_submit->setVisible(!readOnly&&!m_forms.isEmpty()&&(!approval||(choices&&supported))&&page==m_forms.size()-1);
     m_approve->setVisible(buttons);m_deny->setVisible(buttons);
     const bool canApprove=buttons&&m_available&&supported&&!locked&&!draft.uncertain;
     m_approve->setEnabled(canApprove&&m_reviewSeconds==0);m_deny->setEnabled(canApprove);
@@ -748,7 +772,11 @@ void QuestionCard::updateControls()
     m_progress->setVisible(!approval&&(!planReview||(draft.submitted&&!draft.answered)));
     QString notice = draft.storageError.isEmpty() ? draft.notice : draft.storageError;
     if (notice.isEmpty() && !m_available) notice = m_unavailableReason;
-    if (notice.isEmpty() && !supported) notice = m_question.value("answer_unavailable_reason").toString();
+    // OpenCode states its reason on the card ("Answer this form in OpenCode").
+    if (notice.isEmpty() && !supported) for (const auto *field : {"answer_unavailable_reason", "unavailable_reason"}) {
+        notice = m_question.value(field).toString().trimmed();
+        if (!notice.isEmpty()) break;
+    }
     // A disabled Submit always says why, even when an older host sends no reason.
     if (notice.isEmpty() && !supported) notice = tr("Answer this request in Terminal.");
     if (notice.isEmpty() && m_loadingKeys.contains(m_key)) notice = tr("Loading your saved answer…");

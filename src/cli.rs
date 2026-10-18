@@ -1622,6 +1622,7 @@ fn absolute_directory(path: &str) -> std::io::Result<PathBuf> {
 struct LaunchOptions {
     account: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
     launch_id: Option<String>,
     project: String,
     tag: String,
@@ -1658,6 +1659,7 @@ impl LaunchOptions {
                     i += 1;
                 }
                 "--model" => { options.model=Some(require(args,i+1,"--model needs provider/model")?.into()); i+=1; }
+                "--effort" => { options.effort=Some(require(args,i+1,"--effort needs a model variant")?.into()); i+=1; }
                 "--account" => {
                     options.account =
                         Some(require(args, i + 1, "--account needs a profile ID")?.into());
@@ -1824,12 +1826,13 @@ fn launch(
     if command_name=="opencode" {
         if options.account.as_deref().is_some_and(|id|id!="native-opencode") {return Err(Error::new(1,"Choose native-opencode; separate OpenCode profiles are not supported"));}
         if options.resume || !options.extra.is_empty() || options.fresh || options.remote_control {return Err(Error::new(1,"Use saved HGS session names to resume OpenCode; select a model with --model provider/model"));}
+        if options.effort.is_some() && options.model.is_none() {return Err(Error::new(1,"--effort needs --model"));}
         let project=if project=="/" {"root".into()}else{sanitize(&project)};
         let tag=if options.tag.is_empty(){"main"}else{&options.tag};let name=format!("opencode/{project}/{tag}");
-        state::opencode::launch(&name,&directory,options.launch_id.as_deref(),options.model.as_deref(),options.dry,options.new_only).map_err(|e|Error::new(1,e))?;
+        state::opencode::launch(&name,&directory,options.launch_id.as_deref(),options.model.as_deref(),options.effort.as_deref(),options.dry,options.new_only).map_err(|e|Error::new(1,e))?;
         if !options.dry {println!("OpenCode session ready: {name}\nOpen this session in Zerus.");}return Ok(0);
     }
-    if options.model.is_some() {return Err(Error::new(1,"--model is an OpenCode launch option; other agent flags go after --"));}
+    if options.model.is_some() || options.effort.is_some() {return Err(Error::new(1,"--model and --effort are OpenCode launch options; other agent flags go after --"));}
     if command_name == "dsh" {
         if options
             .account

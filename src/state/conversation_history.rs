@@ -1148,6 +1148,42 @@ pub(super) fn inspected_voice_messages(record: &Value, detail: &Value, agent: Op
     json!(voices)
 }
 
+/// The OpenCode rows that are durable history. Queued inbox items are not
+/// native history until OpenCode admits them, and a reply OpenCode still
+/// streams changes later; journal rows are never replaced once indexed.
+fn opencode_history(detail: &Value) -> impl Iterator<Item = &Value> {
+    detail["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row.get("delivery_state").is_none() && row["streaming"] != true)
+}
+
+/// OpenCode admits a queued message after the delivery window; a voice
+/// binding to its exact message ID still finds that native row.
+fn bound_opencode_row(db: &Connection, binding: &Value) -> Result<Option<(String, Value)>> {
+    let Some(id) = binding["provider_message_id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && binding["provider_source"] == "opencode_native")
+    else {
+        return Ok(None);
+    };
+    let origin = original(
+        &json!({"type":"UserPromptSubmit","source":"opencode_native","message_id":id}),
+        "journal",
+    )
+    .ok_or("Invalid OpenCode voice binding")?;
+    let found: Option<(String, String)> = db
+        .query_row(
+            "SELECT m.id,m.body FROM aliases a JOIN messages m ON m.id=a.id WHERE a.original=? AND m.role='outgoing' AND m.stream!='voice'",
+            [&origin],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(found.and_then(|(id, body)| serde_json::from_str::<Value>(&body).ok().map(|v| (id, v))))
+}
+
 fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result<()> {
     if request.agent_id.as_deref().is_some_and(|id| !id.is_empty()) { return Ok(()); }
     let sources: Value = get(db,"sources")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!([]));
@@ -1166,6 +1202,9 @@ fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result
         if rows.len() > 64 { continue; }
         let mut rows: Vec<_> = rows.into_iter().filter_map(|(id,body)| serde_json::from_str::<Value>(&body).ok().map(|v|(id,v)))
             .filter(|(_,row)| ["UserPromptSubmit","UserPromptQueued","UserMessage","TurnStarted"].contains(&string(row,"type"))).collect();
+        if let Some(found) = bound_opencode_row(db,binding)? {
+            if !rows.iter().any(|(id,_)| *id == found.0) { rows.push(found); }
+        }
         for (id,row) in &mut rows {
             let mut aliases = db.prepare("SELECT original FROM aliases WHERE id=? ORDER BY original LIMIT 8").map_err(|e|e.to_string())?;
             let ids = aliases.query_map([id.as_str()],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?
@@ -1387,10 +1426,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         .map_err(|e| e.to_string())?;
     let (provider_complete, mut status) = if string(&parent,"agent")=="opencode" {
         let detail=opencode::inspect(name,request.agent_id.as_deref())?;
+        // An unreadable service or an OpenCode 1 binding has no history to index.
+        if let Some(reason)=detail["inspection_reason"].as_str() {return Err(reason.into());}
         // A child view carries its exact parent separately from its own ID.
         if detail["run_id"]!=parent["run_id"] || detail.get("parent_conversation_id").unwrap_or(&detail["conversation_id"])!=&parent["conversation_id"]
             || detail.get("agent_id").map(|id| Some(id.as_str().unwrap_or_default())!=request.agent_id.as_deref()).unwrap_or(request.agent_id.is_some()) {return Err("OpenCode history identity changed".into());}
-        for row in detail["events"].as_array().into_iter().flatten() { add(&db,&key(&parent,&request),row.clone(),"journal")?; }
+        for row in opencode_history(&detail) { add(&db,&key(&parent,&request),row.clone(),"journal")?; }
         let done=detail["history_truncated"]==false;
         (done,json!({"provider":if done{"complete"}else{"partial_native_window"}}))
     } else if string(&parent, "agent") == "dsh" {
@@ -1576,6 +1617,70 @@ mod tests {
         assert_eq!(count,1);
         assert_eq!(body["voice"]["state"],"submitted");
         assert_eq!(body["source"],"hgs_voice");
+    }
+    #[test]
+    fn an_opencode_voice_binding_finds_its_exact_native_row() {
+        let db = database();
+        let binding = json!({"provider_message_id":"msg_V","provider_source":"opencode_native"});
+        let native = json!({"type":"UserPromptSubmit","detail":"Spoken text","source":"opencode_native","message_id":"msg_V","at":5000.0});
+        assert!(voice_binding_matches(
+            &native,
+            &binding,
+            &json!({}),
+            &json!([])
+        ));
+        let mut other = native.clone();
+        other["message_id"] = json!("msg_W");
+        assert!(!voice_binding_matches(
+            &other,
+            &binding,
+            &json!({}),
+            &json!([])
+        ));
+        assert!(bound_opencode_row(&db, &binding).unwrap().is_none());
+        add(&db, "conversation", other, "journal").unwrap();
+        add(&db, "conversation", native, "journal").unwrap();
+        // Admitted from the queue long after delivery, outside the time window.
+        let (_, row) = bound_opencode_row(&db, &binding).unwrap().unwrap();
+        assert_eq!(row["message_id"], "msg_V");
+        assert_eq!(row["detail"], "Spoken text");
+        assert!(bound_opencode_row(&db, &json!({"journal_seq":3}))
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn opencode_rows_are_indexed_once_they_are_final() {
+        let db = database();
+        let user = json!({"type":"UserPromptSubmit","detail":"hello","source":"opencode_native","message_id":"msg_U","at":1.0});
+        let reply = |text: &str, streaming: bool| {
+            let mut row = json!({"type":"AgentMessage","detail":text,"source":"opencode_native","message_id":"msg_A","reply_id":"msg_A","at":2.0});
+            if streaming {
+                row["streaming"] = json!(true);
+            }
+            row
+        };
+        let queued = json!({"type":"UserPromptSubmit","detail":"later","source":"opencode_native","message_id":"msg_Q","at":3.0,"delivery_state":"queued"});
+        let index = |events: Value| {
+            for row in opencode_history(&json!({ "events": events })) {
+                add(&db, "conversation", row.clone(), "journal").unwrap();
+            }
+        };
+        index(json!([user, reply("Partial", true), queued]));
+        let bodies = |db: &Connection| -> Vec<Value> {
+            let mut query = db.prepare("SELECT body FROM messages ORDER BY at").unwrap();
+            query
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|body| serde_json::from_str(&body.unwrap()).unwrap())
+                .collect()
+        };
+        assert_eq!(bodies(&db).len(), 1);
+        for _ in 0..2 {
+            index(json!([user, reply("Partial and final", false)]));
+        }
+        let stored = bodies(&db);
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[1]["detail"], "Partial and final");
     }
     fn database() -> Connection {
         let db = Connection::open_in_memory().unwrap();

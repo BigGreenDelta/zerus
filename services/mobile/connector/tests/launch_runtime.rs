@@ -831,3 +831,391 @@ async fn an_abandoned_usage_refresh_reaps_only_its_own_child() {
     }
     panic!("the abandoned account inspection {pid} is still running");
 }
+
+fn opencode_catalog() -> Value {
+    json!({"profiles": [{"id": "native-opencode", "provider": "opencode", "label": "OpenCode",
+        "installed": true, "catalog_state": "ready", "catalog_reason": "", "catalog_at": 5,
+        "model_options": [
+            {"id": "fixture/local", "value": "fixture/local", "label": "Local", "provider": "fixture",
+             "provider_label": "Fixture", "free": true,
+             "effort_options": ["low", "high"], "effort_labels": ["Low", "High"]},
+            {"id": "fixture/plain", "value": "fixture/plain", "label": "Plain", "provider": "fixture"}]}]})
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_opencode_launch_passes_only_an_offered_effort() {
+    let harness = harness("launch-effort");
+    let connector = &harness.connector;
+    let native = &connector.native;
+    native.answer(&["account", "ls"], opencode_catalog());
+    native.answer(
+        &["dirs", DIRECTORY],
+        json!({"path": DIRECTORY, "directories": []}),
+    );
+    let id = "5f4d1e8e-1d8b-4f73-9a3b-2a3c5d6e7f80";
+    let launch = [
+        "opencode",
+        DIRECTORY,
+        "--new",
+        "-n",
+        "fx",
+        "-d",
+        "--launch-id",
+        id,
+        "--account",
+        "native-opencode",
+        "--model",
+        "fixture/local",
+        "--effort",
+        "high",
+    ];
+    native.answer(&launch, json!("Created\n"));
+    native.answer(
+        &["ls", "--json", "--local"],
+        json!({"sessions": [{"name": "opencode/example/fx", "run_id": "run", "launch_id": id,
+                             "conversation_id": "conversation"}]}),
+    );
+    let payload = |id: &str, model: &str, effort: &str| {
+        json!({"request_id": id, "agent": "opencode", "directory": DIRECTORY, "tag": "fx",
+               "account_id": "native-opencode", "model": model, "effort": effort})
+    };
+    let sent = finished(
+        connector
+            .execute(request(
+                id,
+                "launch",
+                "",
+                payload(id, "fixture/local", "high"),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(sent["state"], "completed", "{sent}");
+    assert_eq!(native.count(&launch), 1);
+    // Not offered for this model, or the model offers none: refused before any write.
+    for (index, (model, effort)) in [("fixture/local", "ultra"), ("fixture/plain", "high")]
+        .into_iter()
+        .enumerate()
+    {
+        let other = format!("6f4d1e8e-1d8b-4f73-9a3b-2a3c5d6e7f8{index}");
+        let refused = finished(
+            connector
+                .execute(request(
+                    &other,
+                    "launch",
+                    "",
+                    payload(&other, model, effort),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            refused,
+            failed("failed", "effort is not offered for this model")
+        );
+    }
+    assert_eq!(native.count(&launch), 1);
+    // Other agents keep today's refusal of the unknown field.
+    let base = json!({"request_id": "r", "agent": "codex", "directory": "/example/mobile",
+                      "tag": "t", "effort": "high"});
+    assert!(launch::validate("launch", Some(&base), "r").is_err());
+    let mut model_less = payload("r", "fixture/local", "high");
+    model_less.as_object_mut().unwrap().remove("model");
+    assert!(launch::validate("launch", Some(&model_less), "r").is_err());
+    assert!(launch::validate("launch", Some(&payload("r", "fixture/local", "high")), "r").is_ok());
+    assert!(launch::validate("launch", Some(&payload("r", "fixture/local", "a b")), "r").is_err());
+}
+
+/// The OpenCode effort shape contract every layer shares with the native
+/// catalog projection; `effort_options` membership stays authoritative.
+const EFFORT_IDS: &str = include_str!("../../../../tests/fixtures/opencode-effort-ids.json");
+
+fn effort_ids(kind: &str) -> Vec<String> {
+    let fixture: Value = serde_json::from_str(EFFORT_IDS).unwrap();
+    let ids: Vec<String> = fixture[kind]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect();
+    assert!(!ids.is_empty(), "{kind}");
+    ids
+}
+
+/// One OpenCode account whose `fixture/local` model offers `efforts`.
+fn opencode_offering(efforts: &[&str]) -> Value {
+    json!({"profiles": [{"id": "native-opencode", "provider": "opencode", "label": "OpenCode",
+        "installed": true, "catalog_state": "ready",
+        "model_options": [{"id": "fixture/local", "value": "fixture/local", "label": "Local",
+                           "provider": "fixture", "effort_options": efforts}]}]})
+}
+
+fn opencode_launch(id: &str, effort: &str) -> Value {
+    json!({"request_id": id, "agent": "opencode", "directory": DIRECTORY, "tag": "fx",
+           "account_id": "native-opencode", "model": "fixture/local", "effort": effort})
+}
+
+#[test]
+fn the_shared_fixture_decides_which_projected_efforts_survive() {
+    let projected = |raw: &Value| {
+        let launch =
+            accounts::launch_catalog(raw).unwrap()["accounts"][0]["model_options"][0].clone();
+        let entries = accounts::catalog(raw).unwrap();
+        assert_eq!(entries[0].1.public["model_options"][0], launch);
+        launch
+    };
+    for id in effort_ids("accept") {
+        let option = projected(&opencode_offering(&[&id]));
+        assert_eq!(option["effort_options"], json!([id]), "{id:?}");
+        assert_eq!(option["effort_labels"], json!([id]), "{id:?}");
+    }
+    for id in effort_ids("reject") {
+        // A malformed variant drops only that entry, never the model.
+        let option = projected(&opencode_offering(&[&id, "high"]));
+        assert_eq!(option["value"], "fixture/local", "{id:?}");
+        assert_eq!(option["effort_options"], json!(["high"]), "{id:?}");
+        let option = projected(&opencode_offering(&[&id]));
+        assert!(option.get("effort_options").is_none(), "{id:?}");
+    }
+}
+
+#[test]
+fn the_shared_fixture_decides_every_launch_effort_shape() {
+    for id in effort_ids("accept") {
+        let payload = opencode_launch("r", &id);
+        assert!(
+            launch::validate("launch", Some(&payload), "r").is_ok(),
+            "{id:?}"
+        );
+        let mut model_less = payload;
+        model_less.as_object_mut().unwrap().remove("model");
+        assert!(
+            launch::validate("launch", Some(&model_less), "r").is_err(),
+            "{id:?}"
+        );
+    }
+    for id in effort_ids("reject") {
+        let payload = opencode_launch("r", &id);
+        assert!(
+            launch::validate("launch", Some(&payload), "r").is_err(),
+            "{id:?}"
+        );
+    }
+    assert!(launch::validate("launch", Some(&opencode_launch("r", "")), "r").is_err());
+    let mut number = opencode_launch("r", "high");
+    number["effort"] = json!(8);
+    assert!(launch::validate("launch", Some(&number), "r").is_err());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn only_a_currently_offered_effort_reaches_its_own_argv_element() {
+    let harness = harness("launch-effort-ids");
+    let connector = &harness.connector;
+    let native = &connector.native;
+    // The first projection offers the colon id; every later one has withdrawn it.
+    native.answer(
+        &["account", "ls"],
+        opencode_offering(&["think:deep", "caf\u{e9}"]),
+    );
+    native.answer(&["account", "ls"], opencode_offering(&["caf\u{e9}"]));
+    native.answer(
+        &["dirs", DIRECTORY],
+        json!({"path": DIRECTORY, "directories": []}),
+    );
+    let id = "7a4d1e8e-1d8b-4f73-9a3b-2a3c5d6e7f80";
+    let launch = [
+        "opencode",
+        DIRECTORY,
+        "--new",
+        "-n",
+        "fx",
+        "-d",
+        "--launch-id",
+        id,
+        "--account",
+        "native-opencode",
+        "--model",
+        "fixture/local",
+        "--effort",
+        "think:deep",
+    ];
+    native.answer(&launch, json!("Created\n"));
+    native.answer(
+        &["ls", "--json", "--local"],
+        json!({"sessions": [{"name": "opencode/example/fx", "run_id": "run", "launch_id": id,
+                             "conversation_id": "conversation"}]}),
+    );
+    let sent = finished(
+        connector
+            .execute(request(id, "launch", "", opencode_launch(id, "think:deep")))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(sent["state"], "completed", "{sent}");
+    // The id is one argv element after `--effort`, never part of a payload.
+    let written: Vec<_> = native
+        .calls
+        .borrow()
+        .iter()
+        .filter(|(call, _)| call.first().map(String::as_str) == Some("opencode"))
+        .cloned()
+        .collect();
+    assert_eq!(written, [(argv(&launch), None)]);
+    // Withdrawn from the model, or never offered by it although well formed:
+    // refused from the fresh projection before any native write.
+    for (index, effort) in ["think:deep", "low\u{2014}deep", "thinking-8k_v1.2"]
+        .into_iter()
+        .enumerate()
+    {
+        let other = format!("8a4d1e8e-1d8b-4f73-9a3b-2a3c5d6e7f8{index}");
+        let before = native.argvs().len();
+        let refused = finished(
+            connector
+                .execute(request(
+                    &other,
+                    "launch",
+                    "",
+                    opencode_launch(&other, effort),
+                ))
+                .await
+                .unwrap(),
+        );
+        let receipt = failed(
+            "failed",
+            zerus_mobile_connector::mutations::EFFORT_NOT_OFFERED,
+        );
+        assert_eq!(refused, receipt, "{effort:?}");
+        assert_eq!(
+            native.argvs()[before..],
+            [argv(&["account", "ls"])],
+            "{effort:?}"
+        );
+        // The journal holds only that failed receipt: no write began.
+        let stored: Value =
+            serde_json::from_str(&connector.journal.replay(&other).unwrap()).unwrap();
+        assert_eq!(stored, receipt, "{effort:?}");
+    }
+    assert_eq!(native.count(&["opencode"]), 1);
+}
+
+#[test]
+fn opencode_account_rows_keep_effort_free_and_catalog_fields_within_the_bound() {
+    let raw = opencode_catalog();
+    let view = accounts::launch_catalog(&raw).unwrap();
+    let account = &view["accounts"][0];
+    assert_eq!(account["catalog_state"], "ready");
+    assert!(account.get("catalog_reason").is_none());
+    assert_eq!(account["installed"], true);
+    assert_eq!(
+        account["model_options"][0],
+        json!({"value": "fixture/local", "label": "Local", "provider": "fixture",
+               "provider_label": "Fixture", "free": true,
+               "effort_options": ["low", "high"], "effort_labels": ["Low", "High"]})
+    );
+    // A model without variants keeps its old three-field shape.
+    assert_eq!(
+        account["model_options"][1],
+        json!({"value": "fixture/plain", "label": "Plain", "provider": "fixture"})
+    );
+    let entries = accounts::catalog(&raw).unwrap();
+    assert_eq!(entries[0].1.public["model_options"][0]["free"], true);
+    assert_eq!(entries[0].1.public["catalog_state"], "ready");
+    // An unknown state, an uninstalled reason and oversized variants are bounded.
+    let mut row = raw["profiles"][0].clone();
+    row["catalog_state"] = json!("surprise");
+    row["installed"] = json!(false);
+    row["install_reason"] = json!("OpenCode 2 is not installed");
+    row["model_options"][0]["effort_options"] =
+        json!((0..30).map(|i| format!("v{i}")).collect::<Vec<_>>());
+    let view = accounts::launch_catalog(&json!({"profiles": [row]})).unwrap();
+    let account = &view["accounts"][0];
+    assert!(account.get("catalog_state").is_none());
+    assert_eq!(account["install_reason"], "OpenCode 2 is not installed");
+    assert_eq!(
+        account["model_options"][0]["effort_options"]
+            .as_array()
+            .unwrap()
+            .len(),
+        8
+    );
+    assert_eq!(
+        account["model_options"][0]["effort_labels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        8
+    );
+    // The widest realistic catalog (256 models, 8 variants each) stays inside 128 KiB.
+    let models: Vec<Value> = (0..256)
+        .map(|index| {
+            json!({"id": format!("provider/model-{index:03}-with-a-long-name"),
+                   "value": format!("provider/model-{index:03}-with-a-long-name"),
+                   "label": format!("Provider model {index:03} with a long display name"),
+                   "provider": "provider", "provider_label": "A Provider", "free": false,
+                   "effort_options": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+                   "effort_labels": ["None", "Minimal", "Low", "Medium", "High", "Extra high", "Max", "Ultra"]})
+        })
+        .collect();
+    let wide = json!({"profiles": [{"id": "native-opencode", "provider": "opencode",
+        "label": "OpenCode", "installed": true, "catalog_state": "ready", "model_options": models}]});
+    let view = accounts::launch_catalog(&wide).unwrap();
+    assert_eq!(
+        view["accounts"][0]["model_options"]
+            .as_array()
+            .unwrap()
+            .len(),
+        256
+    );
+    assert!(accounts::catalog(&wide).is_ok());
+}
+
+#[test]
+fn an_oversized_opencode_projection_degrades_before_it_fails() {
+    // 160-character labels and 40-byte variants, the native maximum: the full
+    // projection is over 128 KiB, the labels-free one is not.
+    let efforts: Vec<String> = (0..8).map(|i| format!("{i}{}", "v".repeat(39))).collect();
+    let models: Vec<Value> = (0..160)
+        .map(|index| {
+            json!({"id": format!("p/m{index:03}"), "value": format!("p/m{index:03}"),
+                   "label": "l".repeat(160), "provider": "p", "provider_label": "P", "free": false,
+                   "effort_options": efforts, "effort_labels": efforts.iter().map(|_| "L".repeat(40)).collect::<Vec<_>>()})
+        })
+        .collect();
+    let raw = json!({"profiles": [{"id": "native-opencode", "provider": "opencode",
+        "label": "OpenCode", "installed": true, "catalog_state": "ready", "model_options": models}]});
+    let launch = accounts::launch_catalog(&raw).unwrap();
+    let option = &launch["accounts"][0]["model_options"][0];
+    assert!(option.get("effort_labels").is_none());
+    assert_eq!(option["effort_options"].as_array().unwrap().len(), 8);
+    let entries = accounts::catalog(&raw).unwrap();
+    assert!(entries[0].1.public["model_options"][0]
+        .get("effort_labels")
+        .is_none());
+    assert!(entries[0].1.public["model_options"][0]
+        .get("effort_options")
+        .is_some());
+    let mut cache = AccountCache::default();
+    cache.apply_catalog(Ok(entries), 1000.0);
+    assert_eq!(cache.view(1000.0)["available"], true);
+    // Variants go too when labels alone are not enough.
+    let models: Vec<Value> = (0..256)
+        .map(|index| {
+            json!({"id": format!("p/m{index:03}"), "value": format!("p/m{index:03}"),
+                   "label": "l".repeat(160), "provider": "p", "provider_label": "P", "free": false,
+                   "effort_options": efforts, "effort_labels": efforts})
+        })
+        .collect();
+    let raw = json!({"profiles": [{"id": "native-opencode", "provider": "opencode",
+        "label": "OpenCode", "installed": true, "model_options": models}]});
+    let launch = accounts::launch_catalog(&raw).unwrap();
+    assert!(launch["accounts"][0]["model_options"][0]
+        .get("effort_options")
+        .is_none());
+    assert_eq!(
+        launch["accounts"][0]["model_options"]
+            .as_array()
+            .unwrap()
+            .len(),
+        256
+    );
+}

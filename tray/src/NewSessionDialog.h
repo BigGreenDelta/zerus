@@ -30,7 +30,8 @@ public:
 signals:
     // addFolder: the confirmed folder outside the project that joins it once the
     // session starts, or empty. A worktree generated from it never replaces it.
-    void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,const QString &addFolder,const QString &model);
+    // effort: the chosen OpenCode model's variant, or empty for that model's default.
+    void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,const QString &addFolder,const QString &model,const QString &effort);
     void manageProjectsRequested(const QString &host);
     void projectFoldersRequested(const QString &project);
     // Open Machines with this computer selected (offered without a computer).
@@ -56,6 +57,11 @@ private:
     void refreshUsage();
     void updateUsage();
     void updateModels();
+    void updateEfforts();
+    // The selected OpenCode account row of this computer's catalog, if any.
+    QJsonObject openCodeProfile() const;
+    void updateOpenCodeService();
+    void startOpenCode();
     QString agent() const;
     QString account() const;
     void updateForm();
@@ -76,7 +82,7 @@ private:
     bool m_regroupAccounts=true,m_forceUsage=false;
     MachinePlatform::Style m_accountStyle=MachinePlatform::Style::Posix;
     QJsonArray m_accountGroups;
-    QComboBox *m_project,*m_machine,*m_folder,*m_model;
+    QComboBox *m_project,*m_machine,*m_folder,*m_model,*m_effort;
     QListWidget *m_account;
     QPushButton *m_refreshAccounts;
     QLabel *m_accountStatus;
@@ -84,7 +90,11 @@ private:
     QMap<QString, QString> m_browsedFolders;
     QString m_folderContext;
     QLineEdit *m_name;
-    QLabel *m_projectPath,*m_preview,*m_error,*m_nameError,*m_modelLabel;
+    QLabel *m_projectPath,*m_preview,*m_error,*m_nameError,*m_modelLabel,*m_effortLabel,*m_catalogStatus;
+    QWidget *m_openCodeService;
+    QPushButton *m_startOpenCode;
+    quint64 m_serviceStart=0;
+    QString m_serviceHost;
     QPushButton *m_start,*m_browse,*m_autoWorktree,*m_plainFolder,*m_worktreeOptions,*m_cancel,*m_openMachines;
     QAction *m_worktrees,*m_newWorktree;
     QLabel *m_worktreeTarget;

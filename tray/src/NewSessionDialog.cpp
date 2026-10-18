@@ -11,6 +11,7 @@
 #include "WorkspaceList.h"
 #include "MachinePlatform.h"
 #include "LocalLaunchWarning.h"
+#include "OpenCodeEffort.h"
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QToolButton>
@@ -32,6 +33,9 @@
 namespace {
 using namespace AccountChoice;
 QLabel *plainLabel(const QString &text = {}) {auto *l=new QLabel(text);l->setTextFormat(Qt::PlainText);l->setWordWrap(true);return l;}
+// Each OpenCode model row keeps its validated variants for the effort choice.
+constexpr int EffortRole=Qt::UserRole+10,EffortLabelRole=Qt::UserRole+11;
+bool controlText(const QString &text) {return std::any_of(text.cbegin(),text.cend(),[](QChar c){return c.category()==QChar::Other_Control;});}
 // Folders of the selected computer: drive and UNC paths on the local Windows
 // machine (D16), POSIX paths elsewhere.
 MachinePlatform::Style folderStyle(const FleetState &fleet,const QString &host) {
@@ -113,6 +117,18 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_model=new QComboBox;m_model->setObjectName("launchModel");m_model->setAccessibleName(tr("Model"));m_model->setMinimumContentsLength(18);m_model->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_modelLabel=plainLabel(tr("Model"));form->addRow(m_modelLabel,m_model);
     m_model->addItem(tr("Native default model"),QString());m_model->hide();m_modelLabel->hide();
+    // Inspecting never starts OpenCode: a stopped service keeps the last known
+    // models and offers this explicit start.
+    m_openCodeService=new QWidget;m_openCodeService->setObjectName("launchOpenCodeService");
+    auto *serviceRow=new QHBoxLayout(m_openCodeService);serviceRow->setContentsMargins(0,0,0,0);serviceRow->setSpacing(8);
+    m_catalogStatus=plainLabel();m_catalogStatus->setObjectName("launchCatalogStatus");serviceRow->addWidget(m_catalogStatus,1);
+    m_startOpenCode=new QPushButton;m_startOpenCode->setObjectName("launchStartOpenCode");m_startOpenCode->setAutoDefault(false);
+    m_startOpenCode->setToolTip(tr("Start the shared OpenCode service on this computer. Zerus never stops it."));
+    serviceRow->addWidget(m_startOpenCode);form->addRow(QString(),m_openCodeService);m_openCodeService->hide();
+    m_effort=new QComboBox;m_effort->setObjectName("launchEffort");m_effort->setAccessibleName(tr("Effort"));
+    m_effortLabel=plainLabel(tr("Effort"));form->addRow(m_effortLabel,m_effort);
+    m_effort->addItem(tr("Default"),QString());m_effort->hide();m_effortLabel->hide();
+    m_effort->setToolTip(tr("Variants of the selected model. Default uses the model's own setting."));
     m_name=new QLineEdit(m_generatedBranch);m_name->setObjectName("launchName");form->addRow(tr("Session name"),m_name);
     m_nameError=plainLabel();m_nameError->setObjectName("launchNameError");m_nameError->hide();form->addRow(QString(),m_nameError);
     m_openTerminal=new QCheckBox(tr("Open terminal window"));m_openTerminal->setObjectName("launchOpenTerminal");
@@ -137,6 +153,8 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(m_folder,&QComboBox::activated,this,[this]{m_prefillRequest=0;updateForm();});
     connect(m_account,&QListWidget::currentItemChanged,this,[this]{m_preferredAgent=this->agent();m_preferredAccount=account();m_accountPreset=true;updateModels();updateForm();});
     connect(m_refreshAccounts,&QPushButton::clicked,this,[this]{m_forceUsage=true;loadAccounts(true);});
+    connect(m_model,&QComboBox::currentIndexChanged,this,&NewSessionDialog::updateEfforts);
+    connect(m_startOpenCode,&QPushButton::clicked,this,&NewSessionDialog::startOpenCode);
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){refreshUsage();});
     auto *usageTimer=new QTimer(this);usageTimer->setInterval(60000);
     connect(usageTimer,&QTimer::timeout,this,[this]{refreshUsage();m_account->viewport()->update();});usageTimer->start();
@@ -162,11 +180,19 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         m_validation=0;m_error->setText(error);updateForm();
     });
     connect(&m_client,&HgsClient::accountsReady,this,[this](quint64 id,const QString &machine,const QJsonObject &data){
+        if(m_serviceStart&&id==m_serviceStart){
+            // The service answered with its catalog: read this computer's accounts again.
+            m_serviceStart=0;if(machine==host())loadAccounts(true);updateOpenCodeService();return;
+        }
         if(id!=m_accountRequest||machine!=host())return;
         m_accountRequest=0;m_accountCatalogLoaded=true;m_accounts=data["profiles"].toArray();m_accountStatus->setText({});
         m_regroupAccounts=true;updateAccounts();requestUsage(std::exchange(m_forceUsage,false));
     });
     connect(&m_client,&HgsClient::accountsFailed,this,[this](quint64 id,const QString &machine,const QString &error){
+        if(m_serviceStart&&id==m_serviceStart){
+            m_serviceStart=0;if(machine==host())m_accountStatus->setText(tr("Could not start OpenCode: %1").arg(error));
+            updateOpenCodeService();return;
+        }
         if(id!=m_accountRequest||machine!=host())return;
         m_accountRequest=0;m_accountCatalogLoaded=true;m_forceUsage=false;updateAccounts();m_accountStatus->setText(tr("Could not load accounts: %1").arg(error));
     });
@@ -326,7 +352,7 @@ void NewSessionDialog::updateForm()
     m_start->setEnabled(!noMachine&&m_account->currentItem()&&(!m_accountRequest||agent()=="sh")&&!busy&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()
         &&(!m_autoPreferred||!m_catalogRequest)&&!(automatic&&m_creationFailed));
     m_start->setText(m_creation?tr("Creating worktree…"):m_validation?tr("Checking folder…"):tr("Start session"));
-    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_account,m_model,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
+    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_account,m_model,m_effort,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
     m_refreshAccounts->setEnabled(!busy&&!noMachine&&!m_accountRequest);
     m_autoWorktree->setEnabled(!busy&&automaticWorktreeAvailable());m_plainFolder->setEnabled(!busy);m_cancel->setEnabled(!m_creation);
     m_autoWorktree->setChecked(automatic);m_plainFolder->setChecked(!automatic);
@@ -352,6 +378,7 @@ void NewSessionDialog::updateForm()
     if(noMachine)m_error->setText(LocalSessionHost::canEnable(m_fleet.local())?enableOrRemote:remoteOnly);
     else if(m_error->text()==remoteOnly||m_error->text()==enableOrRemote)m_error->clear();
     m_openMachines->setVisible(noMachine);
+    updateOpenCodeService();
 }
 void NewSessionDialog::start()
 {
@@ -389,7 +416,9 @@ void NewSessionDialog::launch(const QString &target,const QString &addFolder)
         auto machine=accounts.value(host()).toObject();machine[agent()]=selectedAccount;accounts[host()]=machine;
         settings.setValue("workspace/launchAccounts",QJsonDocument(accounts).toJson(QJsonDocument::Compact));
     }
-    emit launchRequested(host(),agent(),target,m_name->text(),account(),m_project->currentData().toString(),m_openTerminal->isChecked()&&agent()!="dsh"&&agent()!="opencode",addFolder,agent()=="opencode"?m_model->currentData().toString():QString());accept();
+    const auto model=agent()=="opencode"?m_model->currentData().toString():QString();
+    emit launchRequested(host(),agent(),target,m_name->text(),account(),m_project->currentData().toString(),m_openTerminal->isChecked()&&agent()!="dsh"&&agent()!="opencode",addFolder,
+        model,model.isEmpty()?QString():m_effort->currentData().toString());accept();
 }
 QString NewSessionDialog::agent() const
 {
@@ -692,12 +721,70 @@ void NewSessionDialog::updateModels()
         for(int index=0;index<qMin(256,options.size());++index){
             const auto entry=options[index];
             const auto option=entry.toObject();const auto id=option["value"].toString(option["id"].toString());
-            if(id.isEmpty()||id.toUtf8().size()>256||!id.contains('/')||std::any_of(id.cbegin(),id.cend(),[](QChar c){return c.category()==QChar::Other_Control;})||m_model->findData(id)>=0)continue;
-            auto label=option["label"].toString();if(label.size()>160||std::any_of(label.cbegin(),label.cend(),[](QChar c){return c.category()==QChar::Other_Control;}))label={};
+            if(id.isEmpty()||id.toUtf8().size()>256||!id.contains('/')||controlText(id)||m_model->findData(id)>=0)continue;
+            auto label=option["label"].toString();if(label.size()>160||controlText(label))label={};
+            // Effort options are this model's variants: at most 16, each valid and distinct.
+            QStringList efforts,effortLabels;
+            const auto variants=option["effort_options"].toArray(),variantLabels=option["effort_labels"].toArray();
+            for(int variant=0;variant<qMin<qsizetype>(64,variants.size())&&efforts.size()<16;++variant){
+                const auto effort=variants[variant].toString();
+                if(!OpenCodeEffort::valid(effort)||efforts.contains(effort))continue;
+                auto effortLabel=variantLabels.at(variant).toString();if(effortLabel.isEmpty()||effortLabel.size()>80||controlText(effortLabel))effortLabel=effort;
+                efforts<<effort;effortLabels<<effortLabel;
+            }
             m_model->addItem(label.isEmpty()||label==id?id:label+" ("+id+")",id);
+            m_model->setItemData(m_model->count()-1,efforts,EffortRole);m_model->setItemData(m_model->count()-1,effortLabels,EffortLabelRole);
         }
     }
     m_model->setCurrentIndex(qMax(0,m_model->findData(selected)));
     m_model->setVisible(enabled);m_modelLabel->setVisible(enabled);
     m_model->setToolTip(tr("Models configured on this computer. Native default uses OpenCode's configuration."));
+    updateEfforts();updateOpenCodeService();
+}
+// A changed model keeps the chosen effort only when it offers that variant too.
+void NewSessionDialog::updateEfforts()
+{
+    const auto selected=m_effort->currentData().toString();
+    const auto efforts=m_model->currentData(EffortRole).toStringList(),labels=m_model->currentData(EffortLabelRole).toStringList();
+    const bool enabled=agent()=="opencode"&&!m_model->currentData().toString().isEmpty()&&!efforts.isEmpty();
+    const QSignalBlocker blocker(m_effort);
+    m_effort->clear();m_effort->addItem(tr("Default"),QString());
+    if(enabled)for(int index=0;index<efforts.size();++index)m_effort->addItem(labels.value(index,efforts[index]),efforts[index]);
+    m_effort->setCurrentIndex(qMax(0,m_effort->findData(selected)));
+    m_effort->setVisible(enabled);m_effortLabel->setVisible(enabled);
+}
+QJsonObject NewSessionDialog::openCodeProfile() const
+{
+    if(agent()!="opencode")return {};
+    for(const auto &value:m_accounts){
+        const auto profile=value.toObject();
+        if(profile["provider"]=="opencode"&&profile["id"].toString()==account())return profile;
+    }
+    return {};
+}
+void NewSessionDialog::updateOpenCodeService()
+{
+    const auto profile=openCodeProfile();const auto state=profile["catalog_state"].toString();
+    const bool starting=m_serviceStart&&m_serviceHost==host();
+    QString reason;
+    if(!profile.isEmpty()&&!profile["installed"].toBool(true))reason=profile["install_reason"].toString();
+    else if(!profile.isEmpty()&&!state.isEmpty()&&state!="ready")reason=profile["catalog_reason"].toString();
+    const bool offer=starting||(state=="not_running"&&profile["installed"].toBool(true));
+    const auto machine=host().isEmpty()?m_fleet.local().host:host();
+    // As in Accounts: an offline computer cannot be asked to start it.
+    const auto *box=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
+    const bool online=box&&box->ok;
+    m_catalogStatus->setText(reason);m_catalogStatus->setVisible(!reason.isEmpty());
+    m_startOpenCode->setText(starting?tr("Starting OpenCode…"):tr("Start OpenCode on %1").arg(machine));
+    m_startOpenCode->setVisible(offer);m_startOpenCode->setEnabled(online&&!starting&&!m_validation&&!m_creation&&!m_accountRequest);
+    m_startOpenCode->setToolTip(online?tr("Start the shared OpenCode service on this computer. Zerus never stops it."):tr("%1 is offline.").arg(machine));
+    m_openCodeService->setVisible(offer||!reason.isEmpty());
+}
+// Explicit only: hgs starts the shared service when none is registered and alive.
+void NewSessionDialog::startOpenCode()
+{
+    if(m_serviceStart||!m_startOpenCode->isEnabled()||openCodeProfile()["catalog_state"]!="not_running")return;
+    m_serviceHost=host();m_accountStatus->clear();
+    m_serviceStart=m_client.requestAccounts(m_serviceHost,{"start","native-opencode","--json"});
+    updateOpenCodeService();
 }

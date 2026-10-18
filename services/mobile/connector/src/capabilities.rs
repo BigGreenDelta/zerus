@@ -73,6 +73,7 @@ pub const LIFECYCLE: &[&str] = &[
     "forget",
     "fork",
     "pause",
+    "remove_queued",
     "rename",
     "restore",
     "resume",
@@ -258,6 +259,13 @@ impl Flags {
                 json!("Native CLI lacks the scoped Terminal ABI"),
             );
         }
+        let mut features = features;
+        // Connector-only: the Python connector never advertises it, so apps
+        // do not send an OpenCode effort to it.
+        if operations.contains(&"launch") {
+            features.push("opencode_launch_effort");
+            features.sort_unstable();
+        }
         json!({"protocol_version": 1, "operations": operations, "features": features,
                "reasons": reasons})
     }
@@ -322,6 +330,7 @@ mod tests {
                 "directory_create_v1",
                 "inspect_after",
                 "inspect_agent",
+                "opencode_launch_effort",
                 "send_agent"
             ])
         );

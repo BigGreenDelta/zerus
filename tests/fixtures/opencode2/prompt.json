@@ -1,0 +1,14 @@
+{
+ "data": {
+  "delivery": "queue",
+  "id": "msg_6kezDqwZEklnh8eFGVy3UbP6iX",
+  "payload": {
+   "text": "hello"
+  },
+  "sessionID": "ses_IycejmWY8RpJq1aeBnnIpbaNAt",
+  "time": {
+   "created": 1792271373872
+  },
+  "type": "user"
+ }
+}

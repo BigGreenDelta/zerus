@@ -304,7 +304,9 @@ fn operation_tables_match_the_python_connector() {
     let features: Vec<&str> = protocol::FEATURES
         .iter()
         .copied()
-        .filter(|feature| !["presence_alerts", "voice_video"].contains(feature))
+        .filter(|feature| {
+            !["opencode_launch_effort", "presence_alerts", "voice_video"].contains(feature)
+        })
         .collect();
     assert_eq!(sorted(&features), set(&["FEATURES"]));
     // The relay's index predicates are its own text over the same operations.

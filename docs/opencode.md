@@ -2,39 +2,63 @@
 
 [Reference](reference.md) | [Local models](local-models.md)
 
-OpenCode owns its tools, permissions and conversations. Zerus connects to its
-native API and presents that conversation in desktop Activity and on Android.
-The model provider is configured on the computer running OpenCode; the client
-and mobile relay do not run inference or receive provider credentials.
+OpenCode owns its tools, permissions and conversations. Zerus connects to
+OpenCode 2's native HTTP API and presents that conversation in desktop Activity,
+on Android and on iOS. The model provider is configured on the computer running
+OpenCode; the client and mobile relay do not run inference or receive provider
+credentials.
 
-## Reviewed native version
+## Supported versions
 
-The initial adapter is pinned to OpenCode **1.18.35**. Check `opencode --version`
-on the agent computer. An incompatible installed or resident version is rejected;
-Zerus does not upgrade or stop an existing native host automatically.
+Zerus supports OpenCode **2.0.32** or newer 2.x. Check `opencode --version` on
+the agent computer. Before using a running service, Zerus reads its
+`/openapi.json` and requires every operation it uses. An incompatibility is
+reported as one of:
 
-The installed version exposes a native session API with durable prompt admission
-and history sequence identities. Zerus uses those identities for status and
-message delivery rather than reading the TUI or treating model generation as an
-agent turn. Public upstream API documentation can describe a different route
-revision; the adapter's native tests qualify the exact pinned version.
+- `OpenCode <version> lacks <method> <path>; update OpenCode or Zerus`
+- `OpenCode <version> is not supported; install OpenCode 2.0.32 or newer 2.x`
 
-## Configure a local model
+Zerus does not upgrade, stop or replace OpenCode.
+
+## The shared service
+
+OpenCode 2 runs one background service per user, registered in
+`$XDG_STATE_HOME/opencode/service.json`. Zerus uses that service and never
+stops, restarts or replaces it, so other OpenCode clients are unaffected.
+
+Zerus starts it (`opencode service start`, in its own transient user scope on
+Linux so that it outlives Zerus) only when no service is registered or the
+registered process is dead, never while an existing registration cannot be
+read, and only for a launch or the explicit **Start
+OpenCode** action (`hgs account start native-opencode`). Inspection never starts
+it. Without a registered live service, Zerus shows "OpenCode is not running on
+<computer>" and offers Start OpenCode; a registered service that does not answer
+shows "OpenCode is not responding" and is never restarted. When OpenCode's
+background service is disabled, Zerus shows "The OpenCode background service is
+disabled on <computer>" and starts nothing. You can also start it yourself with
+`opencode service start`.
+
+Connect providers in a terminal on that computer with `opencode auth login`.
+`hgs account login native-opencode` does not run it; it prints that instruction.
+
+## Models
+
+Zerus lists the models the service reports (`/api/model`), through an allowlist:
+keys, URLs and headers never leave the computer. Keyless free models such as
+`opencode/glm-5.3-flash-free` and `opencode/deepseek-v4.1-flash-free` are listed
+when the service offers them. Effort is the selected model's variants. The
+service's default model is always offered. Models declared in a project's own
+`opencode.json` appear for that project folder.
+
+### Configure a local model
 
 Install Ollama and load a model that supports tools on the same computer.
 `ollama list` shows the existing models. The local example in this repository
 uses `qwen3-coder:30b`; embedding models are not coding agents.
 
-Merge this provider into the host's existing OpenCode configuration, normally
-`~/.config/opencode/opencode.json` or `opencode.jsonc`. Retain other providers,
-credentials and permission rules. A configured `OPENCODE_CONFIG_DIR` or
-`OPENCODE_CONFIG` changes the native CLI's configuration location:
-
-The initial adapter accepts file configuration. Nonempty
-`OPENCODE_CONFIG_CONTENT` is rejected before creating a host or session because
-inline settings are not part of its configuration identity. The mobile connector
-clears inherited OpenCode configuration selectors and uses the host's normal
-configuration files.
+Merge this provider into OpenCode's configuration, normally
+`~/.config/opencode/opencode.json` (or `opencode.jsonc`), or into the project's
+`opencode.json`. Retain other providers, credentials and permission rules.
 
 ```json
 {
@@ -63,96 +87,84 @@ numeric temperature. Choose a model and context that fit the available GPU
 memory while other local services remain running. See the
 [OpenCode provider documentation](https://opencode.ai/docs/providers/#ollama).
 
-On the development host, the installed Qwen model performed native `write`,
-`read` and `bash` calls and produced the expected file. Other attempts returned
-literal tool markup as ordinary text instead of calling tools, including a fresh
-repeat with the ordinary configuration. Zerus preserves those replies as text;
-it never executes tool-like prose. This model's tool behavior with the reviewed
-OpenCode version is variable. The [Codex + Ollama example](local-models.md) has
-separate successful edit, test and exact-resume evidence. A `useResponses` probe
-still called Chat Completions and is not a demonstrated fix.
+Zerus preserves model replies that contain literal tool markup as text; it never
+executes tool-like prose. A local model's tool-calling reliability varies. The
+[Codex + Ollama example](local-models.md) has separate successful edit, test and
+exact-resume evidence.
 
 ## Start a conversation
 
-In New session, select the host computer, **OpenCode**, its native account and
-an offered model. A blank model selection uses the host's native default.
-Inspecting that form creates neither a worktree nor a native session.
-The cold catalog includes models declared in the host's configuration files;
-it does not fetch a cloud catalog or verify provider authentication and quota.
+In New session, select the computer, **OpenCode**, its native account and an
+offered model, and an effort where the model has variants. A blank model uses
+the service default. Inspecting the form creates neither a worktree nor a native
+session; only Start session does. Phones use the same form and the same Zerus
+run and native conversation identity.
 
-From the CLI:
+From the CLI (`--effort` requires `--model`):
 
 ```sh
-hgs opencode /workspace/orbit --new -n local-review --account native-opencode --model ollama/qwen3-coder:30b
-hgs inspect opencode/orbit/local-review
+hgs opencode /workspace/orbit --new -n local-review --model opencode/glm-5.3-flash-free
+hgs opencode /workspace/orbit --new -n deep-review --model opencode/glm-5.3-flash-free --effort high
 hgs @build-01 opencode /workspace/orbit --new -n local-review --model ollama/qwen3-coder:30b
+hgs inspect opencode/orbit/local-review
 ```
 
-The project directory remains on the agent host. Desktop and Android use the
-same HGS run and native conversation identity. Only explicit Start session
-creates a native conversation.
+The project directory remains on the agent computer.
 
 ## Controls and limits
 
-The initial adapter supports history, status, text messages, model selection,
-Stop, native questions and permissions, pause/resume, rename and forgetting a
-saved binding. Voice recognition delivers its transcript through the same guarded
-text-message path; original audio remains in Zerus history.
+- **Send.** Messages sent while OpenCode is working queue. After Stop, queued
+  messages show "Not delivered": they stay in OpenCode's queue, and OpenCode
+  may still deliver them when the session runs again unless you remove them
+  (with confirmation).
+- **Stop** interrupts the current turn.
+- **Questions.** Option, boolean and text fields are answered in Zerus; other
+  forms show "Answer this form in OpenCode".
+- **Permissions.** Allow once, Always allow or Reject. Reject rejects every
+  pending request of that session.
+- **Model and effort** can be changed; **rename** changes the session title.
+- **Forget** removes only the Zerus binding; native history is kept.
+- **Voice** transcripts use the same guarded send path; a refused voice message
+  shows as failed, and the original audio stays in Zerus history.
 
-The initial API-host path has no tmux Terminal or embedded Native UI. Attachments,
-messages to child sessions, archive/fork, context reset and compaction are not yet
-supported. Clients keep those controls unavailable with a reason. Configure
-native permissions and provider credentials on the host; additional managed
-OpenCode accounts are outside this initial native-account contract. Accounts can
-rename the native configuration, remove it from a machine's Zerus catalog and add
-it back; its files, credentials and sessions on the host stay unchanged.
+Not available in this version: pause/resume (OpenCode sessions have no separate
+process to pause), Terminal, attachments, compaction, fork and child sessions
+(a later update).
 
-Pause keeps the native host and exact native conversation available; it does not
-stop other conversations. Use each OpenCode session's own Pause/Resume controls;
-terminal-session bulk `hgs pause --all` / `hgs resume --all` do not include this
-native API backend. Forget removes only the Zerus binding and preserves
-native history. Interrupted or failed delivery is never automatically resubmitted.
-If a native acknowledgement is lost, Zerus reconciles the exact message identity
-when possible and otherwise retains an uncertain result for explicit inspection.
+### Delivery
 
-The initial history scan is bounded; a conversation beyond its event/byte budget
-reports unavailable history rather than claiming that all messages were loaded.
+Zerus pre-generates each message ID. If a response is lost, it reconciles the
+exact message (message list, then inbox) instead of guessing, and never posts
+the message again, so a message removed from the queue cannot come back. A 4xx
+reply is a definite refusal and is never resent. Removing a queued message is
+recorded before OpenCode is asked; once OpenCode confirms the removal, the
+request reports "Removed from the OpenCode queue before delivery". Interrupted
+or failed delivery, or a removal OpenCode did not confirm, is never resubmitted
+automatically; an uncertain result stays for inspection.
 
-The native server listens only on authenticated loopback. Its endpoint metadata
-and access secret are private host state, not relay data or public catalog fields.
-Closing or updating Zerus does not dispose that native host.
+## OpenCode 1 conversations
 
-## Child sessions
+Zerus no longer supports OpenCode 1. After OpenCode 2 migrates an old
+conversation, Zerus adopts it automatically (same session ID and folder).
+Otherwise it is listed as "This conversation belongs to OpenCode 1, which Zerus
+no longer supports" with Forget only. Native data is never modified.
 
-The reviewed version's native API runtime has no `task` tool, so a conversation
-driven only through Zerus does not create subagents. OpenCode's classic runtime,
-used by the OpenCode TUI and `opencode run` on the same computer and data
-directory, can continue that conversation and start children. Each child is a
-native session whose recorded parent is the Zerus conversation.
+## Privacy
 
-Zerus lists exactly those children under the session and opens each one
-read-only with its own recent history (the latest 200 native messages). A child's
-turn is finished when its own newest message records how it ended: completed or
-interrupted children show **Ready**, failed ones **Error**. The API host does
-not run classic turns, so it cannot confirm current work: an unfinished turn,
-which another OpenCode process may still be running or a crashed one abandoned,
-stays **Unknown**. Counters therefore show no confirmed active child and keep
-the `+` uncertainty marker, for example `0+/2`. A child never takes its parent's
-state, and the parent's state never comes from its children. At most 64 recent
-children are checked each time; older ones stay listed as unknown.
-
-Sending to a child, answering its questions or permissions, and changing its
-model remain in the OpenCode client that runs it. Turns that the classic runtime
-runs on the parent conversation itself are not part of the native API history
-that Zerus reads for the parent.
+The service password, URL and registration file never leave the computer: they
+are not relay data or public catalog fields. Catalog fields are allowlisted.
+Closing or updating Zerus does not stop the service.
 
 ## Qualification
 
 The ordinary CLI suite covers parsing and projections. The native adapter suite
-runs against the actual reviewed OpenCode binary with private synthetic state
-and a keyless local model fixture; it does not contact paid model APIs. Its child
-test starts a classic `opencode run` process on the same private data directory
-to create a real child. Run the suite explicitly with the prerequisites installed:
+runs against the actual OpenCode 2 binary with private HOME and XDG folders, its
+own service on a private port and a keyless local model; it never touches the
+service, settings or sessions of the person running it and does not contact paid
+model APIs. Full Linux and macOS CI run it with the reviewed minimum, and a daily
+canary runs it with the newest release
+([native agent compatibility](ci-and-aur.md#native-agent-compatibility-and-upstream-review)).
+Run it explicitly with OpenCode installed:
 
 ```sh
 cargo build --locked
@@ -160,6 +172,8 @@ ZERUS_TEST_OPENCODE_NATIVE=1 HGS_TEST_BIN="$PWD/target/debug/hgs" \
   PYTHONPATH=tests python3 -m unittest test_opencode_native -v
 ```
 
+With `ZERUS_TEST_OPENCODE_NATIVE=1`, a missing OpenCode or one older than the
+minimum fails the suite; `ZERUS_TEST_OPENCODE_BIN` selects another executable.
+
 See [contributing](../CONTRIBUTING.md) for the common CLI, Qt and Android
-gates. Native prerequisites must be present for an explicitly requested native
-qualification; a skipped suite is not compatibility evidence.
+gates. A skipped suite is not compatibility evidence.

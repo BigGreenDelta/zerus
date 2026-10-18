@@ -236,6 +236,9 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     auto *actions = new QHBoxLayout; actions->setSpacing(12);actions->addWidget(m_detail);
     m_login = new QPushButton(tr("Sign in…")); m_login->setObjectName("loginAccount"); actions->addWidget(m_login);
     m_install = new QPushButton(tr("Install agent…")); m_install->setObjectName("installAccountAgent"); actions->addWidget(m_install);
+    // Explicit only: inspecting accounts never starts OpenCode's shared service.
+    m_startOpenCode = new QPushButton; m_startOpenCode->setObjectName("startOpenCode"); actions->addWidget(m_startOpenCode);
+    m_startOpenCode->setToolTip(tr("Start the shared OpenCode service on this machine. Zerus never stops it.")); m_startOpenCode->hide();
     m_copy = new QPushButton(tr("Add to machine…"), this); m_copy->setObjectName("copyAccount"); m_copy->hide();
     actions->addStretch();machineLayout->addLayout(actions);
     auto *permissionRow = new QHBoxLayout; permissionRow->setSpacing(12);
@@ -269,6 +272,11 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     connect(m_copy, &QPushButton::clicked, this, [this] { copy(); });
     connect(m_install, &QPushButton::clicked, this, [this] { const auto p = selected(); if (!p.isEmpty()) emit installRequested(p["host"].toString(), p["provider"].toString()); });
     connect(m_remove, &QPushButton::clicked, this, &AccountsPage::remove);
+    connect(m_startOpenCode, &QPushButton::clicked, this, [this] {
+        const auto p = selected();
+        if (p["provider"] != "opencode" || p["catalog_state"] != "not_running" || !m_requests.isEmpty()) return;
+        request(p["host"].toString(), {"start", "native-opencode", "--json"});
+    });
     connect(m_rename, &QPushButton::clicked, this, &AccountsPage::rename);
     connect(m_login, &QPushButton::clicked, this, [this] {
         const auto p = selected(); if (p.isEmpty()) return;
@@ -280,6 +288,11 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
         if (!m_requests.contains(id)) return;
         const QString op = m_requests.take(id).second;
         if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { render(); return; }
+        if (op == "start") {
+            // The answer is OpenCode's catalog, not the account list: read the list again.
+            emit notice(tr("OpenCode started on %1.").arg(host.isEmpty() ? m_fleet.local().host : host));
+            request(host, {"ls"}); render(); return;
+        }
         if (op == "ls" || op == "add" || op == "rename" || op == "rm" || op == "restore" || op == "set-key" || op == "permissions" || op == "default") m_catalogs[host] = data;
         if (op == "rename" && !m_renameQueue.isEmpty()) { renameNext(); render(); return; }
         if (op != "ls") {
@@ -543,6 +556,7 @@ void AccountsPage::selectionChanged()
     m_add->setEnabled(idle && machines); m_add->setToolTip(machines ? QString() : remoteOnlyHint(m_fleet));
     updateRefreshState();
     m_install->setVisible(has && !p["installed"].toBool()); m_install->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
+    m_startOpenCode->setVisible(false);
     m_remove->setText(has ? tr("Remove from %1…").arg(p["machine"].toString()) : tr("Remove…"));
     m_login->setText(tr("Sign in…")); m_login->setToolTip({});
     renderMachines();
@@ -579,8 +593,16 @@ void AccountsPage::selectionChanged()
         : signedIn ? tr("Ready on %1.").arg(machine) : tr("Account status is unavailable on %1.").arg(machine));
     if(nativeConfig) {
         const auto setup=tr("Configure providers, models and permissions with OpenCode on %1. Zerus uses that native configuration.").arg(machine);
-        m_detail->setText(setup);m_login->setToolTip(setup);m_permissions->setToolTip(setup);m_install->setToolTip(setup);
+        m_login->setToolTip(setup);m_permissions->setToolTip(setup);m_install->setToolTip(setup);
         m_copy->setEnabled(false);
+        // hgs explains a missing or unsupported OpenCode, and a service it cannot use.
+        const auto state=p["catalog_state"].toString();
+        const auto reason=!p["installed"].toBool()?p["install_reason"].toString():!state.isEmpty()&&state!="ready"?p["catalog_reason"].toString():QString();
+        m_detail->setText(!online(p["host"].toString())?tr("%1 is offline.").arg(machine):!reason.isEmpty()?reason
+            :!p["installed"].toBool()?tr("%1 is not installed on %2.").arg(providerName("opencode"),machine):setup);
+        const bool stopped=p["installed"].toBool()&&state=="not_running";
+        m_startOpenCode->setText(tr("Start OpenCode on %1").arg(machine));
+        m_startOpenCode->setVisible(stopped);m_startOpenCode->setEnabled(stopped&&idle&&online(p["host"].toString()));
     }
     m_detail->setToolTip(p["home"].toString());
     if(isVisible())inspectSelected();

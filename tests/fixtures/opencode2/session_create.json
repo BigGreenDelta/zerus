@@ -1,0 +1,35 @@
+{
+ "data": {
+  "cost": 0,
+  "id": "ses_IycejmWY8RpJq1aeBnnIpbaNAt",
+  "location": {
+   "directory": "/workspace/fixture"
+  },
+  "metadata": {
+   "zerus": {
+    "launch_id": "launch-1",
+    "run_id": "run-1"
+   }
+  },
+  "model": {
+   "id": "local",
+   "providerID": "fixture",
+   "variant": "default"
+  },
+  "projectID": "7e036652a096beafcae6c4d7f7d233d816a83cc8",
+  "time": {
+   "created": 1792271373796,
+   "updated": 1792271373796
+  },
+  "title": "probe",
+  "tokens": {
+   "cache": {
+    "read": 0,
+    "write": 0
+   },
+   "input": 0,
+   "output": 0,
+   "reasoning": 0
+  }
+ }
+}

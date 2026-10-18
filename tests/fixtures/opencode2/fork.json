@@ -1,0 +1,42 @@
+{
+ "data": {
+  "cost": 0,
+  "fork": {
+   "boundary": {
+    "messageID": "msg_14bb336ac0019Mqw2Lyy4Qa4Sj",
+    "type": "through"
+   },
+   "sessionID": "ses_IycejmWY8RpJq1aeBnnIpbaNAt"
+  },
+  "id": "ses_eb44cc196ffeOcEUMCZm4t66t7",
+  "location": {
+   "directory": "/workspace/fixture"
+  },
+  "metadata": {
+   "zerus": {
+    "launch_id": "launch-1",
+    "run_id": "run-1"
+   }
+  },
+  "model": {
+   "id": "local",
+   "providerID": "fixture",
+   "variant": "default"
+  },
+  "projectID": "7e036652a096beafcae6c4d7f7d233d816a83cc8",
+  "time": {
+   "created": 1792271400554,
+   "updated": 1792271400554
+  },
+  "title": "probe (fork #1)",
+  "tokens": {
+   "cache": {
+    "read": 0,
+    "write": 0
+   },
+   "input": 0,
+   "output": 0,
+   "reasoning": 0
+  }
+ }
+}

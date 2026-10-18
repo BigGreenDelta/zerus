@@ -60,6 +60,7 @@ private slots:
     void init();
     void nativeDefaultsAndMachineScopedActions();
     void openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations();
+    void openCodeReasonsAndExplicitStart();
     void addAccountUsesProviderRows();
     void addAccountKeepsItsLayoutAcrossAgents();
     void repliesFromRemovedMachineAreIgnored();
@@ -142,6 +143,11 @@ if args[0]=='account':
  if args[1]=='rename':
   publish('renamed',json.dumps({'host':host,'args':args}))
   with (root/'rename-calls').open('a') as out:out.write(json.dumps({'host':host,'args':args})+'\n')
+ if args[1]=='start':
+  publish('started',json.dumps({'host':host,'args':args}))
+  if (root/'fail-start').exists():print('OpenCode did not register a compatible service within 20 seconds',file=sys.stderr);sys.exit(1)
+  (root/'opencode-state').unlink(missing_ok=True)
+  print(json.dumps({'model_options':[],'settings_model':'','catalog_state':'ready','catalog_reason':'','catalog_at':time.time()}));sys.exit(0)
  removed_file=root/('removed-'+(host or 'local'))
  if args[1]=='set-key':
   data=json.load(sys.stdin)
@@ -157,6 +163,14 @@ if args[0]=='account':
   p['is_default']=p['id']==(chosen.read_text() if chosen.exists() and p['provider']=='codex' else 'native-'+p['provider'])
  if (root/'deepseek').exists():
   profiles.append({'id':'native-dsh','provider':'dsh','label':'Native DeepSeek account','home':'~/.dsh','native':True,'installed':not (host=='mac' and (root/'missing-dsh').exists()),'portable':False,'credential_file':False})
+ if (root/'opencode').exists():
+  state=(root/'opencode-state').read_text() if (root/'opencode-state').exists() else 'ready'
+  where=host or 'arch'
+  oc={'id':'native-opencode','provider':'opencode','label':'Native configuration','home':'~/.config/opencode','native':True,'installed':True,'portable':False,'credential_file':False,'is_default':True,
+      'model_options':[],'settings_model':'','catalog_state':state,'catalog_at':None,
+      'catalog_reason':{'ready':'','not_running':'OpenCode is not running on '+where,'unreachable':'OpenCode on '+where+' did not answer'}.get(state,'')}
+  if (root/'opencode-missing').exists():oc.update(installed=False,install_reason='OpenCode 2.0.31 is not supported; install OpenCode 2.0.32 or newer 2.x')
+  profiles.append(oc)
  if (root/'portable-auth').exists():
   for p in profiles:
    if p['portable']:p['credential_file']=True
@@ -227,6 +241,38 @@ void TestAccountsPage::openCodeNativeConfigurationDoesNotOfferUnsupportedAccount
     QVERIFY(!QFile::exists(m_dir.filePath("removed-local")));QVERIFY(login.isEmpty());
     page.showAccount({},"native-codex");QTRY_VERIFY(page.findChild<QPushButton *>("renameAccount")->isEnabled());
     QVERIFY(!page.findChild<QPushButton *>("renameAccount")->toolTip().contains("OpenCode"));
+}
+
+void TestAccountsPage::openCodeReasonsAndExplicitStart()
+{
+    const auto write=[&](const QString &name,const QByteArray &text={}){QVERIFY(FakeCli::replace(m_dir.filePath(name),text));};
+    write("opencode");write("opencode-state","not_running");
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet(false));page.show();QSignalSpy notices(&page,&AccountsPage::notice);
+    auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_COMPARE(list->count(),5);
+    page.showAccount({},"native-opencode");QTRY_COMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["provider"].toString(),QString("opencode"));
+    auto *detail=page.findChild<QLabel *>("accountMachineStatus");auto *start=page.findChild<QPushButton *>("startOpenCode");QVERIFY(detail);QVERIFY(start);
+    QTRY_COMPARE(detail->text(),QString("OpenCode is not running on arch"));
+    QVERIFY(start->isVisible());QVERIFY(start->isEnabled());QCOMPARE(start->text(),QString("Start OpenCode on arch"));
+    // Inspection never starts the service; only the explicit action does.
+    QVERIFY(!QFile::exists(m_dir.filePath("started")));
+    start->click();QTRY_VERIFY(QFile::exists(m_dir.filePath("started")));
+    QFile started(m_dir.filePath("started"));QVERIFY(started.open(QIODevice::ReadOnly));const auto call=QJsonDocument::fromJson(started.readAll()).object();started.close();
+    QCOMPARE(call["host"].toString(),QString());QCOMPARE(call["args"].toArray(),QJsonArray({"account","start","native-opencode","--json"}));
+    // Success refreshes the account: the service is ready now.
+    QTRY_VERIFY(!start->isVisible());QTRY_VERIFY(detail->text().contains("Configure providers, models and permissions with OpenCode on arch"));
+    QTRY_VERIFY(std::any_of(notices.cbegin(),notices.cend(),[](const QList<QVariant> &n){return n[0].toString()=="OpenCode started on arch."&&!n[1].toBool();}));
+    // Other unavailable states show their reason without offering Start.
+    write("opencode-state","unreachable");page.ensureCatalogs(true);
+    QTRY_COMPARE(detail->text(),QString("OpenCode on arch did not answer"));QVERIFY(!start->isVisible());
+    // A missing or unsupported installation shows why.
+    write("opencode-missing");page.ensureCatalogs(true);
+    QTRY_COMPARE(detail->text(),QString("OpenCode 2.0.31 is not supported; install OpenCode 2.0.32 or newer 2.x"));QVERIFY(!start->isVisible());
+    // A failed start reports the CLI error and offers Start again.
+    QVERIFY(QFile::remove(m_dir.filePath("opencode-missing")));QVERIFY(QFile::remove(m_dir.filePath("started")));
+    write("opencode-state","not_running");write("fail-start");page.ensureCatalogs(true);
+    QTRY_VERIFY(start->isVisible());QTRY_VERIFY(start->isEnabled());notices.clear();start->click();
+    QTRY_VERIFY(std::any_of(notices.cbegin(),notices.cend(),[](const QList<QVariant> &n){return n[0].toString().contains("did not register a compatible service")&&n[1].toBool();}));
+    QTRY_VERIFY(start->isEnabled());QVERIFY(start->isVisible());QCOMPARE(detail->text(),QString("OpenCode is not running on arch"));
 }
 
 void TestAccountsPage::addAccountUsesProviderRows()
