@@ -8452,7 +8452,12 @@ void TestSessionsWindow::openCodeRemovesUndeliveredMessageOnlyAfterConfirmation(
         const bool cancelDefault=dialog->defaultButton()==dialog->button(QMessageBox::Cancel)&&dialog->escapeButton()==dialog->button(QMessageBox::Cancel);
         bool destructive=false;for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole)destructive=button->text()=="Remove";
         dialog->button(QMessageBox::Cancel)->click();
+#ifdef Q_OS_MACOS
+        // Qt ignores a message box's window title on macOS (QMessageBox::setWindowTitle).
+        QVERIFY2(title.isEmpty(),qPrintable(title));
+#else
         QCOMPARE(title,QString("Remove queued message"));
+#endif
         QCOMPARE(shown,QString("Remove this queued message? It is still waiting in OpenCode's queue and runs first with your next message unless you remove it."));
         QVERIFY(cancelDefault);QVERIFY(destructive);
     });
