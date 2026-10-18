@@ -1146,13 +1146,16 @@ card answers through it, so a clipped panel no longer needs a larger Terminal.
 - The card always shows the whole request the hook answers: the Bash command,
   its description and any other field, or the whole input of another tool.
 - Claude's own options appear only when a complete panel shows exactly that
-  operation: the main agent's Bash command and description, with no other
-  field. A file name or host proves too little. For example, a Read of another
-  file with the same name may be queued in front of this one.
+  operation. That means the main agent's Bash command, with its description if
+  any and no other field, and no other active Bash call. A file name or host
+  proves too little. For example, a Read of another file with the same name may
+  be queued in front of this one.
 - Any other complete panel is answered on the screen as above, acting on what
-  it shows. A clipped panel gives **Yes** and **No**.
-- A safety warning is shown only when its visible command rows belong to this
-  request's command.
+  it shows. A clipped panel gives **Yes** and **No**. An unreadable terminal
+  gives no hook card.
+- A visible safety warning must belong to this request's command, through a
+  proven panel or the visible command rows of a clipped one. Otherwise there is
+  no hook card.
 - **Yes** allows this one tool call without changing any permission setting.
   **No** ends Claude's turn as in Terminal. **Tell Claude what to do instead**
   denies the call with your message, and Claude continues without it.

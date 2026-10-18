@@ -469,6 +469,8 @@ class NativeClaudeApprovalChannel(unittest.TestCase):
                 self.assertFalse(card['panel_verified'], 'no Read panel proves the whole request')
         card = cards[0]
         body = card['questions'][0]['body']
+        # No Read panel proves the whole request, so the screen answers its panel.
+        self.assertEqual((card['answer_transport'], card.get('panel_verified')), ('claude_tui', None))
         displayed = [key for key, path in [('A', self.target_A), ('B', self.target_B)] if str(path) in body]
         self.assertEqual(len(displayed), 1, body)
         # The screen path may report its queued panel as uncertain; either way
@@ -478,6 +480,8 @@ class NativeClaudeApprovalChannel(unittest.TestCase):
         self.assertTrue(result.returncode == 0 or 'delivery uncertain' in result.stderr, result.stderr)
         first = self.wait_for(lambda: self.results())[0]
         self.assertEqual(first, 'toolu_read_' + displayed[0], 'the decision acts on the request the card shows')
+        self.assertEqual(self.channels('answer.json') + self.channels('claimed.json') + self.channels('emitted.json'), [],
+                         'nothing was offered to a hook')
 
     def test_claimed_decision_is_never_sent_again_through_any_transport(self):
         card = self.channel_card()

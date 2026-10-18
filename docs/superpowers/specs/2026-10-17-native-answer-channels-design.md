@@ -304,21 +304,28 @@ delivery. The channel is only another transport.
 - The card's options:
   - Claude's options are listed verbatim, and `panel_verified` is true, only
     when a complete panel proves the exact operation (`proves`). That means the
-    main agent's "Bash command" title, the full command and description, and no
-    other input field.
+    main agent's "Bash command" title, the full command, the description if any,
+    and no other input field. The bound call must also be the only active main
+    Bash call (`channel::alone`), because the command match ignores how
+    whitespace wraps.
   - The legacy file-name or host match is not proof. A Read of another file
     with the same name can be queued in front, shown as "1 of 2" while the hook
     waits for the second.
   - Any other complete panel is left to the screen path, which acts on what it
     shows.
-  - A clipped or unreadable panel gives one-time Yes and No.
+  - A clipped panel gives one-time Yes and No. An unreadable terminal gives no
+    hook card.
   - Its free-text field, "Tell Claude what to do instead", maps to deny with
     the message.
   - Broader options, and the keys after an unclaimed offer, use only a proven
     panel.
-- A visible safety warning is added only when it belongs to this request: the
-  panel proves it, or the visible command rows of a clipped panel are part of
-  this command.
+- A visible safety warning is added, as its rows below the last fence, only
+  when it belongs to this request: the panel proves it, or the visible command
+  rows of a clipped panel are part of this command. A warning that cannot be
+  attributed means no hook card.
+- When the screen path answers a panel of another queued request, its
+  pre-existing bookkeeping settles the recorded request. That request then
+  waits in Terminal. This path is unchanged.
 - Automatic approvals accept `claude_hook` only with `panel_verified`, so only
   for a proven Bash panel. This is the same one-time grant as on the screen
   path.

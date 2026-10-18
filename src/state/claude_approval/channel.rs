@@ -39,6 +39,14 @@ pub(super) fn observe(record:&mut Value,event:&Value) {
     if uses.is_empty() {record.as_object_mut().unwrap().remove(USES);} else {record[USES]=json!(uses);}
 }
 
+/// Whether `tool_use` is the only active main-agent call of its tool, so a
+/// panel of that tool cannot be another call's.
+pub(super) fn alone(record:&Value,tool_use:&str)->bool {
+    let tool=&record[USES][tool_use]["tool_name"];
+    !tool.is_null()&&record[OVERFLOW]!=true
+        &&record[USES].as_object().is_some_and(|uses|uses.values().filter(|used|&used["tool_name"]==tool).count()==1)
+}
+
 /// Forget the tool use a denial settled: Claude reports no end for it.
 pub(super) fn forget(record:&mut Value,tool_use:&str) {
     if let Some(uses)=record[USES].as_object_mut() {uses.remove(tool_use);}

@@ -298,7 +298,9 @@ const FEEDBACK:&str="Tell Claude what to do instead";
 /// grants. The legacy match accepts a file name or host, so it can be another
 /// request with the same name, queued in front of this one. Only a Bash panel
 /// can show it all: the main agent's own title, the full command, its
-/// description, and no other input field.
+/// description if any, and no other input field. The caller also requires the
+/// bound call to be the only active Bash call (`channel::alone`): the command
+/// match ignores how whitespace wraps.
 fn proves(request:&Value,panel:&Panel)->bool {
     let input=&request["tool_input"];
     request["tool_name"]=="Bash"&&panel.title=="Bash command"
@@ -307,17 +309,24 @@ fn proves(request:&Value,panel:&Panel)->bool {
         &&compact(&panel.body.join("\n")).contains(&compact(string(input,"description")))
 }
 
-/// The warning of a visible native safety panel, when it belongs to this Bash
+/// The visible native safety panel, and whether it belongs to this Bash
 /// request: a panel that `proves` it, or a clipped one whose visible command
 /// rows are part of this request's command. Another request's warning is never
 /// shown as this one's.
-fn attributed_warning(request:&Value,screen:&str,proven:bool)->Option<Panel> {
-    if request["tool_name"]!="Bash" {return None;}
+fn safety_warning(request:&Value,screen:&str,proven:bool)->Option<(Panel,bool)> {
     let panel=safety_panel(screen)?;
-    if proven {return Some(panel);}
-    let fence=panel.body.iter().position(|row|rule(row,'╌'))?;
-    let shown=compact(&panel.body[..fence].join(""));
-    (!shown.is_empty()&&compact(string(&request["tool_input"],"command")).contains(&shown)).then_some(panel)
+    if request["tool_name"]!="Bash" {return Some((panel,false));}
+    if proven {return Some((panel,true));}
+    let own=panel.body.iter().position(|row|rule(row,'╌')).is_some_and(|fence|{
+        let shown=compact(&panel.body[..fence].iter().map(|row|row.strip_prefix('│').unwrap_or(row)).collect::<String>());
+        !shown.is_empty()&&compact(string(&request["tool_input"],"command")).contains(&shown)
+    });
+    Some((panel,own))
+}
+/// The diagnostic rows of a safety panel: those below its last fence.
+fn warning_text(panel:&Panel)->String {
+    let start=panel.body.iter().rposition(|row|rule(row,'╌')).map_or(0,|fence|fence+1);
+    panel.body[start..].join("\n").trim().to_owned()
 }
 
 /// The card for the pending main-agent request while Claude's permission hook
@@ -326,22 +335,24 @@ fn attributed_warning(request:&Value,screen:&str,proven:bool)->Option<Panel> {
 /// `proves` the same operation adds Claude's options; one reaching beyond this
 /// request goes through that verified panel. A complete panel that proves less
 /// is left to the screen path, which acts on what it shows. A clipped one gives
-/// a one-time Yes or No. None when the screen proves nothing, or when a
-/// child's request may be the one shown (`channel::shown`).
+/// a one-time Yes or No. None when the screen proves nothing, when a child's
+/// request may be the one shown (`channel::shown`), or when a visible safety
+/// warning cannot be shown as this request's own.
 fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value> {
     let screen=screen?;
     let request=request(record)?;
     if !eligible(record)||!channel::shown(record,screen) {return None;}
     let complete=parse(screen);
-    if complete.as_ref().is_some_and(|panel|!proves(request,panel)) {return None;}
+    if complete.as_ref().is_some_and(|panel|!proves(request,panel)||!channel::alone(record,string(identity,"tool_call_id"))) {return None;}
     let native=complete;
-    let warning=attributed_warning(request,screen,native.is_some());
+    let warning=match safety_warning(request,screen,native.is_some()) {
+        Some((panel,true)) => Some(panel),
+        Some((_,false)) => return None,
+        None => None,
+    };
     let tool=string(request,"tool_name");
     let mut body=request_body(request)?;
-    if let Some(warning)=&warning {
-        let text=warning.body.iter().map(|r|if rule(r,'╌'){""}else{r.as_str()}).collect::<Vec<_>>().join("\n");
-        body=format!("{body}\n\n{}",text.trim());
-    }
+    if let Some(warning)=&warning {body=format!("{body}\n\n{}",warning_text(warning));}
     let (question,options)=match &native {
         Some(panel) => (panel.question.clone(),native_options(panel)),
         None => (format!("Claude asks to use {tool}"),
@@ -1082,6 +1093,12 @@ pub(super) fn reconcile(record:Value)->Value {
         assert!(!proves(&hooked("Bash",other)["pending_approval"],&parse(BASH).unwrap()));
         let child_panel=BASH.replace(" Bash command\n"," Bash command · from the \"fixture-checks\" workflow\n");
         assert!(!proves(&r["pending_approval"],&parse(&child_panel).unwrap()));
+        // Another active Bash call may own the panel: no proof, no hook card.
+        let identity=channel::identity(&r).unwrap();
+        assert!(channel_card(&r,Some(BASH),&identity).unwrap()["panel_verified"]==true);
+        let mut two=r.clone();
+        channel::observe(&mut two,&json!({"hook_event_name":"PreToolUse","tool_use_id":"toolu_other","tool_name":"Bash","tool_input":{"command":"printf  hi > out.txt"}}));
+        assert!(channel_card(&two,Some(BASH),&identity).is_none());
     }
     #[test] fn a_fetch_of_the_same_host_is_not_the_same_operation() {
         let r=hooked("WebFetch",json!({"url":"https://example.com/private/report","prompt":"title?"}));
@@ -1099,12 +1116,23 @@ pub(super) fn reconcile(record:Value)->Value {
         let own=hooked("Bash",json!({"command":command}));
         let q=channel_card(&own,Some(clipped),&channel::identity(&own).unwrap()).unwrap();
         assert!(string(&q["questions"][0],"body").contains("Dangerous rm operation"));
+        assert_eq!(string(&q["questions"][0],"body").matches("T=$(pwd)").count(),1,"the warning rows only, not the command again");
+        // Another command's warning is never shown as this one's: no hook card.
         let other=hooked("Bash",json!({"command":"rm -f build/*.o"}));
-        let q=channel_card(&other,Some(clipped),&channel::identity(&other).unwrap()).unwrap();
-        let body=string(&q["questions"][0],"body");
-        assert!(body.starts_with("Bash\n\nrm -f build/*.o")&&!body.contains("Dangerous rm operation"),"{body}");
+        assert!(channel_card(&other,Some(clipped),&channel::identity(&other).unwrap()).is_none());
         let only_warning=&clipped[clipped.find("╌").unwrap()..];
-        assert!(attributed_warning(&own["pending_approval"],only_warning,false).is_none(),"no visible command, no attribution");
+        assert!(channel_card(&own,Some(only_warning),&channel::identity(&own).unwrap()).is_none(),"no visible command, no attribution");
+        // A blank row of a multi-line command keeps only its bare gutter.
+        let script="printf one\n\nT=$(pwd); test \"$T\" = /workspace/example && rm -f $T/*.jsonl $T/*.port";
+        let multi=hooked("Bash",json!({"command":script}));
+        let blank=clipped.replace(" │ T=$(pwd)"," │ printf one\n │\n │ T=$(pwd)");
+        let q=channel_card(&multi,Some(&blank),&channel::identity(&multi).unwrap()).unwrap();
+        assert!(string(&q["questions"][0],"body").contains("Dangerous rm operation"));
+        // A complete safety panel of the same command proves it, and adds its warning once.
+        let full=channel_card(&own,Some(SAFETY),&channel::identity(&own).unwrap()).unwrap();
+        assert_eq!(full["panel_verified"],true);
+        assert_eq!(string(&full["questions"][0],"body").matches("T=$(pwd)").count(),1);
+        assert!(string(&full["questions"][0],"body").contains("Dangerous rm operation"));
     }
 
     #[test] fn waiting_hook_card_keeps_broader_options_behind_the_screen() {
