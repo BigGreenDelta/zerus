@@ -438,8 +438,10 @@ extern "C" fn terminate(_: libc::c_int) {
 /// AskUserQuestion. It waits beside the native panel for an answer offered
 /// through `hgs answer` and prints Claude's allow with those answers. Anything
 /// else (another session, no exact card, an answer in Terminal, a timeout)
-/// ends it without output, and the panel stays. So does any error: nothing was
-/// printed before emitted.json, so `hgs answer` uses the screen instead.
+/// ends it without output, and the panel stays. So does any error: nothing is
+/// printed before emitted.json. An offer this worker had not claimed lets
+/// `hgs answer` use the screen; a claimed one stays with the channel and is
+/// reported uncertain, never sent again.
 pub(super) fn run() -> Result<i32> {
     let _ = wait();
     Ok(0)
