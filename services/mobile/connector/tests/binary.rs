@@ -124,6 +124,15 @@ fn valid(scratch: &Scratch) -> Value {
     json!({"server_url": RELAY, "node_token": TOKEN, "state_dir": scratch.path("state").display().to_string()})
 }
 
+/// Inspect an existing owned fixture after its writer was forcibly stopped.
+/// SQLite may need to recover a hot rollback journal before even a SELECT;
+/// this is not the connector's read-only `--check` path.
+fn post_crash_journal(path: &Path) -> rusqlite::Connection {
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    rusqlite::Connection::open_with_flags(path, flags).unwrap()
+}
+
 #[test]
 fn main_outcomes_match_the_python_connector() {
     let mut checked = 0;
@@ -163,7 +172,7 @@ fn main_outcomes_match_the_python_connector() {
             // Validation passed and the journal is open; the runtime decides the rest.
             assert!(!stderr.contains(STARTUP_FAILURE), "{id}: {stderr}");
             assert_ne!(code, Some(2), "{id}");
-            let stored: String = read_only(&state.join(JOURNAL))
+            let stored: String = post_crash_journal(&state.join(JOURNAL))
                 .query_row(
                     "SELECT value FROM metadata WHERE key='relay_binding'",
                     [],
@@ -191,6 +200,64 @@ fn main_outcomes_match_the_python_connector() {
         checked += 1;
     }
     assert_eq!(checked, 14);
+}
+
+#[test]
+fn post_crash_inspection_recovers_the_committed_binding() {
+    let scratch = scratch("post-crash-binding");
+    let live = scratch.path("live");
+    let committed = "committed-binding";
+    Journal::open(&live, committed, EPOCH).unwrap().close();
+    let writer = rusqlite::Connection::open(live.join(JOURNAL)).unwrap();
+    writer
+        .execute_batch("PRAGMA cache_size=1; BEGIN IMMEDIATE")
+        .unwrap();
+    writer
+        .execute(
+            "UPDATE metadata SET value=? WHERE key='relay_binding'",
+            ["uncommitted-binding"],
+        )
+        .unwrap();
+    for index in 0..200 {
+        writer
+            .execute(
+                "INSERT INTO metadata VALUES(?, ?)",
+                [format!("k{index}"), "x".repeat(500)],
+            )
+            .unwrap();
+    }
+    writer.cache_flush().unwrap();
+    // Copy during the transaction. The copies have no writer or lock holder,
+    // exactly the recovery state a forced stop can leave behind.
+    let state = scratch.path("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for name in [JOURNAL.to_owned(), format!("{JOURNAL}-journal")] {
+        std::fs::copy(live.join(&name), state.join(&name)).unwrap();
+        std::fs::set_permissions(state.join(&name), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
+    drop(writer);
+    let path = state.join(JOURNAL);
+    let error = read_only(&path)
+        .query_row(
+            "SELECT value FROM metadata WHERE key='relay_binding'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK),
+        "the original read-only inspection must require rollback: {error}"
+    );
+    let recovered: String = post_crash_journal(&path)
+        .query_row(
+            "SELECT value FROM metadata WHERE key='relay_binding'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recovered, committed);
 }
 
 #[test]
@@ -270,7 +337,7 @@ fn state_below_a_symlinked_parent_opens_as_in_python() {
     assert!(!stderr.contains(STARTUP_FAILURE), "{stderr}");
     assert_ne!(code, Some(2));
     let binding = zerus_relay::json::digest(format!("{RELAY}\0{TOKEN}"));
-    let stored: String = read_only(&scratch.path("real/state").join(JOURNAL))
+    let stored: String = post_crash_journal(&scratch.path("real/state").join(JOURNAL))
         .query_row(
             "SELECT value FROM metadata WHERE key='relay_binding'",
             [],
