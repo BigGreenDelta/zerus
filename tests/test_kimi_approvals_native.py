@@ -140,25 +140,26 @@ def stop_client(client, start, start_of=proc_start, seconds=5):
 def close(retain, stop_client, stop, seal, remove):
     """Owned cleanup in a fixed order, whatever fails: keep evidence, stop the
     fixture's own client, then every owned process, check every seal, and
-    remove private state only when all of that succeeded. Every problem."""
+    remove private state only when all of that succeeded. Each step is tried
+    on its own, so a failure never skips a later stop or seal. Every problem."""
     problems = []
-    try:
-        retain()
-    except BaseException as error:
-        problems.append(f'evidence: {error!r}')
-    unknown = stop_client()
+
+    def attempt(name, step):
+        try:
+            return step()
+        except BaseException as error:
+            problems.append(f'{name}: {error!r}')
+            return None
+    attempt('evidence', retain)
+    unknown = attempt('control client', stop_client)
     if unknown:
         problems.append(unknown)
-    try:
-        stop()
-    except BaseException as error:
-        problems.append(f'owned processes: {error!r}')
-    problems.extend(seal())
+    attempt('owned processes', stop)
+    sealed = attempt('seals', seal)
+    if sealed:
+        problems.extend(sealed)
     if not problems:
-        try:
-            remove()
-        except BaseException as error:
-            problems.append(f'removal: {error!r}')
+        attempt('removal', remove)
     return problems
 
 
@@ -678,6 +679,20 @@ class FixtureControls(unittest.TestCase):
             problems = close(step('retain'), step('client', result=client), step('stop', stop),
                              step('seal', result=['copy changed']), step('remove'))
             self.assertEqual((calls, len(problems)), (['retain', 'client', 'stop', 'seal'], 2))
+        # A client, owned stop or seal step that raises still lets every later
+        # step run, and keeps all private state.
+        for raising in ('client', 'stop', 'seal'):
+            calls.clear()
+            problems = close(step('retain'), step('client', OSError('wait') if raising == 'client' else None),
+                             step('stop', AssertionError('survivors') if raising == 'stop' else None),
+                             step('seal', ValueError('digest') if raising == 'seal' else None, result=[]), step('remove'))
+            self.assertEqual((calls, len(problems)), (['retain', 'client', 'stop', 'seal'], 1), raising)
+        calls.clear()
+        problems = close(step('retain', TimeoutError('capture')), step('client', OSError('wait')),
+                         step('stop', AssertionError('survivors')), step('seal', ValueError('digest')), step('remove'))
+        self.assertEqual((calls, len(problems)), (['retain', 'client', 'stop', 'seal'], 4))
+        self.assertEqual([problem.split(':')[0] for problem in problems],
+                         ['evidence', 'control client', 'owned processes', 'seals'])
         calls.clear()
         self.assertEqual(close(step('retain'), step('client'), step('stop'), step('seal', result=[]), step('remove')), [])
         self.assertEqual(calls, ['retain', 'client', 'stop', 'seal', 'remove'])
