@@ -7,6 +7,7 @@ mod project;
 pub mod rank;
 mod render;
 mod schema;
+mod store;
 mod task;
 
 pub use error::{Error, Result};
@@ -15,4 +16,5 @@ pub use render::{cancel_message, task_prompt, Tools};
 pub use schema::{
     Actor, LogEntry, SessionKey, Stage, Target, TaskView, MAX_DOCUMENT, MAX_TEXT, SCHEMA,
 };
+pub use store::{Damaged, Position, ProjectStore};
 pub use task::{NewTask, TaskDoc};

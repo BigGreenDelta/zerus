@@ -21,6 +21,14 @@ pub struct NewTask<'a> {
 pub struct TaskDoc {
     uuid: String,
     doc: LoroDoc,
+    /// The version the store last read or wrote, for appending updates.
+    pub(crate) saved: Option<VersionVector>,
+    /// The length of the valid updates the store read or wrote after the snapshot.
+    pub(crate) saved_len: u64,
+    /// The stored updates were cut short or could not be applied: rewrite the snapshot.
+    pub(crate) needs_fold: bool,
+    /// The stage when the store last read or wrote the task.
+    pub(crate) saved_stage: Option<Stage>,
 }
 
 fn string(map: &LoroMap, key: &str) -> Option<String> {
@@ -73,7 +81,14 @@ impl TaskDoc {
         fields.insert("rank", task.rank)?;
         fields.insert("summary", "")?;
         doc.get_text("text").insert(0, task.text)?;
-        let this = Self { uuid, doc };
+        let this = Self {
+            uuid,
+            doc,
+            saved: None,
+            saved_len: 0,
+            needs_fold: false,
+            saved_stage: None,
+        };
         this.log("created", &task.author, task.now, "", None)?;
         this.doc.commit();
         Ok(this)
@@ -88,7 +103,14 @@ impl TaskDoc {
         if !ids::is_uuid(&uuid) {
             return Err(Error::new("not a task document"));
         }
-        Ok(Self { uuid, doc })
+        Ok(Self {
+            uuid,
+            doc,
+            saved: None,
+            saved_len: 0,
+            needs_fold: false,
+            saved_stage: None,
+        })
     }
 
     pub fn uuid(&self) -> &str {
@@ -111,6 +133,21 @@ impl TaskDoc {
     pub fn export_since(&self, version: &[u8]) -> Result<Vec<u8>> {
         let version = VersionVector::decode(version)?;
         Ok(self.doc.export(ExportMode::updates(&version))?)
+    }
+
+    pub(crate) fn export_since_vv(&self, version: &VersionVector) -> Result<Vec<u8>> {
+        Ok(self.doc.export(ExportMode::updates(version))?)
+    }
+
+    pub(crate) fn current_vv(&self) -> VersionVector {
+        self.doc.oplog_vv()
+    }
+
+    /// Applies stored updates; false when they cannot be applied completely.
+    pub(crate) fn import_block(&mut self, bytes: &[u8]) -> bool {
+        self.doc
+            .import(bytes)
+            .is_ok_and(|status| status.pending.is_none())
     }
 
     fn meta(&self) -> LoroMap {
