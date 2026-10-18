@@ -6,7 +6,7 @@
 //! Updates are folded into a fresh snapshot when they grow, and once when a
 //! task is accepted (its Done compaction). One process at a time holds a project.
 use crate::project::ProjectDoc;
-use crate::schema::{Actor, Stage};
+use crate::schema::{Actor, Stage, SCHEMA};
 use crate::task::TaskDoc;
 use crate::{ids, rank, Error, Result};
 use fs2::FileExt;
@@ -17,6 +17,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
+/// A rank longer than this renumbers its stage (ranks stay valid up to 64).
+const RENUMBER_AT: usize = 32;
 /// Appended updates beyond this size are folded into the snapshot.
 const FOLD_BYTES: u64 = 256 * 1024;
 /// A block: little-endian `u32` length, the first four bytes of the SHA-256
@@ -341,7 +343,23 @@ impl ProjectStore {
             .iter()
             .map(TaskDoc::rank)
             .find(|r| low.as_ref().is_none_or(|l| r > l));
-        rank::between(low.as_deref(), high.as_deref())
+        let placed = rank::between(low.as_deref(), high.as_deref());
+        if placed.as_ref().is_ok_and(|r| r.len() <= RENUMBER_AT)
+            || list.iter().any(|t| t.schema() > SCHEMA)
+        {
+            return placed;
+        }
+        // Inserting at one place again and again lengthens ranks; renumber the
+        // stage evenly, in its current order, and place the task among them.
+        let fresh = rank::spread(list.len());
+        for (mut task, rank) in list.into_iter().zip(&fresh) {
+            if task.rank() != *rank {
+                task.set_rank(rank)?;
+                self.save(&mut task)?;
+            }
+        }
+        let low = index.checked_sub(1).map(|i| fresh[i].as_str());
+        rank::between(low, fresh.get(index).map(String::as_str))
     }
 
     /// How many tasks agents started since `since` (Unix milliseconds).
@@ -584,6 +602,29 @@ mod tests {
         assert!(store
             .rank_for(Stage::Backlog, &Position::Before(last), None)
             .is_err());
+    }
+
+    #[test]
+    fn long_ranks_are_renumbered_in_order() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        // Ranks that many moves to the top leave behind.
+        let long = |last: char| format!("{}{last}", "0".repeat(40));
+        for rank in [long('1'), long('2'), "V".to_owned()] {
+            let mut task = new_task(&store, &rank);
+            store.save(&mut task).unwrap();
+        }
+        let before: Vec<String> = store
+            .ordered(Stage::Todo)
+            .unwrap()
+            .iter()
+            .map(TaskDoc::id)
+            .collect();
+        let top = store.rank_for(Stage::Todo, &Position::Top, None).unwrap();
+        let after = store.ordered(Stage::Todo).unwrap();
+        assert_eq!(after.iter().map(TaskDoc::id).collect::<Vec<_>>(), before);
+        assert!(after.iter().all(|t| t.rank().len() <= 5), "renumbered");
+        assert!(top.len() <= 5 && top < after[0].rank(), "{top}");
     }
 
     #[test]

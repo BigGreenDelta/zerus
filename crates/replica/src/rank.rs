@@ -57,6 +57,33 @@ pub fn between(low: Option<&str>, high: Option<&str>) -> Result<String> {
     Ok(rank)
 }
 
+/// `count` short ranks in increasing order, evenly spaced with room between
+/// them, for renumbering a list whose ranks have grown long.
+pub fn spread(count: usize) -> Vec<String> {
+    let slots = count as u128 + 1;
+    // The shortest width that leaves at least 62 free values in every gap.
+    let mut width = 1;
+    while 62u128.pow(width) < slots * 62 {
+        width += 1;
+    }
+    let space = 62u128.pow(width);
+    (1..slots)
+        .map(|i| {
+            let mut value = i * space / slots;
+            let mut digits = vec![b'0'; width as usize];
+            for slot in digits.iter_mut().rev() {
+                *slot = DIGITS[(value % 62) as usize];
+                value /= 62;
+            }
+            // Dropping trailing zeros keeps the order and the no-trailing-0 rule.
+            while digits.last() == Some(&b'0') {
+                digits.pop();
+            }
+            String::from_utf8(digits).expect("ASCII digits")
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +125,15 @@ mod tests {
         assert!(between(Some("W"), Some("V")).is_err());
         assert!(between(Some("V0"), None).is_err());
         assert!(between(Some("a-b"), None).is_err());
+    }
+
+    #[test]
+    fn spread_gives_short_increasing_ranks() {
+        for n in [0, 1, 2, 61, 62, 1000, 100_000] {
+            let ranks = spread(n);
+            assert_eq!(ranks.len(), n);
+            assert!(ranks.iter().all(|r| is_rank(r) && r.len() <= 5), "{n}");
+            assert!(ranks.windows(2).all(|w| w[0] < w[1]), "{n}");
+        }
     }
 }
