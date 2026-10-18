@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""The per-user Windows installer: names, the unchanged payload and the Inno Setup
+script's contract (docs/superpowers/specs/2026-10-18-windows-installer-design.md).
+Runs on every platform; installing it is tested on Windows by
+test_windows_installer_survival.py."""
+import importlib.util
+from pathlib import Path
+import re
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+import zipfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import conpty_pair
+import windows_installer
+import windows_portable
+from windows_portable_fixture import pinned_pair, portable_zip
+
+ROOT = Path(__file__).resolve().parents[1]
+ISS = ROOT / "packaging" / "windows" / "zerus.iss"
+COMMIT = "c" * 40
+
+
+def load_packager():
+    spec = importlib.util.spec_from_file_location("package_windows_installer",
+                                                  ROOT / "scripts" / "package-windows-installer.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class Names(unittest.TestCase):
+    def test_the_installer_is_named_after_the_zip_version(self):
+        self.assertEqual(windows_installer.installer_name("0.45.0"), "zerus-0.45.0-windows-x86_64-setup.exe")
+        self.assertEqual(windows_installer.installer_name("0.45.0.r12.gabcdef0.n7"),
+                         "zerus-0.45.0.r12.gabcdef0.n7-windows-x86_64-setup.exe")
+
+    def test_file_versions_have_four_numeric_parts(self):
+        self.assertEqual(windows_installer.numeric_version("0.45.0"), "0.45.0.0")
+        self.assertEqual(windows_installer.numeric_version("0.45.0.r12.gabcdef0.n7"), "0.45.0.7")
+        self.assertEqual(windows_installer.numeric_version("0.45.0.r12.gabcdef0.n70000"), "0.45.0.0")
+        for version in ("0.45", "0.45.0-dev.3", "0.45.0.r1.gzzzzzzz.n1", ""):
+            with self.assertRaises(ValueError, msg=version):
+                windows_installer.numeric_version(version)
+
+
+class Payload(unittest.TestCase):
+    def setUp(self):
+        pin = patch.object(conpty_pair, "PIN", pinned_pair())
+        pin.start()
+        self.addCleanup(pin.stop)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.stage = self.root / "payload"
+        self.stage.mkdir()
+
+    def zip(self, entries=()):
+        return portable_zip(self.root / "zerus.zip", commit=COMMIT, version="0.45.0", entries=entries)
+
+    def test_every_zip_file_is_staged_byte_for_byte_with_the_installation_record(self):
+        archive = self.zip(entries=[(f"{windows_portable.TOP}/platforms/qwindows-extra.dll", b"\x00\xffthird-party")])
+        manifest, expected = windows_installer.stage(archive, self.stage)
+        self.assertEqual((manifest["version"], manifest["source_commit"]), ("0.45.0", COMMIT))
+        with zipfile.ZipFile(archive) as bundle:
+            for entry in bundle.infolist():
+                relative = entry.filename[len(windows_portable.TOP) + 1:]
+                self.assertEqual((self.stage / relative).read_bytes(), bundle.read(entry), relative)
+                self.assertIn(relative, expected)
+            zipped = len(bundle.infolist())
+        self.assertEqual(len(expected), zipped + 2)
+        record = (self.stage / "installation.json").read_text(encoding="utf-8")
+        self.assertEqual(record, '{\n  "schema": 1,\n  "kind": "installer",\n  "product": "Zerus",\n'
+                                 f'  "version": "0.45.0",\n  "source_commit": "{COMMIT}"\n}}\n')
+        listing = (self.stage / "uninstall" / "payload.txt").read_bytes().decode("utf-8")
+        lines = listing.split("\r\n")
+        self.assertEqual(lines[-1], "")
+        self.assertEqual(lines[:-1], sorted(name.replace("/", "\\") for name in expected
+                                            if name != windows_installer.PAYLOAD_LIST))
+        self.assertIn("platforms\\qwindows-extra.dll", lines)
+        self.assertIn("installation.json", lines)
+        self.assertEqual(windows_installer.problems(self.stage, expected), [])
+
+    def test_staging_needs_an_empty_folder(self):
+        (self.stage / "left-over.dll").write_bytes(b"old")
+        with self.assertRaisesRegex(ValueError, "empty folder"):
+            windows_installer.stage(self.zip(), self.stage)
+
+    def test_a_zip_cannot_bring_the_files_the_installer_adds(self):
+        for name in ("installation.json", "Installation.JSON", "uninstall/unins000.exe", "Uninstall/payload.txt"):
+            with self.subTest(name=name):
+                (self.root / "zerus.zip").unlink(missing_ok=True)
+                with self.assertRaisesRegex(ValueError, "installer adds it"):
+                    windows_installer.stage(self.zip(entries=[(f"{windows_portable.TOP}/{name}", "x")]), self.stage)
+                # Nothing was extracted before the refusal.
+                self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_payload_names_are_ascii(self):
+        with self.assertRaisesRegex(ValueError, "ASCII"):
+            windows_installer.stage(self.zip(entries=[(f"{windows_portable.TOP}/licenses/café.txt", "x")]),
+                                    self.stage)
+
+    def test_an_unchecked_zip_is_refused(self):
+        archive = self.root / "zerus.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr(f"{windows_portable.TOP}/hgs.exe", "only")
+        with self.assertRaisesRegex(ValueError, "lacks"):
+            windows_installer.stage(archive, self.stage)
+
+
+class Comparison(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.folder = Path(temporary.name)
+        (self.folder / "platforms").mkdir()
+        (self.folder / "uninstall").mkdir()
+        (self.folder / "hgs.exe").write_bytes(b"cli")
+        (self.folder / "platforms" / "qwindows.dll").write_bytes(b"qt")
+        (self.folder / "uninstall" / "payload.txt").write_bytes(b"list")
+        self.expected = {name: windows_installer.sha256(self.folder / name)
+                         for name in ("hgs.exe", "platforms/qwindows.dll", "uninstall/payload.txt")}
+
+    def test_the_uninstaller_is_the_only_allowed_addition(self):
+        (self.folder / "uninstall" / "unins000.exe").write_bytes(b"inno")
+        (self.folder / "uninstall" / "unins000.dat").write_bytes(b"log")
+        self.assertEqual(windows_installer.problems(self.folder, self.expected), [])
+        (self.folder / "uninstall" / "notes.txt").write_bytes(b"?")
+        (self.folder / "stale.dll").write_bytes(b"old")
+        self.assertEqual(windows_installer.problems(self.folder, self.expected),
+                         ["extra stale.dll", "extra uninstall/notes.txt"])
+
+    def test_changed_and_missing_files_are_reported(self):
+        (self.folder / "platforms" / "qwindows.dll").write_bytes(b"qt, re-signed")
+        (self.folder / "hgs.exe").unlink()
+        self.assertEqual(windows_installer.problems(self.folder, self.expected),
+                         ["missing hgs.exe", "changed platforms/qwindows.dll"])
+
+    def test_names_compare_as_ntfs_does(self):
+        (self.folder / "hgs.exe").rename(self.folder / "HGS.EXE")
+        self.assertEqual(windows_installer.problems(self.folder, self.expected), [])
+
+
+class Packager(unittest.TestCase):
+    def test_the_compiler_receives_every_definition_the_script_requires(self):
+        packager = load_packager()
+        output = Path("/out/zerus-0.45.0.r3.gabcdef0.n9-windows-x86_64-setup.exe")
+        command = packager.command(Path("ISCC.exe"), Path("/payload"), output, "0.45.0.r3.gabcdef0.n9")
+        self.assertEqual(command[:2], ["ISCC.exe", "/Q"])
+        self.assertEqual(command[-1], str(ISS))
+        definitions = dict(item[2:].split("=", 1) for item in command[2:-1])
+        self.assertEqual(definitions, {"AppVersion": "0.45.0.r3.gabcdef0.n9", "NumericVersion": "0.45.0.9",
+                                       "PayloadDir": str(Path("/payload")), "OutputDir": str(output.parent),
+                                       "OutputName": output.stem, "IconFile": str(packager.ICON)})
+        required = set(re.findall(r"(?m)^#ifndef (\w+)$", ISS.read_text(encoding="utf-8")))
+        self.assertEqual(required, set(definitions))
+        self.assertTrue(packager.ICON.is_file())
+
+
+class Script(unittest.TestCase):
+    def setUp(self):
+        self.text = ISS.read_text(encoding="utf-8")
+        self.setup = dict(re.findall(r"(?m)^(\w+)=(.*)$", self.text.split("[Setup]", 1)[1].split("\n[", 1)[0]))
+
+    def test_it_installs_per_user_into_its_own_folder(self):
+        for key, value in {"PrivilegesRequired": "lowest", "DefaultDirName": r"{autopf}\Zerus",
+                           "DisableDirPage": "yes", "UninstallFilesDir": r"{app}\uninstall",
+                           "ArchitecturesInstallIn64BitMode": "x64compatible", "MinVersion": "10.0.18362",
+                           "CloseApplications": "yes", "RestartApplications": "no",
+                           "ChangesEnvironment": "no", "ChangesAssociations": "no"}.items():
+            self.assertEqual(self.setup.get(key), value, key)
+        self.assertNotIn("PrivilegesRequiredOverridesAllowed", self.setup)
+        # Upgrades and the uninstaller find earlier installs by this identity.
+        self.assertEqual(self.setup["AppId"], "{{6F1B0C52-7E3A-4D8B-9C41-2A5E8F0D3B17}")
+
+    def test_it_touches_nothing_outside_its_folder_and_the_start_menu(self):
+        sections = set(re.findall(r"(?m)^\[(\w+)\]$", self.text))
+        self.assertEqual(sections, {"Setup", "Files", "Icons", "Run", "UninstallDelete", "Code"})
+        body = self.text.split("[Setup]", 1)[1]
+        for forbidden in ("{userprofile}", "{%USERPROFILE", "{localappdata}\\hgs", ".local", ".config",
+                          "{commonpf}", "{sys}", "restartreplace", "uninsneveruninstall", "Registry",
+                          "deleteafterinstall", "{tmp}"):
+            self.assertNotIn(forbidden, body.split("[Code]")[0], forbidden)
+        self.assertEqual(re.findall(r"(?m)^Source: (.*)$", self.text),
+                         ['"{#PayloadDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs'])
+        self.assertEqual(re.findall(r"(?m)^Name: (.*)$", self.text.split("[Icons]", 1)[1].split("\n[", 1)[0]),
+                         ['"{autoprograms}\\Zerus"; Filename: "{app}\\hgs-tray.exe"; WorkingDir: "{app}"'])
+
+    def test_stale_files_are_removed_only_after_a_complete_upgrade(self):
+        code = self.text.split("[Code]", 1)[1]
+        self.assertIn(f"{{app}}\\{windows_installer.INSTALLATION}", code)
+        self.assertIn("{app}\\" + windows_installer.PAYLOAD_LIST.replace("/", "\\"), code)
+        self.assertIn(f"CompareText(Name, '{windows_installer.UNINSTALL}') <> 0", code)
+        self.assertRegex(code, r"CurStep = ssInstall then\s+Upgrade := FileExists")
+        self.assertRegex(code, r"\(CurStep = ssPostInstall\) and Upgrade then")
+        self.assertNotIn("DelTree", code)
+
+    def test_only_a_silent_self_update_relaunches_the_app(self):
+        runs = re.findall(r"(?m)^Filename: (.*)$", self.text.split("[Run]", 1)[1].split("\n[", 1)[0])
+        self.assertEqual(runs, ['"{app}\\hgs-tray.exe"; Description: "Start Zerus"; Flags: nowait postinstall skipifsilent',
+                                '"{app}\\hgs-tray.exe"; Flags: nowait; Check: Relaunch'])
+        self.assertIn("CompareText(ParamStr(I), '/RELAUNCH') = 0", self.text)
+
+
+if __name__ == "__main__":
+    unittest.main()

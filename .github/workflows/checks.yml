@@ -973,6 +973,27 @@ jobs:
             --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
           python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest \
             </dev/null 2>&1 | tee artifacts/test-results/portable.log
+      # The per-user installer (packaging/windows/zerus.iss) from that zip, with
+      # the runner image's Inno Setup 6: its payload is the zip's files byte for
+      # byte. Release assembly takes only the zip at the top of this artifact.
+      - name: Per-user installer from the portable zip
+        run: |
+          python scripts/package-windows-installer.py artifacts/zerus-windows-x86_64.zip \
+            --output artifacts/installer/zerus-windows-x86_64-setup.exe </dev/null 2>&1 | tee artifacts/test-results/installer-package.log
+      # Install, upgrade over it and uninstall while a session host of the
+      # installed build runs from its staged image, outside the step's job as the
+      # host suites run.
+      - name: Installer upgrade keeps the session host
+        timeout-minutes: 15
+        run: |
+          HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
+          HGS_TEST_INSTALLER=$(cygpath -w "$PWD/artifacts/installer/zerus-windows-x86_64-setup.exe")
+          HGS_TEST_PORTABLE_ZIP=$(cygpath -w "$PWD/artifacts/zerus-windows-x86_64.zip")
+          export HGS_TEST_BIN HGS_TEST_INSTALLER HGS_TEST_PORTABLE_ZIP
+          cd tests
+          python ../scripts/ci/outside-job.py --timeout 600 --end "$HGS_TEST_BIN" --end '*\hgs-host-*\hgs.exe' \
+            --log ../artifacts/test-results/installer.log -- \
+            python -m unittest -v test_windows_installer_survival </dev/null
       # Stable and nightly assembly download this artifact from the same run.
       - name: Retain Windows portable zip and test logs
         if: always()
