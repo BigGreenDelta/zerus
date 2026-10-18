@@ -2,6 +2,7 @@
 //!
 //! Version-one manifests and journal rows deliberately remain compatible with
 //! the original helper: an upgrade must never orphan a saved conversation.
+mod answer_channel;
 mod archive;
 pub(crate) mod archive_catalog;
 mod claude_trust;
@@ -657,6 +658,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "hook" {
         return hooks::hook();
+    }
+    if command == "answer-channel" {
+        return answer_channel::run();
     }
     if command == "graph" { return session_graph::dispatch(args); }
     if command == "statusline" {

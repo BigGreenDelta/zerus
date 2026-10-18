@@ -748,7 +748,10 @@ void QuestionCard::updateControls()
     m_progress->setVisible(!approval&&(!planReview||(draft.submitted&&!draft.answered)));
     QString notice = draft.storageError.isEmpty() ? draft.notice : draft.storageError;
     if (notice.isEmpty() && !m_available) notice = m_unavailableReason;
-    if (notice.isEmpty() && !supported) notice = m_question.value("answer_unavailable_reason").toString(tr("Answer this request in Terminal."));
+    if (notice.isEmpty() && !supported) notice = m_question.value("answer_unavailable_reason").toString();
+    // A disabled Submit always says why, even when an older host sends no reason.
+    if (notice.isEmpty() && !supported) notice = tr("Answer this request in Terminal.");
+    if (notice.isEmpty() && m_loadingKeys.contains(m_key)) notice = tr("Loading your saved answer…");
     if (notice.isEmpty()) for (const auto &form : m_forms) {
         const auto answer = draft.answers.value(form.id);
         if (!form.allowOther || (!form.options.isEmpty() && !answer.other)) continue;

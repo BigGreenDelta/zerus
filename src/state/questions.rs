@@ -397,8 +397,18 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
                     }
                 }
                 if string(record,"agent")=="claude" && string(card,"source")=="hook" {
-                    match claude_question::available(record,card) {
-                        Ok(()) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_tui"); card["answer_unavailable_reason"]=json!(""); }
+                    match answer_channel::route(record, card) {
+                        // Claude's own hook waits beside the panel; the screen is not needed.
+                        Ok(answer_channel::Route::Channel(_)) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_hook"); card["answer_unavailable_reason"]=json!(""); }
+                        // An answer already belongs to the channel: never offer a second one.
+                        Ok(answer_channel::Route::Locked) => { card["can_answer"]=json!(false); card["answer_transport"]=json!(""); card["answer_unavailable_reason"]=json!(answer_channel::LOCKED); }
+                        Ok(answer_channel::Route::Screen) => {
+                            claude_question::fit(record, card);
+                            match claude_question::available(record,card) {
+                                Ok(()) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_tui"); card["answer_unavailable_reason"]=json!(""); }
+                                Err(error) => card["answer_unavailable_reason"]=json!(error),
+                            }
+                        }
                         Err(error) => card["answer_unavailable_reason"]=json!(error),
                     }
                 }
@@ -562,26 +572,28 @@ fn response_matches(question: &Value, answers: &Value, event: &Value) -> bool {
         return false;
     }
     items.iter().zip(answers).all(|(question, answer)| {
-        let mut labels: Vec<String> = question["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|option| {
-                answer["selected_option_ids"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&option["id"])
-            })
-            .map(|option| string(option, "label").to_owned())
-            .collect();
-        if !string(answer, "text").is_empty() {
-            labels.push(string(answer, "text").into());
-        }
         actual
             .get(string(question, "question"))
             .and_then(Value::as_str)
-            == Some(labels.join(", ").as_str())
+            == Some(answer_text(question, answer).as_str())
     })
+}
+
+/// The text Claude records for one validated answer: the chosen labels in
+/// source option order, then any Other text, joined by ", ".
+pub(super) fn answer_text(question: &Value, answer: &Value) -> String {
+    let selected = answer["selected_option_ids"].as_array();
+    let mut labels: Vec<&str> = question["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|option| selected.is_some_and(|ids| ids.contains(&option["id"])))
+        .map(|option| string(option, "label"))
+        .collect();
+    if !string(answer, "text").is_empty() {
+        labels.push(string(answer, "text"));
+    }
+    labels.join(", ")
 }
 
 fn log_answer(record: &Value, question: &Value, response: &Value) -> Result<()> {
@@ -692,7 +704,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             }
             if answers[0]["skip"]!=true {codex_questions::available(&record,&question)?;}
         } else if string(&record,"agent")=="claude" && string(&question,"source")=="hook" {
-            claude_question::available(&record,&question)?;
+            match answer_channel::route(&record, &question)? {
+                answer_channel::Route::Channel(_) => {}
+                answer_channel::Route::Locked => return Err(answer_channel::LOCKED.into()),
+                answer_channel::Route::Screen => claude_question::available(&record,&question)?,
+            }
         } else if string(&question, "source") == "claude_tool_approval" {
             claude_approval::available(&record,&question)?;
         } else if string(&question, "source") == "claude_permission_mode" {
@@ -745,7 +761,21 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     // Update now says whether Codex still runs its installer.
     let mut update_phase = None;
     let delivery = if string(&record,"agent")=="claude" && string(&question,"source")=="hook" {
-        claude_question::answer(&record,&question,&answers)
+        let screen = || {
+            claude_question::available(&record, &question)?;
+            claude_question::answer(&record, &question, &answers)
+        };
+        match answer_channel::route(&record, &question) {
+            Ok(answer_channel::Route::Channel(dir)) => {
+                let offer = json!({"request_id":request_id,"answers":answer_channel::native_answers(&question,&answers)});
+                answer_channel::deliver(&dir, &offer, Duration::from_secs(3), Duration::from_secs(3), screen)
+                    .map(|transport| receipt["transport"] = json!(transport))
+            }
+            // Another request's answer reached the channel since preparation: nothing was sent.
+            Ok(answer_channel::Route::Locked) => Err(answer_channel::LOCKED.into()),
+            Ok(answer_channel::Route::Screen) => screen().map(|()| receipt["transport"] = json!("claude_tui")),
+            Err(error) => Err(error),
+        }
     } else if string(&question, "source") == "claude_tool_approval" {
         claude_approval::answer(&record,&question,&answers)
     } else if string(&question, "source") == "claude_permission_mode" {
@@ -851,6 +881,24 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answer_text_matches_response_format() {
+        let card = json!({"questions": normalize(&json!([
+            {"question":"Which checks?","header":"Checks","multiSelect":true,
+                "options":[{"label":"Unit"},{"label":"Integration"},{"label":"UI"}]},
+            {"question":"Anything else?","header":"Notes","options":[{"label":"Nothing"},{"label":"Later"}]}])).unwrap()});
+        let answers = json!([
+            {"question_id":"q_0","selected_option_ids":["opt_0_2","opt_0_0"],"text":"Lint, quickly"},
+            {"question_id":"q_1","selected_option_ids":[],"text":"Ship it"}]);
+        let items = card["questions"].as_array().unwrap();
+        // Source option order, then Other: what Claude's own panel records.
+        assert_eq!(answer_text(&items[0], &answers[0]), "Unit, UI, Lint, quickly");
+        assert_eq!(answer_text(&items[1], &answers[1]), "Ship it");
+        let event = json!({"type":"interaction.resolved","response":{"answers":{
+            "Which checks?":answer_text(&items[0], &answers[0]),"Anything else?":answer_text(&items[1], &answers[1])}}});
+        assert!(response_matches(&card, &answers, &event));
+    }
     fn record() -> Value {
         json!({"agent":"kimi","run_id":"run","conversation_id":"session_test","active_tools":{"tool_test":{"name":"AskUserQuestion"}}})
     }

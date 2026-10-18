@@ -1054,6 +1054,28 @@ draft with the form answer, including clearing it for a preset-only answer.
 Polling and inspection never edit native drafts. The exact form payload and
 matching native acknowledgement determine delivery; uncertain attempts are
 never replayed automatically.
+
+With Claude Code 2.1.296 or later on Linux and macOS, hgs also registers its
+own `PermissionRequest` hook for AskUserQuestion, `hgs __state answer-channel`,
+beside its usual hooks.
+- It waits next to Claude's question panel and is bound to the one exact
+  pending question. **Submit** hands the answer to Claude through this hook
+  instead of the terminal, so the question can be answered at any terminal
+  size. `hgs answer` receipts then report `transport` `claude_hook`.
+- It answers only for the saved conversation, and one hook process owns each
+  question.
+- If the hook does not take an answer within three seconds, delivery falls back
+  to the verified Terminal path (`claude_tui`).
+- Once the hook has taken an answer, that answer is never sent another way. If
+  Claude does not confirm it, delivery is uncertain, the card stays locked and
+  further answers are refused until the question is resolved in Terminal.
+- An answer, decline or cancellation in Terminal ends the hook, and so do a run
+  change and its one-day deadline.
+- Sessions started before the hook was registered, Windows and other agents keep
+  Terminal delivery.
+
+A disabled **Submit** always shows why, including while a saved answer is still
+loading.
 Desktop question submissions, including skips and approval choices, require
 **Submit with full context** confirmation when the prompt cache is cold or its
 estimated lifetime has expired. Resuming with the full conversation can increase
@@ -1080,12 +1102,12 @@ the terminal width and splits words longer than a row. Zerus matches the wrapped
 rows against the exact request at any width; only a clipped panel needs a
 larger Terminal.
 
-Claude keeps no scrollback for an approval panel taller than its pane, so a
-long command can lose its title and beginning everywhere. A session no client
-views keeps tmux's default 80x24 size. While a recorded permission request
-waits and such a pane shows a clipped panel, Zerus makes that pane taller,
-doubling its height up to 192 rows without changing its width, until Claude
-redraws the complete panel. The exact request match still decides; the next
+Claude keeps no scrollback for a question or approval panel taller than its
+pane, so a long question or command can lose its title and beginning
+everywhere. A session no client views keeps tmux's default 80x24 size. While a
+recorded question or permission request waits and such a pane shows a clipped
+panel, Zerus makes that pane taller, doubling its height up to 192 rows without
+changing its width, until Claude redraws the complete panel. The exact request match still decides; the next
 client that attaches sets the size again. A pane a client views keeps that
 client's size, so its clipped panel stays in Terminal. Only a question listing,
 such as `hgs inspect`, grows a pane, and never while an answer to that run
