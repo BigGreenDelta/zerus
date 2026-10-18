@@ -6,6 +6,10 @@ from pathlib import Path
 import shutil
 import subprocess
 
+ROOT = Path(__file__).resolve().parents[1]
+# Reviewed notice texts for crates that publish none; see the README there.
+FALLBACK = ROOT / "packaging/rust-licenses"
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -32,10 +36,13 @@ def main():
     for _, package in sorted(packages.items()):
         source = Path(package["manifest_path"]).parent
         notices = [path for path in source.rglob("*") if path.is_file()
-                   and path.name.upper().startswith(("LICENSE", "COPYING", "NOTICE", "UNLICENSE"))]
+                   and path.name.upper().startswith(("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE"))]
         if package.get("license_file"):
             notices.append(source / package["license_file"])
         notices = sorted(set(notices))
+        if not notices and (FALLBACK / package["name"]).is_dir():
+            source = FALLBACK / package["name"]
+            notices = sorted(path for path in source.iterdir() if path.is_file())
         if not notices:
             raise SystemExit(f"No license text found for {package['name']} {package['version']}; review before distribution.")
         folder = destination / f"{package['name']}-{package['version']}"

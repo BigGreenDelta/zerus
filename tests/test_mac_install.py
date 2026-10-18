@@ -66,7 +66,9 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
                 sent = (self.root / 'transport.log.tar').read_text().splitlines()[0].split()
                 for path in ('services/mobile/connector/Cargo.toml', 'services/mobile/connector/Cargo.lock',
                              'services/mobile/connector/.cargo', 'services/mobile/connector/src',
-                             'services/mobile/relay/Cargo.toml', 'services/mobile/relay/src'):
+                             'services/mobile/relay/Cargo.toml', 'services/mobile/relay/src',
+                             'crates/replica/Cargo.toml', 'crates/replica/Cargo.lock',
+                             'crates/replica/.cargo', 'crates/replica/src'):
                     self.assertIn(path, sent)
                 self.assertFalse(any('target' in path.split('/') for path in sent), sent)
                 builds = [line for line in (self.root / 'transport.log').read_text().splitlines()

@@ -36,6 +36,11 @@ in `tray/resources/icons/github-mark.svg`, including the embedded Qt resource.
 
 Rust dependencies and versions are locked in `Cargo.lock` and, for the mobile
 connector that Linux packages also ship, `services/mobile/connector/Cargo.lock`.
+hgs links Loro (MIT) through `crates/replica`; Loro in turn links `im`,
+`bitmaps` and `sized-chunks` under MPL-2.0, unmodified from crates.io, where
+their source code is available. Packages carry their MPL-2.0 license texts.
+Crates that publish no license file get the upstream notices kept in
+`packaging/rust-licenses`.
 The license expressions and source repositories of the first are recorded in
 `docs/rust-dependencies.json`; packages carry the notices of both.
 This inventory is metadata, not a replacement for dependency license texts.
