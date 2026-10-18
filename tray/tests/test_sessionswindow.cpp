@@ -8334,11 +8334,14 @@ void TestSessionsWindow::openCodeRemovesUndeliveredMessageOnlyAfterConfirmation(
     bool asked=false;
     QTimer::singleShot(0,&window,[&]{
         auto *dialog=window.findChild<QMessageBox *>("removeQueuedConfirm");QVERIFY(dialog);asked=true;
-        QCOMPARE(dialog->windowTitle(),QString("Remove queued message"));
-        QCOMPARE(dialog->text(),QString("Remove this queued message? It has not been delivered to OpenCode."));
-        QCOMPARE(dialog->defaultButton(),dialog->button(QMessageBox::Cancel));QCOMPARE(dialog->escapeButton(),dialog->button(QMessageBox::Cancel));
+        // Read everything, then close: a failed check must not leave the dialog open.
+        const auto title=dialog->windowTitle(),shown=dialog->text();
+        const bool cancelDefault=dialog->defaultButton()==dialog->button(QMessageBox::Cancel)&&dialog->escapeButton()==dialog->button(QMessageBox::Cancel);
         bool destructive=false;for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole)destructive=button->text()=="Remove";
-        QVERIFY(destructive);dialog->button(QMessageBox::Cancel)->click();
+        dialog->button(QMessageBox::Cancel)->click();
+        QCOMPARE(title,QString("Remove queued message"));
+        QCOMPARE(shown,QString("Remove this queued message? It is still waiting in OpenCode's queue and runs first with your next message unless you remove it."));
+        QVERIFY(cancelDefault);QVERIFY(destructive);
     });
     click();QVERIFY(asked);QTest::qWait(200);QVERIFY(!QFileInfo::exists(removal));QCOMPARE(finished.size(),0);
     // A message that is not shown as not delivered asks nothing.

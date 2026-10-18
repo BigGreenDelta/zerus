@@ -113,10 +113,12 @@ The project directory remains on the agent computer.
 
 ## Controls and limits
 
-- **Send.** Messages sent while OpenCode is working queue. After Stop, queued
-  messages show "Not delivered": they stay in OpenCode's queue, and OpenCode
-  may still deliver them when the session runs again unless you remove them
-  (with confirmation).
+- **Send.** Messages sent while OpenCode is working queue. After Stop, a queued
+  message shows "Not delivered": it is still waiting in OpenCode's queue. When
+  you send your next message, OpenCode runs the waiting one first, with its own
+  reply, and then yours, unless you remove it first (Remove asks for
+  confirmation). "Not delivered" is not a refusal, and Zerus never resends the
+  message on its own.
 - **Stop** interrupts the current turn.
 - **Questions.** Option, boolean and text fields are answered in Zerus; other
   forms show "Answer this form in OpenCode".

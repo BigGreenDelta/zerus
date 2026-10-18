@@ -3411,7 +3411,7 @@ void SessionsWindow::renderDetails()
         && serviceReason.startsWith(QStringLiteral("OpenCode is not running on "));
     m_openCodeService->setVisible(serviceStopped);
     m_openCodeServiceText->setText(serviceReason + (serviceReason.endsWith('.') ? QString() : QStringLiteral(".")));
-    m_openCodeServiceStart->setText(m_openCodeStartRequest ? tr("Starting OpenCode…") : tr("Start OpenCode on %1").arg(entry->machine));
+    m_openCodeServiceStart->setText(m_openCodeStartRequest && m_openCodeStartHost == entry->host ? tr("Starting OpenCode…") : tr("Start OpenCode on %1").arg(entry->machine));
     m_openCodeServiceStart->setEnabled(serviceStopped && entry->online && !m_openCodeStartRequest);
     setWorkspaceStyle(m_openCodeService, QString("QWidget#openCodeServiceBanner { background:%1; border:1px solid %2; border-radius:8px; } QLabel { color:%3; background:transparent; border:0; }")
         .arg(m_dark ? "#40371e" : "#fff0ba", m_dark ? "#927140" : "#c6a15f", m_dark ? "#ffda76" : "#392900"));
@@ -3816,7 +3816,8 @@ void SessionsWindow::removeQueuedMessage(const QString &messageId)
     const auto *entry=selected();
     const auto key=m_selectedKey,host=entry->host,name=entry->session.name;
     const auto run=m_details.value("run_id").toString(),conversation=m_details.value("conversation_id").toString();
-    QMessageBox dialog(QMessageBox::Warning,tr("Remove queued message"),tr("Remove this queued message? It has not been delivered to OpenCode."),QMessageBox::NoButton,this);
+    QMessageBox dialog(QMessageBox::Warning,tr("Remove queued message"),
+        tr("Remove this queued message? It is still waiting in OpenCode's queue and runs first with your next message unless you remove it."),QMessageBox::NoButton,this);
     dialog.setObjectName("removeQueuedConfirm");dialog.setTextFormat(Qt::PlainText);
     auto *confirm=dialog.addButton(tr("Remove"),QMessageBox::DestructiveRole);
     auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);
@@ -3996,7 +3997,7 @@ void SessionsWindow::startOpenCodeService()
 {
     const auto *entry = selected();
     if (!entry || !entry->online || m_openCodeStartRequest || entry->session.cmd != "opencode" || !m_openCodeServiceStart->isEnabled()) return;
-    m_openCodeStartMachine = entry->machine;
+    m_openCodeStartMachine = entry->machine; m_openCodeStartHost = entry->host;
     m_openCodeStartRequest = m_client.requestAccounts(entry->host, {"start", "native-opencode", "--json"});
     renderDetails();
 }

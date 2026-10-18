@@ -17,6 +17,7 @@
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
+#include <QValidator>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
@@ -32,6 +33,22 @@
 #include <QVBoxLayout>
 
 namespace {
+// hgs counts an OpenCode text limit in Unicode characters, not UTF-16 units.
+class CharacterLimit final : public QValidator {
+public:
+    CharacterLimit(int limit, QObject *parent) : QValidator(parent), m_limit(limit) {}
+    State validate(QString &input, int &) const override { return input.toUcs4().size() <= m_limit ? Acceptable : Invalid; }
+private:
+    int m_limit;
+};
+// The first characters of text, never splitting a surrogate pair.
+QString clipCharacters(const QString &text, int limit)
+{
+    qsizetype units = 0;
+    for (int count = 0; units < text.size() && count < limit; ++count)
+        units += text.at(units).isHighSurrogate() && units + 1 < text.size() && text.at(units + 1).isLowSurrogate() ? 2 : 1;
+    return text.left(units);
+}
 // Reserve the same space for every submit label, including the shorter busy
 // label used while Skip is being delivered. Let Qt size it for the current
 // font and style instead of fixing a pixel width.
@@ -498,8 +515,11 @@ void QuestionCard::rebuild()
                 if (!offered.contains(id.toString()) || (!form.multi && !seeded.options.isEmpty())) continue;
                 seeded.options.insert(id.toString());
             }
-            if (form.allowOther && offered.isEmpty()) seeded.text = question.value("default_text").toString().left(maxLength > 0 ? maxLength : 4096);
-            if (!seeded.options.isEmpty() || !seeded.text.isEmpty()) { answer = seeded; m_drafts[m_key].answers.insert(form.id, seeded); }
+            if (form.allowOther && offered.isEmpty()) seeded.text = clipCharacters(question.value("default_text").toString(), maxLength > 0 ? maxLength : 4096);
+            // Shown and submitted, but saved only once the user edits (capture) or submits.
+            if (!seeded.options.isEmpty() || !seeded.text.isEmpty()) {
+                answer = seeded; m_drafts[m_key].answers.insert(form.id, seeded); m_drafts[m_key].seeded.insert(form.id);
+            }
         }
         auto *formPage = new QWidget;
         auto *formLayout = new QVBoxLayout(formPage); formLayout->setContentsMargins(0, 0, 0, 0); formLayout->setSpacing(7);
@@ -556,7 +576,8 @@ void QuestionCard::rebuild()
             }
             form.text = new QLineEdit; form.text->setObjectName("questionFreeText"); form.text->setProperty("questionId", form.id);
             form.text->setPlaceholderText(tr("Write your answer…")); form.text->setAccessibleName(tr("Your answer to %1").arg(promptText));
-            form.text->setMinimumHeight(35); form.text->setMaxLength(maxLength > 0 ? maxLength : 4096); form.text->setText(answer.text);
+            form.text->setMinimumHeight(35); form.text->setMaxLength(maxLength > 0 ? 2 * maxLength : 4096); form.text->setText(answer.text);
+            if (maxLength > 0) form.text->setValidator(new CharacterLimit(maxLength, form.text));
             // Keep the answer reachable while a long prompt or option list scrolls.
             formLayout->addWidget(form.text); connect(form.text, &QLineEdit::textChanged, this, [this] { capture(); });
             connect(form.text, &QLineEdit::returnPressed, this, [this] {
@@ -621,7 +642,7 @@ void QuestionCard::capture()
     if (m_loading || m_key.isEmpty() || m_loadingKeys.contains(m_key)) return;
     if (m_drafts.value(m_key).sending || m_drafts.value(m_key).submitted || m_drafts.value(m_key).answered
         || m_sendingKeys.contains(identity(m_session, m_id))) return;
-    auto &draft = m_drafts[m_key]; draft.confirm.clear();
+    auto &draft = m_drafts[m_key]; draft.confirm.clear(); draft.seeded.clear();
     for (const auto &form : m_forms) {
         auto &answer = draft.answers[form.id]; answer.options.clear();
         for (auto it = form.options.cbegin(); it != form.options.cend(); ++it) if (it.value()->isChecked()) answer.options.insert(it.key());
@@ -659,6 +680,8 @@ bool QuestionCard::saveDraft(const QString &key, bool asynchronous, std::functio
     QJsonArray answers; QStringList text;
     auto ids = draft.answers.keys(); ids.sort();
     for (const auto &id : ids) {
+        // Seeded defaults the user has not touched are not a draft.
+        if (draft.seeded.contains(id)) continue;
         const auto answer = draft.answers.value(id); QJsonArray options;
         auto selected = answer.options.values(); selected.sort(); for (const auto &option : selected) options.append(option);
         answers.append(QJsonObject{{"id", id}, {"text", answer.text}, {"other", answer.other}, {"options", options}});
@@ -694,9 +717,11 @@ QJsonArray QuestionCard::answers(bool *valid) const
         }
         const bool custom = form.allowOther && (form.options.isEmpty() || answer.other);
         const QString text = custom ? answer.text.trimmed() : QString();
+        // hgs counts the chosen options and an Other answer against the bounds.
+        const auto count = selected.size() + (text.isEmpty() ? 0 : 1);
         if ((selected.isEmpty() && text.isEmpty()) || (custom && text.isEmpty())
             || (!form.multi && selected.size() > 1) || !customAnswerProblem(text).isEmpty() || form.id.isEmpty()
-            || (!custom && form.minItems > 0 && selected.size() < form.minItems) || (!custom && form.maxItems > 0 && selected.size() > form.maxItems)) complete = false;
+            || (form.minItems > 0 && count < form.minItems) || (form.maxItems > 0 && count > form.maxItems)) complete = false;
         result.append(QJsonObject{{"question_id", form.id}, {"selected_option_ids", selected}, {"text", text}});
     }
     if (valid) *valid = complete;
@@ -849,6 +874,8 @@ void QuestionCard::submit()
     if (!broader.isEmpty() && m_drafts[m_key].confirm != broader) {
         m_drafts[m_key].confirm = broader; updateControls(); return;
     }
+    // Submitting is the user's explicit choice of the shown values, seeds included.
+    m_drafts[m_key].seeded.clear();
     emit answerRequested(m_session, m_id, result);
 }
 
