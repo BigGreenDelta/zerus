@@ -3,7 +3,11 @@
 //! 50 ms processing deadline and nonblocking database writes. OS I/O operations
 //! can exceed that deadline. Native text is not
 //! an identity, classification signal, stored field or exported diagnostic.
-use super::{adapters, model::*, store::Store};
+use super::{
+    adapters,
+    model::*,
+    store::{is_rejected_metadata, Store},
+};
 use anyhow::{ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -315,11 +319,13 @@ fn read_with_budget(
                 break 'lines;
             }
             // A contradictory native metadata row must not pin all future reads.
-            // Failed records are explicit coverage gaps; durable native state is
-            // untouched. Accepted events and the cursor commit together; a line
-            // interrupted by the budget replays safely via exact event IDs.
-            if db.record(&e, now).is_err() {
-                db.note_gap(Gap::Observation, now)?;
+            // Only a typed metadata rejection is skippable. Storage and unknown
+            // failures roll back the pass, including already accepted events, so
+            // a later independent pass can replay from its original cursor.
+            match db.record(&e, now) {
+                Ok(_) => (),
+                Err(error) if is_rejected_metadata(&error) => db.note_gap(Gap::Observation, now)?,
+                Err(error) => return Err(error),
             }
         }
         offset += line.len() as u64;
@@ -660,6 +666,49 @@ mod tests {
         raw.execute_batch("DROP TRIGGER reject_cursor;").unwrap();
         drain(&mut db, &record);
         assert_eq!(total(&db, "turn_completed"), 1);
+    }
+
+    #[test]
+    fn second_event_sql_failure_rolls_back_the_pass_and_replays() {
+        let (dir, mut db, record, at) = fixture();
+        drain(&mut db, &record);
+        let key = Identity::new(&["codex", ID]);
+        let before = db.cursor(&key).unwrap().unwrap().1;
+        for turn in ["first-valid", "second-valid"] {
+            append(
+                &record,
+                &json!({"type":"event_msg","timestamp":DateTime::from_timestamp_millis(at).unwrap().to_rfc3339(),
+                "payload":{"type":"task_complete","turn_id":turn}}),
+            );
+        }
+        let raw =
+            rusqlite::Connection::open(dir.path().join("analytics/analytics.sqlite3")).unwrap();
+        // The message deliberately resembles a semantic rejection. Classification
+        // must use the error type, never text from a SQLite error or native row.
+        raw.execute_batch("CREATE TRIGGER reject_second_event BEFORE INSERT ON events WHEN (SELECT count(*) FROM events)=1 BEGIN SELECT RAISE(ABORT,'Conflicting analytics event identity'); END;").unwrap();
+        let hook = json!({"hook_event_name":"Stop"});
+        let failed = read_with_budget(&mut db, &record, &hook, || false);
+        assert_eq!(
+            (
+                failed.is_err(),
+                total(&db, "turn_completed"),
+                db.cursor(&key).unwrap().unwrap().1
+            ),
+            (true, 0, before),
+            "SQL failure must roll back the prior accepted event and cursor"
+        );
+        raw.execute_batch("DROP TRIGGER reject_second_event;")
+            .unwrap();
+        read_with_budget(&mut db, &record, &hook, || false).unwrap();
+        assert_eq!(total(&db, "turn_completed"), 2);
+        assert_eq!(
+            db.cursor(&key).unwrap().unwrap().1,
+            std::fs::metadata(record["transcript"].as_str().unwrap())
+                .unwrap()
+                .len()
+        );
+        read_with_budget(&mut db, &record, &hook, || false).unwrap();
+        assert_eq!(total(&db, "turn_completed"), 2);
     }
 
     #[test]

@@ -1024,3 +1024,55 @@ fn native_batch_busy_and_cursor_quota_fail_before_accepting_events() {
         .unwrap();
     assert!(db.native_batch(&source, AT).unwrap().is_some());
 }
+
+#[test]
+fn unknown_record_error_keeps_the_batch_poisoned_after_successful_cleanup() {
+    let (dir, mut db) = enabled();
+    let seed = event("seed", Kind::TurnCompleted, AT);
+    db.record(&seed, AT).unwrap();
+    let raw = rusqlite::Connection::open(dir.path().join("analytics.sqlite3")).unwrap();
+    let payload: String = raw
+        .query_row(
+            "SELECT payload FROM daily WHERE provider='codex'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    raw.execute(
+        "UPDATE daily SET payload='invalid-json' WHERE provider='codex'",
+        [],
+    )
+    .unwrap();
+    let source = Identity::new(&["source"]);
+    let mut first = event("first-valid", Kind::TurnCompleted, AT);
+    first.provider = Provider::Claude;
+    let second = event("second-valid", Kind::TurnCompleted, AT);
+    let mut batch = db.native_batch(&source, AT).unwrap().unwrap();
+    assert!(batch.record(&first, AT).unwrap());
+    // Decoding corrupt stored JSON is neither a SQLite error nor rejected native
+    // metadata. Successful savepoint cleanup must not make it safe to continue.
+    assert!(batch.record(&second, AT).is_err());
+    assert!(
+        batch.commit().is_err(),
+        "unclassified errors must poison the batch"
+    );
+    assert_eq!(
+        raw.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(db.cursor(&source).unwrap().is_none());
+    raw.execute(
+        "UPDATE daily SET payload=? WHERE provider='codex'",
+        [payload],
+    )
+    .unwrap();
+    let mut batch = db.native_batch(&source, AT).unwrap().unwrap();
+    assert!(batch.record(&first, AT).unwrap());
+    assert!(batch.record(&second, AT).unwrap());
+    batch
+        .save_cursor(&source, &Identity::new(&["file"]), 123, AT)
+        .unwrap();
+    batch.commit().unwrap();
+    assert_eq!(total(&summary(&db), "turn_completed"), 3);
+}

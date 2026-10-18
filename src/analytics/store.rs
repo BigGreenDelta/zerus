@@ -397,6 +397,29 @@ impl Store {
     }
 }
 
+/// Only explicit validation failures in native metadata may be skipped. SQL,
+/// stored-payload decoding, arithmetic and all unclassified errors stay fatal.
+#[derive(Debug)]
+enum RejectedMetadata {
+    ConflictingIdentity,
+    InvalidClock,
+    InvalidTokens,
+}
+impl std::fmt::Display for RejectedMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ConflictingIdentity => "Conflicting analytics event identity",
+            Self::InvalidClock => "Invalid monotonic clock",
+            Self::InvalidTokens => "Invalid token counter",
+        })
+    }
+}
+impl std::error::Error for RejectedMetadata {}
+
+pub(super) fn is_rejected_metadata(error: &anyhow::Error) -> bool {
+    error.is::<RejectedMetadata>()
+}
+
 /// Private to the analytics native ingestion path. Drop rolls back the whole pass.
 pub(crate) struct NativeBatch<'a> {
     tx: Transaction<'a>,
@@ -412,7 +435,8 @@ impl NativeBatch<'_> {
             "Analytics batch cannot continue after a storage failure"
         );
         // Only a successfully released/rolled-back savepoint allows the pass to
-        // commit. A cleanup failure must not retain a rejected event's counters.
+        // commit. Successful cleanup does not make a storage/unknown error safe:
+        // only an explicit metadata rejection may continue this same batch.
         self.usable = false;
         let savepoint = self.tx.savepoint()?;
         let result = record(&savepoint, event, now);
@@ -421,7 +445,10 @@ impl NativeBatch<'_> {
         } else {
             savepoint.finish()?;
         }
-        self.usable = true;
+        self.usable = match &result {
+            Ok(_) => true,
+            Err(error) => is_rejected_metadata(error),
+        };
         result.map(|outcome| match outcome {
             RecordOutcome::Skip => false,
             RecordOutcome::Commit(accepted) => accepted,
@@ -551,7 +578,7 @@ fn record(tx: &Connection, event: &Event, now: i64) -> Result<RecordOutcome> {
     if let Some(old) = old {
         ensure!(
             old == fingerprint.as_slice(),
-            "Conflicting analytics event identity"
+            RejectedMetadata::ConflictingIdentity
         );
         return Ok(RecordOutcome::Skip);
     }
@@ -777,7 +804,10 @@ fn start(tx: &Connection, event: &Event, kind: Interval) -> Result<()> {
     if !existing && rows >= MAX_SCOPES {
         return gap(tx, Gap::Quota, event.observed_ms);
     };
-    ensure!(clock.monotonic_ms <= MAX_VALUE, "Invalid monotonic clock");
+    ensure!(
+        clock.monotonic_ms <= MAX_VALUE,
+        RejectedMetadata::InvalidClock
+    );
     tx.execute("INSERT INTO intervals VALUES(?,?,?,?,?,?) ON CONFLICT(scope,kind) DO UPDATE SET generation=excluded.generation,mono=excluded.mono,at=excluded.at,owner=excluded.owner",
         params![correlation.0.as_slice(),kind.key(),clock.generation.0.as_slice(),clock.monotonic_ms,event.observed_ms,event.scope.0.as_slice()])?;
     Ok(())
@@ -864,7 +894,7 @@ fn usage(
             .values()
             .iter()
             .all(|(_, n)| n.is_none_or(|n| n <= MAX_VALUE)),
-        "Invalid token counter"
+        RejectedMetadata::InvalidTokens
     );
     if counters.values().iter().all(|(_, n)| n.is_none()) {
         return gap(tx, Gap::Observation, event.observed_ms);
