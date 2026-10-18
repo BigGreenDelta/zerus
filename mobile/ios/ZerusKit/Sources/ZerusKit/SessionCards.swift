@@ -87,7 +87,8 @@ public enum SessionCardPresentation {
 
     public static func inactiveChild(_ child: JSONObject, countsComplete: Bool = false) -> Bool {
         let state = childState(child)
-        let inactive = ["finished", "idle", "ready"].contains(state)
+        // A failed turn has ended too; its error belongs to the parent's result.
+        let inactive = ["finished", "idle", "ready", "error"].contains(state)
         // Explicit display evidence wins over an older raw turn state or count.
         if !state.isEmpty && !inactive { return false }
         if flag(child, "group") { return countsComplete && child["active_count"]?.numberValue == 0 }
@@ -133,7 +134,7 @@ public enum SessionCardPresentation {
         }.map(\.target.agentId))
     }
 
-    /// The expanded rows. Finished, idle and ready turns are hidden unless completed children are included.
+    /// The expanded rows. Finished, idle, ready and failed turns are hidden unless completed children are included.
     public static func children(_ session: Session, _ online: Bool, includeCompleted: Bool = false, drafted: Set<String> = []) -> [SessionCardChild] {
         let current = SessionFilters.currentActivity(session, online)
         let complete = flag(session.raw, "subagent_counts_complete")
