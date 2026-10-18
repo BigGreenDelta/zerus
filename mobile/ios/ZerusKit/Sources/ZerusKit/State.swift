@@ -207,6 +207,26 @@ public struct OutgoingMessage: Codable, Hashable, Sendable {
     public var blocksSending: Bool { status == "sending" || status == "uncertain" }
 }
 
+/// One automatic receipt lookup for the current navigation, never a message submission.
+public struct OutgoingReceiptProbe: Sendable {
+    private struct Attempt: Hashable, Sendable {
+        let target: Target
+        let navigation: Int64
+        let requestId: String
+    }
+    private var attempted: Attempt?
+
+    public init() {}
+
+    public mutating func claim(_ target: Target, navigation: Int64, message: OutgoingMessage, busy: Bool) -> Bool {
+        guard message.belongs(to: target), message.status == "uncertain", !busy else { return false }
+        let attempt = Attempt(target: target, navigation: navigation, requestId: message.requestId)
+        if attempted == attempt { return false }
+        attempted = attempt
+        return true
+    }
+}
+
 extension Target {
     /// Only the initial blank conversation can acquire an identity under the same verified run.
     public func resolves(to current: Target) -> Bool {

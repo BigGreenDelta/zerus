@@ -343,18 +343,18 @@ extension ConversationModel {
         if let target = selected?.target, message.belongs(to: target) { refreshActivity() }
     }
 
-    /// Reads the original receipt of an unconfirmed message; it never sends again.
-    func checkOutgoing(_ message: OutgoingMessage) async {
+    /// Reads the original receipt of an unconfirmed message; it never sends again. An automatic check stays silent
+    /// when the receipt is unavailable, and both give up after 45 seconds.
+    func checkOutgoing(_ message: OutgoingMessage, automatic: Bool = false) async {
         guard let connection = app.connections.first(where: { $0.id == message.target.connectionId }) else { return }
         let flight = "outgoing:\(message.requestId)"
         guard !receiptFlights.contains(flight), message.status != "sending" else { return }
         receiptFlights.insert(flight)
         defer { receiptFlights.remove(flight) }
         do {
-            let receipt = try await app.client.waitForReceipt(connection, initial: try await app.client.receipt(connection, id: message.requestId))
-            await settleOutgoing(message, receipt)
+            await settleOutgoing(message, try await app.client.boundedReceipt(connection, id: message.requestId))
         } catch {
-            app.error = "Receipt unavailable. The outgoing message remains saved."
+            if !automatic { app.error = "Receipt unavailable. The outgoing message remains saved." }
         }
     }
 
