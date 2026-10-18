@@ -440,6 +440,48 @@ final class OpenCodeTests: XCTestCase {
         XCTAssertEqual(ConversationMerge.merge(target: target, native: kept.inspection(named, scope: target).events, outgoing: [sent()]).events.count, 2)
     }
 
+    func testAPagedPromptTakesARequestOnlyFromItsOwnPromptRow() throws {
+        func head(_ canonical: Event) -> HistoryWindow {
+            HistoryWindow(target: target, epoch: "epoch", events: [canonical], before: nil, after: "c1", hasBefore: false, hasAfter: false, atHead: true)
+        }
+        func page(_ row: JSONObject) throws -> Event {
+            let stored = row.putting("history_id", "h1").putting("history_stream", "journal").putting("history_cursor", "c1")
+            return try XCTUnwrap(NativeEvents.events(["history_epoch": "epoch", "events": [.object(stored)]]).first)
+        }
+        // An identity that is not an OpenCode msg_ message ID.
+        let native = try paged("Waited in the queue", "native-1", 1_012)
+        let nativeRows = NativeEvents.events(["events": [prompt("Waited in the queue", "native-1", 1_012, request: .string(request))]])
+        XCTAssertEqual(nativeRows.map(\.requestId), [request])
+        XCTAssertEqual(head(native).inspection(nativeRows, scope: target).events, [native])
+        // A row that is not an OpenCode user prompt, even when its inspection row names a request.
+        let reply: JSONObject = ["type": "AgentMessage", "detail": "Done", "source": "opencode_native", "agent_id": "", "message_id": "msg_1", "at": 1_013,
+                                 "request_id": .string(request)]
+        let codex = try XCTUnwrap(prompt("Waited in the queue", "msg_1", 1_012, request: .string(request)).object).putting("source", "codex_transcript")
+        for row in [reply, codex] {
+            let label = row.string("source") + " " + row.string("type")
+            let stored = try page(row)
+            var named = try XCTUnwrap(NativeEvents.events(["events": [.object(row)]]).first)
+            XCTAssertEqual([stored.requestId, named.requestId], ["", ""], label)
+            named.requestId = request
+            XCTAssertEqual(head(stored).inspection([named], scope: target).events, [stored], label)
+        }
+        // An inspection that no longer reports the row, as its bounded window moved on, copies nothing.
+        let canonical = try paged("Waited in the queue", "msg_1", 1_012)
+        let later = NativeEvents.events(["events": [prompt("Later", "msg_3", 1_030, request: .string(otherRequest))]])
+        for incoming in [[], later] {
+            XCTAssertEqual(head(canonical).inspection(incoming, scope: target).events, [canonical])
+        }
+        // A shortened inspection row of the same message still names its request; the full history text stays.
+        var shortened = try XCTUnwrap(prompt("Waited in", "msg_1", 1_012, request: .string(request)).object)
+        shortened["detail_truncated"] = true
+        let truncated = NativeEvents.events(["events": [.object(shortened)]])
+        XCTAssertEqual(truncated.map(\.detailTruncated), [true])
+        var expected = canonical
+        expected.requestId = request
+        XCTAssertEqual(head(canonical).inspection(truncated, scope: target).events, [expected])
+        XCTAssertEqual(ConversationMerge.merge(target: target, native: [expected], outgoing: [sent()]).events.map(\.id), ["outgoing:\(request)"])
+    }
+
     // MARK: Form contract
 
     /// The card the computer sends for one contract case: the asserted fields, with `item` as its question item.
