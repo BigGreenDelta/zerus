@@ -151,9 +151,20 @@ fn actor(here: &str) -> Actor {
 fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines) -> Result<Value> {
     let mut value = serde_json::to_value(task.view().map_err(fail)?).map_err(fail)?;
     value["ref"] = json!(format!("{project_name}/{}", task.id()));
-    for key in ["target", "session"] {
-        if let Some(machine) = value[key]["machine"].as_str().map(str::to_owned) {
-            value[key]["host"] = machines.host(&machine);
+    // Every session reference names its computer: the task's target, session and
+    // author, and each history entry's session and actor.
+    let name = |reference: &mut Value| {
+        if let Some(machine) = reference["machine"].as_str().map(str::to_owned) {
+            reference["host"] = machines.host(&machine);
+        }
+    };
+    for key in ["target", "session", "author"] {
+        name(&mut value[key]);
+    }
+    if let Some(log) = value["log"].as_array_mut() {
+        for entry in log {
+            name(&mut entry["session"]);
+            name(&mut entry["actor"]);
         }
     }
     if !with_log {
@@ -246,6 +257,9 @@ fn add(config: &Config, args: &[String]) -> Result<i32> {
         Stage::Todo
     };
     // A task an agent files is always pinned to that agent's session.
+    if option(args, "--host")?.is_some() && matches!(option(args, "--target")?, None | Some("any")) {
+        return Err(fail("--host needs a --target session"));
+    }
     let target = match (&author, option(args, "--target")?) {
         (Actor::Agent(_), Some(_)) => {
             return Err(fail(
@@ -344,6 +358,9 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
         }
         "target" => {
             let value = args.get(1).ok_or_else(|| fail(USAGE))?;
+            if value == "any" && option(args, "--host")?.is_some() {
+                return Err(fail("--host needs a --target session"));
+            }
             let target = if value == "any" {
                 Target::Any
             } else {

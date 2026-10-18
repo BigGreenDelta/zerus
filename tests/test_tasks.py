@@ -129,6 +129,9 @@ class TaskCommands(Fixture):
         task = self.add("Document the setup", session="codex/api")
         self.assertEqual(task["author"]["kind"], "agent")
         self.assertEqual(task["target"]["session"], "codex/api")
+        # The author and the history's actors name their computer like sessions do.
+        self.assertEqual(task["author"]["host"], "")
+        self.assertEqual(task["log"][0]["actor"]["host"], "")
         self.assertIn("pinned to its own session", self.hgs("add", "--project", "orchard", "--target", "any", text="x", session="codex/api", ok=False))
 
     def test_settings(self):
@@ -195,6 +198,10 @@ class TaskCommands(Fixture):
         refused = self.hgs("add", "--project", "orchard", "--target", "codex/api", "--host", "orchard-mac",
                            text="Remote work", ok=False)
         self.assertIn("orchard-mac is not a verified computer", refused)
+        # --host names the computer of a --target session, so it needs one.
+        for args in (("--host", "orchard-mac"), ("--target", "any", "--host", "orchard-mac")):
+            self.assertIn("--host needs a --target session", self.hgs("add", "--project", "orchard", *args, text="x", ok=False))
+        self.assertIn("--host needs a --target session", self.hgs("target", here["ref"], "any", "--host", "orchard-mac", ok=False))
         # This computer verified orchard-mac itself: tasks can be pinned to its sessions.
         catalog = self.root / "config" / "swarm" / "catalog.json"
         data = json.loads(catalog.read_text())
@@ -298,6 +305,9 @@ class TaskDelivery(Fixture):
         sent = self.hgs("send", task["ref"])
         self.assertEqual(sent["task"]["stage"], "active")
         self.assertEqual(sent["task"]["session"]["session"], self.name)
+        # History entries name the computer of their session too.
+        entry = next(e for e in sent["task"]["log"] if e["kind"] == "sent")
+        self.assertEqual((entry["session"]["session"], entry["session"]["host"]), (self.name, ""))
         self.assertEqual(sent["receipt"]["status"], "submitted")
         self.wait_received("[Zerus task orchard/" + task["id"] + "]")
         self.wait_received("Add rate limiting")

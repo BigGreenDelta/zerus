@@ -1888,8 +1888,10 @@ JSON object and changes only the fields it names.
 
 `--host ALIAS` pins a task to a session on another computer of the swarm that
 this computer verified itself; sending there comes with replication. Listings
-name each session's computer as `host`: empty for this one, the alias of a
-verified member, or null.
+name the computer of every session reference (the target, the session, the
+author and each history entry's session and actor) as `host`: empty for this
+one, the alias of a verified member, or null. Windows keeps no verified
+bindings yet, so there `--host` is refused and other computers read null.
 
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in
