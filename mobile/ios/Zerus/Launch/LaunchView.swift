@@ -45,6 +45,7 @@ struct LaunchForm: View {
     @State private var provider = ""
     @State private var account = ""
     @State private var selectedModel = ""
+    @State private var selectedEffort = ""
     @State private var projectId = ""
     @State private var folder = ""
     @State private var browsedFolder = ""
@@ -67,6 +68,8 @@ struct LaunchForm: View {
         let providers = LaunchPresentation.agents(catalog)
         let accounts = LaunchPresentation.accounts(catalog, provider)
         let modelOptions = LaunchPresentation.models(catalog, provider: provider, accountId: account)
+        let effortOptions = LaunchPresentation.efforts(catalog, provider: provider, accountId: account, model: selectedModel,
+                                                       supported: launch.effortSupported(machine))
         let choices = LaunchPresentation.accountChoices(catalog, machine: machine, catalogs: app.accountCatalogs, now: Clock.seconds(),
                                                         selectedProvider: provider, selectedAccount: account)
         let projects = LaunchPresentation.projects(catalog)
@@ -282,6 +285,18 @@ struct LaunchForm: View {
                             .pickerStyle(.menu)
                             .disabled(busy)
                             hint("Models configured on \(computer). Native default uses OpenCode's configuration.")
+                            if !effortOptions.isEmpty {
+                                HStack {
+                                    Text("Effort").foregroundStyle(Theme.onSurface)
+                                    Spacer()
+                                    Picker("Effort", selection: $selectedEffort) {
+                                        Text("Model default").tag("")
+                                        ForEach(effortOptions, id: \.value) { Text($0.label).tag($0.value) }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .disabled(busy)
+                                }
+                            }
                         }
                     }
                     section("Session name") {
@@ -337,6 +352,7 @@ struct LaunchForm: View {
         .onChange(of: providers, initial: true) { if !providers.contains(provider) { provider = providers.first ?? "" } }
         .onChange(of: accounts.map(\.id), initial: true) { account = LaunchPresentation.defaultAccount(accounts, selected: account) }
         .onChange(of: modelOptions.map(\.value)) { if !selectedModel.isEmpty && !modelOptions.contains(where: { $0.value == selectedModel }) { selectedModel = "" } }
+        .onChange(of: effortOptions.map(\.value)) { if !selectedEffort.isEmpty && !effortOptions.contains(where: { $0.value == selectedEffort }) { selectedEffort = "" } }
         .onChange(of: projects.map(\.id), initial: true) {
             guard !projects.contains(where: { $0.id == projectId }) else { return }
             let scoped = app.sessionProjectScope?.key
@@ -447,10 +463,11 @@ struct LaunchForm: View {
     private func create(automatic: Bool, reason: String, placement: JSONObject?) {
         guard !launch.busy, reason.isEmpty else { return }
         if automatic {
-            launch.launchWithWorktree(machine, agent: provider, folder: folder, tag: tag, accountId: account, expectedCatalog: allowedCatalog, projectId: projectId, model: selectedModel)
+            launch.launchWithWorktree(machine, agent: provider, folder: folder, tag: tag, accountId: account, expectedCatalog: allowedCatalog, projectId: projectId,
+                                      model: selectedModel, effort: selectedEffort)
         } else {
             launch.launch(machine, agent: provider, directory: folder, tag: tag, accountId: account, expectedCatalog: allowedCatalog, projectId: projectId,
-                          worktrees: placement, model: selectedModel)
+                          worktrees: placement, model: selectedModel, effort: selectedEffort)
         }
     }
 

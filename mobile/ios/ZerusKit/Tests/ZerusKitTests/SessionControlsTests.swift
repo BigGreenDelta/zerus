@@ -57,7 +57,9 @@ final class SessionActionTests: XCTestCase {
         XCTAssertThrowsError(try SessionActionPolicies.arguments("send_now", ["queue_id": "../other"]))
         XCTAssertThrowsError(try SessionActionPolicies.arguments("rename", ["new_name": "bad\nname"]))
         XCTAssertThrowsError(try SessionActionPolicies.arguments("fork", ["tag": "a/b"]))
-        XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["effort": "turbo"]))
+        // Native variants are open-ended (OpenCode); malformed tokens are still refused before the inspection check.
+        XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["effort": "turbo boost"]))
+        XCTAssertThrowsError(try SessionActionPolicies.arguments("settings", ["effort": "a/b"]))
         XCTAssertNoThrow(try SessionActionPolicies.arguments("settings", ["model": "native-model", "effort": "high"]))
         XCTAssertThrowsError(try SessionActionPolicies.arguments("terminal_input", ["terminal_binding_id": "b", "key": "F13"]))
         XCTAssertNoThrow(try SessionActionPolicies.arguments("terminal_input", ["terminal_binding_id": "b", "text": "ls", "enter": true]))
@@ -69,6 +71,7 @@ final class SessionActionTests: XCTestCase {
         XCTAssertEqual("", SessionActionPolicies.inspectReason(target, "settings", ["model": "a", "effort": "high"], raw))
         XCTAssertEqual("The selected model is no longer in the native catalog.", SessionActionPolicies.inspectReason(target, "settings", ["model": "c"], raw))
         XCTAssertEqual("The selected effort is unavailable for this model.", SessionActionPolicies.inspectReason(target, "settings", ["model": "b", "effort": "high"], raw))
+        XCTAssertEqual("The selected effort is unavailable for this model.", SessionActionPolicies.inspectReason(target, "settings", ["model": "a", "effort": "turbo"], raw))
         XCTAssertEqual("The pending settings changed.", SessionActionPolicies.inspectReason(target, "settings", ["model": "a", "expected_pending_id": "q"], raw))
         var unsupported = raw
         unsupported["settings_change_supported"] = false

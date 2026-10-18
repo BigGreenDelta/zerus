@@ -59,13 +59,7 @@ enum ActionText {
         return name + " / " + state
     }
 
-    static func effort(_ value: String) -> String {
-        switch value {
-        case "": "Default"
-        case "xhigh": "Extra high"
-        default: value.prefix(1).uppercased() + value.dropFirst()
-        }
-    }
+    static func effort(_ value: String) -> String { EffortOption.text(value) }
 }
 
 /// Name, owning computer and desktop-coloured status; tapping opens session details.

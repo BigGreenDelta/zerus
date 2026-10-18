@@ -395,30 +395,19 @@ final class LaunchModel {
 
     // MARK: Launch
 
-    private func launchArguments(_ catalog: JSONObject, agent: String, directory: String, tag: String, accountId: String?, projectId: String,
-                                 worktrees: JSONObject?, model: String = "") throws -> JSONObject {
-        guard LaunchPresentation.agents(catalog).contains(agent) else { throw ZerusError.invalid("This native provider is unavailable.") }
-        guard let accountId, LaunchPresentation.accounts(catalog, agent).contains(where: { $0.id == accountId }) else {
-            throw ZerusError.invalid("Choose an offered account for the selected provider.")
-        }
-        var args: JSONObject = ["agent": .string(agent), "directory": .string(directory), "tag": .string(tag), "account_id": .string(accountId)]
-        if !model.isEmpty {
-            guard LaunchPresentation.models(catalog, provider: agent, accountId: accountId).contains(where: { $0.value == model }) else {
-                throw ZerusError.invalid("The native model changed. Review the current choices.")
-            }
-            args["model"] = .string(model)
-        }
-        if catalog["project_launch_supported"] == .bool(true) {
-            let fields = try LaunchPresentation.projectArguments(catalog, projectId: projectId, directory: directory, worktrees: worktrees)
-            for key in fields.keys { args[key] = fields[key] }
-        } else if !projectId.isEmpty {
-            throw ZerusError.invalid("This computer does not support scoped project assignment.")
-        }
-        return try SessionActionPolicies.arguments("launch", args)
+    /// An OpenCode launch carries an effort only when both the relay and this computer's connector accept it.
+    func effortSupported(_ machine: MachineKey) -> Bool {
+        LaunchPresentation.effortSupported(relay: app.relayFeatures[machine.connectionId], computer: app.machineFeatures[machine])
+    }
+
+    private func launchArguments(_ machine: MachineKey, _ catalog: JSONObject, agent: String, directory: String, tag: String, accountId: String?,
+                                 projectId: String, worktrees: JSONObject?, model: String = "", effort: String = "") throws -> JSONObject {
+        try LaunchPresentation.arguments(catalog, agent: agent, directory: directory, tag: tag, accountId: accountId, projectId: projectId,
+                                         worktrees: worktrees, model: model, effort: effort, effortSupported: effortSupported(machine))
     }
 
     func launch(_ machine: MachineKey, agent: String, directory: String, tag: String, accountId: String?, expectedCatalog: String, projectId: String,
-                worktrees: JSONObject?, model: String = "") {
+                worktrees: JSONObject?, model: String = "", effort: String = "") {
         if let problem = reason(machine).nonEmpty {
             error = problem
             return
@@ -433,7 +422,10 @@ final class LaunchModel {
             return
         }
         let args: JSONObject
-        do { args = try launchArguments(catalog, agent: agent, directory: directory, tag: tag, accountId: accountId, projectId: projectId, worktrees: worktrees, model: model) }
+        do {
+            args = try launchArguments(machine, catalog, agent: agent, directory: directory, tag: tag, accountId: accountId, projectId: projectId,
+                                       worktrees: worktrees, model: model, effort: effort)
+        }
         catch {
             self.error = AppModel.message(error, fallback: "Invalid launch choices.")
             return
@@ -505,7 +497,7 @@ final class LaunchModel {
     /// Desktop Auto: create the generated sibling worktree, verify its folder and catalog, then launch there.
     /// Every step is pinned to this form; a failed or unknown creation is never replayed and never launches.
     func launchWithWorktree(_ machine: MachineKey, agent: String, folder: String, tag: String, accountId: String?, expectedCatalog: String,
-                            projectId: String, model: String = "") {
+                            projectId: String, model: String = "", effort: String = "") {
         if let problem = worktreeReason(machine).nonEmpty {
             error = problem
             return
@@ -533,8 +525,8 @@ final class LaunchModel {
         let creation: SessionAction
         do {
             // Everything the session needs is checked before anything is created.
-            _ = try launchArguments(catalog, agent: agent, directory: destination, tag: tag, accountId: accountId, projectId: projectId,
-                                    worktrees: WorktreePresentation.withCreated(evidence, path: destination), model: model)
+            _ = try launchArguments(machine, catalog, agent: agent, directory: destination, tag: tag, accountId: accountId, projectId: projectId,
+                                    worktrees: WorktreePresentation.withCreated(evidence, path: destination), model: model, effort: effort)
             creation = try worktreeAction(machine, evidence, branch: branch, base: "HEAD", destination: destination)
         } catch {
             self.error = AppModel.message(error, fallback: "Invalid launch choices.")
@@ -591,7 +583,10 @@ final class LaunchModel {
             let project = LaunchPresentation.projects(catalog).first { $0.id == projectId }
             let placement = WorktreePresentation.placement(fresh: fresh, created: createdEvidence, project: project, directory: created)
             let args: JSONObject
-            do { args = try launchArguments(catalog, agent: agent, directory: created, tag: tag, accountId: accountId, projectId: projectId, worktrees: placement, model: model) }
+            do {
+                args = try launchArguments(machine, catalog, agent: agent, directory: created, tag: tag, accountId: accountId, projectId: projectId,
+                                           worktrees: placement, model: model, effort: effort)
+            }
             catch {
                 self.error = "Worktree created at \(created). \(AppModel.message(error, fallback: ""))"
                 return

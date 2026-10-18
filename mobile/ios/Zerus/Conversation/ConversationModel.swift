@@ -462,7 +462,8 @@ final class ConversationModel {
             let previousTruncated = previous?.truncated == true
             let prepared = await Task.detached(priority: .userInitiated) { () -> (ConversationFrame, [String: String]) in
                 let incoming = NativeEvents.events(raw)
-                let retained = RollingConversationHistory.merge(target: resolved, previousTarget: previousTarget, previous: previousEvents, incoming: incoming)
+                let retained = RollingConversationHistory.merge(target: resolved, previousTarget: previousTarget, previous: previousEvents, incoming: incoming,
+                                                                inspection: true)
                 let window = currentWindow.flatMap { $0.atHead ? $0.inspection(incoming, previous: previousInspected) : nil }
                 let rows = window?.events ?? retained.events
                 let unknown = currentWindow.map { HistoryInspection.changed($0, incoming, previousInspected) } ?? false

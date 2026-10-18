@@ -59,6 +59,8 @@ public struct NativeModelChoice: Hashable, Sendable {
     public let id: String
     public let label: String
     public let efforts: [String]
+    /// The native names of `efforts` by position (OpenCode `effort_labels`); empty when not reported.
+    public var effortLabels: [String] = []
 }
 
 public struct NativeSettings: Hashable, Sendable {
@@ -73,12 +75,24 @@ public struct NativeSettings: Hashable, Sendable {
     public let supported: Bool
     public let reason: String
     public let notice: String
+    /// The inspected provider; only OpenCode offers native variants beyond the relay's fixed levels.
+    public var agent = ""
 
     /// Relevant semantic fields only; timestamps and unrelated history polls do not invalidate a dialog.
     public var signature: String {
-        let choices: [JSON] = models.map { .array([.string($0.id), .string($0.label), JSON($0.efforts)]) }
+        let choices: [JSON] = models.map { .array([.string($0.id), .string($0.label), JSON($0.efforts), JSON($0.effortLabels)]) }
         return JSON.array([.string(model), .string(effort), .array(choices), JSON(efforts), .string(pendingModel), .string(pendingEffort),
                            .string(pendingId), .string(applyWhen), .bool(supported), .string(reason), .string(notice)]).compact
+    }
+
+    /// The model's own effort variants (OpenCode `effort_options` with `effort_labels`), or the session's list when the
+    /// model is not in the catalog, after the native default "". Variants beyond the relay's fixed levels are offered
+    /// only for OpenCode when the relay and connector advertise `LaunchPresentation.effortFeature`.
+    public func effortOptions(_ model: String, effortFeature: Bool) -> [EffortOption] {
+        let choice = models.first { $0.id == model }
+        let open = agent == "opencode" && effortFeature
+        let offered = EffortOption.options(choice?.efforts ?? efforts, labels: choice?.effortLabels ?? [])
+        return [EffortOption(value: "", label: EffortOption.text(""))] + offered.filter { open || SessionActionPolicies.efforts.contains($0.value) }
     }
 }
 
@@ -94,12 +108,13 @@ public enum SessionDetailsPresentation {
             model: model.isEmpty ? raw?.string("model") ?? "" : model, effort: raw?.string("effort") ?? "",
             models: (raw?.objects("model_options") ?? []).map { option in
                 let label = option.string("label")
-                return NativeModelChoice(id: option.string("id"), label: label.isEmpty ? option.string("id") : label, efforts: option.strings("effort_options"))
+                return NativeModelChoice(id: option.string("id"), label: label.isEmpty ? option.string("id") : label, efforts: option.strings("effort_options"),
+                                         effortLabels: option.strings("effort_labels"))
             },
             efforts: raw?.strings("effort_options") ?? [], pendingModel: raw?.string("pending_model") ?? "", pendingEffort: raw?.string("pending_effort") ?? "",
             pendingId: raw?.string("pending_settings_id") ?? "", applyWhen: raw?.string("settings_apply_when") ?? "",
             supported: raw?.bool("settings_change_supported") == true, reason: raw?.string("settings_change_reason") ?? "",
-            notice: raw?.string("settings_change_notice") ?? "")
+            notice: raw?.string("settings_change_notice") ?? "", agent: raw?.string("agent") ?? "")
     }
 
     public static func parse(_ raw: JSONObject?, _ target: Target, verified: Bool) -> SessionDetailsView {

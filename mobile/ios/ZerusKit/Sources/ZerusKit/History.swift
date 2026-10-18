@@ -8,8 +8,10 @@ public enum RollingConversationHistory {
         public let supersededIds: [String: String]
     }
 
+    /// With `inspection`, `incoming` is a whole native inspection: the only source of queued and not-delivered rows,
+    /// so earlier ones are not retained.
     public static func merge(target: Target, previousTarget: Target?, previous: [Event], incoming: [Event],
-                             maxEvents: Int = 500, maxBytes: Int = 2 * 1024 * 1024) -> Result {
+                             maxEvents: Int = 500, maxBytes: Int = 2 * 1024 * 1024, inspection: Bool = false) -> Result {
         var order: [String] = []
         var rows: [String: Event] = [:]
         func put(_ event: Event) {
@@ -18,7 +20,7 @@ public enum RollingConversationHistory {
         func remove(_ id: String) {
             if rows.removeValue(forKey: id) != nil { order.removeAll { $0 == id } }
         }
-        if target == previousTarget { previous.forEach(put) }
+        if target == previousTarget { previous.filter { !inspection || $0.deliveryState == nil }.forEach(put) }
         for row in incoming {
             if let voice = row.voice {
                 let latest = VoiceProtocol.newer(rows[row.id]?.voice, voice)
@@ -322,8 +324,11 @@ public struct HistoryWindow: Hashable, Sendable {
     }
 
     /// Inspection rows that update or extend a head window, ordered by journal arrival.
+    /// Queued and not-delivered rows are never history: the head shows the current inspection's after its canonical rows.
     public func inspection(_ incoming: [Event], previous previousInspection: [Event] = []) -> HistoryWindow {
         guard atHead else { return self }
+        let pending = incoming.filter { $0.deliveryState != nil }
+        let events = self.events.filter { $0.deliveryState == nil }
         let known = Set(events.flatMap(HistoryInspection.identities))
         let updated = events.map { canonical -> Event in
             let identities = HistoryInspection.identities(canonical)
@@ -343,11 +348,15 @@ public struct HistoryWindow: Hashable, Sendable {
         }
         var copy = self
         copy.events = updated
-        if newer.isEmpty { return copy }
-        let cursor = events.last { !$0.historyCursor.isEmpty }?.historyCursor ?? after
-        let page = HistoryPage(target: target, epoch: epoch, events: newer, before: before, after: cursor, hasBefore: hasBefore, hasAfter: false,
-                               latestIncoming: nil, totalIncoming: nil, complete: false, indexing: false, truncated: false)
-        return copy.merge(page, direction: "after")
+        if !newer.isEmpty {
+            let cursor = events.last { !$0.historyCursor.isEmpty }?.historyCursor ?? after
+            let page = HistoryPage(target: target, epoch: epoch, events: newer, before: before, after: cursor, hasBefore: hasBefore, hasAfter: false,
+                                   latestIncoming: nil, totalIncoming: nil, complete: false, indexing: false, truncated: false)
+            copy = copy.merge(page, direction: "after")
+        }
+        let shown = Set(copy.events.map(\.id))
+        copy.events += pending.filter { !shown.contains($0.id) }
+        return copy
     }
 }
 
@@ -400,9 +409,10 @@ public enum HistoryInspection {
     public static func journalSequence(_ row: Event) -> Int64? { identities(row).compactMap(sequence).max() }
     public static func journalWatermark(_ rows: [Event]) -> Int64? { rows.compactMap(journalSequence).max() }
 
+    /// Queued and not-delivered rows are not canonical history and never change it.
     public static func changed(_ window: HistoryWindow, _ incoming: [Event], _ previous: [Event]) -> Bool {
         let known = Set((window.events + previous).flatMap(identities))
-        return incoming.contains { row in !identities(row).contains(where: known.contains) }
+        return incoming.contains { row in row.deliveryState == nil && !identities(row).contains(where: known.contains) }
     }
 
     public static func retain(_ current: HistoryWindow, _ candidate: HistoryWindow?, _ incoming: [Event], _ previous: [Event]) -> HistoryWindow {

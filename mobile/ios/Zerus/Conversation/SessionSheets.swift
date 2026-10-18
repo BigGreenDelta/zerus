@@ -89,7 +89,12 @@ struct NativeSettingsSheet: View {
         let current = SessionDetailsPresentation.settings(model.activity)
         let snapshot = self.snapshot ?? current
         let choice = snapshot.models.first { $0.id == selectedModel }
-        let efforts = choice?.efforts ?? snapshot.efforts
+        // The selected model's own variants (OpenCode `effort_options`, named by `effort_labels`); an older relay or
+        // connector accepts only its fixed levels.
+        let effortFeature = LaunchPresentation.effortSupported(relay: app.relayFeatures[target.connectionId], computer: app.machineFeatures[target.machineKey])
+        let effortChoices = snapshot.effortOptions(selectedModel, effortFeature: effortFeature)
+        let efforts = effortChoices.map(\.value)
+        let effortLabel = effortChoices.first { $0.value == selectedEffort }?.label ?? ActionText.effort(selectedEffort)
         let applyingPending = !snapshot.pendingId.isEmpty && selectedModel == snapshot.pendingModel && selectedEffort == snapshot.pendingEffort
         let reason: String = model.actionReason(target, "settings").nonEmpty ?? {
             if current.signature != snapshot.signature { return "Native settings changed. Close and reopen this dialog to review them." }
@@ -98,7 +103,6 @@ struct NativeSettingsSheet: View {
             if !selectedEffort.isEmpty && !efforts.contains(selectedEffort) { return "Choose a supported effort for this model." }
             return ""
         }()
-        let effortChoices = ([""] + efforts).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
         NavigationStack {
             List {
                 Section {
@@ -110,8 +114,8 @@ struct NativeSettingsSheet: View {
                 }
                 if effortPage {
                     Section(choice?.label ?? selectedModel) {
-                        ForEach(effortChoices, id: \.self) { effort in
-                            row(ActionText.effort(effort), selected: selectedEffort == effort) { selectedEffort = effort }
+                        ForEach(effortChoices, id: \.value) { effort in
+                            row(effort.label, selected: selectedEffort == effort.value) { selectedEffort = effort.value }
                         }
                     }
                 } else {
@@ -120,12 +124,12 @@ struct NativeSettingsSheet: View {
                             HStack {
                                 Text("Effort").foregroundStyle(Theme.onSurface)
                                 Spacer()
-                                Text(ActionText.effort(selectedEffort)).foregroundStyle(Theme.mint)
+                                Text(effortLabel).foregroundStyle(Theme.mint)
                                 Image(systemName: "chevron.right").foregroundStyle(Theme.muted)
                             }
                         }
                         .disabled(!(effortChoices.count > 1 || !selectedEffort.isEmpty))
-                        .accessibilityLabel("Choose effort, \(ActionText.effort(selectedEffort))")
+                        .accessibilityLabel("Choose effort, \(effortLabel)")
                     }
                     Section("Model") {
                         ForEach(snapshot.models, id: \.id) { option in
