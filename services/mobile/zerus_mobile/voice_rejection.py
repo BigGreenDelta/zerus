@@ -26,7 +26,7 @@ def decoded(value, maximum):
 def intent(payload):
     audio = payload["audio"]
     pcm = decoded(audio["data_base64"], 3_840_000)
-    if not 3200 <= len(pcm) <= 3_840_000 or len(pcm) % 2:
+    if not 2 <= len(pcm) <= 3_840_000 or len(pcm) % 2:
         raise ValueError("Invalid voice PCM intent")
     header = struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", len(pcm) + 36, b"WAVE", b"fmt ", 16,
                          1, 1, 16000, 32000, 2, 16, b"data", len(pcm))
@@ -65,7 +65,7 @@ def valid_proof(value):
                 or set(audio) != {"format", "sample_rate", "channels", "bytes", "sha256"}
                 or audio["format"] != "pcm_s16le" or type(audio["sample_rate"]) is not int or audio["sample_rate"] != 16000
                 or type(audio["channels"]) is not int or audio["channels"] != 1
-                or type(audio["bytes"]) is not int or not 3244 <= audio["bytes"] <= 3_840_044 or audio["bytes"] % 2 or not digest(audio["sha256"])):
+                or type(audio["bytes"]) is not int or not 46 <= audio["bytes"] <= 3_840_044 or audio["bytes"] % 2 or not digest(audio["sha256"])):
             return False
         speech.identity(route["machine_id"])
         if "video" in native_intent:

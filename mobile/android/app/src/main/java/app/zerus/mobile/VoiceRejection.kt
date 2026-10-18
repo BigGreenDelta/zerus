@@ -20,7 +20,7 @@ internal object VoiceRejection {
     private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     fun intent(entry: VoiceOutgoing): JSONObject {
         val audio = requireNotNull(entry.audio)
-        require(audio.bytes in 3244..3_840_044 && audio.bytes % 2 == 0L && hex(audio.sha256))
+        require(audio.bytes in 46..3_840_044 && audio.bytes % 2 == 0L && hex(audio.sha256))
         val route = JSONObject().put("machine_id", entry.machineId).put("profile_id", entry.profileId).put("profile_revision", entry.profileRevision)
         return JSONObject().put("speech", route).put("audio", JSONObject().put("format", "pcm_s16le").put("sample_rate", 16000)
             .put("channels", 1).put("bytes", audio.bytes).put("sha256", audio.sha256)).also { result ->

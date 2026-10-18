@@ -240,6 +240,10 @@ Codes cover native admission's `route_unavailable`, `storage_full` and `queue_fu
 and canonical WAV byte count/SHA-256, plus optional MP4 format/duration/dimensions/
 byte count/SHA-256 and poster SHA-256. Proofs are bounded to 4096 bytes. These are
 private admission receipts; native delivery receipts and agent adapters are unchanged.
+This extension requires actual JSON integers for numeric proof fields and its outer
+response schema. It preserves the native API's nonempty even PCM range, 2–3840000
+bytes (canonical WAV 46–3840044 bytes); capture controls keep their existing minimum.
+Ordinary legacy envelopes retain their existing validation rules.
 
 The refusal and its operation receipt commit atomically before returning. The saved
 barrier blocks the original request even if its route recovers or an old envelope

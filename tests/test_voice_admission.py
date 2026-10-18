@@ -116,6 +116,26 @@ class VoiceAdmission(unittest.TestCase):
         self.assertEqual(second["payload_sha256"], proof["payload_sha256"])
         self.assertEqual(self.counts(), (0, 1, 2))
 
+    def test_legacy_short_pcm_gets_scoped_refusal_without_changing_ui_capture_minimum(self):
+        accepted = 0
+        for size in (2, 4, 320, 3198, 3200, 3_840_000):
+            with self.subTest(pcm_bytes=size):
+                payload = self.payload()
+                payload["audio"]["data_base64"] = base64.b64encode(bytes(size)).decode()
+                proof = self.call(payload)["rejection"]
+                accepted += 1
+                self.assertEqual(proof["intent"]["audio"]["bytes"], size + 44)
+                self.assertEqual(proof["message_id"], payload["request_id"])
+                self.assertEqual(proof["generation"], 1)
+                self.assertEqual(self.counts(), (0, accepted, accepted))
+        before = self.counts()
+        for size in (0, 1, 3, 3199, 3_840_002):
+            with self.subTest(invalid_pcm_bytes=size):
+                payload = self.payload()
+                payload["audio"]["data_base64"] = base64.b64encode(bytes(size)).decode()
+                self.call(payload, rejected=True)
+                self.assertEqual(self.counts(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

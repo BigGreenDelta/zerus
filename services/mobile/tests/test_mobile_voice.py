@@ -48,6 +48,32 @@ def video_command():
 
 
 class VoiceValidationTests(unittest.TestCase):
+    def test_refusal_intent_preserves_nonempty_even_legacy_pcm_api_bounds(self):
+        from zerus_mobile import voice_rejection
+        for size in (2, 4, 320, 3198, 3200, 3_840_000):
+            with self.subTest(pcm_bytes=size):
+                request = command()
+                payload = request["payload"]
+                payload["audio"]["data_base64"] = base64.b64encode(bytes(size)).decode()
+                validate_request(request)
+                native_intent = voice_rejection.intent(payload)
+                self.assertEqual(native_intent["audio"]["bytes"], size + 44)
+                proof = {"schema": 1, "state": "rejected_before_acceptance", "request_id": request["request_id"],
+                         "message_id": request["request_id"], "run_id": payload["expected_run_id"],
+                         "conversation_id": payload["expected_conversation_id"], "intent": native_intent,
+                         "payload_sha256": "a" * 64, "generation": 1, "retry_token": str(uuid.uuid4()),
+                         "code": "route_unavailable", "detail": "The recording was not accepted."}
+                self.assertTrue(voice_rejection.valid_proof(proof))
+                retry = dict(payload, request_id=str(uuid.uuid4()), message_id=request["request_id"], rejection=proof)
+                voice.validate("voice_submit", retry, retry["request_id"])
+                self.assertTrue(voice.result_valid("voice_submit", {"schema": 1, "rejection": proof}, payload))
+        for size in (0, 1, 3, 3199, 3_840_002):
+            with self.subTest(invalid_pcm_bytes=size):
+                payload = command()["payload"]
+                payload["audio"]["data_base64"] = base64.b64encode(bytes(size)).decode()
+                with self.assertRaises(ValueError):
+                    voice_rejection.intent(payload)
+
     def test_only_new_refusal_proofs_require_exact_integer_types(self):
         from zerus_mobile import voice_rejection
         request = video_command()

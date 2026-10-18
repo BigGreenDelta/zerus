@@ -11,6 +11,15 @@ import org.junit.Test
 import java.util.UUID
 
 class VoiceMessagesTest {
+    @Test fun refusalMetadataRetainsLegacyShortWavWhileUiCaptureMinimumIsUnchanged() {
+        val original = entry().copy(audio = audio.copy(bytes = 46), durationMs = 1)
+        assertEquals(46L, VoiceRejection.intent(original).getJSONObject("audio").getLong("bytes"))
+        assertTrue(VoiceRejection.accept(refusal(original), original, original.id).canRestoreUnsent)
+        assertThrows(IllegalArgumentException::class.java) { VoiceProtocol.wav(ByteArray(2)) }
+        for (bytes in listOf(0L, 44L, 45L, 3_840_046L)) {
+            assertThrows(IllegalArgumentException::class.java) { VoiceRejection.intent(original.copy(audio = audio.copy(bytes = bytes))) }
+        }
+    }
     private fun refusal(entry: VoiceOutgoing, operation: String = entry.operationId, generation: Long = 1) = JSONObject()
         .put("schema", 1).put("rejection", JSONObject().put("schema", 1).put("state", "rejected_before_acceptance")
             .put("request_id", operation).put("message_id", entry.id).put("run_id", entry.target.run)

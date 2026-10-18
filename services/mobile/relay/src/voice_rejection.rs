@@ -51,7 +51,7 @@ fn decoded(value: &Value, max: usize) -> Result<Vec<u8>> {
 /// byte counts and SHA-256. Hash the canonical retained WAV, as clients do.
 pub fn intent(payload: &Value) -> Result<Value> {
     let pcm = decoded(&payload["audio"]["data_base64"], 3_840_000)?;
-    if !(3200..=3_840_000).contains(&pcm.len()) || pcm.len() % 2 != 0 {
+    if !(2..=3_840_000).contains(&pcm.len()) || pcm.len() % 2 != 0 {
         return Err("Invalid voice PCM intent".into());
     }
     let mut hash = Sha256::new();
@@ -116,7 +116,7 @@ pub fn valid_intent(value: &Value) -> bool {
         || !hex(&value["audio"]["sha256"])
         || value["audio"]["bytes"]
             .as_u64()
-            .is_none_or(|n| !(3244..=3_840_044).contains(&n) || n % 2 != 0)
+            .is_none_or(|n| !(46..=3_840_044).contains(&n) || n % 2 != 0)
     {
         return false;
     }
@@ -221,4 +221,46 @@ pub fn result_valid(result: &Value, payload: &Value) -> bool {
         && proof["conversation_id"] == payload["expected_conversation_id"]
         && (payload.get("audio").is_none()
             || intent(payload).is_ok_and(|intent| proof["intent"] == intent))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_intent_retains_legacy_even_pcm_bounds() {
+        let payload = |size| {
+            json!({"request_id":"11111111-1111-4111-8111-111111111111","expected_run_id":"run","expected_conversation_id":"conversation",
+            "speech":{"machine_id":"bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb","profile_id":"fixture"},
+            "audio":{"format":"pcm_s16le","sample_rate":16000,"channels":1,"data_base64":STANDARD.encode(vec![0u8;size])}})
+        };
+        for size in [2, 4, 320, 3198, 3200, 3_840_000] {
+            let request = payload(size);
+            let value = intent(&request).unwrap();
+            assert!(valid_intent(&value));
+            assert_eq!(value["audio"]["bytes"], size + 44);
+            let proof = json!({"schema":1,"state":"rejected_before_acceptance","request_id":request["request_id"],"message_id":request["request_id"],
+                "run_id":"run","conversation_id":"conversation","intent":value,"payload_sha256":"a".repeat(64),"generation":1,
+                "retry_token":"33333333-3333-4333-8333-333333333333","code":"route_unavailable","detail":"The recording was not accepted."});
+            assert!(valid_proof(&proof));
+            assert!(result_valid(
+                &json!({"schema":1,"rejection":proof}),
+                &request
+            ));
+            let mut retry = request.clone();
+            retry["message_id"] = request["request_id"].clone();
+            retry["request_id"] = json!("22222222-2222-4222-8222-222222222222");
+            retry["rejection"] = proof;
+            validate_retry(&retry).unwrap();
+        }
+        for size in [0, 1, 3, 3199, 3_840_002] {
+            assert!(intent(&payload(size)).is_err());
+        }
+        let value = intent(&payload(2)).unwrap();
+        for bytes in [0, 44, 45, 3_840_046] {
+            let mut invalid = value.clone();
+            invalid["audio"]["bytes"] = json!(bytes);
+            assert!(!valid_intent(&invalid));
+        }
+    }
 }
