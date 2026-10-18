@@ -15,7 +15,9 @@ not traced. Every allowlist entry cites one of the deliberate divergences a-k
 
 What a connector's clock drives (polls, single heartbeats, periodic native
 reads) is reported but not compared; a shape summarizing each run's heartbeats
-is. Native work and journal rows also match in number.
+is. That shape applies the explicit Rust-only OpenCode launch-effort capability
+contract; all other keys and arrays still match exactly. Native work and journal
+rows also match in number.
 """
 from __future__ import annotations
 
@@ -309,11 +311,59 @@ def clocked(kind: str, entry: str) -> bool:
     return kind == "relay" and CLOCKED.match(entry) is not None
 
 
+def capability_projection(entries: collections.Counter, side: str) -> tuple[collections.Counter, list[dict]]:
+    """Project the frozen Python capabilities into the declared Rust extension.
+
+    Only accepted local/peer heartbeat SHAPEs are projected. Python must never
+    offer OpenCode effort; Rust must offer it exactly when it offers launch.
+    All other keys, operations, features and counts remain exact comparisons.
+    Raw trace files are never changed.
+    """
+    projected, invalid, seen = collections.Counter(), [], set()
+    feature = "opencode_launch_effort"
+    for entry, count in entries.items():
+        if not entry.startswith(("SHAPE heartbeat", "SHAPE peer heartbeat")):
+            projected[entry] += count
+            continue
+        try:
+            match = re.fullmatch(r"SHAPE (heartbeat|peer heartbeat) (\{.*\})", entry)
+            if match is None:
+                raise ValueError("malformed heartbeat shape")
+            kind, text = match.groups()
+            shape = json.loads(text)
+            if not isinstance(shape, dict) or set(shape) != {"body", "snapshot", "operations", "features"}:
+                raise ValueError("unexpected heartbeat shape keys")
+            if any(not isinstance(value, list) or any(not isinstance(item, str) for item in value)
+                   or value != sorted(set(value)) for value in shape.values()):
+                raise ValueError("heartbeat arrays must contain sorted unique strings")
+            if type(count) is not int or count != 1 or kind in seen:
+                raise ValueError("one shape of each heartbeat kind is required")
+            seen.add(kind)
+            offered = feature in shape["features"]
+            if side == "python":
+                if offered:
+                    raise ValueError("Python must not advertise OpenCode launch effort")
+                if "launch" in shape["operations"]:
+                    shape["features"] = sorted([*shape["features"], feature])
+            elif offered != ("launch" in shape["operations"]):
+                raise ValueError("Rust OpenCode launch effort must match its launch operation")
+            projected["SHAPE " + kind + " " + canonical(shape)] += count
+        except (ValueError, TypeError) as error:
+            invalid.append({"kind": "relay", "side": side,
+                            "entry": f"INVALID CAPABILITY SHAPE ({error}): {entry}"})
+    return projected, invalid
+
+
 def differences(python: dict, rust: dict) -> tuple[list[dict], int]:
     """Differences that fail, and the number of clock-driven ones reported."""
     found, informational = [], 0
     for kind in KINDS:
         left, right = collections.Counter(python[kind]), collections.Counter(rust[kind])
+        if kind == "relay":
+            left, invalid = capability_projection(left, "python")
+            found.extend(invalid)
+            right, invalid = capability_projection(right, "rust")
+            found.extend(invalid)
         for entry in sorted(set(left) | set(right)):
             if clocked(kind, entry):
                 informational += (entry in left) != (entry in right)

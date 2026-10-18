@@ -175,7 +175,13 @@ and is reported but not compared: polls, single heartbeats, presence and peer
 heartbeats, and the periodic native reads (`PERIODIC`, also through a peer
 envelope). Instead each run's accepted heartbeats are summarized in a shape (the
 union of their body and snapshot keys and capability operations and features),
-which must match. Native work and journal rows must match in number; result
+which must match after one explicit capability projection: the maintained
+Python connector never advertises `opencode_launch_effort`; the Rust connector
+must advertise exactly that additional feature when its operations include
+`launch`, and must omit it otherwise. The comparison checks complete local and
+peer heartbeat shapes, rejects malformed or duplicate arrays and keeps all
+other body/snapshot keys, operations and features exact. Raw traces stay intact.
+Native work and journal rows must match in number; result
 uploads must match as distinct receipts and answers, since a result whose
 answer was lost on a busy runner is uploaded and accepted again. Delivery flags
 race the teardown's SIGKILL and are left out of journal rows.
