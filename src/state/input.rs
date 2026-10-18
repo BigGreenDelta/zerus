@@ -689,6 +689,15 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// Plain text for the session's current run and conversation (task prompts).
+pub(super) fn submit_text(name: &str, text: &str) -> Result<Value> {
+    let record = read(name)?;
+    let request = json!({"request_id": uuid::Uuid::new_v4().to_string(), "text": text,
+        "expected_run_id": string(&record, "run_id"),
+        "expected_conversation_id": string(&record, "conversation_id"), "attachments": []});
+    submit(name, request.to_string().as_bytes(), None)
+}
+
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
     let request: Request =
         serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;

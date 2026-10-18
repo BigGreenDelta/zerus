@@ -614,6 +614,13 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
 }
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
+/// Pastes a task prompt or cancel message into `name` for its current run and
+/// conversation, the way `hgs send` does, and returns the durable receipt.
+pub(crate) fn submit_task_text(name: &str, text: &str) -> Result<Value> {
+    local_sessions()?;
+    input::submit_text(name, text)
+}
+
 pub fn dispatch(args: &[String]) -> Result<i32> {
     // Coordination metadata never starts or controls a native session host.
     if args.first().map(String::as_str)==Some("wait") { return waits::dispatch(&args[1..]); }

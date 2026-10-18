@@ -185,5 +185,150 @@ class TaskCommands(Fixture):
         self.assertEqual(len(listing["damaged"]), 1)
 
 
+@unittest.skipUnless(TMUX, "tmux is required for delivery")
+class TaskDelivery(Fixture):
+    def setUp(self):
+        super().setUp()
+        (self.root / "agent.py").write_text(AGENT)
+        self.name = "codex/task-test"
+        self.run_id = str(uuid.uuid4())
+        self.tmux("new-session", "-d", "-s", self.name, "-x", "100", "-y", "30", "python3", str(self.root / "agent.py"))
+        self.addCleanup(self.stop)
+        for _ in range(200):
+            pid_file = self.root / "agent-pid"
+            if pid_file.exists() and pid_file.read_text().strip():
+                break
+            time.sleep(.02)
+        pid = int((self.root / "agent-pid").read_text())
+        start = subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="],
+                                        env=dict(self.env, LC_ALL="C", TZ="UTC"), text=True).strip()
+        pane = self.tmux("display-message", "-p", "-t", "=" + self.name + ":", "#{pane_id}").strip()
+        self.tmux("set-option", "-t", "=" + self.name + ":", "@hgs_run", self.run_id)
+        self.record_path = self.state / (hashlib.sha256(self.name.encode()).hexdigest() + ".json")
+        self.record_path.write_text(json.dumps(dict(
+            version=1, name=self.name, agent="codex", run_id=self.run_id, conversation_id=str(uuid.uuid4()),
+            pane=pane, pid=pid, process_start=start, activity="idle", phase="idle", active_tools={},
+            subagents={}, last_event_at=time.time(), created=time.time())))
+
+    def stop(self):
+        # kill-server acknowledges before its panes exit; wait for them before the
+        # fixture home is removed, so no pane writes into a deleted directory.
+        panes = subprocess.run([str(self.bin / "tmux"), "list-panes", "-a", "-F", "#{pane_pid}"], env=self.env,
+                               capture_output=True, text=True, timeout=5).stdout.split()
+        pids = {pid for pid in panes if pid.isdigit()}
+        subprocess.run([TMUX, "-S", str(self.socket), "kill-server"], capture_output=True)
+        deadline = time.monotonic() + 2
+        while pids and time.monotonic() < deadline:
+            status = subprocess.run(["ps", "-p", ",".join(sorted(pids)), "-o", "pid=,stat="],
+                                    capture_output=True, text=True, timeout=5)
+            pids = {parts[0] for line in status.stdout.splitlines()
+                    if len(parts := line.split()) >= 2 and not parts[1].startswith(("Z", "X"))}
+            if pids:
+                time.sleep(.02)
+        self.assertFalse(pids, "owned fixture panes survived tmux shutdown")
+
+    def tmux(self, *args):
+        result = subprocess.run([str(self.bin / "tmux"), *args], env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def received(self):
+        path = self.root / "received"
+        return path.read_bytes().decode(errors="replace") if path.exists() else ""
+
+    def wait_received(self, text):
+        for _ in range(250):
+            if text in self.received():
+                return
+            time.sleep(.02)
+        self.fail("the agent never received " + repr(text) + "; got " + repr(self.received()))
+
+    def confirm(self):
+        # The agent's next hook event confirms the pasted input.
+        record = json.loads(self.record_path.read_text())
+        record["last_event_at"] = record.get("input_pending_at", time.time()) + 1
+        self.record_path.write_text(json.dumps(record))
+
+    def settings(self, **changes):
+        settings = self.hgs("settings", "--project", "orchard")["settings"]
+        settings.update(changes)
+        self.hgs("settings", "--project", "orchard", "--set", text=json.dumps(settings))
+
+    def test_send_report_and_a_second_send(self):
+        task = self.add("Add rate limiting", "--target", self.name)
+        sent = self.hgs("send", task["ref"])
+        self.assertEqual(sent["task"]["stage"], "active")
+        self.assertEqual(sent["task"]["session"]["session"], self.name)
+        self.assertEqual(sent["receipt"]["status"], "submitted")
+        self.wait_received("[Zerus task orchard/" + task["id"] + "]")
+        self.wait_received("Add rate limiting")
+        self.wait_received("`hgs task report orchard/" + task["id"] + "`")
+        self.assertIn("already In progress in " + self.name, self.hgs("send", task["ref"], ok=False))
+        done = self.hgs("report", task["ref"], text="Token bucket; 6 tests.", session=self.name)
+        self.assertTrue(done["moved_to_review"])
+        self.assertEqual((done["task"]["stage"], done["task"]["summary"]), ("review", "Token bucket; 6 tests."))
+        again = self.hgs("report", task["ref"], text="Also updated the README.", session=self.name)
+        self.assertFalse(again["moved_to_review"])
+
+    def test_an_any_session_task_needs_a_session(self):
+        task = self.add("Anywhere")
+        self.assertIn("--session", self.hgs("send", task["ref"], ok=False))
+        sent = self.hgs("send", task["ref"], "--session", self.name)["task"]
+        self.assertEqual((sent["stage"], sent["target"]), ("active", {"kind": "any"}))
+        self.wait_received("Anywhere")
+
+    def test_session_rules(self):
+        pinned = self.add("Pinned", "--target", self.name)
+        self.assertIn("pinned to " + self.name, self.hgs("send", pinned["ref"], "--session", "codex/other", ok=False))
+        anywhere = self.add("Anywhere")
+        # An agent that names the session also pins the task there.
+        sent = self.hgs("send", anywhere["ref"], "--session", self.name, session="codex/planner")["task"]
+        self.assertEqual(sent["target"]["session"], self.name)
+
+    def test_a_refused_send_changes_nothing(self):
+        task = self.add("Nowhere", "--target", "codex/missing")
+        self.assertIn("codex/missing", self.hgs("send", task["ref"], ok=False))
+        after = self.hgs("get", task["ref"])["task"]
+        self.assertEqual((after["stage"], [e["kind"] for e in after["log"]]), ("todo", ["created"]))
+
+    def test_project_settings_bound_agents(self):
+        self.settings(agents_other=False)
+        other = self.add("Elsewhere", "--target", "codex/other")
+        self.assertIn("only in their own session", self.hgs("send", other["ref"], session=self.name, ok=False))
+        self.assertEqual(self.received(), "")
+        own = self.add("Mine")
+        self.hgs("send", own["ref"], session=self.name)
+        self.wait_received("Mine")
+        self.confirm()
+        self.settings(agents_other=True, agent_limit=1)
+        another = self.add("One more")
+        self.assertIn("1 tasks started by agents per hour", self.hgs("send", another["ref"], session=self.name, ok=False))
+        # People are not limited.
+        self.assertEqual(self.hgs("send", another["ref"], "--session", self.name)["task"]["stage"], "active")
+
+    def test_cancel_moves_to_review_and_tells_the_agent(self):
+        task = self.add("Refactor the parser", "--target", self.name)
+        self.hgs("send", task["ref"])
+        self.confirm()
+        self.assertIn("a task you were sent", self.hgs("cancel", task["ref"], session=self.name, ok=False))
+        out = self.hgs("cancel", task["ref"], "--reason", "Wrong approach")
+        self.assertEqual((out["task"]["stage"], out["task"]["cancel_reason"]), ("review", "Wrong approach"))
+        self.assertEqual([(e["kind"], e.get("text", "")) for e in out["task"]["log"][-2:]],
+                         [("cancelled", ""), ("comment", "Wrong approach")])
+        self.assertTrue(out["cancel_message"]["sent"])
+        self.wait_received("[Zerus task orchard/" + task["id"] + " cancelled]")
+        self.assertNotIn("Wrong approach", self.received())
+
+    def test_a_refused_cancel_message_still_cancels(self):
+        task = self.add("Refactor the parser", "--target", self.name)
+        self.hgs("send", task["ref"])
+        # No hook event since the paste: hgs refuses further input.
+        out = self.hgs("cancel", task["ref"])
+        self.assertEqual(out["task"]["stage"], "review")
+        self.assertFalse(out["cancel_message"]["sent"])
+        self.assertIn("not been confirmed", out["cancel_message"]["error"])
+        self.assertEqual(out["task"]["log"][-1]["kind"], "note")
+
+
 if __name__ == "__main__":
     unittest.main()
