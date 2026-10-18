@@ -189,6 +189,9 @@ public:
     // reaches. Probes the host CLI first, so an older one is never asked.
     quint64 requestMobile(const QString &host, const QStringList &arguments);
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
+    // `hgs task <arguments>` on this computer, whose replica holds the project's
+    // tasks. A prompt, report or comment travels on stdin; the reply is the JSON object.
+    quint64 requestTask(const QStringList &arguments, const QString &input = {});
     // `hgs session-host <action> --json` on this computer (Windows, spec D2):
     // install enables local sessions and stages the stable CLI and a host image.
     quint64 requestSessionHost(const QString &action);
@@ -319,6 +322,8 @@ signals:
     void machinesFailed(quint64 request, const QString &error);
     void swarmReady(quint64 request, const QJsonObject &result);
     void swarmFailed(quint64 request, const QString &error);
+    void taskReady(quint64 request, const QJsonObject &result);
+    void taskFailed(quint64 request, const QString &error);
     void sessionHostReady(quint64 request, const QJsonObject &result);
     void sessionHostFailed(quint64 request, const QString &error);
     void presenceFinished(const QString &error); // Empty on success.
@@ -419,6 +424,7 @@ private:
     quint64 m_machineRequest = 0;
     quint64 m_mobileRequest = 0;
     quint64 m_swarmRequest = 0;
+    quint64 m_taskRequest = 0;
     quint64 m_sessionHostRequest = 0;
     quint64 m_accountRequest = 0;
     bool m_machineSetupInFlight = false;

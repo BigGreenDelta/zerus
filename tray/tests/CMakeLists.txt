@@ -253,6 +253,12 @@ target_include_directories(test_fleetstate PRIVATE ../src)
 target_link_libraries(test_fleetstate PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
 zerus_add_test(fleetstate test_fleetstate)
 
+# Project tasks as the Tasks tab shows them (TaskBoard.h).
+add_executable(test_taskboard test_taskboard.cpp)
+target_include_directories(test_taskboard PRIVATE ../src)
+target_link_libraries(test_taskboard PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+zerus_add_test(taskboard test_taskboard)
+
 # Folder paths per machine (MachinePlatform.h, header-only): both styles everywhere.
 add_executable(test_machineplatform test_machineplatform.cpp)
 target_include_directories(test_machineplatform PRIVATE ../src)

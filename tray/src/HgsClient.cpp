@@ -510,6 +510,29 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
     return request;
 }
 
+quint64 HgsClient::requestTask(const QStringList &arguments, const QString &input)
+{
+    const quint64 request = ++m_taskRequest;
+    QStringList args{QStringLiteral("task")}; args.append(arguments);
+    // A send waits for hgs to accept the paste; everything else is a local file.
+    auto call = processRequest(m_hgs, args); call.timeoutMs = 30000;
+    // stdin always closes, even empty: a command that reads a text never waits on the GUI.
+    call.input = input.toUtf8();
+    ProcessRunner::run(std::move(call), this, [this, request](const ProcessRunner::Result &result) {
+        if (result.outcome == ProcessRunner::Result::TimedOut) return emit taskFailed(request, tr("hgs task timed out"));
+        if (result.outcome == ProcessRunner::Result::FailedToStart)
+            return emit taskFailed(request, tr("cannot start '%1': %2").arg(m_hgs, result.errorString));
+        if (result.exitStatus != QProcess::NormalExit || result.exitCode != 0) {
+            const QString detail = QString::fromLocal8Bit(result.standardError).trimmed().left(4000);
+            return emit taskFailed(request, detail.isEmpty() ? tr("exit code %1").arg(result.exitCode) : detail);
+        }
+        QJsonParseError error; const auto data = QJsonDocument::fromJson(result.standardOutput, &error);
+        if (error.error != QJsonParseError::NoError || !data.isObject()) emit taskFailed(request, tr("Invalid task response"));
+        else emit taskReady(request, data.object());
+    });
+    return request;
+}
+
 quint64 HgsClient::requestSessionHost(const QString &action)
 {
     const quint64 request = ++m_sessionHostRequest;

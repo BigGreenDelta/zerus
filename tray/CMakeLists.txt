@@ -113,7 +113,7 @@ include(cmake/BuildVersion.cmake)
 add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/FleetState.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
-    src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp
+    src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp src/TaskBoard.cpp
     # Main-thread watchdog (MainThreadWatchdog.h): every platform, prompted by macOS.
     src/MainThreadWatchdog.cpp)
 if(NOT WIN32)
