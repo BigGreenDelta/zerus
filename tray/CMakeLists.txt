@@ -44,15 +44,24 @@ if(NOT ZERUS_LRELEASE)
 endif()
 find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
 set(ZERUS_RU_QM "${CMAKE_CURRENT_BINARY_DIR}/zerus_ru.qm")
-add_custom_command(OUTPUT "${ZERUS_RU_QM}"
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/translations/prepare_catalog.py"
-        "${CMAKE_CURRENT_SOURCE_DIR}/translations/zerus_ru.ts" "${CMAKE_CURRENT_BINARY_DIR}/zerus_ru.ts"
-    COMMAND "${ZERUS_LRELEASE}" "${CMAKE_CURRENT_BINARY_DIR}/zerus_ru.ts" -nounfinished -qm "${ZERUS_RU_QM}"
-    DEPENDS translations/zerus_ru.ts translations/prepare_catalog.py VERBATIM)
-add_custom_target(zerus-translations DEPENDS "${ZERUS_RU_QM}")
 set(ZERUS_TRANSLATIONS_QRC "${CMAKE_CURRENT_BINARY_DIR}/translations.qrc")
 file(WRITE "${ZERUS_TRANSLATIONS_QRC}"
     "<RCC><qresource prefix=\"/hgs/translations\"><file alias=\"zerus_ru.qm\">zerus_ru.qm</file></qresource></RCC>")
+# One object target owns both generated files. Sharing a generated catalog
+# through independent AUTORCC targets can race rcc against lrelease, or run
+# lrelease twice while its prepared catalog is still being written.
+set(ZERUS_TRANSLATIONS_CPP "${CMAKE_CURRENT_BINARY_DIR}/qrc_translations.cpp")
+add_custom_command(OUTPUT "${ZERUS_TRANSLATIONS_CPP}" "${ZERUS_RU_QM}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/translations/prepare_catalog.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/translations/zerus_ru.ts" "${CMAKE_CURRENT_BINARY_DIR}/zerus_ru.ts"
+    COMMAND "${ZERUS_LRELEASE}" "${CMAKE_CURRENT_BINARY_DIR}/zerus_ru.ts" -nounfinished -qm "${ZERUS_RU_QM}"
+    COMMAND Qt6::rcc -name translations -o "${ZERUS_TRANSLATIONS_CPP}" "${ZERUS_TRANSLATIONS_QRC}"
+    DEPENDS translations/zerus_ru.ts translations/prepare_catalog.py "${ZERUS_TRANSLATIONS_QRC}" VERBATIM)
+add_library(hgs-translations OBJECT "${ZERUS_TRANSLATIONS_CPP}")
+set_target_properties(hgs-translations PROPERTIES AUTOMOC OFF AUTORCC OFF)
+target_link_libraries(hgs-translations PRIVATE Qt6::Core)
+add_custom_target(zerus-translations)
+add_dependencies(zerus-translations hgs-translations)
 # std::thread сторожа главного потока (MainThreadWatchdog) -- на Linux это -lpthread.
 find_package(Threads REQUIRED)
 include(cmake/Terminal.cmake)
@@ -249,8 +258,7 @@ endif()
 # Qt finalization imports macOS permission plugins selected by our Info.plist.
 # A plain add_executable silently leaves QMicrophonePermission without a backend.
 qt_add_executable(hgs-tray MANUAL_FINALIZATION resources.qrc src/main.cpp src/TrayAgent.cpp)
-target_sources(hgs-tray PRIVATE "${ZERUS_TRANSLATIONS_QRC}")
-add_dependencies(hgs-tray zerus-translations)
+target_link_libraries(hgs-tray PRIVATE hgs-translations)
 if(APPLE)
     # LSUIElement живёт в Info.plist; без MACOSX_BUNDLE получится голый исполняемый файл.
     # Icon Composer catalog provides native layers/masking; actool also produces

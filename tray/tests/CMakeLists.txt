@@ -1,9 +1,8 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
-add_executable(test_ui_language test_ui_language.cpp "${ZERUS_TRANSLATIONS_QRC}")
-add_dependencies(test_ui_language zerus-translations)
+add_executable(test_ui_language test_ui_language.cpp)
 target_include_directories(test_ui_language PRIVATE ../src)
-target_link_libraries(test_ui_language PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_ui_language PRIVATE Qt6::Test Qt6::Widgets hgs-translations)
 # Registered below, after the common native-test launcher is defined.
 
 # support/FakeCli.h starts fixture scripts as fake executables on every platform.
