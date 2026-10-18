@@ -417,6 +417,19 @@ original editing form is restored only while its prepared request and revision
 remain owned; a concurrent edit is preserved. This refusal never opens a new
 confirmation or retries input automatically.
 
+Android context details offer a separate **Dismiss and clear…** confirmation
+only when both relay and exact computer advertise `clear_context_dismiss` and
+the selected fresh native inspection reports actual Boolean eligibility. The
+dialog captures its mode and target; it never upgrades an ordinary clear
+confirmation automatically. The explicit mode stores `dismiss_prompt:true` in
+the original durable context operation and rechecks identity, capabilities,
+eligibility and other pending work before transport. Only its own reservation
+is excluded from that final pending-work check. Ordinary clear omits the field;
+strict decoding preserves actual `false`/`true` metadata and rejects malformed
+new fields through the existing storage failure path without overwriting data.
+Receipt checking, recovery and review retain the original identity and never
+authorize replay. Cold-cache consent and draft/attachment handling are unchanged.
+
 Compact and clear are fixed native operations scoped to the exact computer,
 session, run, conversation and request UUID. The phone saves an operation before
 transport, and uncertain delivery is checked without replaying the mutation.
