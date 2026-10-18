@@ -530,10 +530,13 @@ fn wait() -> Result<()> {
     else {
         return Ok(());
     };
+    let started = now();
     let event = stdin_json()?;
     let Some(kind) = kind(&event) else {
         return Ok(());
     };
+    // One proof that an approval still waits, before and after its claim.
+    let waits = claude_approval::channel::waits_now;
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t);
@@ -547,7 +550,7 @@ fn wait() -> Result<()> {
         if let Some(record) = read_run(&name, &token)? {
             let card = match kind {
                 Kind::Question => bind(&record, &event),
-                Kind::Approval => match asked.get_or_insert_with(|| claude_approval::channel::asked_use(&record, &event)) {
+                Kind::Approval => match asked.get_or_insert_with(|| claude_approval::channel::asked_use(&record, &event, started)) {
                     Some(tool_use) => claude_approval::channel::bind_to(&record, &event, tool_use),
                     None => return Ok(()),
                 },
@@ -598,15 +601,14 @@ fn wait() -> Result<()> {
                 return Ok(());
             }
         }
-        let ready = || current.as_ref().is_some_and(claude_approval::channel::waits_now);
+        let ready = || current.as_ref().is_some_and(waits);
         if let Some(offer) = take_offer(kind, &dir, ready)? {
             // The question must still be the bound one when its answer goes out.
             // Claude tells the hook nothing of a Terminal approval: only the
             // screen still showing the request proves it waits.
             let current = read_run(&name, &token)?;
             let answered = transcript.answered(current.as_ref().unwrap_or(&record), &tool);
-            let withheld = withheld(kind, current.as_ref(), &record, &card, &event, answered,
-                claude_approval::channel::waits_now);
+            let withheld = withheld(kind, current.as_ref(), &record, &card, &event, answered, waits);
             let output = decision_kind(kind, &event, &card, &offer);
             if withheld.is_some() || output.is_err() || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
                 close(&dir, withheld.unwrap_or("invalid answer"));
@@ -1053,7 +1055,7 @@ mod tests {
         let (record, event, card) = approval();
         assert_eq!(withheld(Kind::Approval, Some(&record), &record, &card, &event, false, |_| true), None);
         // What a refused identity gives after the claim: nothing printed.
-        let refused = |_: &Value| claude_approval::channel::waits(Err("Session identity changed; open Terminal".into()), |_| unreachable!());
+        let refused = |checked: &Value| claude_approval::channel::waits(checked, Err("Session identity changed; open Terminal".into()), |_| unreachable!());
         assert_eq!(withheld(Kind::Approval, Some(&record), &record, &card, &event, false, refused),
             Some("approval not shown before delivery"));
         assert_eq!(withheld(Kind::Approval, Some(&record), &record, &card, &event, true, |_| true),
@@ -1080,7 +1082,7 @@ mod tests {
     fn a_refused_identity_leaves_an_offer_unclaimed() {
         let (temp, waiting) = channel(|dir| {
             for _ in 0..40 {
-                let ready = || claude_approval::channel::waits(Err("Session identity changed; open Terminal".into()), |_| unreachable!());
+                let ready = || claude_approval::channel::waits(&json!({}), Err("Session identity changed; open Terminal".into()), |_| unreachable!());
                 assert!(take_offer(Kind::Approval, dir, ready).unwrap().is_none());
                 std::thread::sleep(Duration::from_millis(10));
             }

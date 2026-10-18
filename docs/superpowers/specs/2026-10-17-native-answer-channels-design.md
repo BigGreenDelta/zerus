@@ -291,11 +291,13 @@ delivery. The channel is only another transport.
   - Only a capture that fails after the identity holds proves nothing and never
     blocks the claim. Claude ignores a decision that arrives after a Terminal
     answer.
-- A hook binds only to a request recorded in the last ten seconds, and only to
-  the one active tool call with the event's tool and input in the first record
-  it reads. PreToolUse is journaled before Claude asks. Without exactly one
-  such call the hook exits and the screen remains. A later identical call is
-  never adopted.
+- A hook binds only to a request recorded in the last ten seconds. It binds
+  only to the one active tool call with the event's tool and input that began
+  before the hook started, as the first record it reads shows it. PreToolUse is
+  journaled before Claude asks. Without exactly one such call, the hook exits
+  and the screen remains. A later identical call is never adopted.
+- Before and after the claim, the screen is matched against the record that
+  was just checked.
 - The card's options:
   - With a complete matching panel, it lists Claude's options verbatim, and
     `panel_verified` is true.

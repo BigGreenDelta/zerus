@@ -138,13 +138,16 @@ class AnswerChannelApprovalBinding(unittest.TestCase):
             time.sleep(.35)
             started=worker.poll() is None
             if later is not None:
+                # A call journaled now began after the hook started; a call the
+                # first record already showed keeps its own start.
                 uses,tool=later;at=int(time.time())
-                write(dict(record,phase='approval',pending_approval=event,pending_approval_at=at,
-                           claude_tool_uses={name:dict(use,at=at-1) for name,use in uses.items()}))
+                write(dict(record,phase='approval',pending_approval=event,pending_approval_at=at+1,
+                           claude_tool_uses={name:use if name in first_uses else dict(use,at=time.time())
+                                             for name,use in uses.items()}))
             stdout,stderr=worker.communicate(timeout=30)
             self.assertEqual((worker.returncode,stdout,stderr),(0,'',''))
             channels=[json.loads(Path(p).read_text()) for p in glob.glob(os.path.join(state,'native_answers','*','*','waiting.json'))]
-            return started,[c['question_id'] for c in channels],(at if later is not None else None)
+            return started,[c['question_id'] for c in channels],(at+1 if later is not None else None)
 
     def identity(self,tool,at):
         key=[self.RUN,self.CONVERSATION,None,1,'not this process',tool,'Bash',self.INPUT,at]
