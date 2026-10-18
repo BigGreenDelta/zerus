@@ -235,7 +235,7 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
         if (action == SelectionAction::Terminate)
             text += tr("\n\nRunning processes will stop. Tracked Codex, Claude and Kimi conversations are kept in Archive; native conversation history is kept.");
         else if (bindings < targets.size())
-            text += bindings ? tr("\n\nOnly these saved or archived entries are removed. Other live sessions and native conversation history are kept.")
+            text += bindings ? tr("\n\nThese saved or archived entries are removed. Other live sessions and native conversation history are kept.")
                 : tr("\n\nOnly these saved or archived entries are removed. Live sessions and native conversation history are kept.");
         if (bindings) text += tr("\n\nOpenCode sessions: only Zerus forgets them; their conversations stay in OpenCode.");
         if (entries.size() != targets.size()) text += tr("\n\n%1 unavailable or inapplicable sessions will be left as they are.").arg(entries.size() - targets.size());

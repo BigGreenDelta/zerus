@@ -1743,8 +1743,11 @@ quint64 HgsClient::runSessionAction(const QString &host, const QString &name, co
     auto *process = new QProcess(this); configureProcess(process,m_hgs,args);
     auto *timer = new QTimer(process); timer->setSingleShot(true);
     auto reported = std::make_shared<bool>(false);
+    // QProcess can fail inside start(), before the caller holds the request ID:
+    // a failure is always reported afterwards.
     const auto fail = [this,request,reported](const QString &error) {
-        if (*reported) return; *reported = true; emit sessionActionFinished(request,false,{},error);
+        if (*reported) return; *reported = true;
+        QTimer::singleShot(0, this, [this,request,error] { emit sessionActionFinished(request,false,{},error); });
     };
     const auto payload = QJsonDocument(data).toJson(QJsonDocument::Compact);
     // OpenCode actions have no Terminal to check.
