@@ -458,7 +458,16 @@ class NativeClaudeApprovalChannel(unittest.TestCase):
 
     def test_two_reads_of_one_name_never_grant_the_request_not_shown(self):
         # Claude shows the first Read ("1 of 2") while hgs records the latest
-        # request, which may be the other one.
+        # request, which may be the other one. Read the cards only once both
+        # requests are recorded: the second replaces the first card.
+        self.wait_for(lambda: '1 of 2' in self.screen())
+        def settled():
+            before = json.loads(self.record_path.read_text())
+            time.sleep(.5)
+            after = json.loads(self.record_path.read_text())
+            return (after.get('pending_approval_at') and after.get('pending_approval_at') == before.get('pending_approval_at')
+                    and len(after.get('claude_tool_uses', {})) == 2)
+        self.wait_for(settled)
         cards = self.wait_for(lambda: [c for c in self.inspect()['pending_questions'] if c['can_answer']])
         bound = json.loads(self.record_path.read_text())['pending_approval']['tool_input']['file_path']
         other = str(self.target_A) if bound == str(self.target_B) else str(self.target_B)
