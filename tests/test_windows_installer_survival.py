@@ -60,7 +60,7 @@ class Installer(windows_host.HostCase):
         self.assertIsNone(registered(), "Zerus is already installed for this user")
         expected = tempfile.TemporaryDirectory(prefix="zerus-expected-")
         self.addCleanup(expected.cleanup)
-        self.manifest, self.expected = windows_installer.stage(PORTABLE_ZIP, Path(expected.name))
+        self.record, self.expected = windows_installer.stage(PORTABLE_ZIP, Path(expected.name))
         self.app = self.root / "Zerus"
         self.cli = self.home / ".local" / "bin" / "hgs.exe"
         self.images = self.home / ".local" / "share" / "hgs" / "host"
@@ -121,14 +121,14 @@ class Installer(windows_host.HostCase):
         self.wait_for(marker, lambda: self.capture(pane).count(marker) >= 2)
 
     def test_upgrade_and_uninstall_leave_the_session_host_and_staged_files_alone(self):
-        version = self.manifest["version"]
+        version = self.record["version"]
         self.install()
         self.assertEqual(windows_installer.problems(self.app, self.expected), [])
         self.assertEqual(registered(), {"DisplayVersion": version, "InstallLocation": str(self.app) + "\\"})
         self.assertTrue(self.shortcut.is_file(), self.shortcut)
         record = json.loads((self.app / windows_installer.INSTALLATION).read_text(encoding="utf-8"))
         self.assertEqual((record["kind"], record["version"]), ("installer", version))
-        self.assertEqual(self.run_installed("hgs-tray.exe", "--version"), f"Zerus {version}")
+        self.assertEqual(self.run_installed("hgs-tray.exe", "--version"), f"Zerus {self.record['product_version']}")
 
         # Local sessions from the installed folder: the host runs from its image.
         installed = json.loads(self.run_installed("hgs.exe", "session-host", "install", "--json"))
@@ -190,7 +190,7 @@ class Installer(windows_host.HostCase):
         self.assertIn("is a link or junction on the path of the Zerus folder or inside it", log)
         self.assertIn("linked", log)
         self.assertTrue(os.path.isjunction(link))
-        self.assertEqual(registered()["DisplayVersion"], self.manifest["version"])
+        self.assertEqual(registered()["DisplayVersion"], self.record["version"])
         self.assertTrue((self.app / "hgs-tray.exe").is_file())
 
         # Without the junction the upgrade proceeds; the outside files stay.

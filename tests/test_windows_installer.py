@@ -42,7 +42,7 @@ class Names(unittest.TestCase):
         self.assertEqual(windows_installer.numeric_version("0.45.0"), "0.45.0.0")
         self.assertEqual(windows_installer.numeric_version("0.45.0.r12.gabcdef0.n7"), "0.45.0.7")
         self.assertEqual(windows_installer.numeric_version("0.45.0.r12.gabcdef0.n70000"), "0.45.0.0")
-        for version in ("0.45", "0.45.0-dev.3", "0.45.0.r1.gzzzzzzz.n1", ""):
+        for version in ("0.45", "0.45.0-dev.3", "0.45.0.r1.gzzzzzzz.n1", "0.45.0.r0.gabcdef0.n1", "0.45.0.r1.gabcdef0.n0", ""):
             with self.assertRaises(ValueError, msg=version):
                 windows_installer.numeric_version(version)
 
@@ -63,8 +63,8 @@ class Payload(unittest.TestCase):
 
     def test_every_zip_file_is_staged_byte_for_byte_with_the_installation_record(self):
         archive = self.zip(entries=[(f"{windows_portable.TOP}/platforms/qwindows-extra.dll", b"\x00\xffthird-party")])
-        manifest, expected = windows_installer.stage(archive, self.stage)
-        self.assertEqual((manifest["version"], manifest["source_commit"]), ("0.45.0", COMMIT))
+        record, expected = windows_installer.stage(archive, self.stage)
+        self.assertEqual((record["version"], record["product_version"], record["source_commit"]), ("0.45.0", "0.45.0", COMMIT))
         with zipfile.ZipFile(archive) as bundle:
             for entry in bundle.infolist():
                 relative = entry.filename[len(windows_portable.TOP) + 1:]
@@ -74,7 +74,8 @@ class Payload(unittest.TestCase):
         self.assertEqual(len(expected), zipped + 2)
         record = (self.stage / "installation.json").read_text(encoding="utf-8")
         self.assertEqual(record, '{\n  "schema": 1,\n  "kind": "installer",\n  "product": "Zerus",\n'
-                                 f'  "version": "0.45.0",\n  "source_commit": "{COMMIT}"\n}}\n')
+                                 '  "version": "0.45.0",\n  "product_version": "0.45.0",\n'
+                                 f'  "source_commit": "{COMMIT}"\n}}\n')
         listing = (self.stage / "uninstall" / "payload.txt").read_bytes().decode("utf-8")
         lines = listing.split("\r\n")
         self.assertEqual(lines[-1], "")
@@ -83,6 +84,25 @@ class Payload(unittest.TestCase):
         self.assertIn("platforms\\qwindows-extra.dll", lines)
         self.assertIn("installation.json", lines)
         self.assertEqual(windows_installer.problems(self.stage, expected), [])
+
+    def test_a_nightly_installer_records_its_nightly_version(self):
+        nightly = f"0.45.0.r812.g{COMMIT[:7]}.n42"
+        record, _ = windows_installer.stage(self.zip(), self.stage, nightly)
+        self.assertEqual((record["version"], record["product_version"]), (nightly, "0.45.0"))
+        self.assertEqual(json.loads((self.stage / "installation.json").read_text(encoding="utf-8")), record)
+
+    def test_a_version_that_does_not_suit_the_zip_is_refused_before_anything_is_written(self):
+        archive = self.zip()
+        for version, reason in (("0.99.0", "not the zip's product version"), ("0.44.9", "not the zip's product version"),
+                                (f"0.44.0.r812.g{COMMIT[:7]}.n42", "not a build of"),
+                                ("0.45.0.r812.gabcdef0.n42", "not a build of"),
+                                ("0.45.0-dev.3", "Dev builds have no Windows build"),
+                                ("0.46.0-dev.3", "Dev builds have no Windows build"),
+                                (f"0.45.0.r0.g{COMMIT[:7]}.n42", "Unsupported"), ("v0.45.0", "Unsupported")):
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(ValueError, reason):
+                    windows_installer.stage(archive, self.stage, version)
+                self.assertEqual(list(self.stage.iterdir()), [])
 
     def test_staging_needs_an_empty_folder(self):
         (self.stage / "left-over.dll").write_bytes(b"old")
@@ -160,6 +180,51 @@ class Packager(unittest.TestCase):
         self.assertTrue(packager.ICON.is_file())
 
 
+class PackagerVersions(unittest.TestCase):
+    """The packager checks --version against the zip before it stages or compiles."""
+
+    def setUp(self):
+        pin = patch.object(conpty_pair, "PIN", pinned_pair())
+        pin.start()
+        self.addCleanup(pin.stop)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.archive = portable_zip(self.root / "zerus.zip", commit=COMMIT, version="0.45.0")
+        self.packager = load_packager()
+
+    def main(self, *arguments):
+        with patch.object(sys, "argv", ["package-windows-installer.py", str(self.archive), *arguments]):
+            self.packager.main()
+
+    def test_a_mismatched_version_never_reaches_the_compiler(self):
+        iscc = self.root / "ISCC.exe"
+        iscc.write_bytes(b"")
+        for version in ("0.99.0", "0.45.0.r812.gabcdef0.n42", "0.45.0-dev.3"):
+            with self.subTest(version=version), patch.object(self.packager.subprocess, "run") as compile_:
+                with self.assertRaises(ValueError):
+                    self.main("--version", version, "--iscc", str(iscc), "--output", str(self.root / "setup.exe"))
+                compile_.assert_not_called()
+                self.assertFalse((self.root / "setup.exe").exists())
+
+    def test_stage_only_refuses_a_mismatched_version_and_stages_nothing(self):
+        staged = self.root / "staged"
+        with self.assertRaisesRegex(ValueError, "not the zip's product version"):
+            self.main("--version", "0.99.0", "--stage-only", str(staged), "--output", str(self.root / "setup.exe"))
+        self.assertEqual(list(staged.iterdir()), [])
+
+    def test_the_compiler_receives_the_version_installation_json_records(self):
+        nightly = f"0.45.0.r812.g{COMMIT[:7]}.n42"
+        staged = self.root / "staged"
+        with patch("builtins.print") as printed:
+            self.main("--version", nightly, "--stage-only", str(staged), "--output", str(self.root / "setup.exe"))
+        command = printed.call_args_list[0].args[0]
+        self.assertIn(f"/DAppVersion={nightly} ", command)
+        self.assertIn("/DNumericVersion=0.45.0.42 ", command)
+        record = json.loads((staged / "installation.json").read_text(encoding="utf-8"))
+        self.assertEqual((record["version"], record["product_version"]), (nightly, "0.45.0"))
+
+
 class Script(unittest.TestCase):
     def setUp(self):
         self.text = ISS.read_text(encoding="utf-8")
@@ -209,7 +274,8 @@ class Script(unittest.TestCase):
         self.assertIn(f"{{app}}\\{windows_installer.INSTALLATION}", owned)
         self.assertIn("(LinkedPath(ExpandConstant('{app}')) = '')", owned)
         # The markers it looks for are those of the record stage() writes.
-        record = json.dumps(windows_installer.installation_record({"version": "0.45.0", "source_commit": "c" * 40}), indent=2)
+        record = json.dumps(windows_installer.installation_record({"version": "0.45.0", "source_commit": "c" * 40}, "0.45.0"),
+                            indent=2)
         markers = re.findall(r"Pos\('([^']+)', Contents\)", owned)
         self.assertEqual(markers, ['"kind": "installer"', '"product": "Zerus"'])
         for marker in markers:

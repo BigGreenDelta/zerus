@@ -20,7 +20,8 @@ INSTALLATION = "installation.json"
 # Inno Setup's uninstaller (UninstallFilesDir) and the payload list.
 UNINSTALL = "uninstall"
 PAYLOAD_LIST = f"{UNINSTALL}/payload.txt"
-NIGHTLY = re.compile(r"(\d+\.\d+\.\d+)\.r\d+\.g[0-9a-f]{7}\.n(\d+)")
+# nightly_common.nightly_version: <product>.r<revisions>.g<commit[:7]>.n<run number>.
+NIGHTLY = re.compile(r"(?P<product>\d+\.\d+\.\d+)\.r[1-9]\d*\.g(?P<commit>[0-9a-f]{7})\.n(?P<run>[1-9]\d*)")
 STABLE = re.compile(r"\d+\.\d+\.\d+")
 
 
@@ -36,14 +37,35 @@ def numeric_version(version):
         return f"{version}.0"
     match = NIGHTLY.fullmatch(version)
     require(match is not None, f"Unsupported installer version: {version!r}")
-    run = int(match[2])
-    return f"{match[1]}.{run if run <= 65535 else 0}"
+    run = int(match["run"])
+    return f"{match['product']}.{run if run <= 65535 else 0}"
 
 
-def installation_record(manifest):
-    """installation.json for the build that build-info.json describes."""
-    return {"schema": 1, "kind": "installer", "product": "Zerus", "version": manifest["version"],
-            "source_commit": manifest["source_commit"]}
+def release_version(manifest, version=None):
+    """The release version an installer of the zip that build-info.json `manifest`
+    describes may carry: the zip's product version for a stable release (the
+    default), or the nightly version of that product version and source commit.
+    Dev builds have no Windows build."""
+    if version is None:
+        return manifest["version"]
+    if STABLE.fullmatch(version):
+        require(version == manifest["version"],
+                f"Version {version} is not the zip's product version {manifest['version']}.")
+        return version
+    match = NIGHTLY.fullmatch(version)
+    require(match is not None, f"Unsupported installer version {version!r}: a stable x.y.z or a nightly "
+            "x.y.z.rN.gCOMMIT.nN version; Dev builds have no Windows build.")
+    require(match["product"] == manifest["version"] and match["commit"] == manifest["source_commit"][:7],
+            f"Nightly {version} is not a build of the zip's product version {manifest['version']} "
+            f"at commit {manifest['source_commit'][:7]}.")
+    return version
+
+
+def installation_record(manifest, version):
+    """installation.json for the build that build-info.json describes, released as
+    `version` (release_version): the same version the installer itself carries."""
+    return {"schema": 1, "kind": "installer", "product": "Zerus", "version": version,
+            "product_version": manifest["version"], "source_commit": manifest["source_commit"]}
 
 
 def sha256(path):
@@ -54,12 +76,14 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def stage(zip_path, destination):
+def stage(zip_path, destination, version=None):
     """Extract the checked zip's files into the empty folder `destination` and add
-    installation.json and the payload list. Returns (build-info.json, expected),
-    where expected maps every relative path the installer installs, except the
-    uninstaller, to its SHA-256."""
+    installation.json and the payload list. `version` must suit the zip
+    (release_version) and is checked before anything is written. Returns
+    (installation.json, expected), where expected maps every relative path the
+    installer installs, except the uninstaller, to its SHA-256."""
     manifest = inspect(zip_path)
+    record = installation_record(manifest, release_version(manifest, version))
     destination = Path(destination)
     require(destination.is_dir() and not any(destination.iterdir()), f"{destination} must be an empty folder.")
     expected = {}
@@ -81,15 +105,15 @@ def stage(zip_path, destination):
                     digest.update(block)
                     output.write(block)
             expected[relative.as_posix()] = digest.hexdigest()
-    record = destination / INSTALLATION
-    record.write_text(json.dumps(installation_record(manifest), indent=2) + "\n", encoding="utf-8", newline="\n")
-    expected[INSTALLATION] = sha256(record)
+    written = destination / INSTALLATION
+    written.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n")
+    expected[INSTALLATION] = sha256(written)
     listing = destination.joinpath(*PAYLOAD_LIST.split("/"))
     listing.parent.mkdir()
     # The installer compares these case-insensitively with the files it finds.
     listing.write_text("".join(path.replace("/", "\\") + "\r\n" for path in sorted(expected)), encoding="utf-8")
     expected[PAYLOAD_LIST] = sha256(listing)
-    return manifest, expected
+    return record, expected
 
 
 def problems(folder, expected):

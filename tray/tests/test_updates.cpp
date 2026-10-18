@@ -284,7 +284,7 @@ private slots:
     void installerBuildsStayLinkOnly(){
         // installation.json as scripts/windows_installer.py writes it.
         const QByteArray record="{\n  \"schema\": 1,\n  \"kind\": \"installer\",\n  \"product\": \"Zerus\",\n  \"version\": \"0.45.0\",\n"
-                                "  \"source_commit\": \"cccccccccccccccccccccccccccccccccccccccc\"\n}\n";
+                                "  \"product_version\": \"0.45.0\",\n  \"source_commit\": \"cccccccccccccccccccccccccccccccccccccccc\"\n}\n";
         QVERIFY(UpdateController::installerRecord(record));
         for(const QByteArray &other:{QByteArray(),QByteArray("[]"),QByteArray("{\"schema\":2,\"kind\":\"installer\",\"product\":\"Zerus\"}"),
                                      QByteArray("{\"schema\":1,\"kind\":\"portable\",\"product\":\"Zerus\"}"),QByteArray("{\"schema\":1,\"kind\":\"installer\",\"product\":\"Other\"}"),

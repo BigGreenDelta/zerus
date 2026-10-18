@@ -50,7 +50,8 @@ def command(iscc, payload, output, version):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("zip", type=Path, help="tested portable zip (scripts/package-windows.py)")
-    parser.add_argument("--version", help="release version the installer carries [default: the zip's product version]")
+    parser.add_argument("--version", help="release version the installer carries: the zip's product version "
+                        "(the default) or its nightly version")
     parser.add_argument("--output", type=Path, required=True, help="installer to write (.exe)")
     parser.add_argument("--iscc", help="ISCC.exe [default: Inno Setup 6 under Program Files]")
     parser.add_argument("--stage-only", type=Path, metavar="FOLDER",
@@ -60,22 +61,22 @@ def main():
     output = args.output.resolve()
     if args.stage_only:
         args.stage_only.mkdir(parents=True, exist_ok=True)
-        manifest, expected = windows_installer.stage(args.zip, args.stage_only)
-        version = args.version or manifest["version"]
-        print(" ".join(command(Path("ISCC.exe"), args.stage_only.resolve(), output, version)))
-        print(f"Staged {len(expected)} files of Zerus {manifest['version']} in {args.stage_only}.")
+        record, expected = windows_installer.stage(args.zip, args.stage_only, args.version)
+        print(" ".join(command(Path("ISCC.exe"), args.stage_only.resolve(), output, record["version"])))
+        print(f"Staged {len(expected)} files of Zerus {record['version']} in {args.stage_only}.")
         return
     iscc = compiler(args.iscc)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="zerus-installer-") as temporary:
         payload = Path(temporary) / "payload"
         payload.mkdir()
-        manifest, expected = windows_installer.stage(args.zip, payload)
-        version = args.version or manifest["version"]
-        subprocess.run(command(iscc, payload, output, version), check=True, stdin=subprocess.DEVNULL)
+        # The version is checked against the zip before anything is staged or compiled,
+        # and the installer carries the version its installation.json records.
+        record, expected = windows_installer.stage(args.zip, payload, args.version)
+        subprocess.run(command(iscc, payload, output, record["version"]), check=True, stdin=subprocess.DEVNULL)
     require(output.is_file(), f"Inno Setup wrote no {output}.")
-    print(f"{output.name}: {output.stat().st_size} bytes, {len(expected)} files of Zerus {version} "
-          f"({manifest['source_commit']}).")
+    print(f"{output.name}: {output.stat().st_size} bytes, {len(expected)} files of Zerus {record['version']} "
+          f"({record['source_commit']}).")
 
 
 if __name__ == "__main__":
