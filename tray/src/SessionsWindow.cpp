@@ -559,6 +559,17 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     }
     m_clear->setToolTip(tr("Clear session\nStart this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
     auto *moreMenu = new QMenu(m_more);
+    // The menu repeats the header icons as named items: each one clicks its icon,
+    // so it shares the icon's state, guards and handler.
+    QList<QPair<QAction *, QPushButton *>> mirrors;
+    const auto mirror = [&mirrors, moreMenu](QPushButton *button, const QString &text, const char *name) {
+        auto *action = moreMenu->addAction(text); action->setObjectName(QLatin1String(name));
+        QObject::connect(action, &QAction::triggered, button, &QPushButton::click); mirrors.append({action, button}); return action;
+    };
+    mirror(m_fileManager, tr("Open folder"), "menuOpenSessionFolderAction");
+    mirror(m_shell, tr("Open shell in session folder"), "menuOpenFolderShellAction");
+    auto *copyId = mirror(m_copyHeaderId, tr("Copy session ID"), "menuCopySessionIdAction");
+    moreMenu->addSeparator();
     m_renameAction = moreMenu->addAction(tr("Rename…")); m_renameAction->setObjectName("renameSessionAction");
     connect(m_renameAction, &QAction::triggered, this, &SessionsWindow::renameSession);
     m_forkAction = moreMenu->addAction(tr("Fork session…")); m_forkAction->setObjectName("forkSessionAction");
@@ -569,6 +580,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_changeAction = moreMenu->addAction(tr("Pause session")); m_changeAction->setObjectName("pauseAction");
     connect(m_changeAction, &QAction::triggered, this, &SessionsWindow::changeSession);
     moreMenu->addSeparator();
+    // A live session clears; a stopped one starts fresh in the same place.
+    auto *clear = mirror(m_clear, tr("Clear session…"), "menuClearSessionAction");
+    connect(moreMenu, &QMenu::aboutToShow, this, [this, mirrors, copyId, clear] {
+        for (const auto &[action, button] : mirrors) {
+            action->setVisible(button->isVisibleTo(button->parentWidget())); action->setEnabled(button->isEnabled());
+        }
+        copyId->setText(m_copyHeaderId->accessibleName()); clear->setText(m_clearRequest ? tr("Clearing…") : tr("Clear session…"));
+    });
     m_freshAction = moreMenu->addAction(tr("Start fresh…")); m_freshAction->setObjectName("freshSessionAction");
     m_freshAction->setToolTip(tr("Start this stopped session with a new conversation and the same folder, account and model."));
     connect(m_freshAction, &QAction::triggered, this, &SessionsWindow::startFresh);
@@ -3210,6 +3229,12 @@ QString contextActionReason(const QJsonObject &details, const QString &action)
     if (details.value(action + "_context_supported").toBool()) return {};
     return details.value(action + "_context_reason").toString().simplified();
 }
+// The inspected conversation can be cleared now, or after dismissing a Claude chooser.
+bool clearableContext(const QJsonObject &details)
+{
+    return !details.value("run_id").toString().isEmpty() && !details.value("conversation_id").toString().isEmpty()
+        && (details.value("clear_context_supported").toBool() || details.value("clear_context_dismiss").toBool());
+}
 QString contextReasonSentence(const QString &reason)
 {
     return reason.isEmpty() || QStringLiteral(".!?…").contains(reason.back()) ? reason : reason + '.';
@@ -3259,9 +3284,7 @@ void SessionsWindow::renderDetails()
     const bool mainContext=m_subagentId.isEmpty();
     m_detailsClear->setVisible(mainContext);m_detailsContext->setVisible(mainContext);
     const bool canClear=mainContext && entry && entry->online && entry->session.state!="archived"
-        && !m_clearRequest && !m_composer->isSending(m_selectedKey) && m_inspectError.isEmpty()
-        && !m_details.value("run_id").toString().isEmpty() && !m_details.value("conversation_id").toString().isEmpty()
-        && (m_details.value("clear_context_supported").toBool() || m_details.value("clear_context_dismiss").toBool());
+        && !m_clearRequest && !m_composer->isSending(m_selectedKey) && m_inspectError.isEmpty() && clearableContext(m_details);
     m_detailsClear->setEnabled(canClear);
     // A Claude chooser still allows Dismiss and clear.
     const auto clearReason=reported && !m_details.value("clear_context_dismiss").toBool()?contextActionReason(m_details,"clear"):QString();
@@ -4693,19 +4716,31 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     m_sessionMenu->addSeparator();
     add(archived ? tr("Restore session") : original.session.state == "running" ? tr("Pause session") : tr("Resume session"),
         "contextChangeSession", SessionMenuAction::ChangeState, selectedTarget ? m_changeAction->isEnabled() : canChange && NativeSessionCapabilities::action(target,archived?"restore":target.state=="running"?"pause":"resume"));
+    // A live session clears where a stopped one starts fresh.
+    QPointer<QAction> clear;
     if (target.state == "paused" || target.state == "stopped")
         add(tr("Start fresh…"), "contextStartFresh", SessionMenuAction::StartFresh, canStartStopped(original),
             tr("Start with a new conversation and the same folder, account and model"));
+    else if (!archived)
+        clear = add(tr("Clear session…"), "contextClearSession", SessionMenuAction::Clear, selectedTarget && m_clear->isEnabled(),
+            selectedTarget ? m_clear->toolTip() : QString());
     add(tr("Rename…"), "contextRenameSession", SessionMenuAction::Rename, available && NativeSessionCapabilities::action(target,"rename") && !target.name.section('/', 1, 1).isEmpty() && (!archived || !target.archiveId.isEmpty()));
     auto *fork = add(tr("Fork session…"), "contextForkSession", SessionMenuAction::Fork, selectedTarget && m_forkAction->isEnabled(), m_forkAction->toolTip());
     if (!selectedTarget && available) {
         fork->setToolTip(tr("Checking whether this session can be forked…"));
-        connect(&m_client, &HgsClient::inspectionReady, fork, [fork, original](const QString &host, const QString &name, const QJsonObject &data, const QString &archive) {
+        if (clear) clear->setToolTip(tr("Checking whether this session can be cleared…"));
+        connect(&m_client, &HgsClient::inspectionReady, fork, [this, fork, clear, original](const QString &host, const QString &name, const QJsonObject &data, const QString &archive) {
             if (host != original.host || name != original.session.name || archive != original.session.archiveId) return;
             if ((!original.session.runId.isEmpty() && data["run_id"] != original.session.runId)
                 || (!original.session.conversationId.isEmpty() && data["conversation_id"] != original.session.conversationId)) return;
             fork->setProperty("details", data); fork->setEnabled(data["fork_supported"].toBool());
             fork->setToolTip(data["fork_reason"].toString());
+            if (!clear) return;
+            // Selecting the session adopts only details that name its listed conversation.
+            clear->setProperty("details", data); clear->setProperty("usualToolTip", QString());
+            clear->setEnabled(!m_clearRequest && clearableContext(data)
+                && data["run_id"] == original.session.runId && data["conversation_id"] == original.session.conversationId);
+            explainContextAction(clear.data(), data["clear_context_dismiss"].toBool() ? QString() : contextActionReason(data, "clear"));
         });
         m_client.requestInspection(original.host, target.name, 0, target.archiveId,false);
     }
@@ -4784,9 +4819,9 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
     }
     if (!selectSessionEntry(original)) return;
     const auto *entry = selected(); if (!entry) return;
-    if (action == SessionMenuAction::Fork) {
-        const auto *fork = m_sessionMenu->findChild<QAction *>("contextForkSession");
-        const auto data = fork ? fork->property("details").toJsonObject() : QJsonObject();
+    if (action == SessionMenuAction::Fork || action == SessionMenuAction::Clear) {
+        const auto *source = m_sessionMenu->findChild<QAction *>(action == SessionMenuAction::Fork ? "contextForkSession" : "contextClearSession");
+        const auto data = source ? source->property("details").toJsonObject() : QJsonObject();
         if (!data.isEmpty() && data["run_id"].toString() == entry->session.runId && data["conversation_id"].toString() == entry->session.conversationId) {
             m_details = data; renderDetails();
         }
@@ -4814,6 +4849,12 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         }
         if (action == SessionMenuAction::ChangeState) changeSession(); else terminateSession();
         return;
+    case SessionMenuAction::Clear:
+        // A session that stopped meanwhile offers Start fresh instead.
+        if (entry->session.state != original.session.state) {
+            showNotice(tr("The session state changed. Open its actions again."), true); return;
+        }
+        clearContext(); return;
     case SessionMenuAction::Rename: renameSession(); return;
     case SessionMenuAction::StartFresh: startFresh(); return;
     case SessionMenuAction::Fork: forkSession(); return;
