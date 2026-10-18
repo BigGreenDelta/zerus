@@ -29,6 +29,8 @@
 #include <QTextDocument>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+#include <QValidator>
+#include "ComposerDraftStore.h"
 
 namespace {
 QJsonObject request(const QString &id = "tool-question", const QString &hash = "hash-one")
@@ -157,6 +159,8 @@ private slots:
     void unanswerableOpenCodeFormPointsToOpenCode();
     void oversizedOpenCodeFormShowsReasonWithoutSubmit();
     void openCodeFormDefaultsSeedOnlyWithoutSavedDraft();
+    void openCodeSeededDefaultsStayUnsavedUntilEdited();
+    void openCodeOtherAnswerCountsTowardItemBounds();
     void claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes();
     void unreadableApprovalPointsToTerminal();
     void kimiPlanReviewShowsPlanAndNamedRevise();
@@ -563,7 +567,8 @@ void TestQuestionCard::openCodeFormDefaultsSeedOnlyWithoutSavedDraft()
     {
         QuestionCard card; QSignalSpy sent(&card, &QuestionCard::answerRequested);
         setQuestionReady(card, "opencode\nsession", form("hash-one"));
-        QCOMPARE(text(card, "name")->text(), QString("Ada")); QCOMPARE(text(card, "name")->maxLength(), 3);
+        QCOMPARE(text(card, "name")->text(), QString("Ada")); QVERIFY(text(card, "name")->validator());
+        { QString longer = "Adam"; int position = 4; QCOMPARE(text(card, "name")->validator()->validate(longer, position), QValidator::Invalid); }
         QVERIFY(option(card, "yes")->isChecked()); QVERIFY(!option(card, "no")->isChecked());
         QVERIFY(option(card, "a")->isChecked()); QVERIFY(!option(card, "b")->isChecked()); QVERIFY(option(card, "c")->isChecked());
         QVERIFY2(modes(card).contains("Select 1 to 2"), qPrintable(modes(card).join(" | ")));
@@ -588,10 +593,63 @@ void TestQuestionCard::openCodeFormDefaultsSeedOnlyWithoutSavedDraft()
     legacy["questions"] = items;
     for (const auto &card : {legacy, form("hash-four", "hook")}) {
         QuestionCard plain; setQuestionReady(plain, "opencode\nsession", card);
-        QVERIFY(text(plain, "name")->text().isEmpty()); QCOMPARE(text(plain, "name")->maxLength(), 4096);
+        QVERIFY(text(plain, "name")->text().isEmpty()); QCOMPARE(text(plain, "name")->maxLength(), 4096); QVERIFY(!text(plain, "name")->validator());
         for (const auto *id : {"yes", "no", "a", "b", "c"}) QVERIFY2(!option(plain, id)->isChecked(), id);
         QVERIFY(!modes(plain).contains("Select 1 to 2"));
     }
+}
+
+// Seeded defaults are shown but never become a stored (unsent) draft until the
+// user edits; navigating between questions saves only the page.
+void TestQuestionCard::openCodeSeededDefaultsStayUnsavedUntilEdited()
+{
+    QJsonObject form{{"question_id", "que_seeded"}, {"question_hash", "seeded-hash"}, {"run_id", "run"}, {"conversation_id", "ses_one"},
+        {"kind", "opencode_form"}, {"source", "opencode_native"}, {"answer_transport", "native_opencode"}, {"can_answer", true}, {"answerable", true}};
+    form["questions"] = QJsonArray{
+        QJsonObject{{"id", "name"}, {"header", "Name"}, {"question", "Your name"}, {"multi_select", false}, {"required", true},
+            {"allow_other", true}, {"input_kind", "text"}, {"options", QJsonArray{}}, {"default_text", QString::fromUtf8("Ada \xF0\x9F\x98\x80\xF0\x9F\x98\x80\xF0\x9F\x98\x80")}, {"max_length", 6}},
+        QJsonObject{{"id", "confirm"}, {"header", "Confirm"}, {"question", "Proceed?"}, {"multi_select", false}, {"required", true},
+            {"allow_other", false}, {"input_kind", "choice"}, {"default_option_ids", QJsonArray{"yes"}},
+            {"options", QJsonArray{QJsonObject{{"id", "yes"}, {"label", "Yes"}}, QJsonObject{{"id", "no"}, {"label", "No"}}}}}};
+    const auto stored = [] { ComposerDraftStore::flushWrites(); QStringList keys; for (const auto &key : ComposerDraftStore().keys()) if (key.startsWith("question\n")) keys << key; return keys; };
+    {
+        QuestionCard card; card.show(); setQuestionReady(card, "opencode\nsession", form);
+        // The limit counts characters, and a clipped default keeps whole characters.
+        QCOMPARE(text(card, "name")->text(), QString::fromUtf8("Ada \xF0\x9F\x98\x80\xF0\x9F\x98\x80"));
+        auto *tabs = card.findChild<QTabBar *>("questionTabs"); QVERIFY(tabs); QCOMPARE(tabs->count(), 2);
+        tabs->setCurrentIndex(1); tabs->setCurrentIndex(0); tabs->setCurrentIndex(1);
+        QCOMPARE(text(card, "name")->text(), QString::fromUtf8("Ada \xF0\x9F\x98\x80\xF0\x9F\x98\x80")); QVERIFY(option(card, "yes")->isChecked());
+        QVERIFY2(stored().isEmpty(), qPrintable(stored().join(" | ")));
+    }
+    {
+        // Still nothing saved: a new card seeds again and keeps the page.
+        QuestionCard card; card.show(); setQuestionReady(card, "opencode\nsession", form);
+        QCOMPARE(text(card, "name")->text(), QString::fromUtf8("Ada \xF0\x9F\x98\x80\xF0\x9F\x98\x80")); QVERIFY(option(card, "yes")->isChecked());
+        QVERIFY(stored().isEmpty());
+        // An edit stores the answer.
+        auto *field = text(card, "name"); field->setText("Ada"); QTRY_COMPARE(stored().size(), 1);
+        // Typing beyond the limit in characters is refused.
+        auto value = QString::fromUtf8("Ada \xF0\x9F\x98\x80\xF0\x9F\x98\x80\xF0\x9F\x98\x80"); int position = value.size();
+        QVERIFY(field->validator()); QCOMPARE(field->validator()->validate(value, position), QValidator::Invalid);
+        value = QString::fromUtf8("Ada \xF0\x9F\x98\x80\xF0\x9F\x98\x80"); position = value.size();
+        QCOMPARE(field->validator()->validate(value, position), QValidator::Acceptable);
+    }
+}
+
+// hgs counts the selected options and an Other answer against the item bounds.
+void TestQuestionCard::openCodeOtherAnswerCountsTowardItemBounds()
+{
+    QJsonObject form{{"question_id", "que_bounds"}, {"question_hash", "bounds-hash"}, {"run_id", "run"}, {"conversation_id", "ses_one"},
+        {"kind", "opencode_form"}, {"source", "opencode_native"}, {"answer_transport", "native_opencode"}, {"can_answer", true}, {"answerable", true}};
+    form["questions"] = QJsonArray{QJsonObject{{"id", "tags"}, {"header", "Tags"}, {"question", "Pick tags"}, {"multi_select", true},
+        {"allow_multiple", true}, {"required", true}, {"allow_other", true}, {"input_kind", "choice"}, {"min_items", 2}, {"max_items", 2},
+        {"options", QJsonArray{QJsonObject{{"id", "a"}, {"label", "Alpha"}}, QJsonObject{{"id", "b"}, {"label", "Beta"}}}}}};
+    QuestionCard card; card.show(); setQuestionReady(card, "opencode\nsession", form);
+    option(card, "a")->click(); QVERIFY(!submit(card)->isEnabled());
+    other(card, "tags")->click(); text(card, "tags")->setText("Gamma"); QVERIFY(submit(card)->isEnabled());
+    option(card, "b")->click(); QVERIFY(!submit(card)->isEnabled());
+    option(card, "a")->click(); QVERIFY(submit(card)->isEnabled());
+    option(card, "b")->click(); text(card, "tags")->setText("Gamma"); QVERIFY(!submit(card)->isEnabled());
 }
 
 void TestQuestionCard::unreadableApprovalPointsToTerminal()

@@ -2024,10 +2024,10 @@ See [OpenCode versions, service and controls](opencode.md).
 
 From the CLI, `hgs [@host] opencode DIRECTORY --new -n TAG --model PROVIDER/MODEL`
 starts a session. `--effort VARIANT` needs `--model` and must be one of that
-model's `effort_options` (listed by `hgs account ls`); empty or omitted uses the
-model's default. A launch starts the shared service when none is running, and
-`hgs [@host] account start native-opencode` starts it explicitly (**Start
-OpenCode**). Inspection, listings and sending never start it. OpenCode's
+model's `effort_options` (listed by `hgs account ls`); when omitted, the
+model's default is used. A launch starts the shared service when none is
+running, and `hgs [@host] account start native-opencode` starts it explicitly
+(**Start OpenCode**). Inspection, listings and sending never start it. OpenCode's
 official user install, `~/.opencode/bin`, is discoverable from GUI, service and
 SSH launches; an `opencode` found earlier on PATH keeps precedence.
 

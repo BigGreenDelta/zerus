@@ -68,6 +68,7 @@ private:
     struct Answer { QSet<QString> options; QString text; bool other = false; };
     struct Draft {
         QHash<QString, Answer> answers;
+        QSet<QString> seeded;   // answers that are untouched OpenCode defaults, never saved
         QString notice, confirm, storageError, label;
         int page = 0;
         bool sending = false, submitted = false, answered = false, error = false, uncertain = false;

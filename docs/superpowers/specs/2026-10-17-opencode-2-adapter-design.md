@@ -68,10 +68,10 @@ OpenCode 2.0.32 (`/openapi.json`, 119 paths):
   (`uri`, `name`; at most 20 MiB each), `delivery` (`steer` or `queue`;
   `steer` when omitted) and `resume`. A queued prompt is listed in `/inbox`
   and `GET /message/{id}` returns 404 until OpenCode runs it; queued items
-  stay pending after `/interrupt`, unrun. The next prompt starts a run that
-  delivers them first, in order, each as its own step with its own reply,
-  and then the new prompt; the run ends in one idle (native `test_11`,
-  2026-10-18). `/message` pages by cursor.
+  stay pending after `/interrupt`, unrun. The next prompt starts a run in
+  which the waiting prompt runs first, as its own step with its own reply,
+  and then the new prompt; the run ends in one idle (native `test_11` with
+  one waiting prompt, 2026-10-18). `/message` pages by cursor.
 - `/interrupt`; `/model` (`Model.Ref`: `providerID`, `id`, optional
   `variant`); `/compact` (client ID); `/fork` (only `before`; no client ID;
   400 for an empty session); `/form`, `/form/{id}/reply`

@@ -459,7 +459,7 @@ private:
     QLabel *m_openCodeServiceText = nullptr;
     QPushButton *m_openCodeServiceStart = nullptr;
     quint64 m_openCodeStartRequest = 0;
-    QString m_openCodeStartMachine;
+    QString m_openCodeStartMachine, m_openCodeStartHost;
     void startOpenCodeService();
     ActivityView *m_subagentView = nullptr;
     QStackedWidget *m_activityStack = nullptr;

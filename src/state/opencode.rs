@@ -112,10 +112,10 @@ fn legacy_verdict(record: &Value, migration: &Value, session: Option<&Value>) ->
     }
 }
 type Reply = std::result::Result<Response, String>;
-/// Server text as an OpenCode reason presents it: `journal::clipped`'s
-/// escape-sequence removal, tabs and line breaks and its 300-character cap,
-/// and in addition without DEL or C1 controls, which `clipped` keeps. The
-/// controls are dropped before the cap, so they never count toward it.
+/// Server text as an OpenCode reason presents it. As `journal::clipped`:
+/// escape sequences and C0 controls other than tabs and line breaks removed,
+/// at most 300 characters plus an ellipsis. Unlike it, DEL and C1 controls are
+/// removed too, before the cap, so they never count toward it.
 pub(super) fn server_reason(text: &str) -> String {
     let clean: String = journal::clipped(&json!(text), usize::MAX)
         .chars()
@@ -276,6 +276,9 @@ fn adopt_binding(name: &str, conversation_id: &str) {
         }
     }
 }
+/// The binding keeps its pending creation, so launching the same session
+/// name again reconciles it by its ID; OpenCode 2 sessions have no Resume.
+const CREATION_MISMATCH: &str = "OpenCode creation acknowledgement did not match; inspect the session, then launch the same session name again to reconcile it";
 enum Refusal {
     /// The service definitely refused the creation (HTTP 4xx).
     Definite(String),
@@ -290,10 +293,7 @@ fn creation_reply(
             if acknowledged(&response.body) {
                 Ok(())
             } else {
-                Err(Refusal::Other(
-                    "OpenCode creation acknowledgement did not match; inspect before resuming"
-                        .into(),
-                ))
+                Err(Refusal::Other(CREATION_MISMATCH.into()))
             }
         }
         Ok(response) if (400..500).contains(&response.status) => {
@@ -1962,7 +1962,11 @@ mod tests {
         assert!(result.is_ok() && gets == 1 && posts == 1);
         let wrong = reply(200, json!({"data": {"id": "ses_other"}}));
         let (result, _, posts) = counted(wrong, found.clone(), false);
-        assert!(matches!(result, Err(Refusal::Other(_))) && posts == 0);
+        assert!(
+            matches!(&result, Err(Refusal::Other(why)) if why == CREATION_MISMATCH
+                && !why.contains("resum"))
+                && posts == 0
+        );
         let (result, _, posts) = counted(reply(404, json!({})), wrong_ack(), false);
         assert!(matches!(result, Err(Refusal::Other(_))) && posts == 1);
         // First attempt: a definite refusal ends it; a lost reply reconciles.

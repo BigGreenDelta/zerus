@@ -2429,6 +2429,8 @@ void TestActivityView::openCodeQueuedMessagesShowDeliveryAndRemove()
     // session's reported action.
     events[1]=queued("not_delivered");view.setActivity(idle,events);text=view.browser()->toPlainText();
     QVERIFY(text.contains("Not delivered"));QVERIFY(!text.contains("Queued"));QVERIFY(!text.contains("Remove"));QVERIFY(removeLinks().isEmpty());
+    // Not delivered is not a refusal: the message still waits in OpenCode's queue.
+    QVERIFY(text.contains("Still waiting in OpenCode's queue. It runs first with your next message unless you remove it."));
     view.setActivity({{"allowed_actions",QJsonArray{"rename","forget","remove_queued"}}},events);text=view.browser()->toPlainText();
     QVERIFY(text.contains("Not delivered"));QVERIFY(text.contains("Remove"));
     const auto commands=removeLinks();QCOMPARE(commands.size(),1);

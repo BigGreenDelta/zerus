@@ -975,6 +975,11 @@ struct ActivityRenderResult {
             // Remove is offered only while the session reports it; the owner confirms first.
             // While one removal runs, no Remove can be clicked.
             const auto queuedId=event.value("message_id").toString();
+            // Not delivered is not a refusal: OpenCode keeps the message queued and
+            // runs it before the next one; Zerus never resends it.
+            if(delivery=="not_delivered")
+                body+=QString("<p style='font-size:11px;color:%1;margin:6px 0 0;'>%2</p>").arg(muted,
+                    escaped(tr("Still waiting in OpenCode's queue. It runs first with your next message unless you remove it.")));
             if(delivery=="not_delivered" && !queuedId.isEmpty() && details.value("allowed_actions").toArray().contains(QStringLiteral("remove_queued"))) {
                 const auto removing=details.value("queued_removal").toString();
                 if(!removing.isEmpty() || details.value("queued_removal_busy").toBool())

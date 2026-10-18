@@ -892,7 +892,9 @@ class OpenCodeNative(unittest.TestCase):
             messages = history()
         # The leftover message ran first, as its own step with its own reply, then the
         # new one; one run, one idle.
-        after = messages[next(i for i, m in enumerate(messages) if m['id'] == left_id):]
+        start = next((i for i, m in enumerate(messages) if m['id'] == left_id), None)
+        self.assertIsNotNone(start, 'the leftover message is not in history: ' + json.dumps(messages)[-3000:])
+        after = messages[start:]
         self.assertEqual([(m['type'], m['id'] if m['type'] == 'user' else m.get('outcome')) for m in after],
                          [('user', left_id), ('assistant', None), ('user', next_id), ('assistant', None),
                           ('idle', 'succeeded')])
@@ -914,8 +916,14 @@ class OpenCodeNative(unittest.TestCase):
         self.assertEqual((again['status'], again['native_message_id'], again.get('queued')), ('submitted', left_id, True))
         self.assertNotIn('reason', again)
         self.assertEqual(self.receipt_path(left).read_bytes(), receipt)
-        self.assertEqual([i for i, _ in self.user_messages(conversation)].count(left_id), 1)
+        # OpenCode answers a same-ID post with the original admission, so also check
+        # that no copy under another ID was queued or delivered.
+        self.assertEqual(self.inbox(conversation), [])
+        users = self.user_messages(conversation)
+        self.assertEqual([i for i, _ in users].count(left_id), 1)
+        self.assertEqual([t for _, t in users].count(left_text), 1)
         self.assertEqual([r for r in self.model.requests if r['last_user'] == left_text and r['tools']][1:], [])
+
 
 if __name__ == '__main__':
     unittest.main()
