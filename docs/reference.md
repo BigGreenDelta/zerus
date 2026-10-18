@@ -702,7 +702,7 @@ application and window switchers.
 | Rename session | F2 | F2 |
 | Search sessions | Ctrl+F | ⌘F |
 | Refresh | Ctrl+R, F5 | ⌘R, F5 |
-| Next / previous tab (Activity, Terminal, Processes, Native UI) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
+| Next / previous tab (Activity, Terminal, Tasks, Native UI, Processes) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
 | Switch between Activity and Terminal | Ctrl+` | ⌃` |
 | Show or hide the side panel | Ctrl+I | ⌘I |
 | Next / previous area (list, conversation, message field, side panel) | F6 / Shift+F6 | F6 / ⇧F6 |
@@ -1371,9 +1371,10 @@ Claude's recorded compaction boundary replaces the earlier context size with its
 reported summary size. It invalidates the earlier prompt cache estimate; a new
 warm countdown requires fresh native usage with a reported TTL.
 
-**Tasks & agents**, **Details** and **Worktrees** occupy the resizable inspector.
+**Plan & agents**, **Details** and **Worktrees** occupy the resizable inspector.
 Its width, tab and open state are local; toggling it preserves Activity, drafts and
-Terminal attachment. Successful native task/plan tools supply recorded pending,
+Terminal attachment. Plan & agents shows the agent's own plan, not the project's
+Zerus tasks (the Tasks tab). Successful native task/plan tools supply recorded pending,
 in-progress and completed items. Tool failures and Stop do not complete tasks.
 There are up to 100 items per list and 65 lists, with truncation disclosed.
 Old data shows **Last recorded**; unavailable history is not reconstructed.
@@ -1399,7 +1400,7 @@ The expanded session tree hides children whose latest reported turn is finished
 or failed by default. Session and Overview cards then show only the active count, omitting
 an empty indicator when no active or uncertain children remain.
 **Settings → Sessions → Show completed subagents** restores completed rows and
-active/total card counts. The **Tasks & agents** inspector always shows the full
+active/total card counts. The **Plan & agents** inspector always shows the full
 reported roster and its active/total counts, including completed turns.
 Unknown states, paused agents and input/approval requests remain visible.
 An open child's Activity and draft stay in place when its turn finishes. A child's
@@ -1892,8 +1893,17 @@ verified member, or null.
 
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in
-place. Replication between computers, the Tasks view and the MCP tools come in
-later releases.
+place. Replication between computers and the MCP tools come in later releases.
+
+In the desktop, the **Tasks** tab beside Activity and Terminal shows the open
+session's project. Stage tiles (In review, In progress, To do, Backlog, Done)
+filter one list; the funnel tile keeps only the open session's tasks and the Any
+session tasks it can take, and the gear opens the project's task settings. A row
+shows its actions on hover, and a click opens the task: its prompt and session
+(editable in To do and Backlog), history and comments. The input below files a
+task for the open session in To do, or in Backlog while Backlog is open. The tab
+label counts the tasks In review and in To do. Done lists the last 7 days, and
+Show older adds the rest. A session outside every project has no tasks.
 
 ## Machines and accounts
 

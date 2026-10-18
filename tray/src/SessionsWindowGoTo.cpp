@@ -1,6 +1,7 @@
 // Go to (Ctrl+K) and the keyboard cheat sheet (F1) of the workspace window.
 // See docs/superpowers/specs/2026-10-15-keyboard-shortcuts-design.md, "Go to".
 #include "SessionsWindow.h"
+#include "TasksView.h"
 #include "AccountsPage.h"
 #include "ComposerDraftStore.h"
 #include "GoToDialog.h"
@@ -147,6 +148,9 @@ void SessionsWindow::openDraftSession(const QString &draftKey)
     }
     if (!m_subagentId.isEmpty()) closeSubagent();
     if (owner.kind == ComposerDraftOwner::Kind::Message && m_composer->isInputVisible()) m_composer->editor()->setFocus(Qt::OtherFocusReason);
+    if (owner.kind == ComposerDraftOwner::Kind::Task) {
+        m_detailTabs->setCurrentWidget(m_tasks); m_tasks->composer()->editor()->setFocus(Qt::OtherFocusReason);
+    }
 }
 
 void SessionsWindow::activateGoTo(const GoToItem &item)

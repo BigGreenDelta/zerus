@@ -28,6 +28,7 @@
 #include "NewSessionDialog.h"
 #include "ActivityView.h"
 #include "ProcessView.h"
+#include "TasksView.h"
 #include "AttachmentViewer.h"
 #include "NativeBrowserPlugin.h"
 #include "NativeUiView.h"
@@ -1192,8 +1193,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_info = browser(); m_info->setObjectName("sessionInfo"); m_info->setAccessibleName(tr("Session details"));
     tabs->addTab(m_activityStack, tr("Activity")); tabs->addTab(m_terminal, tr("Terminal"));
+    // The open session's project tasks; the label counts In review and To do.
+    m_tasks = new TasksView(&m_client); tabs->addTab(m_tasks, tr("Tasks"));
+    m_tasksBadge = new TaskTabBadge; tabs->tabBar()->setTabButton(tabs->indexOf(m_tasks), QTabBar::RightSide, m_tasksBadge);
+    connect(m_tasks, &TasksView::countsChanged, m_tasksBadge, &TaskTabBadge::setCounts);
+    connect(m_tasks, &TasksView::notice, this, &SessionsWindow::showNotice);
     m_nativeUi = new NativeUiView(&m_client, [] { return NativeBrowserPlugin::factory(); });
-    tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(2, false);
+    tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(tabs->indexOf(m_nativeUi), false);
     m_processes=new ProcessView(&m_client);tabs->addTab(m_processes,tr("Processes"));tabs->setTabVisible(tabs->indexOf(m_processes),ProcessSettings::enabled());
     connect(m_processes,&ProcessView::refreshRequested,this,&SessionsWindow::inspect);
     for(auto *view:{m_activityView,m_subagentView})connect(view,&ActivityView::processRequested,this,[this](const QString &id){if(!ProcessSettings::enabled())return;m_detailTabs->setCurrentWidget(m_processes);m_processes->selectProcess(id);});
@@ -1237,7 +1243,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_detailsClear->setToolTip(tr("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
     connect(m_detailsClear,&QPushButton::clicked,this,&SessionsWindow::clearContext);
     contextRow->addWidget(m_detailsContext,1);contextRow->addWidget(m_detailsClear);detailsLayout->addLayout(contextRow);
-    m_inspector->addTab(m_children, tr("Tasks && agents")); m_inspector->addTab(detailsPage, tr("Details"));
+    // The agent's own plan, not the project's Zerus tasks (the Tasks tab).
+    m_inspector->addTab(m_children, tr("Plan && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
@@ -1246,7 +1253,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_inspectorToggle = new QPushButton; m_inspectorToggle->setObjectName("toggleInspector");
     m_inspectorToggle->setProperty("glyph", "inspector"); m_inspectorToggle->setCheckable(true);
     m_inspectorToggle->setProperty("sessionHeaderAction", true);
-    configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show tasks, agents, details and worktrees"), m_dark);
+    configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show plan, agents, details and worktrees"), m_dark);
     tabs->setCornerWidget(m_inspectorToggle);
     connect(m_inspectorToggle, &QPushButton::toggled, this, &SessionsWindow::setInspectorVisible);
     connect(m_inspector, &QTabWidget::currentChanged, this, [](int index) { QSettings().setValue("workspace/inspectorTab", index); });
@@ -1266,7 +1273,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     detail->addWidget(m_workSplitter, 1); m_detailStack->addWidget(details); m_splitter->addWidget(m_detailStack);
     m_fileDrop=new SessionFileDrop(details,[this]()->MessageComposer *{
-        if(!selected()||m_detailTabs->currentWidget()==m_terminal)return nullptr;
+        // A task is text only: nothing is dropped on the Tasks tab.
+        if(!selected()||m_detailTabs->currentWidget()==m_terminal||m_detailTabs->currentWidget()==m_tasks)return nullptr;
         if(m_detailTabs->currentIndex()==0&&!m_subagentId.isEmpty())return m_subagentComposer->isInputVisible()?m_subagentComposer:nullptr;
         return m_composer;
     },[this](MessageComposer *composer){if(composer==m_composer)closeSubagent();m_detailTabs->setCurrentIndex(0);},
@@ -1633,6 +1641,7 @@ void SessionsWindow::applyTheme()
         QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QColorDialog#workspaceColorDialog { background:%1; color:%2; }
         QDialog#savedDraftsDialog { background:%1; color:%2; }
+        QDialog#taskDialog, QDialog#taskCancelDialog, QDialog#taskSettingsDialog { background:%1; color:%2; }
         QWidget#automaticApprovalSettings { background:transparent; color:%2; }
         QPlainTextEdit#approvalJournalDetail { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:10px; selection-background-color:%10; selection-color:%2; }
         QTableWidget#approvalJournal::item { padding:7px 10px; border-bottom:1px solid %4; }
@@ -1797,6 +1806,7 @@ void SessionsWindow::applyTheme()
     m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     m_processes->setTheme(m_dark);
+    m_tasks->setTheme(m_dark); m_tasksBadge->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
 }
 
@@ -1946,7 +1956,7 @@ void SessionsWindow::setInspectorVisible(bool visible)
     const QSignalBlocker blocker(m_inspectorToggle); m_inspectorToggle->setChecked(visible);
     m_inspectorToggle->setProperty("glyph", visible ? "collapse-panel" : "inspector");
     m_inspectorToggle->setIcon(workspaceIcon(m_inspectorToggle->property("glyph").toString(), QColor(m_muted)));
-    m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show tasks, agents, details and worktrees"));
+    m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show plan, agents, details and worktrees"));
     m_inspectorToggle->setToolTip(ShortcutRegistry::instance().tooltip(m_inspectorToggle->accessibleName(), "panel.toggle"));
     m_inspectorToggle->show();
     if (restoreFocus) m_inspectorToggle->setFocus(keyboardFocus ? Qt::TabFocusReason : Qt::MouseFocusReason);
@@ -3224,11 +3234,31 @@ template<typename Control> void explainContextAction(Control *control, const QSt
 }
 }
 
+void SessionsWindow::updateTasks(const Entry *entry)
+{
+    if (!entry || entry->session.state == "archived") { m_tasks->setContext({}, {}, {}, {}, {}, {}); return; }
+    // Sessions outside every catalog project have no tasks.
+    const QString projectId = m_organization.groupFor(entry->identity);
+    const auto *project = m_organization.group(projectId);
+    const bool real = project && projectId != QLatin1String("ungrouped");
+    QList<TaskSession> sessions;
+    for (const auto &other : std::as_const(m_entries)) {
+        if (other.session.state == "archived" || m_organization.groupFor(other.identity) != projectId) continue;
+        TaskSession session{other.host, other.session.name, status(other.session, other.online), {}, true};
+        session.running = other.online && other.session.state == "running" && other.session.processState != "exited";
+        if (!session.running) session.blocker = tr("The agent is not running. Resume it before sending.");
+        else if (other.session.needsAction()) session.blocker = tr("agent is waiting for input, approval, or has an unknown state; open Terminal");
+        sessions << session;
+    }
+    m_tasks->setContext(real ? projectId : QString(), real ? project->name : QString(), entry->host, entry->session.name, entry->key, sessions);
+}
+
 void SessionsWindow::renderDetails()
 {
     updateSessionLoading();
     m_compactCancel->setVisible(m_compacts.contains(m_selectedKey) || (m_startSend.key == m_selectedKey && !m_startSend.key.isEmpty()));
     const auto *entry = selected(); m_detailStack->setCurrentIndex(entry ? 1 : 0);
+    updateTasks(entry);
     const auto recoveryDetails=entry && entry->session.state != "archived"
         && m_details.value("provider_status_at").toDouble() >= entry->session.providerStatusAt ? m_details : QJsonObject();
     const auto recoveryState=recoveryDetails.value("recovery").toObject().value("state").toString();
@@ -3469,10 +3499,11 @@ void SessionsWindow::renderDetails()
     const bool terminalTab = terminalAvailable && m_subagentId.isEmpty();
     // Loads the optional plugin on the first DeepSeek session, not at startup.
     const bool nativeTab = s.cmd == "dsh" && m_subagentId.isEmpty() && NativeBrowserPlugin::factory();
-    if (m_detailTabs->isTabVisible(1) != terminalTab) m_detailTabs->setTabVisible(1, terminalTab);
-    if (m_detailTabs->isTabVisible(2) != nativeTab) m_detailTabs->setTabVisible(2, nativeTab);
-    if (!terminalTab && m_detailTabs->currentIndex() == 1) m_detailTabs->setCurrentIndex(0);
-    if (!nativeTab && m_detailTabs->currentIndex() == 2) m_detailTabs->setCurrentIndex(0);
+    const int terminalIndex = m_detailTabs->indexOf(m_terminal), nativeIndex = m_detailTabs->indexOf(m_nativeUi);
+    if (m_detailTabs->isTabVisible(terminalIndex) != terminalTab) m_detailTabs->setTabVisible(terminalIndex, terminalTab);
+    if (m_detailTabs->isTabVisible(nativeIndex) != nativeTab) m_detailTabs->setTabVisible(nativeIndex, nativeTab);
+    if (!terminalTab && m_detailTabs->currentIndex() == terminalIndex) m_detailTabs->setCurrentIndex(0);
+    if (!nativeTab && m_detailTabs->currentIndex() == nativeIndex) m_detailTabs->setCurrentIndex(0);
     m_terminal->setAvailable(entry->online && s.state == "running" && terminalAvailable,
         !entry->online ? tr("Machine unavailable. Reconnect when it is online.") :
         !terminalAvailable ? NativeSessionCapabilities::terminalReason(s,m_details) : tr("Resume this session before opening its terminal."));
@@ -5064,7 +5095,7 @@ void SessionsWindow::terminateSession()
 void SessionsWindow::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event); rebuild(); if (m_dashboardStale) updateDashboard();
-    m_timer.start(); m_readTimer.start(); emit refreshRequested(); inspect();
+    m_timer.start(); m_readTimer.start(); emit refreshRequested(); inspect(); m_tasks->setPolling(true);
 }
 bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
 {
@@ -5089,7 +5120,7 @@ bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
     }
     return QWidget::eventFilter(watched, event);
 }
-void SessionsWindow::hideEvent(QHideEvent *event) { m_readTimer.stop(); m_readCandidate.clear(); m_timer.stop(); m_terminal->disconnectSession(); QWidget::hideEvent(event); }
+void SessionsWindow::hideEvent(QHideEvent *event) { m_readTimer.stop(); m_readCandidate.clear(); m_timer.stop(); m_tasks->setPolling(false); m_terminal->disconnectSession(); QWidget::hideEvent(event); }
 void SessionsWindow::closeEvent(QCloseEvent *event)
 {
     QSettings settings; settings.setValue("sessions/geometry", saveGeometry()); settings.setValue("workspace/splitter", m_splitter->saveState());

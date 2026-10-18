@@ -2,6 +2,7 @@
 // rebound from ShortcutRegistry. See Shortcuts.h and
 // docs/superpowers/specs/2026-10-15-keyboard-shortcuts-design.md.
 #include "SessionsWindow.h"
+#include "TasksView.h"
 #include "ActivityView.h"
 #include "ContentScale.h"
 #include "MachinesPage.h"
@@ -408,6 +409,7 @@ QWidget *SessionsWindow::viewFocusTarget() const
 {
     QWidget *view = m_detailTabs->currentWidget();
     if (view == m_activityStack) return (m_activityStack->currentIndex() == 1 ? m_subagentView : m_activityView)->browser();
+    if (view == m_tasks) return m_tasks->composer()->editor();
     return focusTarget(view);
 }
 

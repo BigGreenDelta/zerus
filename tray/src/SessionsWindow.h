@@ -147,6 +147,8 @@ private:
     bool entryNeedsAttention(const Entry &entry) const;
     bool entryHasDraft(const Entry &entry) const;
     void renderDetails();
+    // The Tasks tab follows the open session's project and its sessions.
+    void updateTasks(const Entry *entry);
     void updateWorktrees();
     void filterFolder(const QString &host, const QString &path, bool checkout);
     void openRelatedSession(const QString &host, const QString &name, const QString &archive);
@@ -453,6 +455,8 @@ private:
     QTextBrowser *m_children = nullptr, *m_info = nullptr;
     ActivityView *m_activityView = nullptr;
     class ProcessView *m_processes = nullptr;
+    class TasksView *m_tasks = nullptr;
+    class TaskTabBadge *m_tasksBadge = nullptr;
     QWidget *m_nativeSignIn = nullptr;
     // A stopped OpenCode service: started only by this explicit action.
     QWidget *m_openCodeService = nullptr;
