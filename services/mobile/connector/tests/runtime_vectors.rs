@@ -252,7 +252,8 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (244, 2));
+    // The common Python vectors include both hook health and analytics reads.
+    assert_eq!((checked, refused), (245, 2));
 }
 
 /// Python's `capable(node)`: every flag, the vectors' sessions and archive.
