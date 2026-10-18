@@ -12,12 +12,15 @@ class OpenCodeFormContractTest {
     private val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/opencode-form-contract.json")).bufferedReader().use { it.readText() })
     private val cases = contract.getJSONArray("cases").objects()
     private fun case(name: String) = cases.single { it.getString("name") == name }
-    /** The contract pins the first item; unanswerable cards list only their count, so the rest are synthetic placeholders. */
-    private fun question(example: JSONObject): Question {
+    /**
+     * The contract pins the first item; unanswerable cards list only their count. With [pad] the rest are
+     * synthetic placeholders; without it the card carries exactly the contract's items.
+     */
+    private fun question(example: JSONObject, pad: Boolean = true): Question {
         val card = JSONObject(example.getJSONObject("card").toString())
         val items = JSONArray()
         (card.remove("item") as? JSONObject)?.let(items::put)
-        while (items.length() < card.getInt("question_count")) items.put(JSONObject().put("id", "field-${items.length()}").put("prompt", "Field ${items.length()}"))
+        while (pad && items.length() < card.getInt("question_count")) items.put(JSONObject().put("id", "field-${items.length()}").put("prompt", "Field ${items.length()}"))
         card.put("questions", items).put("question_hash", "hash-" + example.getString("name"))
         return NativeParser.questions(JSONObject().put("pending_questions", JSONArray().put(card))).single()
     }
@@ -34,7 +37,18 @@ class OpenCodeFormContractTest {
             assertEquals(name, card.getString("question_id"), question.id)
             assertEquals(name, card.getBoolean("can_answer"), question.canAnswer)
             assertEquals(name, card.getBoolean("approval"), question.approval)
-            assertEquals(name, card.getInt("question_count"), question.prompts.size)
+            // Only the contract's own items: a pinned item is the card's single item; a card
+            // without one is unanswerable and still shown with its reason.
+            val exact = question(example, pad = false)
+            if (card.has("item")) {
+                assertEquals(name, 1, card.getInt("question_count"))
+                assertEquals(name, listOf(card.getJSONObject("item").getString("id")), exact.prompts.map { it.id })
+            } else {
+                assertTrue(name, exact.prompts.isEmpty())
+                assertFalse(name, card.getBoolean("can_answer"))
+                assertTrue(name, QuestionPolicies.shown(exact))
+                assertEquals(name, "Answer this form in OpenCode", QuestionPolicies.unavailableNotice(exact))
+            }
             assertEquals(name, card.getBoolean("can_answer"), QuestionPolicies.submitVisible(question))
             assertEquals(name, card.optString("unavailable_reason"), question.unavailableReason)
             val item = card.optJSONObject("item") ?: return@forEach
@@ -69,6 +83,33 @@ class OpenCodeFormContractTest {
         // A choice with a custom answer keeps the familiar label.
         assertEquals("Other answer", QuestionPolicies.textField(question(case("question-single")), question(case("question-single")).prompts.single())?.label)
         assertNull(QuestionPolicies.textField(question(case("question-custom-forbidden")), question(case("question-custom-forbidden")).prompts.single()))
+    }
+
+    @Test fun anUnanswerableCardIsReadOnly() {
+        val answerable = question(case("question-single"))
+        val locked = answerable.copy(canAnswer = false, unavailableReason = "Answer this form in OpenCode")
+        assertNotNull(QuestionPolicies.textField(answerable, answerable.prompts.single()))
+        assertNull(QuestionPolicies.textField(locked, locked.prompts.single()))
+        assertTrue(QuestionPolicies.inputEnabled(answerable, true))
+        assertFalse(QuestionPolicies.inputEnabled(locked, true))
+        assertFalse(QuestionPolicies.inputEnabled(answerable, false))
+        assertFalse(QuestionPolicies.submitVisible(locked))
+    }
+
+    @Test fun anOptionalFormItemMayBeLeftEmpty() {
+        // hgs omits an empty answer to a field that is not required; the answer row keeps its usual shape.
+        val required = question(case("plain-string")).prompts.single()
+        val optional = required.copy(required = false)
+        assertFalse(QuestionPolicies.complete(listOf(required), emptyMap(), emptyMap()))
+        assertTrue(QuestionPolicies.complete(listOf(optional), emptyMap(), emptyMap()))
+        assertTrue(QuestionSteps.current(listOf(optional), 0, emptyMap(), emptyMap()).complete)
+        val row = QuestionPolicies.answers(listOf(optional), emptyMap(), emptyMap()).getJSONObject(0)
+        assertEquals("k", row.getString("question_id")); assertEquals(0, row.getJSONArray("selected_option_ids").length()); assertEquals("", row.getString("text"))
+        // Bounds still apply to a typed answer.
+        assertEquals("Answer is longer than 5 characters", QuestionPolicies.answerError(listOf(optional), emptyMap(), mapOf("k" to "toolong")))
+        // Items without the form fields (Codex optional questions) still need an answer or Skip.
+        val legacy = Prompt("q_0", "Any notes?", listOf(Choice("0", "One", "")), false, false, true)
+        assertFalse(QuestionPolicies.complete(listOf(legacy), emptyMap(), emptyMap()))
     }
 
     @Test fun booleanPreselectsTheNativeDefault() {

@@ -124,7 +124,7 @@ object ConversationMerge {
                     attachments = if (result[match].attachments.isNotEmpty()) AttachmentIdentity.withLocal(result[match].attachments, message.attachments)
                         else message.attachments.map(Attachment::displayed),
                     // The computer accepted it; a native inbox state says whether the agent has it yet.
-                    delivery = result[match].delivery.takeIf { it in MessageDeliveryPresentation.native } ?: "recorded")
+                    delivery = result[match].delivery.takeIf { it in MessageDeliveryPresentation.inboxStates } ?: "recorded")
             } else result += Event("outgoing:${message.requestId}", "You", message.submittedText.ifBlank { message.text }, "", message.submittedAt.takeIf { it > 0 } ?: message.createdAt, message.requestId,
                 message.attachments.map(Attachment::displayed), "mobile_outbox", message.status, message.requestId)
         }

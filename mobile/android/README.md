@@ -78,9 +78,10 @@ is visible in the focused foreground form.
 OpenCode form items follow the shared `opencode-form-contract.json`: a plain text
 item is an **Answer** field limited to the form's `max_length`, with a character
 counter; `default_option_ids` start selected, and length and `min_items`/`max_items`
-bounds are checked before Send. A card with `can_answer: false` shows its
-`unavailable_reason`, such as **Answer this form in OpenCode**, and no Send, also
-when the computer omitted its items.
+bounds are checked before Send; an item that is not `required` may stay empty.
+A card with `can_answer: false` is read-only and shows its `unavailable_reason`,
+such as **Answer this form in OpenCode**, and no Send, also when the computer
+omitted its items.
 
 Conversation messages use 16 sp text and a 20 sp baseline; the editor uses 18 sp
 text and a 22 sp baseline. Both keep natural character spacing. Compact Markdown
@@ -113,8 +114,10 @@ A message waiting in the agent's native queue appears as one compact expandable
 card. Expand it to read and select the full text. Send now remains a manual
 action, available only when the current agent and queued message allow it.
 An OpenCode message in the session inbox is a user bubble labelled **Queued**;
-after Stop it is labelled **Not delivered**. Phones do not remove undelivered
-messages.
+after Stop it is labelled **Not delivered**. Inbox rows are not history: with
+paged history they follow the newest loaded message while the inspection reports
+them and never become a page, cursor or unread reply. Phones do not remove
+undelivered messages.
 
 Attach files through the system document picker. The app copies and encrypts
 selected bytes privately before adding them to the original draft, rather than

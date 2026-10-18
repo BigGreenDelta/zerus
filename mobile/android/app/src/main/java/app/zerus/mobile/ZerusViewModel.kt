@@ -194,8 +194,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val scheduledReadScheduler=HistoryHeadScheduler()
     private val acknowledgedContexts = mutableSetOf<String>()
     private val contextObservations = mutableSetOf<String>()
-    private var relayFeatures = emptyMap<String,Set<String>>()
-    private var machineFeatures = emptyMap<MachineKey,Set<String>>()
+    // Observable so capability-gated controls (the OpenCode Effort row) appear when discovery finishes.
+    private var relayFeatures by mutableStateOf<Map<String,Set<String>>>(emptyMap())
+    private var machineFeatures by mutableStateOf<Map<MachineKey,Set<String>>>(emptyMap())
     private var parentSelection:Session?=null
     private var relayOperations by mutableStateOf<Map<String, Set<String>>>(emptyMap())
     private var machineOperations by mutableStateOf<Map<MachineKey, Set<String>>>(emptyMap())
@@ -345,14 +346,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(page.complete && verified) currentHistoryHeads+=ConversationReadPolicies.key(page.target) else currentHistoryHeads-=ConversationReadPolicies.key(page.target)
         refreshReadAttention()
     }
-    private fun publishWindow(target:Target,window:HistoryWindow,complete:Boolean=false,indexing:Boolean=false,boundary:String?=null) {
+    private fun publishWindow(target:Target,page:HistoryWindow,complete:Boolean=false,indexing:Boolean=false,boundary:String?=null) {
+        // A page reaching the head shows the latest inspection's inbox rows, never an older copy.
+        val inspected=(frames[target.key] ?: activeFrame?.takeIf { it.target==target })?.inspectedEvents
+        val window=if(page.atHead && inspected!=null) page.copy(inbox=HistoryInspection.inbox(inspected)) else page
         historyWindows[target.key]=window
         while(historyWindows.size>20) historyWindows.remove(historyWindows.keys.first())
         if(selected?.target != target) return
         if(!readPositionReady) pendingHistoryPosition=target.key
         pendingHistoryPublication=target.key
         val head=frames[target.key] ?: activeFrame?.takeIf { it.target==target } ?: return
-        installFrame(head.copy(events=window.events,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
+        installFrame(head.copy(events=window.displayed,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
     }
     private fun loadHistory(target:Target,direction:String,cursor:String="",latest:Boolean=false):Job? {
         if(selected?.target != target || olderLoading) return null
@@ -794,7 +798,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val changed=window!=null && incoming.window!=window && HistoryInspection.changed(window,incoming.inspectedEvents,priorInspection)
         if(changed) currentHistoryHeads-=ConversationReadPolicies.key(incoming.target)
         val guarded=window?.let { HistoryInspection.retain(it,incoming.window,incoming.inspectedEvents,priorInspection) }
-        val frame=if(guarded!=null && (incoming.window!=guarded || incoming.events!=guarded.events)) incoming.copy(events=guarded.events,presentation=null,truncated=incoming.truncated || guarded.hasBefore || guarded.hasAfter,window=guarded,indexComplete=historyComplete && !changed,indexing=historyIndexing) else incoming
+        val frame=if(guarded!=null && (incoming.window!=guarded || incoming.events!=guarded.displayed)) incoming.copy(events=guarded.displayed,presentation=null,truncated=incoming.truncated || guarded.hasBefore || guarded.hasAfter,window=guarded,indexComplete=historyComplete && !changed,indexing=historyIndexing) else incoming
         if(guarded!=null) historyWindows[incoming.target.key]=guarded
         activeFrame = frame; activeFrameVerified = verified
         if (frame.presentation == null) { activityVerified = false; historyCached = activity != null }
@@ -882,7 +886,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val incoming=NativeParser.events(raw)
                 val retained=RollingConversationHistory.merge(resolved,previous?.target,previous?.events.orEmpty(),incoming)
                 val window=currentWindow?.takeIf { it.atHead }?.inspection(incoming,previous?.inspectedEvents.orEmpty())
-                val events=window?.events ?: retained.events
+                val events=window?.displayed ?: retained.events
                 val nativeUnknown=currentWindow?.let { HistoryInspection.changed(it,incoming,previous?.inspectedEvents.orEmpty()) }==true
                 Triple(Frame(resolved,raw,events,NativeParser.questions(raw),observedAt,
                     raw.toString().toByteArray(Charsets.UTF_8).size+EventHistoryCodec.encode(events).toString().toByteArray(Charsets.UTF_8).size,
@@ -896,7 +900,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     latest?.let { HistoryInspection.retain(it,null,frame.inspectedEvents,previous?.inspectedEvents.orEmpty()) }
                 }
                 val changed=latest?.let { HistoryInspection.changed(it,frame.inspectedEvents,previous?.inspectedEvents.orEmpty()) }==true
-                frame.copy(events=guard?.events ?: frame.events,window=guard,presentation=null,indexComplete=complete && !changed,indexing=indexing) to guard
+                frame.copy(events=guard?.displayed ?: frame.events,window=guard,presentation=null,indexComplete=complete && !changed,indexing=indexing) to guard
             }
             val expectedWindow=rebased.base
             val (finalFrame,finalWindow)=rebased.value

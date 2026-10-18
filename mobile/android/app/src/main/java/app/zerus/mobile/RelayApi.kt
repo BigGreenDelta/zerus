@@ -223,7 +223,7 @@ object NativeParser {
             val historyId = value.string("history_id")
             return Event(if (historyId.isBlank()) originalId else "history:$historyId", role,
                 text, value.string("at", "timestamp"), at, if (source in setOf("hgs_delivery", "hgs_voice") && role == "You") value.string("message_id") else "", files, source,
-                delivery = if (role == "You") MessageDeliveryPresentation.native(value) else "",
+                delivery = if (role == "You") MessageDeliveryPresentation.inboxState(value) else "",
                 nativeType = type, submittedText = if (source == "hgs_delivery") value.string("submitted_text") else "",
                 originalId = originalId, historyId = historyId, historyCursor = value.string("history_cursor"),
                 historyEpoch = raw.string("history_epoch"), incomingSeq = (value.opt("incoming_seq") as? Number)?.toLong()?.takeIf { it >= 0 },

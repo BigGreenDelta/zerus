@@ -227,7 +227,7 @@ import org.json.JSONObject
                         if (question.approval) {
                             SelectionContainer { Text(choice.label, style = MaterialTheme.typography.bodySmall) }
                             if (choice.description.isNotBlank()) SelectionContainer { Text(choice.description, style = MaterialTheme.typography.bodySmall) }
-                        } else QuestionOption(choice, prompt.multi, choice.id in options[prompt.id].orEmpty(), editing) {
+                        } else QuestionOption(choice, prompt.multi, choice.id in options[prompt.id].orEmpty(), QuestionPolicies.inputEnabled(question, editing)) {
                             val selected = options[prompt.id].orEmpty()
                             options = options + (prompt.id to if (prompt.multi) {
                                 if (choice.id in selected) selected - choice.id else selected + choice.id
@@ -259,8 +259,8 @@ import org.json.JSONObject
                         true // Consume key up/repeats too; the field must not generate a second IME action.
                     }
                 }, label = { Text(field.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    supportingText = if (field.maxLength != null) { { Text("${texts[prompt.id].orEmpty().let { it.codePointCount(0, it.length) }}/${field.maxLength}") } } else null,
-                    singleLine = true, readOnly = !editing,
+                    supportingText = if (field.maxLength != null) { { Text("${QuestionPolicies.characters(texts[prompt.id].orEmpty())}/${field.maxLength}") } } else null,
+                    singleLine = true, readOnly = !QuestionPolicies.inputEnabled(question, editing),
                     keyboardOptions = KeyboardOptions.Default.copy(imeAction = if(step.nextPage != null) ImeAction.Next else ImeAction.Send),
                     keyboardActions = KeyboardActions(onNext = { if(focused) primaryAction() }, onSend = { if(focused) primaryAction() }))
                 if(index == otherPrompts.lastIndex && submitVisible) QuestionActionButton(primaryEnabled,step,::primaryAction)

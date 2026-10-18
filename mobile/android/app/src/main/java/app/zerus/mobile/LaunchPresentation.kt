@@ -12,6 +12,23 @@ enum class LaunchLimitTone { Normal, Warning, Critical }
 data class LaunchLimitPace(val used:Double,val elapsed:Double?,val tone:LaunchLimitTone)
 /** One OpenCode variant of a model, offered as launch effort. */
 data class LaunchEffort(val value:String,val label:String)
+/** One native effort: a validated ID and the computer's label when it reported a usable one. */
+data class NativeEffort(val value:String,val label:String?)
+/** The one reader of `effort_options`/`effort_labels` for New session and the model sheet. */
+object NativeEfforts {
+    const val MAX=16
+    /** Bounded, one token, no path separator. Membership is checked against the model's own list. */
+    fun valid(value:String) = value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size<=64 && value.none { it.isWhitespace() || it.isISOControl() || it=='/' }
+    /** Valid IDs in native order, first occurrence, at most [MAX]; labels come from `effort_labels` at the same index. */
+    fun parse(option:JSONObject?):List<NativeEffort> {
+        val ids=option?.optJSONArray("effort_options") ?: return emptyList()
+        val labels=option.optJSONArray("effort_labels")
+        return (0 until ids.length()).asSequence().mapNotNull { index ->
+            val id=(ids.opt(index) as? String)?.takeIf(::valid) ?: return@mapNotNull null
+            NativeEffort(id,(labels?.opt(index) as? String)?.takeIf { it.isNotBlank() && it.length<=80 && it.none(Char::isISOControl) })
+        }.distinctBy { it.value }.take(MAX).toList()
+    }
+}
 data class LaunchModel(val value:String,val label:String,val efforts:List<LaunchEffort> = emptyList())
 data class LaunchFolder(val path: String,val name: String)
 data class LaunchProjectFolder(val id:String,val path:String,val name:String)
@@ -74,17 +91,9 @@ object LaunchPresentation {
     /** Both the relay and the computer's connector must advertise it; older ones refuse native variant names. */
     fun effortSupported(relayFeatures:Set<String>,computerFeatures:Set<String>) = OPENCODE_LAUNCH_EFFORT in relayFeatures && OPENCODE_LAUNCH_EFFORT in computerFeatures
     fun validModel(value:String) = value.isNotBlank() && value.length<=120 && value.contains('/') && value.none(Char::isISOControl)
-    /** A native variant ID: bounded, one token, no path separator. Membership is checked against the model's own list. */
-    fun validEffort(value:String) = value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size<=64 && value.none { it.isWhitespace() || it.isISOControl() || it=='/' }
-    /** The model's own variants in native order, labeled from `effort_labels` at the same index. */
-    private fun modelEfforts(option:JSONObject):List<LaunchEffort> {
-        val ids=option.optJSONArray("effort_options") ?: return emptyList()
-        val labels=option.optJSONArray("effort_labels")
-        return (0 until ids.length()).asSequence().mapNotNull { index ->
-            val id=(ids.opt(index) as? String)?.takeIf(::validEffort) ?: return@mapNotNull null
-            LaunchEffort(id,(labels?.opt(index) as? String)?.takeIf { it.isNotBlank() && it.length<=80 && it.none(Char::isISOControl) } ?: id)
-        }.distinctBy { it.value }.take(16).toList()
-    }
+    fun validEffort(value:String) = NativeEfforts.valid(value)
+    /** The model's own variants in native order; a missing label shows the ID. */
+    private fun modelEfforts(option:JSONObject):List<LaunchEffort> = NativeEfforts.parse(option).map { LaunchEffort(it.value,it.label ?: it.value) }
     /** Only exact models offered by this computer's selected native OpenCode account. */
     fun models(raw:JSONObject?,provider:String,accountId:String):List<LaunchModel> {
         if(provider!="opencode") return emptyList()

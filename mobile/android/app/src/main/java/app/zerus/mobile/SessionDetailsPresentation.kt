@@ -30,8 +30,10 @@ object SessionDetailsPresentation {
     }?.toLong()
     private fun strings(raw: JSONArray?): List<String> = raw?.let { values -> (0 until values.length()).mapNotNull { values.opt(it) as? String } }.orEmpty()
     fun settings(raw: JSONObject?) = NativeSettings(raw?.string("settings_model").orEmpty().ifBlank { raw?.string("model").orEmpty() }, raw?.string("effort").orEmpty(),
-        raw?.optJSONArray("model_options")?.objects().orEmpty().map { NativeModelChoice(it.string("id"), it.string("label").ifBlank { it.string("id") }, strings(it.optJSONArray("effort_options")), effortLabels(it)) },
-        strings(raw?.optJSONArray("effort_options")), raw?.string("pending_model").orEmpty(), raw?.string("pending_effort").orEmpty(),
+        raw?.optJSONArray("model_options")?.objects().orEmpty().map { option -> NativeEfforts.parse(option).let { efforts ->
+            NativeModelChoice(option.string("id"), option.string("label").ifBlank { option.string("id") }, efforts.map { it.value },
+                efforts.mapNotNull { effort -> effort.label?.let { effort.value to it } }.toMap()) } },
+        NativeEfforts.parse(raw).map { it.value }, raw?.string("pending_model").orEmpty(), raw?.string("pending_effort").orEmpty(),
         raw?.string("pending_settings_id").orEmpty(), raw?.string("settings_apply_when").orEmpty(), raw?.optBoolean("settings_change_supported") == true,
         raw?.string("settings_change_reason").orEmpty(), raw?.string("settings_change_notice").orEmpty())
 
@@ -42,16 +44,7 @@ object SessionDetailsPresentation {
     fun effortChoices(settings: NativeSettings, model: String, nativeNames: Boolean): List<String> =
         (listOf("") + (settings.models.find { it.id == model }?.efforts ?: settings.efforts)).distinct()
             .filter { nativeNames || it in SessionActionPolicies.relayEfforts }
-    /** Labels at the same index as `effort_options`; a missing or unusable label falls back to the shared name. */
-    private fun effortLabels(option: JSONObject): Map<String, String> {
-        val ids = option.optJSONArray("effort_options") ?: return emptyMap()
-        val labels = option.optJSONArray("effort_labels") ?: return emptyMap()
-        return (0 until minOf(ids.length(), labels.length())).mapNotNull { index ->
-            val id = ids.opt(index) as? String ?: return@mapNotNull null
-            val label = (labels.opt(index) as? String)?.takeIf { it.isNotBlank() && it.length <= 80 && it.none(Char::isISOControl) } ?: return@mapNotNull null
-            id to label
-        }.distinctBy { it.first }.toMap()
-    }
+    /** The computer's label for this model's effort ([NativeEfforts]), else the shared name. */
     fun effortLabel(settings: NativeSettings, model: String, effort: String): String =
         effort.takeIf { it.isNotEmpty() }?.let { settings.models.find { choice -> choice.id == model }?.effortLabels?.get(it) } ?: effortLabel(effort)
     fun effortLabel(effort: String) = when(effort) {

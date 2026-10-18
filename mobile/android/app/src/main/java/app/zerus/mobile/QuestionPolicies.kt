@@ -67,20 +67,25 @@ object QuestionPolicies {
     }
     fun complete(prompts: List<Prompt>, options: Map<String, Set<String>>, texts: Map<String, String>): Boolean =
         prompts.isNotEmpty() && answerError(prompts, options, texts).isBlank() && prompts.all {
-            options[it.id].orEmpty().isNotEmpty() || it.other && texts[it.id].orEmpty().isNotBlank()
+            options[it.id].orEmpty().isNotEmpty() || it.other && texts[it.id].orEmpty().isNotBlank() || mayBeEmpty(it)
         }
+    /**
+     * A form item (one with the additive `input_kind`) that is not required: its ordinary empty answer row
+     * leaves the field out on the computer. Older items keep requiring an answer or the card's Skip.
+     */
+    fun mayBeEmpty(prompt: Prompt) = prompt.inputKind.isNotEmpty() && !prompt.required
 
     /**
      * The free-text field of one item, or null when it takes only offered options. A plain text item
-     * (`input_kind: "text"`) is the answer itself; an unanswerable card shows no empty field for it.
+     * (`input_kind: "text"`) is the answer itself. An unanswerable card is read-only and has no field.
      */
     fun textField(question: Question, prompt: Prompt): QuestionTextField? = when {
-        !prompt.other || question.approval -> null
-        prompt.inputKind == "text" -> if (question.canAnswer) QuestionTextField(prompt.otherLabel.ifBlank { "Answer" }, prompt.maxLength) else null
+        !prompt.other || question.approval || !question.canAnswer -> null
+        prompt.inputKind == "text" -> QuestionTextField(prompt.otherLabel.ifBlank { "Answer" }, prompt.maxLength)
         else -> QuestionTextField(prompt.otherLabel.ifBlank { "Other answer" }, prompt.maxLength)
     }
     /** Characters as the computer counts them: Unicode code points. */
-    private fun characters(text: String) = text.codePointCount(0, text.length)
+    fun characters(text: String) = text.codePointCount(0, text.length)
     fun limitText(text: String, max: Int?): String =
         if (max == null || characters(text) <= max) text else text.substring(0, text.offsetByCodePoints(0, max))
     /** Saved selections win; otherwise the item's offered defaults (one for a single choice). */
@@ -89,6 +94,8 @@ object QuestionPolicies {
             ?: prompt.defaults.filter { id -> prompt.choices.any { it.id == id } }.let { if (prompt.multi) it else it.take(1) }.toSet()) }
     /** An unanswerable card shows its reason and no Send. */
     fun submitVisible(question: Question) = question.canAnswer
+    /** Options and text accept edits only while the draft is editable and the card can be answered. */
+    fun inputEnabled(question: Question, editing: Boolean) = editing && question.canAnswer
     fun unavailableNotice(question: Question) = question.unavailableReason.ifBlank { "Complete this request on your machine." }
 
     fun approvalSupported(question: Question) = question.approval && question.prompts.size == 1 &&

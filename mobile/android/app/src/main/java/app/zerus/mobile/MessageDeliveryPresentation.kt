@@ -13,8 +13,8 @@ object MessageDeliveryPresentation {
         else -> status.replaceFirstChar { it.uppercase() }
     }
     /** Native inbox states of a user row: waiting for the agent, or left undelivered after Stop. */
-    val native = setOf("queued", "not_delivered")
-    fun native(row: org.json.JSONObject) = row.optString("delivery_state").takeIf { it in native }.orEmpty()
+    val inboxStates = setOf("queued", "not_delivered")
+    fun inboxState(row: org.json.JSONObject) = row.optString("delivery_state").takeIf { it in inboxStates }.orEmpty()
     /** Captions that need the user's attention use the warning color. */
     fun warning(status: String) = status in listOf("failed", "uncertain", "not_delivered")
 }

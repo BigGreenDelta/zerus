@@ -84,6 +84,25 @@ class OpenCodeEffortTest {
         assertEquals("",SessionActionPolicies.effortReason("launch",thinking,false))
     }
 
+    @Test fun launchAndModelSheetReadVariantsWithTheSameRules() {
+        val many = (1..20).map { "v$it" }
+        val messy = option("fixture/messy","Messy",listOf("low","has space","with/slash","x".repeat(65),"low") + many,listOf("Low","Bad","Bad","Bad","Again") + many.map { it.uppercase() })
+        val raw = JSONObject().put("settings_model","fixture/messy").put("settings_change_supported",true)
+            .put("effort_options",JSONArray(listOf("low","two words","high"))).put("model_options",JSONArray().put(messy))
+        val launch = LaunchPresentation.models(JSONObject().put("accounts",JSONArray().put(JSONObject().put("id","native-opencode").put("provider","opencode")
+            .put("model_options",JSONArray().put(messy)))),"opencode","native-opencode").single().efforts
+        val settings = SessionDetailsPresentation.settings(raw)
+        assertEquals(16,launch.size)
+        assertEquals(listOf("low") + many.take(15),launch.map { it.value })
+        assertEquals(launch.map { it.value },settings.models.single().efforts)
+        assertEquals(launch.map { it.label },settings.models.single().efforts.map { SessionDetailsPresentation.effortLabel(settings,"fixture/messy",it) })
+        // The session-wide list follows the same validation.
+        assertEquals(listOf("low","high"),settings.efforts)
+        // Without reported labels the shared names stay, as for Codex and Claude.
+        val codex = SessionDetailsPresentation.settings(JSONObject().put("model_options",JSONArray().put(JSONObject().put("id","gpt").put("effort_options",JSONArray(listOf("xhigh","low"))))))
+        assertEquals(listOf("Extra high","Low"),codex.models.single().efforts.map { SessionDetailsPresentation.effortLabel(codex,"gpt",it) })
+    }
+
     @Test fun modelSheetOffersTheSessionModelsOwnVariantsWithNativeLabels() {
         // OpenCode inspection: per-model variants; a fixed session list must not leak into the sheet.
         val raw = JSONObject().put("settings_model","fixture/local").put("model","local").put("effort","high").put("settings_change_supported",true)

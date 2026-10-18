@@ -66,7 +66,18 @@ data class HistoryPage(val target:Target,val epoch:String,val events:List<Event>
         }
     }
 }
-data class HistoryWindow(val target:Target,val epoch:String,val events:List<Event>,val before:String?,val after:String?,val hasBefore:Boolean,val hasAfter:Boolean,val atHead:Boolean) {
+/**
+ * [events] are durable canonical rows, the only ones paged, cached or used as cursors. [inbox] holds the
+ * latest inspection's undelivered inbox rows (hgs keeps them out of history); at the head they follow
+ * the durable tail in [displayed] until a durable row represents them or the inspection drops them.
+ */
+data class HistoryWindow(val target:Target,val epoch:String,val events:List<Event>,val before:String?,val after:String?,val hasBefore:Boolean,val hasAfter:Boolean,val atHead:Boolean,
+    val inbox:List<Event> = emptyList()) {
+    val displayed:List<Event> get() {
+        if(!atHead || inbox.isEmpty()) return events
+        val known=events.flatMap(HistoryInspection::identities).toSet()
+        return events+inbox.filter { row -> HistoryInspection.identities(row).none { it in known } }
+    }
     fun merge(page:HistoryPage,direction:String,maxEvents:Int=500,maxBytes:Int=2*1024*1024):HistoryWindow {
         require(target==page.target && epoch==page.epoch)
         require(direction in setOf("before","after"))
@@ -101,10 +112,11 @@ data class HistoryWindow(val target:Target,val epoch:String,val events:List<Even
         }
         val watermark=HistoryInspection.journalWatermark(events+previousInspection)
         val newer=incoming.filter { row -> row.id !in known && watermark!=null && HistoryInspection.journalSequence(row)?.let { it>watermark }==true }
-        if(newer.isEmpty()) return copy(events=updated)
+        val inbox=HistoryInspection.inbox(incoming)
+        if(newer.isEmpty()) return copy(events=updated,inbox=inbox)
         val cursor=events.lastOrNull { it.historyCursor.isNotBlank() }?.historyCursor ?: after
         val page=HistoryPage(target,epoch,newer,before,cursor,hasBefore,false,null,null,false,false,false,JSONObject())
-        return copy(events=updated).merge(page,"after")
+        return copy(events=updated,inbox=inbox).merge(page,"after")
     }
     companion object { fun from(page:HistoryPage)=HistoryWindow(page.target,page.epoch,page.events,page.before,page.after,page.hasBefore,page.hasAfter,!page.hasAfter) }
 }
@@ -148,9 +160,12 @@ object HistoryInspection {
     }
     fun journalSequence(row:Event)=identities(row).mapNotNull(::sequence).maxOrNull()
     fun journalWatermark(rows:List<Event>)=rows.mapNotNull(::journalSequence).maxOrNull()
+    /** Inspection-only inbox rows (queued or not delivered); never canonical history. */
+    fun inbox(incoming:List<Event>)=incoming.filter { it.role=="You" && it.delivery in MessageDeliveryPresentation.inboxStates }.take(64)
+    /** New canonical evidence only: inbox rows never invalidate the history head. */
     fun changed(window:HistoryWindow,incoming:List<Event>,previous:List<Event>):Boolean {
         val known=(window.events+previous).flatMap(::identities).toSet()
-        return incoming.any { row -> identities(row).none { it in known } }
+        return incoming.any { row -> row.delivery !in MessageDeliveryPresentation.inboxStates && identities(row).none { it in known } }
     }
     fun retain(current:HistoryWindow,candidate:HistoryWindow?,incoming:List<Event>,previous:List<Event>):HistoryWindow =
         if(current==candidate) current else if(current.atHead) current.inspection(incoming,previous) else current
