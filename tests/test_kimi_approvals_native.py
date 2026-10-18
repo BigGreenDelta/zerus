@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Kimi's own tool approval panel against a localhost-only API fixture, never a
+user's account. Run with HGS_KIMI_TEST_BIN=/absolute/path/to/a/pinned/kimi and
+its sha256 in HGS_KIMI_TEST_SHA256 (otherwise skipped). Kimi installs updates
+over the executable it runs from, so the fixture runs a private copy with
+automatic updates off and never the user's installed Kimi. HGS_KIMI_GUARD
+lists executables, such as that installed Kimi, that must not change during a
+run; HGS_KIMI_EVIDENCE_DIR keeps each run's screens, logs and metadata. The
+model asks for one Bash command that only touches the fixture's own folder.
+"""
+import hashlib,json,os,shlex,shutil,subprocess,tempfile,threading,time,unittest,uuid
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from pathlib import Path
+import test_input as fixtures
+import test_questions as questions
+
+KIMI=os.environ.get('HGS_KIMI_TEST_BIN')
+KIMI_SHA256=os.environ.get('HGS_KIMI_TEST_SHA256','')
+GUARDED=[Path(path) for path in os.environ.get('HGS_KIMI_GUARD','').split(os.pathsep) if path]
+EVIDENCE=os.environ.get('HGS_KIMI_EVIDENCE_DIR')
+def sha256(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+CALL='call_fixture'
+MARKER='printf approved > approved-marker'
+DANGER='rm -rf scratch-fixture'
+FEEDBACK='Use a dry run instead'
+
+@unittest.skipUnless(KIMI,'Set HGS_KIMI_TEST_BIN to test a pinned native Kimi against a local fake API')
+class NativeKimiApprovals(unittest.TestCase):
+ """A sealed private copy of the pinned Kimi in a private home and tmux socket."""
+ script=fixtures.InputTransport.script
+ tmux=fixtures.InputTransport.tmux
+ write_record=fixtures.InputTransport.write_record
+ inspect=questions.Questions.inspect
+ answer=questions.Questions.answer
+ command=MARKER
+ rows=24
+ def wait_for(self,callback,seconds=30):
+  deadline=time.monotonic()+seconds
+  while time.monotonic()<deadline:
+   result=callback()
+   if result:return result
+   time.sleep(.1)
+  self.fail('Native fixture timed out:\n'+self.screen())
+ def screen(self):return self.tmux('capture-pane','-p','-t',self.pane,check=False)
+ def height(self):return int(self.tmux('display-message','-p','-t',self.pane,'#{window_height}'))
+
+ def setUp(self):
+  if '_danger' in self._testMethodName:self.command=DANGER
+  if '_clipped_' in self._testMethodName:self.rows=12
+  self.temp=tempfile.TemporaryDirectory(prefix='hgs-kimi-approval-');self.addCleanup(self.temp.cleanup)
+  self.root=Path(self.temp.name).resolve();self.bin=self.root/'.local/bin';self.bin.mkdir(parents=True)
+  self.state=self.root/'state';self.state.mkdir();self.work=work=self.root/'work';work.mkdir()
+  (work/'scratch-fixture').mkdir()
+  self.kimi_home=self.root/'.kimi-code';self.kimi_home.mkdir()
+  # Kimi stages updates beside its executable and swaps them in at the next
+  # start: run a private copy of exactly the pinned build, keep both update
+  # switches off, and prove afterwards that nothing outside changed.
+  self.assertRegex(KIMI_SHA256,'^[0-9a-f]{64}$','HGS_KIMI_TEST_SHA256 must pin the executable')
+  self.assertEqual(sha256(KIMI),KIMI_SHA256)
+  guarded={str(path):sha256(path) for path in GUARDED}
+  self.addCleanup(lambda:self.assertEqual({str(path):sha256(path) for path in GUARDED},guarded,'a guarded executable changed'))
+  self.kimi=kimi=self.root/'kimi-bin/kimi';kimi.parent.mkdir();shutil.copy2(KIMI,kimi)
+  self.assertEqual(sha256(kimi),KIMI_SHA256)
+  (self.kimi_home/'tui.toml').write_text('[upgrade]\nauto_install = false\n')
+  fixture=self;self.native_requests=[]
+  class Server(BaseHTTPRequestHandler):
+   def log_message(self,*args):pass
+   def do_POST(self):
+    body=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or b'{}')
+    fixture.native_requests.append(body)
+    tools={t.get('function',{}).get('name') for t in body.get('tools',[])}
+    answered=any(m.get('role')=='tool' for m in body.get('messages',[]))
+    self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+    def chunk(delta,finish=None):
+     data=dict(id='chatcmpl-fixture',object='chat.completion.chunk',created=int(time.time()),model='m',
+               choices=[dict(index=0,delta=delta,finish_reason=finish)])
+     self.wfile.write(('data: '+json.dumps(data)+'\n\n').encode());self.wfile.flush()
+    if 'Bash' in tools and not answered:
+     arguments=dict(command=fixture.command,description='Fixture command')
+     call=dict(index=0,id=CALL,type='function',function=dict(name='Bash',arguments=json.dumps(arguments)))
+     chunk(dict(role='assistant',content=None,tool_calls=[call]));chunk({},'tool_calls')
+    else:chunk(dict(role='assistant',content='Fixture complete.'));chunk({},'stop')
+    self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
+  server=ThreadingHTTPServer(('127.0.0.1',0),Server);self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+  threading.Thread(target=server.serve_forever,daemon=True).start()
+  (self.kimi_home/'config.toml').write_text(f'''default_model = "fixture/m"
+default_permission_mode = "default"
+[providers.fixture]
+type = "openai"
+base_url = "http://127.0.0.1:{server.server_port}/v1"
+api_key = "fixture-key"
+[models."fixture/m"]
+provider = "fixture"
+model = "m"
+max_context_size = 128000
+capabilities = []
+display_name = "Fixture"
+''')
+  self.socket=self.root/'socket'
+  self.script('tmux','#!/bin/sh\nexec '+shlex.quote(fixtures.TMUX)+' -S '+shlex.quote(str(self.socket))+' -f /dev/null "$@"\n')
+  self.env=dict(os.environ,HOME=str(self.root),HGS_STATE_DIR=str(self.state),HGS_CONFIG_DIR=str(self.root/'config'),PATH=str(self.bin)+':'+os.environ['PATH'],HGS_SELF='test')
+  for v in ('TMUX','TMUX_PANE','HGS_RUN_ID','HGS_SESSION','HGS_EXECUTABLE'):self.env.pop(v,None)
+  self.name='kimi/approval-native';self.run_id=str(uuid.uuid4())
+  self.addCleanup(lambda:fixtures.InputTransport.tearDown(self))
+  # tmux's default size for a session no client has attached to is 80x24.
+  self.tmux('new-session','-d','-s',self.name,'-x','80','-y',str(self.rows),'-c',str(work),'env','-i','HOME='+str(self.root),
+            'PATH='+os.environ['PATH'],'TERM=xterm-256color','LANG=C.UTF-8','KIMI_CODE_HOME='+str(self.kimi_home),
+            'KIMI_DISABLE_TELEMETRY=1','KIMI_CODE_NO_AUTO_UPDATE=1',str(kimi))
+  self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
+  self.addCleanup(self.retain)
+  self.pid=pid=int(self.tmux('display-message','-p','-t',self.pane,'#{pane_pid}'))
+  # The pane runs the private copy, not any other Kimi.
+  if Path('/proc').is_dir():self.wait_for(lambda:os.readlink(f'/proc/{pid}/exe')==str(kimi),10)
+  self.start=subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
+  self.tmux('set-option','-t','='+self.name+':','@hgs_run',self.run_id)
+  self.record_path=self.state/(hashlib.sha256(self.name.encode()).hexdigest()+'.json')
+  # A short pane may not show the startup screens either: prompt at full size.
+  if self.rows<24:self.tmux('resize-window','-t',self.pane,'-y','24')
+  def started():
+   screen=self.screen()
+   return screen if 'Trust this folder?' in screen or '│ >' in screen else None
+  if 'Trust this folder?' in self.wait_for(started):self.tmux('send-keys','-t',self.pane,'Enter')
+  self.wait_for(lambda:'│ >' in self.screen())
+  self.tmux('send-keys','-t',self.pane,'-l','Run the fixture command.');time.sleep(.3)
+  self.tmux('send-keys','-t',self.pane,'Enter')
+  def asked():
+   for wire in self.kimi_home.glob('sessions/*/*/agents/main/wire.jsonl'):
+    if '"kind":"approval"' in wire.read_text() and '1. Approve once' in self.screen():return wire
+  self.wire=wire=self.wait_for(asked);self.conversation_id=wire.parent.parent.parent.name
+  if self.rows<24:
+   # Back to the default height of a pane no client has viewed.
+   self.tmux('resize-window','-t',self.pane,'-y',str(self.rows));self.tmux('set-option','-w','-u','-t',self.pane,'window-size')
+  self.record=dict(version=1,name=self.name,agent='kimi',run_id=self.run_id,conversation_id=self.conversation_id,
+                   agent_home=str(self.kimi_home),pane=self.pane,pid=self.pid,process_start=self.start,activity='busy',phase='approval',
+                   active_tools={CALL:{'name':'Bash','started':time.time()-5}},subagents={},last_event_at=time.time(),created=time.time())
+  self.write_record()
+
+ def retain(self):
+  """Keep this run's screens, logs and metadata before its home is removed."""
+  if not EVIDENCE:return
+  out=Path(EVIDENCE)/self.id().rsplit('.',1)[-1];out.mkdir(parents=True,exist_ok=True)
+  (out/'screen.txt').write_text(self.screen())
+  (out/'screen-styled.txt').write_text(self.tmux('capture-pane','-p','-e','-t',self.pane,check=False))
+  for source in [self.kimi_home/'logs',*self.kimi_home.glob('sessions/*/*/agents/main')]:
+   if source.is_dir():shutil.copytree(source,out/source.relative_to(self.kimi_home),dirs_exist_ok=True)
+  if self.record_path.exists():shutil.copy2(self.record_path,out/'record.json')
+  (out/'metadata.json').write_text(json.dumps(dict(pinned=KIMI,pinned_sha256=KIMI_SHA256,copy=str(self.kimi),copy_sha256=sha256(self.kimi),
+   guarded={str(path):sha256(path) for path in GUARDED},height=self.tmux('display-message','-p','-t',self.pane,'#{window_height}',check=False).strip(),
+   requests=len(self.native_requests)),indent=1))
+ def attach_client(self):
+  """A control-mode client: tmux counts the session as viewed."""
+  client=subprocess.Popen([fixtures.TMUX,'-S',str(self.socket),'-f','/dev/null','-C','attach','-t','='+self.name],
+                          stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=self.env)
+  self.addCleanup(lambda:(client.stdin.close(),client.wait(5)))
+  # It views the pane at the same short height.
+  client.stdin.write(f'refresh-client -C 80x{self.rows}\n'.encode());client.stdin.flush()
+  self.wait_for(lambda:self.tmux('display-message','-p','-t',self.pane,'#{session_attached}').strip()=='1')
+ def card(self):
+  cards=[card for card in self.inspect()['pending_questions'] if card['source']=='kimi_tool_approval']
+  self.assertEqual(len(cards),1,self.inspect()['pending_questions'])
+  return cards[0]
+ def payload(self,card,option=None,text=''):
+  return dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id,
+              question_id=card['question_id'],expected_question_hash=card['question_hash'],
+              answers=[dict(question_id='approval',selected_option_ids=[option] if option else [],text=text)])
+ def resolved(self):
+  rows=[json.loads(line) for line in self.wire.read_text().splitlines() if '"interaction.resolved"' in line]
+  return rows[-1]['response'] if rows else None
+ def answerable(self):
+  card=self.card()
+  self.assertTrue(card['can_answer'],card['answer_unavailable_reason'])
+  self.assertEqual(card['answer_transport'],'kimi_tui')
+  item=card['questions'][0]
+  self.assertEqual((item['question'],item['header']),('Run this command?','Bash'))
+  self.assertIn('cwd: '+str(self.work),item['body'])
+  self.assertIn('$ '+self.command,item['body'])
+  self.assertEqual([o['label'] for o in item['options']],['Approve once','Approve for this session','Reject'])
+  return card
+ def decide(self,card,**choice):
+  receipt=self.answer(self.payload(card,**choice),timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.wait_for(lambda:'Fixture complete.' in self.screen())
+  return self.resolved()
+ def tool_results(self):
+  return [m.get('content') for body in self.native_requests for m in body.get('messages',[]) if m.get('role')=='tool']
+
+ def test_approve_once_runs_the_command(self):
+  self.assertEqual(self.decide(self.answerable(),option='1'),{'decision':'approved'})
+  self.assertEqual((self.work/'approved-marker').read_text(),'approved')
+
+ def test_approve_for_this_session_records_its_scope(self):
+  self.assertEqual(self.decide(self.answerable(),option='2'),{'decision':'approved','scope':'session'})
+  self.assertTrue((self.work/'approved-marker').exists())
+
+ def test_reject_never_runs_the_command(self):
+  self.assertEqual(self.decide(self.answerable(),option='3'),{'decision':'rejected'})
+  self.assertFalse((self.work/'approved-marker').exists())
+
+ def test_reject_with_feedback_reaches_the_model(self):
+  self.assertEqual(self.decide(self.answerable(),text=FEEDBACK),{'decision':'rejected','feedback':FEEDBACK})
+  self.assertFalse((self.work/'approved-marker').exists())
+  self.assertTrue(any('Reason: '+FEEDBACK in json.dumps(result) for result in self.tool_results()),self.tool_results())
+
+ def test_a_danger_warning_is_part_of_the_reviewed_request(self):
+  card=self.answerable()
+  self.assertIn('Dangerous: recursive delete',card['questions'][0]['body'])
+  self.assertEqual(self.decide(card,option='3'),{'decision':'rejected'})
+  self.assertTrue((self.work/'scratch-fixture').is_dir())
+
+ def test_an_unviewed_clipped_panel_grows_until_answerable(self):
+  self.assertEqual(self.height(),12)
+  card=self.answerable()
+  self.assertGreater(self.height(),12)
+  self.assertEqual(self.tmux('show-options','-w','-v','-t',self.pane,'window-size').strip(),'')
+  self.assertEqual(self.decide(card,option='3'),{'decision':'rejected'})
+
+ def test_a_viewed_clipped_panel_is_never_resized_or_answered(self):
+  self.attach_client()
+  before=self.height()
+  card=self.card()
+  self.assertFalse(card['can_answer'])
+  self.assertIn('enlarge Terminal',card['answer_unavailable_reason'])
+  self.assertEqual(self.height(),before)
+  self.assertIn('enlarge Terminal',self.answer(self.payload(card,option='1'),success=False))
+  self.assertIsNone(self.resolved())
+  self.assertFalse((self.work/'approved-marker').exists())
+
+if __name__=='__main__':unittest.main()
