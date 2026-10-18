@@ -9732,7 +9732,7 @@ print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer
     SessionsWindow window(FakeCli::program(script));window.resize(1100,900);window.setFleet(state);window.show();
     window.findChild<QPushButton *>("workspaceSettings")->click();auto &page=*static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"));page.openRecovery();
     auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
-    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("Synchronized across 1 machines"),20000);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("Synchronized with 1 machine."),20000);
     auto *save=window.findChild<QPushButton *>("recoverySave");QTRY_VERIFY(save->isEnabled());
     window.findChild<QCheckBox *>("recoveryEnabled")->setChecked(true);save->click();
     QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(script+".saved"),20000);
@@ -9786,7 +9786,7 @@ print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer
     // Recovery includes this computer as well as the remote machine.
     static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"))->openRecovery();
     auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
-    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains("Synchronized across 2 machines"),20000);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().startsWith("Synchronized across 2 machines."),20000);
     local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     window.setFleet(state);QVERIFY(!sections->item(5)->isHidden());
     local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
