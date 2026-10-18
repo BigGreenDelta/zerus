@@ -287,6 +287,50 @@ final class QuestionPoliciesTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(PermissionConfirmation(try described("  "))).message, general)
     }
 
+    /// Confirm revalidates what the Always allow… button needed: this card, answerable and editable, in the foreground,
+    /// visible, with its own review complete. A dialog left open across background and resume cannot skip a new review.
+    func testAlwaysAllowConfirmsOnlyForAReviewedVisibleForegroundCard() throws {
+        let permission = try card(approval: true, items: [permissionItem])
+        let confirmation = try XCTUnwrap(PermissionConfirmation(permission))
+        let key = ApprovalReview.key(target, permission)
+        let always = QuestionPolicies.approvalAnswers(permission, PermissionAction.alwaysAllow.option)
+        func confirm(_ review: ApprovalReview, now: Double, foreground: Bool = true, visible: Bool = true, editing: Bool = true, available: Bool = true,
+                     on target: Target? = nil, card: Question? = nil) -> JSON? {
+            confirmation.confirm(card ?? permission, target: target ?? self.target, editing: editing, available: available, foreground: foreground,
+                                 visible: visible, review: review, now: now)
+        }
+        var review = ApprovalReview().observe(eligible: true, now: 1, card: key)
+        XCTAssertNil(confirm(review, now: 2), "the review is still counting")
+        // Control: this card, reviewed, visible and in the foreground.
+        XCTAssertEqual(confirm(review, now: 4), always)
+        XCTAssertNotNil(always)
+        XCTAssertNil(confirm(review, now: 4, foreground: false), "not in the foreground")
+        XCTAssertNil(confirm(review, now: 4, visible: false), "not visible")
+        XCTAssertNil(confirm(review, now: 4, editing: false))
+        XCTAssertNil(confirm(review, now: 4, available: false))
+        var replaced = permission
+        replaced.hash = "replacement"
+        XCTAssertNil(confirm(review, now: 4, card: replaced), "another card")
+
+        // Background, then resume with the dialog still open: nothing is confirmed until a new review completes.
+        review = review.observe(eligible: false, now: 5, card: key)
+        XCTAssertNil(confirm(review, now: 5, foreground: false))
+        XCTAssertNil(confirm(review, now: 5), "back in the foreground before the card is observed again")
+        review = review.observe(eligible: true, now: 6, card: key)
+        XCTAssertNil(confirm(review, now: 6))
+        XCTAssertNil(confirm(review, now: 8.9))
+        XCTAssertEqual(confirm(review, now: 9), always, "a new review completed")
+        // Scrolled out of view and back: the same.
+        review = review.observe(eligible: false, now: 10, card: key).observe(eligible: true, now: 10.5, card: key)
+        XCTAssertNil(confirm(review, now: 11))
+        // A review of another card or on another target never confirms this one.
+        var other = permission
+        other.id = "other"
+        XCTAssertNil(confirm(ApprovalReview().observe(eligible: true, now: 1, card: ApprovalReview.key(target, other)), now: 20))
+        XCTAssertNil(confirm(review, now: 20, on: target.with(run: "other")))
+        XCTAssertNil(confirm(ApprovalReview(), now: 20), "never reviewed")
+    }
+
     func testAlwaysAllowIsSentOnlyForTheExactCardThatStillOffersIt() throws {
         let permission = try card(approval: true, items: [permissionItem])
         let confirmation = try XCTUnwrap(PermissionConfirmation(permission))
