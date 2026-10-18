@@ -9066,7 +9066,10 @@ void TestSessionsWindow::openCodeStoppedServiceOffersExplicitStart()
         {"activity_detail","OpenCode is not running on fixture"},{"cursor",0}};
     QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
     const QByteArray answer="elif c=='account' and a[1:2]==['start']:\n"
-        " open(__file__+'.started','a').write(json.dumps(sys.argv[1:])+'\\n')\n"
+        " import time\n"
+        " with open(__file__+'.started','a') as started:\n"
+        "  time.sleep(0.2)\n"
+        "  started.write(json.dumps(sys.argv[1:])+'\\n')\n"
         " print(json.dumps({'model_options':[],'settings_model':'','catalog_state':'ready','catalog_reason':'','catalog_at':1791018000}))\n"
         "elif c=='inspect' and a[1:2]==["+FakeCli::pythonString(name)+"]:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact)))+")\n";
     const auto fixture=m_dir->filePath("opencode-stopped-service"),started=fixture+".started";
@@ -9088,11 +9091,12 @@ void TestSessionsWindow::openCodeStoppedServiceOffersExplicitStart()
     auto offline=box;offline.ok=false;state.setLocal(offline,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
     QTRY_VERIFY(!start->isEnabled());start->click();QTest::qWait(100);QVERIFY(!QFileInfo::exists(started));
     state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QTRY_VERIFY(start->isEnabled());
-    start->click();QTRY_VERIFY(QFileInfo::exists(started));
+    const auto noticed=[&](const QString &text){for(auto *label:window.findChildren<QLabel *>())if(label->isVisible()&&label->text().contains(text))return true;return false;};
+    start->click();
+    // File creation precedes the fixture's write; completion proves it is closed.
+    QTRY_VERIFY(noticed("OpenCode started on arch."));
     QFile calls(started);QVERIFY(calls.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(calls.readAll().trimmed()).array(),QJsonArray({"account","start","native-opencode","--json"}));
-    const auto noticed=[&](const QString &text){for(auto *label:window.findChildren<QLabel *>())if(label->isVisible()&&label->text().contains(text))return true;return false;};
-    QTRY_VERIFY(noticed("OpenCode started on arch."));
     // Other OpenCode states never show it.
     auto running=details;running["state"]="running";running.remove("inspection_unavailable");running.remove("inspection_reason");
     client->inspectionReady({},name,running);QTRY_VERIFY(!banner->isVisible());
