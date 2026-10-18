@@ -48,6 +48,35 @@ def video_command():
 
 
 class VoiceValidationTests(unittest.TestCase):
+    def test_only_new_refusal_proofs_require_exact_integer_types(self):
+        from zerus_mobile import voice_rejection
+        request = video_command()
+        payload = request["payload"]
+        proof = {"schema": 1, "state": "rejected_before_acceptance", "request_id": request["request_id"],
+                 "message_id": request["request_id"], "run_id": payload["expected_run_id"],
+                 "conversation_id": payload["expected_conversation_id"], "intent": voice_rejection.intent(payload),
+                 "payload_sha256": "a" * 64, "generation": 1, "retry_token": str(uuid.uuid4()),
+                 "code": "route_unavailable", "detail": "The recording was not accepted."}
+        self.assertTrue(voice_rejection.valid_proof(proof))
+        for value in (True, 1.0, "1"):
+            with self.subTest(outer_schema=value):
+                self.assertFalse(voice.result_valid("voice_submit", {"schema": value, "rejection": proof}, payload))
+        for field, value in (("channels", True), ("channels", 1.0), ("sample_rate", 16000.0)):
+            with self.subTest(field=field, value=value):
+                wrong = copy.deepcopy(proof); wrong["intent"]["audio"][field] = value
+                self.assertFalse(voice_rejection.valid_proof(wrong))
+                retry = dict(payload, request_id=str(uuid.uuid4()), message_id=request["request_id"], rejection=wrong)
+                with self.assertRaises(ValueError):
+                    voice.validate("voice_submit", retry, retry["request_id"])
+                self.assertFalse(voice.result_valid("voice_submit", {"schema": 1, "rejection": wrong}, payload))
+        # This review tightens the refusal extension only. Legacy response
+        # classification and ordinary envelopes retain their existing behavior.
+        legacy = command()
+        validate_request(legacy)
+        for value in (1, True, 1.0):
+            result = message(legacy); result["schema"] = value
+            self.assertTrue(voice.result_valid("voice_submit", result, legacy["payload"]))
+
     def test_video_keeps_existing_speech_identity_and_rejects_unbounded_or_incomplete_media(self):
         request = video_command()
         validate_request(request)

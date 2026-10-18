@@ -63,7 +63,8 @@ def valid_proof(value):
                 or not text(route["profile_id"], 64)
                 or "profile_revision" in route and (type(route["profile_revision"]) is not int or not 1 <= route["profile_revision"] <= 9_007_199_254_740_991)
                 or set(audio) != {"format", "sample_rate", "channels", "bytes", "sha256"}
-                or audio["format"] != "pcm_s16le" or audio["sample_rate"] != 16000 or audio["channels"] != 1
+                or audio["format"] != "pcm_s16le" or type(audio["sample_rate"]) is not int or audio["sample_rate"] != 16000
+                or type(audio["channels"]) is not int or audio["channels"] != 1
                 or type(audio["bytes"]) is not int or not 3244 <= audio["bytes"] <= 3_840_044 or audio["bytes"] % 2 or not digest(audio["sha256"])):
             return False
         speech.identity(route["machine_id"])
@@ -98,7 +99,7 @@ def validate_retry(payload):
 
 def result_valid(result, payload):
     proof = result.get("rejection") if isinstance(result, dict) else None
-    return (isinstance(result, dict) and result.get("schema") == 1 and valid_proof(proof)
+    return (isinstance(result, dict) and type(result.get("schema")) is int and result["schema"] == 1 and valid_proof(proof)
             and proof["request_id"] == payload["request_id"] and proof["message_id"] == message_id(payload)
             and proof["run_id"] == payload["expected_run_id"] and proof["conversation_id"] == payload["expected_conversation_id"]
             and ("audio" not in payload or proof["intent"] == intent(payload)))
