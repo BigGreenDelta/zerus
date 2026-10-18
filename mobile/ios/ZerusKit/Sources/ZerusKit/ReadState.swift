@@ -84,6 +84,14 @@ public struct ConversationReadState: Codable, Hashable, Sendable {
         return next.viewed(target, Set(incoming.filter { $0.incomingSeq == nil || $0.historyEpoch != previous?.epoch }.map(\.id)))
     }
 
+    /// Raises the watermark of the record's current epoch; it never lowers it.
+    public func acknowledged(_ target: Target, through: Int64) -> ConversationReadState {
+        guard var record = record(target), !record.epoch.isEmpty, through > record.readThrough else { return self }
+        record.readThrough = through
+        record.established = true
+        return put(record)
+    }
+
     public func head(_ target: Target, epoch: String, latest: Int64?, total: Int64?, complete: Bool) -> ConversationReadState {
         if epoch.isEmpty || epoch.count > 512 || (latest.map { $0 < 0 } ?? false) || (total.map { $0 < 0 } ?? false) { return self }
         var old = record(target) ?? ConversationReadRecord(target: target)
@@ -142,15 +150,24 @@ public struct ConversationReadState: Codable, Hashable, Sendable {
 
 /// A later canonical page can identify rows already read from the bounded native inspection.
 public enum ConversationReadHead {
-    /// Only exact native-provided aliases of canonical rows in this page's epoch carry a read position forward;
-    /// equal text never does, and a later unseen reply stays unread.
+    /// Exact native-provided aliases of canonical rows in this page's epoch keep their seen identity; equal text never does.
+    /// The watermark then advances only along consecutive incoming sequences whose rows are seen, stopping at the first
+    /// unseen, missing or duplicated sequence, so no unseen incoming row is ever acknowledged and a later reply stays unread.
     public static func observe(_ state: ConversationReadState, _ page: HistoryPage) -> ConversationReadState {
         let canonical = page.events.filter { $0.historyEpoch == page.epoch && !$0.historyId.isEmpty && !$0.historyCursor.isEmpty }
         let aliases = HistoryAliases.exact(canonical, known: Set(state.record(page.target)?.seen ?? []))
         let next = state.head(page.target, epoch: page.epoch, latest: page.latestIncoming, total: page.totalIncoming, complete: page.complete)
             .supersede(page.target, aliases)
-        let seen = Set(next.record(page.target)?.seen ?? [])
-        return next.visible(page.target, canonical.filter { seen.contains($0.id) })
+        guard let record = next.record(page.target), !record.epoch.isEmpty, record.epoch == page.epoch else { return next }
+        var rows: [Int64: [String]] = [:]
+        for event in canonical where ConversationReadPolicies.incoming(event) {
+            if let sequence = event.incomingSeq { rows[sequence, default: []].append(event.id) }
+        }
+        let seen = Set(record.seen)
+        var through = record.readThrough
+        // A maximum watermark has no successor; checking first keeps the walk from overflowing.
+        while through < Int64.max, let ids = rows[through + 1], ids.count == 1, seen.contains(ids[0]) { through += 1 }
+        return next.acknowledged(page.target, through: through)
     }
 }
 

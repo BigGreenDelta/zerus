@@ -1,7 +1,7 @@
 import XCTest
 @testable import ZerusKit
 
-/// Ported from Android ConversationReadHeadTest.
+/// Ported from Android ConversationReadHeadTest; on iOS an alias also needs a proved prefix (ConversationReadPrefixTests).
 final class ConversationReadHeadTests: XCTestCase {
     private let target = Target(computerId: "computer", session: "session", run: "run", conversation: "conversation", connectionId: "workspace")
     private let native = Event(id: "provider:reply", role: "AgentMessage", text: "Latest reply", time: "", at: 1, source: "codex_transcript",
@@ -25,9 +25,24 @@ final class ConversationReadHeadTests: XCTestCase {
     }
 
     func testCanonicalHeadReconcilesTheExactNativeReplyAlreadyReadOnScreen() throws {
-        let read = ConversationReadState().head(target, epoch: "epoch", latest: 63, total: 63, complete: true).visible(target, [native])
-        XCTAssertEqual(ConversationReadPolicies.lowerBound(read.record(target), [native]), 63)
-        let reconciled = ConversationReadHead.observe(read, page([canonical()]))
+        // Unproved: none of the 63 earlier replies was read, so the alias keeps only this reply's identity.
+        let unproved = ConversationReadState().head(target, epoch: "epoch", latest: 63, total: 63, complete: true).visible(target, [native])
+        XCTAssertEqual(ConversationReadPolicies.lowerBound(unproved.record(target), [native]), 63)
+        let kept = ConversationReadHead.observe(unproved, page([canonical()]))
+        XCTAssertEqual(kept.record(target)?.readThrough, 0)
+        XCTAssertTrue(kept.record(target)?.seen.contains("history:reply") == true)
+        XCTAssertEqual(ConversationReadPolicies.lowerBound(kept.record(target), [canonical()]), 74)
+        // Proved: every earlier reply was read on screen, so the exact native reply completes the prefix.
+        var previous = canonical(73)
+        previous.id = "history:previous"
+        previous.historyId = "previous"
+        previous.historyCursor = "cursor:previous"
+        previous.originalId = ""
+        previous.originalIds = []
+        let read = ConversationReadState().head(target, epoch: "epoch", latest: 73, total: 73, complete: true).visible(target, [previous])
+            .visible(target, [native])
+        XCTAssertEqual(read.record(target)?.readThrough, 73)
+        let reconciled = ConversationReadHead.observe(read, page([previous, canonical()]))
         XCTAssertEqual(reconciled.record(target)?.readThrough, 74)
         XCTAssertEqual(ConversationReadPolicies.lowerBound(reconciled.record(target), [canonical()]), 0)
         let stored = try JSONDecoder().decode(ConversationReadState.self, from: JSONEncoder().encode(reconciled))
@@ -37,7 +52,8 @@ final class ConversationReadHeadTests: XCTestCase {
     func testLaterRepliesAndUnseenHeadsRemainUnread() {
         let read = ConversationReadState().visible(target, [native])
         let reconciled = ConversationReadHead.observe(read, page([canonical()], total: 75))
-        XCTAssertEqual(ConversationReadPolicies.lowerBound(reconciled.record(target), []), 1)
+        // No earlier reply was read on this phone, so the whole head stays unread (Android's watermark gives 1).
+        XCTAssertEqual(ConversationReadPolicies.lowerBound(reconciled.record(target), []), 75)
         XCTAssertEqual(ConversationReadPolicies.lowerBound(ConversationReadHead.observe(ConversationReadState(), page([canonical()])).record(target), []), 74)
     }
 
