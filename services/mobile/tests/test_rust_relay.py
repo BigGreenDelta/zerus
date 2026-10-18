@@ -21,6 +21,9 @@ import relay_fixture
 
 OPERATIONS = set(json.loads((Path(__file__).resolve().parents[1] / 'vectors/operations.json')
                             .read_text())['sets']['OPERATIONS'])
+# Operations only the Rust connector executes; the vectors freeze Python's set.
+RUST_ONLY = {row['operation'] for row in json.loads((Path(__file__).resolve().parent / 'rust-only-operations.json')
+                                                   .read_text())['operations']}
 # Background maintenance every 0.1 s, so expired rows leave while a test waits.
 MAINTAINED = dict(background=True, maintenance_interval=0.1)
 TOMBSTONE = 'request history expired; delivery must not be retried'
@@ -406,8 +409,8 @@ class RustHttpContracts(unittest.IsolatedAsyncioTestCase):
         delivered = await self.call('GET', '/v1/node/requests', node=True)
         self.assertEqual(delivered['requests'][0]['payload'], value['payload'])
         # The released operation set, as the golden vectors froze it from the
-        # Python connector, and the OpenCode removal only the Rust connector runs.
-        self.assertEqual(set((await self.call('GET', '/v1/capabilities'))['operations']), OPERATIONS | {'remove_queued'})
+        # Python connector, and those only the Rust connector runs.
+        self.assertEqual(set((await self.call('GET', '/v1/capabilities'))['operations']), OPERATIONS | RUST_ONLY)
 
     async def test_set_mobile_delivery_request_validation(self):
         value = {'request_id': str(uuid.uuid4()), 'computer_id': self.node['node_id'],

@@ -28,7 +28,7 @@ const QUEUED_MESSAGE_IDS: &str =
     include_str!("../../../../tests/fixtures/opencode-queued-message-ids.json");
 /// Operations only the Rust connector executes: the Python connector, whose
 /// tables the golden vectors freeze, never lists or advertises them.
-const RUST_CONNECTOR_ONLY: &[&str] = &["remove_queued"];
+const RUST_ONLY: &str = include_str!("../../tests/rust-only-operations.json");
 
 /// A session request with the native identity a mutation carries; `extra`
 /// adds payload fields.
@@ -164,8 +164,10 @@ async fn context_commands_are_gated_per_operation_and_protocol_version() {
             .collect()
     };
     let mut python = set(&vectors["capabilities"]["all"]["operations"]);
-    for op in RUST_CONNECTOR_ONLY {
-        assert!(python.insert((*op).to_owned()), "{op}");
+    let rust_only: Value = serde_json::from_str(RUST_ONLY).unwrap();
+    for row in rust_only["operations"].as_array().unwrap() {
+        let op = row["operation"].as_str().unwrap();
+        assert!(python.insert(op.to_owned()), "{op}");
     }
     assert_eq!(set(&declared), python);
     assert_eq!(declared, json!(protocol::OPERATIONS));

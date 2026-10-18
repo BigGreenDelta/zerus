@@ -1,11 +1,15 @@
 """Strict contracts for the Rust-only OpenCode launch-effort and queue-removal capabilities."""
 import copy
 import unittest
+from unittest.mock import patch
 
+import differential
 from differential import canonical, differences
 
 FEATURE = "opencode_launch_effort"
 REMOVAL = "remove_queued"
+# The Python operations the frozen lifecycle marker gates.
+ACTIONS = ["archive", "forget", "fork", "pause", "rename", "restore", "resume", "terminate"]
 
 
 def trace(shape, kind="heartbeat", count=1):
@@ -105,7 +109,7 @@ class CapabilityProjectionTests(unittest.TestCase):
 def action_shapes(actions=True):
     """Shapes with or without the session actions that gate queue removal."""
     python = {"body": ["presence", "snapshot"], "snapshot": ["mobile_capabilities", "sessions"],
-              "operations": ["forget", "inspect", "rename"] if actions else ["inspect"], "features": ["inspect_after"]}
+              "operations": sorted([*ACTIONS, "inspect"]) if actions else ["inspect"], "features": ["inspect_after"]}
     rust = copy.deepcopy(python)
     if actions:
         rust["operations"] = sorted([*rust["operations"], REMOVAL])
@@ -144,12 +148,29 @@ class QueueRemovalProjectionTests(unittest.TestCase):
 
     def test_other_session_actions_stay_exact(self):
         python, rust = action_shapes()
-        right = copy.deepcopy(rust)
-        right["operations"].remove("rename")
-        self.assertTrue(differences(trace(python), trace(right))[0])
-        right = copy.deepcopy(rust)
-        right["operations"].remove("forget")
-        self.assertTrue(differences(trace(python), trace(right))[0])
+        for action in ("rename", "forget"):
+            with self.subTest(action=action):
+                right = copy.deepcopy(rust)
+                right["operations"].remove(action)
+                self.assertTrue(differences(trace(python), trace(right))[0])
+
+    def test_the_table_and_the_frozen_markers_drive_the_rule(self):
+        self.assertEqual(differential.FROZEN_MARKERS["lifecycle"], ACTIONS)
+        self.assertIn({"operation": REMOVAL, "marker": "lifecycle", "class": "mutation"}, differential.RUST_ONLY)
+
+    def test_an_operation_behind_a_marker_python_does_not_know_is_left_to_the_suites(self):
+        row = {"operation": "fixture_read", "marker": "fixture_marker", "class": "read"}
+        python, _ = action_shapes(False)
+        with patch.object(differential, "RUST_ONLY", [*differential.RUST_ONLY, row]):
+            for listed in (False, True):
+                with self.subTest(listed=listed):
+                    right = copy.deepcopy(python)
+                    if listed:
+                        right["operations"] = sorted([*right["operations"], "fixture_read"])
+                    self.assertEqual(differences(trace(python), trace(right)), ([], 0))
+            left = copy.deepcopy(python)
+            left["operations"] = sorted([*left["operations"], "fixture_read"])
+            self.assertTrue(differences(trace(left), trace(left))[0])
 
 
 if __name__ == "__main__":

@@ -41,6 +41,11 @@ DIVERGENCES = set("abcdefghijk")
 KINDS = ("native", "relay", "journal")
 # The harness adds these for a Python connector run from this source tree.
 HARNESS_ENVIRONMENT = {"PYTHONPATH", "PYTHONDONTWRITEBYTECODE"}
+# Operations only the Rust connector executes, each with the marker that gates
+# it, and the operations each frozen Python marker gates (vectors).
+RUST_ONLY = json.loads((TESTS / "rust-only-operations.json").read_text())["operations"]
+FROZEN_MARKERS = {marker["name"]: marker["operations"] for marker in
+                  json.loads((TESTS.parent / "vectors" / "operations.json").read_text())["capabilities"]["markers"]}
 # Native commands a connector repeats on its own schedule rather than once per
 # request: heartbeat snapshots, capability probes and fleet discovery.
 PERIODIC = (
@@ -316,14 +321,17 @@ def capability_projection(entries: collections.Counter, side: str) -> tuple[coll
 
     Only accepted local/peer heartbeat SHAPEs are projected. Python must never
     offer OpenCode effort; Rust must offer it exactly when it offers launch.
-    Python must never offer OpenCode queue removal (`remove_queued`); Rust must
-    offer it exactly when it offers the session actions (`forget`), whose
-    native marker gates both. All other keys, operations, features and counts
-    remain exact comparisons. Raw trace files are never changed.
+    Python must never offer an operation of `rust-only-operations.json` (such
+    as `remove_queued`). Rust must offer one gated by a frozen marker exactly
+    when it offers every operation that marker gates in Python (the session
+    actions for `remove_queued`). A Python shape cannot show a marker the
+    vectors do not know, so an operation gated by one is left out of the Rust
+    shape; the black-box suites check its advertisement. All other keys,
+    operations, features and counts remain exact comparisons. Raw trace files
+    are never changed.
     """
     projected, invalid, seen = collections.Counter(), [], set()
     feature = "opencode_launch_effort"
-    removal, actions = "remove_queued", "forget"
     for entry, count in entries.items():
         if not entry.startswith(("SHAPE heartbeat", "SHAPE peer heartbeat")):
             projected[entry] += count
@@ -343,20 +351,26 @@ def capability_projection(entries: collections.Counter, side: str) -> tuple[coll
                 raise ValueError("one shape of each heartbeat kind is required")
             seen.add(kind)
             offered = feature in shape["features"]
-            removable = removal in shape["operations"]
             if side == "python":
                 if offered:
                     raise ValueError("Python must not advertise OpenCode launch effort")
-                if removable:
-                    raise ValueError("Python must not advertise OpenCode queue removal")
                 if "launch" in shape["operations"]:
                     shape["features"] = sorted([*shape["features"], feature])
-                if actions in shape["operations"]:
-                    shape["operations"] = sorted([*shape["operations"], removal])
             elif offered != ("launch" in shape["operations"]):
                 raise ValueError("Rust OpenCode launch effort must match its launch operation")
-            elif removable != (actions in shape["operations"]):
-                raise ValueError("Rust OpenCode queue removal must match its session actions")
+            operations = set(shape["operations"])
+            for row in RUST_ONLY:
+                operation, gated = row["operation"], FROZEN_MARKERS.get(row["marker"])
+                marked = gated is not None and set(gated) <= operations
+                if side == "python":
+                    if operation in operations:
+                        raise ValueError(f"Python must not advertise {operation}")
+                    if marked:
+                        shape["operations"] = sorted([*shape["operations"], operation])
+                elif gated is None:
+                    shape["operations"] = [item for item in shape["operations"] if item != operation]
+                elif (operation in operations) != marked:
+                    raise ValueError(f"Rust {operation} must match its {row['marker']} marker")
             projected["SHAPE " + kind + " " + canonical(shape)] += count
         except (ValueError, TypeError) as error:
             invalid.append({"kind": "relay", "side": side,

@@ -176,11 +176,15 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   identity, like `forget`: exact `expected_run_id`, nonempty
   `expected_conversation_id` and one `message_id`, `msg_` followed by 1–124
   ASCII letters, digits, `_` or `-`
-  ([shared with hgs and the connector](../../../tests/fixtures/opencode-queued-message-ids.json));
+  ([shared with hgs, the desktop and the connector](../../../tests/fixtures/opencode-queued-message-ids.json));
   any other field is rejected. Submission requires the computer to advertise
   it, which only the Rust connector does, with the scoped session-action ABI.
-  The golden vectors freeze the Python connector's tables, so `tests/vectors.rs`
-  names it as the one operation they lack.
+  An older hgs prints that marker too and refuses the request (an uncertain
+  receipt, nothing removed), so the session's `allowed_actions` listing
+  `remove_queued` is what shows that its hgs can remove a message; phones
+  require both. The golden vectors freeze the Python connector's tables, so
+  `tests/vectors.rs` names the operations they lack from
+  [`rust-only-operations.json`](../tests/rust-only-operations.json).
 - `json.rs` bounds depth and lexical structure before object materialization.
   Canonical ASCII escaping, key ordering, arbitrary integer precision and Python
   float formatting preserve API v1 request identities. A deterministic 20,000

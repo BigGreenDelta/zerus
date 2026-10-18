@@ -4,8 +4,8 @@
 //!
 //! An operation is advertised only when the native CLI offers it, as in
 //! Python, and this connector implements it; a later slice adds to
-//! [`IMPLEMENTED`]. [`CONNECTOR_ONLY`] operations follow the same markers but
-//! are never Python's. Python resets every flag before probing, so a failed
+//! [`IMPLEMENTED`]. [`CONNECTOR_ONLY`] operations follow their own native
+//! gates and are never Python's. Python resets every flag before probing, so a failed
 //! probe disables everything for 300 s; here a probe that fails keeps the
 //! previous flags (divergence a).
 use serde_json::{json, Map, Value};
@@ -71,11 +71,73 @@ const FEATURE_OPERATIONS: &[(&str, &str)] = &[
     ("gateway_one_hop", "send"),
 ];
 
-/// Operations of the relay's set that only this connector executes, each
-/// gated by its native marker like the others (`remove_queued` by the
-/// scoped session-action ABI). The Python connector never lists or
-/// advertises them, so they are outside [`Flags::python_operations`].
-pub const CONNECTOR_ONLY: &[&str] = &["remove_queued"];
+/// Whether an operation only reads native state or may change it. The relay
+/// classifies it the same way (`READS`), and a mutation keeps its journal
+/// identity and recovers as uncertain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    Read,
+    Mutation,
+}
+
+/// The native help marker that gates a [`CONNECTOR_ONLY`] operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// `session-action <session> --json`, the scoped session actions.
+    Lifecycle,
+}
+
+impl Gate {
+    /// Whether the native CLI offers it.
+    pub fn open(self, flags: &Flags) -> bool {
+        match self {
+            Gate::Lifecycle => flags.lifecycle,
+        }
+    }
+
+    /// Its marker name in `services/mobile/tests/rust-only-operations.json`,
+    /// which is also the frozen marker's name in `operations.json`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Gate::Lifecycle => "lifecycle",
+        }
+    }
+
+    /// A help line that offers it.
+    pub fn help_line(self) -> &'static str {
+        match self {
+            Gate::Lifecycle => "hgs session-action <session> --json",
+        }
+    }
+}
+
+/// An operation of the relay's set that only this connector executes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectorOnly {
+    pub operation: &'static str,
+    pub gate: Gate,
+    pub class: Class,
+}
+
+/// The operations of the relay's set that only this connector executes, each
+/// advertised exactly when its native marker is offered. The Python connector
+/// never lists or advertises them, so they are outside
+/// [`Flags::python_operations`]. The tests of the relay, of this connector and
+/// of the black-box suites read the same table from
+/// `services/mobile/tests/rust-only-operations.json`.
+pub const CONNECTOR_ONLY: &[ConnectorOnly] = &[ConnectorOnly {
+    // The session-action marker predates queue removal: an older hgs prints it
+    // and refuses the request. Only `remove_queued` in the session's
+    // `allowed_actions` shows that hgs can remove the message.
+    operation: "remove_queued",
+    gate: Gate::Lifecycle,
+    class: Class::Mutation,
+}];
+
+/// Whether only this connector executes the operation.
+pub fn connector_only(operation: &str) -> bool {
+    CONNECTOR_ONLY.iter().any(|row| row.operation == operation)
+}
 
 pub const LIFECYCLE: &[&str] = &[
     "archive",
@@ -179,14 +241,12 @@ impl Flags {
     /// `fleet` is whether a fleet exists (always in the connector).
     pub fn python_operations(&self, fleet: bool) -> BTreeSet<&'static str> {
         let mut operations = self.offered(fleet);
-        for operation in CONNECTOR_ONLY {
-            operations.remove(operation);
-        }
+        operations.retain(|operation| !connector_only(operation));
         operations
     }
 
     /// The relay's operations the native CLI offers, by Python's formula,
-    /// with [`CONNECTOR_ONLY`] under the same markers.
+    /// and [`CONNECTOR_ONLY`] under their own gates.
     fn offered(&self, fleet: bool) -> BTreeSet<&'static str> {
         let mut removed: BTreeSet<&str> = BTreeSet::new();
         let mut remove = |gate: bool, operations: &[&'static str]| {
@@ -216,6 +276,9 @@ impl Flags {
         remove(self.speech, SPEECH);
         remove(self.voice, VOICE);
         remove(self.speech_config, SPEECH_CONFIG);
+        for row in CONNECTOR_ONLY {
+            remove(row.gate.open(self), &[row.operation]);
+        }
         OPERATIONS
             .iter()
             .copied()
@@ -381,6 +444,27 @@ mod tests {
     }
 
     #[test]
+    fn connector_only_operations_follow_their_gate_and_are_never_pythons() {
+        let advertises = |flags: Flags, fleet: bool, operation: &str| {
+            flags.advertised_for(fleet, false)["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|advertised| advertised == operation)
+        };
+        for row in CONNECTOR_ONLY {
+            assert!(implemented(row.operation) && OPERATIONS.contains(&row.operation));
+            let open = Flags::from_help(&format!("{}\n", row.gate.help_line()));
+            assert!(row.gate.open(&open) && !row.gate.open(&Flags::default()));
+            for fleet in [false, true] {
+                assert!(advertises(open, fleet, row.operation), "{row:?}");
+                assert!(!advertises(Flags::default(), fleet, row.operation));
+                assert!(!open.python_operations(fleet).contains(row.operation));
+            }
+        }
+    }
+
+    #[test]
     fn remove_queued_follows_the_session_action_abi_and_is_never_pythons() {
         let advertises = |flags: Flags| {
             flags.advertised(false)["operations"]
@@ -408,8 +492,13 @@ mod tests {
                 assert!(!flags.python_operations(fleet).contains("remove_queued"));
             }
         }
-        assert!(CONNECTOR_ONLY.iter().all(|operation| implemented(operation)
-            && LIFECYCLE.contains(operation)
-            && OPERATIONS.contains(operation)));
+        assert_eq!(
+            CONNECTOR_ONLY,
+            [ConnectorOnly {
+                operation: "remove_queued",
+                gate: Gate::Lifecycle,
+                class: Class::Mutation
+            }]
+        );
     }
 }

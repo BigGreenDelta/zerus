@@ -20,14 +20,18 @@ OPERATIONS = json.loads((VECTORS / "operations.json").read_text())
 _ERRORS = json.loads((VECTORS / "errors.json").read_text())
 _RECEIPTS = json.loads((VECTORS / "receipts.json").read_text())
 _MARKERS = {marker["name"]: marker for marker in OPERATIONS["capabilities"]["markers"]}
+# Operations only the Rust connector executes, each with the marker that gates
+# it there (`CONNECTOR_ONLY` in capabilities.rs). The Python connector, whose
+# tables the vectors freeze, never advertises them; a marker the vectors do not
+# know brings its own help line and gates nothing in Python.
+_RUST_ONLY = json.loads((SERVICE / "tests" / "rust-only-operations.json").read_text())
+RUST_ONLY = {row["operation"]: row["marker"] for row in _RUST_ONLY["operations"]}
+_MARKERS.update({name: {"name": name, "help_line": line, "operations": [], "features": [], "reasons": {}}
+                 for name, line in _RUST_ONLY["markers"].items() if name not in _MARKERS})
 _TEXTS = ({row["message"] for row in _ERRORS["raises"]} | {row["message"] for row in _ERRORS["library_messages"]}
           | {row["error"] for row in _RECEIPTS["receipts"].values()})
 # The connector's own listing, help probe and catalog reads.
 BACKGROUND = (["--help"], ["ls", "--json", "--local"], ["swarm", "get"], ["account", "ls"])
-# Operations only the Rust connector executes, with the marker that gates each
-# there (`CONNECTOR_ONLY` in capabilities.rs). The Python connector, whose
-# tables the vectors freeze, never advertises them.
-RUST_ONLY = {"remove_queued": "lifecycle"}
 
 
 def validation(family: str) -> tuple[dict, list[dict]]:

@@ -269,14 +269,22 @@ as Rust does. None survives a rollback to Python.
   validation, so its receipt is `unsupported operation` where Python would
   report a validation error or run it.
 - Two OpenCode extensions exist only here (`CONNECTOR_ONLY` and the
-  `opencode_launch_effort` feature in `capabilities.rs`): `remove_queued` is
+  `opencode_launch_effort` feature in `capabilities.rs`). `CONNECTOR_ONLY` is a
+  table of each relay operation only this connector executes, the native gate
+  that advertises it and whether it is a read or a mutation;
+  `services/mobile/tests/rust-only-operations.json` mirrors it for the relay
+  tests, the black-box suites and `differential.py`. `remove_queued` is
   advertised with the scoped session-action marker that gates the other
   session actions and journaled as a mutation, so an in-flight one recovers
-  as uncertain after a restart. Python never lists either, so a rollback to
-  Python withdraws them from phones; `differential.py` projects both. Python's
-  own restart recovery does not know `remove_queued`: a removal that a killed
-  Rust connector left running would become failed there, not uncertain, while
-  hgs still never resends the message.
+  as uncertain after a restart. That marker predates queue removal, so an
+  older hgs (for example on a one-hop peer) is advertised too and refuses the
+  request, leaving an uncertain receipt; only `remove_queued` in the session's
+  `allowed_actions` shows that hgs can remove the message, and phones require
+  it. Python never lists either extension, so a rollback to Python withdraws
+  them from phones; `differential.py` projects both. Python's own restart
+  recovery does not know `remove_queued`: a removal that a killed Rust
+  connector left running would become failed there, not uncertain, while hgs
+  still never resends the message.
 - Both implementations take an exclusive `flock(2)` on `connector.lock`, so
   they never run on one journal at once, and `hgs status` reports either one as
   running.

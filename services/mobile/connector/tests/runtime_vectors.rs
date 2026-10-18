@@ -747,6 +747,41 @@ fn ported_operations_name_what_this_build_implements() {
     assert_eq!(listed, implemented);
 }
 
+/// The connector-only table equals the shared one the relay tests and the
+/// black-box suites read, and a gate named after a frozen marker is that
+/// marker.
+#[test]
+fn connector_only_operations_match_the_shared_table() {
+    let raw = std::fs::read(vectors().join("../tests/rust-only-operations.json")).unwrap();
+    let shared: Value = serde_json::from_slice(&raw).unwrap();
+    let rows: Vec<Value> = capabilities::CONNECTOR_ONLY
+        .iter()
+        .map(|row| {
+            let class = match row.class {
+                capabilities::Class::Read => "read",
+                capabilities::Class::Mutation => "mutation",
+            };
+            json!({"operation": row.operation, "marker": row.gate.name(), "class": class})
+        })
+        .collect();
+    assert_eq!(json!(rows), shared["operations"]);
+    let operations = document("operations.json");
+    let markers = operations["capabilities"]["markers"].as_array().unwrap();
+    for row in capabilities::CONNECTOR_ONLY {
+        let frozen = markers
+            .iter()
+            .find(|marker| marker["name"] == row.gate.name());
+        match frozen {
+            Some(marker) => assert_eq!(marker["help_line"], row.gate.help_line(), "{row:?}"),
+            None => assert_eq!(
+                shared["markers"][row.gate.name()],
+                row.gate.help_line(),
+                "{row:?}"
+            ),
+        }
+    }
+}
+
 #[test]
 fn capability_markers_match_the_python_connector() {
     let operations = document("operations.json");
@@ -782,25 +817,20 @@ fn capability_markers_match_the_python_connector() {
                     .unwrap()
                     .iter()
                     .any(|wanted| wanted == operation)
-                    || capabilities::CONNECTOR_ONLY.contains(&operation),
+                    || capabilities::connector_only(operation),
                 "{name} {operation}"
             );
         }
-        // A connector-only operation comes with Python's session-action ABI.
-        let lifecycle = wanted["operations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|operation| operation == "forget");
-        for operation in capabilities::CONNECTOR_ONLY {
+        // A connector-only operation comes exactly with its own native gate.
+        for row in capabilities::CONNECTOR_ONLY {
             assert_eq!(
                 advertised["operations"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|advertised| advertised == operation),
-                lifecycle,
-                "{name} {operation}"
+                    .any(|advertised| advertised == row.operation),
+                row.gate.open(flags),
+                "{name} {row:?}"
             );
         }
     }
