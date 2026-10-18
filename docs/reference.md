@@ -1859,7 +1859,7 @@ JSON. Tasks belong to a catalog project, named by its ID or name; a task is
 `T-` plus six characters, and `PROJECT/T-xxxxxx` names it anywhere.
 
 ```sh
-hgs task add --project orchard [--backlog] [--target codex/api|any] [--position N] < prompt.txt
+hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS]] [--position N] < prompt.txt
 hgs task list --project orchard [--stage todo]
 hgs task get orchard/T-a1b2c3
 hgs task send orchard/T-a1b2c3 [--session codex/api]
@@ -1869,7 +1869,7 @@ hgs task stage orchard/T-a1b2c3 backlog|todo|done
 hgs task move orchard/T-a1b2c3 --top|--before REF|--after REF
 hgs task edit orchard/T-a1b2c3 < prompt.txt
 hgs task comment orchard/T-a1b2c3 < comment.txt
-hgs task target orchard/T-a1b2c3 codex/api|any
+hgs task target orchard/T-a1b2c3 codex/api|any [--host ALIAS]
 hgs task settings --project orchard [--set < settings.json]
 ```
 
@@ -1884,6 +1884,11 @@ shows In progress is not sent again. Run inside a session (`HGS_SESSION` and
 for that session, and the project settings can keep agents to their own
 session or limit how many tasks they start per hour. `settings --set` reads a
 JSON object and changes only the fields it names.
+
+`--host ALIAS` pins a task to a session on another computer of the swarm that
+this computer verified itself; sending there comes with replication. Listings
+name each session's computer as `host`: empty for this one, the alias of a
+verified member, or null.
 
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in

@@ -96,6 +96,8 @@ pub struct TaskView {
     pub schema: i64,
     pub writable: bool,
     pub created_at: i64,
+    /// When the task entered its current stage (Unix milliseconds).
+    pub stage_at: i64,
     pub author: Actor,
     pub stage: Stage,
     pub target: Target,

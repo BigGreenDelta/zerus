@@ -9,6 +9,7 @@
 use crate::cli::{Error, Result};
 use crate::config::Config;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zerus_replica::{
@@ -16,7 +17,7 @@ use zerus_replica::{
     Stage, Target, TaskDoc, Tools, MAX_TEXT,
 };
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any] [--position N] | edit REF | move REF --top|--before REF|--after REF | stage REF backlog|todo|done | target REF SESSION|any | send REF [--session SESSION] | cancel REF [--reason TEXT] | report REF | comment REF | settings --project P [--set]
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION] | cancel REF [--reason TEXT] | report REF | comment REF | settings --project P [--set]
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin";
 
 fn fail(message: impl std::fmt::Display) -> Error {
@@ -95,8 +96,43 @@ fn store(config: &Config, project_id: &str) -> Result<ProjectStore> {
     ProjectStore::open(&config.state.join("replica"), project_id).map_err(fail)
 }
 
-fn machine(config: &Config) -> Result<String> {
-    crate::swarm::local_node_id(config).map_err(fail)
+/// This computer and the swarm members it verified itself, by SSH alias.
+struct Machines {
+    here: String,
+    peers: BTreeMap<String, String>,
+}
+
+fn machines(config: &Config) -> Result<Machines> {
+    let here = crate::swarm::local_node_id(config).map_err(fail)?;
+    #[cfg(unix)]
+    let peers = crate::swarm::verified_bindings(config, &here);
+    #[cfg(not(unix))]
+    let peers = BTreeMap::new();
+    Ok(Machines { here, peers })
+}
+
+impl Machines {
+    /// The computer `--host ALIAS` names, or this one without it.
+    fn node(&self, host: Option<&str>) -> Result<String> {
+        match host.filter(|h| !h.is_empty()) {
+            None => Ok(self.here.clone()),
+            Some(alias) => self.peers.get(alias).cloned().ok_or_else(|| {
+                fail(format!("{alias} is not a verified computer of this swarm"))
+            }),
+        }
+    }
+
+    /// How callers name a computer: "" for this one, a verified member's
+    /// alias, or null when this computer does not know it.
+    fn host(&self, node: &str) -> Value {
+        if node == self.here {
+            return json!("");
+        }
+        self.peers
+            .iter()
+            .find(|(_, id)| id.as_str() == node)
+            .map_or(Value::Null, |(alias, _)| json!(alias))
+    }
 }
 
 /// The agent of the session that runs this command, as hooks know it (both
@@ -112,9 +148,14 @@ fn actor(here: &str) -> Actor {
     }
 }
 
-fn view(task: &TaskDoc, project_name: &str, with_log: bool) -> Result<Value> {
+fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines) -> Result<Value> {
     let mut value = serde_json::to_value(task.view().map_err(fail)?).map_err(fail)?;
     value["ref"] = json!(format!("{project_name}/{}", task.id()));
+    for key in ["target", "session"] {
+        if let Some(machine) = value[key]["machine"].as_str().map(str::to_owned) {
+            value[key]["host"] = machines.host(&machine);
+        }
+    }
     if !with_log {
         value.as_object_mut().expect("object").remove("log");
     }
@@ -146,10 +187,11 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         "list" => list(config, args),
         "get" => {
             let r = reference(config, args)?;
+            let machines = machines(config)?;
             let task = store(config, &r.project.0)?
                 .find(&r.task)
                 .map_err(fail)?;
-            print(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": view(&task, &r.project.1, true)?}))
+            print(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": view(&task, &r.project.1, true, &machines)?}))
         }
         "add" => add(config, args),
         "edit" | "move" | "stage" | "target" | "comment" | "report" | "send" | "cancel" => {
@@ -169,6 +211,7 @@ fn list(config: &Config, args: &[String]) -> Result<i32> {
         .map(Stage::parse)
         .transpose()
         .map_err(fail)?;
+    let machines = machines(config)?;
     // One load of the project; each stage is then a filter of the sorted list.
     let (tasks, damaged) = store(config, &id)?.listing().map_err(fail)?;
     let mut out = Vec::new();
@@ -183,7 +226,7 @@ fn list(config: &Config, args: &[String]) -> Result<i32> {
             continue;
         }
         for task in tasks.iter().filter(|t| t.stage().ok() == Some(stage)) {
-            out.push(view(task, &name, false)?);
+            out.push(view(task, &name, false, &machines)?);
         }
     }
     print(json!({"project": {"id": id, "name": name}, "tasks": out, "damaged": damaged}))
@@ -195,8 +238,8 @@ fn add(config: &Config, args: &[String]) -> Result<i32> {
         config,
         option(args, "--project")?.ok_or_else(|| fail(USAGE))?,
     )?;
-    let here = machine(config)?;
-    let author = actor(&here);
+    let machines = machines(config)?;
+    let author = actor(&machines.here);
     let stage = if flag(args, "--backlog") {
         Stage::Backlog
     } else {
@@ -212,7 +255,7 @@ fn add(config: &Config, args: &[String]) -> Result<i32> {
         (Actor::Agent(own), None) => Target::Session(own.clone()),
         (Actor::Person, None | Some("any")) => Target::Any,
         (Actor::Person, Some(session)) => Target::Session(SessionKey {
-            machine: here.clone(),
+            machine: machines.node(option(args, "--host")?)?,
             session: session.to_owned(),
         }),
     };
@@ -242,7 +285,7 @@ fn add(config: &Config, args: &[String]) -> Result<i32> {
     .map_err(fail)?;
     check_prompt(&store, &task, &name)?;
     store.save(&mut task).map_err(fail)?;
-    print(json!({"task": view(&task, &name, true)?}))
+    print(json!({"task": view(&task, &name, true, &machines)?}))
 }
 
 fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
@@ -254,8 +297,9 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
     };
     let r = reference(config, args)?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
-    let here = machine(config)?;
-    let who = actor(&here);
+    let machines = machines(config)?;
+    let here = machines.here.as_str();
+    let who = actor(here);
     let store = store(config, project_id)?;
     let mut task = store.find(&r.task).map_err(fail)?;
     let text = text.unwrap_or_default();
@@ -304,18 +348,18 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
                 Target::Any
             } else {
                 Target::Session(SessionKey {
-                    machine: here.clone(),
+                    machine: machines.node(option(args, "--host")?)?,
                     session: value.clone(),
                 })
             };
             task.set_target(&target, &who, now()).map_err(fail)?;
         }
-        "send" => extra = send(&here, &store, &mut task, project_name, args, &who)?,
-        "cancel" => extra = cancel(&here, &store, &mut task, project_name, args, &who)?,
+        "send" => extra = send(here, &store, &mut task, project_name, args, &who)?,
+        "cancel" => extra = cancel(here, &store, &mut task, project_name, args, &who)?,
         _ => return Err(fail(USAGE)),
     }
     store.save(&mut task).map_err(fail)?;
-    let mut out = json!({"task": view(&task, project_name, true)?});
+    let mut out = json!({"task": view(&task, project_name, true, &machines)?});
     for (key, value) in extra.as_object().expect("object") {
         out[key] = value.clone();
     }

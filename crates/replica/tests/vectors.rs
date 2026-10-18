@@ -82,6 +82,29 @@ fn bless_task() {
     fs::write(path(&format!("{TASK}-merged.json")), merged).unwrap();
 }
 
+/// Every value the stored view has, this build's view has too. Later builds
+/// may add fields; they never drop or change the ones a vector recorded.
+fn contains(actual: &serde_json::Value, expected: &serde_json::Value, path: &str) {
+    use serde_json::Value;
+    match (actual, expected) {
+        (Value::Object(actual), Value::Object(expected)) => {
+            for (key, value) in expected {
+                let found = actual
+                    .get(key)
+                    .unwrap_or_else(|| panic!("{path}.{key} is missing"));
+                contains(found, value, &format!("{path}.{key}"));
+            }
+        }
+        (Value::Array(actual), Value::Array(expected)) => {
+            assert_eq!(actual.len(), expected.len(), "{path} length");
+            for (index, (found, value)) in actual.iter().zip(expected).enumerate() {
+                contains(found, value, &format!("{path}[{index}]"));
+            }
+        }
+        _ => assert_eq!(actual, expected, "{path}"),
+    }
+}
+
 fn merged(first: &str, second: &str) -> TaskView {
     let mut task = TaskDoc::from_bytes(&read(&format!("{TASK}.loro"))).unwrap();
     task.import(&read(&format!("{TASK}-{first}.update")))
@@ -101,7 +124,7 @@ fn task_schema1_loro_1_16() {
     // Concurrent updates merge to the same task in either order.
     for (first, second) in [("a", "b"), ("b", "a")] {
         let view = merged(first, second);
-        assert_eq!(serde_json::to_value(&view).unwrap(), expected);
+        contains(&serde_json::to_value(&view).unwrap(), &expected, "view");
     }
     // The history reads oldest first, whatever order the merge gave its entries.
     let times: Vec<i64> = merged("a", "b").log.iter().map(|e| e.at).collect();
@@ -115,9 +138,10 @@ fn task_schema1_loro_1_16() {
         .unwrap();
     let mut fresh = TaskDoc::from_bytes(&read(&format!("{TASK}.loro"))).unwrap();
     fresh.import(&delta).unwrap();
-    assert_eq!(
-        serde_json::to_value(fresh.view().unwrap()).unwrap(),
-        expected
+    contains(
+        &serde_json::to_value(fresh.view().unwrap()).unwrap(),
+        &expected,
+        "view",
     );
     // The stored document still accepts this build's edits.
     both.set_stage(Stage::Done, &Actor::Person, 1_760_000_004_000)

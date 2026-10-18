@@ -189,6 +189,27 @@ class TaskCommands(Fixture):
         self.hgs("stage", "orchard/" + second, "backlog")
         self.assertEqual((self.ids("todo"), self.ids("backlog")), ([later, first], [second, other]))
 
+    def test_tasks_name_the_computer_of_their_session(self):
+        here = self.add("Local work", "--target", "codex/api")
+        self.assertEqual(here["target"]["host"], "")
+        refused = self.hgs("add", "--project", "orchard", "--target", "codex/api", "--host", "orchard-mac",
+                           text="Remote work", ok=False)
+        self.assertIn("orchard-mac is not a verified computer", refused)
+        # This computer verified orchard-mac itself: tasks can be pinned to its sessions.
+        catalog = self.root / "config" / "swarm" / "catalog.json"
+        data = json.loads(catalog.read_text())
+        mac = str(uuid.uuid4())
+        data.setdefault("bindings", {})["orchard-mac"] = {"id": mac, "verified": True}
+        catalog.write_text(json.dumps(data))
+        there = self.hgs("add", "--project", "orchard", "--target", "codex/web", "--host", "orchard-mac",
+                         text="Remote work")["task"]
+        self.assertEqual((there["target"]["machine"], there["target"]["host"]), (mac, "orchard-mac"))
+        moved = self.hgs("target", here["ref"], "codex/web", "--host", "orchard-mac")["task"]
+        self.assertEqual(moved["target"]["host"], "orchard-mac")
+        listed = {t["id"]: t for t in self.hgs("list", "--project", "orchard")["tasks"]}
+        self.assertEqual(listed[there["id"]]["target"]["host"], "orchard-mac")
+        self.assertIn("on another computer", self.hgs("send", there["ref"], ok=False))
+
     def test_a_project_name_with_a_slash(self):
         task = self.hgs("add", "--project", "team/web", text="Ship it")["task"]
         self.assertEqual(task["ref"], "team/web/" + task["id"])

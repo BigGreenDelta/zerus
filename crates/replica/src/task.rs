@@ -77,6 +77,7 @@ impl TaskDoc {
         meta.insert("author", serde_json::to_string(&task.author)?)?;
         let fields = doc.get_map("fields");
         fields.insert("stage", task.stage.as_str())?;
+        fields.insert("stage_at", task.now)?;
         fields.insert("target", serde_json::to_string(&task.target)?)?;
         fields.insert("rank", task.rank)?;
         fields.insert("summary", "")?;
@@ -238,6 +239,10 @@ impl TaskDoc {
             schema: self.schema(),
             writable,
             created_at: integer(&meta, "created_at").unwrap_or(0),
+            // Documents written before this field existed report their creation.
+            stage_at: integer(&fields, "stage_at")
+                .or_else(|| integer(&meta, "created_at"))
+                .unwrap_or(0),
             author,
             stage: self.stage()?,
             target,
@@ -344,6 +349,7 @@ impl TaskDoc {
             )));
         }
         self.fields().insert("stage", to.as_str())?;
+        self.fields().insert("stage_at", now)?;
         self.log("stage", actor, now, to.as_str(), None)?;
         self.doc.commit();
         Ok(())
@@ -389,6 +395,7 @@ impl TaskDoc {
         self.check_send()?;
         let fields = self.fields();
         fields.insert("stage", Stage::Active.as_str())?;
+        fields.insert("stage_at", now)?;
         fields.insert("session", serde_json::to_string(session)?)?;
         fields.delete("cancelled_at")?;
         fields.delete("cancel_reason")?;
@@ -415,6 +422,7 @@ impl TaskDoc {
         if moved {
             let fields = self.fields();
             fields.insert("stage", Stage::Review.as_str())?;
+            fields.insert("stage_at", now)?;
             fields.insert("summary", summary)?;
         }
         self.log("report", actor, now, summary, None)?;
@@ -430,6 +438,7 @@ impl TaskDoc {
         }
         let fields = self.fields();
         fields.insert("stage", Stage::Review.as_str())?;
+        fields.insert("stage_at", now)?;
         fields.insert("cancelled_at", now)?;
         fields.insert("cancel_reason", reason.trim())?;
         self.log("cancelled", actor, now, "", None)?;
@@ -733,6 +742,24 @@ mod tests {
             newer.check_send().unwrap_err().to_string(),
             "Update Zerus to edit this task"
         );
+    }
+
+    #[test]
+    fn the_time_a_task_entered_its_stage_is_kept() {
+        let mut t = task(Stage::Todo);
+        assert_eq!(t.view().unwrap().stage_at, 1);
+        t.comment("no stage change", &Actor::Person, 3).unwrap();
+        assert_eq!(t.view().unwrap().stage_at, 1);
+        t.record_send(&api(), "r", &Actor::Person, 5).unwrap();
+        assert_eq!(t.view().unwrap().stage_at, 5);
+        t.record_report("Done.", &agent("codex/api"), 9).unwrap();
+        assert_eq!(t.view().unwrap().stage_at, 9);
+        t.set_stage(Stage::Done, &Actor::Person, 12).unwrap();
+        assert_eq!(t.view().unwrap().stage_at, 12);
+        // Documents written before the field existed fall back to creation.
+        t.fields().delete("stage_at").unwrap();
+        t.doc.commit();
+        assert_eq!(t.view().unwrap().stage_at, 1);
     }
 
     #[test]
