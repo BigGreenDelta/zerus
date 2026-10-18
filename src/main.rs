@@ -1,5 +1,6 @@
 mod accounts;
 mod agent_guide;
+mod analytics;
 mod approval_log;
 mod cli;
 mod config;

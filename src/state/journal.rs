@@ -279,7 +279,10 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
             .execute("DELETE FROM events WHERE seq <= ?", [seq - 50000])
             .map_err(|e| e.to_string())?;
     }
-    transaction.commit().map_err(|e| e.to_string())
+    transaction.commit().map_err(|e| e.to_string())?;
+    crate::analytics::native::collect(&root(), record, event);
+    crate::analytics::adapters::hook(&root(), record, event);
+    Ok(())
 }
 
 pub(super) fn normalized_activity(record: &Value, live_pane: bool) -> Value {

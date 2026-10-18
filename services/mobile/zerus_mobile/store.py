@@ -15,6 +15,7 @@ import uuid
 
 from .attachments import MAX_QUEUE_BYTES
 from . import speech, speech_config, voice
+from .context import CLEAR_CONTEXT_DISMISS_FEATURE
 from .context import CAPABILITY_OPERATIONS, ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, inspect_features, supports
 from .projects import is_archived
 from .routes import Registry, RouteError, drive_sync, SCHEMA as ROUTE_SCHEMA, MAX_PEER_SNAPSHOT_BYTES
@@ -121,6 +122,7 @@ class Store:
         self.db.execute("CREATE INDEX IF NOT EXISTS event_expiry ON events(created)")
         self.db.execute("CREATE INDEX IF NOT EXISTS push_expiry ON push_jobs(created)")
         self.db.execute("CREATE INDEX IF NOT EXISTS invitation_expiry ON invitations(expires)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS analytics_reads_history ON requests(updated,id) WHERE operation='analytics_read' AND state IN ('completed','failed','uncertain')")
         self.db.execute(f"CREATE INDEX IF NOT EXISTS read_history_v3 ON requests(updated) WHERE operation IN {READ_SQL} AND state IN ('completed','failed','uncertain')")
         request_columns = {r[1] for r in self.db.execute("PRAGMA table_info(requests)")}
         with self.db:
@@ -244,6 +246,7 @@ class Store:
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests INDEXED BY hook_health_history WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now - min(retention, 3600),))
             self.db.execute(f"UPDATE requests SET body='',body_bytes=0,result=NULL,result_bytes=length('request history expired; delivery must not be retried'),reserved_bytes=0,error='request history expired; delivery must not be retried' WHERE id IN (SELECT id FROM requests WHERE state IN ('completed','failed','uncertain') AND updated<? AND body!='' ORDER BY updated LIMIT {batch_size})", (now - retention,))
+            self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation='analytics_read' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {voice.READ_SQL} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {speech_config.READ_SQL} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {speech.READ_SQL} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
@@ -283,6 +286,8 @@ class Store:
                     return 404, {"error": "speech configuration operation not found"}
             if body["operation"] in CAPABILITY_OPERATIONS and not supports(snapshot, body["operation"]):
                 return 409, {"error": "computer does not advertise this operation; update its connector"}
+            if body["operation"] == "clear_context" and "dismiss_prompt" in body["payload"] and not supports(snapshot, CLEAR_CONTEXT_DISMISS_FEATURE, "features"):
+                return 409, {"error": "computer does not advertise dismiss-and-clear; update its connector"}
             if body["operation"] == "inspect" and any(not supports(snapshot, feature, "features") for feature in inspect_features(body["payload"])):
                 return 409, {"error": "computer does not advertise this inspection feature; update its connector"}
             if body["operation"] == "send" and "agent_id" in body["payload"] and not supports(snapshot, "send_agent", "features"):

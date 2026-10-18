@@ -17,6 +17,7 @@ pub mod execute;
 pub mod files;
 pub mod fleet;
 pub mod fsguard;
+pub mod git_status;
 pub mod hook_health;
 #[cfg(feature = "test-hooks")]
 pub mod hooks;

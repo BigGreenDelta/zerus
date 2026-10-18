@@ -10,12 +10,14 @@ use uuid::Uuid;
 pub const MIB: usize = 1024 * 1024;
 pub const REQUEST_MAX: usize = 29 * MIB;
 pub const READS: &[&str] = &[
+    "analytics_read",
     "archive_list",
     "speech_config",
     "speech_config_status",
     "inspect",
     "history",
     "hooks_status",
+    "git_status",
     "process_output",
     "terminal_snapshot",
     "catalog",
@@ -69,6 +71,7 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "analytics_read",
     "archive_list",
     "speech_config",
     "speech_profile_upsert",
@@ -92,6 +95,7 @@ pub const OPERATIONS: &[&str] = &[
     "fork",
     "history",
     "hooks_status",
+    "git_status",
     "inspect",
     "interrupt",
     "launch",
@@ -100,6 +104,7 @@ pub const OPERATIONS: &[&str] = &[
     "process_output",
     "process_stop",
     "recovery_action",
+    "remove_queued",
     "rename",
     "restore",
     "resume",
@@ -119,6 +124,7 @@ pub const OPERATIONS: &[&str] = &[
     "worktrees",
 ];
 pub const FEATURES: &[&str] = &[
+    "clear_context_dismiss",
     "inspect_after",
     "inspect_agent",
     "opencode_launch_effort",
@@ -136,6 +142,87 @@ pub const ATTACHMENT_FILE_MAX: u64 = 10 * MIB as u64;
 pub const ATTACHMENT_RESULT_TTL: f64 = 60.0;
 pub const ATTACHMENT_READ_GRACE: f64 = 5.0;
 const ID: &[&str] = &["request_id", "expected_run_id", "expected_conversation_id"];
+
+/// A canonical Gregorian UTC calendar date, as a bounded ordinal. No locale,
+/// timestamps or caller-supplied offsets enter aggregate bucket selection.
+fn analytics_day(value: &Value) -> Result<u32> {
+    let bytes = value.as_str().ok_or(Error::BAD)?.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(i, b)| i != 4 && i != 7 && !b.is_ascii_digit())
+    {
+        return Err(Error::BAD);
+    }
+    let number = |part: &[u8]| part.iter().fold(0u32, |n, b| n * 10 + u32::from(b - b'0'));
+    let (year, month, day) = (
+        number(&bytes[..4]),
+        number(&bytes[5..7]),
+        number(&bytes[8..]),
+    );
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if year == 0 || !(1..=12).contains(&month) || day == 0 || day > months[(month - 1) as usize] {
+        return Err(Error::BAD);
+    }
+    let previous = year - 1;
+    Ok(365 * previous + previous / 4 - previous / 100
+        + previous / 400
+        + months[..(month - 1) as usize].iter().sum::<u32>()
+        + day)
+}
+
+/// Mobile analytics are strictly read-only and span at most 90 inclusive days.
+pub fn analytics_read(payload: &Value) -> Result<()> {
+    fields(payload, &["schema", "from", "through"], &[])?;
+    if payload["schema"].as_u64() != Some(1) {
+        return Err(Error::BAD);
+    }
+    let from = analytics_day(&payload["from"])?;
+    let through = analytics_day(&payload["through"])?;
+    if through < from || through - from >= 90 {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
+/// Check the native summary envelope without rewriting its aggregate buckets.
+pub fn analytics_summary(value: &Value, payload: &Value, machine: Option<&str>) -> Result<()> {
+    uuid(&value["machine_id"], true)?;
+    uuid(&value["source_epoch"], false)?;
+    if value["schema"].as_u64() != Some(1)
+        || value["source"] != "agent"
+        || machine.is_some_and(|expected| value["machine_id"] != expected)
+        || value["range"] != json!({"from": payload["from"], "through": payload["through"]})
+        || value["revision"].as_u64().is_none()
+        || !value["generated_at"]
+            .as_f64()
+            .is_some_and(|at| at.is_finite() && at >= 0.0)
+        || !value["collection"].is_object()
+        || !value["coverage"].is_object()
+        || !value["buckets"].is_array()
+    {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
 pub fn fields(v: &Value, required: &[&str], optional: &[&str]) -> Result<()> {
     let o = v.as_object().ok_or(Error::BAD)?;
     if required.iter().any(|k| !o.contains_key(*k))
@@ -304,12 +391,33 @@ pub fn request(v: &Value) -> Result<()> {
     text(
         &v["session"],
         1024,
-        op == "archive_list"
+        op == "git_status"
+            || op == "analytics_read"
+            || op == "archive_list"
             || LAUNCH.contains(&op)
             || COMPUTER.contains(&op)
             || SPEECH.contains(&op),
     )?;
-    if op == "archive_list" {
+    if op == "git_status" {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        fields(p, &["request_id", "path"], &[])?;
+        let path = p["path"].as_str().ok_or(Error::BAD)?;
+        if p["request_id"] != id
+            || path.is_empty()
+            || path.len() > 4096
+            || !path.starts_with('/')
+            || path.chars().any(char::is_control)
+        {
+            return Err(Error::BAD);
+        }
+    } else if op == "analytics_read" {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        analytics_read(p)?;
+    } else if op == "archive_list" {
         if v["session"] != "" {
             return Err(Error::BAD);
         }
@@ -415,6 +523,7 @@ pub fn request(v: &Value) -> Result<()> {
     } else {
         let extras: &[&str] = match op {
             "send" => &["text", "attachments", "expected_compaction_id", "agent_id"],
+            "clear_context" => &["dismiss_prompt"],
             "voice_submit" => &["speech", "audio", "video", "message_id", "rejection"],
             "voice_status" | "voice_cancel" => &["message_id"],
             "answer" => &["question_id", "expected_question_hash", "answers"],
@@ -437,6 +546,7 @@ pub fn request(v: &Value) -> Result<()> {
             "rename" => &["new_name", "archive_id"],
             "fork" => &["tag", "archive_id"],
             "restore" | "forget" => &["archive_id"],
+            "remove_queued" => &["message_id"],
             "terminal_input" => &["terminal_binding_id", "text", "enter", "key"],
             "file_read" => &[
                 "path",
@@ -472,6 +582,7 @@ pub fn request(v: &Value) -> Result<()> {
                 "voice_submit",
                 "voice_status",
                 "voice_cancel",
+                "remove_queued",
             ]
             .contains(&op),
         )?;
@@ -515,6 +626,11 @@ pub fn request(v: &Value) -> Result<()> {
             }
             "voice_status" | "voice_cancel" => {
                 uuid(&p["message_id"], true)?;
+            }
+            "clear_context" => {
+                if p.get("dismiss_prompt").is_some_and(|v| !v.is_boolean()) {
+                    return Err(Error::BAD);
+                }
             }
             "send" => send(p)?,
             "answer" => {
@@ -585,6 +701,7 @@ pub fn request(v: &Value) -> Result<()> {
             "restore" => {
                 uuid(&p["archive_id"], true)?;
             }
+            "remove_queued" => queued_message(&p["message_id"])?,
             "terminal_input" => terminal(p)?,
             "attachment_read" => attachment_read(p)?,
             "file_read" => file_read(p)?,
@@ -600,6 +717,22 @@ pub fn request(v: &Value) -> Result<()> {
         json::size(v, 6 * MIB)?;
     } else if op != "send" {
         json::size(v, MIB)?;
+    }
+    Ok(())
+}
+/// The OpenCode message a `remove_queued` names: `msg_` and 1-124 ASCII
+/// letters, digits, `_` or `-`, as hgs and the connector check it
+/// (`tests/fixtures/opencode-queued-message-ids.json`). The computer decides
+/// whether it is still queued and was never delivered.
+fn queued_message(v: &Value) -> Result<()> {
+    let s = v.as_str().ok_or(Error::BAD)?;
+    if !(5..=128).contains(&s.len())
+        || !s.starts_with("msg_")
+        || !s
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+    {
+        return Err(Error::BAD);
     }
     Ok(())
 }

@@ -9,6 +9,7 @@ CREATE TABLE requests (
             delivered_at REAL, response_expired INTEGER NOT NULL DEFAULT 0
         );
 CREATE INDEX delivered_history ON requests(delivered,delivered_at);
+CREATE INDEX analytics_delivered_reads ON requests(delivered_at) WHERE operation='analytics_read' AND delivered=1 AND state!='running';
 CREATE INDEX terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running';
 CREATE INDEX archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running';
 CREATE INDEX file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running';

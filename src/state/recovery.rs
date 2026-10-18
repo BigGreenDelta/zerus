@@ -163,7 +163,9 @@ fn save_job(job: &Value) -> Result<()> {
         }
     }
     job["history"] = json!(history);
-    atomic(&job_path(string(&job, "name")), &job.to_string())
+    atomic(&job_path(string(&job, "name")), &job.to_string())?;
+    crate::analytics::adapters::recovery(&root(), &job);
+    Ok(())
 }
 fn seconds(v: &Value, key: &str) -> f64 {
     v[key].as_f64().unwrap_or(0.0)
@@ -534,7 +536,7 @@ fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
     {
         return Value::Null;
     }
-    let mut fresh = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"name":s["name"],
+    let mut fresh = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"name":s["name"],"agent":s["agent"],
         "identity":identity(s),"action":adapter(s),"attempt":0,"attempts":{},
         "schedules":(["service","rate_limit","session_limit","network"].into_iter().map(|k|(k,delays_for(p,k))).collect::<BTreeMap<_,_>>()),
         "session_limit_mode":p.session_limit_mode,
@@ -628,6 +630,7 @@ fn observe() -> Result<Vec<Value>> {
     Ok(snapshots)
 }
 fn tick() -> Result<()> {
+    crate::analytics::maintenance(&root());
     let mut sends = Vec::new();
     // Native inspection can wait on an agent. Never hold the global write lock
     // while collecting observations; delivery revalidates the exact failure.
