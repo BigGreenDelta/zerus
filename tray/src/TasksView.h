@@ -1,5 +1,6 @@
 #pragma once
 #include "TaskBoard.h"
+#include "TaskDrag.h"
 #include "TaskRow.h"
 #include <QHash>
 #include <QJsonObject>
@@ -75,7 +76,13 @@ signals:
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
+    // Drops on the stage tiles.
+    bool eventFilter(QObject *watched, QEvent *event) override;
 private:
+    // Drags a To do or Backlog row; the tiles and the session list take it.
+    void startDrag(TaskRow *row, const QPoint &hotSpot);
+    // The To do and Backlog tiles take a task of this project from the other list.
+    bool takesOnTile(const TaskDrag &drag, const QString &stage) const;
     void request(const QStringList &arguments, const QString &input, std::function<void(const QJsonObject &)> done,
                  std::function<void(const QString &)> failed = {});
     void received(const QJsonObject &listing, quint64 generation);

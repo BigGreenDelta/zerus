@@ -6,6 +6,8 @@
 #include "WorkspaceStyle.h"
 #include <QAbstractButton>
 #include <QDateTime>
+#include <QDrag>
+#include <QDropEvent>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QLabel>
@@ -38,6 +40,8 @@ public:
         setProperty("count", count); setAccessibleName(QStringLiteral("%1, %2").arg(TaskBoard::stageLabel(m_stage)).arg(count)); update();
     }
     void setColors(const TaskColors &colors) { m_colors = colors; update(); }
+    // A dashed outline while a dragged task would move here.
+    void setDropTarget(bool on) { if (property("dropTarget").toBool() != on) { setProperty("dropTarget", on); update(); } }
     QSize sizeHint() const override { return {120, 34}; }
 protected:
     void paintEvent(QPaintEvent *) override {
@@ -47,6 +51,9 @@ protected:
         const QColor edge = isChecked() ? alpha(color, 0.45) : underMouse() ? m_colors.border : Qt::transparent;
         p.setPen(edge.alpha() ? QPen(edge, 1) : Qt::NoPen); p.setBrush(fill);
         p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 9, 9);
+        if (property("dropTarget").toBool()) {
+            p.setPen(QPen(color, 2, Qt::DashLine)); p.setBrush(Qt::NoBrush); p.drawRoundedRect(QRectF(rect()).adjusted(3, 3, -3, -3), 7, 7);
+        }
         p.setPen(Qt::NoPen); p.setBrush(alpha(color, 0.18)); p.drawEllipse(QRectF(10, 6, 22, 22));
         workspaceIcon(TaskBoard::stageIcon(m_stage), color).paint(&p, QRect(14, 10, 14, 14));
         QFont count = font(); count.setPixelSize(15); count.setBold(true); p.setFont(count); p.setPen(m_colors.fg);
@@ -101,6 +108,7 @@ TasksView::TasksView(HgsClient *client, QWidget *parent) : QWidget(parent), m_cl
     auto *tiles = new QHBoxLayout; tiles->setSpacing(8);
     for (const auto &stage : TaskBoard::stages()) {
         auto *tile = new TaskTile(stage, this); m_tiles.insert(stage, tile); tiles->addWidget(tile, 1);
+        tile->setAcceptDrops(true); tile->installEventFilter(this);
         connect(tile, &QAbstractButton::clicked, this, [this, stage] { selectStage(stage); });
     }
     const auto square = [this](const QString &name) {
@@ -268,6 +276,7 @@ void TasksView::render() {
             row = new TaskRow(m_listHost); m_rows.insert(task.uuid, row);
             connect(row, &TaskRow::actionRequested, this, [this, row](TaskAction action) { act(row->task(), action); });
             connect(row, &TaskRow::opened, this, [this, row] { openTask(row->task()); });
+            connect(row, &TaskRow::dragStarted, this, [this, row](const QPoint &hotSpot) { startDrag(row, hotSpot); });
         }
         row->setObjectName(QStringLiteral("taskRow:") + task.id);
         TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session); state.anyNow = sessionLabel(m_host, m_session);
@@ -365,6 +374,43 @@ void TasksView::addTask(const QString &key, const QString &text) {
             [this, key, stage](const QJsonObject &) { m_composer->deliveryFinished(key, true); selectStage(stage); refresh(); },
             [this, key](const QString &error) { m_composer->deliveryFinished(key, false, error); emit notice(error, true); });
     });
+}
+
+void TasksView::startDrag(TaskRow *row, const QPoint &hotSpot) {
+    if (m_projectId.isEmpty()) return;
+    // A listing may replace the row while the drag runs; the drag carries the task.
+    QPointer<TaskRow> source(row);
+    auto *drag = new QDrag(this);
+    drag->setMimeData(TaskDrag::of(m_projectId, row->task()).mimeData());
+    drag->setPixmap(row->grab()); drag->setHotSpot(hotSpot);
+    row->setDragging(true);
+    drag->exec(Qt::MoveAction);
+    if (source) source->setDragging(false);
+}
+
+bool TasksView::takesOnTile(const TaskDrag &drag, const QString &stage) const {
+    const auto list = [](const QString &s) { return s == QLatin1String("todo") || s == QLatin1String("backlog"); };
+    return drag.projectId == m_projectId && list(stage) && list(drag.stage) && drag.stage != stage;
+}
+
+bool TasksView::eventFilter(QObject *watched, QEvent *event) {
+    const auto type = event->type();
+    if (type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::DragLeave && type != QEvent::Drop)
+        return QWidget::eventFilter(watched, event);
+    for (auto it = m_tiles.cbegin(); it != m_tiles.cend(); ++it) {
+        if (it.value() != watched) continue;
+        auto *tile = it.value();
+        if (type == QEvent::DragLeave) { tile->setDropTarget(false); return true; }
+        auto *drop = static_cast<QDropEvent *>(event);
+        const auto drag = TaskDrag::from(drop->mimeData());
+        const bool takes = drag && takesOnTile(*drag, it.key());
+        tile->setDropTarget(takes && type != QEvent::Drop);
+        if (!takes) { drop->ignore(); return true; }
+        drop->setDropAction(Qt::MoveAction); drop->accept();
+        if (type == QEvent::Drop) run({{withProject({"stage", drag->uuid, it.key()}), {}}});
+        return true;
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void TasksView::openTask(const TaskItem &task) {
