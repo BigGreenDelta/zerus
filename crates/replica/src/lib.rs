@@ -4,5 +4,11 @@
 mod error;
 pub mod ids;
 pub mod rank;
+mod schema;
+mod task;
 
 pub use error::{Error, Result};
+pub use schema::{
+    Actor, LogEntry, SessionKey, Stage, Target, TaskView, MAX_DOCUMENT, MAX_TEXT, SCHEMA,
+};
+pub use task::{NewTask, TaskDoc};
