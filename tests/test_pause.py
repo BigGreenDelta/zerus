@@ -249,7 +249,8 @@ class Harness(unittest.TestCase):
     def stop_report(self):
         """What still runs once a stop has missed its deadline, and where: the
         saved stop evidence, each process of the private panes, the fake
-        agents' Python stacks and, natively, what each process waits in.
+        agents' Python stacks, the host's load and, natively, what each
+        process waits in.
 
         Collection is bounded: each command has a timeout, the whole report a
         deadline and a size, and a step that fails says so instead of
@@ -399,6 +400,12 @@ class Harness(unittest.TestCase):
                 else:
                     lines.append(f"python in {pane[1]}: no stack on its terminal")
 
+        def host():
+            # How loaded the computer is as the native stacks are taken: a slow
+            # sample there is the collector's limit, not a lifecycle fault.
+            load = " ".join(f"{value:.2f}" for value in os.getloadavg())
+            lines.append(f"host: load {load} (1, 5, 15 min) on {os.cpu_count()} CPUs")
+
         def native(row):
             if not verified(row):
                 lines.append(f"native {row['pid']}: omitted, its process identity or pane changed")
@@ -421,6 +428,7 @@ class Harness(unittest.TestCase):
             step("processes", processes)
             step("signals", signal_agents)
             step("python stacks", python_stacks)
+            step("host", host)
             # Only the private panes' own processes: a listed path match is never sampled.
             for row in [row for row in state["owned"] if row["pid"] in state.get("descendants", ())][:STOP_REPORT_NATIVE]:
                 step(f"native stack {row['pid']}", lambda row=row: native(row))
@@ -1328,7 +1336,15 @@ exit $status
         self.assertIn("Stop diagnostics:", message)
         self.assertRegex(message, r"(?m)^process: " + pid + r" \d+ ")
         self.assertRegex(message, r"(?m)^python in %\d+: (Current thread|Thread) 0x.*line \d+ in <module>")
-        self.assertRegex(message, r"(?m)^stack " + pid + " " if sys.platform == "darwin" else r"(?m)^wchan " + pid + ": ")
+        self.assertRegex(message, r"(?m)^host: load \d+\.\d\d \d+\.\d\d \d+\.\d\d \(1, 5, 15 min\) on \d+ CPUs$")
+        if sys.platform != "darwin":
+            self.assertRegex(message, r"(?m)^wchan " + pid + ": ")
+            return
+        # The agent's native stack, or explicit evidence that Apple's sample did
+        # not finish within its own limit: a loaded runner can keep it longer.
+        # Neither replaces the failure; StopReportControls checks both exactly.
+        sampled = f"Command '['sample', '{pid}', '1', '-mayDie', '-file', '/dev/stdout']' timed out after 5 seconds"
+        self.assertRegex(message, rf"(?m)^(stack {pid} |unavailable: native stack {pid}: TimeoutExpired: {re.escape(sampled)}$)")
 
     def test_abandoned_pause_does_not_block_future_work(self):
         name = self.start()
@@ -3313,6 +3329,32 @@ class Migration(Harness):
 
 
 
+# What Apple's sample writes for a stopped Python agent, in its own layout: a
+# main and a second thread, each deeper than the six frames a report keeps.
+SAMPLED = """Sampling process 501 for 1 second with 1 millisecond of run time between samples
+Call graph:
+    868 Thread_54085961   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 868 start  (in dyld) + 6688  [0x1841ebe80]
+    +   868 Py_BytesMain  (in Python) + 40  [0x10398bdd8]
+    +     868 Py_RunMain  (in Python) + 524  [0x10398a2a4]
+    +       868 PyEval_EvalCode  (in Python) + 132  [0x1038a81f8]
+    +         868 _PyEval_EvalFrameDefault  (in Python) + 58912  [0x1038b8d1c]
+    +           868 time_sleep  (in Python) + 184  [0x103a046b4]
+    +             868 nanosleep  (in libsystem_c.dylib) + 220  [0x184457054]
+    +               868 __semwait_signal  (in libsystem_kernel.dylib) + 8,16  [0x184580308,0x184580310]
+    868 Thread_54085962
+      868 thread_start  (in libsystem_pthread.dylib) + 8  [0x1845bccec]
+        868 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1845c1d00]
+          868 pythread_wrapper  (in Python) + 48  [0x1039754b4]
+            868 thread_run  (in Python) + 160  [0x103a02f3c]
+              868 lock_PyThread_acquire_lock  (in Python) + 60  [0x103a00f0c]
+                868 _PySemaphore_Wait  (in Python) + 108  [0x1039475e8]
+                  868 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18458050c]
+
+Total number in stack (recursion counted multiple times):
+"""
+
+
 class StopReportControls(unittest.TestCase):
     """The stop report against mocked commands, each a small real child that
     prints what the command would: the report stays within its deadline and
@@ -3346,6 +3388,7 @@ class StopReportControls(unittest.TestCase):
                       "999": ("1", f"{python} {self.bin / 'claude'}")}
         self.executables = {"501": sorted(self.interpreters)[0], "504": "/synthetic/notpython"}
         self.identity, self.flood, self.pane_gone, self.kills, self.commands, self.children = {}, False, False, [], [], []
+        self.slow_sample = None
         real_kill = os.kill
         # Signals reach only the report's own command children; any other is recorded, not sent.
         def kill_child_or_record(pid, number):
@@ -3372,7 +3415,7 @@ class StopReportControls(unittest.TestCase):
         if argv[0] == str(self.bin / "tmux") and argv[1] == "capture-pane":
             return 'Current thread 0x1 (most recent call first):\n  File "claude", line 73 in <module>\n'
         if argv[0] == "sample":
-            return "Call graph:\n    9 Thread_1   DispatchQueue_1: fixture\n      9 frame  (in fixture) + 8\nTotal number in stack\n"
+            return SAMPLED
         return ""
 
     def spawn(self, argv, **options):
@@ -3381,7 +3424,7 @@ class StopReportControls(unittest.TestCase):
         if argv[0] == str(HGS):
             code = ["import sys; sys.stderr.write(sys.argv[1]); sys.exit(1)",
                     "hgs: claude/p/one: agent did not exit after SIGTERM (no forced kill was sent)\n"]
-        elif self.hang:
+        elif self.hang or argv[0] == "sample" and argv[1] == self.slow_sample:
             code = ["import time; time.sleep(60)"]
         elif argv[0] == "sample" and self.flood:
             block = "".join(f"    9 Thread_{index}   DispatchQueue_1: fixture\n" + "      9 frame  (in fixture) + 8\n" * 40
@@ -3409,7 +3452,8 @@ class StopReportControls(unittest.TestCase):
             return real_realpath(path, *args, **options)
         with mock.patch.object(subprocess, "Popen", side_effect=self.spawn), mock.patch.object(sys, "platform", platform), \
                 mock.patch("builtins.open", side_effect=proc_open), mock.patch.object(os.path, "realpath", side_effect=proc_realpath), \
-                mock.patch.object(time, "sleep"):
+                mock.patch.object(time, "sleep"), mock.patch.object(os, "getloadavg", return_value=(5.5, 4.25, 3.0)), \
+                mock.patch.object(os, "cpu_count", return_value=3):
             return self.stop_report()
 
     def sampled(self):
@@ -3457,6 +3501,39 @@ class StopReportControls(unittest.TestCase):
         self.assertIn("/proc/500/wchan", self.proc)
         self.assertIn("python 504: not signalled, it does not run the fixture's Python", report)
         self.assertEqual(self.kills, [])
+
+    def test_a_sample_past_its_limit_stays_explicit_bounded_evidence(self):
+        # The agent's sample outlasts its limit, as on a loaded runner: the report
+        # says so, stops that sampler and still stacks every other process.
+        self.slow_sample = "501"
+        started = time.monotonic()
+        report = self.report()
+        self.assertGreaterEqual(time.monotonic() - started, 5)
+        # The host's load comes before the stacks it explains.
+        self.assertIn("\nhost: load 5.50 4.25 3.00 (1, 5, 15 min) on 3 CPUs\nstack 500 ", report)
+        self.assertIn("unavailable: native stack 501: TimeoutExpired: Command '['sample', '501', '1', '-mayDie', "
+                      "'-file', '/dev/stdout']' timed out after 5 seconds", report)
+        self.assertNotRegex(report, r"(?m)^stack 501 ")
+        for pid in ("500", "502", "503", "504"):
+            # The innermost six frames of each thread, innermost first.
+            self.assertIn(f"stack {pid} 868 Thread_54085961   DispatchQueue_1: com.apple.main-thread: "
+                          "+               868 __semwait_signal  (in libsystem_kernel.dylib) + 8,16  [0x184580308,0x184580310]"
+                          " <- +             868 nanosleep  (in libsystem_c.dylib) + 220  [0x184457054]"
+                          " <- +           868 time_sleep  (in Python) + 184  [0x103a046b4]"
+                          " <- +         868 _PyEval_EvalFrameDefault  (in Python) + 58912  [0x1038b8d1c]"
+                          " <- +       868 PyEval_EvalCode  (in Python) + 132  [0x1038a81f8]"
+                          " <- +     868 Py_RunMain  (in Python) + 524  [0x10398a2a4]\n", report)
+            self.assertIn(f"stack {pid} 868 Thread_54085962: 868 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18458050c]"
+                          " <- 868 _PySemaphore_Wait  (in Python) + 108  [0x1039475e8]"
+                          " <- 868 lock_PyThread_acquire_lock  (in Python) + 60  [0x103a00f0c]"
+                          " <- 868 thread_run  (in Python) + 160  [0x103a02f3c]"
+                          " <- 868 pythread_wrapper  (in Python) + 48  [0x1039754b4]"
+                          " <- 868 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1845c1d00]", report)
+        self.assertNotIn("<- 868 thread_start", report)
+        self.assertIn("python in %0: Current thread 0x1", report)
+        slow = [child for argv, child in zip(self.commands, self.children) if argv[:2] == ["sample", "501"]]
+        self.assertEqual([child.wait(timeout=5) for child in slow], [-signal.SIGKILL])
+        self.assertEqual(self.kills, [(501, signal.SIGUSR1)])
 
     def test_a_closed_pane_stops_signals_and_stacks(self):
         self.pane_gone = True
