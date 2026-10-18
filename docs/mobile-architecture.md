@@ -566,6 +566,13 @@ The connector advertises the node feature `accounts_snapshot` and adds
 identified by the workspace, computer, provider and native account ID. Each row
 contains `id`, `provider`, `label`, `native`, `installed`, `is_default` and
 `usage`. This viewer never signs in, changes credentials or edits accounts.
+OpenCode rows add `catalog_state` (`ready`, `loading`, `not_running`,
+`disabled`, `incompatible` or `unreachable`), a bounded `catalog_reason` and,
+when it is not installed, `install_reason`. Each OpenCode `model_options` entry
+may add `provider_label`, `free`, and up to eight `effort_options` with
+`effort_labels` in the same order. All fields are additive and appear only when
+the computer reports them; the whole projection stays within 128 KiB (over the bound, `effort_labels` and
+then `effort_options` are dropped before the projection is refused).
 An unavailable catalog can indicate an older native CLI; it is not an empty
 list of verified accounts.
 
@@ -926,6 +933,22 @@ as `desktop_presence`.
 Both relay capabilities and the computer snapshot's
 `mobile_capabilities` must advertise an extension before the phone uses it.
 
+The Rust connector adds the feature `opencode_launch_effort` (never advertised by
+the legacy Python connector). A phone sends the optional `effort` string in a
+`launch` payload only for OpenCode, with a `model` whose current account
+projection lists that effort in its `effort_options`; the connector re-checks it
+against a fresh `hgs account ls` and passes `--effort`, otherwise the launch fails
+with `effort is not offered for this model` before anything starts. For any other
+agent the field is refused as an unknown field, as before. A `settings` change for
+an `opencode/` session is checked the same way against the target model's
+`effort_options` in the session's own inspection instead of the fixed list.
+The connector also accepts a `remove_queued` session action carrying an exact
+`msg_` `message_id`, run and conversation identity and journals it like other
+session actions, and an in-flight one recovers as uncertain after a restart.
+It is currently unreachable from phones and relay clients: the relay operation
+set does not list it, so the relay rejects it and the connector does not
+advertise it. Phones do not offer it in phase 1.
+
 Legacy live `inspect` accepts an empty payload; an archive supplies its canonical
 `archive_id`. The `inspect_after` and `inspect_agent` features add a journal
 cursor or exact child ID, together with the expected parent run and conversation.
@@ -933,6 +956,10 @@ Child history retains its own identity and never replaces the parent's draft or
 fresh control state. Inspect returns native `hgs inspect` JSON; bounded public
 history may be omitted as whole rows with explicit truncation metadata, while
 question disclosures and other control metadata remain intact.
+OpenCode events keep `delivery_state` (`queued` or `not_delivered`, with
+`message_id`) and `streaming`, and its question cards keep `input_kind`,
+`min_length`, `max_length`, `min_items`, `max_items`, `default_option_ids`,
+`can_answer`, `answerable` and `unavailable_reason` unchanged.
 
 Mutations carry the corresponding existing `hgs --json` input, with the same
 `request_id` as the envelope. Queue promotion pins the native queue fingerprint.

@@ -204,4 +204,36 @@ mod tests {
             json::python_default_len(&receipt, true).unwrap()
         );
     }
+
+    #[test]
+    fn opencode_delivery_streaming_and_question_fields_pass_through_unchanged() {
+        let queued = json!({"type": "UserPromptSubmit", "delivery_state": "not_delivered",
+                            "message_id": "msg_01", "detail": "queued text", "at": 1000});
+        let streaming = json!({"type": "AssistantMessage", "streaming": true, "at": 1001,
+                               "detail": "partial"});
+        let card = json!({"kind": "opencode_form", "can_answer": false, "answerable": false,
+            "unavailable_reason": "Answer this form in OpenCode",
+            "questions": [{"id": "q1", "input_kind": "text", "min_length": 1, "max_length": 80,
+                           "min_items": 1, "max_items": 2, "default_option_ids": ["a"],
+                           "options": [{"id": "a", "label": "A", "description": ""}]}]});
+        let build = |padding: usize| {
+            let mut rows = vec![queued.clone(), streaming.clone()];
+            rows.extend((0..padding).map(
+                |index| json!({"type": "AssistantMessage", "at": index, "detail": "x".repeat(100)}),
+            ));
+            json!({"name": "s", "events": rows, "pending_questions": [card.clone()]})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        // Within the bound nothing changes at all.
+        let small = build(0);
+        assert_eq!(bound_inspection(small.clone(), 1 << 20).unwrap(), small);
+        // Over the bound whole oldest rows go; kept rows and cards are exact.
+        let bounded = bound_inspection(build(40), 3000).unwrap();
+        assert_eq!(bounded["pending_questions"], json!([card]));
+        let events = bounded["events"].as_array().unwrap();
+        assert!(events.len() < 42);
+        assert!(events.contains(&queued) && events.contains(&streaming));
+    }
 }

@@ -341,7 +341,24 @@ pub fn validate(operation: &str, payload: Option<&Value>, request_id: &str) -> P
         "directory_create" => &["request_id", "path"],
         _ => &["request_id", "agent", "directory", "tag"],
     };
-    let extras: &[&str] = if operation == "launch" {
+    // `effort` is additive and only OpenCode takes it; any other agent keeps
+    // the unknown-field refusal.
+    let opencode = payload
+        .and_then(|payload| payload.get("agent"))
+        .is_some_and(|agent| agent == "opencode");
+    let extras: &[&str] = if operation == "launch" && opencode {
+        &[
+            "account_id",
+            "model",
+            "effort",
+            "swarm_id",
+            "project_id",
+            "project_folder_id",
+            "add_folder",
+            "worktree_folder_id",
+            "worktree_common_dir",
+        ]
+    } else if operation == "launch" {
         &[
             "account_id",
             "model",
@@ -406,6 +423,16 @@ fn validate_launch(payload: &Map<String, Value>) -> PyResult<()> {
             return Err(invalid(
                 "model selection requires the native OpenCode account and provider/model",
             ));
+        }
+    }
+    if let Some(effort) = payload.get("effort") {
+        let effort = bounded(Some(effort), 64, false)?;
+        if !payload.contains_key("model")
+            || !effort
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+        {
+            return Err(invalid("effort requires a model and a valid effort"));
         }
     }
     if has("worktree_folder_id") || has("worktree_common_dir") {
@@ -587,6 +614,20 @@ impl<N: Native + 'static> Connector<N> {
             if !offered {
                 return Err(Failure::text(MODEL_WITHDRAWN));
             }
+            if let Some(effort) = payload.get("effort") {
+                let efforts = rows.iter().find(selected).is_some_and(|row| {
+                    row.get("model_options")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter(|option| py_eq(&option["value"], model))
+                        .filter_map(|option| option.get("effort_options")?.as_array())
+                        .any(|efforts| efforts.iter().any(|known| py_eq(known, effort)))
+                });
+                if !efforts {
+                    return Err(Failure::text(crate::mutations::EFFORT_NOT_OFFERED));
+                }
+            }
         }
         let directory = self
             .call(Call::new(["dirs", text("directory")]).timeout(CATALOG_TIMEOUT))
@@ -623,6 +664,9 @@ impl<N: Native + 'static> Connector<N> {
         }
         if payload.get("model").is_some() {
             argv.extend(["--model", text("model")]);
+        }
+        if payload.get("effort").is_some() {
+            argv.extend(["--effort", text("effort")]);
         }
         self.native(Call::new(argv).timeout(LAUNCH_TIMEOUT).text())
             .await?;

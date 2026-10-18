@@ -42,6 +42,7 @@ pub const OPERATIONS: &[&str] = &[
     "pause",
     "process_stop",
     "recovery_action",
+    "remove_queued",
     "rename",
     "restore",
     "resume",
@@ -82,6 +83,7 @@ const BASE64_CHUNK: usize = 65536;
 pub const INVALID_SEND: &str = "invalid or oversized inline attachment/message";
 pub const DELIVERY_UNAVAILABLE: &str =
     "the shared delivery setting is changed on the gateway computer with a current hgs";
+pub const EFFORT_NOT_OFFERED: &str = "effort is not offered for this model";
 const CONTEXT_IDENTITY: &str = "fresh native context identity did not match";
 const NOT_COMPACTED: &str =
     "compaction is not confirmed for this conversation; message was not sent";
@@ -183,8 +185,89 @@ pub fn validate(operation: &str, payload: &Value, request_id: &str) -> Result<()
         "compact_context" | "clear_context" => validate_context(payload, request_id),
         "send_now" | "settings" | "process_stop" => validate_core(operation, payload, request_id),
         "send" => validate_send(payload),
+        "remove_queued" => validate_remove_queued(payload, request_id),
         _ if LIFECYCLE.contains(&operation) => validate_lifecycle(operation, payload, request_id),
         _ => Ok(()),
+    }
+}
+
+/// `settings` for an OpenCode session: the model's own `effort_options` decide
+/// the effort, so the fixed list does not apply. Any other session keeps the
+/// fixed list.
+pub fn validate_for_session(
+    operation: &str,
+    session: &str,
+    payload: &Value,
+    request_id: &str,
+) -> Result<(), String> {
+    if operation == "settings" && session.starts_with("opencode/") {
+        return validate_core_with(operation, payload, request_id, true);
+    }
+    validate(operation, payload, request_id)
+}
+
+/// An OpenCode effort must be one of the target model's `effort_options` in
+/// the session's own model catalog. An empty effort selects the default.
+pub fn opencode_effort_offered(
+    detail: &Map<String, Value>,
+    payload: &Value,
+) -> Result<(), Failure> {
+    let Some(effort) = payload
+        .get("effort")
+        .and_then(Value::as_str)
+        .filter(|effort| !effort.is_empty())
+    else {
+        return Ok(());
+    };
+    let model = payload
+        .get("model")
+        .or_else(|| detail.get("settings_model"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let offered = !model.is_empty()
+        && detail
+            .get("model_options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|option| {
+                ["id", "value"]
+                    .iter()
+                    .any(|key| option.get(*key).and_then(Value::as_str) == Some(model))
+            })
+            .filter_map(|option| option.get("effort_options").and_then(Value::as_array))
+            .any(|efforts| {
+                efforts
+                    .iter()
+                    .any(|offered| offered.as_str() == Some(effort))
+            });
+    if offered {
+        Ok(())
+    } else {
+        Err(Failure::text(EFFORT_NOT_OFFERED))
+    }
+}
+
+/// `remove_queued`: scoped identity plus one exact `msg_` message identity.
+pub fn validate_remove_queued(payload: &Value, request_id: &str) -> Result<(), String> {
+    if !scoped(payload, request_id, &["message_id"], &["message_id"], true) {
+        return Err(text("invalid scoped native operation fields"));
+    }
+    bounded(payload.get("expected_run_id"), 128, false).map_err(value_error)?;
+    bounded(payload.get("expected_conversation_id"), 256, false).map_err(value_error)?;
+    let valid = payload
+        .get("message_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| {
+            id.len() <= 128
+                && id.len() > "msg_".len()
+                && id.starts_with("msg_")
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(text("invalid native message identity"))
     }
 }
 
@@ -233,6 +316,25 @@ pub fn validate_context(payload: &Value, request_id: &str) -> Result<(), String>
 
 /// `context.validate_core` for send_now, settings and process_stop.
 pub fn validate_core(operation: &str, payload: &Value, request_id: &str) -> Result<(), String> {
+    validate_core_with(operation, payload, request_id, false)
+}
+
+/// An OpenCode effort is a bounded variant identifier, checked against the
+/// model's offered `effort_options` before the write.
+fn opencode_effort(effort: &str) -> bool {
+    effort.is_empty()
+        || (effort.len() <= 64
+            && effort
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b)))
+}
+
+fn validate_core_with(
+    operation: &str,
+    payload: &Value,
+    request_id: &str,
+    opencode: bool,
+) -> Result<(), String> {
     let extras: &[&str] = match operation {
         "send_now" => &["queue_id"],
         "settings" => &["model", "effort", "expected_pending_id"],
@@ -274,10 +376,14 @@ pub fn validate_core(operation: &str, payload: &Value, request_id: &str) -> Resu
                 }
             }
             if let Some(effort) = payload.get("effort") {
-                if !effort
-                    .as_str()
-                    .is_some_and(|effort| EFFORTS.contains(&effort))
-                {
+                let allowed = |effort: &str| {
+                    if opencode {
+                        opencode_effort(effort)
+                    } else {
+                        EFFORTS.contains(&effort)
+                    }
+                };
+                if !effort.as_str().is_some_and(allowed) {
                     return Err(text("invalid native effort"));
                 }
             }
@@ -623,6 +729,9 @@ impl<N: Native + 'static> Connector<N> {
                 if !is_true(detail.get("settings_change_supported")) {
                     return Err(Failure::text("native per-session settings are unavailable"));
                 }
+                if session.starts_with("opencode/") {
+                    opencode_effort_offered(detail, payload)?;
+                }
                 if let Some(expected) = payload.get("expected_pending_id") {
                     if !py_eq(get(detail, "pending_settings_id"), expected) {
                         return Err(Failure::text(
@@ -829,6 +938,17 @@ impl<N: Native + 'static> Connector<N> {
             )?
         {
             return Err(Failure::text(LIFECYCLE_MISMATCH));
+        }
+        // An acknowledgement without `message_id` is accepted: hgs echoes it
+        // only for actions that carry one, and the request, name, run and
+        // conversation identity above already bind the receipt. A present
+        // but different `message_id` is refused.
+        if let Some(message) = payload.get("message_id") {
+            if !py_eq(result.get("message_id").unwrap_or(message), message) {
+                return Err(Failure::text(
+                    "native lifecycle message identity did not match",
+                ));
+            }
         }
         if let Some(archive) = payload.get("archive_id") {
             if !py_eq(result.get("archive_id").unwrap_or(archive), archive) {
@@ -1098,5 +1218,91 @@ mod tests {
             assert!(validate_delivery(Some(&payload)).is_err(), "{payload}");
         }
         assert!(validate_delivery(None).is_err());
+    }
+
+    fn scoped_payload(extra: Value) -> Value {
+        let mut payload = json!({"request_id": "r", "expected_run_id": "run",
+                                 "expected_conversation_id": "conversation"});
+        for (key, value) in extra.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        payload
+    }
+
+    #[test]
+    fn remove_queued_needs_one_exact_message_identity() {
+        let check = |extra: Value| validate("remove_queued", &scoped_payload(extra), "r");
+        assert_eq!(check(json!({"message_id": "msg_abc123"})), Ok(()));
+        assert!(check(json!({"message_id": "msg_".to_owned() + &"a".repeat(124)})).is_ok());
+        for bad in [
+            json!({}),
+            json!({"message_id": ""}),
+            json!({"message_id": "msg_"}),
+            json!({"message_id": "abc123"}),
+            json!({"message_id": "msg_a b"}),
+            json!({"message_id": "msg_/x"}),
+            json!({"message_id": 7}),
+            json!({"message_id": "msg_".to_owned() + &"a".repeat(125)}),
+            json!({"message_id": "msg_a", "text": "x"}),
+        ] {
+            assert!(check(bad.clone()).is_err(), "{bad}");
+        }
+        // Run and conversation identity are exact and required.
+        let mut payload = scoped_payload(json!({"message_id": "msg_a"}));
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_conversation_id");
+        assert!(validate("remove_queued", &payload, "r").is_err());
+        payload["expected_conversation_id"] = json!("");
+        assert!(validate("remove_queued", &payload, "r").is_err());
+        assert!(LIFECYCLE.contains(&"remove_queued") && handles("remove_queued"));
+    }
+
+    #[test]
+    fn an_opencode_effort_is_checked_against_the_model_not_the_fixed_list() {
+        let settings = |effort: &str| scoped_payload(json!({"effort": effort}));
+        let accepts = |session: &str, effort: &str| {
+            validate_for_session("settings", session, &settings(effort), "r").is_ok()
+        };
+        // A variant outside the fixed list is fine for OpenCode only.
+        assert!(accepts("opencode/p/t", "thinking-8k"));
+        assert!(accepts("opencode/p/t", ""));
+        assert!(!accepts("codex/p/t", "thinking-8k"));
+        assert!(accepts("codex/p/t", "high"));
+        for bad in ["a b", "x/y", &"a".repeat(65)] {
+            assert!(!accepts("opencode/p/t", bad), "{bad}");
+        }
+        let detail = json!({"settings_model": "fixture/local", "model_options": [
+            {"id": "fixture/local", "effort_options": ["low", "high"]},
+            {"id": "fixture/other", "effort_options": []}]});
+        let detail = detail.as_object().unwrap();
+        let offered = |extra: Value| opencode_effort_offered(detail, &scoped_payload(extra));
+        assert!(offered(json!({"effort": "high"})).is_ok());
+        assert!(offered(json!({"model": "fixture/local", "effort": "low"})).is_ok());
+        assert!(offered(json!({"effort": ""})).is_ok());
+        assert!(offered(json!({"model": "fixture/local"})).is_ok());
+        // No current model and no model in the request: nothing is offered.
+        let bare = json!({"settings_model": "", "model_options": [
+            {"id": "", "effort_options": ["high"]}]});
+        assert!(opencode_effort_offered(
+            bare.as_object().unwrap(),
+            &scoped_payload(json!({"effort": "high"}))
+        )
+        .is_err());
+        let missing =
+            json!({"model_options": [{"id": "fixture/local", "effort_options": ["high"]}]});
+        assert!(opencode_effort_offered(
+            missing.as_object().unwrap(),
+            &scoped_payload(json!({"effort": "high"}))
+        )
+        .is_err());
+        for bad in [
+            json!({"effort": "ultra"}),
+            json!({"model": "fixture/other", "effort": "low"}),
+            json!({"model": "fixture/missing", "effort": "low"}),
+        ] {
+            assert!(offered(bad.clone()).is_err(), "{bad}");
+        }
     }
 }
