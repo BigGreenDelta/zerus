@@ -326,7 +326,9 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
             None => return Ok(None),
         },
     }
-    if let Some(approval)=claude_approval::current(record){cards.push(approval);}
+    // Only a listing may fit a clipped approval into its unviewed pane.
+    let approval=if deadline.is_none() {claude_approval::listed(record)} else {claude_approval::current(record)};
+    if let Some(approval)=approval{cards.push(approval);}
     if let Some(mode) = claude_permission::current(record) {
         cards.push(mode);
     }
@@ -608,6 +610,14 @@ fn log_answer(record: &Value, question: &Value, response: &Value) -> Result<()> 
     )
 }
 
+/// The lock every answer to run `run_id` holds while it drives the terminal.
+/// Fitting a clipped panel (`question_terminal::fit_unviewed`) takes it too.
+pub(super) fn answer_lock(run_id: &str) -> Result<PathBuf> {
+    Ok(absolute_root()?
+        .join("question_locks")
+        .join(format!("{:x}.lock", Sha256::digest(run_id.as_bytes()))))
+}
+
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs answer <session> --json (JSON from stdin)".into());
@@ -640,11 +650,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     // Serialize all answers to this run, including requests arriving through
     // different hosts or carrying different UUIDs. Provider hooks never take
     // this lock, and must remain free to acknowledge completion.
-    let question_lock = absolute_root()?.join("question_locks").join(format!(
-        "{:x}.lock",
-        Sha256::digest(request.expected_run_id.as_bytes())
-    ));
-    let _answer_guard = lock(Some(&question_lock))?;
+    let _answer_guard = lock(Some(&answer_lock(&request.expected_run_id)?))?;
     // Only the preparation is locked. Awaiting the UI must not block provider
     // hooks which confirm the very answer that we are waiting for.
     let (record, question, answers, mut receipt) = {

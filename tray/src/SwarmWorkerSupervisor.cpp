@@ -99,6 +99,8 @@ void SwarmWorkerSupervisor::launch()
     // startup, and when it does so before this assignment, the job assigned here
     // becomes part of that worker's job tree for good. A reused job then refuses
     // every later worker (ERROR_ACCESS_DENIED), and those would outlive the tray.
+    // It forbids breakaway, so the worker must never create a session: a host it
+    // started would stop in this job and be refused (D4). It only syncs catalogs.
     if (HANDLE job = CreateJobObjectW(nullptr, nullptr)) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;

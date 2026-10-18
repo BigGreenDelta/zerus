@@ -626,9 +626,10 @@ Terminal snapshot results expire 120 seconds after entering a completed, failed
 or uncertain relay state.
 Abandoned claims first become uncertain through claim expiry or relay restart,
 then expire on the same schedule. Durable input attempt identities remain.
-Authenticated role/IP limits allow
-2,400 requests per minute for interactive reads, with a separate global limit
-of 6,000 and unchanged invitation limits. Terminal remains capability-gated for
+The relay allows each credential
+2,400 authenticated requests per minute, admits work through bounded lanes and
+keeps its invitation limits; global and per-address limits belong to the reverse
+proxy (see [Mobile deployment](mobile-deployment.md)). Terminal remains capability-gated for
 unsupported native adapters, archived sessions and child activity views.
 
 ### Conversation history and composition
@@ -1064,7 +1065,9 @@ to snapshots, as `mobile_attention` items `{question_id, question_hash}`; an
 optional Codex async question also carries `optional: true`, and blocking items
 never carry the key. The relay treats both alike, so the phone decides whether
 an optional item notifies: Android announces optional-only sessions only with its
-off-by-default Optional questions switch, once per question ID. With many live Codex sessions, these alerts can lag
+off-by-default Optional questions switch, once per question ID. As on the
+desktop, optional items never count as attention in Android's status, filters or
+counters. With many live Codex sessions, these alerts can lag
 by a complete scan cycle; ordinary native attention phases arrive with the next
 heartbeat.
 

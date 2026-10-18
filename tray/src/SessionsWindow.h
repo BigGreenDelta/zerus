@@ -178,6 +178,7 @@ private:
     // Opens a session file like a browser download; see ExternalFile.h.
     void openExternalFile(const QString &path, bool otherMachine);
     void jumpToLatestActivity(QListWidgetItem *item);
+    void copySessionIdentity();
     void openSession();
     void changeSession();
     // Spec D5: asks before resuming or restoring this selected session starts its
@@ -368,6 +369,9 @@ private:
     // the listing or inspect shows the session leave Ready (`rearmed`).
     struct ScheduledSettings { QByteArray identity; bool rearmed = false; };
     QHash<QString, ScheduledSettings> m_scheduledSettings;
+    // The selected session's inspection was already running when a settings
+    // receipt arrived: its reply shows the settings from before the change.
+    QSet<QString> m_inspectionBehindSettings;
     QByteArray m_settingsIdentity; // The automatic apply in flight.
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
     // Polls keep hidden pages' data current; these pages render when shown.
@@ -434,8 +438,8 @@ private:
     void refreshAccountUsage(bool force = false);
     void renderAccountUsage();
     void updateDashboardAccounts(bool request = false, bool force = false);
-    QPushButton *m_open, *m_shell, *m_fileManager, *m_pause, *m_more;
-    QAction *m_renameAction, *m_forkAction, *m_clearAction, *m_freshAction, *m_archiveAction, *m_forgetAction;
+    QPushButton *m_shell, *m_fileManager, *m_copyHeaderId, *m_clear, *m_restore, *m_more;
+    QAction *m_renameAction, *m_forkAction, *m_openAction, *m_changeAction, *m_freshAction, *m_archiveAction, *m_forgetAction;
     QAction *m_markAllReadAction = nullptr;
     QMenu *m_sessionMenu;
     QTextBrowser *m_children = nullptr, *m_info = nullptr;

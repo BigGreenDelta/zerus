@@ -214,6 +214,9 @@ public:
                            const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {}, const QString &discardFingerprint = {});
     quint64 requestDirectories(const QString &host, const QString &path, bool hidden = false);
     quint64 createDirectory(const QString &host, const QString &path);
+    // Whether an inspection of this session is running; one at a time per session.
+    bool inspectionInFlight(const QString &host, const QString &name, const QString &archiveId = QString()) const
+    { return m_inspectionsInFlight.contains(host + QLatin1Char('\n') + name + QLatin1Char('\n') + archiveId); }
     bool requestInspection(const QString &host, const QString &name, qint64 after = 0, const QString &archiveId = {}, bool includeProcesses = true);
     quint64 requestProcess(const QString &host, const QString &name, const QString &processId, const QString &run,
                            const QString &conversation, const QString &archive, const QString &generation, bool stop = false);

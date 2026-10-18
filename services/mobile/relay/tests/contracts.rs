@@ -809,10 +809,8 @@ async fn budgets_reserve_results_and_release_on_expiry() {
     .await;
     let b = f.command("send");
     f.submit(&b).await.unwrap();
-    assert_eq!(
-        f.submit(&f.command("send")).await.unwrap_err().0.as_u16(),
-        429
-    );
+    let full = f.submit(&f.command("send")).await.unwrap_err();
+    assert_eq!((full.0.as_u16(), full.1), (429, "workspace queue is full"));
     f.store
         .db
         .exec(
@@ -830,6 +828,27 @@ async fn budgets_reserve_results_and_release_on_expiry() {
     );
     f.submit(&f.command("send")).await.unwrap();
     f.check_accounting().await;
+    f.close().await;
+}
+#[tokio::test]
+async fn retained_request_counts_name_their_own_limit() {
+    let f = Fixture::new().await;
+    // A workspace at its retained read limit still takes mutations, and the
+    // phone is told which limit it reached rather than that the relay is busy.
+    f.store
+        .db
+        .exec(
+            "UPDATE workspace_usage SET reads=5000 WHERE workspace_id=?",
+            args![&f.phone.workspace],
+        )
+        .await
+        .unwrap();
+    let limit = f.submit(&f.command("inspect")).await.unwrap_err();
+    assert_eq!(
+        (limit.0.as_u16(), limit.1),
+        (429, "workspace retained request limit reached")
+    );
+    f.submit(&f.command("send")).await.unwrap();
     f.close().await;
 }
 #[tokio::test]
@@ -2707,7 +2726,7 @@ async fn http_rate_and_lane_refusals_are_answered_after_bounded_drain() {
 
 #[tokio::test]
 async fn http_streamed_body_over_limit_releases_lane_before_bounded_drain() {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let f = Fixture::new().await;
     let app = App::new(f.store.clone()).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2741,8 +2760,19 @@ async fn http_streamed_body_over_limit_releases_lane_before_bounded_drain() {
     // A stream that stops after crossing the cap is answered at the discard
     // deadline. Its discard no longer holds the sole large payload lane: an
     // unknown-length upload is admitted meanwhile and fails only as JSON.
+    // Linux loopback buffers this whole upload before the relay reads it, so
+    // finishing the writes does not prove admission and a probe could take
+    // the lane first, refusing the stalled stream as busy. The relay sends
+    // 100 Continue only when it first reads the body, after admission.
     let mut stalled = tokio::net::TcpStream::connect(address).await.unwrap();
-    stalled.write_all(head.as_bytes()).await.unwrap();
+    let expect = head.replace("\r\n\r\n", "\r\nExpect: 100-continue\r\n\r\n");
+    stalled.write_all(expect.as_bytes()).await.unwrap();
+    let mut interim = [0u8; 25];
+    tokio::time::timeout(Duration::from_secs(10), stalled.read_exact(&mut interim))
+        .await
+        .expect("the relay admits the stalled stream")
+        .unwrap();
+    assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
     for _ in 0..17 {
         stalled.write_all(&piece).await.unwrap();
     }

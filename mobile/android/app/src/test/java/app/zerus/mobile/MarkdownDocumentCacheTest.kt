@@ -115,6 +115,8 @@ class MarkdownDocumentCacheTest {
         try {
             cache.document("a"); cache.document("b"); cache.document("a"); cache.document("c")
             assertEquals(2, cache.snapshot().first)
+            // A finished request leaves no flight behind for an evicted source to join.
+            assertEquals(0, cache.inFlightCount())
             cache.document("b")
             assertEquals(4, calls.get())
         } finally { cache.close() }
@@ -129,7 +131,10 @@ class MarkdownDocumentCacheTest {
         try {
             cache.document("a"); cache.document("b")
             assertEquals(1 to 8L, cache.snapshot())
-            cache.document("large"); cache.document("large")
+            cache.document("large")
+            // Not retained, and not joinable either: the next request parses it again.
+            assertEquals(0, cache.inFlightCount())
+            cache.document("large")
             assertEquals(4, calls.get())
             assertEquals(1 to 8L, cache.snapshot())
         } finally { cache.close() }

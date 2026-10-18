@@ -2,7 +2,6 @@
 #include "SpeechClient.h"
 #include "SpeechRecorder.h"
 #include "RoundVideo.h"
-#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QThreadPool>
 #include <QRunnable>
@@ -53,9 +52,12 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
 {
     m_recorder->setParent(this);
     m_voice=new ToolbarChip;m_voice->setObjectName("voiceRecord");m_voice->setIconName("microphone");
+    // Keep the switch icon-only at every toolbar width; update() supplies its accessible name.
+    m_mode=new ToolbarChip;m_mode->setObjectName("voiceMode");m_mode->setTone(ChipTone::Quiet);
     m_cancel=new ToolbarChip;m_cancel->setObjectName("voiceCancel");m_cancel->setIconName("close");m_cancel->setLabels(tr("Cancel recording"),tr("Cancel"));
     m_result=new ToolbarChip;m_result->setObjectName("voiceResult");m_result->setIconName("microphone");
     composer->toolbar()->add(ComposerToolbar::Slot::Voice,m_voice);
+    composer->toolbar()->add(ComposerToolbar::Slot::VoiceMode,m_mode);
     composer->toolbar()->add(ComposerToolbar::Slot::VoiceCancel,m_cancel);
     composer->toolbar()->add(ComposerToolbar::Slot::VoiceResult,m_result);
     m_preview=new QWidget(composer);m_preview->setObjectName("voicePreview");
@@ -85,10 +87,11 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
     m_stopPreview=new QPushButton(tr("Stop and preview"),composer);m_stopPreview->setObjectName("voiceStopPreview");
     qobject_cast<QVBoxLayout *>(composer->layout())->insertWidget(0,m_stopPreview,0,Qt::AlignLeft);
     connect(m_stopPreview,&QPushButton::clicked,this,&SpeechComposer::stopRecording);
-    m_holdTimer=new QTimer(this);m_holdTimer->setSingleShot(true);m_holdTimer->setInterval(200);
-    connect(m_holdTimer,&QTimer::timeout,this,[this]{if(m_pressed){m_locked=false;start();}});
-    // Keyboard/accessibility activation starts locked; physical presses use the Telegram gesture below.
-    connect(m_voice,&QPushButton::clicked,this,[this]{if(m_state==State::Recording)requestSendRecording();else{m_locked=true;start();}});
+    connect(m_voice,&QPushButton::clicked,this,[this]{if(m_state==State::Recording)requestSendRecording();else start();});
+    connect(m_mode,&QPushButton::clicked,this,[this]{
+        if(m_loading || m_state!=State::Idle)return;
+        m_videoMode=!m_videoMode;QSettings().setValue("speech/video_mode",m_videoMode);update();
+    });
     connect(m_cancel,&QPushButton::clicked,this,&SpeechComposer::discard);
     connect(m_result,&QPushButton::clicked,this,&SpeechComposer::showResult);
     connect(m_send,&QPushButton::clicked,this,[this]{if(m_state==State::Uncertain)check();else send();});
@@ -118,34 +121,8 @@ QJsonObject SpeechComposer::identityPayload(const QString &action) const {
         {"expected_run_id",m_target.run},{"expected_conversation_id",m_target.conversation}};
 }
 bool SpeechComposer::eventFilter(QObject *watched,QEvent *event) {
-    if(watched==m_voice && event->type()==QEvent::MouseButtonPress){
-        auto *mouse=static_cast<QMouseEvent *>(event);
-        if(mouse->button()==Qt::LeftButton && m_voice->isEnabled()){
-            m_pressStartedLocked=m_state==State::Recording && m_locked;
-            m_pressed=true;m_pressPosition=mouse->globalPosition().toPoint();m_voice->grabMouse();
-            if(m_state==State::Idle)m_holdTimer->start();return true;
-        }
-    }
-    if(watched==m_voice && event->type()==QEvent::MouseMove && m_pressed){
-        auto *mouse=static_cast<QMouseEvent *>(event);
-        if(!m_locked && m_state==State::Recording && m_pressPosition.y()-mouse->globalPosition().y()>=57){m_locked=true;update();}
-        return true;
-    }
-    if(watched==m_voice && event->type()==QEvent::MouseButtonRelease && m_pressed){
-        auto *mouse=static_cast<QMouseEvent *>(event);if(mouse->button()!=Qt::LeftButton)return true;
-        m_pressed=false;m_voice->releaseMouse();
-        if(m_holdTimer->isActive()){m_holdTimer->stop();m_videoMode=!m_videoMode;QSettings().setValue("speech/video_mode",m_videoMode);update();}
-        else if(m_state==State::Starting){m_sendAfterSaved=false;stopRecording();}
-        else if(m_state==State::Recording){
-            const auto local=m_composer->mapFromGlobal(mouse->globalPosition().toPoint());
-            const bool inside=m_composer->rect().contains(local);
-            if(!m_locked){if(inside)requestSendRecording();else discard();}
-            else if(m_pressStartedLocked && m_voice->rect().contains(m_voice->mapFromGlobal(mouse->globalPosition().toPoint())))requestSendRecording();
-        }
-        return true;
-    }
     if((watched==m_composer && event->type()==QEvent::Hide) || event->type()==QEvent::ApplicationDeactivate){
-        m_holdTimer->stop();m_pressed=false;m_voice->releaseMouse();m_sendAfterSaved=false;stopPlayback();
+        m_sendAfterSaved=false;stopPlayback();
         if(m_state==State::Starting || m_state==State::Recording)stopRecording();
     }
     if(event->type()==QEvent::ShortcutOverride || event->type()==QEvent::KeyPress || event->type()==QEvent::KeyRelease){
@@ -177,7 +154,7 @@ void SpeechComposer::stopRecording() {
 void SpeechComposer::syncTarget() {
     if(m_syncing)return;
     const auto key=m_composer->sessionKey();if(key==m_loadedKey)return;
-    m_holdTimer->stop();m_pressed=false;m_voice->releaseMouse();m_sendAfterSaved=false;
+    m_sendAfterSaved=false;
     ++m_generation;m_recorder->cancel();m_videoRecorder->cancel();stopPlayback();m_loadedKey=key;m_target=m_currentTarget();
     m_pcm.clear();m_video.clear();m_videoMeta={};m_captureVideo=false;m_id.clear();m_notice.clear();m_noticeKind=Notice::General;m_state=State::Idle;m_loading=!key.isEmpty();
     m_profilesLoading=false;m_profilesValidated=false;m_profileError.clear();m_selectedProfile=preferredProfile();m_profileBound=false;
@@ -282,7 +259,7 @@ void SpeechComposer::recorded(const QByteArray &base64) {
 void SpeechComposer::requestSendRecording(){
     if(m_state!=State::Recording)return;
     if(m_previewBeforeSend){m_sendAfterSaved=false;stopRecording();return;}
-    // A release never waits for late provider discovery to become a future Send.
+    // A Send click never waits for late provider discovery to become a future Send.
     m_sendAfterSaved=!selectedProfile().isEmpty() && (!m_captureVideo || m_videoSupported);
     if(!m_sendAfterSaved)m_notice=m_captureVideo && !m_videoSupported?tr("Update hgs on the conversation computer to send video messages."):tr("Review the transcription provider before sending. The recording is kept.");
     stopRecording();
@@ -422,18 +399,20 @@ void SpeechComposer::update() {
     const auto current=m_currentTarget();const bool recording=m_state==State::Recording;
     m_composer->setRecording(recording || m_state==State::Starting);
     m_recordingHint->setVisible(recording);
-    m_recordingHint->setText(m_previewBeforeSend
-        ?(m_locked?tr("Recording locked. Stop to preview. Space / Esc to stop"):tr("Release to preview. Drag up to lock. Release outside to cancel"))
-        :(m_locked?tr("Recording locked. Send, or Stop to preview. Space / Esc to stop"):tr("Release to send. Drag up to lock. Release outside to cancel")));
-    m_stopPreview->setVisible(recording && m_locked);
+    m_recordingHint->setText(m_previewBeforeSend?tr("Recording. Stop to preview. Space / Esc to stop")
+        :tr("Recording. Send, or Stop to preview. Space / Esc to stop"));
+    m_stopPreview->setVisible(recording);
     m_videoView->setVisible(m_captureVideo && (m_state==State::Starting || recording || !m_pcm.isEmpty()));
     m_voice->setActive(true);m_voice->setEnabled(!m_loading && (recording || (m_state==State::Idle && current.available && !current.conversation.isEmpty() && m_composer->isInputVisible())));
-    m_voice->setTone(recording?ChipTone::Danger:ChipTone::Quiet);m_voice->setIconName(recording?(m_locked && !m_previewBeforeSend?"send":"stop"):(m_videoMode?"video":"microphone"));
-    m_voice->setLabels(recording?(m_locked?(m_previewBeforeSend?tr("Stop (%1)"):tr("Send (%1)")):tr("Recording (%1)")).arg(duration(m_seconds)):m_state==State::Starting?tr("Opening recorder…"):m_state==State::Saving?tr("Saving recording…"):(m_videoMode?tr("Video"):tr("Voice")));
+    m_voice->setTone(recording?ChipTone::Danger:ChipTone::Quiet);m_voice->setIconName(recording?(m_previewBeforeSend?"stop":"send"):(m_videoMode?"video":"microphone"));
+    m_voice->setLabels(recording?(m_previewBeforeSend?tr("Stop (%1)"):tr("Send (%1)")).arg(duration(m_seconds)):m_state==State::Starting?tr("Opening recorder…"):m_state==State::Saving?tr("Saving recording…"):(m_videoMode?tr("Video"):tr("Voice")));
     m_voice->setDetail(!recording && !current.available && !current.reason.isEmpty()?current.reason
-        :(recording?m_previewBeforeSend:QSettings().value("speech/preview_before_send",false).toBool())
-            ?tr("Tap to switch voice/video. Hold to record; release to preview. Drag up to lock; release outside to cancel.")
-            :tr("Tap to switch voice/video. Hold to record; release to send. Drag up to lock; release outside to cancel."));
+        :recording?(m_previewBeforeSend?tr("Stop recording and preview before sending."):tr("Send recording. Stop and preview or Space / Esc keeps it for review."))
+        :m_videoMode?tr("Click to start a video recording."):tr("Click to start a voice recording."));
+    m_mode->setActive(true);m_mode->setEnabled(!m_loading && m_state==State::Idle);
+    m_mode->setIconName(m_videoMode?"microphone":"video");
+    const auto modeLabel=m_videoMode?tr("Switch to voice recording"):tr("Switch to video recording");
+    m_mode->setAccessibleName(modeLabel);m_mode->setDetail(modeLabel);
     m_cancel->setActive(m_state==State::Starting || recording);
     const bool preview=!m_pcm.isEmpty();m_preview->setVisible(preview);m_previewLabel->setText(tr("Voice %1").arg(duration(m_seconds)));
     m_play->setText(m_player && m_player->playbackState()==QMediaPlayer::PlayingState?tr("Pause"):tr("Play"));

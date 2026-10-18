@@ -105,6 +105,16 @@ fn chooser(rows:&[&str])->Option<(usize,Vec<String>,usize)> {
     Some((question,labels,selected?))
 }
 
+/// A chooser whose panel begins above the top row. Claude keeps no scrollback
+/// for its panel, so the title and the start of the request show nowhere.
+fn clipped(screen:&str)->bool {
+    let rows:Vec<_>=screen.lines().map(str::trim).collect();
+    visible(screen)&&chooser(&rows).is_some_and(|(question,_,_)|!rows[..question].iter().any(|r|rule(r,'─')))
+}
+fn complete_panel(screen:&str)->bool {parse(screen).is_some()}
+/// Only a recorded main or child request may resize its pane to show the panel.
+fn fits(record:&Value)->bool {request(record).is_some()||children::entries(record).next().is_some()}
+
 fn parse(screen:&str)->Option<Panel> {
     let rows:Vec<_>=screen.lines().map(str::trim).collect();
     let (question,labels,selected)=chooser(&rows)?;
@@ -420,10 +430,18 @@ fn snapshot(record:&Value,screen:&str)->Option<(Value,usize)> {
 }
 fn acknowledged(screen:&str)->bool {!screen.trim().is_empty()&&!visible(screen)}
 
-pub(super) fn current(record:&Value)->Option<Value> {
+pub(super) fn current(record:&Value)->Option<Value> {current_with(record,false)}
+/// The card a question listing shows. Only a listing may first fit a clipped
+/// panel into its unviewed pane, and only for a recorded request; guards and
+/// answers read the screen as it is.
+pub(super) fn listed(record:&Value)->Option<Value> {current_with(record,true)}
+fn current_with(record:&Value,fit:bool)->Option<Value> {
     if record["agent"]!="claude"||pause_active(record)||!string(record,"error").is_empty()
         ||!active_phase(record) {return None;}
-    let screen=kimi_tui_choice::identity(record).and_then(|record|kimi_tui_choice::capture(&record)).ok();
+    let screen=kimi_tui_choice::identity(record).and_then(|live|{
+        let screen=kimi_tui_choice::capture(&live)?;
+        Ok(if fit&&fits(&live) {question_terminal::fit_unviewed(&live,screen,kimi_tui_choice::capture,clipped,complete_panel)} else {screen})
+    }).ok();
     build(record,screen.as_deref()).map(|(card,_)|card)
         .or_else(||safety_card(record,screen.as_deref()?))
 }
@@ -728,6 +746,62 @@ pub(super) fn reconcile(record:Value)->Value {
             SAFETY.replace("Do you want to proceed?","Quoted question?"),
             SAFETY.replace("   2. No","   2. Yes, always allow"),
         ] {assert!(safety_card(&r,&invalid).is_none());}
+    }
+
+    #[test] fn clipped_panel_grows_only_an_unviewed_pane_for_a_recorded_request() {
+        use std::sync::atomic::{AtomicBool,AtomicU16,Ordering::SeqCst};
+        static HEIGHT:AtomicU16=AtomicU16::new(24);static VIEWED:AtomicBool=AtomicBool::new(false);
+        static SHORT:AtomicBool=AtomicBool::new(false);static GROWN:AtomicU16=AtomicU16::new(0);
+        // A clipped panel fills the pane down to Claude's blank last row.
+        fn clipped_screen()->String {
+            let tail=SAFETY[SAFETY.find(" │ T=$(pwd)").unwrap()..].trim_end();
+            let height=usize::from(HEIGHT.load(SeqCst));
+            format!("{}{tail}\n\n"," │ :\n".repeat(height.saturating_sub(tail.lines().count()+1)))
+        }
+        struct Pane;
+        impl backend::TerminalBackend for Pane {
+            fn pane_info(&self,_:backend::Target,_:&[backend::PaneField])->Result<backend::PaneInfo> {
+                Ok(backend::PaneInfo::new(format!("{}\n",HEIGHT.load(SeqCst))))
+            }
+            fn grow_unviewed(&self,pane:&str,rows:u16)->Result<bool> {
+                assert_eq!(pane,"%7");
+                if VIEWED.load(SeqCst) {return Ok(false);}
+                HEIGHT.store(rows,SeqCst);GROWN.fetch_add(1,SeqCst);Ok(true)
+            }
+            // Claude redraws its whole panel once the pane is tall enough; a
+            // panel taller than any allowed pane stays clipped at the bottom.
+            fn capture(&self,_:&str,_:backend::Capture)->Result<Vec<u8>> {
+                if HEIGHT.load(SeqCst)>=48&&!SHORT.load(SeqCst) {return Ok(SAFETY.as_bytes().to_vec());}
+                Ok(clipped_screen().into_bytes())
+            }
+        }
+        let reset=|viewed,short|{HEIGHT.store(24,SeqCst);VIEWED.store(viewed,SeqCst);SHORT.store(short,SeqCst);GROWN.store(0,SeqCst);};
+        let mut r=record("Bash",json!({"command":"T=$(pwd); test \"$T\" = /workspace/example && rm -f $T/*.jsonl $T/*.port"}));
+        r["pane"]=json!("%7");
+        let complete=|r:&Value,screen:String|question_terminal::grow_until(r,screen,kimi_tui_choice::capture,clipped,complete_panel);
+        assert!(fits(&r));
+        let mut hookless=r.clone();hookless.as_object_mut().unwrap().remove("pending_approval");
+        assert!(!fits(&hookless));
+        backend::with_fake(&Pane,||{
+            reset(false,false);
+            let screen=complete(&r,clipped_screen());
+            assert_eq!((GROWN.load(SeqCst),HEIGHT.load(SeqCst)),(1,48));
+            assert_eq!(card(&r,&screen)["can_answer"],true);
+            // A complete panel never resizes the pane.
+            reset(false,false);
+            assert_eq!(complete(&r,SAFETY.into()),SAFETY);
+            assert_eq!(GROWN.load(SeqCst),0);
+            // A client's size is the user's: the clipped request stays in Terminal.
+            reset(true,false);
+            let screen=complete(&r,clipped_screen());
+            assert_eq!((GROWN.load(SeqCst),HEIGHT.load(SeqCst)),(0,24));
+            assert_eq!(card(&r,&screen)["can_answer"],false);
+            // Growth is bounded; a panel that never fits is never answered.
+            reset(false,true);
+            let screen=complete(&r,clipped_screen());
+            assert_eq!((GROWN.load(SeqCst),HEIGHT.load(SeqCst)),(3,question_terminal::MAX_UNVIEWED_ROWS));
+            assert!(clipped(&screen));assert_eq!(card(&r,&screen)["can_answer"],false);
+        });
     }
 
     #[test] fn native_options_are_verbatim_and_broader_ones_are_marked() {

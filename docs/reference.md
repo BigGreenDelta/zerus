@@ -53,11 +53,24 @@ alone never launches a session or sends input.
 same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.
 
+An agent obtains its own reference with `hgs self [--json]`. The caller must run
+inside a live tracked native agent: like an agent-originated send, the binding is
+proven through that agent's process ancestry, never through `HGS_SESSION` alone.
+The reply carries the current name after a rename, the `reference` fields and
+`provider`. It never routes to a peer and refuses `--dry-run`.
+
+`hgs [@host] guide [send|wait|launch|stop]` prints compact instructions for
+agents that read, message, wait for, launch or stop other sessions. The text is
+compiled into hgs and stays small because agents read it into their context;
+topics are read only when needed. `@host` returns that peer's guide after
+probing its installed help, so an older peer fails without launching anything.
+
 Native conversation IDs appear only in **Details** on desktop and **Session
 details → Overview** on Android, labeled **Session ID** with a dedicated copy
 icon immediately after the exact identifier. The desktop icon uses the same
 borderless style as header actions. The ID stays on one line whenever the pane
-has room. The icon copies the ID as plain text;
+has room. The icon copies the ID as plain text, as does the **Copy session ID**
+icon in the desktop session header, which copies without showing the ID;
 **Copy session reference** remains in the desktop session context menu and copies
 the portable URI. Successful text copies use the window's status confirmation
 without a system notification on Linux or macOS. Before that ID is reported,
@@ -68,6 +81,15 @@ parts of conversation, run, archive and reported child IDs; a child match
 identifies its parent conversation.
 Machine, project and state filters still apply. Desktop ID results show the
 matched identifier and expose its complete value in the tooltip.
+
+The desktop session header keeps frequent actions as icons: open the session
+folder, open a shell there, **Copy session ID** and **Clear session**. Its **⋯**
+menu holds **Rename…**, **Fork session…**, **Copy connect command** (**Open
+externally** without clipboard mode, or the native DeepSeek UI), **Pause
+session** or **Resume session**, **Start fresh…**, **Move to archive** and
+**Terminate session…**. A stopped session hides the Clear session icon and offers
+**Start fresh…** in the menu; an archived session shows **Restore session** in its
+place.
 
 Identifiers such as `zerus-ab12` are Beads task numbers, not session IDs. Desktop
 message search finds their public mentions; Android session search finds mentions
@@ -375,8 +397,8 @@ unread in Activity but show no new-reply badge or reply-only attention count on
 desktop or Android. The pending reply becomes visible when work finishes; this
 never marks it as read. Explicit questions, approvals, errors and review reminders
 remain actionable. Optional Codex questions, which the agent continues without,
-are not attention: on the desktop they change neither the session's status nor
-the Needs attention filter, counters or badges. Listings report them separately
+are not attention: on the desktop and Android they change neither the session's
+status nor the Needs attention filter, counters or badges. Listings report them separately
 as [`optional_questions`](#optional-questions-in-listings). Settings → Sessions →
 **Notify about optional questions**, off by default, adds an *Optional question*
 banner once for each new question. Questions already pending when it is turned on,
@@ -434,12 +456,14 @@ See [provider management](speech-providers.md) and
 Russian `v3_e2e_rnnt` profile. Saving or selecting a profile does not install or
 download a model and never falls back to another provider.
 
-On desktop, use **Voice** in the message toolbar. Tap to switch voice/video,
-hold to record, release to send, drag up to lock or release outside to cancel.
-Enable **Preview before sending** in Voice input settings to keep both audio
-and video for a separate Send instead. The setting is local to this device and
-applies to the next recording; existing drafts and deliveries are unchanged.
-Stop a locked recording to review it with **Play**, **Discard** or **Send**. Audio recordings
+On desktop, click **Voice** in the message toolbar to start recording. The icon
+immediately to its right switches voice/video mode without starting capture;
+it stays disabled while opening, recording or retaining a preview. Recording
+continues after the click. Click **Send** to send, or **Stop and preview** to
+review it with **Play**, **Discard** or **Send**. Enable **Preview before sending**
+in Voice input settings to show **Stop** instead of **Send** while recording
+audio or video. The setting is local to this device and applies to the next
+recording; existing drafts and deliveries are unchanged. Audio recordings
 are limited to two minutes and remain separate from the typed draft. Capture
 opens the local microphone without waiting for speech computers or providers.
 Provider discovery runs in the background. If it fails, the recording remains
@@ -1056,6 +1080,17 @@ the terminal width and splits words longer than a row. Zerus matches the wrapped
 rows against the exact request at any width; only a clipped panel needs a
 larger Terminal.
 
+Claude keeps no scrollback for an approval panel taller than its pane, so a
+long command can lose its title and beginning everywhere. A session no client
+views keeps tmux's default 80x24 size. While a recorded permission request
+waits and such a pane shows a clipped panel, Zerus makes that pane taller,
+doubling its height up to 192 rows without changing its width, until Claude
+redraws the complete panel. The exact request match still decides; the next
+client that attaches sets the size again. A pane a client views keeps that
+client's size, so its clipped panel stays in Terminal. Only a question listing,
+such as `hgs inspect`, grows a pane, and never while an answer to that run
+drives it: both hold the run's answer lock.
+
 Claude tool approvals keep the session at **Needs approval** and appear in
 Activity while Claude shows its chooser. When the complete panel matches the
 agent's request, such as the Bash command, file name or fetched host, Activity
@@ -1078,7 +1113,7 @@ paths in `rm` commands, also appear in Activity with the native warning text.
 A visible safety confirmation makes the session **Needs approval** even if
 its permission hook was not recorded, and ordinary message sending waits for
 the decision. Without a matching permission request, or when the full command
-is clipped, the card offers **Open Terminal**. With a complete matching request,
+stays clipped, the card offers **Open Terminal**. With a complete matching request,
 Activity can submit the native **Yes** or **No** choice. Claude's unattended
 denial countdown stays visible without replacing the request as it ticks.
 Desktop keeps the card's scroll, chosen option and review delay through these
@@ -1587,7 +1622,10 @@ swarm catalog, and leaves it untouched, until hgs is updated again.
 
 `~/.config/hgs/projects.local` retains `NAME=FOLDER` aliases for CLI compatibility.
 The old infrastructure-owned `~/.config/hgs/projects` is no longer read. Aliases
-import into Zerus once per machine; later project edits belong in Projects.
+import into Zerus once per machine; later project edits belong in Projects. An
+alias whose folder that machine cannot take (not an absolute path in its form)
+starts no project. Projects names it, and the machine imports again at the next
+start of Zerus.
 
 ```sh
 hgs project ls --json
@@ -2072,6 +2110,9 @@ session usage limits and network failures. Automation is off by default. Each cl
 `15, 30, 60, 300, -1` stops after four attempts; `15, 30, 60, 0` repeats the previous
 60-second delay indefinitely after the first two attempts; `-1` alone does nothing.
 Small jitter is applied. Class counters persist within an episode when errors change.
+Temporary overload covers HTTP 500, 502–504 and 529, model capacity errors and the
+520–524 gateway failures that Cloudflare reports for an unreachable or timed-out
+provider, often without a response body.
 
 **Session usage limit** is separate from a temporary rate limit. Its default mode,
 **Wait for reset**, schedules a continuation at the provider's reset time, using

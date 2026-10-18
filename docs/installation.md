@@ -45,6 +45,25 @@ On macOS, install the dependencies first:
 brew install rust python tmux cmake qt qtmultimedia
 ```
 
+The macOS source installer also needs a valid application-signing certificate
+and its private key in your keychain. It selects a certificate compatible with
+the installed app, including its team and distribution class. For a first install
+it prefers Developer ID Application, then Apple Development. If selection is
+ambiguous, choose an exact name or SHA-1 fingerprint from
+`security find-identity -v -p codesigning` with `HGS_MACOS_SIGN_IDENTITY`:
+
+```sh
+HGS_MACOS_SIGN_IDENTITY='Developer ID Application: Example (ABCDE12345)' ./tray/install.sh
+```
+
+Compatible certificate signatures keep the privacy identity across local
+rebuilds. The installer verifies both designated requirements before replacing
+an existing certificate-signed app and stops if they are incompatible. It never
+falls back to ad hoc signing. Moving from an older ad hoc installation can require
+fresh consent once; no permissions are reset automatically. Source builds link
+Homebrew Qt and are signed locally without the hardened runtime or notarization;
+use the published app for distribution. See [macOS signing](macos-distribution.md#local-source-builds).
+
 On Arch Linux, desktop dependencies include `cmake`, `qt6-base`, `qt6-multimedia`, `qt6-svg`,
 `kstatusnotifieritem`, `kwindowsystem`, `kidletime` and C++ build tools; add
 `qt6-webengine` for the embedded Native UI.
@@ -449,6 +468,10 @@ To install on a Mac from another machine:
 ./mac-install.sh <ssh-alias>            # CLI and desktop
 ./mac-install.sh <ssh-alias> --no-tray  # CLI only
 ```
+
+Desktop signing uses the Mac's existing keychain. An optional
+`HGS_MACOS_SIGN_IDENTITY` selector is forwarded to the remote installer; private
+keys and signing credentials are never copied from the calling machine.
 
 The CLI configuration lives at `~/.config/hgs/config`. For terminal use, you can
 set SSH aliases directly:

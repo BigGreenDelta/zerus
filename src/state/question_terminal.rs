@@ -14,6 +14,103 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The tallest pane `fit_unviewed` grows: tmux's default 24 rows doubled three times.
+pub(super) const MAX_UNVIEWED_ROWS: u16 = 192;
+const REDRAW: Duration = Duration::from_secs(1);
+
+/// Blank rows below the last drawn row of a pane `height` rows tall. Escape
+/// sequences alone draw nothing.
+fn blank_below(screen: &str, height: u16) -> usize {
+    static ESCAPE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let escape = ESCAPE.get_or_init(|| {
+        regex::Regex::new(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))").unwrap()
+    });
+    let rows: Vec<_> = screen.lines().collect();
+    let drawn = rows
+        .iter()
+        .rposition(|row| !escape.replace_all(row, "").trim().is_empty())
+        .map_or(0, |index| index + 1);
+    usize::from(height).saturating_sub(drawn)
+}
+
+/// Agents keep no scrollback for a native panel taller than their pane, so in
+/// a pane no client views, such as one still at tmux's default 80x24, the top
+/// of the panel shows nowhere. While `clipped(screen)`, let that pane grow
+/// until the agent redraws the panel and `complete(screen)`; the caller's exact
+/// match still decides. Call it only for a request the agent records.
+///
+/// This holds the run's answer lock (`questions::answer_lock`) and gives up when
+/// an answer holds it: it never resizes a pane an answer drives, and an answer
+/// that starts meanwhile sees the redrawn panel.
+pub(super) fn fit_unviewed(
+    record: &Value,
+    screen: String,
+    capture: fn(&Value) -> Result<String>,
+    clipped: fn(&str) -> bool,
+    complete: fn(&str) -> bool,
+) -> String {
+    if !clipped(&screen) {
+        return screen;
+    }
+    let Ok(path) = questions::answer_lock(string(record, "run_id")) else {
+        return screen;
+    };
+    let Ok(Some(_answer)) = lock_until(&path, Instant::now()) else {
+        return screen;
+    };
+    // An answer may have finished just before this lock was free.
+    match capture(record) {
+        Ok(screen) => grow_until(record, screen, capture, clipped, complete),
+        Err(_) => screen,
+    }
+}
+
+/// Double the height of an unviewed pane, width unchanged and at most
+/// MAX_UNVIEWED_ROWS, waiting up to a second each time for the agent to
+/// redraw, while its panel stays clipped. A viewed pane keeps its client's size.
+pub(super) fn grow_until(
+    record: &Value,
+    mut screen: String,
+    capture: fn(&Value) -> Result<String>,
+    clipped: fn(&str) -> bool,
+    complete: fn(&str) -> bool,
+) -> String {
+    let terminal = backend::current();
+    let pane = string(record, "pane");
+    let Some(mut height) = terminal
+        .pane_info(backend::Target::Pane(pane), &[backend::PaneField::Height])
+        .ok()
+        .and_then(|info| info.value().parse::<u16>().ok())
+    else {
+        return screen;
+    };
+    while clipped(&screen) && height < MAX_UNVIEWED_ROWS {
+        let gap = blank_below(&screen, height);
+        let rows = height.saturating_mul(2).min(MAX_UNVIEWED_ROWS);
+        if !terminal.grow_unviewed(pane, rows).unwrap_or(false) {
+            break;
+        }
+        height = rows;
+        // tmux shows the old rows above new blank ones until the agent redraws.
+        let deadline = Instant::now() + REDRAW;
+        loop {
+            std::thread::sleep(Duration::from_millis(50));
+            let Ok(next) = capture(record) else {
+                return screen;
+            };
+            let drawn = complete(&next) || clipped(&next) && blank_below(&next, height) <= gap + 1;
+            screen = next;
+            if drawn {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return screen;
+            }
+        }
+    }
+    screen
+}
+
 /// Whether terminal rows show `expected` as text the TUI wrapped to its
 /// width. A row boundary stands for one space or splits a word longer than
 /// its row; every visible character must still match in order.
@@ -780,6 +877,14 @@ pub(super) fn answer(record: &Value, card: &Value, answers: &Value) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn styled_blank_rows_do_not_count_as_drawn() {
+        let screen = "\x1b[38;5;246m❯ 1. Yes\x1b[39m\n\x1b[0m\n\x1b[2m   \x1b[0m\n\x1b]8;;\x1b\\\n";
+        assert_eq!(blank_below(screen, 24), 23);
+        assert_eq!(blank_below("", 24), 24);
+        assert_eq!(blank_below("x\n", 0), 0);
+    }
 
     #[test]
     fn plain_preserves_visible_hyperlink_text_and_styling() {

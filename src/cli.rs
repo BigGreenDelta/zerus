@@ -44,7 +44,7 @@ impl From<std::io::Error> for Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
-const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
+pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs approval-log begin|finish|list|detail  local automatic-approval journal (JSON stdin)
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
@@ -60,6 +60,8 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
        hgs [@host] version            this hgs version (also --version)
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
        hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
+       hgs self [--json]              the calling agent's own session reference
+       hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions
        hgs inspect 'zerus://session?...'   resolve and inspect a referenced conversation
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
@@ -449,6 +451,23 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         "--version" | "version" => return crate::status::version(&config, &target, args),
         // Read-only on every machine; never routed as an agent launch.
         "status" => return crate::status::run(&config, &target, args, dry),
+        // Text compiled into this hgs; a peer answers with its own.
+        "guide" => {
+            if !target.is_empty() && !config.is_self(&target) {
+                return remote(&config, &target, command, args, dry);
+            }
+            return crate::agent_guide::dispatch(args);
+        }
+        "self" => {
+            if !target.is_empty() && !config.is_self(&target) {
+                return Err(Error::new(1, "hgs self names the session that runs it; omit @host"));
+            }
+            if dry {
+                return Err(Error::new(1, "hgs self does not support --dry-run"));
+            }
+            local_sessions()?;
+            return crate::session_reference::current(&config, args);
+        }
         _ => {}
     }
     if args.first().is_some_and(|value| value.starts_with("zerus://")) {
@@ -884,7 +903,7 @@ fn remote(
             all
         }
         "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -924,6 +943,8 @@ fn remote(
         // Old peers otherwise interpret an unknown command as an agent launch.
         // Probe the same installed executable without consuming JSON stdin.
         format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] wait'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to track waits' >&2; exit 1; fi",platform::join(&remote_args))
+    } else if command == "guide" {
+        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args))
     } else { format!("~/.local/bin/hgs {}", platform::join(&remote_args)) };
     if global_dry || has(&args, "--dry-run") {
         if let Some(title) = tab {

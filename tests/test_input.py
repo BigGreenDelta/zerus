@@ -819,10 +819,19 @@ os.execv('/bin/sh', ['sh', '-c', sys.argv[-1]])
         self.assertEqual(events[0]['source']['endpoint']['conversation'],origin['conversation_id'])
         self.assertEqual(events[0]['target'],receipt['graph_target'])
         self.assertNotIn(payload['text'],json.dumps(events))
-        graph = subprocess.run([str(HGS),'graph','snapshot','--json'],env=self.env,
-                               capture_output=True,text=True,timeout=5)
-        self.assertEqual(graph.returncode,0,graph.stderr)
-        rows=json.loads(graph.stdout)['items']
+        # Collection runs in bounded slices and reaches send stamps after the
+        # bindings, so a slow runner needs several snapshots for full coverage.
+        deadline=time.monotonic()+60
+        while True:
+            graph = subprocess.run([str(HGS),'graph','snapshot','--json'],env=self.env,
+                                   capture_output=True,text=True,timeout=5)
+            self.assertEqual(graph.returncode,0,graph.stderr)
+            snapshot=json.loads(graph.stdout)
+            if snapshot['coverage']['bindings_complete'] or time.monotonic()>deadline:
+                break
+        self.assertTrue(snapshot['coverage']['bindings_complete'])
+        self.assertFalse(snapshot['has_more'])
+        rows=snapshot['items']
         exchange=[r['item']['value'] for r in rows if r['item']['kind']=='event']
         self.assertEqual(len(exchange),1)
         self.assertEqual(exchange[0]['request_id'],payload['request_id'])

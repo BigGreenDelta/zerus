@@ -226,7 +226,10 @@ bool PtyProcess::start(const QString &program, const QStringList &arguments,
   console->process = info.hProcess;
 
   // Kill-on-close: stopping the terminal, or a tray crash, ends hgs.exe and the
-  // ssh.exe it started. The session itself lives on the remote machine.
+  // ssh.exe it started. The session itself lives on the remote machine. The job
+  // forbids breakaway, so what runs here must never create a session: a host it
+  // started would stop in this job and be refused (D4). The terminal only runs
+  // `hgs a --existing`, which attaches to a live run.
   console->job = CreateJobObjectW(nullptr, nullptr);
   if (console->job) {
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};

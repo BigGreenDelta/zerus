@@ -176,13 +176,16 @@ impl Store {
         let bytes = encoded.len() as i64 + if node["machine_id"].is_null() { 0 } else { 144 };
         let total = bytes + MIB as i64;
         let small = bytes <= 65536 && !b.attachments;
-        if i(&usage, "active") >= self.db.cfg.max_queue
-            || i(&usage, if read { "reads" } else { "mutations" })
-                >= if read { 5000 } else { 100000 }
-            || i(&usage, "payload_bytes") + total
-                > self.db.cfg.max_queue_bytes + if small { MIB as i64 } else { 0 }
+        if i(&usage, "active") >= self.db.cfg.max_queue {
+            return Err(Error::QUEUE_FULL);
+        }
+        if i(&usage, if read { "reads" } else { "mutations" }) >= if read { 5000 } else { 100000 } {
+            return Err(Error::RETAINED_REQUESTS);
+        }
+        if i(&usage, "payload_bytes") + total
+            > self.db.cfg.max_queue_bytes + if small { MIB as i64 } else { 0 }
         {
-            return Err(Error::BUSY);
+            return Err(Error::RETAINED_PAYLOAD);
         }
         if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![total,self.db.shard(&c.workspace),total,self.db.cfg.global_max_bytes/self.db.cfg.quota_shards]).await?==0{return Err(Error::BUSY);}
         let at = now();

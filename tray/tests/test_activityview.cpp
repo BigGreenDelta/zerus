@@ -1514,8 +1514,9 @@ void TestActivityView::voiceWaveformSeeksWithoutRelayout()
     QVERIFY(player->playbackState()!=QMediaPlayer::PlayingState);
     QTest::qWait(100);QVERIFY(player->playbackState()!=QMediaPlayer::PlayingState);
 #ifndef Q_OS_MAC
-    // Darwin's backend requires a native application event loop; offscreen
-    // qualification still exercises hit testing and resource updates below.
+    // Offscreen macOS never finishes loading with Darwin's backend, which needs a
+    // native event loop, and the bundled FFmpeg backend can finish at any later
+    // turn; hit testing and resource updates below are still exercised.
     QTRY_VERIFY_WITH_TIMEOUT(player->mediaStatus()==QMediaPlayer::LoadedMedia || player->mediaStatus()==QMediaPlayer::BufferedMedia,5000);
     QVERIFY(qAbs(player->position()-7000)<100);
 #endif
@@ -1526,9 +1527,12 @@ void TestActivityView::voiceWaveformSeeksWithoutRelayout()
     browser->verticalScrollBar()->setValue(scroll);
     const auto before=document->resource(QTextDocument::ImageResource,image.first).value<QImage>();
     // Drive the same native signal used by playback; there is no timer-driven HTML path.
+    // The image updates synchronously: check it before an event-loop turn, where a late
+    // load applies its pending seek and pause and may restore the original image.
     for(qint64 position=100;position<=5000;position+=100)player->positionChanged(position);
-    player->playbackStateChanged(QMediaPlayer::PlayingState);QCoreApplication::processEvents();
+    player->playbackStateChanged(QMediaPlayer::PlayingState);
     QVERIFY(before!=document->resource(QTextDocument::ImageResource,image.first).value<QImage>());
+    QCoreApplication::processEvents();
     QCOMPARE(browser->document(),document);QCOMPARE(document->documentLayout(),layout);QCOMPARE(layout->documentSize(),size);
     QCOMPARE(view.renderPasses(),passes);QCOMPARE(browser->verticalScrollBar()->value(),scroll);
     QCOMPARE(browser->textCursor().anchor(),selection.anchor());QCOMPARE(browser->textCursor().position(),selection.position());

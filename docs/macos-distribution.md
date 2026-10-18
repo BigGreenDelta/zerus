@@ -79,6 +79,16 @@ command instead of loading it. `zerus-setup --remove` unloads and removes it wit
 the other agents of the bundle; the agents and tmux servers it launched keep
 running.
 
+Under this agent, macOS attributes the connector's file access, and that of its
+`hgs` and `git` children, to Zerus (`com.hgdev.hgs-tray`) rather than to
+`zerus-mobile-connector`. Folder browsing and worktree catalogs in Documents,
+Desktop and Downloads therefore use Zerus's Files and Folders consent; the
+connector needs no consent of its own and no Full Disk Access. The stored consent
+carries Zerus's Developer ID requirement, which later builds signed with the same
+identifier and team satisfy. This was rehearsed on 2026-10-17 with a signed main
+build under a fixture label, on a Mac where Zerus already had that consent, and
+no prompt appeared (`zerus-nbzl.23`).
+
 ## Pinned Qt
 
 `packaging/macos/qt.json` pins official Qt **6.11.2** (`qtbase`, `qtsvg`,
@@ -292,6 +302,52 @@ Check the leaf certificate's issuer and expiration during each rotation; select
 **G2 Sub-CA** when the portal offers a choice. See
 [Apple's replacement procedure](https://developer.apple.com/help/account/certificates/replace-developer-id-certificates/).
 
+### Local source builds
+
+`tray/install.sh` signs the source bundle with a stable certificate through
+`tray/sign-local-macos.py` before copying or restarting anything. It uses a valid
+application-signing identity already in the local keychain; it never imports or
+unlocks credentials and never falls back to ad hoc signing. `mac-install.sh`
+uses the destination Mac's keychain and forwards the optional
+`HGS_MACOS_SIGN_IDENTITY` exact certificate name or SHA-1 selector.
+
+When a certificate-signed app is already installed, selection follows its team
+and signing class. A local rebuild of the published app therefore needs a
+compatible Developer ID Application identity. Apple Development can retain its
+own local identity, but has a different default designated requirement from
+Developer ID. Without an installed certificate identity, selection prefers one
+unambiguous Developer ID Application certificate, then Apple Development.
+Missing or ambiguous identities stop installation with setup instructions.
+
+The keychain must be unlocked in the signing context and allow `codesign` to use
+the private key. An SSH login does not unlock it. For `errSecInternalComponent`
+or a key-access error, test from Terminal on the Mac and respond to the system's
+unlock or key-access dialog. Follow [Apple's signing troubleshooting](https://developer.apple.com/forums/thread/712005)
+before testing SSH again. Do not put keychain passwords in environment variables,
+repository files or command arguments; the installer never edits key ACLs.
+
+The helper verifies the candidate signature and checks that each app satisfies
+the other's designated requirement, as described in
+[Apple TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
+A shared bundle identifier or team alone is insufficient. An incompatible
+signature stops before the maintained GUI updater can replace the installed app.
+An old ad hoc installation can move to certificate signing with fresh consent
+once; the installer does not reset TCC or grant permissions.
+
+The source bundle contains one executable and links external Homebrew Qt.
+It is signed without the hardened runtime or a network timestamp, for local
+development. Unexpected nested code or symbolic links are refused. Public
+distribution continues to use the separate inside-out hardened-runtime signer,
+entitlements, timestamp and notarization checks above.
+
+An opt-in native regression uses two different synthetic executables to verify
+mutual designated-requirement compatibility, compares them to the installed app
+read-only, and proves that an ad hoc replacement is rejected:
+
+```sh
+ZERUS_TEST_LOCAL_MACOS_SIGNING=1 python3 -m unittest discover -s tests -p test_macos_local_signing.py -v
+```
+
 ### macOS privacy permissions after a signature change
 
 macOS attributes agent-launched Apple Events, Accessibility and screen capture
@@ -462,3 +518,37 @@ Still requiring interactive or subsequent release qualification:
 - Installation from the public tap on a clean account, and an upgrade from one
   cask version to the next with running GUI, tmux session and native agent.
 - The channel switch between stable and nightly from the public tap.
+
+### Public cask upgrade qualification
+
+The manual **macOS public cask upgrade qualification** workflow tests already
+published bytes on a disposable standard `macos-15` runner. It has no signing,
+publication, deployment or cache credentials. Supply three full commits from
+`ufna/homebrew-zerus`: an older Stable recipe, a newer Stable recipe and the
+signed Nightly recipe. The defaults retain the public 0.43.0 and 0.44.0 Stable
+recipes; after publishing 0.45.0, repeat with the exact 0.44.0 and 0.45.0 commits.
+The Nightly commit must also be supplied explicitly.
+
+Before Homebrew evaluates a cask, the script checks its complete bytes against
+the current or retained pre-connector template, public release metadata and
+seals, bounded ZIP paths and the native Developer ID signature, Gatekeeper and
+stapled ticket. It installs from the real public tap, performs `brew upgrade`
+between the Stable versions and switches Stable to Nightly and back using
+ordinary uninstall/install, without `--zap` or `zerus-setup --remove`.
+
+An official SHA-512-pinned Claude executable runs against the existing
+localhost-only keyless fixture in a private tmux server. Its exact process start,
+pane, run and conversation must survive every package operation, together with
+synthetic saved preferences and an immutable attachment draft. The old private
+GUI must remain running during package operations; the fixture then explicitly
+restarts only that GUI and checks retained state. The receipt distinguishes this
+from interactive editor input. Native-format preferences belong to the disposable
+runner account; setting `HOME` alone is not claimed to isolate CFPreferences.
+
+This job must never run on an owner's account. It does not grant or reset TCC
+permissions and does not qualify Terminal automation. That remaining case needs
+an actual signed application's explicit **Open in Terminal** action against an
+owned synthetic session in a user-authorized interactive test: accept any normal
+Apple Events consent explicitly, verify the new owned Terminal window attaches
+the exact private tmux session, then close only that window. An `osascript`
+response over SSH or a fake Terminal backend is not that evidence.

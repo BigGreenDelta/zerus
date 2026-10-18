@@ -90,6 +90,18 @@ class RelaySafetyTest {
         assertEquals(1, sessions.size)
         assertEquals("approval", sessions[0].status)
     }
+    @Test fun pendingCountKeepsBlockingRequestsWithoutOptionalQuestions() {
+        val optional = """{"question_id":"codex-async:c:0","question_hash":"h0","optional":true}"""
+        val olderOptional = """{"question_id":"codex-async:c:1","question_hash":"h1"}"""
+        val required = """{"question_id":"request","question_hash":"h2"}"""
+        val machine = JSONObject("""{"id":"machine","snapshot":{"sessions":[
+            {"name":"optional","run_id":"r","conversation_id":"c","activity":"busy","mobile_attention":[$optional,$olderOptional]},
+            {"name":"required","run_id":"r","conversation_id":"c","activity":"busy","mobile_attention":[$optional,$required]},
+            {"name":"empty","run_id":"r","conversation_id":"c","activity":"busy","mobile_attention":[],"pending_question_count":2},
+            {"name":"older","run_id":"r","conversation_id":"c","activity":"busy","pending_question_count":2}]}}""")
+        val sessions = NativeParser.sessions(Connection("gateway", "Test", "https://gateway.example", "token"), machine)
+        assertEquals(listOf(0, 1, 0, 2), sessions.map { it.pendingCount })
+    }
     @Test fun messagingUsesVerifiedNativeReadiness() {
         val raw = JSONObject("""{"tracked":true,"run_id":"r","conversation_id":"c","runtime_state":"live","process_state":"running","activity":"idle","phase":"idle"}""")
         assertEquals("", NativeParser.messageBlockReason(raw))

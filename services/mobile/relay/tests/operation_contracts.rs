@@ -215,6 +215,40 @@ async fn context_receipts_survive_a_capability_change() {
 }
 
 #[test]
+fn answers_hold_only_integers_python_reads() {
+    // The connector refuses integers over 4,300 digits, as Python's json does;
+    // the relay refuses them at submission rather than queue a request that
+    // could only expire unclaimed (zerus-3rqx.7).
+    let answer = |digits: usize| {
+        let mut b = command(
+            "computer",
+            "answer",
+            json!({"question_id":"q","expected_question_hash":"h","answers":[["Yes"]]}),
+        );
+        b["payload"]["answers"] = json!([[0]]);
+        let text = canonical(&b)
+            .unwrap()
+            .replace("[[0]]", &format!("[[{}]]", "9".repeat(digits)));
+        zerus_relay::json::parse(text.as_bytes(), 32, 50_000).unwrap()
+    };
+    assert_eq!(wire(&answer(zerus_relay::json::MAX_INT_DIGITS)), 202);
+    assert_eq!(wire(&answer(zerus_relay::json::MAX_INT_DIGITS + 1)), 400);
+    // Anywhere in the request, as the connector checks the whole of it.
+    let mut b = command(
+        "computer",
+        "answer",
+        json!({"question_id":"q","expected_question_hash":"h","answers":[["Yes"]],"extra":0}),
+    );
+    b["payload"].as_object_mut().unwrap().remove("extra");
+    let text = canonical(&b).unwrap().replace(
+        "\"computer_id\"",
+        &format!("\"n\":{},\"computer_id\"", "1".repeat(4301)),
+    );
+    let parsed = zerus_relay::json::parse(text.as_bytes(), 32, 50_000).unwrap();
+    assert_eq!(wire(&parsed), 400);
+}
+
+#[test]
 fn context_payloads_are_exact() {
     let n = Uuid::new_v4().to_string();
     for op in ["compact_context", "clear_context"] {
@@ -973,10 +1007,15 @@ async fn retained_bodies_reach_the_budget_while_exact_retries_and_controls_fit()
         .result(&f.node, s(&first, "request_id"), &done, None)
         .await
         .unwrap();
-    // The completed body is still retained, so another upload is over budget.
+    // The completed body is still retained, so another upload is over budget,
+    // which the phone shows as such rather than as a busy relay (zerus-3rqx.8).
+    let over = f
+        .submit(&upload(&n, vec![attachment(3000, json!({}))]))
+        .await
+        .unwrap_err();
     assert_eq!(
-        status(&f, &upload(&n, vec![attachment(3000, json!({}))])).await,
-        429
+        (over.0.as_u16(), over.1),
+        (429, "workspace retained payload budget is full")
     );
     // Its exact retry is a receipt, and a small control has its own allowance.
     assert_eq!(f.submit(&first).await.unwrap()["state"], "completed");
@@ -1004,7 +1043,10 @@ async fn many_large_results_reach_the_workspace_budget() {
         match f.submit(&b).await {
             Ok(_) => {}
             Err(e) => {
-                assert_eq!(e.0.as_u16(), 429);
+                assert_eq!(
+                    (e.0.as_u16(), e.1),
+                    (429, "workspace retained payload budget is full")
+                );
                 break;
             }
         }

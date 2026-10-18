@@ -26,6 +26,15 @@ object QuestionPolicies {
         if (item.has("optional")) item.opt("optional") == true
         else (item.opt("question_id") as? String)?.startsWith("codex-async:") == true
 
+    /**
+     * Pending requests in one listing row that the agent cannot continue without: the connector's
+     * `mobile_attention` items other than optional Codex questions or, without that list, the older
+     * `pending_question_count`. As on the desktop, optional questions are never attention; a row
+     * whose only pending items are optional has none.
+     */
+    fun blockingRequests(raw: JSONObject): Int =
+        raw.optJSONArray("mobile_attention")?.objects()?.count { !optionalAttention(it) } ?: raw.optInt("pending_question_count")
+
     fun queue(questions: List<Question>, target: Target, chosen: String): QuestionQueue {
         val distinct = questions.filter { it.id.isNotBlank() && it.prompts.isNotEmpty() }.distinctBy { it.id }
         val submitted = distinct.filter { submitted(it, target) != null }

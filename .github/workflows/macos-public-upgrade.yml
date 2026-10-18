@@ -1,0 +1,54 @@
+name: macOS public cask upgrade qualification
+
+# Read-only post-publication evidence on a disposable standard runner. No signing,
+# publication, deployment environment or cache credentials are requested.
+on:
+  workflow_dispatch:
+    inputs:
+      old_stable_tap_commit:
+        description: Exact ufna/homebrew-zerus commit containing the older Stable cask
+        required: true
+        type: string
+        default: 1a933f06bacbd40e2f9e600cc7f28464b90794c6
+      new_stable_tap_commit:
+        description: Exact ufna/homebrew-zerus commit containing the newer Stable cask
+        required: true
+        type: string
+        default: 84af2670df17748cde53b29bc474d74e513d03f4
+      nightly_tap_commit:
+        description: Exact ufna/homebrew-zerus commit containing the signed Nightly cask
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+jobs:
+  upgrade:
+    if: github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_ANALYTICS: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install private-fixture dependencies
+        run: brew install tmux
+      - name: Qualify immutable public casks and retained native work
+        env:
+          OLD_STABLE_TAP_COMMIT: ${{ inputs.old_stable_tap_commit }}
+          NEW_STABLE_TAP_COMMIT: ${{ inputs.new_stable_tap_commit }}
+          NIGHTLY_TAP_COMMIT: ${{ inputs.nightly_tap_commit }}
+        run: python3 scripts/ci/macos-public-upgrade.py --output artifacts/macos-public-upgrade
+      - name: Retain qualification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-public-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/macos-public-upgrade
+          retention-days: 14
