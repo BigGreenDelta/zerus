@@ -390,6 +390,16 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         flag("opencode-stopped");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
         QTRY_VERIFY(service->isVisible());choices(dialog)->setCurrentRow(row(dialog,"work"));QVERIFY(!service->isVisible());QVERIFY(!reason->isVisible());
     }
+    // As in Accounts, an offline computer cannot be asked to start its service.
+    void openCodeStartNeedsOnlineComputer() {
+        flag("opencode");flag("opencode-models");flag("opencode-stopped");
+        auto state=fleet();BoxState mac;mac.host="mac";mac.ok=false;state.setPeer(mac,QDateTime::currentMSecsSinceEpoch());
+        NewSessionDialog dialog(program(),state,"mac","opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *service=dialog.findChild<QPushButton *>("launchStartOpenCode");QVERIFY(service);
+        QTRY_VERIFY(service->isVisible());QTRY_VERIFY(!dialog.findChild<QLabel *>("launchAccountStatus")->text().contains("Loading"));
+        QVERIFY(!service->isEnabled());service->click();QTest::qWait(100);QVERIFY(!QFile::exists(m_fixture.filePath("service-started")));
+        mac.ok=true;state.setPeer(mac,QDateTime::currentMSecsSinceEpoch());dialog.setFleet(state);QTRY_VERIFY(service->isEnabled());
+    }
     void emptyComputerCatalogOffersOnlyShell() {
         flag("empty-catalog");NewSessionDialog dialog(program(),fleet());dialog.show();
         QTRY_VERIFY(dialog.findChild<QLabel *>("launchAccountStatus")->text().isEmpty());

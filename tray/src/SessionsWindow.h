@@ -260,7 +260,7 @@ private:
     QString m_queueSendKey;
     // One confirmed OpenCode inbox removal at a time.
     quint64 m_removeQueuedRequest = 0;
-    QString m_removeQueuedKey;
+    QString m_removeQueuedKey, m_removeQueuedMessage, m_removeQueuedName;
     void removeQueuedMessage(const QString &messageId);
     // A confirmed OpenCode Forget that removes only the Zerus binding.
     quint64 m_forgetBindingRequest = 0;

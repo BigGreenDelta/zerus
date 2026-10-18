@@ -775,15 +775,19 @@ void NewSessionDialog::updateOpenCodeService()
     else if(!profile.isEmpty()&&!state.isEmpty()&&state!="ready")reason=profile["catalog_reason"].toString();
     const bool offer=starting||(state=="not_running"&&profile["installed"].toBool(true));
     const auto machine=host().isEmpty()?m_fleet.local().host:host();
+    // As in Accounts: an offline computer cannot be asked to start it.
+    const auto *box=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
+    const bool online=box&&box->ok;
     m_catalogStatus->setText(reason);m_catalogStatus->setVisible(!reason.isEmpty());
     m_startOpenCode->setText(starting?tr("Starting OpenCode…"):tr("Start OpenCode on %1").arg(machine));
-    m_startOpenCode->setVisible(offer);m_startOpenCode->setEnabled(!starting&&!m_validation&&!m_creation&&!m_accountRequest);
+    m_startOpenCode->setVisible(offer);m_startOpenCode->setEnabled(online&&!starting&&!m_validation&&!m_creation&&!m_accountRequest);
+    m_startOpenCode->setToolTip(online?tr("Start the shared OpenCode service on this computer. Zerus never stops it."):tr("%1 is offline.").arg(machine));
     m_openCodeService->setVisible(offer||!reason.isEmpty());
 }
 // Explicit only: hgs starts the shared service when none is registered and alive.
 void NewSessionDialog::startOpenCode()
 {
-    if(m_serviceStart||openCodeProfile()["catalog_state"]!="not_running")return;
+    if(m_serviceStart||!m_startOpenCode->isEnabled()||openCodeProfile()["catalog_state"]!="not_running")return;
     m_serviceHost=host();m_accountStatus->clear();
     m_serviceStart=m_client.requestAccounts(m_serviceHost,{"start","native-opencode","--json"});
     updateOpenCodeService();

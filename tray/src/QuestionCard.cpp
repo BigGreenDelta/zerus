@@ -743,7 +743,12 @@ void QuestionCard::updateControls()
     m_progress->setVisible(!approval);
     QString notice = draft.storageError.isEmpty() ? draft.notice : draft.storageError;
     if (notice.isEmpty() && !m_available) notice = m_unavailableReason;
-    if (notice.isEmpty() && !supported) notice = m_question.value("answer_unavailable_reason").toString(tr("Answer this request in Terminal."));
+    // OpenCode states its reason on the card ("Answer this form in OpenCode").
+    if (notice.isEmpty() && !supported) for (const auto *field : {"answer_unavailable_reason", "unavailable_reason"}) {
+        notice = m_question.value(field).toString().trimmed();
+        if (!notice.isEmpty()) break;
+    }
+    if (notice.isEmpty() && !supported) notice = tr("Answer this request in Terminal.");
     if (notice.isEmpty()) for (const auto &form : m_forms) {
         const auto answer = draft.answers.value(form.id);
         if (!form.allowOther || (!form.options.isEmpty() && !answer.other)) continue;

@@ -153,6 +153,7 @@ private slots:
     void reviewCountdownAndNextNavigation();
     void nativeCountdownPreservesScrollChoiceAndReview();
     void terminalOnlyChoicesDoNotPretendToAcceptAnswers();
+    void unanswerableOpenCodeFormPointsToOpenCode();
     void claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes();
     void unreadableApprovalPointsToTerminal();
     void optionalQuestionsHaveExplicitSkipAndKeepDrafts();
@@ -501,6 +502,25 @@ void TestQuestionCard::terminalOnlyChoicesDoNotPretendToAcceptAnswers()
     QSignalSpy sent(&card, &QuestionCard::answerRequested);
     option(card, "opt_0_0")->click(); QVERIFY(!option(card, "opt_0_0")->isChecked()); QCOMPARE(sent.size(), 0);
     QVERIFY(card.findChild<QPushButton *>("questionOpenTerminal")->isEnabled());
+}
+
+// OpenCode reports why a form cannot be answered in Zerus on the card itself.
+void TestQuestionCard::unanswerableOpenCodeFormPointsToOpenCode()
+{
+    QuestionCard card; card.resize(700, 450); card.show();
+    auto form = request("opencode-form", "form-hash"); form["source"] = "opencode_native"; form["kind"] = "opencode_form";
+    form["answer_transport"] = "native_opencode"; form["can_answer"] = false; form["answerable"] = false;
+    form["unavailable_reason"] = "Answer this form in OpenCode";
+    setQuestionReady(card, "opencode/session", form);
+    QVERIFY(submit(card)->isHidden() || !submit(card)->isEnabled());
+    QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), QString("Answer this form in OpenCode"));
+    // A specific answer reason still wins, and only without either is Terminal named.
+    form["answer_unavailable_reason"] = "Answer this one elsewhere.";
+    setQuestionReady(card, "opencode/session", form);
+    QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), QString("Answer this one elsewhere."));
+    form.remove("answer_unavailable_reason"); form.remove("unavailable_reason"); form["question_hash"] = "form-hash-2";
+    setQuestionReady(card, "opencode/session", form);
+    QCOMPARE(card.findChild<QLabel *>("questionStatus")->text(), QString("Answer this request in Terminal."));
 }
 
 void TestQuestionCard::unreadableApprovalPointsToTerminal()

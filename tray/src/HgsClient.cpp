@@ -1747,11 +1747,14 @@ quint64 HgsClient::runSessionAction(const QString &host, const QString &name, co
         if (*reported) return; *reported = true; emit sessionActionFinished(request,false,{},error);
     };
     const auto payload = QJsonDocument(data).toJson(QJsonDocument::Compact);
-    connect(process,&QProcess::started,process,[process,payload,fail] {
-        if (process->write(payload) != payload.size()) { fail(tr("Transfer failed. Check Terminal before retrying.")); process->kill(); }
+    // OpenCode actions have no Terminal to check.
+    const auto transferFailed = scoped ? tr("Transfer failed. Check the session before retrying.") : tr("Transfer failed. Check Terminal before retrying.");
+    const auto timedOut = scoped ? tr("Request timed out. Check the session before retrying.") : tr("Request timed out. Check Terminal before retrying.");
+    connect(process,&QProcess::started,process,[process,payload,fail,transferFailed] {
+        if (process->write(payload) != payload.size()) { fail(transferFailed); process->kill(); }
         process->closeWriteChannel();
     });
-    connect(timer,&QTimer::timeout,process,[process,fail] { fail(tr("Request timed out. Check Terminal before retrying.")); process->kill(); });
+    connect(timer,&QTimer::timeout,process,[process,fail,timedOut] { fail(timedOut); process->kill(); });
     connect(process,&QProcess::errorOccurred,process,[process,timer,fail](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) { timer->stop(); fail(process->errorString()); process->deleteLater(); }
     });
@@ -1759,7 +1762,8 @@ quint64 HgsClient::runSessionAction(const QString &host, const QString &name, co
         timer->stop();
         if (!*reported) {
             const auto error = QString::fromUtf8(process->readAllStandardError()).trimmed().left(2000);
-            if (code || status != QProcess::NormalExit) fail(error.isEmpty() ? tr("Could not complete the request. Check Terminal.") : error);
+            if (code || status != QProcess::NormalExit) fail(!error.isEmpty() ? error
+                : scoped ? tr("Could not complete the request. Check the session before retrying.") : tr("Could not complete the request. Check Terminal."));
             else {
                 const auto result = QJsonDocument::fromJson(process->readAllStandardOutput()).object();
                 const auto state = result.value("status").toString();
@@ -1775,7 +1779,7 @@ quint64 HgsClient::runSessionAction(const QString &host, const QString &name, co
                     || (data.contains("expected_created") && result.value("created").toInteger(-1) != data.value("expected_created").toInteger())
                     || !(state == (scoped ? "completed" : operation == "attachment" ? "staged" : "submitted")
                         || (operation == "clear-context" && state == "confirmed")))
-                    fail(tr("Invalid acknowledgement. Check Terminal before retrying."));
+                    fail(scoped ? tr("Invalid acknowledgement. Check the session before retrying.") : tr("Invalid acknowledgement. Check Terminal before retrying."));
                 else { *reported = true; emit sessionActionFinished(request,true,result,{}); if (operation != "attachment") emit sessionWriteDone(host); }
             }
         }

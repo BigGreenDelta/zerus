@@ -48,9 +48,11 @@ public:
     void setTheme(bool dark);
     // Enlarges the message field; its actions keep the workspace size.
     void setContentScale(double scale);
+    // modelDefaultEffort: an empty effort is a choice, the model's own default
+    // (OpenCode variants); the popup then offers "Default" first.
     void setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,
                           bool enabled, const QString &reason, const QString &pendingModel = {},
-                          const QString &pendingEffort = {}, const QString &applyWhen = {});
+                          const QString &pendingEffort = {}, const QString &applyWhen = {}, bool modelDefaultEffort = false);
     // The provider's own warning about applying a change, shown before Apply.
     void setSettingsNotice(const QString &notice);
     void setSettingsTerminalAvailable(bool available);
@@ -174,6 +176,7 @@ private:
     bool m_settingsTerminalAvailable = false;
     QPushButton *m_settings, *m_applySettings;
     QJsonArray m_modelOptions;
+    bool m_modelDefaultEffort = false;
     QString m_model, m_effort, m_pendingModel, m_pendingEffort, m_settingsReason, m_applyWhen, m_popupKey, m_settingsNotice;
     bool m_settingsEnabled = false;
     QPushButton *m_attach, *m_send, *m_retry;

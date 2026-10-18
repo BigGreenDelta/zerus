@@ -30,8 +30,10 @@ Zerus starts it (`opencode service start`, in its own transient user scope on
 Linux so that it outlives Zerus) only when no service is registered or the
 registered process is dead, and only for a launch or the explicit **Start
 OpenCode** action (`hgs account start native-opencode`). Inspection never starts
-it; an unreachable service shows "OpenCode is not running on <computer>". You
-can also start it yourself with `opencode service start`.
+it. Without a registered live service, Zerus shows "OpenCode is not running on
+<computer>" and offers Start OpenCode; a registered service that does not answer
+shows "OpenCode is not responding" and is never restarted. You can also start it
+yourself with `opencode service start`.
 
 Connect providers in a terminal on that computer with `opencode auth login`.
 `hgs account login native-opencode` does not run it; it prints that instruction.

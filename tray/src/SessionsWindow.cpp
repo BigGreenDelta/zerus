@@ -866,9 +866,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
         if(!m_removeQueuedRequest||id!=m_removeQueuedRequest)return;
-        m_removeQueuedRequest=0;
-        if(m_selectedKey==m_removeQueuedKey){showNotice(ok?tr("Queued message removed."):error,!ok);inspect();}
-        else if(!ok)showNotice(error,true);
+        m_removeQueuedRequest=0;m_removeQueuedMessage.clear();
+        if(m_selectedKey==m_removeQueuedKey){showNotice(ok?tr("Queued message removed."):error,!ok);renderDetails();inspect();}
+        else if(!ok)showNotice(tr("Could not remove the queued message from %1: %2").arg(m_removeQueuedName,error),true);
         emit refreshRequested();
     });
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &receipt,const QString &error) {
@@ -3388,6 +3388,7 @@ void SessionsWindow::renderDetails()
     auto activityDetails = m_details;
     if (!entry->online || !m_inspectError.isEmpty() || s.state != "running") activityDetails["runtime_state"] = "unavailable";
     activityDetails["queue_sending"] = m_queueSendRequest && m_queueSendKey == m_selectedKey;
+    if (m_removeQueuedRequest && m_removeQueuedKey == m_selectedKey) activityDetails["queued_removal"] = m_removeQueuedMessage;
     if (!entry->online || !m_inspectError.isEmpty()) { auto queue=activityDetails["input_queue"].toObject(); queue["can_send_now"]=false; activityDetails["input_queue"]=queue; }
     m_activityView->setTimeline(activityDetails, m_events, m_localMessages.value(m_selectedKey), s.prompt, s.tracked);
     m_composer->setAttachmentAvailability(s.cmd!="opencode" && m_details.value("attachments_supported").toBool(true),
@@ -3413,7 +3414,7 @@ void SessionsWindow::renderDetails()
     m_composer->setModelSettings(m_details.value("settings_model").toString(s.model), s.effort, m_details.value("model_options").toArray(), settingsProblem.isEmpty(),
         settingsProblem.isEmpty() ? m_details.value("settings_change_reason").toString() : settingsProblem,
         m_details.value("pending_model").toString(), m_details.value("pending_effort").toString(),
-        m_details.value("settings_apply_when").toString());
+        m_details.value("settings_apply_when").toString(), s.cmd == "opencode");
     m_composer->setSettingsNotice(m_details.value("settings_change_notice").toString());
     renderQuestion(*entry);
     updateSessionFeedback();
@@ -3794,8 +3795,9 @@ void SessionsWindow::removeQueuedMessage(const QString &messageId)
         ||m_details.value("conversation_id")!=conversation||!queuedMessageRemovable(messageId)){
         showNotice(tr("The queued message changed. Check Activity before removing it."),true);return;
     }
-    m_removeQueuedKey=key;
+    m_removeQueuedKey=key;m_removeQueuedMessage=messageId;m_removeQueuedName=name;
     m_removeQueuedRequest=m_client.requestRemoveQueued(host,name,run,conversation,messageId);
+    renderDetails();
 }
 
 void SessionsWindow::messageAction(const QString &id,const QString &action)

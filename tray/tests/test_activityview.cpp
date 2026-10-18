@@ -2342,6 +2342,10 @@ void TestActivityView::openCodeQueuedMessagesShowDeliveryAndRemove()
     events[1]=queued("queued");view.setActivity({{"allowed_actions",QJsonArray{"remove_queued"}}},events);
     QVERIFY(!view.browser()->toPlainText().contains("Remove"));QVERIFY(removeLinks().isEmpty());
     activate(view.browser(),commands[0]);QCOMPARE(actions.size(),1); // The old Remove is no longer registered.
+    // While a removal runs, its item shows progress and nothing can be clicked.
+    events[1]=queued("not_delivered");
+    view.setActivity({{"allowed_actions",QJsonArray{"remove_queued"}},{"queued_removal","msg_Queued01"}},events);
+    QVERIFY(view.browser()->toPlainText().contains("Removing…"));QVERIFY(removeLinks().isEmpty());
 }
 
 void TestActivityView::localDeliveryCards()

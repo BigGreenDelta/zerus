@@ -579,6 +579,7 @@ void TestHgsClient::openCodeQueuedRemovalUsesScopedSessionAction()
         "p=json.load(sys.stdin);a=sys.argv[1:]\n"
         "open(__file__+'.call','w').write(json.dumps({'args':a,'payload':p}))\n"
         "status=open(__file__+'.status').read().strip() if os.path.exists(__file__+'.status') else 'completed'\n"
+        "if status=='exit':sys.exit(3)\n"
         "r={'request_id':p['request_id'],'name':a[-2],'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],'status':status}\n"
         "if status!='completed' and status!='submitted':r['error']='This message is no longer queued'\n"
         "print(json.dumps(r))\n"));
@@ -608,6 +609,17 @@ void TestHgsClient::openCodeQueuedRemovalUsesScopedSessionAction()
         QTRY_COMPARE(finished.size(),1);QCOMPARE(finished[0][0].toULongLong(),request);QVERIFY(!finished[0][1].toBool());finished.clear();
     }
     QTest::qWait(100);QVERIFY(!QFile::exists(program+".call"));
+    // OpenCode actions have no Terminal to check.
+    for(const auto *outcome:{"bogus","exit"}) {
+        status(outcome);
+        for(const auto forget:{false,true}) {
+            request=forget?client.requestForgetBinding({},name,"run-one","ses_conversation"):client.requestRemoveQueued({},name,"run-one","ses_conversation","msg_Queued01");
+            QTRY_COMPARE(finished.size(),1);QCOMPARE(finished[0][0].toULongLong(),request);QVERIFY(!finished[0][1].toBool());
+            const auto error=finished[0][3].toString();QVERIFY2(!error.contains("Terminal")&&error.contains("Check the session before retrying"),qPrintable(error));
+            finished.clear();
+        }
+    }
+    QCOMPARE(call()["payload"].toObject()["action"].toString(),QString("forget"));
     // Other actions keep their own command and payload.
     status("submitted");request=client.requestInterrupt({},name,"run-one","ses_conversation",12.5);
     QTRY_COMPARE(finished.size(),1);QVERIFY(finished[0][1].toBool());

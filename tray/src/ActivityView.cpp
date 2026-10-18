@@ -970,12 +970,19 @@ struct ActivityRenderResult {
                     .arg(event.value("uncertain").toBool()?button("inspect",details.value("native_ui_available").toBool()?tr("Check native UI"):tr("Check Terminal")):button("retry",tr("Retry")),button("delete",tr("Delete")));
             }
             // Remove is offered only while the session reports it; the owner confirms first.
+            // While one removal runs, no Remove can be clicked.
             const auto queuedId=event.value("message_id").toString();
             if(delivery=="not_delivered" && !queuedId.isEmpty() && details.value("allowed_actions").toArray().contains(QStringLiteral("remove_queued"))) {
-                const auto key=QString::fromLatin1(QCryptographicHash::hash((m_sessionKey+':'+queuedId+":remove_queued").toUtf8(),QCryptographicHash::Sha256).toHex());
-                m_messageActions.insert(key,{queuedId,QStringLiteral("remove_queued")});
-                body+=QString("<table cellspacing='6' cellpadding='4'><tr><td bgcolor='%1' style='border:1px solid %2;'><a href='hgs-message:%3' style='color:%4;'>&nbsp;%5&nbsp;</a></td></tr></table>")
-                    .arg(codeSurface,border,key,accent,escaped(tr("Remove")));
+                const auto removing=details.value("queued_removal").toString();
+                if(!removing.isEmpty())
+                    body+=QString("<table cellspacing='6' cellpadding='4'><tr><td bgcolor='%1' style='border:1px solid %2;color:%3;'>&nbsp;%4&nbsp;</td></tr></table>")
+                        .arg(codeSurface,border,muted,escaped(removing==queuedId?tr("Removing…"):tr("Remove")));
+                else {
+                    const auto key=QString::fromLatin1(QCryptographicHash::hash((m_sessionKey+':'+queuedId+":remove_queued").toUtf8(),QCryptographicHash::Sha256).toHex());
+                    m_messageActions.insert(key,{queuedId,QStringLiteral("remove_queued")});
+                    body+=QString("<table cellspacing='6' cellpadding='4'><tr><td bgcolor='%1' style='border:1px solid %2;'><a href='hgs-message:%3' style='color:%4;'>&nbsp;%5&nbsp;</a></td></tr></table>")
+                        .arg(codeSurface,border,key,accent,escaped(tr("Remove")));
+                }
             }
             // A search excerpt is not the whole reply.
             const bool copyable = role == "assistant" && !(searching && m_searchResult.value("content_truncated").toBool());
